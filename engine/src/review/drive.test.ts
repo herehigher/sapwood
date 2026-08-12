@@ -9,6 +9,7 @@ import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { IForge, PRCheckItem, PRReviewData, PRStatus } from "../forge/forge.js";
 import type { ApprovalResult, ReviewContext } from "../roles/reviewer.js";
 import {
+  ADVISORY_REVIEW_DEADLINE_MS,
   buildAdvisoryReviewComment,
   buildCiInertEscalationComment,
   buildCiInertEscalationPayload,
@@ -383,6 +384,8 @@ function makeDeps(overrides: {
   now?: () => Date;
   runIds?: string[];
   getBaseRedPin?: EngineAgentDriveDeps["getBaseRedPin"];
+  advisoryReviewDeadlineMs?: EngineAgentDriveDeps["advisoryReviewDeadlineMs"];
+  sleep?: EngineAgentDriveDeps["sleep"];
 }): { deps: EngineAgentDriveDeps; recorded: Recorded } {
   const recorded: Recorded = { pin: null, wal: null };
   let runIdCursor = 0;
@@ -425,6 +428,8 @@ function makeDeps(overrides: {
     reconcileAuditDelivery: overrides.reconcileAuditDelivery ?? (async () => ({ delivered: false, reason: "nothing to reconcile" })),
     ciChecksCap: 20,
     ...(overrides.getBaseRedPin ? { getBaseRedPin: overrides.getBaseRedPin } : {}),
+    ...(overrides.advisoryReviewDeadlineMs !== undefined ? { advisoryReviewDeadlineMs: overrides.advisoryReviewDeadlineMs } : {}),
+    ...(overrides.sleep ? { sleep: overrides.sleep } : {}),
   };
   return { deps, recorded };
 }
@@ -478,7 +483,7 @@ test("driveEngineAgentReview: split-state reads (status0.state !== data0.state, 
   assert.match(outcome.kind === "queued" ? outcome.reason : "", /gate-state-mismatch/);
 });
 
-test("#292/#823 driveEngineAgentReview: instruction edit labels/comments, runs ONE advisory engine-agent review (ADVISORY-banner comment) before parking, before CI/identity/WAL — never consumed (kind stays needs-human even on an APPROVED verdict); a latched (second) tick skips the advisory session entirely", async () => {
+test("#292/#823 driveEngineAgentReview: instruction edit labels/comments, makes ONE advisory evaluate() call (ADVISORY-banner comment posted) before parking, before CI/identity/WAL — never consumed (kind stays needs-human even on an APPROVED verdict); a latched (second) tick skips the advisory evaluate() call entirely", async () => {
   const filename = ".claude/rules/team/reviewer`\n‮.md";
   let latched = false;
   let fileReads = 0;
@@ -528,29 +533,29 @@ test("#292/#823 driveEngineAgentReview: instruction edit labels/comments, runs O
   assert.equal(fileReads, 1);
   assert.equal(labelWrites, 1);
   assert.equal(checkReads, 0, "the advisory review must never reach the CI-evidence preflight gate");
-  assert.equal(evaluateCount, 1, "#823: the engine-agent review session now DOES run once on this route");
+  assert.equal(evaluateCount, 1, "#823: reviewerAdapter.evaluate() is now called once (one logical advisory evaluation) on this route");
   assert.equal(diffFetches, 1);
   assert.equal(comments.length, 2, "#292's own escalation comment, plus #823's advisory-review comment");
   assert.match(comments[0]!, /\.claude\/rules\/team\/reviewer\?\?\?\.md.*#292/);
   assert.match(comments[1]!, /ADVISORY, not consumed by the merge driver/);
   assert.match(comments[1]!, /no blocking findings/i);
-  assert.equal(recorded.wal, null, "#823: the advisory session must never write the decisive WAL/pin machinery");
+  assert.equal(recorded.wal, null, "#823: the advisory evaluate() call must never write the decisive WAL/pin machinery");
   assert.equal(recorded.pin, null);
 
   const second = await driveEngineAgentReview(deps, 1, 2);
   assert.deepEqual(second, { kind: "needs-human", reason: "engine-agent: gate:HUMAN:instruction-path-latch" });
   assert.equal(fileReads, 1);
   assert.equal(labelWrites, 1);
-  assert.equal(evaluateCount, 1, "latched ticks never re-run the advisory session — same idempotence as the label latch itself");
+  assert.equal(evaluateCount, 1, "latched ticks never re-run the advisory evaluate() call — same idempotence as the label latch itself");
   assert.equal(comments.length, 2);
 });
 
-test("#823 driveEngineAgentReview: the advisory review session throwing still parks needs-human with the SAME reason (fail-closed, AC2)", async () => {
+test("#823 driveEngineAgentReview: the advisory evaluate() call throwing still parks needs-human with the SAME reason (fail-closed, AC2)", async () => {
   const filename = ".claude/rules/team/reviewer.md";
   const { deps } = makeDeps({
     forge: { getPRChangedFiles: async () => ({ files: [{ filename }], complete: true }) },
     evaluate: async () => {
-      throw new Error("session crashed hard");
+      throw new Error("evaluate() crashed hard");
     },
   });
   const outcome = await driveEngineAgentReview(deps, 1, 2);
@@ -560,7 +565,7 @@ test("#823 driveEngineAgentReview: the advisory review session throwing still pa
   });
 });
 
-test("#823 driveEngineAgentReview: the advisory review's diff fetch failing still parks needs-human (fail-closed, AC2) — no session is even attempted", async () => {
+test("#823 driveEngineAgentReview: the advisory review's diff fetch failing still parks needs-human (fail-closed, AC2) — evaluate() is never called", async () => {
   const filename = ".claude/rules/team/reviewer.md";
   let evaluated = false;
   const { deps } = makeDeps({
@@ -580,7 +585,7 @@ test("#823 driveEngineAgentReview: the advisory review's diff fetch failing stil
     kind: "needs-human",
     reason: "engine-agent: gate:HUMAN:instruction-path-change:.claude/rules/team/reviewer.md",
   });
-  assert.equal(evaluated, false, "no diff text means no session spawn attempt");
+  assert.equal(evaluated, false, "no diff text means evaluate() is never called");
 });
 
 test("#823 driveEngineAgentReview: the advisory comment post failing still parks needs-human (fail-closed, AC2)", async () => {
@@ -606,7 +611,49 @@ test("#823 driveEngineAgentReview: the advisory comment post failing still parks
   assert.equal(commentCalls, 2);
 });
 
-test("#823 driveEngineAgentReview: the advisory session's ReviewContext carries only the live diff + PRReviewData — no PR-body/instructions field for an in-PR edit to influence (instructions are the reviewerAdapter's own engine-construction-time doctrine/prompt/AC-snapshot — see engine-agent.ts's EngineAgentReviewer constructor-loaded promptTemplate/deps.doctrine and evaluate()'s dispatch-time getAcSnapshot call, never a live re-fetch, AC3)", async () => {
+test("#823 driveEngineAgentReview (gate② round 1 P1, liveness): a NEVER-SETTLING evaluate() call does not block the park — the advisory operation is bounded by a deadline race, exercised deterministically (an injected `sleep` resolves immediately; no real timer duration is awaited, no reliance on real timing per repo rule)", async () => {
+  const filename = ".claude/rules/team/reviewer.md";
+  let deadlineMsSeen: number | undefined;
+  const { deps } = makeDeps({
+    forge: { getPRChangedFiles: async () => ({ files: [{ filename }], complete: true }) },
+    // Never settles — the exact liveness hazard gate② found: a hung diff fetch/evaluate()/comment
+    // post must not hold the unconditional needs-human park hostage forever.
+    evaluate: () => new Promise<never>(() => {}),
+    // Deterministic stand-in for the real timer (repo rule: no timing-dependent tests) — resolves
+    // on the next microtask regardless of `ms`, so this test's pass/fail never depends on real
+    // wall-clock duration, only on which branch of the race the implementation takes.
+    sleep: async (ms) => {
+      deadlineMsSeen = ms;
+    },
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, {
+    kind: "needs-human",
+    reason: "engine-agent: gate:HUMAN:instruction-path-change:.claude/rules/team/reviewer.md",
+  });
+  assert.equal(deadlineMsSeen, ADVISORY_REVIEW_DEADLINE_MS, "the default deadline constant was used (no override supplied)");
+});
+
+test("#823 driveEngineAgentReview (gate② round 1 P1, liveness): advisoryReviewDeadlineMs override is threaded through to the deadline race", async () => {
+  const filename = ".claude/rules/team/reviewer.md";
+  let deadlineMsSeen: number | undefined;
+  const { deps } = makeDeps({
+    forge: { getPRChangedFiles: async () => ({ files: [{ filename }], complete: true }) },
+    evaluate: () => new Promise<never>(() => {}),
+    sleep: async (ms) => {
+      deadlineMsSeen = ms;
+    },
+    advisoryReviewDeadlineMs: 5,
+  });
+  const outcome = await driveEngineAgentReview(deps, 1, 2);
+  assert.deepEqual(outcome, {
+    kind: "needs-human",
+    reason: "engine-agent: gate:HUMAN:instruction-path-change:.claude/rules/team/reviewer.md",
+  });
+  assert.equal(deadlineMsSeen, 5, "the injected override, not the default constant, reached the race");
+});
+
+test("#823 driveEngineAgentReview: the advisory evaluate() call's ReviewContext carries only the live diff + PRReviewData — no PR-body/instructions field for an in-PR edit to influence (instructions are the reviewerAdapter's own engine-construction-time doctrine/prompt/AC-snapshot — see engine-agent.ts's EngineAgentReviewer constructor-loaded promptTemplate/deps.doctrine and evaluate()'s dispatch-time getAcSnapshot call, never a live re-fetch, AC3)", async () => {
   const filename = ".claude/rules/team/reviewer.md";
   const fixedData = data({ labels: [] });
   let capturedCtx: ReviewContext | undefined;

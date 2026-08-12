@@ -329,13 +329,61 @@ export function buildAdvisoryReviewComment(result: ApprovalResult): string {
   return `${banner}\n\n${body}`;
 }
 
+/** #823 (gate② round 1 P1): the default wall-clock bound for `runAdvisoryInstructionPathReview`'s
+ *  entire operation. 60s mirrors the established "an external op must not hang forever" magnitude
+ *  already used twice elsewhere in this codebase — `forge.ts`'s `cfg.liveness.forgeCallTimeoutMs`
+ *  default (bounds each individual `gh` call the advisory diff-fetch/comment-post go through) and
+ *  `materializer.ts`'s `DEFAULT_GIT_TIMEOUT_MS` (bounds each individual git subprocess call) —
+ *  reused as a plain constant here rather than adding a new user-tunable config key, since this
+ *  bound exists purely so a hung dependency can never make the PARK (the safety action) wait on
+ *  ADVISORY labor; it is not a knob an operator needs to tune to get correct behavior, only a
+ *  ceiling. Overridable via `EngineAgentDriveDeps.advisoryReviewDeadlineMs` for a composition root
+ *  that wants a different ceiling. */
+export const ADVISORY_REVIEW_DEADLINE_MS = 60_000;
+
+/** #823 (gate② round 1 P1): race `op` against `deadlineMs`, rejecting with a deadline error if the
+ *  timer wins — the SAME injectable-timer shape as `util/spawn-confirm.ts`'s
+ *  `awaitSpawnConfirmation` (`sleep?: (ms) => Promise<void>`, default a real, CANCELABLE
+ *  `setTimeout`, cleared the instant `op` itself settles first so a fast operation never leaves a
+ *  dangling real timer alive). `op` is NOT cancelled when the deadline wins — JS has no way to
+ *  abort an arbitrary in-flight `await` chain — it is merely ABANDONED: this function stops
+ *  waiting on it and rejects immediately. A later settlement of that abandoned `op` (resolve OR
+ *  reject) can never surface as a Node "unhandled rejection": `op.then(...)` below is called
+ *  UNCONDITIONALLY, so the runtime already considers `op` to have an attached reaction regardless
+ *  of which racer this function's own returned promise settles on. */
+async function raceWithDeadline(op: Promise<void>, deadlineMs: number, sleep?: (ms: number) => Promise<void>): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let clearRealTimer: (() => void) | undefined;
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearRealTimer?.();
+      fn();
+    };
+    const onDeadline = (): void => finish(() => reject(new Error(`engine-agent: advisory review exceeded its ${deadlineMs}ms deadline`)));
+    if (sleep) {
+      void sleep(deadlineMs).then(onDeadline);
+    } else {
+      const t = setTimeout(onDeadline, deadlineMs);
+      clearRealTimer = () => clearTimeout(t);
+    }
+    op.then(
+      () => finish(resolve),
+      (e) => finish(() => reject(e)),
+    );
+  });
+}
+
 /**
- * #823: run ONE advisory-only engine-agent review on the instruction-path-change escalation route
- * (#292), immediately after `escalateInstructionPathChanges` returns a FRESH `"escalated"` result
- * — the call site below never invokes this for `"latched"` (a PR that already carries the label):
- * the label write IS the idempotence latch (see that function's own doc, "latched PRs never fetch
- * the list again"), and re-running a paid session every tick forever on an already-parked PR would
- * be pure waste with nothing new to say.
+ * #823: run advisory-only engine-agent review labor on the instruction-path-change escalation
+ * route (#292) — ONE `evaluate()` call (one logical advisory evaluation; `evaluate()` may retry
+ * internally, see engine-agent.ts's own attempt-retry doc, so this is not a claim about session
+ * COUNT) — immediately after `escalateInstructionPathChanges` returns a FRESH `"escalated"`
+ * result. The call site below never invokes this for `"latched"` (a PR that already carries the
+ * label): the label write IS the idempotence latch (see that function's own doc, "latched PRs
+ * never fetch the list again"), and re-running this every tick forever on an already-parked PR
+ * would be pure waste with nothing new to say.
  *
  * NEVER consumed: the route this is called from returns `{kind:"needs-human"}` unconditionally,
  * both before and after this call — see the call site below. This function's return type is
@@ -344,11 +392,15 @@ export function buildAdvisoryReviewComment(result: ApprovalResult): string {
  * `deps.auditDelivery` — the only writers of that machinery in this module — are none of them
  * called here).
  *
- * Fail-closed by construction (#823 AC2): every failure mode (diff fetch, `evaluate()` — whether
- * it throws or rejects — the comment post) is caught here and swallowed. This function itself
+ * Fail-closed by construction (#823 AC2, gate② round 1 P1): every failure mode — diff fetch,
+ * `evaluate()` (whether it throws or rejects), the comment post, OR the whole operation exceeding
+ * `deadlineMs` (`raceWithDeadline` above) — is caught here and swallowed. This function itself
  * never throws, matching `driveEngineAgentReview`'s own never-throws contract; the caller does not
  * branch on this function's outcome at all, so the PR parks either way — only the ADVISORY LABOR
- * is best-effort, never the park.
+ * is best-effort, never the park. The deadline race exists specifically so a never-settling
+ * dependency (a hung `getPRDiff`/`evaluate`/`addPRComment` promise) cannot make the unconditional
+ * `needs-human` return below wait on it indefinitely — the park is the safety action and must
+ * never be hostage to advisory labor.
  *
  * Instructions provably come from engine-construction-time sources, never the PR head (#823 AC3):
  * `deps.reviewerAdapter.evaluate` is the SAME `ReviewerAdapter` this module drives for the
@@ -366,17 +418,21 @@ export function buildAdvisoryReviewComment(result: ApprovalResult): string {
  * of itself is conducted.
  */
 export async function runAdvisoryInstructionPathReview(
-  deps: Pick<EngineAgentDriveDeps, "forge" | "reviewerAdapter">,
+  deps: Pick<EngineAgentDriveDeps, "forge" | "reviewerAdapter" | "advisoryReviewDeadlineMs" | "sleep">,
   pr: number,
   issue: number,
   data: PRReviewData,
 ): Promise<void> {
   try {
-    const diffText = await deps.forge.getPRDiff(pr);
-    const result = await deps.reviewerAdapter.evaluate({ forge: deps.forge, pr, issue, data, diffText });
-    await deps.forge.addPRComment(pr, buildAdvisoryReviewComment(result));
+    const op = (async () => {
+      const diffText = await deps.forge.getPRDiff(pr);
+      const result = await deps.reviewerAdapter.evaluate({ forge: deps.forge, pr, issue, data, diffText });
+      await deps.forge.addPRComment(pr, buildAdvisoryReviewComment(result));
+    })();
+    await raceWithDeadline(op, deps.advisoryReviewDeadlineMs ?? ADVISORY_REVIEW_DEADLINE_MS, deps.sleep);
   } catch {
-    // Fail-closed (#823 AC2): swallow every failure here — the caller parks needs-human either way.
+    // Fail-closed (#823 AC2, gate② round 1 P1): swallow every failure here — including a deadline
+    // timeout — the caller parks needs-human either way.
   }
 }
 
@@ -429,6 +485,17 @@ export interface EngineAgentDriveDeps {
    *  wrongly-set pin can at worst mis-word a queued reason. Absent (or returning null) reproduces
    *  the pre-#502 reason strings exactly. */
   getBaseRedPin?: () => { sha: string; at: string; failing: string[] } | null;
+  /** #823 (gate② round 1 P1): the wall-clock bound on the ENTIRE advisory-review operation
+   *  (`runAdvisoryInstructionPathReview`'s diff fetch + `evaluate()` + comment post) — see that
+   *  function's own doc. Default: `ADVISORY_REVIEW_DEADLINE_MS`. */
+  advisoryReviewDeadlineMs?: number;
+  /** #823 (gate② round 1 P1): the injectable timer for the deadline race above — the SAME
+   *  `sleep?: (ms) => Promise<void>` seam already used throughout this codebase for a
+   *  deterministically-testable timeout (util/spawn-confirm.ts's `awaitSpawnConfirmation`,
+   *  roles/worker.ts, roles/peripheral.ts, loop/driver.ts, loop/round.ts) — default a real,
+   *  CANCELABLE `setTimeout` (see `raceWithDeadline`'s own doc). Never a real timer in tests
+   *  (repo rule: no timing-dependent tests) — drive.test.ts injects a deterministic `sleep`. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export type EngineAgentDriveOutcome =

@@ -1585,19 +1585,25 @@ off.
 the PR needs-human with zero engine review — the human had to arrange an out-of-band review
 themselves. Now, on a FRESH escalation (never on a later, already-`sapwood:human-merge-only`-
 latched tick — the label write is the idempotence latch, so a repeat tick does not re-run this),
-the engine also runs ONE engine-agent review session and posts its verdict as a PR comment before
-parking, prefixed with a prominent banner marking it "instruction-path change: human-merge-only —
-ADVISORY, not consumed by the merge driver". That session's instructions come from the reviewer's
-own engine-construction-time sources — the doctrine text and prompt template `EngineAgentReviewer`
+the engine also makes ONE advisory `evaluate()` call (one logical advisory evaluation — the
+adapter's own `evaluate()` may retry an unparseable/failed attempt internally, engine-agent.ts's
+own attempt-retry logic, so this is a claim about one evaluation being REQUESTED, not about how
+many sessions run underneath it) and posts its verdict as a PR comment before parking, prefixed
+with a prominent banner marking it "instruction-path change: human-merge-only — ADVISORY, not
+consumed by the merge driver". That evaluation's instructions come from the reviewer's own
+engine-construction-time sources — the doctrine text and prompt template `EngineAgentReviewer`
 loads once at construction (engine-agent.ts), plus the dispatch-time AC snapshot (design #279 §5)
 — never a live re-fetch of the PR's own (now human-merge-only) body, so an in-PR instruction-path
 edit cannot influence how this review of itself is conducted. The verdict is advisory labor for
-the human reviewer only: the route returns `needs-human` unconditionally, whether the session
+the human reviewer only: the route returns `needs-human` unconditionally, whether the evaluation
 approves, rejects, or produces nothing at all — no verdict from it ever reaches the merge driver's
-consume path. Fail-closed: if the review session (or the diff fetch, or the comment post) fails,
-the PR still parks needs-human exactly as before, with no different reason string a caller could
-key on. See `review/drive.ts`'s `runAdvisoryInstructionPathReview` for the implementation and
-`drive.test.ts` for the regression coverage (never-consumed, fail-closed, latch-skips-rerun,
+consume path. Fail-closed: if the diff fetch, the evaluation, or the comment post fails — OR the
+whole operation exceeds a wall-clock deadline (`ADVISORY_REVIEW_DEADLINE_MS`, default 60s,
+injectable via `EngineAgentDriveDeps.advisoryReviewDeadlineMs`; a never-settling dependency must
+never make the park itself wait) — the PR still parks needs-human exactly as before, with no
+different reason string a caller could key on. See `review/drive.ts`'s
+`runAdvisoryInstructionPathReview`/`raceWithDeadline` for the implementation and `drive.test.ts`
+for the regression coverage (never-consumed, fail-closed, deadline-bounded, latch-skips-rerun,
 construction-time-instructions).
 
 ### Which carriers are covered, and how immediate the protection is (#527)
