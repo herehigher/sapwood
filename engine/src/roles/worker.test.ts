@@ -23,6 +23,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import { estimateUsd, loadPricingTable } from "../config/pricing.js";
+import { closeOutMergedHumanMergeOnlyLanes } from "../loop/conductor.js";
 import { classifyEnvFailure, DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
 import { mcpToolFullName, PR_TOOLS } from "../proxy/tools.js";
 import { State } from "../state/state.js";
@@ -4566,6 +4567,138 @@ test("#69: DETACHED reclaim (post-restart, persisted pid) retains a dirty worktr
     killAnyRunningLanes(s1, s2, ...s1Children);
     s2?.dispose();
     s1?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+// ── #824 (engine-agent review, PR #835 findings [0]/[1]): conductor.test.ts's own #824 AC1/AC2
+//   tests configure FakeSupervisor.reclaimResults directly — a hand-set mock that never runs
+//   retainOrDeleteWorktree/worktreeMaybeDirty at all, so neither a real deletion nor a real
+//   mtime/ctime-driven retention was ever actually exercised. These two wire
+//   closeOutMergedHumanMergeOnlyLanes to a REAL WorkerSupervisor instead, mirroring the #69
+//   fixture pattern immediately above (a real dispatch, a real file write timed against it, a
+//   real reclaim() call) — the issue's own verification plan asked for exactly this reuse. ──
+
+test("#824 (real fixture): closeOutMergedHumanMergeOnlyLanes runs the PRODUCTION reclaim policy — a CLEAN worktree (no file touched since dispatch) is actually deleted from disk", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const name = "lane-824-clean";
+    const worktreePath = join(worktreeRoot, name);
+    mkdirSync(worktreePath, { recursive: true });
+    writeFileSync(join(worktreePath, "checked-out.txt"), "pre-existing\n"); // pre-dispatch content
+    await sleep(20); // strictly before the lane's recorded dispatch (the dirty-check baseline)
+
+    const { bin, ready } = longRunningStub(dir);
+    s = sup(dir, bin, worktreeRoot);
+    const { name: laneName } = await s.dispatch({ number: 950, title: "t", labels: [] }, name);
+    await waitForFile(ready);
+
+    const st = new State(":memory:");
+    st.upsertWorker({
+      name: laneName,
+      issue: 950,
+      session_id: `s-${laneName}`,
+      state: "failed",
+      started_at: "t0",
+      ended_at: "t1",
+      pr: 750,
+    });
+    st.appendEvent("drive-human-merge-only", { worker: laneName, issue: 950, pr: 750, reason: "gate:HUMAN:instruction-path-changed" });
+    const boardSet: Array<[number, "backlog" | "ready" | "inProgress" | "done"]> = [];
+    const labelsRemoved: Array<[number, string]> = [];
+    const forge = {
+      async getPRStatus(n: number) {
+        return { number: n, headOid: "h", state: "MERGED" as const, mergeable: "MERGEABLE" as const, ciGreen: true };
+      },
+      async setBoardStatus(n: number, status: "backlog" | "ready" | "inProgress" | "done") {
+        boardSet.push([n, status]);
+      },
+      async removeLabel(n: number, l: string) {
+        labelsRemoved.push([n, l]);
+      },
+      async addLabel() {},
+      async addIssueComment() {},
+    };
+
+    const outcomes = await closeOutMergedHumanMergeOnlyLanes(forge, st, s, cfg, () => "t2");
+    assert.deepEqual(outcomes, [{ kind: "closed", worker: laneName, issue: 950, pr: 750 }]);
+    assert.ok(
+      !existsSync(worktreePath),
+      "clean worktree actually deleted via the PRODUCTION reclaim policy (worktreeMaybeDirty/retainOrDeleteWorktree), not a mocked result",
+    );
+    assert.deepEqual(boardSet, [[950, "done"]]);
+    assert.deepEqual(labelsRemoved, [[950, cfg.labels.inProgress]]);
+    assert.equal(st.getWorker(laneName)?.state, "done");
+    st.close();
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("#824 (real fixture): closeOutMergedHumanMergeOnlyLanes runs the PRODUCTION reclaim policy — a worktree written to AFTER dispatch (dirty per the real mtime/ctime check) is RETAINED, content and all, and the lane is escalated", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const name = "lane-824-dirty";
+    const worktreePath = join(worktreeRoot, name);
+    mkdirSync(join(worktreePath, "src"), { recursive: true });
+
+    const { bin, ready } = longRunningStub(dir);
+    s = sup(dir, bin, worktreeRoot);
+    const { name: laneName } = await s.dispatch({ number: 951, title: "t", labels: [] }, name);
+    await waitForFile(ready);
+    await sleep(50); // ensure the WIP write lands strictly after the recorded dispatch baseline
+    writeFileSync(join(worktreePath, "src", "wip.txt"), "uncommitted work\n");
+
+    const st = new State(":memory:");
+    st.upsertWorker({
+      name: laneName,
+      issue: 951,
+      session_id: `s-${laneName}`,
+      state: "failed",
+      started_at: "t0",
+      ended_at: "t1",
+      pr: 751,
+    });
+    st.appendEvent("drive-human-merge-only", { worker: laneName, issue: 951, pr: 751, reason: "gate:HUMAN:instruction-path-changed" });
+    const boardSet: Array<[number, "backlog" | "ready" | "inProgress" | "done"]> = [];
+    const labelsAdded: Array<[number, string]> = [];
+    const comments: Array<[number, string]> = [];
+    const forge = {
+      async getPRStatus(n: number) {
+        return { number: n, headOid: "h", state: "MERGED" as const, mergeable: "MERGEABLE" as const, ciGreen: true };
+      },
+      async setBoardStatus(n: number, status: "backlog" | "ready" | "inProgress" | "done") {
+        boardSet.push([n, status]);
+      },
+      async removeLabel() {},
+      async addLabel(n: number, l: string) {
+        labelsAdded.push([n, l]);
+      },
+      async addIssueComment(n: number, body: string) {
+        comments.push([n, body]);
+      },
+    };
+
+    const outcomes = await closeOutMergedHumanMergeOnlyLanes(forge, st, s, cfg, () => "t2");
+    assert.deepEqual(outcomes, [{ kind: "retained", worker: laneName, issue: 951, pr: 751, worktreePath }]);
+    assert.ok(existsSync(join(worktreePath, "src", "wip.txt")), "worktree (and its uncommitted WIP) survives on disk — never deleted");
+    assert.deepEqual(boardSet, [], "no board write — a human still owns the worktree");
+    assert.deepEqual(labelsAdded, [[951, cfg.labels.needsHuman]]);
+    assert.equal(comments.length, 1, "the salvage comment carries the absolute path");
+    assert.match(comments[0]![1]!, new RegExp(worktreePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.equal(st.getWorker(laneName)?.state, "failed", "row left exactly as parking found it");
+    st.close();
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }

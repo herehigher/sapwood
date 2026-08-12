@@ -2315,6 +2315,7 @@ test("formatTickSummary (#504): kept/skipped/queued steady-state no-ops count as
     overBudget: false,
     ceilingBreached: false,
     ceilingReasons: [],
+    humanMergeOnlyClosed: [],
   });
   assert.equal(
     line,
@@ -2347,6 +2348,7 @@ test("formatTickSummary (#504): real actions still count", () => {
     overBudget: false,
     ceilingBreached: false,
     ceilingReasons: [],
+    humanMergeOnlyClosed: [],
   });
   assert.match(line, /reclaimed=1 /);
   assert.match(line, /dispatched=1 /);

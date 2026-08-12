@@ -89,6 +89,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `lane-pr-unknown` — **expected-noise**: a lane's PR association came back UNKNOWN (transient forge write failure); the lane is deferred rather than settled (#377). (see #377)
 - `lane-revived` — **routine** [escalation-clear]: an env-failed lane holding an OPEN PR was revived back to `driving` rather than left stranded between owners (#447). (see #447)
 - `lane-revival-terminal` — **routine**: the revival pass found the lane's PR already MERGED (recorded for the merged case only) and closed it out instead of reviving it (#447). (see #447)
+- `human-merge-only-closed` — **routine**: a parked human-merge-only lane's PR (#397 bucket 2) was found MERGED and closed out — in-progress cleared, board set done, worktree run through the same mtime/ctime reclaim policy the DEAD path uses, worker row terminalized. Never re-drives the lane (#824). (see #824)
 - `ceiling-escalated` — **intervene** [retro, round-artifact, escalation-source:never]: a lane was drained for a cost/wall-clock ceiling breach; `never` a proof of the needs-human label (the drain's own label write is best-effort).
 - `worktree-retained` — **investigate**: a lane's worktree was kept on disk (dirty/uncommitted state) instead of being deleted on reclaim, for a human to salvage.
 - `worktree-released` — **routine**: a lane's worktree was deleted after reclaim (clean, nothing to salvage).
