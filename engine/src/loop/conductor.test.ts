@@ -11768,6 +11768,11 @@ test("#826: gated-reentry close-out on a MERGED PR skips the AC-drift escalation
   assert.deepEqual(forge.boardSet, [[745, "done"]]);
   assert.deepEqual(forge.labelsAdded, [], "no needs-human re-applied to a terminal, merged lane");
   assert.deepEqual(forge.issueComments, [], "no drift-explaining comment posted on a terminal lane");
+  // #826 gate② finding [0] ("merged-drift-exemption-not-durable"): settlement never depends on
+  // DRIVE's own per-lane loop (gate.driveOne) running this tick — GATED RECLAIM settles the lane
+  // directly, so there is no "flip to driving, hope DRIVE gets to it" handoff for a deferred or
+  // restarted pass to lose.
+  assert.equal(gate.calls.length, 0, "settled directly by GATED RECLAIM — driveOne is never invoked for this lane");
 
   // A second close-out pass over the same (now `done`) lane emits no additional label writes —
   // it has left gatedFailedWorkers()/drivingWorkers() for good.
@@ -11775,6 +11780,52 @@ test("#826: gated-reentry close-out on a MERGED PR skips the AC-drift escalation
   assert.deepEqual(r2.gatedReclaimed, []);
   assert.deepEqual(r2.driven, []);
   assert.deepEqual(forge.labelsAdded, []);
+  st.close();
+});
+
+// #826 gate② finding [0] ("merged-drift-exemption-not-durable"): the exact deferral vector the
+// finding named — "the earlier pendingThreadWriteWorkers branch skips driveOne" — reproduced
+// directly. A lane whose name ALSO carries a pending thread write (leftover from a prior fixing
+// episode) would, under the old design, flip to `driving` and then have its would-be DRIVE pass
+// skipped by the pendingThreadWriteWorkers guard — deferring settlement to a LATER tick with an
+// empty (tick-local) exemption set, reopening the AC-drift race. Settling directly in GATED
+// RECLAIM (this fix) never reaches that guard at all, so the deferral vector cannot exist.
+test("#826 gate② finding [0]: a lane with a pending thread write under its own name still settles in ONE tick — merged settlement never routes through the pendingThreadWriteWorkers-guarded DRIVE loop", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+
+  const originalBody = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests";
+  st.recordAcSnapshot({ issue: 746, bodyHash: hashBody(originalBody), body: originalBody, manifest: [], snapshottedAt: "t0" });
+  st.upsertWorker({
+    name: "lane-746",
+    issue: 746,
+    session_id: "s-lane-746",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 792,
+    gated_escalation_labeled: 1,
+    ac_body_hash: hashBody(originalBody),
+  });
+  // A leftover pending thread write under this SAME lane name — the exact condition that makes
+  // DRIVE's pendingThreadWriteWorkers guard skip gate.driveOne for a `driving` lane.
+  st.enqueueThreadWrite(
+    { worker: "lane-746", issue: 746, pr: 792, threadId: "t1", reply: "done", resolution: "addressed", batchKey: "b1", fixRounds: 1 },
+    "t0",
+  );
+  forge.issueLabelsByIssue[746] = [];
+  forge.issueBodies[746] = "## Acceptance criteria\n\n- [ ] one, ADJUDICATED\n\n## Verification plan\nrun tests";
+  forge.prStatus = { ...forge.prStatus, state: "MERGED" };
+  gate.outcomes[792] = { kind: "merged", pr: 792, headOid: "H1" };
+
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r.gatedReclaimed, [{ kind: "merged", worker: "lane-746", issue: 746, pr: 792, attempts: 0 }]);
+  assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-746", issue: 746, pr: 792 }], "settled in the SAME tick, not deferred");
+  assert.equal(st.getWorker("lane-746")?.state, "done");
+  assert.deepEqual(forge.labelsAdded, [], "no needs-human — the pending thread write never blocks this settlement");
   st.close();
 });
 
