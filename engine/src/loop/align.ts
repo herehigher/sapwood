@@ -894,7 +894,9 @@ function persistTriageDecision(
 type BodyWriteGuardResult =
   | { applied: true }
   | { applied: false; reason: "hash-mismatch"; actualHash: string }
-  | { applied: false; reason: "invalid-marker"; detail: string };
+  | { applied: false; reason: "invalid-marker"; detail: string }
+  | { applied: false; reason: "operator-fence-violation"; detail: string }
+  | { applied: false; reason: "malformed-operator-fence"; detail: string };
 
 /** The #232 concurrent-edit guard, extended by #703 v2 gate② (P1-1) to be the ONE place a
  *  triage body-write is normalized against the adjudication marker — for BOTH a fresh decision's
@@ -918,7 +920,14 @@ type BodyWriteGuardResult =
  *      role, a human can leave a body in this state directly) refuses the ENTIRE write, never
  *      "repairs" it. Checked BEFORE any normalization or hash comparison.
  *   2. `applyRoleBodyRewrite(current, roleBody)` — strips any marker `roleBody` carries and
- *      reattaches `current`'s marker byte-for-byte (or none, if `current` has none).
+ *      reattaches `current`'s marker byte-for-byte (or none, if `current` has none). #827: ALSO
+ *      refuses the whole write (`ok: false`, `reason: "operator-fence-violation"`) if `roleBody`
+ *      altered/removed any operator-owned fenced block `current` carries, or (`reason:
+ *      "malformed-operator-fence"`, gate② round 1 fix) if `current`'s own fence boundary is
+ *      already malformed (an unclosed opener) — both surfaced here as their own `BodyWriteGuardResult`
+ *      arms, same non-repairing stance as step 1's marker refusal. A role-forged fence tag inside
+ *      `roleBody` is silently stripped (content kept) rather than refused — see
+ *      `stripUnpreservedOperatorFenceTags`'s own doc.
  *   3. `current === newBody` short-circuit — resume-safe by construction: idempotent by
  *      `applyRoleBodyRewrite`'s own doc (re-normalizing an ALREADY-normalized `current` against
  *      the SAME `roleBody` reproduces `current` byte-for-byte), so a genuine crash-resume where
@@ -941,7 +950,11 @@ async function updateIssueBodyIfUnchanged(
   if (!precondition.ok) {
     return { applied: false, reason: "invalid-marker", detail: precondition.detail };
   }
-  const newBody = applyRoleBodyRewrite(current, roleBody);
+  const rewrite = applyRoleBodyRewrite(current, roleBody);
+  if (!rewrite.ok) {
+    return { applied: false, reason: rewrite.reason, detail: rewrite.detail };
+  }
+  const newBody = rewrite.body;
   if (current === newBody) return { applied: true };
   const actualHash = contentVersion(current);
   if (actualHash !== expectedHash) return { applied: false, reason: "hash-mismatch", actualHash };
@@ -2423,6 +2436,27 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
                   `adjudication-cursor marker is invalid (${guard.detail}); a role write cannot repair ` +
                   `human-owned marker state — fix it directly, this issue re-matches every future round`,
               );
+              alignSummaryTriaged.push({ issue: number, drafted: false });
+              continue;
+            }
+            if (guard.reason === "operator-fence-violation" || guard.reason === "malformed-operator-fence") {
+              // #827 / gate② round 1 fix (P1a): the role's triage body-write altered/removed an
+              // operator-owned fenced block (the PO's own testimony), OR the CURRENT body's own
+              // fence boundary is malformed (an unclosed opener) — both refused, same
+              // non-repairing stance as the invalid-marker arm above; a malformed fence is never
+              // silently "repaired" or treated as absent. No forge write happened, so a
+              // same-round crash-resume hitting this branch again is a harmless repeat.
+              try {
+                deps.state.appendEvent("operator-fence-violated", {
+                  round_id: roundId,
+                  issue: number,
+                  phase: "po-triage",
+                  detail: guard.detail,
+                });
+              } catch {
+                /* best-effort honesty event — the log line below still lands */
+              }
+              (deps.log ?? console.error)(`[sapwood:po] round ${roundId}: triage write refused for #${number} — ${guard.detail}`);
               alignSummaryTriaged.push({ issue: number, drafted: false });
               continue;
             }

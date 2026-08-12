@@ -1640,6 +1640,63 @@ test("createAligningStub (#703 v2b): a po-triage redraft carrying a marker, but 
   state.close();
 });
 
+test("createAligningStub (#827): a po-triage redraft that alters bytes inside an operator-owned fence is REFUSED entirely — no updateIssueBody call, an operator-fence-violated event names the violation", async () => {
+  const forge = new FakeForge();
+  const ruling = ["<!-- sapwood:operator-owned -->", "Ruling: X is required.", "<!-- /sapwood:operator-owned -->"].join("\n");
+  const currentBody = `original body, no plan\n\n${ruling}`;
+  forge.planTriageCandidates = [{ number: 72, title: "t", labels: [], body: currentBody }];
+  const cfg = mkCfg();
+  const rewordedRuling = ["<!-- sapwood:operator-owned -->", "Ruling: X is required (refined).", "<!-- /sapwood:operator-owned -->"].join(
+    "\n",
+  );
+  const draftedBodyWithAlteredFence = `original body\n## Verification\n- run npm test\n\n${rewordedRuling}`;
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult("po-triage-72", triageResultText(72, draftedBodyWithAlteredFence)),
+  ]);
+  const state = new State(":memory:");
+  const logged = tapEvents(state);
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 32, phase: "aligning", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "the reworded fence never lands");
+  assert.equal(forge.issueBodies[72], currentBody, "the issue body is completely untouched");
+  const fenceEvent = logged.find(([kind]) => kind === "operator-fence-violated");
+  assert.ok(fenceEvent, "the violation is named by its own event");
+  const fencePayload = fenceEvent![1] as { round_id: number; issue: number; phase: string; detail: string };
+  assert.equal(fencePayload.round_id, 32);
+  assert.equal(fencePayload.issue, 72);
+  assert.equal(fencePayload.phase, "po-triage");
+  assert.match(fencePayload.detail, /operator-owned/);
+  state.close();
+});
+
+test("createAligningStub (P1a, gate② round 1 fix): the CURRENT body carries a MALFORMED (unclosed) operator-owned fence — the po-triage WRITE is REFUSED entirely (never treated as absent), an operator-fence-violated event names it", async () => {
+  const forge = new FakeForge();
+  const malformedBody = "original body, no plan\n\n<!-- sapwood:operator-owned -->\nAn unclosed ruling, no matching close tag anywhere.";
+  forge.planTriageCandidates = [{ number: 73, title: "t", labels: [], body: malformedBody }];
+  const cfg = mkCfg();
+  const runner = new ScriptedRunner([
+    doneResult("po-align-1", alignResultText([])),
+    doneResult("po-triage-73", triageResultText(73, "## Verification\n- run npm test")),
+  ]);
+  const state = new State(":memory:");
+  const logged = tapEvents(state);
+  const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createAligningStub(deps);
+  await stub.run({ roundId: 33, phase: "aligning", marker: null });
+  assert.equal(forge.updateIssueBodyCalls.length, 0, "the malformed boundary is never silently repaired or ignored");
+  assert.equal(forge.issueBodies[73], malformedBody, "the issue body is completely untouched");
+  const fenceEvent = logged.find(([kind]) => kind === "operator-fence-violated");
+  assert.ok(fenceEvent, "the malformed fence is named by its own event");
+  const fencePayload = fenceEvent![1] as { round_id: number; issue: number; phase: string; detail: string };
+  assert.equal(fencePayload.round_id, 33);
+  assert.equal(fencePayload.issue, 73);
+  assert.equal(fencePayload.phase, "po-triage");
+  assert.match(fencePayload.detail, /unclosed/);
+  state.close();
+});
+
 test("createAligningStub (#703 v2, gate② P1-1 revision — refusal arm): the CURRENT body already carries a DUPLICATE cursor marker — the po-triage WRITE is REFUSED entirely (never repaired): no updateIssueBody call, no success comment. The decision IS write-ahead accepted per #232's own doctrine (the refusal happens at the write boundary, not before), but that accepted text never reaches GitHub", async () => {
   const forge = new FakeForge();
   const brokenBody =

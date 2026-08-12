@@ -2292,6 +2292,92 @@ a role-proposed BRAND-NEW issue body, which can only ever have its own attempted
 (there being no current body to preserve a marker from) without disturbing the terminal proposal
 marker's own position-load-bearing `endsWith` trailer (`issue-creation.ts`).
 
+**Operator-owned section fence (#827).** The adjudication-cursor marker above protects one
+metadata LINE; the operator-owned fence protects an arbitrary BLOCK of body prose — a design
+ruling, ownership note, or other PO testimony a role must never rewrite. Batch-14 (2026-08-11,
+issue #752): the PO wrote a design ruling into the issue body before Ready promotion, and gate⓪'s
+drafter, refining the body during plan review, REWROTE the ruling's own sentences in place (kept
+the substance, changed the wording) — laundering a defective ruling sentence forward under refined
+phrasing instead of leaving it verbatim for the audit trail. Same "operator-owned bytes a role
+rewrites must preserve verbatim" family as the marker above and #805's finding markers. A block
+delimited by `<!-- sapwood:operator-owned -->` … `<!-- /sapwood:operator-owned -->` (standalone
+lines, fence-aware exactly like the marker: an inline or fenced-code-quoted example never
+registers as a real boundary) must survive any role-produced body rewrite byte-for-byte, open tag
+through close tag; a role may append content before, between, or after fences freely, it just may
+never change a single byte between an open and its matching close.
+
+**Enforcement point, chosen arm: REJECT (not silent-restore).** `applyRoleBodyRewrite`
+(`comment-cursor.ts`) — the SAME function that carries the marker's own strip-and-restore logic —
+checks fence preservation FIRST, before any marker normalization: `missingOperatorFences` compares
+every operator-owned fence in the current body against the role-proposed body (multiset, byte-for-
+byte) and, if any is missing or altered, the function returns `{ ok: false, reason:
+"operator-fence-violation", detail }` instead of a rewritten body — the ENTIRE role-produced write
+is refused, not just the touched fence. This differs deliberately from the marker's own silent
+strip-and-restore: a fence can hold arbitrary multi-line prose, and silently splicing the
+operator's original text back in would both hide from the role (and from review) that its output
+was rejected, and throw away whatever legitimate, non-conflicting edits shared the same body —
+reject-the-whole-write is the honest failure mode, consistent with the marker's own write-time
+refusal arm (`checkMarkerWritePrecondition`) above. Every `applyRoleBodyRewrite` call site handles
+the refusal: `plan-review.ts`'s two write sites (reviewer approve-with-revision, drafter's drafted
+body) escalate `needs-human` and append both an `operator-fence-violated` event (naming the
+violation) and `plan-review-escalated` (tagged `origin: "operator-fence-violation"` — a healthy,
+working-as-designed catch, never counted toward `round-artifact.ts`'s empty-spin breaker, which
+counts only `origin: "session-failure"`); `align.ts`'s PO-triage `updateIssueBodyIfUnchanged`
+refuses the write (the candidate re-matches next round, same non-repairing stance as its
+`invalid-marker` arm) and appends `operator-fence-violated` naming the violation;
+`issue-creation.ts`'s brand-new-issue call site can never violate this arm — an empty current body
+carries no fence to protect by construction.
+
+Multiset comparison has no notion of position: two byte-identical fences that changed order
+relative to the rest of the body, or relative to each other, are not a violation — moving a fence
+is explicitly allowed (append/move freely, never edit the bytes between open and close).
+
+**gate② round 1 fixes (2026-08-12), three findings against the initial #827 landing:**
+
+- **A malformed current fence now fails closed, never open.** An unclosed
+  `<!-- sapwood:operator-owned -->` opener in the CURRENT body (a human left a fence open) used to
+  extract no block at all — indistinguishable from "no fence exists" — so the role write proceeded
+  silently and the operator's own testimony went unprotected. `applyRoleBodyRewrite` now checks
+  this FIRST, before the fence-preservation comparison: a malformed current fence refuses the
+  entire write outright (`ok: false, reason: "malformed-operator-fence"`), the same non-repairing,
+  fail-closed stance `checkMarkerWritePrecondition`'s `malformed-marker` arm already takes for the
+  adjudication-cursor marker. Every call site treats it exactly like an `operator-fence-violation`
+  refusal — needs-human escalation with an `operator-fence-violated` event (plan-review.ts) or a
+  logged, skipped write (align.ts's po-triage) — the malformed boundary is never silently "repaired"
+  by treating it as absent.
+- **The byte-for-byte comparison is now CRLF-sensitive.** The fence-extraction/comparison path
+  splits lines on `"\n"` only (never `/\r?\n/`) and reads a fenced block's bytes as a raw substring
+  of the original body between two line offsets — never by rejoining an array of lines with a
+  literal `"\n"`. A role that changes only a fence's line-ending bytes (CRLF to LF, or the reverse)
+  now fails the comparison like any other byte change; before this fix, both bodies were normalized
+  to LF before comparing, so an EOL-only edit inside a fence passed as "byte-for-byte identical."
+  Recognizing a fence-tag line still trims (a trailing `\r` never defeats recognition) — only the
+  COMPARISON is raw.
+- **A role-introduced fence tag is stripped, not accepted.** Nothing previously stopped a role from
+  writing its OWN `<!-- sapwood:operator-owned -->` / `<!-- /sapwood:operator-owned -->` pair (or a
+  bare, unmatched attempt) into its proposed body — which would then read as genuine operator
+  authority forever after, including at brand-new issue creation, where the current body is always
+  empty and so nothing was ever "missing" to violate. `applyRoleBodyRewrite` now strips any such
+  role-authored tag LINE that is not part of an already-verified, preserved current fence — the
+  tag line is removed, the content between a forged open/close pair is left in place untouched, the
+  same "strip the role's own attempt, never trust its shape" stance the adjudication-cursor marker
+  already takes on a role-authored marker line. This runs unconditionally, including when the
+  current body carries no fence at all — `issue-creation.ts`'s brand-new-issue call site now
+  strips any fence tags a role's proposed body invents, rather than accepting them as authoritative
+  by construction.
+
+**Interaction with AC/verification-section extraction.** The generic reserved-namespace anchor
+scan `associateMarkedSections` (`forge.ts`) — the ac/verification "marked-mode" parser
+`extractAcceptanceCriteria`/`extractVerificationPlan`/`extractVerificationSection` share — treats
+ANY standalone `<!-- sapwood:<token> -->` line as an attempt to enter marked mode, deliberately
+failing closed (`null`, planless) on any token that isn't exactly `ac` or `verification`, so a
+near-miss or future protocol token never silently falls back to legacy heading parsing. The
+operator-owned fence's open tag is carved out of that scan by name (`marker[1] !==
+"operator-owned"`): without the exception, ANY issue body carrying an operator-owned fence would
+read as planless even when a perfectly ordinary legacy-heading Verification/Acceptance-criteria
+section sits right beside it — the fence's own close tag never collides in the first place (it
+starts `<!-- /sapwood:...`, not `<!-- sapwood:...`, so the anchor regex never matches it at all).
+
 **Normalization happens exactly ONCE, at the WRITE boundary — never pre-persisted into a journal
 (#703 v2 gate② P1-1, 2026-08-06).** PO triage's `updateIssueBodyIfUnchanged` (`align.ts`) is the
 ONE place a triage body-write is normalized, applied against a FRESH live-body read taken

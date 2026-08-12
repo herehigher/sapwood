@@ -2144,8 +2144,18 @@ function associateMarkedSections(body: string): MarkedSectionAssociation | null 
         // token selects marked mode; only the two roles below are then accepted. This keeps
         // future digit/hyphenated sapwood protocol attempts from falling through to legacy
         // English-heading parsing.
+        //
+        // #827 exception: `sapwood:operator-owned` is a REAL, unrelated sapwood protocol token
+        // (comment-cursor.ts's operator-owned section fence, opened by this exact standalone
+        // line) — it is deliberately excluded here rather than left to trip "marked mode selected
+        // but malformed" (`null`, below), which would otherwise poison EVERY body carrying an
+        // operator-owned fence: `extractAcceptanceCriteria`/`extractVerificationPlan` would go
+        // fail-closed-null even when a perfectly normal legacy-heading AC/Verification section
+        // sits right beside the fence. The fence's OWN closing tag (`<!-- /sapwood:... -->`)
+        // never matches this regex at all — it starts with `/sapwood:`, not `sapwood:` — so only
+        // the open tag needs this explicit carve-out.
         const marker = /^<!-- sapwood:([a-z0-9][a-z0-9-]*) -->$/.exec(line);
-        if (marker) {
+        if (marker && marker[1] !== "operator-owned") {
           const previous = headings[headings.length - 1];
           anchors.push({
             role: marker[1]!,

@@ -893,6 +893,34 @@ test("#591 fixture matrix: partial, duplicate, unknown, and misplaced anchors fa
   }
 });
 
+test("#827: an operator-owned fence coexisting with a LEGACY (unanchored) verification plan does not poison extraction — 'sapwood:operator-owned' is excluded from the generic reserved-namespace anchor scan", () => {
+  const body = [
+    "## Acceptance criteria",
+    "",
+    "- [ ] the criteria are met",
+    "",
+    "## Verification",
+    "",
+    "Run `npm test` and confirm green.",
+    "",
+    "<!-- sapwood:operator-owned -->",
+    "Ruling: X is required.",
+    "<!-- /sapwood:operator-owned -->",
+  ].join("\n");
+  assert.ok(extractVerificationPlan(body) != null, "the fence must not force marked-mode malformed-null on an otherwise-legacy body");
+  assert.ok(extractVerificationSection(body) != null);
+  assert.deepEqual(
+    extractAcceptanceCriteria(body)?.map((item) => item.text),
+    ["the criteria are met"],
+  );
+});
+
+test("#827: an operator-owned fence coexisting with a real ac/verification MARKED-MODE body still extracts normally", () => {
+  const body = `${JAPANESE_ANCHORED_BODY}\n\n<!-- sapwood:operator-owned -->\nRuling: X.\n<!-- /sapwood:operator-owned -->`;
+  assert.ok(extractVerificationPlan(body)?.includes("<!-- sapwood:ac -->"));
+  assert.equal(extractAcceptanceCriteria(body)?.length, 1);
+});
+
 test("#591: digit and hyphenated reserved-namespace anchors fail closed instead of dispatching through legacy headings", () => {
   const legacyDispatchable = `## Acceptance criteria
 

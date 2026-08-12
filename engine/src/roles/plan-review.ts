@@ -662,6 +662,35 @@ async function reviewOneIssue(
     }
   };
 
+  /** #827: a role-produced body (reviewer's approve-with-revision, or the drafter's redraft)
+   *  altered/removed an operator-owned fenced block, OR (gate② round 1 fix, P1a) the current
+   *  body's own fence boundary was already malformed (an unclosed opener) — either way
+   *  `applyRoleBodyRewrite` already refused to apply it (`ok: false`). Escalate to needs-human,
+   *  same forge+state shape as `escalate` above, but tagged with its OWN `operator-fence-violated`
+   *  event (naming the violation for a reader who never opens the forge comment) and `origin:
+   *  "operator-fence-violation"` — a healthy, working-as-designed catch, not a session/provider
+   *  failure, so it must NOT count toward round-artifact.ts's empty-spin breaker (which counts
+   *  only `"session-failure"`; see that file's own doc). */
+  const escalateOperatorFenceViolation = async (checkpoint: string, detail: string): Promise<void> => {
+    const reason = `role write refused — ${detail}`;
+    await escalateForge(reason);
+    try {
+      deps.state.appendEvent("operator-fence-violated", { round_id: roundId, issue: issue.number, phase: checkpoint, detail });
+    } catch {
+      /* contained — the forge label/comment above already externalized it */
+    }
+    try {
+      deps.state.appendEvent("plan-review-escalated", {
+        round_id: roundId,
+        issue: issue.number,
+        reason,
+        origin: "operator-fence-violation",
+      });
+    } catch {
+      /* contained — the forge label/comment above already externalized it */
+    }
+  };
+
   for (let cycle = 0; cycle <= maxCycles; cycle++) {
     // P1 (fable): refetch the CURRENT body every cycle — after cycle 0 it's the drafter's edit
     // the reviewer must judge, not the phase-start snapshot.
@@ -800,7 +829,13 @@ async function reviewOneIssue(
           await escalateFinalWriteDrift(deps, issue, roundId, "gate0-write-apply", writeDrift);
           return false;
         }
-        await deps.forge.updateIssueBody(issue.number, applyRoleBodyRewrite(writeTimeBody, decision.body));
+        const rewrite = applyRoleBodyRewrite(writeTimeBody, decision.body);
+        if (!rewrite.ok) {
+          trail.push(`cycle ${cycle}: reviewer's approve-with-revision body refused — ${rewrite.detail}`);
+          await escalateOperatorFenceViolation("gate0-write-apply", rewrite.detail);
+          return false;
+        }
+        await deps.forge.updateIssueBody(issue.number, rewrite.body);
       }
       // #214 decision C: WRITE-AHEAD the load-bearing `plan-approved` event BEFORE the label
       // (#232 stance — a durable fact must exist before its externally-visible side effect).
@@ -1004,7 +1039,16 @@ async function reviewOneIssue(
     // #703: same marker-preservation rule as the reviewer's approve-with-revision branch above —
     // the drafter's ENTIRE deliverable is a role-produced body, so its output can never carry an
     // authoritative marker; the CURRENT body's marker (or lack of one) wins byte-for-byte.
-    await deps.forge.updateIssueBody(issue.number, applyRoleBodyRewrite(writeTimeBody, draftValidated.body));
+    // #827: the exact call path issue #752 exercised — a drafter refining an operator-owned
+    // fenced ruling in place. `applyRoleBodyRewrite` now refuses the write outright on a
+    // violation rather than applying the drafter's rewording.
+    const draftRewrite = applyRoleBodyRewrite(writeTimeBody, draftValidated.body);
+    if (!draftRewrite.ok) {
+      trail.push(`cycle ${cycle}: verification-plan-drafter session ${drafterResult.name} -> ${draftRewrite.detail}`);
+      await escalateOperatorFenceViolation("gate0-write-drafter", draftRewrite.detail);
+      return false;
+    }
+    await deps.forge.updateIssueBody(issue.number, draftRewrite.body);
     // Loop back -> re-run the reviewer against the drafter's edit (body refetched above).
   }
   // Unreachable in practice (the loop always returns via one of the branches above before this
