@@ -1950,6 +1950,21 @@ async function settleMergedLane(
     // #420: offline/replay tooltip source (frontend-design §11 #3) — omitted, never null.
     ...(title !== undefined ? { prTitle: title } : {}),
   });
+  // #832 gate② finding [0] ("direct-merged-settlement-drops-signals"): `gate.driveOne` reports
+  // `holdObservation: { held: false }` for a terminal MERGED PR specifically so the conductor's
+  // hold-episode bookkeeping (DRIVE's per-lane loop, which reads `outcome.holdObservation`
+  // BEFORE dispatching on `outcome.kind`) can close a previously-announced `pr-held` episode with
+  // `pr-released` — "any standing hold label on a merged PR is moot" (merge-driver.ts's own
+  // comment on that early return). GATED RECLAIM's direct settlement call site never produces a
+  // `DriveOutcome` to read a `holdObservation` off, so it would otherwise skip that close-out
+  // entirely and strand the episode open forever (the lane goes `done` and is never revisited).
+  // Closing it HERE, unconditionally, covers both call sites: MERGED always implies held:false,
+  // and this is a no-op when there is nothing to close, including the DRIVE-driven call, where
+  // the generic pre-switch handling has typically already closed it (`lastHoldEvent` is no
+  // longer 'pr-held' by the time this runs, so the check below skips a duplicate append).
+  if (state.lastHoldEvent(w.name, pr) === "pr-held") {
+    state.appendEvent("pr-released", { worker: w.name, issue: w.issue, pr });
+  }
   return { kind: "merged", worker: w.name, issue: w.issue, pr };
 }
 
@@ -4391,7 +4406,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         // collected.
         state.appendEvent("gated-reentry-merged", { worker: w.name, issue: w.issue, pr, attempts });
         gatedReclaimed.push({ kind: "merged", worker: w.name, issue: w.issue, pr, attempts });
-        driven.push(await settleMergedLane(forge, state, cfg, iso, deps.log, rollbacks, w, pr, prStatus.headOid));
+        driven.push(await settleMergedLane(forge, state, cfg, iso, deps.log, rollbacks, w, pr, prStatus.headOid, prStatus.title));
         continue;
       }
       const issueState = (await forge.getIssueMeta(w.issue)).state;

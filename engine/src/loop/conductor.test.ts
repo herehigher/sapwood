@@ -11829,6 +11829,53 @@ test("#826 gate② finding [0]: a lane with a pending thread write under its own
   st.close();
 });
 
+// #832 gate② finding [0] ("direct-merged-settlement-drops-signals"): GATED RECLAIM's direct
+// settlement (settleMergedLane) never produces a DriveOutcome for DRIVE's own generic
+// holdObservation handling to read, so it must carry BOTH signals gate.driveOne's terminal-MERGED
+// early return exists to preserve: the PR's title (for the `merged` event's `prTitle`) and the
+// `held: false` observation that closes a standing `pr-held` episode with `pr-released` —
+// "any standing hold label on a merged PR is moot" (merge-driver.ts's own comment on that path).
+test("#832 gate② finding [0]: GATED RECLAIM's direct MERGED settlement carries prTitle and closes a standing pr-held episode with pr-released", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+
+  st.upsertWorker({
+    name: "lane-m2",
+    issue: 800,
+    session_id: "s-lane-m2",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 900,
+    gated_escalation_labeled: 1,
+  });
+  // A hold episode was announced earlier (a human applied `hold` while the escalation stood) and
+  // never closed — DRIVE never revisited this lane once it went `failed`.
+  st.appendEvent("pr-held", { worker: "lane-m2", issue: 800, pr: 900, label: "hold" });
+  forge.issueLabelsByIssue[800] = [];
+  forge.prStatus = { ...forge.prStatus, state: "MERGED", title: "fix(engine): the titled PR" };
+
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r.gatedReclaimed, [{ kind: "merged", worker: "lane-m2", issue: 800, pr: 900, attempts: 0 }]);
+  assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-m2", issue: 800, pr: 900 }]);
+  const mergedEvent = st.eventsAfterId(0, ["merged"]).find((e) => (e.payload as { pr: number }).pr === 900);
+  assert.ok(mergedEvent, "a merged event was recorded for this PR");
+  assert.equal(
+    (mergedEvent!.payload as { prTitle?: string }).prTitle,
+    "fix(engine): the titled PR",
+    "prTitle is carried through from prStatus.title",
+  );
+  assert.equal(
+    st.lastHoldEvent("lane-m2", 900),
+    "pr-released",
+    "the standing hold episode is closed on merge settlement, same as driveOne's own MERGED early return",
+  );
+  st.close();
+});
+
 // #167 review (Codex P2+P3 adjudication): capHitEscalationNote — direct unit tests for the
 // helper extracted from the gated-reentry-cap escalation comment above. Covers the two
 // defects the review found: (a) unconditionally citing "review doctrine, adjudication point
