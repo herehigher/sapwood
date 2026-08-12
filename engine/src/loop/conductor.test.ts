@@ -11720,6 +11720,64 @@ test("#484 AC3: the live sweep↔reentry cycle (round 262: resolve -> sweep -> r
   st.close();
 });
 
+// #826: batch-14's lane-745 shape — a lane escalated for a reason UNRELATED to AC drift (so
+// `ac_rebaseline_eligible` was never set and GATED RECLAIM's own reclaim path never re-baselines
+// the stale dispatch-time snapshot), whose PR is hand-merged while a REAL post-dispatch AC edit
+// sits unadjudicated. GATED RECLAIM's own MERGED branch hands the lane straight to DRIVE this
+// same tick (the lane-433/#484 path) — but pre-fix, DRIVE's checkAcDriftBeforeDrive ran BEFORE
+// driveOne and re-escalated needs-human onto a lane that had already reached terminal success,
+// exactly the ev#13481/13482 + ev#13495/13496 double-fire this issue exists to close. #752's
+// marker-normalized hashing does not excuse this: the edit here is a real, non-marker AC change.
+test("#826: gated-reentry close-out on a MERGED PR skips the AC-drift escalation entirely — no needs-human on a terminal lane", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg();
+  const gate = new FakeMergeGate();
+
+  const originalBody = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests";
+  st.recordAcSnapshot({ issue: 745, bodyHash: hashBody(originalBody), body: originalBody, manifest: [], snapshottedAt: "t0" });
+  // Escalated by a NON-AC-drift path (e.g. review-disputed / fix-rounds cap): the dispatch-time
+  // snapshot is still on file, but `ac_rebaseline_eligible` was never set — only
+  // checkAcDriftBeforeDrive/checkCommentCursorBeforeDrive ever touch that column.
+  st.upsertWorker({
+    name: "lane-745",
+    issue: 745,
+    session_id: "s-lane-745",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 791,
+    gated_escalation_labeled: 1,
+    ac_body_hash: hashBody(originalBody),
+  });
+  forge.issueLabelsByIssue[745] = []; // a human cleared needs-human — the unrelated finding was addressed
+  // A genuine, real PO adjudication edit to the AC lands after dispatch — never rebaselined.
+  forge.issueBodies[745] = "## Acceptance criteria\n\n- [ ] one, ADJUDICATED\n\n## Verification plan\nrun tests";
+  forge.prStatus = { ...forge.prStatus, state: "MERGED" }; // the PR merged despite the drift
+  gate.outcomes[791] = { kind: "merged", pr: 791, headOid: "H1" };
+
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r.gatedReclaimed, [{ kind: "merged", worker: "lane-745", issue: 745, pr: 791, attempts: 0 }]);
+  assert.deepEqual(
+    r.driven,
+    [{ kind: "merged", worker: "lane-745", issue: 745, pr: 791 }],
+    "no needs-human — the close-out reaches the ordinary merged terminal",
+  );
+  assert.equal(st.getWorker("lane-745")?.state, "done");
+  assert.deepEqual(forge.boardSet, [[745, "done"]]);
+  assert.deepEqual(forge.labelsAdded, [], "no needs-human re-applied to a terminal, merged lane");
+  assert.deepEqual(forge.issueComments, [], "no drift-explaining comment posted on a terminal lane");
+
+  // A second close-out pass over the same (now `done`) lane emits no additional label writes —
+  // it has left gatedFailedWorkers()/drivingWorkers() for good.
+  const r2 = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg, mergeGate: gate });
+  assert.deepEqual(r2.gatedReclaimed, []);
+  assert.deepEqual(r2.driven, []);
+  assert.deepEqual(forge.labelsAdded, []);
+  st.close();
+});
+
 // #167 review (Codex P2+P3 adjudication): capHitEscalationNote — direct unit tests for the
 // helper extracted from the gated-reentry-cap escalation comment above. Covers the two
 // defects the review found: (a) unconditionally citing "review doctrine, adjudication point

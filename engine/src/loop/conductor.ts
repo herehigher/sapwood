@@ -4260,6 +4260,12 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   through would just strand the lane in `driving`).
   const gate = deps.mergeGate;
   const gatedReclaimed: GatedReclaimOutcome[] = [];
+  // #826: worker names handed to DRIVE via the MERGED branch below, THIS tick — a lane already
+  // proven terminal-success (its PR is MERGED) has no drive left to protect, so DRIVE's own
+  // AC-drift/comment-cursor pre-checks (which exist to stop a DRIVE from proceeding on changed
+  // authority) must not re-escalate needs-human onto it. See that branch's own comment for why
+  // it hands off to DRIVE instead of settling here directly.
+  const gatedReclaimMergedTerminal = new Set<string>();
   if (gate) {
     for (const w of state.gatedFailedWorkers()) {
       if (w.pr == null) continue; // fail-safe; gatedFailedWorkers() already filters this
@@ -4317,6 +4323,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           pr,
           attempts,
         });
+        gatedReclaimMergedTerminal.add(w.name);
         gatedReclaimed.push({ kind: "merged", worker: w.name, issue: w.issue, pr, attempts });
         continue;
       }
@@ -4667,20 +4674,30 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // called for this lane. See checkAcDriftBeforeDrive's own doc for the fail-closed ordering
       // guarantee (drift routes to needsHuman and skips driveOne entirely this tick; a missing
       // snapshot is not drift and drives normally).
-      const driftCheck = await checkAcDriftBeforeDrive(forge, state, cfg, w, pr, iso);
-      if (driftCheck.outcome) {
-        driven.push(driftCheck.outcome);
-        continue;
-      }
-      // #652: comment-adjudication cursor recheck — immediately after the AC-snapshot drift
-      // check above confirms the body itself hasn't drifted, and still BEFORE gate.driveOne. A
-      // comment can arrive without ever touching the body (the batch-8 incident shape); see
-      // checkCommentCursorBeforeDrive's own doc for the fail-closed ordering. #752: threads the
-      // live body the drift check above already fetched — no second forge fetch here.
-      const cursorOutcome = await checkCommentCursorBeforeDrive(forge, state, cfg, w, pr, iso, driftCheck.liveBody);
-      if (cursorOutcome) {
-        driven.push(cursorOutcome);
-        continue;
+      //
+      // #826: SKIPPED for a lane GATED RECLAIM just proved terminal-success (its PR is MERGED)
+      // this same tick — drift gating exists to stop a DRIVE from proceeding on changed
+      // authority, and there is no drive left to stop once the PR is already merged. Falling
+      // through to gate.driveOne lets it independently re-confirm MERGED and record the honest
+      // terminal (state "done", board write) instead of re-escalating needs-human onto a lane
+      // that has nothing left to protect. A non-terminal reentry (not in this set) keeps the
+      // fail-closed drift/cursor checks unchanged.
+      if (!gatedReclaimMergedTerminal.has(w.name)) {
+        const driftCheck = await checkAcDriftBeforeDrive(forge, state, cfg, w, pr, iso);
+        if (driftCheck.outcome) {
+          driven.push(driftCheck.outcome);
+          continue;
+        }
+        // #652: comment-adjudication cursor recheck — immediately after the AC-snapshot drift
+        // check above confirms the body itself hasn't drifted, and still BEFORE gate.driveOne. A
+        // comment can arrive without ever touching the body (the batch-8 incident shape); see
+        // checkCommentCursorBeforeDrive's own doc for the fail-closed ordering. #752: threads the
+        // live body the drift check above already fetched — no second forge fetch here.
+        const cursorOutcome = await checkCommentCursorBeforeDrive(forge, state, cfg, w, pr, iso, driftCheck.liveBody);
+        if (cursorOutcome) {
+          driven.push(cursorOutcome);
+          continue;
+        }
       }
       // #55 P1-B: the trigger decision now lives in gate.driveOne itself (it's the only place
       // that knows the LIVE current head) — tick() just threads the lane's State-recorded pin
