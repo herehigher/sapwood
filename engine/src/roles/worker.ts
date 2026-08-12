@@ -781,6 +781,25 @@ export function discoverClaudeBin(env: Record<string, string | undefined>): stri
   return b ? b : "claude";
 }
 
+/** #799 (PLAN.md:129 — "state a minimum Claude Code CLI version and test against it in CI",
+ *  never previously built): the minimum Claude Code CLI version this engine's worker/probe argv
+ *  is verified against — the ONLY version this repo has evidence for. probeLlmPing's own doc
+ *  below states it: "verified working against claude CLI 2.1.209" for `--no-session-persistence`,
+ *  `--strict-mcp-config`, `--tools`, `--max-budget-usd`, `--system-prompt`. An older CLI missing
+ *  one of those flags fails every probe/worker leg with `error: unknown option ...`, which #168's
+ *  deterministic signature classifier reads as an ENVIRONMENT failure (the loop parks the LLM
+ *  source and backs off) rather than naming the real, fixable cause. Do not invent a newer
+ *  unverified number here — that fails the drift test below by construction (it can only compare
+ *  this constant against the docs, never re-derive "what the CLI actually verifies").
+ *
+ *  Drift-tested against docs/getting-started.md's Requirements bullet and docs/configuration.md's
+ *  `worker` section (claude-version-startup-check.test.ts's AC1/AC2 test) — changing this value
+ *  without updating both docs to the SAME exact string fails that test. Consumed by
+ *  claude-version-startup-check.ts's once-per-engine-start WARN-only startup detector — never a
+ *  gate, see that module's own doc — and by the human-owned CI remainder
+ *  (docs/patches/799-ci-claude-cli-version-floor.patch) via `ENGINE_CLAUDE_LONG_FLAGS` below. */
+export const MIN_CLAUDE_CLI_VERSION = "2.1.209";
+
 /** #168: the ping probe's outcome. `detail` is set on FAILURE only — the first stderr (or
  *  stdout) error line, a timeout note, or a spawn error — so the recorded probe event lets an
  *  operator distinguish "provider still down" (a 429/overloaded error) from a local
@@ -796,6 +815,31 @@ export interface LlmPingResult {
  *  --system-prompt REPLACES the CLI's default (much larger) system prompt. */
 const LLM_PING_SYSTEM_PROMPT = "You are a heartbeat responder. Only output the requested word.";
 const LLM_PING_PROMPT = "Respond with the single word 'pong' and nothing else.";
+
+/** #799 gate② P1 #4 fix: probeLlmPing's argv, extracted to a pure builder so the CI floor-check
+ *  (`ENGINE_CLAUDE_LONG_FLAGS`, defined after `claudeArgs` below) can derive its required-flag
+ *  set by actually CALLING this function rather than hand-copying flag names into a second list
+ *  that can silently fall behind (sol-high gate② finding: a 5-flag hand list omitted even this
+ *  same function's own `--model`/`--output-format`, and 19 more flags `claudeArgs` can emit).
+ *  probeLlmPing itself calls this — one source, not two. */
+function llmPingArgv(probeModel: string, probeMaxBudgetUsd: number): string[] {
+  return [
+    "-p",
+    "--model",
+    probeModel,
+    "--no-session-persistence",
+    "--system-prompt",
+    LLM_PING_SYSTEM_PROMPT,
+    "--strict-mcp-config",
+    "--tools",
+    "",
+    "--max-budget-usd",
+    String(probeMaxBudgetUsd),
+    "--output-format",
+    "text",
+    LLM_PING_PROMPT,
+  ];
+}
 
 /** #168 (PR #180 review, P1-1 amendment — final form): the LLM-source probe for conductor.ts's
  *  park machinery (TickDeps.probeLlmReachable) — a REAL minimal inference ping, verified
@@ -847,26 +891,7 @@ export function probeLlmPing(claudeBin: string, probeModel: string, probeMaxBudg
     const firstLine = (s: string): string => s.trim().split("\n")[0]?.trim() ?? "";
     let child: ChildProcess;
     try {
-      child = spawn(
-        claudeBin,
-        [
-          "-p",
-          "--model",
-          probeModel,
-          "--no-session-persistence",
-          "--system-prompt",
-          LLM_PING_SYSTEM_PROMPT,
-          "--strict-mcp-config",
-          "--tools",
-          "",
-          "--max-budget-usd",
-          String(probeMaxBudgetUsd),
-          "--output-format",
-          "text",
-          LLM_PING_PROMPT,
-        ],
-        { stdio: ["ignore", "pipe", "pipe"] },
-      );
+      child = spawn(claudeBin, llmPingArgv(probeModel, probeMaxBudgetUsd), { stdio: ["ignore", "pipe", "pipe"] });
     } catch (e) {
       finish({ ok: false, detail: `ping spawn failed: ${e instanceof Error ? e.message : String(e)}` });
       return;
@@ -908,6 +933,94 @@ export function probeLlmPing(claudeBin: string, probeModel: string, probeMaxBudg
       // API errors land), else the first stdout line, else the bare exit code.
       const detail = firstLine(stderr) || firstLine(stdout) || `ping exited ${code} with no output`;
       finish({ ok: false, detail });
+    });
+  });
+}
+
+// ── #799: the version probe — claude-version-startup-check.ts's own detector logic lives in
+// loop/, but the ACTUAL spawn lives HERE, next to probeLlmPing, on purpose: this file's own
+// `#69 grep-invariant` test (below, "the ONLY child_process importers are worker.ts...") is a
+// repo-wide structural check that no OTHER engine module shells out — the "Claude CLI coupling
+// isolated in worker.ts" property PLAN.md:129 itself names as a v1 requirement. Adding a second
+// spawn call in loop/claude-version-startup-check.ts would either violate that invariant or force
+// widening its allowlist; keeping the spawn here and exporting only the RESULT type/function
+// keeps the isolation property intact while still letting the startup module own the arm/log/
+// event logic. detectClaudeVersionStartupTier (loop/claude-version-startup-check.ts) is the only
+// production caller.
+
+/** The version probe's raw outcome — same two-shape contract as `LlmPingResult` above
+ *  (`{ok:true,...}` / `{ok:false,detail}`), so failure surfacing reads the same way as its
+ *  sibling. */
+export type ClaudeVersionProbeResult = { ok: true; stdout: string } | { ok: false; detail: string };
+
+/** Bounded probe timeout. `--version` is a local, no-network CLI invocation — unlike
+ *  probeLlmPing's real inference round-trip, which is why THAT probe needs a user-configurable
+ *  `probeTimeoutSec` — so a short, fixed bound is appropriate here and deliberately NOT a new
+ *  config key (user-tunable values belong in config only when there is a real tuning need; a
+ *  healthy `--version` call returns in milliseconds, and an unhealthy one should hard-kill fast
+ *  rather than hold up startup). */
+export const CLAUDE_VERSION_PROBE_TIMEOUT_MS = 5_000;
+
+/** #799 gate② P1 #4 (round 2, sol-high): the version probe's own argv — extracted the same way
+ *  `llmPingArgv` was, so `ENGINE_CLAUDE_LONG_FLAGS` below can derive its required-flag set by
+ *  actually CALLING this too, not just the worker/ping argv builders. Round 1's fix covered
+ *  fresh + resume `claudeArgs` shapes and `llmPingArgv`, but omitted THIS probe entirely — sol-
+ *  high's round-2 reproduction: `probeClaudeVersion` really spawns `claudeBin ["--version"]`
+ *  (below), so a real engine install's complete fresh+resume+ping+version-probe argv union is
+ *  24 flags, not the 23 the round-1 derivation covered. `probeClaudeVersion` calls this. */
+function versionProbeArgv(): string[] {
+  return ["--version"];
+}
+
+/** Spawns `<claudeBin> --version` and resolves the raw result — never throws: a spawn error, a
+ *  hang past `CLAUDE_VERSION_PROBE_TIMEOUT_MS` (hard SIGKILL), and a non-zero exit all resolve
+ *  `{ ok: false, detail }` instead of rejecting, exactly like probeLlmPing's own never-throws
+ *  contract. */
+export function probeClaudeVersion(claudeBin: string): Promise<ClaudeVersionProbeResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (r: ClaudeVersionProbeResult): void => {
+      if (settled) return;
+      settled = true;
+      resolve(r);
+    };
+    let child: ChildProcess;
+    try {
+      child = spawn(claudeBin, versionProbeArgv(), { stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      finish({ ok: false, detail: `version probe spawn failed: ${e instanceof Error ? e.message : String(e)}` });
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      finish({ ok: false, detail: `version probe timed out after ${CLAUDE_VERSION_PROBE_TIMEOUT_MS}ms (hard-killed)` });
+    }, CLAUDE_VERSION_PROBE_TIMEOUT_MS);
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      finish({ ok: false, detail: `version probe spawn error: ${e.message}` });
+    });
+    // 'close', not 'exit' — same #578 rationale as above: stdio buffers are only guaranteed
+    // complete once every stream has closed, not the moment the child terminates.
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        const firstLine = (stderr || stdout).trim().split("\n")[0]?.trim();
+        finish({ ok: false, detail: `version probe exited ${code}${firstLine ? `: ${firstLine}` : ""}` });
+        return;
+      }
+      finish({ ok: true, stdout });
     });
   });
 }
@@ -1181,6 +1294,63 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
     "--verbose",
   ];
 }
+
+/** #799 gate② P1 #4 fix: EVERY optional `ClaudeArgsOpts` field is deliberately filled in below —
+ *  typed `Required<ClaudeArgsOpts>`, not `ClaudeArgsOpts`, so a FUTURE new optional field fails
+ *  to COMPILE here until this fixture supplies a value for it. Same completeness discipline as
+ *  `unstubbed-forge.test-support.ts`'s `MISSING_FROM_LIST` gives `IForge`: without it, a new
+ *  field could add a new long flag that silently never reaches `ENGINE_CLAUDE_LONG_FLAGS` below
+ *  (the same class of gap a hand-maintained flag list already failed on once — sol-high gate②
+ *  review of #799). `resumeSessionId` is set here (the "resume" shape); the "fresh" shape below
+ *  derives from this SAME object with that one field omitted, rather than a second
+ *  independently-typed fixture that could itself drift. */
+const MAXIMAL_CLAUDE_ARGS_OPTS: Required<ClaudeArgsOpts> = {
+  prompt: "prompt",
+  model: "model",
+  effort: "high",
+  fallbackModel: "sonnet",
+  worktree: "lane",
+  name: "lane",
+  sessionId: "session",
+  addDir: "/tmp/add-dir",
+  settings: "{}",
+  resumeSessionId: "prior-session",
+  allowedTools: "Read",
+  disallowedTools: "Bash",
+  mcpConfig: "{}",
+  strictMcpConfig: true,
+  settingSources: "",
+  maxBudgetUsd: 1,
+  pluginDir: "/tmp/plugin",
+};
+
+/** A long flag: `--xxx`, never a bare value or a short flag (`-p`) — the shape `claude --help`'s
+ *  own output lists flags in. */
+function isLongFlag(token: string): boolean {
+  return /^--[a-zA-Z][a-zA-Z-]*$/.test(token);
+}
+
+/** #799 gate② P1 #4 fix (round 1 + round 2, sol-high): the COMPLETE set of long flags the
+ *  engine's OWN `claude` invocations can ever emit — derived by actually CALLING `claudeArgs`
+ *  (both the fresh-dispatch shape, `--session-id`, and the resume shape, `--resume`),
+ *  `llmPingArgv`, AND `versionProbeArgv` with every optional field populated, rather than a
+ *  hand-maintained list a future flag could silently miss. Round 1 covered only the worker argv
+ *  + the LLM-ping probe (23 flags); round 2 closes the gap sol-high's reproduction found — the
+ *  version-floor startup check ALSO spawns `claude` (`probeClaudeVersion`, `["--version"]`), and
+ *  that argv had never been folded in, so a real installed CLI's true fresh+resume+ping+version
+ *  union (24 flags) exceeded what this set asserted (23). This is what the CI floor-check
+ *  (`docs/patches/799-ci-claude-cli-version-floor.patch`'s `check-claude-cli-flags.ts`) asserts
+ *  `claude --help` advertises — the human-owned CI remainder's own promise to check EVERY long
+ *  flag the engine emits across EVERY shape it spawns `claude` in, not a curated subset. */
+export const ENGINE_CLAUDE_LONG_FLAGS: readonly string[] = (() => {
+  const { resumeSessionId: _resumeSessionId, ...freshOpts } = MAXIMAL_CLAUDE_ARGS_OPTS;
+  const freshArgv = claudeArgs(freshOpts);
+  const resumeArgv = claudeArgs(MAXIMAL_CLAUDE_ARGS_OPTS);
+  const pingArgv = llmPingArgv("probe-model", 0.05);
+  const versionArgv = versionProbeArgv();
+  const all = [...freshArgv, ...resumeArgv, ...pingArgv, ...versionArgv].filter(isLongFlag);
+  return [...new Set(all)].sort();
+})();
 
 const SENTINEL_EXTS = ["running.json", "done.json", "failed.json", "handoff.json", "heartbeat", "jsonl"];
 
