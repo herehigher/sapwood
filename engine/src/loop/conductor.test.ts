@@ -3030,6 +3030,36 @@ test("#834 (gate② round 1, F1): a merged lane whose worktree settlement FAILED
   st.close();
 });
 
+test("#834 (gate② round 2, G2): a failed settlement's tombstonePath, when present, is threaded into the merged-lane-worktree-settle-failed event — never the stale original worktreePath", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  sup.enableWorktreeSettlement({
+    "lane-a": {
+      worktreePath: "/repo/.claude/worktrees/lane-a",
+      verdict: "failed",
+      reason: "re-verified dirty; rename-back failed: boom",
+      tombstonePath: "/repo/.claude/worktrees/.settle-tombstone-abc123",
+    },
+  });
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const failed = st.eventsSince("1970-01-01T00:00:00.000Z", ["merged-lane-worktree-settle-failed"]);
+  assert.equal(failed.length, 1);
+  assert.deepEqual(failed[0]!.payload, {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    worktreePath: "/repo/.claude/worktrees/lane-a",
+    reason: "re-verified dirty; rename-back failed: boom",
+    tombstonePath: "/repo/.claude/worktrees/.settle-tombstone-abc123",
+  });
+  st.close();
+});
+
 test("#834: a Supervisor with no opinion on worktree settlement (settleMergedWorktree unset) leaves the merged path exactly as before — zero new events, zero behavior change", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

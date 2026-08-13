@@ -2185,7 +2185,18 @@ export function worktreeMaybeDirty(worktreePath: string, sinceMs: number): boole
  *  (settleWorktreeDirectory's own tests), which cannot deterministically construct the "old
  *  mtime, fresh ctime" shape without either real elapsed time or exactly the fixed-past-date
  *  trick worker.test.ts's own dedicated test for this function uses. Production code only ever
- *  reaches it through settleWorktreeDirectory, immediately after its own rename. */
+ *  reaches it through settleWorktreeDirectory, immediately after its own rename.
+ *
+ *  THREAT MODEL (gate② round 2, G4 — the PO's own adjudication): this function, like the
+ *  worktreeMaybeDirty family it composes with, assumes a TIMESTAMP-HONEST writer — it fences
+ *  ACCIDENTS (a lane that happened to still be writing), never ADVERSARIES. A writer that
+ *  deliberately unlinks an entry and then forges the parent directory's mtime backward via
+ *  `utimes` (to make the removal look like it never happened) evades this check — but that same
+ *  forgery defeats EVERY mtime/ctime-based check in this file equally, including the
+ *  dispatch-baselined worktreeMaybeDirty calls this PR never touched; it indicts the whole
+ *  scanner family's long-standing assumption, not this function's own delta, and is out of scope
+ *  for the same reason the rest of this file's mtime/ctime discipline has always been: this
+ *  machinery has never claimed to jail an adversary with write access to the tree it's judging. */
 export function tombstoneMaybeDirty(tombstonePath: string, sinceMs: number): boolean {
   if (!Number.isFinite(sinceMs)) return true;
   let topStat: ReturnType<typeof lstatSync>;
@@ -2232,6 +2243,15 @@ export interface WorktreeDirectorySettleOutcome {
   verdict: WorktreeDirectorySettleVerdict;
   /** Present only for `"failed"`. */
   reason?: string;
+  /** #834 (gate② round 2, G2): present WHENEVER this outcome's data survives at a TOMBSTONE
+   *  path rather than the original — i.e. every `"failed"` verdict this function can reach
+   *  (both happen strictly AFTER the first rename already succeeded: a re-verified-dirty
+   *  tombstone whose rename-back itself failed, or a post-rename removal that didn't complete).
+   *  Absent on `"retained"` (data is always still at the ORIGINAL path there — either genuinely
+   *  dirty and never touched, or the very first rename failed outright) and on `"settled"`
+   *  (nothing survives anywhere). Callers must surface this path, never the stale original one,
+   *  when reporting a `"failed"` verdict — see settleMergedLane's own doc. */
+  tombstonePath?: string;
 }
 
 /** #834 (gate② round 1, F1 + F4): the ONE clean-worktree-deletion primitive shared by worker.ts's
@@ -2267,7 +2287,26 @@ export interface WorktreeDirectorySettleOutcome {
  *  preserved on disk, with the git-worktree registration for the ORIGINAL path now dangling
  *  (its directory moved out from under it). That dangling registration is exactly the shape
  *  #825's own missing-directory janitor pass already reaps (dead-pid/no-directory -> "reap") —
- *  no new recovery machinery is needed; the existing food source just gained one more producer. */
+ *  no new recovery machinery is needed; the existing food source just gained one more producer.
+ *
+ *  RESIDUAL RACE WINDOW (gate② round 2, G3 — the PO's own adjudication, recorded here so the
+ *  next reader doesn't have to re-derive it): the rename-then-verify-then-delete sequence above
+ *  closes the ORIGINAL check-then-delete race (a writer landing a file between the purity read
+ *  and the deletion, invisibly, over the whole scan+delete duration) down to a MUCH smaller one
+ *  — but does not close it to zero. A writer that already holds an open file descriptor into the
+ *  worktree (or one that independently discovers the tombstone's generated path and writes into
+ *  it) can still land a write strictly AFTER tombstoneMaybeDirty's re-verify and strictly BEFORE
+ *  (or DURING) `fsOps.rm`'s own recursive walk — no check-then-delete sequence, however tight,
+ *  can close a window against a writer already inside the door. This is accepted, deliberately,
+ *  not fenced: (1) it is definitionally unclosable in userspace — the ONLY closing move
+ *  (deleting under a lock a live writer respects) doesn't exist for a plain directory tree; (2)
+ *  it is out of proportion for the classes this function actually gates — Phase 1 only ever
+ *  calls this AFTER the lane's own process has exited at MERGED close-out (no live writer to
+ *  race), and Phase 2 only ever calls this for a dead-pid or 24h-git-quiescent registration (no
+ *  plausible fd-holder either). The rename is still worth doing: it shrinks the exposed window
+ *  from "the whole scan-plus-delete duration, at a path anyone can still find" down to
+ *  "microseconds, at a path nothing else has any reason to know" — a real, if not total,
+ *  reduction. */
 /** #834 (gate② round 1, F1): the two raw fs primitives settleWorktreeDirectory needs, as an
  *  injectable seam — real defaults (`renameSync`/`rmSync`) for production, a fake for tests that
  *  need to exercise the "removal didn't actually complete" path DETERMINISTICALLY (a real
@@ -2311,8 +2350,10 @@ export function settleWorktreeDirectory(
       return { verdict: "retained" };
     } catch (error) {
       // The data is intact, just no longer at the original path. Never delete data that
-      // re-verified dirty — leave the tombstone in place and say so honestly.
-      return { verdict: "failed", reason: `re-verified dirty; rename-back failed: ${String(error)}` };
+      // re-verified dirty — leave the tombstone in place and say so honestly. #834 (gate② round
+      // 2, G2): carry the TOMBSTONE path — the original path no longer holds this data, and a
+      // caller reporting the stale original path would misdirect anyone trying to salvage it.
+      return { verdict: "failed", reason: `re-verified dirty; rename-back failed: ${String(error)}`, tombstonePath };
     }
   }
   try {
@@ -2322,14 +2363,14 @@ export function settleWorktreeDirectory(
     // "clean, settled" claim — the caller would then run `git worktree unlock/remove` against a
     // directory that (per this catch) may still be fully present, the exact #65 clean-check RCE
     // class this file's whole discipline exists to close. Report the truth instead: never
-    // "settled" unless deletion is PROVEN, below.
-    return { verdict: "failed", reason: `tombstone removal failed: ${String(error)}` };
+    // "settled" unless deletion is PROVEN, below. (G2: tombstonePath carried — see above.)
+    return { verdict: "failed", reason: `tombstone removal failed: ${String(error)}`, tombstonePath };
   }
   if (existsSync(tombstonePath)) {
     // F1: a `rm` that reports success without actually removing everything (a mount-point
     // oddity, a fake in a test) must not be trusted at face value either — verify the tombstone
-    // is PROVABLY gone before ever claiming "settled".
-    return { verdict: "failed", reason: "tombstone still present after removal" };
+    // is PROVABLY gone before ever claiming "settled". (G2: tombstonePath carried — see above.)
+    return { verdict: "failed", reason: "tombstone still present after removal", tombstonePath };
   }
   return { verdict: "settled" };
 }
@@ -4376,7 +4417,14 @@ export class WorkerSupervisor implements Supervisor {
     if (!existsSync(worktreePath)) return { worktreePath: null, verdict: "absent" };
     const indexMs = resolveWorktreeIndexBaselineMs(worktreePath);
     const outcome = settleWorktreeDirectory(worktreePath, this.worktreeRoot, indexMs);
-    return { worktreePath, verdict: outcome.verdict, ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}) };
+    // #834 (gate② round 2, G2): tombstonePath threads through unmodified — present exactly when
+    // outcome.verdict is "failed" and data survives at that path rather than `worktreePath`.
+    return {
+      worktreePath,
+      verdict: outcome.verdict,
+      ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
+      ...(outcome.tombstonePath !== undefined ? { tombstonePath: outcome.tombstonePath } : {}),
+    };
   }
 
   /** The IMMUTABLE first-dispatch time (`dispatched_at`) that the dirty-worktree retention

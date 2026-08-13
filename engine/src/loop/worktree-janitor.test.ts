@@ -350,7 +350,7 @@ test("sweepPresentDirectoryWorktreesOnce: a LOCKED dead-pid present-directory re
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/role-x", lockReason: "claude session role-x (pid 111 start now)" };
   const deps = fakePresentDeps({ registrations: [reg], isPidAlive: () => false, directoryExists: () => true });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [reg.path], retained: [], skipped: 0, failed: [], nextOffset: 0 });
+  assert.deepEqual(result, { reaped: [reg.path], retained: [], skipped: 0, failed: [], nextOffset: 0, examinedPaths: [reg.path] });
   assert.deepEqual(deps.settleCalls, [reg.path]);
   assert.deepEqual(deps.unlocked, [reg.path]);
   assert.deepEqual(deps.removed, [reg.path]);
@@ -366,7 +366,7 @@ test("sweepPresentDirectoryWorktreesOnce: a LOCKED dead-pid present-directory re
     settleDirectory: () => ({ verdict: "retained" }),
   });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [reg.path], skipped: 0, failed: [], nextOffset: 0 });
+  assert.deepEqual(result, { reaped: [], retained: [reg.path], skipped: 0, failed: [], nextOffset: 0, examinedPaths: [reg.path] });
   assert.deepEqual(deps.unlocked, []);
   assert.deepEqual(deps.removed, []);
   assert.equal(deps.pruneCalls, 0);
@@ -387,6 +387,19 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F1): a LOCKED dead-pi
   assert.deepEqual(deps.unlocked, [], "never proceeds to git against a directory that isn't PROVEN gone");
   assert.deepEqual(deps.removed, []);
   assert.equal(deps.pruneCalls, 0);
+});
+
+test("sweepPresentDirectoryWorktreesOnce (gate② round 2, G2): a failed settlement's tombstonePath, when present, is threaded into the failed entry", async () => {
+  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/role-x", lockReason: "claude session role-x (pid 111 start now)" };
+  const tombstonePath = "/repo/.claude/worktrees/.settle-tombstone-abc123";
+  const deps = fakePresentDeps({
+    registrations: [reg],
+    isPidAlive: () => false,
+    directoryExists: () => true,
+    settleDirectory: () => ({ verdict: "failed", reason: "re-verified dirty; rename-back failed: boom", tombstonePath }),
+  });
+  const result = await sweepPresentDirectoryWorktreesOnce(deps);
+  assert.deepEqual(result.failed, [{ path: reg.path, error: "re-verified dirty; rename-back failed: boom", tombstonePath }]);
 });
 
 test("sweepPresentDirectoryWorktreesOnce: an alive-pid LOCKED present-directory registration is never touched (classifyRegistration's own 'alive' verdict, unchanged)", async () => {
@@ -413,7 +426,7 @@ test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registra
     // — not overridden, so the call-recorded assertion below actually proves something.
   });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [reg.path], retained: [], skipped: 0, failed: [], nextOffset: 0 });
+  assert.deepEqual(result, { reaped: [reg.path], retained: [], skipped: 0, failed: [], nextOffset: 0, examinedPaths: [reg.path] });
   assert.deepEqual(deps.settleCalls, [reg.path]);
   assert.deepEqual(deps.unlocked, [], "an unlocked registration is never unlock()'d");
   assert.deepEqual(deps.removed, [reg.path]);
@@ -425,7 +438,7 @@ test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registra
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/fix-382", lockReason: null, branch: "refs/heads/fix-382" };
   const deps = fakePresentDeps({ registrations: [reg], directoryExists: () => true, registrationAgeMs: () => AGE_YOUNG });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, failed: [], nextOffset: 0 });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, failed: [], nextOffset: 0, examinedPaths: [] });
   assert.deepEqual(deps.branchMergedCalls, [], "the expensive git check never runs for an under-age candidate");
   assert.deepEqual(deps.settleCalls, []);
 });
@@ -434,7 +447,7 @@ test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registra
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/fix-382", lockReason: null, branch: "refs/heads/fix-382" };
   const deps = fakePresentDeps({ registrations: [reg], directoryExists: () => true, registrationAgeMs: () => Number.NaN });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, failed: [], nextOffset: 0 });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, failed: [], nextOffset: 0, examinedPaths: [] });
   assert.deepEqual(deps.branchMergedCalls, []);
 });
 
@@ -447,7 +460,7 @@ test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registra
     isBranchMerged: async () => false,
   });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, failed: [], nextOffset: 0 });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, failed: [], nextOffset: 0, examinedPaths: [reg.path] });
   assert.deepEqual(deps.settleCalls, [], "never fs-deleted without proof of a merged branch");
 });
 
@@ -455,7 +468,7 @@ test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registra
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/detached-1", lockReason: null };
   const deps = fakePresentDeps({ registrations: [reg], directoryExists: () => true });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, failed: [], nextOffset: 0 });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, failed: [], nextOffset: 0, examinedPaths: [] });
   assert.deepEqual(deps.branchMergedCalls, []);
 });
 
@@ -463,7 +476,7 @@ test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED registration whose directo
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/fix-382", lockReason: null, branch: "refs/heads/fix-382" };
   const deps = fakePresentDeps({ registrations: [reg], directoryExists: () => false });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, failed: [], nextOffset: 0 });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, failed: [], nextOffset: 0, examinedPaths: [] });
 });
 
 test("sweepPresentDirectoryWorktreesOnce: per-cycle work is bounded to batchSize — overflow candidates are counted as skipped, not touched", async () => {
@@ -554,26 +567,53 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F5): a stock whose fi
   assert.equal(second.nextOffset, 0, "one full lap complete");
 });
 
-test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 1, F5): reaches the ENTIRE candidate list in one call, accumulating every cycle's counts — the operator one-shot's own full-coverage guarantee", async () => {
-  const registrations: WorktreeRegistration[] = Array.from({ length: 7 }, (_, i) => ({
-    path: `/repo/.claude/worktrees/role-${i}`,
-    lockReason: `claude session role-${i} (pid ${i} start now)`,
-  }));
+/** #834 (gate② round 2, G1): a listRegistrations fake that REFLECTS removals — `remove()` deletes
+ *  the matching entry from the live list, exactly like a real `git worktree remove` does. This
+ *  is the load-bearing difference from `fakePresentDeps` above (whose `registrations` array
+ *  never shrinks): round 1's own to-completion test used the STATIC version, which is exactly
+ *  why the index-based cursor bug (G1) slipped through gate② round 1 — a candidate list that
+ *  never actually shrinks can never expose an index cursor pointing past the end of a shrunken
+ *  one. Every to-completion test below uses THIS fake. */
+function fakeShrinkingPresentDeps(
+  initial: WorktreeRegistration[],
+  overrides: Partial<PresentDirectorySweepDeps> = {},
+): PresentDirectorySweepDeps & { settleCalls: string[]; removedCalls: string[] } {
+  let live = [...initial];
   const settleCalls: string[] = [];
-  const deps = fakePresentDeps({
-    registrations,
-    isPidAlive: () => false,
+  const removedCalls: string[] = [];
+  const base: PresentDirectorySweepDeps = {
+    listRegistrations: async () => live,
+    worktreeRoot: ROOT,
     directoryExists: () => true,
+    isPidAlive: () => false,
+    indexBaselineMs: () => 0,
     settleDirectory: (path) => {
       settleCalls.push(path);
       return { verdict: "settled" };
     },
-  });
+    registrationAgeMs: () => AGE_OLD,
+    isBranchMerged: async () => true,
+    unlock: async () => {},
+    remove: async (path) => {
+      removedCalls.push(path);
+      live = live.filter((r) => r.path !== path); // the real-world shrinkage the fix must survive
+    },
+    prune: async () => {},
+  };
+  return { ...base, ...overrides, settleCalls, removedCalls };
+}
+
+test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 1, F5): reaches the ENTIRE candidate list in one call, accumulating every cycle's counts — the operator one-shot's own full-coverage guarantee (SHRINKING registrations, per gate② round 2 G1)", async () => {
+  const registrations: WorktreeRegistration[] = Array.from({ length: 7 }, (_, i) => ({
+    path: `/repo/.claude/worktrees/role-${i}`,
+    lockReason: `claude session role-${i} (pid ${i} start now)`,
+  }));
+  const deps = fakeShrinkingPresentDeps(registrations);
   const logs: string[] = [];
   const result = await runPresentDirectoryWorktreeSweepToCompletion(deps, (m) => logs.push(m), 3);
   assert.equal(result.reaped.length, 7, "every candidate reached, across ceil(7/3) = 3 cycles");
   assert.deepEqual(
-    new Set(settleCalls),
+    new Set(deps.settleCalls),
     new Set(registrations.map((r) => r.path)),
     "each candidate examined EXACTLY once — no re-examination within the single lap",
   );
@@ -584,10 +624,26 @@ test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 1, F5): reache
   );
 });
 
+test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 2, G1 — the reviewer's own reproduction): 7 candidates, batchSize=3 — cycle 1 reaps indices 0-2 and SHRINKS the list to 4; the OLD index-based cursor (nextOffset: 3) would then point at the last element and silently skip candidates 3-5. The identity-based cursor must reach ALL 7.", async () => {
+  const registrations: WorktreeRegistration[] = Array.from({ length: 7 }, (_, i) => ({
+    path: `/repo/.claude/worktrees/role-${i}`,
+    lockReason: `claude session role-${i} (pid ${i} start now)`,
+  }));
+  const deps = fakeShrinkingPresentDeps(registrations);
+  const result = await runPresentDirectoryWorktreeSweepToCompletion(deps, () => {}, 3);
+  assert.deepEqual(
+    new Set(result.reaped),
+    new Set(registrations.map((r) => r.path)),
+    "all 7 candidates reaped — none silently skipped when the list shrinks mid-run",
+  );
+  assert.equal(result.reaped.length, 7);
+  assert.deepEqual(new Set(deps.removedCalls), new Set(registrations.map((r) => r.path)));
+});
+
 test("runPresentDirectoryWorktreeSweepToCompletion: an empty candidate list terminates after one no-op cycle", async () => {
   const deps = fakePresentDeps({ registrations: [] });
   const result = await runPresentDirectoryWorktreeSweepToCompletion(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, failed: [], nextOffset: 0 });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, failed: [], nextOffset: 0, examinedPaths: [] });
 });
 
 // ── #834 (gate② round 1, F6): a prune-step failure must never escape sweepPresentDirectoryWorktreesOnce
@@ -668,7 +724,7 @@ test("sweepPresentDirectoryWorktreesAndReport: a failing appendEvent never throw
   };
   const logs: string[] = [];
   const result = await sweepPresentDirectoryWorktreesAndReport(deps, state, (m) => logs.push(m));
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, failed: [], nextOffset: 0 });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, failed: [], nextOffset: 0, examinedPaths: [] });
   assert.equal(logs.length, 1);
   assert.match(logs[0]!, /rollup event append failed/);
 });

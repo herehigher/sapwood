@@ -1349,11 +1349,18 @@ export interface ReclaimResult {
  *  untouched) and a provably-deleted one (`"settled"`, the only verdict a caller may prune a
  *  git-worktree registration on). `worktreePath` is `null` only for `"absent"` (nothing on disk
  *  to settle, or the resolved path failed root-containment — see worker.ts's own doc). `reason`
- *  is present only for `"failed"`, a short diagnostic for the caller's own log/event. */
+ *  is present only for `"failed"`, a short diagnostic for the caller's own log/event.
+ *
+ *  `tombstonePath` (gate② round 2, G2): present WHENEVER a `"failed"` verdict's data actually
+ *  survives at a rename-tombstone path rather than `worktreePath` (every `"failed"` verdict this
+ *  chain can reach happens strictly after a successful rename — see worker.ts's
+ *  settleWorktreeDirectory doc). A caller reporting a failure MUST surface this path, never the
+ *  now-stale `worktreePath`, when it's present. */
 export interface WorktreeSettleOutcome {
   worktreePath: string | null;
   verdict: "absent" | "retained" | "settled" | "failed";
   reason?: string;
+  tombstonePath?: string;
 }
 
 /** The conductor's only handle on workers. worker.ts (M2 #11) implements this.
@@ -2064,12 +2071,16 @@ async function settleMergedLane(
           // An attempted deletion did not complete cleanly (TOCTOU re-verify, or the removal
           // itself failed) — never prune a registration for a directory that isn't PROVEN gone,
           // and never claim "settled". Event-only, same no-escalation stance as "retained".
+          // #834 (gate② round 2, G2): `tombstonePath`, when present, means the data actually
+          // survives THERE, not at `worktreePath` (which the rename already vacated) — carried
+          // into the event so a human salvaging this doesn't go looking in the wrong place.
           state.appendEvent("merged-lane-worktree-settle-failed", {
             worker: w.name,
             issue: w.issue,
             pr,
             worktreePath: settlement.worktreePath!,
             reason: settlement.reason ?? "unknown",
+            ...(settlement.tombstonePath !== undefined ? { tombstonePath: settlement.tombstonePath } : {}),
           });
           break;
       }

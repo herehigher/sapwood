@@ -357,9 +357,10 @@ export interface PresentDirectorySweepDeps extends WorktreeJanitorClassifyDeps {
 
 export interface PresentDirectorySweepResult {
   reaped: string[];
-  /** Purity-dirty (or a failed-attempt-but-untouched) candidates left in place — counted, never
+  /** Purity-dirty candidates, or an untouched failed-rename attempt (settleDirectory's own
+   *  `"retained"` verdict covers both — see its doc) — left in place — counted, never
    *  per-directory-escalated (the issue's own explicit "never per-directory events for the
-   *  stock" line). */
+   *  stock" line). An attempted-but-INCOMPLETE deletion is a DIFFERENT bucket: `failed`, below. */
   retained: string[];
   /** Every registration this arm looked at but did not reap: alive-owner, under-age, unmerged-
    *  branch, detached/branchless, beyond this cycle's window (see nextOffset), or a prune-step
@@ -367,12 +368,25 @@ export interface PresentDirectorySweepResult {
    *  any ONE directory). One number — the whole POINT of the rollup is that the stock never
    *  generates per-entry noise. */
   skipped: number;
-  failed: Array<{ path: string; error: string }>;
+  /** An attempted-but-incomplete deletion (settleDirectory's own `"failed"` verdict) or a whole-
+   *  sweep prune failure (F6, under PRUNE_FAILURE_SENTINEL_PATH). `tombstonePath` (#834 gate②
+   *  round 2, G2) is present exactly when the data survives THERE rather than at `path` — see
+   *  WorktreeDirectorySettleOutcome's own doc for why every reachable "failed" verdict carries
+   *  one. */
+  failed: Array<{ path: string; error: string; tombstonePath?: string }>;
   /** #834 (gate② round 1, F5): where the NEXT cycle's window should start, so a permanently-
    *  dirty/unmerged HEAD candidate can never starve everything behind it across repeated calls
    *  — see sweepPresentDirectoryWorktreesOnce's own windowing doc. `0` once a full lap over the
-   *  candidate list completes (including the trivial zero-candidate case). */
+   *  candidate list completes (including the trivial zero-candidate case). Meaningful ONLY for
+   *  the offset-rotation caller (engine startup); the identity-based to-completion path (gate②
+   *  round 2, G1) ignores it entirely — see runPresentDirectoryWorktreeSweepToCompletion's doc. */
   nextOffset: number;
+  /** #834 (gate② round 2, G1): the exact candidate PATHS this cycle's window actually examined
+   *  (every entry in `batch`, regardless of individual verdict) — the identity-based cursor
+   *  runPresentDirectoryWorktreeSweepToCompletion accumulates across cycles, replacing the
+   *  index-based `nextOffset` rotation that silently skipped candidates the instant a reap
+   *  shrank the registration list. Empty exactly when nothing was in this cycle's window. */
+  examinedPaths: string[];
 }
 
 /** #834 (gate② round 1, F6): the sentinel `path` a whole-sweep prune-step failure is recorded
@@ -399,16 +413,23 @@ type PresentDirectoryCandidate =
  *  WINDOWING (#834 gate② round 1, F5 — the head-of-line starvation fix): the CLASSIFICATION pass
  *  above always scans every registration (cheap: no subprocess calls), but the batch of
  *  candidates this cycle actually EXAMINES through the merge/purity gates is a `batchSize`-wide
- *  WINDOW starting at `offset % candidates.length` (never index 0 unless `offset` is 0 or the
- *  list wraps) — NOT a fixed head slice. Without this, a persistently-dirty or perpetually-
- *  unmerged registration sitting in the first `batchSize` positions would be re-selected every
- *  single cycle forever, and everything BEHIND it in the list would never even be examined,
- *  regardless of how many times this function is called. `nextOffset` in the result is where the
- *  window ends (wrapping to 0 once it reaches the end of the list) — callers that want FULL
- *  coverage loop, feeding each call's `nextOffset` back in as the next call's `offset`, until it
- *  returns to 0 (runPresentDirectoryWorktreeSweepToCompletion does exactly this); a single-cycle
- *  caller (engine startup) that wants to avoid ALWAYS re-examining the same window across
- *  restarts instead starts from a RANDOMIZED offset — see cli.ts's own startup wiring.
+ *  WINDOW, never a fixed head slice — TWO DIFFERENT windowing strategies, selected by which
+ *  caller is asking:
+ *   - `alreadyExamined` provided (the to-completion caller, gate② round 2 G1): candidates whose
+ *     path is already in that set are filtered out FIRST, then the window is the first
+ *     `batchSize` of what remains — an IDENTITY-based cursor, immune to the list shrinking when
+ *     a candidate gets reaped between cycles (an INDEX-based cursor is not: see
+ *     runPresentDirectoryWorktreeSweepToCompletion's own doc for the exact bug this replaces).
+ *     `offset` is ignored in this mode.
+ *   - `alreadyExamined` omitted (the single-cycle engine-startup caller): the window starts at
+ *     `offset % candidates.length` — a RANDOMIZED offset (never a fixed 0) is how that caller
+ *     avoids always re-examining the same head slice across restarts, since it has no cross-
+ *     restart cursor to carry forward; see cli.ts's own startup wiring. `nextOffset` in the
+ *     result is meaningful only in this mode.
+ *
+ *  `examinedPaths` in the result is the exact set of candidate paths this cycle's window
+ *  actually reached (regardless of verdict) — what the to-completion caller accumulates into its
+ *  own `alreadyExamined` set for the next call.
  *
  *  Every candidate this cycle actually reaches, clean or dirty, goes through settleDirectory
  *  (the shared rename-tombstone-verify-delete primitive, #834 gate② round 1 F1/F4) — never a
@@ -418,6 +439,7 @@ export async function sweepPresentDirectoryWorktreesOnce(
   deps: PresentDirectorySweepDeps,
   batchSize: number = WORKTREE_JANITOR_BATCH_SIZE,
   offset = 0,
+  alreadyExamined?: ReadonlySet<string>,
 ): Promise<PresentDirectorySweepResult> {
   const registrations = await deps.listRegistrations();
   const candidates: PresentDirectoryCandidate[] = [];
@@ -443,17 +465,22 @@ export async function sweepPresentDirectoryWorktreesOnce(
     // "reap"/"alive"/"out-of-root"/(unlocked, no directory): not this arm's concern.
   }
 
-  const total = candidates.length;
+  // #834 (gate② round 2, G1): the to-completion caller's identity-based cursor — filter OUT
+  // already-examined candidates before windowing, so a candidate the CALLER already looked at
+  // this run is never re-selected regardless of what index it now sits at.
+  const unexamined = alreadyExamined ? candidates.filter((c) => !alreadyExamined.has(c.path)) : candidates;
+
+  const total = unexamined.length;
   const startIdx = total === 0 ? 0 : offset % total;
   const endIdx = Math.min(startIdx + batchSize, total);
-  const batch = candidates.slice(startIdx, endIdx);
+  const batch = unexamined.slice(startIdx, endIdx);
   const consumed = endIdx - startIdx;
   skipped += total - consumed; // candidates outside this cycle's window
   const nextOffset = total === 0 || endIdx >= total ? 0 : endIdx;
 
   const reaped: string[] = [];
   const retained: string[] = [];
-  const failed: Array<{ path: string; error: string }> = [];
+  const failed: Array<{ path: string; error: string; tombstonePath?: string }> = [];
   for (const c of batch) {
     if (c.kind === "unlocked-merged-candidate") {
       const merged = await deps.isBranchMerged(c.branch);
@@ -469,7 +496,13 @@ export async function sweepPresentDirectoryWorktreesOnce(
       continue;
     }
     if (settled.verdict === "failed") {
-      failed.push({ path: c.path, error: settled.reason ?? "settle failed" });
+      // #834 (gate② round 2, G2): tombstonePath, when present, is where this candidate's data
+      // ACTUALLY survives — see WorktreeDirectorySettleOutcome's own doc.
+      failed.push({
+        path: c.path,
+        error: settled.reason ?? "settle failed",
+        ...(settled.tombstonePath !== undefined ? { tombstonePath: settled.tombstonePath } : {}),
+      });
       continue; // never call git against a directory that isn't PROVEN gone
     }
     // settled.verdict === "settled" — the directory is provably gone; prune its registration.
@@ -497,7 +530,7 @@ export async function sweepPresentDirectoryWorktreesOnce(
       failed.push({ path: PRUNE_FAILURE_SENTINEL_PATH, error: String(error) });
     }
   }
-  return { reaped, retained, skipped, failed, nextOffset };
+  return { reaped, retained, skipped, failed, nextOffset, examinedPaths: batch.map((c) => c.path) };
 }
 
 /** Real deps for sweepPresentDirectoryWorktreesOnce — reuses createWorktreeJanitorDeps's own
@@ -568,21 +601,29 @@ export async function sweepPresentDirectoryWorktreesAndReport(
   return result;
 }
 
-/** #834 (gate② round 1, F5) — the present-directory arm's own to-completion path, the AC5
- *  operator one-shot counterpart to runWorktreeJanitorToCompletion above, but with a DIFFERENT
- *  termination rule: unlike the missing-directory reap (where a successfully-reaped candidate
- *  LEAVES the candidate list, so the list itself shrinks toward empty across cycles), a
- *  retained/skipped present-directory candidate is NOT removed from the registration list and
- *  reappears at the SAME position on every re-scan — "no more work to do" here means "every
- *  candidate has now been examined once in this run", not "the list is empty". Loops
- *  sweepPresentDirectoryWorktreesOnce, feeding each cycle's `nextOffset` back in as the next
- *  cycle's `offset`, until it returns to `0` — by that function's own windowing contract this is
- *  EXACTLY ONE LAP over the full candidate list (each cycle's window is disjoint from every
- *  other cycle's in the same lap), so counts from every cycle are accumulated, never just the
- *  last one. A second lap would only re-examine the SAME still-present directories and report
- *  nothing new, so this stops after exactly one. This is the SAME code path
- *  scripts/worktree-janitor.ts (the operator one-shot script) now runs alongside the existing
- *  missing-directory pass. */
+/** #834 (gate② round 1, F5; cursor fixed round 2, G1) — the present-directory arm's own
+ *  to-completion path, the AC5 operator one-shot counterpart to runWorktreeJanitorToCompletion
+ *  above, but with a DIFFERENT termination rule: unlike the missing-directory reap (where a
+ *  successfully-reaped candidate LEAVES the candidate list, so the list itself shrinks toward
+ *  empty across cycles), a retained/skipped present-directory candidate is NOT removed from the
+ *  registration list and reappears at the SAME position on every re-scan — "no more work to do"
+ *  here means "every candidate has now been examined once in this run", not "the list is empty".
+ *
+ *  IDENTITY-based cursor (G1 — replaces an index-based `nextOffset` rotation that was WRONG the
+ *  instant a reap shrank the list): a cycle that reaps candidates 0-2 out of 7 leaves the NEXT
+ *  `listRegistrations()` call returning only the remaining 4 — an index cursor computed against
+ *  the OLD 7-element list (`nextOffset: 3`) then points PAST the end of the NEW 4-element list,
+ *  silently skipping candidates 3-5 and terminating early (the reviewer's own reproduction,
+ *  gate② round 2). This function instead accumulates a `seen` SET of candidate PATHS across
+ *  cycles, passed as `sweepPresentDirectoryWorktreesOnce`'s `alreadyExamined` — each cycle
+ *  examines the first `batchSize` candidates NOT already in `seen` (see that function's own doc),
+ *  which is correct regardless of how the underlying list reshuffles or shrinks between calls.
+ *  Terminates the instant a cycle's `examinedPaths` comes back empty (no unseen candidates left);
+ *  every cycle's counts are accumulated (never just the last one), since each cycle's window is
+ *  disjoint from every earlier one in the same run.
+ *
+ *  This is the SAME code path scripts/worktree-janitor.ts (the operator one-shot script) now runs
+ *  alongside the existing missing-directory pass. */
 export async function runPresentDirectoryWorktreeSweepToCompletion(
   deps: PresentDirectorySweepDeps,
   log: (message: string) => void = console.error,
@@ -590,13 +631,13 @@ export async function runPresentDirectoryWorktreeSweepToCompletion(
 ): Promise<PresentDirectorySweepResult> {
   const totalReaped: string[] = [];
   const totalRetained: string[] = [];
-  const totalFailed: Array<{ path: string; error: string }> = [];
+  const totalFailed: Array<{ path: string; error: string; tombstonePath?: string }> = [];
   let totalSkipped = 0;
-  let offset = 0;
+  const seen = new Set<string>();
   let cycle = 0;
-  do {
+  for (;;) {
     cycle++;
-    const result = await sweepPresentDirectoryWorktreesOnce(deps, batchSize, offset);
+    const result = await sweepPresentDirectoryWorktreesOnce(deps, batchSize, 0, seen);
     totalReaped.push(...result.reaped);
     totalRetained.push(...result.retained);
     totalSkipped += result.skipped;
@@ -605,7 +646,8 @@ export async function runPresentDirectoryWorktreeSweepToCompletion(
       `[sapwood:worktree-janitor] present-dir cycle ${cycle}: reaped ${result.reaped.length}, retained ${result.retained.length}, ` +
         `skipped ${result.skipped}, failed ${result.failed.length}`,
     );
-    offset = result.nextOffset;
-  } while (offset !== 0);
-  return { reaped: totalReaped, retained: totalRetained, skipped: totalSkipped, failed: totalFailed, nextOffset: 0 };
+    if (result.examinedPaths.length === 0) break; // #834 G1: no unseen candidates left -> done
+    for (const p of result.examinedPaths) seen.add(p);
+  }
+  return { reaped: totalReaped, retained: totalRetained, skipped: totalSkipped, failed: totalFailed, nextOffset: 0, examinedPaths: [] };
 }

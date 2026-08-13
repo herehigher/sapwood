@@ -228,7 +228,7 @@ export const LANE_EVENT_KINDS = defineKinds({
   "merged-lane-worktree-settle-failed": {
     tags: [],
     meaning:
-      "a MERGED lane's worktree was purity-clean but its deletion did not complete cleanly (TOCTOU re-verify or the removal itself failed) — left in place, its git-worktree registration untouched; carries a `reason` (#834 Phase 1, gate② round 1 F1/F4).",
+      "a MERGED lane's worktree was purity-clean but its deletion did not complete cleanly (TOCTOU re-verify or the removal itself failed) — data preserved, possibly at a `tombstonePath` rather than the original `worktreePath` (present whenever the rename already succeeded before the failure), its git-worktree registration left dangling for the #825 missing-directory pass to eventually reap; carries a `reason` (#834 Phase 1, gate② round 1 F1/F4, round 2 G2).",
     actionability: "investigate",
     see: "#834",
   },
