@@ -12,12 +12,14 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { after, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -64,10 +66,12 @@ import {
   renderPromptTemplate,
   resolveWorktreeHead,
   scanEgressSuspects,
+  settleWorktreeDirectory,
   shellSingleQuote,
   signalOnceAndReport,
   spawnClaudeSession,
   spawnSshKeygen,
+  tombstoneMaybeDirty,
   WORKER_ALLOWED_TOOLS,
   WORKER_ALLOWED_TOOLS_NO_GH,
   WORKER_DISABLE_BACKGROUND_TASKS_ENV,
@@ -76,6 +80,7 @@ import {
   WorkerSupervisor,
   workerCredentialFreeEnv,
   workerDeployKeyEnv,
+  worktreeMaybeDirty,
 } from "./worker.js";
 
 /** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
@@ -4576,6 +4581,291 @@ test("#69: DETACHED reclaim (post-restart, persisted pid) retains a dirty worktr
     killAnyRunningLanes(s1, s2, ...s1Children);
     s2?.dispose();
     s1?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+// ── #834 Phase 1: settleMergedWorktree — the MERGED-lane close-out settlement, baselined on the
+//   worktree's OWN git-index mtime (resolveWorktreeIndexBaselineMs), NEVER dispatchedBaselineMs.
+//   Real fixtures throughout (fake-verdict doctrine rule): a REAL `.git` gitdir pointer + REAL
+//   index file, exercising the REAL resolveWorktreeIndexBaselineMs/worktreeMaybeDirty production
+//   path — no preset verdicts, no stubbing worktreeMaybeDirty. ──
+
+/** #834: fabricates the `gitdir:` pointer + index file shape `git worktree add` produces —
+ *  enough for the real production resolveWorktreeIndexBaselineMs/worktreeMaybeDirty path to run,
+ *  no `git` invocation (worktreeMaybeDirty itself never shells to git; see its own doc). */
+function mkGitIndexFixture(worktreeRoot: string, name: string): { worktreePath: string; gitDir: string; indexPath: string } {
+  const worktreePath = join(worktreeRoot, name);
+  const gitDir = join(worktreeRoot, `${name}-gitdir`);
+  mkdirSync(worktreePath, { recursive: true });
+  mkdirSync(gitDir, { recursive: true });
+  writeFileSync(join(worktreePath, ".git"), `gitdir: ${gitDir}\n`);
+  const indexPath = join(gitDir, "index");
+  writeFileSync(indexPath, "");
+  return { worktreePath, gitDir, indexPath };
+}
+
+test("#834: settleMergedWorktree DELETES a CLEAN worktree (nothing newer than its git index)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const name = "lane-834-clean";
+    const { worktreePath, indexPath } = mkGitIndexFixture(worktreeRoot, name);
+    writeFileSync(join(worktreePath, "committed.txt"), "clean\n");
+    // #834/#428 pattern (no sleep, no timing dependence): stamp the index at a fixed FAR-FUTURE
+    // date via utimesSync — every file under the worktree is then unambiguously older than the
+    // baseline, regardless of filesystem timestamp granularity.
+    const farFuture = new Date("2099-01-01T00:00:00Z");
+    utimesSync(indexPath, farFuture, farFuture);
+
+    s = sup(dir, "/bin/true", worktreeRoot);
+    const r = s.settleMergedWorktree(name);
+    assert.equal(r.verdict, "settled");
+    assert.equal(r.worktreePath, worktreePath);
+    assert.ok(!existsSync(worktreePath), "clean worktree directory actually deleted");
+    // #834 (gate② round 1, F4): no tombstone residue left behind under worktreeRoot either.
+    assert.deepEqual(
+      readdirSync(worktreeRoot).filter((n) => n.startsWith(".settle-tombstone-")),
+      [],
+    );
+  } finally {
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("#834: settleMergedWorktree RETAINS a DIRTY worktree (something newer than its git index) — left on disk, no escalation machinery here (that is the caller's job per #834's ruling)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const name = "lane-834-dirty";
+    const { worktreePath } = mkGitIndexFixture(worktreeRoot, name); // index written "now"
+    writeFileSync(join(worktreePath, "wip.txt"), "uncommitted\n"); // written strictly after — dirty (inclusive >=)
+
+    s = sup(dir, "/bin/true", worktreeRoot);
+    const r = s.settleMergedWorktree(name);
+    assert.equal(r.verdict, "retained");
+    assert.equal(r.worktreePath, worktreePath);
+    assert.ok(existsSync(join(worktreePath, "wip.txt")), "dirty worktree (and its WIP) survives untouched");
+    // #834 (F4): a dirty verdict never even attempts the rename — nothing is renamed away, so
+    // there is no tombstone to leave behind (the rename step never runs for a dirty worktree).
+    assert.deepEqual(
+      readdirSync(worktreeRoot).filter((n) => n.startsWith(".settle-tombstone-")),
+      [],
+    );
+  } finally {
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("#834: settleMergedWorktree with no worktree on disk -> nothing retained, nothing to settle", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    s = sup(dir, "/bin/true", worktreeRoot);
+    const r = s.settleMergedWorktree("lane-834-nope");
+    assert.deepEqual(r, { worktreePath: null, verdict: "absent" });
+  } finally {
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("#834 (gate② round 1, F3): settleMergedWorktree refuses a name that resolves OUTSIDE worktreeRoot — never scans, never deletes, even when the resolved path is a real, present, purity-clean directory", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  const outsideDir = mkdtempSync(join(tmpdir(), "sapwood-outside-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    // worktreeRoot's basename, so `../<basename>-victim` escapes it by exactly one level —
+    // exactly the shape join(worktreeRoot, name) would otherwise resolve without complaint.
+    const victimName = `../${basename(outsideDir)}`;
+    writeFileSync(join(outsideDir, "sentinel.txt"), "must survive\n");
+
+    s = sup(dir, "/bin/true", worktreeRoot);
+    const r = s.settleMergedWorktree(victimName);
+    assert.deepEqual(r, { worktreePath: null, verdict: "absent" }, "out-of-root -> nothing-to-settle, never a scan/delete attempt");
+    assert.ok(existsSync(outsideDir), "the out-of-root directory itself must survive");
+    assert.ok(existsSync(join(outsideDir, "sentinel.txt")), "and its contents");
+  } finally {
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test("#834 (gate② round 1, F1): settleWorktreeDirectory reports 'failed', never 'settled', when the tombstone removal does not actually complete — an injected fs seam pins this deterministically (never an OS-permission race)", () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  try {
+    const name = "lane-834-removal-fails";
+    const { worktreePath, indexPath } = mkGitIndexFixture(worktreeRoot, name);
+    writeFileSync(join(worktreePath, "committed.txt"), "clean\n");
+    const farFuture = new Date("2099-01-01T00:00:00Z");
+    utimesSync(indexPath, farFuture, farFuture); // purity-clean
+
+    const renameCalls: Array<[string, string]> = [];
+    const outcome = settleWorktreeDirectory(worktreePath, worktreeRoot, statSync(indexPath).mtimeMs, {
+      rename: (oldPath, newPath) => {
+        renameCalls.push([oldPath, newPath]);
+        renameSync(oldPath, newPath); // the real rename still happens — only `rm` is sabotaged
+      },
+      rm: () => {
+        throw new Error("simulated: tombstone removal failed");
+      },
+    });
+    assert.equal(outcome.verdict, "failed");
+    assert.match(outcome.reason ?? "", /tombstone removal failed/);
+    assert.equal(renameCalls.length, 1, "exactly one rename — to the tombstone, never a rename-back (the data wasn't re-verified dirty)");
+    assert.ok(!existsSync(worktreePath), "the original path is gone — the directory now lives at the tombstone");
+    // The data itself survives, at the tombstone path — never silently lost.
+    const [, tombstonePath] = renameCalls[0]!;
+    assert.ok(existsSync(join(tombstonePath, "committed.txt")));
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("#834 (gate② round 1, F1): settleWorktreeDirectory reports 'failed' when the tombstone is STILL PRESENT after removal reports success (never trusts a silent no-op rm at face value)", () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  try {
+    const name = "lane-834-noop-rm";
+    const { worktreePath, indexPath } = mkGitIndexFixture(worktreeRoot, name);
+    writeFileSync(join(worktreePath, "committed.txt"), "clean\n");
+    const farFuture = new Date("2099-01-01T00:00:00Z");
+    utimesSync(indexPath, farFuture, farFuture);
+
+    const outcome = settleWorktreeDirectory(worktreePath, worktreeRoot, statSync(indexPath).mtimeMs, {
+      rename: renameSync,
+      rm: () => {
+        /* pretends to succeed, but actually does nothing */
+      },
+    });
+    assert.equal(outcome.verdict, "failed");
+    assert.match(outcome.reason ?? "", /still present/);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("#834 (gate② round 1, F4): tombstoneMaybeDirty excludes the tombstone's OWN top-level ctime bump (what a rename alone produces) while a CHILD directory's ctime still counts via the unmodified shared scanner one level down — the exact implementation trap the fix must not get wrong", () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-tombstone-"));
+  try {
+    const tombstonePath = join(worktreeRoot, "tombstone-1");
+    mkdirSync(tombstonePath, { recursive: true }); // deliberately EMPTY — see doc below for why
+    // Two FIXED, absolute calendar dates — never a race against real-clock ticks (no sleep, no
+    // ordering assumption between two operations landing in the same/different timestamp tick):
+    // `nearPast` predates this repo's real run date by years; `baseline` is a second fixed date
+    // safely between `nearPast` and "today" (this repo's own calendar is comfortably past 2022).
+    // ctime can NEVER be backdated by unprivileged code (this file's own worktreeMaybeDirty doc),
+    // so ANY entry this test creates/touches inevitably carries a REAL "now" ctime — which is
+    // why the tombstone directory here stays EMPTY: a child FILE would also carry that
+    // unavoidable "now" ctime and trip the (correct, unchanged) child-level ctime check,
+    // confounding the top-level-only assertion below. `nearPast`/`baseline` are picked so that
+    // a real "now" ctime (this repo's actual run date) is ALWAYS >= `baseline`, and `nearPast`
+    // is always < `baseline` — deterministic given real time only ever moves forward.
+    const nearPast = new Date("2020-01-01T00:00:00Z");
+    const baseline = new Date("2022-01-01T00:00:00Z").getTime();
+    // Backdates the TOMBSTONE DIRECTORY's own mtime — simulating exactly what a `rename()` alone
+    // produces: the directory's ENTRY SET is untouched (mtime stays old), only its own ctime
+    // bumps to real "now" (unavoidable).
+    utimesSync(tombstonePath, nearPast, nearPast);
+
+    assert.equal(
+      tombstoneMaybeDirty(tombstonePath, baseline),
+      false,
+      "the tombstone's OWN top-level ctime (real 'now', simulating a rename) must NOT read as dirty — only its mtime counts at that one level",
+    );
+    // Contrast: worker.ts's own worktreeMaybeDirty — UNCHANGED, the correct behavior for every
+    // OTHER caller — reads this SAME fixture as dirty via ctime alone, proving
+    // tombstoneMaybeDirty's top-level exclusion is a genuinely different, deliberate behavior
+    // rather than an accidental no-op wrapper around the shared scanner.
+    assert.equal(
+      worktreeMaybeDirty(tombstonePath, baseline),
+      true,
+      "the unmodified scanner (every other caller) still reads this as dirty",
+    );
+
+    // The other half of the fix: a CHILD directory's ctime bump (simulating a writer that raced
+    // in AFTER the rename, one level down) must still be caught — tombstoneMaybeDirty delegates
+    // to the FULL, unmodified worktreeMaybeDirty for everything below the top level. A directory
+    // (not a file) here too, for the same "ctime is unavoidably real now" reason as above —
+    // this isolates "does the CHILD's ctime get checked at all" from "was this file's content
+    // otherwise dirty."
+    const childDir = join(tombstonePath, "child");
+    mkdirSync(childDir);
+    utimesSync(childDir, nearPast, nearPast); // its own mtime backdated too, ctime -> real "now"
+    assert.equal(
+      tombstoneMaybeDirty(tombstonePath, baseline),
+      true,
+      "a child directory's ctime bump (one level down, never touched by the parent's rename) is still caught",
+    );
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("#834 (baseline-source pin; gate② round 1 F8, no timing dependence): settleMergedWorktree's git-index baseline and reclaim()'s dispatch baseline reach OPPOSITE verdicts on the SAME write pattern — every relevant mtime is explicitly stamped via utimesSync, never inferred from real-clock ordering", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-worktrees-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const dispatchName = "lane-834-dispatch-baseline";
+    const settleName = "lane-834-index-baseline";
+    const dispatchWorktreePath = join(worktreeRoot, dispatchName);
+    const settleWorktreePath = join(worktreeRoot, settleName);
+    mkdirSync(dispatchWorktreePath, { recursive: true });
+    mkdirSync(settleWorktreePath, { recursive: true });
+
+    const { bin } = longRunningStub(dir);
+    s = sup(dir, bin, worktreeRoot);
+    const { name: dispatchLane } = await s.dispatch({ number: 834, title: "t", labels: [] }, dispatchName);
+
+    // #834 gate② round 1 (F8): every relevant mtime is EXPLICITLY stamped via utimesSync to a
+    // fixed far-future date — the repo rule is "remove the dependence, never widen the margin".
+    // No sleep, no assumption that two real writes land in different timestamp ticks (the
+    // CI-red failure mode this replaces: a same-instant file+index write tied under the
+    // scanner's inclusive `>=` comparison).
+    const farFuture = new Date("2099-01-01T00:00:00Z"); // postdates any real dispatched_at/"now"
+
+    // dispatch arm: the content file itself is stamped past any real dispatched_at -> dirty
+    // under reclaim()'s dispatch baseline.
+    writeFileSync(join(dispatchWorktreePath, "committed.txt"), "work\n");
+    utimesSync(join(dispatchWorktreePath, "committed.txt"), farFuture, farFuture);
+
+    // settle arm: the SAME write pattern, but this time the git INDEX (the baseline itself) is
+    // what's stamped past "now" — the same pattern the CLEAN test above already uses, never
+    // dependent on real-clock ordering between the two writes.
+    writeFileSync(join(settleWorktreePath, "committed.txt"), "work\n");
+    const gitDir = join(worktreeRoot, `${settleName}-gitdir`);
+    mkdirSync(gitDir, { recursive: true });
+    writeFileSync(join(settleWorktreePath, ".git"), `gitdir: ${gitDir}\n`);
+    const indexPath = join(gitDir, "index");
+    writeFileSync(indexPath, "");
+    utimesSync(indexPath, farFuture, farFuture);
+
+    const settled = s.settleMergedWorktree(settleName);
+    assert.equal(settled.verdict, "settled", "index-baselined: this lane's own commit reads CLEAN");
+    assert.ok(!existsSync(settleWorktreePath), "clean -> deleted");
+
+    const reclaimed = await s.reclaim(dispatchLane);
+    assert.equal(
+      reclaimed.worktreeRetained,
+      true,
+      "dispatch-baselined: the IDENTICAL write pattern reads DIRTY (explicitly stamped past dispatched_at)",
+    );
+    assert.ok(existsSync(dispatchWorktreePath), "dispatch-baselined verdict retains its worktree");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
     rmSync(worktreeRoot, { recursive: true, force: true });
   }

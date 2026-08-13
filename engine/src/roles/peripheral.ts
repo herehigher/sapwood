@@ -18,7 +18,7 @@
 // diagnosable instead of silent. Still no probe/resume/escalation machinery: keep + record, and
 // the next round's retro tries again.
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
@@ -36,8 +36,8 @@ import {
   KNOWN_UNPROBED_NOTE,
   type PreSpawnManifestCapture,
   readAmbientSource,
-  resolveWorktreeGitDir,
   resolveWorktreeHead,
+  resolveWorktreeIndexBaselineMs,
   type WorktreeGitState,
 } from "./context-manifest.js";
 import { shouldInjectSkillsPlugin } from "./skills-plugin.js";
@@ -1220,15 +1220,10 @@ export class RoleRunner {
     if (!hasWriteCapableGrant(opts.allowedTools ?? ROLE_ALLOWED_TOOLS)) return false;
     const worktreePath = join(this.worktreeRoot, name);
     if (!existsSync(worktreePath)) return false; // nothing on disk to keep
-    const gitDir = resolveWorktreeGitDir(worktreePath);
-    let indexMs = Number.NaN;
-    if (gitDir !== null) {
-      try {
-        indexMs = statSync(join(gitDir, "index")).mtimeMs;
-      } catch {
-        /* no index written yet -> NaN -> fail-safe dirty below */
-      }
-    }
+    // #834: resolveWorktreeIndexBaselineMs factors out this exact resolve-gitDir/stat-index/NaN-
+    // on-failure glue (context-manifest.ts's own doc) — worker.ts's settleMergedWorktree and
+    // worktree-janitor.ts's present-directory sweep arm now share it too.
+    const indexMs = resolveWorktreeIndexBaselineMs(worktreePath);
     if (!worktreeMaybeDirty(worktreePath, indexMs)) return false;
     const basis = Number.isFinite(indexMs) ? "git-index-mtime" : "no-index-baseline";
     try {

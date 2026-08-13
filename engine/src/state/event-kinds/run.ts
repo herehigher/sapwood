@@ -148,6 +148,13 @@ export const RUN_EVENT_KINDS = defineKinds({
     meaning: "leftover session/worktree debris from a peripheral role session was cleaned up.",
     actionability: "routine",
   },
+  "worktree-janitor-rollup": {
+    tags: [],
+    meaning:
+      "one dead-owner/unlocked present-directory worktree sweep cycle finished — carries reaped/retained/skipped/failed counts, never a per-directory event for the stock (#834 Phase 2).",
+    actionability: "routine",
+    see: "#834",
+  },
 
   // Cost ceiling (the breach state itself; the per-lane `ceiling-escalated` lives in lane.ts).
   "ceiling-breach-entered": {

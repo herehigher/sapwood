@@ -67,6 +67,7 @@ import {
   type Supervisor,
   startFixLeg,
   tick,
+  type WorktreeSettleOutcome,
 } from "./conductor.js";
 import { reconcileEscalations } from "./escalation-reconcile.js";
 import { sweepResolvedHolds } from "./escalation-sweep.js";
@@ -541,6 +542,21 @@ class FakeSupervisor implements Supervisor {
     this.durablePidAlive = (w) => this.durablePids[w] ?? false;
     this.signalDurablePid = (w, signal) => {
       this.signalsSent.push({ worker: w, signal });
+    };
+  }
+  /** #834 Phase 1: per-lane settleMergedWorktree result — set via enableWorktreeSettlement()
+   *  below. Left genuinely UNSET by default (not just "returns nothing retained"): most existing
+   *  fixture callers never touch worktree settlement at all, and settleMergedLane's own `typeof`
+   *  guard must see the real "no opinion" absence, not a fake opinion of "nothing to settle" —
+   *  same optional-capability stance durablePidAlive/signalDurablePid already take above. */
+  settleResults: Record<string, WorktreeSettleOutcome> = {};
+  settleCalls: string[] = [];
+  settleMergedWorktree?: (worker: string) => WorktreeSettleOutcome;
+  enableWorktreeSettlement(results: Record<string, WorktreeSettleOutcome> = {}): void {
+    this.settleResults = results;
+    this.settleMergedWorktree = (w) => {
+      this.settleCalls.push(w);
+      return this.settleResults[w] ?? { worktreePath: null, verdict: "absent" };
     };
   }
 }
@@ -2907,6 +2923,209 @@ test("tick DRIVE (#570): every merged event carries a same-tick log line naming 
     logged.filter((m) => m.includes("MERGED")),
     ["[sapwood:drive] lane lane-a pr #55 MERGED (deadbeef)"],
   );
+  st.close();
+});
+
+// ── #834 Phase 1: settleMergedLane's worktree settlement — integration wiring only (FakeSupervisor
+//    is a fabricated seam, same convention as every other Supervisor capability in this file; the
+//    REAL purity-check/production-function coverage lives in worker.test.ts's own #834 block
+//    against a real `.git` index fixture). ──
+
+test("#834: a merged lane whose worktree settles CLEAN gets its registration pruned and a merged-lane-worktree-settled event — no needs-human, no forge comment", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  sup.enableWorktreeSettlement({ "lane-a": { worktreePath: "/repo/.claude/worktrees/lane-a", verdict: "settled" } });
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
+  const pruneCalls: string[] = [];
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    worktreeRegistrationPruner: async (path) => void pruneCalls.push(path),
+  });
+  assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
+  assert.deepEqual(sup.settleCalls, ["lane-a"]);
+  assert.deepEqual(pruneCalls, ["/repo/.claude/worktrees/lane-a"]);
+  const settled = st.eventsSince("1970-01-01T00:00:00.000Z", ["merged-lane-worktree-settled"]);
+  assert.equal(settled.length, 1);
+  assert.deepEqual(settled[0]!.payload, { worker: "lane-a", issue: 2, pr: 55, worktreePath: "/repo/.claude/worktrees/lane-a" });
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["merged-lane-worktree-retained"]), []);
+  assert.deepEqual(forge.labelsAdded, [], "a clean settlement never touches labels");
+  assert.deepEqual(forge.issueComments, [], "a clean settlement never comments");
+  st.close();
+});
+
+test("#834: a merged lane whose worktree settles DIRTY is retained event-only — no needs-human label, no forge comment (the PR is already merged; nothing is blocked)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  sup.enableWorktreeSettlement({ "lane-a": { worktreePath: "/repo/.claude/worktrees/lane-a", verdict: "retained" } });
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
+  const pruneCalls: string[] = [];
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    worktreeRegistrationPruner: async (path) => void pruneCalls.push(path),
+  });
+  assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
+  assert.deepEqual(pruneCalls, [], "a dirty settlement never prunes a registration — nothing was deleted");
+  const retained = st.eventsSince("1970-01-01T00:00:00.000Z", ["merged-lane-worktree-retained"]);
+  assert.equal(retained.length, 1);
+  assert.deepEqual(retained[0]!.payload, { worker: "lane-a", issue: 2, pr: 55, worktreePath: "/repo/.claude/worktrees/lane-a" });
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["merged-lane-worktree-settled"]), []);
+  assert.deepEqual(forge.labelsAdded, [], "#834's ruling: event-only, NO needs-human label on a merged lane");
+  assert.deepEqual(forge.issueComments, [], "#834's ruling: no escalation comment either — the PR is merged, nothing is blocked");
+  st.close();
+});
+
+test("#834 (gate② round 1, F1): a merged lane whose worktree settlement FAILED (attempted deletion did not complete cleanly) never prunes a registration and never claims settled — merged-lane-worktree-settle-failed, event-only, carrying the reason", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  sup.enableWorktreeSettlement({
+    "lane-a": { worktreePath: "/repo/.claude/worktrees/lane-a", verdict: "failed", reason: "tombstone removal failed: boom" },
+  });
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
+  const pruneCalls: string[] = [];
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    worktreeRegistrationPruner: async (path) => void pruneCalls.push(path),
+  });
+  assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
+  assert.deepEqual(pruneCalls, [], "F1: a failed settlement must produce NO git calls — nothing was proven deleted");
+  const failed = st.eventsSince("1970-01-01T00:00:00.000Z", ["merged-lane-worktree-settle-failed"]);
+  assert.equal(failed.length, 1);
+  assert.deepEqual(failed[0]!.payload, {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    worktreePath: "/repo/.claude/worktrees/lane-a",
+    reason: "tombstone removal failed: boom",
+  });
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["merged-lane-worktree-settled", "merged-lane-worktree-retained"]), []);
+  assert.deepEqual(forge.labelsAdded, [], "F1: never escalated — event-only, same as retained");
+  assert.deepEqual(forge.issueComments, []);
+  st.close();
+});
+
+test("#834 (gate② round 2, G2): a failed settlement's tombstonePath, when present, is threaded into the merged-lane-worktree-settle-failed event — never the stale original worktreePath", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  sup.enableWorktreeSettlement({
+    "lane-a": {
+      worktreePath: "/repo/.claude/worktrees/lane-a",
+      verdict: "failed",
+      reason: "re-verified dirty; rename-back failed: boom",
+      tombstonePath: "/repo/.claude/worktrees/.settle-tombstone-abc123",
+    },
+  });
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  const failed = st.eventsSince("1970-01-01T00:00:00.000Z", ["merged-lane-worktree-settle-failed"]);
+  assert.equal(failed.length, 1);
+  assert.deepEqual(failed[0]!.payload, {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    worktreePath: "/repo/.claude/worktrees/lane-a",
+    reason: "re-verified dirty; rename-back failed: boom",
+    tombstonePath: "/repo/.claude/worktrees/.settle-tombstone-abc123",
+  });
+  st.close();
+});
+
+test("#834: a Supervisor with no opinion on worktree settlement (settleMergedWorktree unset) leaves the merged path exactly as before — zero new events, zero behavior change", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor(); // enableWorktreeSettlement() never called
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
+  const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["merged-lane-worktree-settled", "merged-lane-worktree-retained"]), []);
+  st.close();
+});
+
+test("#834: settleMergedWorktree returning a null worktreePath (nothing on disk to settle) emits no settlement event either way", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  sup.enableWorktreeSettlement({ "lane-a": { worktreePath: null, verdict: "absent" } });
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.deepEqual(sup.settleCalls, ["lane-a"]);
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["merged-lane-worktree-settled", "merged-lane-worktree-retained"]), []);
+  st.close();
+});
+
+test("#834: settleMergedWorktree also runs for the GATED RECLAIM merged path (#826's settleMergedLane, terminality-before-cap), not only DRIVE's own gate.driveOne outcome", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  sup.enableWorktreeSettlement({ "lane-a": { worktreePath: "/repo/.claude/worktrees/lane-a", verdict: "settled" } });
+  // Mirrors the #484 AC1 fixture shape immediately below this block: a gated-reentry lane whose
+  // PR a human merged by hand — the GATED RECLAIM branch settles it directly via settleMergedLane,
+  // never through gate.driveOne (no FakeMergeGate is even configured here).
+  st.upsertWorker({
+    name: "lane-a",
+    issue: 2,
+    session_id: "s-lane-a",
+    state: "failed",
+    started_at: "t0",
+    ended_at: "t1",
+    pr: 55,
+    gated_reentry_attempts: 1,
+    gated_escalation_labeled: 1,
+  });
+  forge.issueLabelsByIssue[2] = []; // no hold label -> reentry eligible
+  forge.prStatus = { ...forge.prStatus, state: "MERGED" };
+  const pruneCalls: string[] = [];
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: new FakeMergeGate(), // GATED RECLAIM lives behind the same mergeGate-present gate DRIVE does
+    worktreeRegistrationPruner: async (path) => void pruneCalls.push(path),
+  });
+  assert.deepEqual(r.gatedReclaimed, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55, attempts: 1 }]);
+  assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
+  assert.deepEqual(sup.settleCalls, ["lane-a"]);
+  assert.deepEqual(pruneCalls, ["/repo/.claude/worktrees/lane-a"]);
+  const settled = st.eventsSince("1970-01-01T00:00:00.000Z", ["merged-lane-worktree-settled"]);
+  assert.equal(settled.length, 1);
   st.close();
 });
 

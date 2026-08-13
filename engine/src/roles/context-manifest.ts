@@ -35,7 +35,7 @@
 // SAME shared key — this module never builds or depends on that linkage; it only guarantees the
 // key it writes under is stable and reconstructable independently of #231's schema.
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 // #235 PR-B: a TYPE-ONLY import (see this module's header doc — PURE, no filesystem/subprocess
@@ -398,6 +398,26 @@ export function resolveWorktreeGitDir(worktreePath: string): string | null {
     return isAbsolute(gitDirRaw) ? gitDirRaw : resolve(worktreePath, gitDirRaw);
   } catch {
     return null;
+  }
+}
+
+/** #834: the shared "resolve the git-index-mtime PURITY BASELINE" glue peripheral.ts's
+ *  maybeRetainWorktree (#428) established inline and worker.ts's settleMergedWorktree /
+ *  worktree-janitor.ts's present-directory sweep arm now also need — factored out once three
+ *  call sites wanted the identical `resolveWorktreeGitDir` + `<gitDir>/index` stat + NaN-on-
+ *  failure shape, rather than growing a third copy. Returns `NaN` — worktreeMaybeDirty's own
+ *  documented fail-safe-dirty input — whenever the `.git` pointer can't be resolved (not a
+ *  linked worktree) or the index file can't be stat'd (no index written yet); never guesses a
+ *  baseline it can't prove. PURE FILESYSTEM, same class as resolveWorktreeGitDir/
+ *  resolveWorktreeHead above — no subprocess, so it stays outside worker.ts's #69 grep-invariant
+ *  git-import boundary. */
+export function resolveWorktreeIndexBaselineMs(worktreePath: string): number {
+  const gitDir = resolveWorktreeGitDir(worktreePath);
+  if (gitDir === null) return Number.NaN;
+  try {
+    return statSync(join(gitDir, "index")).mtimeMs;
+  } catch {
+    return Number.NaN; // no index written yet -> fail-safe dirty
   }
 }
 
