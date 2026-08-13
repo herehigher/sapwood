@@ -4,10 +4,12 @@
 // reaped, alive-pid never touched (any directory state), dead-pid/present-directory never
 // reaped (scope boundary), and per-cycle batching.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { resolveWorktreeGitDir } from "../roles/context-manifest.js";
 import {
   classifyRegistration,
   createPresentDirectorySweepDeps,
@@ -24,6 +26,12 @@ import {
   type WorktreeJanitorDeps,
   type WorktreeRegistration,
 } from "./worktree-janitor.js";
+
+/** Shared real-git helper for the D1/D2 real-composition fixtures below — runs a git command
+ *  against `repoRoot` via `-C`, matching this module's own subprocess discipline. */
+function git(repoRoot: string, ...args: string[]): string {
+  return execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8" });
+}
 
 const ROOT = "/repo/.claude/worktrees";
 const classifyDeps = (over: Partial<WorktreeJanitorClassifyDeps> = {}): WorktreeJanitorClassifyDeps => ({
@@ -329,6 +337,8 @@ function fakePresentDeps(
         return { verdict: "settled" };
       }),
     registrationAgeMs: over.registrationAgeMs ?? (() => AGE_OLD),
+    hasSymbolicHead: over.hasSymbolicHead ?? (() => true),
+    hasNoStagedChanges: over.hasNoStagedChanges ?? (async () => true),
     unlock: over.unlock ?? (async (path) => void unlocked.push(path)),
     remove: over.remove ?? (async (path) => void removed.push(path)),
     prune: over.prune ?? (async () => void pruneCalls++),
@@ -416,13 +426,46 @@ test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registra
   assert.equal(deps.pruneCalls, 1);
 });
 
-test("sweepPresentDirectoryWorktreesOnce (#834 Ruling addendum): a BRANCHLESS/detached UNLOCKED present-directory registration is eligible exactly like any other — the merged-branch gate that used to make 'detached' permanently unreachable is gone", async () => {
-  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/detached-1", lockReason: null };
+test("sweepPresentDirectoryWorktreesOnce (#834 Ruling addendum): an UNLOCKED present-directory registration with no porcelain branch info at all is eligible exactly like any other — the merged-branch gate that used to key off a `branch` field is gone; eligibility now depends solely on hasSymbolicHead (D1) + age + purity", async () => {
+  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/no-branch-field-1", lockReason: null };
   const deps = fakePresentDeps({ registrations: [reg], directoryExists: () => true, registrationAgeMs: () => AGE_OLD });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
   assert.deepEqual(result, { reaped: [reg.path], retained: [], skipped: 0, failed: [], examinedPaths: [reg.path] });
   assert.deepEqual(deps.settleCalls, [reg.path]);
   assert.deepEqual(deps.removed, [reg.path]);
+});
+
+test("sweepPresentDirectoryWorktreesOnce (#834 gate② round 1, D1): an UNLOCKED present-directory registration whose admin HEAD is NOT symbolic (detached, or unresolvable) is classification-skipped — never becomes a candidate, never reaches the age check or settleDirectory", async () => {
+  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/detached-1", lockReason: null };
+  const deps = fakePresentDeps({
+    registrations: [reg],
+    directoryExists: () => true,
+    registrationAgeMs: () => AGE_OLD,
+    hasSymbolicHead: () => false,
+  });
+  const result = await sweepPresentDirectoryWorktreesOnce(deps);
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, failed: [], examinedPaths: [] });
+  assert.deepEqual(deps.settleCalls, [], "never reaches the purity gate — filtered out at classification");
+});
+
+test("sweepPresentDirectoryWorktreesOnce (#834 gate② round 1, D2): a candidate with staged-but-uncommitted content is RETAINED, never settled — applies to the LOCKED dead-pid class too, not just UNLOCKED", async () => {
+  const lockedDeadStaged: WorktreeRegistration = {
+    path: "/repo/.claude/worktrees/locked-staged",
+    lockReason: "claude session locked-staged (pid 1 start now)",
+  };
+  const unlockedStaged: WorktreeRegistration = { path: "/repo/.claude/worktrees/unlocked-staged", lockReason: null };
+  const deps = fakePresentDeps({
+    registrations: [lockedDeadStaged, unlockedStaged],
+    isPidAlive: () => false,
+    directoryExists: () => true,
+    registrationAgeMs: () => AGE_OLD,
+    hasNoStagedChanges: async () => false,
+  });
+  const result = await sweepPresentDirectoryWorktreesOnce(deps);
+  assert.deepEqual(result.reaped, []);
+  assert.deepEqual(result.retained.sort(), [lockedDeadStaged.path, unlockedStaged.path].sort());
+  assert.deepEqual(deps.settleCalls, [], "the staged-check gate runs BEFORE settleDirectory — never reaches the purity/deletion path");
+  assert.deepEqual(deps.removed, []);
 });
 
 test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registration UNDER the age threshold is skipped and never reaches settleDirectory", async () => {
@@ -544,6 +587,8 @@ function fakeShrinkingPresentDeps(
       return { verdict: "settled" };
     },
     registrationAgeMs: () => AGE_OLD,
+    hasSymbolicHead: () => true,
+    hasNoStagedChanges: async () => true,
     unlock: async () => {},
     remove: async (path) => {
       removedCalls.push(path);
@@ -758,6 +803,11 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F7, real composition)
       worktreeRoot,
       listRegistrations: async () => [reg],
       isPidAlive: () => false,
+      // These F7 fixtures use a synthetic `.git` pointer (mkGitIndexFixture), not a real git
+      // repository — no HEAD/objects/refs — so the REAL hasNoStagedChanges (D2) would always
+      // read false against them. Overridden here to isolate the PURITY mechanism this test suite
+      // targets; D2's own real-git behavior gets dedicated fixtures below.
+      hasNoStagedChanges: async () => true,
       unlock: async () => {},
       remove: async () => {},
       prune: async () => {},
@@ -784,6 +834,11 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F7, real composition)
       worktreeRoot,
       listRegistrations: async () => [reg],
       isPidAlive: () => false,
+      // These F7 fixtures use a synthetic `.git` pointer (mkGitIndexFixture), not a real git
+      // repository — no HEAD/objects/refs — so the REAL hasNoStagedChanges (D2) would always
+      // read false against them. Overridden here to isolate the PURITY mechanism this test suite
+      // targets; D2's own real-git behavior gets dedicated fixtures below.
+      hasNoStagedChanges: async () => true,
       unlock: async () => {},
       remove: async () => {},
       prune: async () => {},
@@ -812,6 +867,11 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F7, real composition)
       worktreeRoot,
       listRegistrations: async () => [reg],
       isPidAlive: () => false,
+      // These F7 fixtures use a synthetic `.git` pointer (mkGitIndexFixture), not a real git
+      // repository — no HEAD/objects/refs — so the REAL hasNoStagedChanges (D2) would always
+      // read false against them. Overridden here to isolate the PURITY mechanism this test suite
+      // targets; D2's own real-git behavior gets dedicated fixtures below.
+      hasNoStagedChanges: async () => true,
       unlock: async () => {},
       remove: async () => {},
       prune: async () => {},
@@ -832,3 +892,143 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F7, real composition)
 // merge state (the branch ref and its commits survive `git worktree remove`). The real-git
 // fixture coverage that used to live here (default-branch-vs-current-HEAD disambiguation,
 // unresolvable-origin/HEAD fail-safe) went with it.
+
+// ── #834 gate② round 1, P1 D1 (real-git repro): a DETACHED worktree's commits can be reachable
+//    ONLY via that worktree's own admin HEAD/reflog — deleting the registration deletes the admin
+//    directory, and a detached-only commit goes unreachable (GC-eligible) the instant it does.
+//    hasSymbolicHead must gate this out at classification time, before it's ever a candidate. ──
+
+function commonSetup(repoRoot: string): void {
+  git(repoRoot, "init", "-q", "-b", "main");
+  git(repoRoot, "config", "user.email", "a@b.com");
+  git(repoRoot, "config", "user.name", "a");
+  git(repoRoot, "config", "commit.gpgsign", "false");
+  writeFileSync(join(repoRoot, "base.txt"), "base\n");
+  git(repoRoot, "add", "base.txt");
+  git(repoRoot, "commit", "-q", "-m", "base");
+}
+
+test("sweepPresentDirectoryWorktreesOnce (#834 gate② round 1, D1, real composition): a DETACHED worktree with a commit reachable ONLY via its own admin HEAD is classification-skipped, never reaped — proven against a real `git fsck --unreachable` repro", async () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-detached-"));
+  try {
+    commonSetup(repoRoot);
+    const baseSha = git(repoRoot, "rev-parse", "HEAD").trim();
+
+    const worktreePath = join(repoRoot, "wt-detached");
+    git(repoRoot, "worktree", "add", "-q", "--detach", worktreePath, baseSha);
+
+    // A commit that exists ONLY on this detached worktree's own HEAD — no branch anywhere points
+    // at it.
+    writeFileSync(join(worktreePath, "detached-only.txt"), "only reachable via this worktree\n");
+    git(worktreePath, "add", "detached-only.txt");
+    git(worktreePath, "commit", "-q", "-m", "detached-only commit");
+    const detachedSha = git(worktreePath, "rev-parse", "HEAD").trim();
+
+    const real = createPresentDirectorySweepDeps(repoRoot);
+    const reg: WorktreeRegistration = { path: worktreePath, lockReason: null };
+    const deps: PresentDirectorySweepDeps = {
+      ...real,
+      worktreeRoot: repoRoot,
+      listRegistrations: async () => [reg],
+      registrationAgeMs: () => AGE_OLD,
+      unlock: async () => {},
+      remove: async () => {},
+      prune: async () => {},
+    };
+    const result = await sweepPresentDirectoryWorktreesOnce(deps);
+    assert.deepEqual(result.reaped, [], "a detached worktree is never a candidate at all");
+    assert.equal(result.skipped, 1);
+    assert.ok(existsSync(worktreePath), "the worktree — and its only-reachable-here commit — survives untouched");
+
+    // Prove the underlying danger this gate closes: if the registration HAD been reaped (admin
+    // dir deleted), the detached-only commit would go unreachable. Confirm that's still true of
+    // the raw git mechanics this fixture models (independent of our own code, which never ran
+    // `git worktree remove` here since it correctly skipped).
+    git(repoRoot, "worktree", "remove", "--force", worktreePath);
+    git(repoRoot, "reflog", "expire", "--expire=now", "--all");
+    const fsckOutput = git(repoRoot, "fsck", "--unreachable", "--no-reflogs");
+    assert.ok(fsckOutput.includes(detachedSha), "confirms the real accident this gate exists to prevent");
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+// ── #834 gate② round 1, P1 D2 (real-git repro): `git add` writes the index AFTER the staged
+//    file's own mtime, so an artificially-aged index reads purity-CLEAN by mtime comparison alone
+//    even with real staged content sitting in it. hasNoStagedChanges (`git diff --cached --quiet`
+//    against the worktree's admin dir) must catch what the mtime baseline structurally cannot. ──
+
+test("sweepPresentDirectoryWorktreesOnce (#834 gate② round 1, D2, real composition): a STAGED-but-uncommitted file with an artificially-aged index reads purity-clean by mtime alone but is RETAINED — the reviewer's exact repro shape", async () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-staged-"));
+  try {
+    commonSetup(repoRoot);
+
+    const worktreePath = join(repoRoot, "wt-staged");
+    git(repoRoot, "worktree", "add", "-q", "-b", "wt-staged-branch", worktreePath);
+
+    // Stage a NEW file — `git status --porcelain` would show " A valuable-uncommitted.txt".
+    writeFileSync(join(worktreePath, "valuable-uncommitted.txt"), "do not lose me\n");
+    git(worktreePath, "add", "valuable-uncommitted.txt");
+
+    // Force the index-mtime baseline to read CLEAN regardless of the staged content — this is the
+    // exact blind spot: `git add` writes the index AFTER the staged file's own mtime, so an aged
+    // index always postdates it.
+    const gitDir = resolveWorktreeGitDir(worktreePath);
+    assert.ok(gitDir, "a real linked worktree must resolve a git dir");
+    const farFuture = new Date("2099-01-01T00:00:00Z");
+    utimesSync(join(gitDir!, "index"), farFuture, farFuture);
+
+    const real = createPresentDirectorySweepDeps(repoRoot);
+    const reg: WorktreeRegistration = { path: worktreePath, lockReason: null };
+    const deps: PresentDirectorySweepDeps = {
+      ...real,
+      worktreeRoot: repoRoot,
+      listRegistrations: async () => [reg],
+      registrationAgeMs: () => AGE_OLD,
+      unlock: async () => {},
+      remove: async () => {},
+      prune: async () => {},
+    };
+    const result = await sweepPresentDirectoryWorktreesOnce(deps);
+    assert.deepEqual(result.retained, [worktreePath]);
+    assert.deepEqual(result.reaped, []);
+    assert.ok(existsSync(join(worktreePath, "valuable-uncommitted.txt")), "the staged file survives — never deleted");
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("sweepPresentDirectoryWorktreesOnce (#834 gate② round 1, D2, real composition): a fully-COMMITTED clean worktree (nothing staged) is still reaped", async () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-staged-"));
+  try {
+    commonSetup(repoRoot);
+
+    const worktreePath = join(repoRoot, "wt-clean");
+    git(repoRoot, "worktree", "add", "-q", "-b", "wt-clean-branch", worktreePath);
+    writeFileSync(join(worktreePath, "committed.txt"), "clean\n");
+    git(worktreePath, "add", "committed.txt");
+    git(worktreePath, "commit", "-q", "-m", "clean commit");
+
+    const gitDir = resolveWorktreeGitDir(worktreePath);
+    assert.ok(gitDir, "a real linked worktree must resolve a git dir");
+    const farFuture = new Date("2099-01-01T00:00:00Z");
+    utimesSync(join(gitDir!, "index"), farFuture, farFuture);
+
+    const real = createPresentDirectorySweepDeps(repoRoot);
+    const reg: WorktreeRegistration = { path: worktreePath, lockReason: null };
+    const deps: PresentDirectorySweepDeps = {
+      ...real,
+      worktreeRoot: repoRoot,
+      listRegistrations: async () => [reg],
+      registrationAgeMs: () => AGE_OLD,
+      unlock: async () => {},
+      remove: async () => {},
+      prune: async () => {},
+    };
+    const result = await sweepPresentDirectoryWorktreesOnce(deps);
+    assert.deepEqual(result.reaped, [worktreePath]);
+    assert.ok(!existsSync(worktreePath), "the clean, fully-committed worktree is actually deleted");
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});

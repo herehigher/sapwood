@@ -30,17 +30,60 @@
 // and the purity check already protects any uncommitted work; the merged-branch condition was
 // guarding a fact those two already cover.
 //
+// #834 gate② round 1 (P1 D1, real-git repro): that safety argument has a hole — "the branch ref
+// and its commits survive" is only true when the worktree actually HAS a branch ref backing its
+// HEAD. A DETACHED worktree's own commits can be reachable ONLY via that worktree's own admin
+// HEAD (and its reflog); deleting the registration deletes the admin directory, and a
+// detached-only commit goes unreachable (GC-eligible) the moment it does — confirmed with a real
+// `git fsck --unreachable --no-reflogs` repro. Fix: the UNLOCKED arm requires a SYMBOLIC admin
+// HEAD (`ref: refs/heads/...`) before a candidate is even considered (hasSymbolicHead below) — a
+// raw-SHA (detached), unreadable, or missing HEAD is a classification-skip, never a candidate.
+// This makes the Ruling addendum's own safety argument actually hold for every candidate it
+// reaches: git itself refuses to delete a branch checked out in ANY worktree (`error: cannot
+// delete branch '...' used by worktree`), so a symbolic HEAD whose target ref later vanishes out
+// from under it would require deliberate manual ref surgery — outside this janitor's own
+// accident-fence threat model (it fences against automation reaping live work, not against a
+// human hand-deleting a ref another worktree still points at).
+//
+// #834 gate② round 1 (P1 D2, real-git repro): the index-mtime purity baseline has a blind spot
+// for STAGED-but-uncommitted work, independent of the merge gate this PR otherwise dropped —
+// `git add` writes the index file AFTER the staged file's own mtime, so once the tree ages past
+// the registration-age threshold, every real file in it reads OLDER than the index and the
+// mtime-only scan calls it clean even with staged content sitting in the index (reproduced: a
+// worktree with only a staged addition, index artificially aged, reads purity-clean and gets
+// deleted without this fix). Fix: hasNoStagedChanges below, applied to EVERY present-directory
+// candidate class (LOCKED dead-pid too, not just UNLOCKED) — `git --git-dir=<adminDir> diff
+// --cached --quiet` compares the index against HEAD directly, catching what an mtime comparison
+// structurally cannot. This targets the worktree's ADMIN directory specifically (never `-C
+// repoRoot`, which would inspect the MAIN repo's own index, not this candidate's) — the admin
+// directory lives under the TRUSTED main repo's own `.git/worktrees/`, never inside the
+// worker-controlled tree itself, so this stays outside the #65 clean-filter RCE class: `diff
+// --cached` compares index bytes against HEAD without materializing or filtering any
+// working-tree file, and no configured filter/hook ever executes for it.
+//
 // #69 SIXTH legitimate child_process importer (worker.test.ts's grep-invariant enumerates the
-// other five). execFile only, every git invocation targets the repo via `-C`, never a subprocess
-// `cwd:` option — the same discipline review/materializer.ts already uses for its own engine-side
-// git calls. This keeps "git only ever runs in the trusted main-repo context, never a worker
-// worktree" mechanically checkable rather than just asserted in prose (the issue's own explicit
-// constraint, mirroring retainOrDeleteWorktree's `git worktree prune` note). #834's own present-
-// directory reaping keeps the SAME discipline: the directory is always fs-deleted FIRST (never a
-// git call against a still-present worker-controlled tree), so every git call here ever only
-// ever touches an ALREADY-missing path — see sweepPresentDirectoryWorktreesOnce's own doc.
+// other five). execFile only; every git invocation either targets the repo via `-C` or, for
+// hasNoStagedChanges above, an explicit `--git-dir=<adminDir>` — never a subprocess `cwd:` option
+// either way, and never a path inside a worker-controlled tree — the same discipline
+// review/materializer.ts already uses for its own engine-side git calls. This keeps "git only
+// ever runs in the trusted main-repo context, never a worker worktree" mechanically checkable
+// rather than just asserted in prose (the issue's own explicit constraint, mirroring
+// retainOrDeleteWorktree's `git worktree prune` note). #834's own present-directory DELETION
+// keeps the SAME discipline: the directory is always fs-deleted FIRST (never a git call against a
+// still-present worker-controlled tree), so every deletion-adjacent git call here only ever
+// touches an ALREADY-missing path — see sweepPresentDirectoryWorktreesOnce's own doc. (The D1/D2
+// gates above are pre-deletion PROOF-GATHERING calls, not deletion calls — they read admin-side
+// state that always exists ahead of and independent of the fs-delete-first sequencing.)
+//
+// #834 gate② round 1 (P1 D3): D2's staged-content blind spot isn't unique to this module's own
+// sweep — Phase 1's merged-lane close-out settlement (conductor.ts's settleMergedLane, calling
+// worker.ts's Supervisor.settleMergedWorktree) runs the SAME index-mtime-only purity check and
+// has the SAME hole. worker.ts's #69 grep-invariant forbids git there, so hasNoStagedWorktreeChanges
+// below is EXPORTED (not module-private) so settleMergedLane can run the identical check itself,
+// BEFORE ever calling settleMergedWorktree — one implementation, two callers, see that function's
+// own doc.
 import { execFile } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { resolveWorktreeGitDir, resolveWorktreeIndexBaselineMs } from "../roles/context-manifest.js";
@@ -326,10 +369,31 @@ export interface PresentDirectorySweepDeps extends WorktreeJanitorClassifyDeps {
    *  arm's purpose: "how long has NOTHING touched this worktree via git", not merely "how long
    *  ago was it created" — a worktree whose lane is still alive and running normal git commands
    *  keeps resetting this clock, exactly the "still in use, leave it" signal this gate wants.
-   *  Per #834's Ruling addendum, this (plus the purity check) is now the ENTIRE UNLOCKED gate —
-   *  see this module's own header doc for why the formerly-paired merged-branch check was
-   *  dropped. */
+   *  Per #834's Ruling addendum, this (plus the purity check and the D1/D2 gates below) is the
+   *  ENTIRE UNLOCKED gate — see this module's own header doc for why the formerly-paired
+   *  merged-branch check was dropped. */
   registrationAgeMs(path: string): number;
+  /** #834 (gate② round 1, P1 D1): `true` only when the worktree's ADMIN HEAD file
+   *  (resolveWorktreeGitDir → `<gitDir>/HEAD`, a plain fs read — no git subprocess, no porcelain
+   *  branch parsing) is a SYMBOLIC ref (`ref: refs/heads/...`) — the shape a checked-out branch
+   *  produces. `false` for a raw 40-hex SHA (detached HEAD), an unreadable/missing HEAD file, or
+   *  an unresolvable admin directory — fail-safe, never guessed eligible. Checked ONLY for the
+   *  UNLOCKED class, at classification time (before a registration even becomes a candidate) —
+   *  see this module's own header doc for why a detached worktree's commits need this gate even
+   *  though the LOCKED+dead-pid arm doesn't (a dead pid says nothing about what the worktree's
+   *  HEAD points at). Real default: worktreeHeadIsSymbolic below. */
+  hasSymbolicHead(path: string): boolean;
+  /** #834 (gate② round 1, P1 D2): `true` only when `git --git-dir=<adminDir> diff --cached
+   *  --quiet` exits 0 against this candidate's worktree — i.e. the index matches HEAD, nothing
+   *  staged. ANY non-zero exit (real staged content) OR any error (unresolvable admin dir, unborn
+   *  HEAD, anything else) reads `false` — fail-safe, never guessed clean; see this module's own
+   *  header doc for why the index-mtime purity baseline alone cannot see staged-but-uncommitted
+   *  work, and why this stays outside the #65 clean-filter RCE class. Checked for EVERY
+   *  present-directory candidate class (LOCKED dead-pid included) — a dead pid or an old,
+   *  purity-clean-by-mtime registration says nothing about what's sitting in the index. Real
+   *  default: git-backed, targeting the admin directory via `--git-dir`, never `-C repoRoot` (see
+   *  header doc). */
+  hasNoStagedChanges(path: string): Promise<boolean>;
   unlock(path: string): Promise<void>;
   remove(path: string): Promise<void>;
   prune(): Promise<void>;
@@ -337,20 +401,23 @@ export interface PresentDirectorySweepDeps extends WorktreeJanitorClassifyDeps {
 
 export interface PresentDirectorySweepResult {
   reaped: string[];
-  /** Purity-dirty candidates, or an untouched failed-rename attempt (settleDirectory's own
-   *  `"retained"` verdict covers both — see its doc) — left in place — counted, never
-   *  per-directory-escalated (the issue's own explicit "never per-directory events for the
-   *  stock" line). An attempted-but-INCOMPLETE deletion is a DIFFERENT bucket: `failed`, below. */
+  /** Purity-dirty candidates, a candidate with staged-but-uncommitted content (#834 gate② round
+   *  1, D2 — `hasNoStagedChanges` reading false), or an untouched failed-rename attempt
+   *  (settleDirectory's own `"retained"` verdict covers the purity case — see its doc) — left in
+   *  place — counted, never per-directory-escalated (the issue's own explicit "never
+   *  per-directory events for the stock" line). An attempted-but-INCOMPLETE deletion is a
+   *  DIFFERENT bucket: `failed`, below. */
   retained: string[];
   /** Every registration this arm looked at but did not reap: alive-owner, under-age (or an
-   *  unresolvable age reading), beyond this cycle's window, or a prune-step failure (#834 gate②
-   *  round 1, F6 — counted here under a sentinel path since it isn't about any ONE directory).
-   *  One number — the whole POINT of the rollup is that the stock never generates per-entry
-   *  noise. Every candidate this cycle's window actually REACHES (i.e. every entry counted in
-   *  `examinedPaths`) ends in exactly one of `reaped`/`retained`/`failed` — never `skipped` — so
-   *  a caller running multiple cycles against the same candidate pool (the to-completion path)
-   *  can safely take the TERMINATING (final, empty-window) cycle's own `skipped` as the run's
-   *  total; see runPresentDirectoryWorktreeSweepToCompletion's own doc. */
+   *  unresolvable age reading), a non-symbolic/unreadable admin HEAD (#834 gate② round 1, D1 —
+   *  UNLOCKED only, classification-time), beyond this cycle's window, or a prune-step failure
+   *  (#834 gate② round 1, F6 — counted here under a sentinel path since it isn't about any ONE
+   *  directory). One number — the whole POINT of the rollup is that the stock never generates
+   *  per-entry noise. Every candidate this cycle's window actually REACHES (i.e. every entry
+   *  counted in `examinedPaths`) ends in exactly one of `reaped`/`retained`/`failed` — never
+   *  `skipped` — so a caller running multiple cycles against the same candidate pool (the
+   *  to-completion path) can safely take the TERMINATING (final, empty-window) cycle's own
+   *  `skipped` as the run's total; see runPresentDirectoryWorktreeSweepToCompletion's own doc. */
   skipped: number;
   /** An attempted-but-incomplete deletion (settleDirectory's own `"failed"` verdict) or a whole-
    *  sweep prune failure (F6, under PRUNE_FAILURE_SENTINEL_PATH). `tombstonePath` (#834 gate②
@@ -380,15 +447,23 @@ type PresentDirectoryCandidate = { path: string; kind: "locked-dead" } | { path:
  *     today's 5-member class per #825's census) — purity-checked, no other gate needed (a dead
  *     pid already proves nobody is driving it).
  *   - UNLOCKED + directory present — a MUCH weaker signal (no pid to check at all), so gated by
- *     registration age past WORKTREE_JANITOR_MIN_REGISTRATION_AGE_MS, then the SAME purity check
- *     as every other class. Per #834's Ruling addendum (see this module's own header doc), a
- *     THIRD gate — the candidate's branch fully merged into the repo's default branch — used to
- *     sit here too; it was DROPPED as structurally dead under squash merges. Age + purity is now
- *     the whole gate: deleting a worktree DIRECTORY loses no committed work (the branch ref and
- *     its commits survive `git worktree remove` regardless of merge state), and purity already
- *     protects any uncommitted work — merge state adds no coverage those two don't already give.
- *     A BRANCHLESS/detached unlocked registration is therefore eligible exactly like any other
- *     unlocked one now — there is nothing left to check about its branch at all.
+ *     a SYMBOLIC admin HEAD (#834 gate② round 1, D1 — hasSymbolicHead; a detached worktree's
+ *     commits have no durable ref surviving the registration prune, so it's never a candidate at
+ *     all), registration age past WORKTREE_JANITOR_MIN_REGISTRATION_AGE_MS, then the SAME purity
+ *     check as every other class. Per #834's Ruling addendum (see this module's own header doc), a
+ *     branch-fully-merged-into-default gate used to sit here too; it was DROPPED as structurally
+ *     dead under squash merges. Age + purity + a symbolic HEAD is now the UNLOCKED-specific gate:
+ *     deleting a worktree DIRECTORY loses no committed work PROVIDED that work is reachable via a
+ *     branch ref (the D1 fix), and purity already protects any uncommitted work MODULO the staged
+ *     blind spot D2 (below) closes for every class.
+ *
+ *  Every candidate this cycle's window reaches — LOCKED dead-pid included — also passes
+ *  hasNoStagedChanges (#834 gate② round 1, D2) before settleDirectory even runs: the index-mtime
+ *  purity baseline cannot see content that's staged but never committed (`git add` writes the
+ *  index AFTER the staged file's own mtime, so an aged index always reads newer than it). A
+ *  non-clean or unresolvable staged-check reads as `retained`, same bucket as a purity-dirty
+ *  verdict — see this module's own header doc for the full rationale and why this stays outside
+ *  the #65 clean-filter RCE class.
  *
  *  WINDOWING (#834 gate② round 1, F5; collapsed to ONE mode round 4, A2 — the owner's own
  *  architecture ruling): the CLASSIFICATION pass above always scans every registration (cheap:
@@ -430,6 +505,10 @@ export async function sweepPresentDirectoryWorktreesOnce(
       continue;
     }
     if (verdict === "unlocked" && deps.directoryExists(reg.path)) {
+      if (!deps.hasSymbolicHead(reg.path)) {
+        skipped++; // #834 gate② round 1, D1: detached/unreadable HEAD -> no durable ref, never a candidate
+        continue;
+      }
       const ageMs = deps.registrationAgeMs(reg.path);
       if (!Number.isFinite(ageMs) || ageMs < WORKTREE_JANITOR_MIN_REGISTRATION_AGE_MS) {
         skipped++; // unresolvable or too young -> the conservative "leave it" direction
@@ -453,6 +532,14 @@ export async function sweepPresentDirectoryWorktreesOnce(
   const retained: string[] = [];
   const failed: Array<{ path: string; error: string; tombstonePath?: string }> = [];
   for (const c of batch) {
+    // #834 gate② round 1, D2: staged-but-uncommitted content is invisible to the index-mtime
+    // purity baseline (below) — checked for EVERY class, LOCKED dead-pid included, before that
+    // baseline even runs. A `false` reading (real staged content OR any resolution error) is the
+    // same "leave it, count it" bucket as a purity-dirty verdict.
+    if (!(await deps.hasNoStagedChanges(c.path))) {
+      retained.push(c.path);
+      continue;
+    }
     const baseline = deps.indexBaselineMs(c.path);
     const settled = deps.settleDirectory(c.path, deps.worktreeRoot, baseline);
     if (settled.verdict === "retained") {
@@ -498,12 +585,57 @@ export async function sweepPresentDirectoryWorktreesOnce(
   return { reaped, retained, skipped, failed, examinedPaths: batch.map((c) => c.path) };
 }
 
+/** #834 (gate② round 1, P1 D1): true only when `<gitDir>/HEAD` is a SYMBOLIC ref
+ *  (`ref: refs/heads/...`). Plain filesystem read via resolveWorktreeGitDir + readFileSync — no
+ *  git subprocess, no porcelain branch parsing (see this module's own header doc for why: a
+ *  detached worktree's commits have no durable ref outside its own admin HEAD/reflog, which the
+ *  registration prune deletes). Any resolution failure (unresolvable admin dir, unreadable/
+ *  missing HEAD file) reads false — fail-safe, never guessed eligible. */
+function worktreeHeadIsSymbolic(worktreePath: string): boolean {
+  const gitDir = resolveWorktreeGitDir(worktreePath);
+  if (gitDir === null) return false;
+  try {
+    return readFileSync(join(gitDir, "HEAD"), "utf8").trim().startsWith("ref: refs/heads/");
+  } catch {
+    return false;
+  }
+}
+
+/** #834 (gate② round 1, P1 D2): `true` only when `git --git-dir=<adminDir> diff --cached
+ *  --quiet` exits 0 for `worktreePath` — the index matches HEAD, nothing staged. ANY non-zero
+ *  exit (real staged content) OR any error (unresolvable admin dir, unborn HEAD, anything else)
+ *  reads `false` — fail-safe, never guessed clean. See this module's own header doc for why the
+ *  index-mtime purity baseline alone cannot see staged-but-uncommitted work, and why this stays
+ *  outside the #65 clean-filter RCE class.
+ *
+ *  EXPORTED (not module-private like worktreeHeadIsSymbolic above) because conductor.ts's
+ *  settleMergedLane needs the IDENTICAL check at merged-lane close-out (#834 gate② round 1, D3):
+ *  worker.ts's #69 grep-invariant forbids git there, so the caller runs this same helper BEFORE
+ *  ever invoking Supervisor.settleMergedWorktree — one implementation, two callers, the same
+ *  "one implementation, two callers" stance settleWorktreeDirectory (worker.ts) already
+ *  established for the TOCTOU-safe deletion primitive itself. */
+export async function hasNoStagedWorktreeChanges(worktreePath: string): Promise<boolean> {
+  const gitDir = resolveWorktreeGitDir(worktreePath);
+  if (gitDir === null) return false; // unresolvable admin dir -> fail-safe dirty
+  try {
+    // `--git-dir` targets the candidate's OWN admin directory directly — never `-C repoRoot`,
+    // which would inspect the MAIN repo's index instead of this worktree's. `diff --cached
+    // --quiet` compares the index against HEAD only; it never touches, materializes, or filters
+    // a working-tree file, and runs from this process's own cwd (never a path inside the
+    // worker-controlled tree) — see this module's own header doc.
+    await pexecFile("git", ["--git-dir", gitDir, "diff", "--cached", "--quiet"]);
+    return true; // exit 0 -> index matches HEAD, nothing staged
+  } catch {
+    return false; // exit 1 (real staged content) or any error (incl. unborn HEAD) -> dirty
+  }
+}
+
 /** Real deps for sweepPresentDirectoryWorktreesOnce — reuses createWorktreeJanitorDeps's own
  *  git-backed listRegistrations/isPidAlive/directoryExists/unlock/remove/prune wholesale (#834's
  *  own "reuse the janitor's existing deps machinery" instruction) rather than growing a second
- *  git-wiring implementation, and adds only the purity/age reads this arm needs on top. (The
- *  default-branch-ancestry read this used to also wire up here was removed per #834's Ruling
- *  addendum — see this module's own header doc.) */
+ *  git-wiring implementation, and adds only the purity/age/symbolic-head/staged-content reads this
+ *  arm needs on top. (The default-branch-ancestry read this used to also wire up here was removed
+ *  per #834's Ruling addendum — see this module's own header doc.) */
 export function createPresentDirectorySweepDeps(repoRoot: string = process.cwd()): PresentDirectorySweepDeps {
   const base = createWorktreeJanitorDeps(repoRoot);
   return {
@@ -519,6 +651,8 @@ export function createPresentDirectorySweepDeps(repoRoot: string = process.cwd()
         return Number.NaN;
       }
     },
+    hasSymbolicHead: worktreeHeadIsSymbolic,
+    hasNoStagedChanges: hasNoStagedWorktreeChanges,
   };
 }
 
