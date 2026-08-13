@@ -4142,7 +4142,8 @@ export class State {
    *  Null-honest: a PR absent here simply carries no persisted terminal witness (still open, or
    *  closed-without-merge, which the engine never persists) — never a guessed state. §8's hero
    *  tally binds its confident-pending count to this projection instead of inferring from lane-row
-   *  presence (a live lane row can never carry a terminal PR state — round-375 gate⓪). */
+   *  presence (a live lane row can never carry a terminal PR state — the tick that first observes
+   *  a terminal PR state settles the lane out of activeWorkers() in the same synchronous step). */
   mergedPrNumbers(): number[] {
     const placeholders = MERGED_WITNESS_KINDS.map(() => "?").join(",");
     const rows = this.db

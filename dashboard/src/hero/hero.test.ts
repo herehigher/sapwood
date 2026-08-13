@@ -1275,10 +1275,10 @@ test('#745 AC1 / round 4 finding [1]: a handoff ("saved for a successor") drople
 
 // ── #803: the merged-witness projection binds the tally to authoritative persisted signal ──
 //
-// PR #791's own round-4 finding: `/api/loop/state`'s `lanes.items[]` carries a PR NUMBER but
-// never its STATE, and a live lane row can never carry a terminal PR state anyway (round-375
-// gate⓪ — the tick that first observes a terminal PR state settles the lane out of `lanes.items`
-// in the same synchronous step). `mergedPrs` (server.ts, sourced from `State.mergedPrNumbers`)
+// PR #791's own review found: `/api/loop/state`'s `lanes.items[]` carries a PR NUMBER but
+// never its STATE, and a live lane row can never carry a terminal PR state anyway (the tick that
+// first observes a terminal PR state settles the lane out of `lanes.items` in the same synchronous
+// step). `mergedPrs` (server.ts, sourced from `State.mergedPrNumbers`)
 // is the structural fix: the set of PR numbers the persisted event log witnesses as MERGED,
 // covering paths this fold's own event-driven transitions never handle (`gated-reentry-merged`,
 // `lane-revival-terminal`, `human-merge-only-closed` — only the plain `merged` kind moves a
