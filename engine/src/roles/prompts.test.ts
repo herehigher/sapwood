@@ -93,7 +93,10 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // (`{{lang.issuesAndPrs}}`) for prose this role originates; the pre-existing "(English is
   // fine)" parenthetical now points at it instead of naming a literal language.
   // #848: retired the paste-ready-patch deliverable from the human-merge-only resolution — carve-out remainder / needs-human only.
-  "po.md": "71fa561626a89345d43be2722fb4d98fb0806022011c03bc48e52809dbf3008d",
+  // #870: "immediately below"/"immediately after" the heading reworded to "as the first non-blank
+  // line after" — the accepted grammar tolerates blank lines between the heading and its marker
+  // (round #382), so the old wording contradicted what gate⓪ actually accepts.
+  "po.md": "8d95ce6c2fc3bdb05a37d074a5b9a6b35a72502e2464e951ba39199bba2e86aa",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
@@ -182,7 +185,8 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // language for prose with nothing existing to match, right after the pre-existing "use the
   // issue's own language" sentence.
   // #848: retired the paste-ready-patch escape from both the outcome-2 brief and the outcome-4 prerequisite case — carve-out remainder / needs-human only.
-  "verification-plan-reviewer.md": "8d097e29309faf3c8577a9a4a090140d164b9e3a34e9a05db94cb2e254d15e2f",
+  // #870: same "as the first non-blank line after" reword as po.md above.
+  "verification-plan-reviewer.md": "94f3981bfcf130052c813cb12a4ad3a69c1c730cb2cda1d72c7666cf3d79f37b",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above —
   // the confirm pass's one question (repo drift) is answered by its own READ-ONLY worktree
   // grant OR, now again, its forge lookup when attached; the prose no longer claims totality
@@ -207,7 +211,8 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #848: the drift re-check now points at the split-remainder / needs-human repair options, not the retired patch-deliverable.
   // #828: the "security-relevant config" shorthand (the exact phrasing docs/security.md warns
   // against) is now the full explicit human-merge-only path enumeration, matching the other 4 carriers.
-  "verification-plan-reviewer-confirm.md": "88df006be79a4e653bd60da72f8965389ba30a992b6c153651fd2ee991454ec0",
+  // #870: same "as the first non-blank line after" reword as po.md above.
+  "verification-plan-reviewer-confirm.md": "cd8de34604c37a87dd61ef35b75dd64ed488e8a780e6cf32a4c12e434ec245e1",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — the
   // drafter's brief is still its primary instruction set; the forge grant (never removed) is a
   // read-only aid, never a write path, exactly as this file has always said.
@@ -226,7 +231,8 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #701: new "Working language" section states the configured `language.issuesAndPrs` default;
   // the pre-existing "(English is fine)" parenthetical now points at it.
   // #848: retired the paste-ready-patch deliverable from the human-merge-only-conflict handling — carve-out remainder / needs-human only.
-  "verification-plan-drafter.md": "627c25d9d845c05de196f4e4a6ffa5c23de63f2b61cf47bb7fc94f2a2edcd992",
+  // #870: same "as the first non-blank line after" reword as po.md above.
+  "verification-plan-drafter.md": "82cf170733ab47518023f1aa10e21c448c938f5a43f168a690f184d484d5f5d3",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — targets
   // still arrive as bare #N and comments are still round-stats boilerplate; harvest's forge
   // grant was never removed, so the capability paragraph again names it (when attached) instead
@@ -300,7 +306,8 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #701: new "Working language" section states the configured `language.issuesAndPrs` default;
   // the pre-existing "(English is fine)" parenthetical now points at it.
   // #828: added the missing sapwood.config.example.yaml/.json entry to the human-merge-only list.
-  "po-decompose.md": "8adaff9c48671de1de1597f51c83c8a6a2d3a7e78325cbf4797f7d644a5272c7",
+  // #870: same "as the first non-blank line after" reword as po.md above.
+  "po-decompose.md": "48956be67804690841a86c61f149aa970a81928343335f84f8b3b9d1761319dc",
 };
 
 test("prompt snapshot: po.md hash matches the pinned revision", () => {

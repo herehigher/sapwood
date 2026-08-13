@@ -2,6 +2,7 @@ import { COPY, type SentencePart } from "../copy.ts";
 import type { DomainEvent } from "../domain-event.ts";
 import type { EntityTitles } from "../entities.ts";
 import { formatRelativeWithAbsoluteTitle } from "../format-time.ts";
+import { ATTENTION_KIND_TO_NODE, type StageNode } from "../inspector.ts";
 import { SentencePartView } from "./ActivityFeed.tsx";
 
 export interface NeedsAttentionProps {
@@ -13,6 +14,9 @@ export interface NeedsAttentionProps {
   titles: EntityTitles;
   repoUrl?: string | undefined;
   now?: Date;
+  /** §6 phase inspector (#861) — AC7: only the three `ATTENTION_KIND_TO_NODE` kinds render an
+   *  "inspect" control at all; absent entirely leaves every row exactly as it renders today. */
+  onInspect?: ((node: StageNode) => void) | undefined;
 }
 
 function AttentionRow({
@@ -20,15 +24,18 @@ function AttentionRow({
   titles,
   repoUrl,
   now,
+  onInspect,
 }: {
   event: DomainEvent;
   titles: EntityTitles;
   repoUrl?: string | undefined;
   now: Date;
+  onInspect?: ((node: StageNode) => void) | undefined;
 }) {
   const payload = event.payload ?? {};
   const parts: SentencePart[] = event.known ? COPY[event.kind].sentence(payload) : [`Unrecognized event: ${event.kind}`];
   const { text, title } = formatRelativeWithAbsoluteTitle(event.ts, "local", now);
+  const node = event.known ? ATTENTION_KIND_TO_NODE[event.kind] : undefined;
   return (
     <li className="attention-row">
       <span className="attention-sentence">
@@ -39,6 +46,13 @@ function AttentionRow({
           </span>
         ))}
       </span>
+      {/* AC7: a SIBLING control, never nested inside the sentence's own GitHub anchor — each
+       *  independently focusable with its own accessible name. */}
+      {node && onInspect && (
+        <button type="button" className="attention-inspect" aria-label={`inspect ${node}`} onClick={() => onInspect(node)}>
+          inspect
+        </button>
+      )}
       <span className="muted data attention-ts" title={title}>
         {text}
       </span>
@@ -53,7 +67,7 @@ function AttentionRow({
  * entities.ts's clearing rules) — this component owns no membership or clearing logic of its
  * own (#361 AC).
  */
-export function NeedsAttention({ items, titles, repoUrl, now }: NeedsAttentionProps) {
+export function NeedsAttention({ items, titles, repoUrl, now, onInspect }: NeedsAttentionProps) {
   if (items.length === 0) return null;
   const sorted = [...items].sort((a, b) => b.id - a.id);
   const clock = now ?? new Date();
@@ -62,7 +76,7 @@ export function NeedsAttention({ items, titles, repoUrl, now }: NeedsAttentionPr
       <h2>needs attention</h2>
       <ul aria-live="polite" className="attention-list">
         {sorted.map((event) => (
-          <AttentionRow key={event.id} event={event} titles={titles} repoUrl={repoUrl} now={clock} />
+          <AttentionRow key={event.id} event={event} titles={titles} repoUrl={repoUrl} now={clock} onInspect={onInspect} />
         ))}
       </ul>
     </section>

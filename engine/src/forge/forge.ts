@@ -2111,7 +2111,16 @@ type MarkedSection = { start: number; level: number };
 type MarkedSectionAssociation = Record<MarkedSectionRole, string> & { plan: string };
 
 /**
- * Associate exact sapwood section markers with the ATX heading immediately above each marker.
+ * Associate exact sapwood section markers with the ATX heading above each marker, where the
+ * marker must be the first non-blank line after that heading. This tolerates any number of
+ * BLANK lines between the heading and the marker (the shipped prompts say the marker goes "as
+ * the first non-blank line after" the heading, matching this grammar, but every role — and
+ * every human editing a role's output by hand — routinely leaves the one blank line ATX
+ * headings conventionally get before their body; round #382's retro found a real, well-formed
+ * issue #855 bounced twice by gate⓪ over exactly this byte-exact gap, even though a human
+ * reading the rendered issue would call it obviously well-formed). Any OTHER content between
+ * the heading and the marker still breaks the association — this loosens whitespace tolerance
+ * only, not "marker anywhere below its heading".
  *
  * `undefined` means no markers occurred outside fences, so callers must retain the legacy
  * English-heading parser unchanged. `null` means marked mode was selected but its protocol was
@@ -2124,6 +2133,13 @@ function associateMarkedSections(body: string): MarkedSectionAssociation | null 
   const anchors: Array<{ role: string; heading: MarkedSection | undefined }> = [];
   let offset = 0;
   let fence: { character: "`" | "~"; length: number } | null = null;
+  // Tracks whether every line since the most recent heading has been blank — the marker
+  // still has to be the FIRST non-blank content after its heading, just not necessarily the
+  // very next physical line. Reset true on every new heading; cleared by any non-blank line,
+  // including a fence opener, a marker line itself (closing its own association window so a
+  // second marker reached only via more blank lines can't bind to the same heading), or any
+  // other non-blank content.
+  let blankSinceHeading = true;
 
   for (const [lineNumber, rawLine] of body.split("\n").entries()) {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
@@ -2134,32 +2150,44 @@ function associateMarkedSections(body: string): MarkedSectionAssociation | null 
       const opener = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
       if (opener) {
         fence = { character: opener[0] as "`" | "~", length: opener.length };
+        blankSinceHeading = false;
       } else {
         const heading = /^(#{1,6})\s/.exec(line);
-        if (heading) headings.push({ start: offset, level: heading[1]!.length, line: lineNumber });
-
-        // The grammar is intentionally exact: lower-case ASCII protocol tokens, an otherwise
-        // empty line, and no normalization/case folding. Any plausible reserved-namespace
-        // token selects marked mode; only the two roles below are then accepted. This keeps
-        // future digit/hyphenated sapwood protocol attempts from falling through to legacy
-        // English-heading parsing.
-        //
-        // #827 exception: `sapwood:operator-owned` is a REAL, unrelated sapwood protocol token
-        // (comment-cursor.ts's operator-owned section fence, opened by this exact standalone
-        // line) — it is deliberately excluded here rather than left to trip "marked mode selected
-        // but malformed" (`null`, below), which would otherwise poison EVERY body carrying an
-        // operator-owned fence: `extractAcceptanceCriteria`/`extractVerificationPlan` would go
-        // fail-closed-null even when a perfectly normal legacy-heading AC/Verification section
-        // sits right beside the fence. The fence's OWN closing tag (`<!-- /sapwood:... -->`)
-        // never matches this regex at all — it starts with `/sapwood:`, not `sapwood:` — so only
-        // the open tag needs this explicit carve-out.
-        const marker = /^<!-- sapwood:([a-z0-9][a-z0-9-]*) -->$/.exec(line);
-        if (marker && marker[1] !== "operator-owned") {
-          const previous = headings[headings.length - 1];
-          anchors.push({
-            role: marker[1]!,
-            heading: previous?.line === lineNumber - 1 ? previous : undefined,
-          });
+        if (heading) {
+          headings.push({ start: offset, level: heading[1]!.length, line: lineNumber });
+          blankSinceHeading = true;
+        } else {
+          // The grammar is intentionally exact: lower-case ASCII protocol tokens, an otherwise
+          // empty line, and no normalization/case folding. Any plausible reserved-namespace
+          // token selects marked mode; only the two roles below are then accepted. This keeps
+          // future digit/hyphenated sapwood protocol attempts from falling through to legacy
+          // English-heading parsing.
+          //
+          // #827 exception: `sapwood:operator-owned` is a REAL, unrelated sapwood protocol token
+          // (comment-cursor.ts's operator-owned section fence, opened by this exact standalone
+          // line) — it is deliberately excluded here rather than left to trip "marked mode selected
+          // but malformed" (`null`, below), which would otherwise poison EVERY body carrying an
+          // operator-owned fence: `extractAcceptanceCriteria`/`extractVerificationPlan` would go
+          // fail-closed-null even when a perfectly normal legacy-heading AC/Verification section
+          // sits right beside the fence. The fence's OWN closing tag (`<!-- /sapwood:... -->`)
+          // never matches this regex at all — it starts with `/sapwood:`, not `sapwood:` — so only
+          // the open tag needs this explicit carve-out.
+          const marker = /^<!-- sapwood:([a-z0-9][a-z0-9-]*) -->$/.exec(line);
+          if (marker && marker[1] !== "operator-owned") {
+            const previous = headings[headings.length - 1];
+            anchors.push({
+              role: marker[1]!,
+              heading: previous && blankSinceHeading ? previous : undefined,
+            });
+            // Close the association window: the marker line itself is "content" for every
+            // subsequent line under this heading, so a SECOND marker line reached only via
+            // more blank lines (or via this marker line) never re-associates with the same
+            // heading. Without this, "heading / blank / <ac> / blank / <verification>" bound
+            // BOTH markers to one heading instead of failing closed as malformed.
+            blankSinceHeading = false;
+          } else if (line.trim() !== "") {
+            blankSinceHeading = false;
+          }
         }
       }
     }

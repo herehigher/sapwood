@@ -61,6 +61,15 @@ and happy-dom's `fetch` enforces same-origin/CORS against `window.location`, whi
 `server.test.ts`'s real network calls if registered process-wide — do not add it to the
 dashboard workspace's `test` script's `--import`.
 
+**Proving query/data-flow wiring has no equivalent helper yet.** `registerRealDom()` closed the
+click-wiring gap; the same class recurred one level up the stack in #866/#868 — a test that
+mounts a real entry point but still hands it a synthetic view-model, or a hand-constructed state
+combination the real derivation could never itself produce, proves nothing about the actual
+TanStack Query hook → server response → render chain (see `docs/REVIEW-DOCTRINE.md`'s WIRING
+rule, data-flow sub-shape). Each PR currently re-derives an app-mount-with-settled-queries
+pattern ad hoc; the next one to need it should extract it to shared test infra rather than
+reinventing it again.
+
 **The UI itself.** `src/App.tsx` wires the full app: the §3 modules — loop/round
 hero (`src/hero/Hero.tsx`, `stage.tsx`), lane board (`src/components/LaneBoard.tsx`),
 activity feed (`ActivityFeed.tsx`), needs-attention strip (`NeedsAttention.tsx`),

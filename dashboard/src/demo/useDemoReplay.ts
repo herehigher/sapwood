@@ -124,5 +124,9 @@ export function useDemoReplay(bundle: DemoBundle | undefined, lanesMax: number |
     scrub,
     spendThroughCursor,
     phaseWindows: log?.phaseWindows ?? [],
+    // #868 gate② finding [1]: `buildRoundLog`'s own `events` slice is already round-scoped and
+    // uncapped (`demo/build-round-log.ts`'s own doc) — the phase inspector's event-derived counts
+    // read this directly, same as live `useReplay`'s `roundEvents`.
+    roundEvents: log?.events ?? [],
   };
 }
