@@ -2323,13 +2323,17 @@ export async function normalizeUnplacedBoardItems(
  *  #834 Phase 2: also runs ONE bounded cycle of the present-directory sweep, in its OWN try/
  *  catch (a failure in either pass must never mask or be masked by the other — each is
  *  independently best-effort) — see sweepPresentDirectoryWorktreesAndReport's own doc for the
- *  single rollup event this emits. #834 (gate② round 1, F5): the cycle starts from a RANDOMIZED
- *  offset (never a fixed 0) so repeated single-cycle startup sweeps don't deterministically
- *  re-examine only the same window of the candidate list forever — a minimal mechanism that
- *  needs no durable cross-restart cursor: `sweepPresentDirectoryWorktreesOnce` mods any offset
- *  into range internally, so an oversized random value is always safe regardless of how many
- *  candidates actually exist this cycle. Full-coverage-in-one-run is
- *  `runPresentDirectoryWorktreeSweepToCompletion` (the operator one-shot script), not this path. */
+ *  single rollup event this emits.
+ *
+ *  #834 (gate② round 4, A2 — the owner's own architecture ruling): this cycle is a FIXED head
+ *  window (the first `batchSize` present-directory candidates, unconditionally) — the earlier
+ *  design's randomized-offset rotation was deleted as unjustified dual-mode complexity. Be
+ *  HONEST about what that means: this startup pass is OPPORTUNISTIC, not a coverage guarantee —
+ *  a persistently-dirty (or perpetually-unmerged) candidate sitting at the head of the list makes
+ *  NO per-start progress past it, restart after restart. The CLEARANCE path for the full stock is
+ *  the operator one-shot (`runPresentDirectoryWorktreeSweepToCompletion`, scripts/worktree-
+ *  janitor.ts), which provably reaches every candidate via its identity-based `seen` set — this
+ *  startup pass is a cheap, best-effort trickle on top of that, never a substitute for it. */
 async function sweepWorktreeJanitorStartup(state: Pick<State, "appendEvent">, log: (message: string) => void): Promise<void> {
   try {
     const result = await sweepWorktreeJanitorOnce(createWorktreeJanitorDeps());
@@ -2343,13 +2347,11 @@ async function sweepWorktreeJanitorStartup(state: Pick<State, "appendEvent">, lo
     log(`[sapwood:startup] worktree janitor sweep failed; continuing: ${String(error)}`);
   }
   try {
-    const startOffset = Math.floor(Math.random() * 1_000_000);
     const result = await sweepPresentDirectoryWorktreesAndReport(
       createPresentDirectorySweepDeps(),
       state,
       log,
       WORKTREE_JANITOR_BATCH_SIZE,
-      startOffset,
     );
     if (result.reaped.length > 0 || result.retained.length > 0 || result.failed.length > 0) {
       log(

@@ -350,7 +350,7 @@ test("sweepPresentDirectoryWorktreesOnce: a LOCKED dead-pid present-directory re
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/role-x", lockReason: "claude session role-x (pid 111 start now)" };
   const deps = fakePresentDeps({ registrations: [reg], isPidAlive: () => false, directoryExists: () => true });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [reg.path], retained: [], skipped: 0, failed: [], nextOffset: 0, examinedPaths: [reg.path] });
+  assert.deepEqual(result, { reaped: [reg.path], retained: [], skipped: 0, mergeGateSkipped: 0, failed: [], examinedPaths: [reg.path] });
   assert.deepEqual(deps.settleCalls, [reg.path]);
   assert.deepEqual(deps.unlocked, [reg.path]);
   assert.deepEqual(deps.removed, [reg.path]);
@@ -366,7 +366,7 @@ test("sweepPresentDirectoryWorktreesOnce: a LOCKED dead-pid present-directory re
     settleDirectory: () => ({ verdict: "retained" }),
   });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [reg.path], skipped: 0, failed: [], nextOffset: 0, examinedPaths: [reg.path] });
+  assert.deepEqual(result, { reaped: [], retained: [reg.path], skipped: 0, mergeGateSkipped: 0, failed: [], examinedPaths: [reg.path] });
   assert.deepEqual(deps.unlocked, []);
   assert.deepEqual(deps.removed, []);
   assert.equal(deps.pruneCalls, 0);
@@ -426,7 +426,7 @@ test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registra
     // — not overridden, so the call-recorded assertion below actually proves something.
   });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [reg.path], retained: [], skipped: 0, failed: [], nextOffset: 0, examinedPaths: [reg.path] });
+  assert.deepEqual(result, { reaped: [reg.path], retained: [], skipped: 0, mergeGateSkipped: 0, failed: [], examinedPaths: [reg.path] });
   assert.deepEqual(deps.settleCalls, [reg.path]);
   assert.deepEqual(deps.unlocked, [], "an unlocked registration is never unlock()'d");
   assert.deepEqual(deps.removed, [reg.path]);
@@ -438,7 +438,7 @@ test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registra
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/fix-382", lockReason: null, branch: "refs/heads/fix-382" };
   const deps = fakePresentDeps({ registrations: [reg], directoryExists: () => true, registrationAgeMs: () => AGE_YOUNG });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, failed: [], nextOffset: 0, examinedPaths: [] });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, mergeGateSkipped: 0, failed: [], examinedPaths: [] });
   assert.deepEqual(deps.branchMergedCalls, [], "the expensive git check never runs for an under-age candidate");
   assert.deepEqual(deps.settleCalls, []);
 });
@@ -447,7 +447,7 @@ test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registra
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/fix-382", lockReason: null, branch: "refs/heads/fix-382" };
   const deps = fakePresentDeps({ registrations: [reg], directoryExists: () => true, registrationAgeMs: () => Number.NaN });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, failed: [], nextOffset: 0, examinedPaths: [] });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, mergeGateSkipped: 0, failed: [], examinedPaths: [] });
   assert.deepEqual(deps.branchMergedCalls, []);
 });
 
@@ -460,7 +460,7 @@ test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registra
     isBranchMerged: async () => false,
   });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, failed: [], nextOffset: 0, examinedPaths: [reg.path] });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, mergeGateSkipped: 1, failed: [], examinedPaths: [reg.path] });
   assert.deepEqual(deps.settleCalls, [], "never fs-deleted without proof of a merged branch");
 });
 
@@ -468,7 +468,7 @@ test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registra
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/detached-1", lockReason: null };
   const deps = fakePresentDeps({ registrations: [reg], directoryExists: () => true });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, failed: [], nextOffset: 0, examinedPaths: [] });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, mergeGateSkipped: 0, failed: [], examinedPaths: [] });
   assert.deepEqual(deps.branchMergedCalls, []);
 });
 
@@ -476,10 +476,10 @@ test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED registration whose directo
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/fix-382", lockReason: null, branch: "refs/heads/fix-382" };
   const deps = fakePresentDeps({ registrations: [reg], directoryExists: () => false });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, failed: [], nextOffset: 0, examinedPaths: [] });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, mergeGateSkipped: 0, failed: [], examinedPaths: [] });
 });
 
-test("sweepPresentDirectoryWorktreesOnce: per-cycle work is bounded to batchSize — overflow candidates are counted as skipped, not touched", async () => {
+test("sweepPresentDirectoryWorktreesOnce: per-cycle work is bounded to batchSize — overflow candidates are counted as skipped, not touched (gate② round 4, A2: window is now simply the first batchSize candidates from the head — no more offset rotation)", async () => {
   const registrations: WorktreeRegistration[] = Array.from({ length: 5 }, (_, i) => ({
     path: `/repo/.claude/worktrees/role-${i}`,
     lockReason: `claude session role-${i} (pid ${i} start now)`,
@@ -488,7 +488,7 @@ test("sweepPresentDirectoryWorktreesOnce: per-cycle work is bounded to batchSize
   const result = await sweepPresentDirectoryWorktreesOnce(deps, 2);
   assert.equal(result.reaped.length, 2);
   assert.equal(result.skipped, 3);
-  assert.equal(result.nextOffset, 2, "the window ends where it stopped — not wrapped, since the list has more left");
+  assert.equal(result.examinedPaths.length, 2, "only the head window was examined — the rest counted skipped, not touched");
 });
 
 test("sweepPresentDirectoryWorktreesOnce: a mixed batch (locked-dead-clean, locked-dead-dirty, unlocked-merged-clean) reaps/retains/skips correctly in one cycle", async () => {
@@ -511,33 +511,17 @@ test("sweepPresentDirectoryWorktreesOnce: a mixed batch (locked-dead-clean, lock
   assert.deepEqual(result.failed, []);
 });
 
-// ── #834 (gate② round 1, F5): head-of-line starvation — a permanently-dirty/unmerged HEAD
-//    candidate must never block everything behind it across repeated calls, and the operator
-//    one-shot must provably reach the FULL candidate list. ──
+// ── #834 (gate② round 1, F5; dual-mode DELETED round 4, A2 — owner ruling): head-of-line
+//    starvation used to be fenced by TWO windowing strategies (a randomized-offset rotation for
+//    the single-cycle caller, plus the identity-based `alreadyExamined` cursor for the
+//    to-completion caller). The owner ruled that dual-mode split unjustified complexity and had
+//    the offset mode deleted outright — there is now exactly ONE windowing rule (see
+//    sweepPresentDirectoryWorktreesOnce's own doc). A single bounded cycle with no
+//    `alreadyExamined` set is now honestly OPPORTUNISTIC, not starvation-proof — the test below
+//    pins that plainly, and the actual starvation-proof guarantee is exercised ONLY through the
+//    identity-based to-completion tests further down (the one caller that still needs it). ──
 
-test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F5): an offset rotates the window — candidates BEFORE the offset are counted skipped, not examined", async () => {
-  const registrations: WorktreeRegistration[] = Array.from({ length: 5 }, (_, i) => ({
-    path: `/repo/.claude/worktrees/role-${i}`,
-    lockReason: `claude session role-${i} (pid ${i} start now)`,
-  }));
-  const deps = fakePresentDeps({ registrations, isPidAlive: () => false, directoryExists: () => true });
-  const result = await sweepPresentDirectoryWorktreesOnce(deps, 2, 3); // window [3,5) — wraps? no, 3+2=5=total -> no wrap
-  assert.deepEqual(result.reaped.sort(), ["/repo/.claude/worktrees/role-3", "/repo/.claude/worktrees/role-4"].sort());
-  assert.equal(result.skipped, 3); // role-0, role-1, role-2 outside this cycle's window
-  assert.equal(result.nextOffset, 0, "the window reached the end of the list -> wraps to 0");
-});
-
-test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F5): an oversized offset is modulo'd into range regardless of the candidate list's actual size", async () => {
-  const registrations: WorktreeRegistration[] = Array.from({ length: 5 }, (_, i) => ({
-    path: `/repo/.claude/worktrees/role-${i}`,
-    lockReason: `claude session role-${i} (pid ${i} start now)`,
-  }));
-  const deps = fakePresentDeps({ registrations, isPidAlive: () => false, directoryExists: () => true });
-  const result = await sweepPresentDirectoryWorktreesOnce(deps, 25, 1_000_003); // 1_000_003 % 5 === 3
-  assert.deepEqual(result.reaped.sort(), ["/repo/.claude/worktrees/role-3", "/repo/.claude/worktrees/role-4"].sort());
-});
-
-test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F5): a stock whose first batchSize candidates are ALL permanently dirty still lets a LATER cycle (via nextOffset) reach and reap a clean candidate behind them", async () => {
+test("sweepPresentDirectoryWorktreesOnce (gate② round 4, A2): a single bounded cycle with no alreadyExamined set is a plain HEAD window — a permanently-dirty head candidate is NOT starvation-proof within one call (that guarantee now belongs solely to the to-completion identity cursor, tested separately)", async () => {
   const dirtyHead: WorktreeRegistration[] = Array.from({ length: 3 }, (_, i) => ({
     path: `/repo/.claude/worktrees/dirty-${i}`,
     lockReason: `claude session dirty-${i} (pid ${i} start now)`,
@@ -553,18 +537,19 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F5): a stock whose fi
     directoryExists: () => true,
     settleDirectory: (path) => (path.startsWith("/repo/.claude/worktrees/dirty-") ? { verdict: "retained" } : { verdict: "settled" }),
   });
-  // batchSize=3: cycle 1's window is exactly the three permanently-dirty entries — the OLD
-  // fixed-head-slice design would starve cleanTail forever, every single cycle, from here on.
-  const first = await sweepPresentDirectoryWorktreesOnce(deps, 3, 0);
-  assert.deepEqual(first.reaped, []);
-  assert.deepEqual(first.retained.sort(), dirtyHead.map((r) => r.path).sort());
-  assert.equal(first.nextOffset, 3, "the window advances past the dirty head instead of resetting to 0");
-
-  // Cycle 2, fed the PREVIOUS cycle's nextOffset — reaches cleanTail, which cycle 1 never even
-  // examined.
-  const second = await sweepPresentDirectoryWorktreesOnce(deps, 3, first.nextOffset);
-  assert.deepEqual(second.reaped, [cleanTail.path]);
-  assert.equal(second.nextOffset, 0, "one full lap complete");
+  // batchSize=3: this single cycle's window is exactly the three permanently-dirty head
+  // entries — cleanTail is never even reached, and a SECOND call with the SAME (no-set) deps
+  // would examine the exact same head window again, forever. Honest, not a bug: the
+  // to-completion path is the one that must (and does, elsewhere) reach cleanTail.
+  const result = await sweepPresentDirectoryWorktreesOnce(deps, 3);
+  assert.deepEqual(result.reaped, []);
+  assert.deepEqual(result.retained.sort(), dirtyHead.map((r) => r.path).sort());
+  assert.equal(result.skipped, 1, "cleanTail counted skipped — outside this cycle's fixed head window");
+  assert.deepEqual(
+    result.examinedPaths.sort(),
+    dirtyHead.map((r) => r.path).sort(),
+    "only the head window was ever examined — no rotation, no identity cursor, in this mode",
+  );
 });
 
 /** #834 (gate② round 2, G1): a listRegistrations fake that REFLECTS removals — `remove()` deletes
@@ -617,7 +602,7 @@ test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 1, F5): reache
     new Set(registrations.map((r) => r.path)),
     "each candidate examined EXACTLY once — no re-examination within the single lap",
   );
-  assert.equal(result.nextOffset, 0);
+  assert.equal(result.examinedPaths.length, 0, "the final aggregated result's own examinedPaths is always empty — see the field's own doc");
   assert.ok(
     logs.some((m) => m.includes("cycle 3")),
     "logged every cycle, including the final partial one",
@@ -667,10 +652,44 @@ test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 3, W4 — the 
   assert.ok(logs.length >= 3, "this run genuinely spanned multiple cycles (the scenario the inflation bug needed)");
 });
 
+test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 4, A2 — the reviewer's own reproduction): a single unmerged candidate must land in `skipped`, not vanish from every bucket", async () => {
+  // The exact bug: cycle 1 examines the candidate, its merge-gate skip (skipped++) is folded
+  // into that CYCLE's own combined `skipped` — then the candidate joins `seen`. Cycle 2 (the
+  // terminating, empty-window cycle) never re-examines it (it's in `seen`, so classification's
+  // re-scan doesn't matter), and W4's own fix (round 3) used ONLY the terminating cycle's
+  // `skipped`, which is 0 here — the candidate was in NO bucket at all.
+  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/unmerged-1", lockReason: null, branch: "refs/heads/unmerged-1" };
+  const deps = fakeShrinkingPresentDeps([reg], { isBranchMerged: async () => false });
+  const result = await runPresentDirectoryWorktreeSweepToCompletion(deps, () => {}, 25);
+  assert.equal(result.reaped.length, 0);
+  assert.equal(result.retained.length, 0);
+  assert.equal(
+    result.skipped,
+    1,
+    "the single unmerged candidate must be counted exactly once — the reviewer's reported bug returned 0 here",
+  );
+});
+
+test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 4, A2): a mixed run (1 reapable + 1 permanently-classification-skipped + 1 merge-gate-skipped) pins the exact total — 2 skipped, never 1 (undercount) or inflated", async () => {
+  const reapable: WorktreeRegistration = {
+    path: "/repo/.claude/worktrees/reapable-1",
+    lockReason: "claude session reapable-1 (pid 1 start now)",
+  };
+  const detached: WorktreeRegistration = { path: "/repo/.claude/worktrees/detached-1", lockReason: null }; // no branch -> classification-skipped
+  const unmerged: WorktreeRegistration = { path: "/repo/.claude/worktrees/unmerged-1", lockReason: null, branch: "refs/heads/unmerged-1" };
+  const deps = fakeShrinkingPresentDeps([reapable, detached, unmerged], {
+    isBranchMerged: async (branch) => branch !== unmerged.branch,
+  });
+  const result = await runPresentDirectoryWorktreeSweepToCompletion(deps, () => {}, 25);
+  assert.deepEqual(result.reaped, [reapable.path]);
+  assert.equal(result.retained.length, 0);
+  assert.equal(result.skipped, 2, "detached (classification) + unmerged (merge-gate) — each counted exactly once");
+});
+
 test("runPresentDirectoryWorktreeSweepToCompletion: an empty candidate list terminates after one no-op cycle", async () => {
   const deps = fakePresentDeps({ registrations: [] });
   const result = await runPresentDirectoryWorktreeSweepToCompletion(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, failed: [], nextOffset: 0, examinedPaths: [] });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, mergeGateSkipped: 0, failed: [], examinedPaths: [] });
 });
 
 // ── #834 (gate② round 1, F6): a prune-step failure must never escape sweepPresentDirectoryWorktreesOnce
@@ -751,7 +770,7 @@ test("sweepPresentDirectoryWorktreesAndReport: a failing appendEvent never throw
   };
   const logs: string[] = [];
   const result = await sweepPresentDirectoryWorktreesAndReport(deps, state, (m) => logs.push(m));
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, failed: [], nextOffset: 0, examinedPaths: [] });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, mergeGateSkipped: 0, failed: [], examinedPaths: [] });
   assert.equal(logs.length, 1);
   assert.match(logs[0]!, /rollup event append failed/);
 });

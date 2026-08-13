@@ -363,11 +363,23 @@ export interface PresentDirectorySweepResult {
    *  stock" line). An attempted-but-INCOMPLETE deletion is a DIFFERENT bucket: `failed`, below. */
   retained: string[];
   /** Every registration this arm looked at but did not reap: alive-owner, under-age, unmerged-
-   *  branch, detached/branchless, beyond this cycle's window (see nextOffset), or a prune-step
-   *  failure (#834 gate② round 1, F6 — counted here under a sentinel path since it isn't about
-   *  any ONE directory). One number — the whole POINT of the rollup is that the stock never
-   *  generates per-entry noise. */
+   *  branch, detached/branchless, beyond this cycle's window, or a prune-step failure (#834
+   *  gate② round 1, F6 — counted here under a sentinel path since it isn't about any ONE
+   *  directory). One number — the whole POINT of the rollup is that the stock never generates
+   *  per-entry noise. For a SINGLE cycle this is the complete picture; a caller that runs
+   *  MULTIPLE cycles against the same candidate pool (the to-completion path) must NOT simply
+   *  sum this field across cycles — see `mergeGateSkipped`'s own doc and
+   *  runPresentDirectoryWorktreeSweepToCompletion's doc for why. */
   skipped: number;
+  /** #834 (gate② round 4, A2): the subset of `skipped` produced specifically by the in-batch
+   *  `isBranchMerged` gate (an unlocked-merged-candidate whose branch turned out NOT to be
+   *  merged) — broken out because the to-completion runner needs it separately: once a candidate
+   *  is examined at all (added to the identity-based `seen` set, regardless of verdict), it never
+   *  reappears in any LATER cycle's classification pass, so a merge-gate skip from an early cycle
+   *  would otherwise vanish from the run's final total instead of landing in either `skipped` or
+   *  any other bucket. Always `0` for a candidate that never reached the merge-gate check
+   *  (classification-skipped, or LOCKED+dead-pid, which has no merge gate at all). */
+  mergeGateSkipped: number;
   /** An attempted-but-incomplete deletion (settleDirectory's own `"failed"` verdict) or a whole-
    *  sweep prune failure (F6, under PRUNE_FAILURE_SENTINEL_PATH). `tombstonePath` (#834 gate②
    *  round 2, G2; wording corrected round 3, W1) is present on every reachable `"failed"`
@@ -375,18 +387,10 @@ export interface PresentDirectorySweepResult {
    *  survives (a recursive removal can delete several entries before failing on a later one) —
    *  see WorktreeDirectorySettleOutcome's own doc. */
   failed: Array<{ path: string; error: string; tombstonePath?: string }>;
-  /** #834 (gate② round 1, F5): where the NEXT cycle's window should start, so a permanently-
-   *  dirty/unmerged HEAD candidate can never starve everything behind it across repeated calls
-   *  — see sweepPresentDirectoryWorktreesOnce's own windowing doc. `0` once a full lap over the
-   *  candidate list completes (including the trivial zero-candidate case). Meaningful ONLY for
-   *  the offset-rotation caller (engine startup); the identity-based to-completion path (gate②
-   *  round 2, G1) ignores it entirely — see runPresentDirectoryWorktreeSweepToCompletion's doc. */
-  nextOffset: number;
   /** #834 (gate② round 2, G1): the exact candidate PATHS this cycle's window actually examined
    *  (every entry in `batch`, regardless of individual verdict) — the identity-based cursor
-   *  runPresentDirectoryWorktreeSweepToCompletion accumulates across cycles, replacing the
-   *  index-based `nextOffset` rotation that silently skipped candidates the instant a reap
-   *  shrank the registration list. Empty exactly when nothing was in this cycle's window. */
+   *  runPresentDirectoryWorktreeSweepToCompletion accumulates across cycles. Empty exactly when
+   *  nothing was in this cycle's window (candidate pool exhausted, or none to begin with). */
   examinedPaths: string[];
 }
 
@@ -411,22 +415,21 @@ type PresentDirectoryCandidate =
  *     DEFAULT branch (isBranchMerged) — checked LAST, since it is the only per-candidate git
  *     call, after the window below has already shrunk the candidate set.
  *
- *  WINDOWING (#834 gate② round 1, F5 — the head-of-line starvation fix): the CLASSIFICATION pass
- *  above always scans every registration (cheap: no subprocess calls), but the batch of
- *  candidates this cycle actually EXAMINES through the merge/purity gates is a `batchSize`-wide
- *  WINDOW, never a fixed head slice — TWO DIFFERENT windowing strategies, selected by which
- *  caller is asking:
+ *  WINDOWING (#834 gate② round 1, F5; collapsed to ONE mode round 4, A2 — the owner's own
+ *  architecture ruling): the CLASSIFICATION pass above always scans every registration (cheap:
+ *  no subprocess calls), but the batch of candidates this cycle actually EXAMINES through the
+ *  merge/purity gates is a `batchSize`-wide WINDOW, never the WHOLE candidate list at once. There
+ *  used to be a SECOND windowing mode (a randomized numeric `offset`, for the single-cycle
+ *  engine-startup caller) alongside this one — the owner ruled that dual-mode split unjustified
+ *  complexity and had it deleted; there is now exactly ONE windowing rule, for every caller:
  *   - `alreadyExamined` provided (the to-completion caller, gate② round 2 G1): candidates whose
  *     path is already in that set are filtered out FIRST, then the window is the first
  *     `batchSize` of what remains — an IDENTITY-based cursor, immune to the list shrinking when
- *     a candidate gets reaped between cycles (an INDEX-based cursor is not: see
- *     runPresentDirectoryWorktreeSweepToCompletion's own doc for the exact bug this replaces).
- *     `offset` is ignored in this mode.
- *   - `alreadyExamined` omitted (the single-cycle engine-startup caller): the window starts at
- *     `offset % candidates.length` — a RANDOMIZED offset (never a fixed 0) is how that caller
- *     avoids always re-examining the same head slice across restarts, since it has no cross-
- *     restart cursor to carry forward; see cli.ts's own startup wiring. `nextOffset` in the
- *     result is meaningful only in this mode.
+ *     a candidate gets reaped between cycles.
+ *   - `alreadyExamined` omitted (the single-cycle engine-startup caller): the window is simply
+ *     the first `batchSize` candidates from the head of the list, unconditionally — see cli.ts's
+ *     own startup wiring doc for why a fixed head window is an accepted, OPPORTUNISTIC trade-off
+ *     there (the to-completion path, not this one, is what provably reaches everything).
  *
  *  `examinedPaths` in the result is the exact set of candidate paths this cycle's window
  *  actually reached (regardless of verdict) — what the to-completion caller accumulates into its
@@ -439,7 +442,6 @@ type PresentDirectoryCandidate =
 export async function sweepPresentDirectoryWorktreesOnce(
   deps: PresentDirectorySweepDeps,
   batchSize: number = WORKTREE_JANITOR_BATCH_SIZE,
-  offset = 0,
   alreadyExamined?: ReadonlySet<string>,
 ): Promise<PresentDirectorySweepResult> {
   const registrations = await deps.listRegistrations();
@@ -468,25 +470,23 @@ export async function sweepPresentDirectoryWorktreesOnce(
 
   // #834 (gate② round 2, G1): the to-completion caller's identity-based cursor — filter OUT
   // already-examined candidates before windowing, so a candidate the CALLER already looked at
-  // this run is never re-selected regardless of what index it now sits at.
+  // this run is never re-selected regardless of what position it now sits at. (Round 4, A2: the
+  // single-cycle caller passes no set at all, so `unexamined` is just `candidates` — the window
+  // is then simply the first `batchSize` of the full list, from the head, every time.)
   const unexamined = alreadyExamined ? candidates.filter((c) => !alreadyExamined.has(c.path)) : candidates;
-
-  const total = unexamined.length;
-  const startIdx = total === 0 ? 0 : offset % total;
-  const endIdx = Math.min(startIdx + batchSize, total);
-  const batch = unexamined.slice(startIdx, endIdx);
-  const consumed = endIdx - startIdx;
-  skipped += total - consumed; // candidates outside this cycle's window
-  const nextOffset = total === 0 || endIdx >= total ? 0 : endIdx;
+  const batch = unexamined.slice(0, batchSize);
+  skipped += unexamined.length - batch.length; // candidates outside this cycle's window
 
   const reaped: string[] = [];
   const retained: string[] = [];
   const failed: Array<{ path: string; error: string; tombstonePath?: string }> = [];
+  let mergeGateSkipped = 0;
   for (const c of batch) {
     if (c.kind === "unlocked-merged-candidate") {
       const merged = await deps.isBranchMerged(c.branch);
       if (!merged) {
         skipped++;
+        mergeGateSkipped++; // #834 (gate② round 4, A2) — see this field's own doc
         continue;
       }
     }
@@ -532,7 +532,7 @@ export async function sweepPresentDirectoryWorktreesOnce(
       failed.push({ path: PRUNE_FAILURE_SENTINEL_PATH, error: String(error) });
     }
   }
-  return { reaped, retained, skipped, failed, nextOffset, examinedPaths: batch.map((c) => c.path) };
+  return { reaped, retained, skipped, mergeGateSkipped, failed, examinedPaths: batch.map((c) => c.path) };
 }
 
 /** Real deps for sweepPresentDirectoryWorktreesOnce — reuses createWorktreeJanitorDeps's own
@@ -578,18 +578,19 @@ export function createPresentDirectorySweepDeps(repoRoot: string = process.cwd()
  *  directory event for the present-directory stock (retained/skipped counts alone are the
  *  honest signal; a per-entry escalation storm is exactly what #825's own missing-directory reap
  *  design already rejected for its class too). Best-effort: a failed event append is logged,
- *  never thrown — same posture as cli.ts's other best-effort startup passes. `offset` (#834
- *  gate② round 1, F5) threads through to sweepPresentDirectoryWorktreesOnce's own windowing —
- *  see that function's own doc; cli.ts's startup call passes a RANDOMIZED offset so repeated
- *  single-cycle sweeps don't deterministically re-examine only the same window forever. */
+ *  never thrown — same posture as cli.ts's other best-effort startup passes. This is a SINGLE
+ *  bounded cycle (#834 gate② round 4, A2 — the owner's dual-windowing-mode ruling deleted the
+ *  offset-rotation mode this used to also support): with no `alreadyExamined` set,
+ *  sweepPresentDirectoryWorktreesOnce examines the first `batchSize` candidates from the head of
+ *  the list every call — OPPORTUNISTIC, not a coverage guarantee; see cli.ts's own startup
+ *  wiring doc for why that trade-off is accepted there. */
 export async function sweepPresentDirectoryWorktreesAndReport(
   deps: PresentDirectorySweepDeps,
   state: Pick<State, "appendEvent">,
   log: (message: string) => void = console.error,
   batchSize: number = WORKTREE_JANITOR_BATCH_SIZE,
-  offset = 0,
 ): Promise<PresentDirectorySweepResult> {
-  const result = await sweepPresentDirectoryWorktreesOnce(deps, batchSize, offset);
+  const result = await sweepPresentDirectoryWorktreesOnce(deps, batchSize);
   try {
     state.appendEvent("worktree-janitor-rollup", {
       reaped: result.reaped.length,
@@ -603,27 +604,46 @@ export async function sweepPresentDirectoryWorktreesAndReport(
   return result;
 }
 
-/** #834 (gate② round 1, F5; cursor fixed round 2, G1) — the present-directory arm's own
- *  to-completion path, the AC5 operator one-shot counterpart to runWorktreeJanitorToCompletion
- *  above, but with a DIFFERENT termination rule: unlike the missing-directory reap (where a
- *  successfully-reaped candidate LEAVES the candidate list, so the list itself shrinks toward
- *  empty across cycles), a retained/skipped present-directory candidate is NOT removed from the
- *  registration list and reappears at the SAME position on every re-scan — "no more work to do"
- *  here means "every candidate has now been examined once in this run", not "the list is empty".
+/** #834 (gate② round 1, F5; cursor fixed round 2, G1; skipped-count fixed round 4, A2) — the
+ *  present-directory arm's own to-completion path, the AC5 operator one-shot counterpart to
+ *  runWorktreeJanitorToCompletion above, but with a DIFFERENT termination rule: unlike the
+ *  missing-directory reap (where a successfully-reaped candidate LEAVES the candidate list, so
+ *  the list itself shrinks toward empty across cycles), a retained/skipped present-directory
+ *  candidate is NOT removed from the registration list and reappears at the SAME position on
+ *  every re-scan — "no more work to do" here means "every candidate has now been examined once
+ *  in this run", not "the list is empty". This is the ONLY caller that ever passes
+ *  `alreadyExamined` to sweepPresentDirectoryWorktreesOnce (#834 gate② round 4, A2 — the
+ *  single-cycle engine-startup caller never does, by owner ruling: see that function's own
+ *  windowing doc).
  *
- *  IDENTITY-based cursor (G1 — replaces an index-based `nextOffset` rotation that was WRONG the
- *  instant a reap shrank the list): a cycle that reaps candidates 0-2 out of 7 leaves the NEXT
- *  `listRegistrations()` call returning only the remaining 4 — an index cursor computed against
- *  the OLD 7-element list (`nextOffset: 3`) then points PAST the end of the NEW 4-element list,
- *  silently skipping candidates 3-5 and terminating early (the reviewer's own reproduction,
- *  gate② round 2). This function instead accumulates a `seen` SET of candidate PATHS across
- *  cycles, passed as `sweepPresentDirectoryWorktreesOnce`'s `alreadyExamined` — each cycle
- *  examines the first `batchSize` candidates NOT already in `seen` (see that function's own doc),
- *  which is correct regardless of how the underlying list reshuffles or shrinks between calls.
- *  Terminates the instant a cycle's `examinedPaths` comes back empty (no unseen candidates left).
- *  `reaped`/`retained`/`failed` accumulate across every cycle, since each cycle's window is
- *  disjoint from every earlier one in the same run — but `skipped` does NOT (gate② round 3, W4):
- *  see this function's own body for why summing it would inflate the total.
+ *  IDENTITY-based cursor (G1): accumulates a `seen` SET of candidate PATHS across cycles, passed
+ *  as `alreadyExamined` — each cycle examines the first `batchSize` candidates NOT already in
+ *  `seen`, which is correct regardless of how the underlying list reshuffles or shrinks between
+ *  calls (an index-based cursor is not — a cycle that reaps candidates 0-2 out of 7 shrinks the
+ *  NEXT `listRegistrations()` call to 4 elements, and an index computed against the OLD 7-element
+ *  list points past the end of the new one; this was the exact bug the reviewer reproduced in
+ *  gate② round 2). Terminates the instant a cycle's `examinedPaths` comes back empty.
+ *
+ *  SKIPPED-COUNT ARITHMETIC (#834 gate② round 4, A2 — found independently by both the reviewer
+ *  and the PO): `reaped`/`retained`/`failed` accumulate across every cycle unchanged, since each
+ *  cycle's window is disjoint from every earlier one in the same run. `skipped` needs TWO
+ *  components, not one:
+ *   1. The TERMINATING (final, empty-window) cycle's own `skipped` — by construction that cycle's
+ *      internal candidate count is 0, so its `skipped` is exactly the count of permanently
+ *      classification-skipped candidates (under-age, no-branch/detached) as of the final scan,
+ *      each counted exactly once, with zero window-overflow component (gate② round 3, W4 — a
+ *      naive SUM across cycles re-counts these on every single cycle, since they never enter
+ *      `candidates` and so never join `seen`).
+ *   2. The SUM, across every cycle, of each cycle's own `mergeGateSkipped` — an unlocked-merged-
+ *      candidate whose branch fails `isBranchMerged` DOES join `seen` (it was examined, just not
+ *      reaped), so it drops out of every later cycle's classification pass and would otherwise
+ *      vanish from the terminating cycle's count entirely (gate② round 4, A2's own finding: W4's
+ *      fix alone undercounts these). Summing `mergeGateSkipped` specifically — never the whole
+ *      combined `skipped` field — is exact, because the identity-based cursor guarantees each
+ *      candidate is examined AT MOST ONCE across the whole run, so there is nothing to
+ *      double-count.
+ *  Two local variables carry this (`finalSkipped`, `mergeGateSkippedSum`) — no new counters or
+ *  state beyond that, per the owner's explicit instruction.
  *
  *  This is the SAME code path scripts/worktree-janitor.ts (the operator one-shot script) now runs
  *  alongside the existing missing-directory pass. */
@@ -636,33 +656,34 @@ export async function runPresentDirectoryWorktreeSweepToCompletion(
   const totalRetained: string[] = [];
   const totalFailed: Array<{ path: string; error: string; tombstonePath?: string }> = [];
   let finalSkipped = 0;
+  let mergeGateSkippedSum = 0;
   const seen = new Set<string>();
   let cycle = 0;
   for (;;) {
     cycle++;
-    const result = await sweepPresentDirectoryWorktreesOnce(deps, batchSize, 0, seen);
+    const result = await sweepPresentDirectoryWorktreesOnce(deps, batchSize, seen);
     totalReaped.push(...result.reaped);
     totalRetained.push(...result.retained);
     totalFailed.push(...result.failed);
+    mergeGateSkippedSum += result.mergeGateSkipped;
     log(
       `[sapwood:worktree-janitor] present-dir cycle ${cycle}: reaped ${result.reaped.length}, retained ${result.retained.length}, ` +
         `skipped ${result.skipped}, failed ${result.failed.length}`,
     );
     if (result.examinedPaths.length === 0) {
-      // #834 (gate② round 3, W4 — the PO's own finding): the TERMINATING (final, empty-window)
-      // cycle's own `skipped` is the run's honest total, NEVER a sum across cycles. Every
-      // earlier cycle re-scans the FULL current registration list from scratch (classification
-      // is cheap, no subprocess calls), so summing `result.skipped` across cycles re-counts the
-      // SAME permanently-classification-skipped candidates (under-age, no-branch/detached) once
-      // per cycle, plus any not-yet-examined window overflow — inflating the returned total far
-      // beyond the real number. By construction this final call's `total` (its own internal
-      // candidate count) is 0 — the loop only reaches here once nothing remains unexamined — so
-      // its `skipped` is exactly the count of permanently-skipped candidates as of THIS scan,
-      // each counted exactly once, with zero window-overflow component.
-      finalSkipped = result.skipped;
+      // See this function's own doc for the full arithmetic: the terminating cycle's `skipped`
+      // (classification-only, by construction) plus the run-wide sum of merge-gate skips.
+      finalSkipped = result.skipped + mergeGateSkippedSum;
       break;
     }
     for (const p of result.examinedPaths) seen.add(p);
   }
-  return { reaped: totalReaped, retained: totalRetained, skipped: finalSkipped, failed: totalFailed, nextOffset: 0, examinedPaths: [] };
+  return {
+    reaped: totalReaped,
+    retained: totalRetained,
+    skipped: finalSkipped,
+    mergeGateSkipped: mergeGateSkippedSum,
+    failed: totalFailed,
+    examinedPaths: [],
+  };
 }
