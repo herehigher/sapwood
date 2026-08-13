@@ -5,8 +5,12 @@
 #       normalizeLogin's doc, and CodexReviewer's class doc). Each keeps the real
 #       constraint/rationale it documents (gate②'s review protocol, the freshness/OID-bound
 #       rules, bot-login normalization) and drops the private predecessor-repo framing
-#       (`pr_gate.sh`, "TS port of X", "predecessor-project-style"). No behavior change —
-#       comment-only.
+#       (`pr_gate.sh`, "TS port of X", "predecessor-project-style"). freshThumbCount's doc
+#       also fixes a dangling "remains only for compatibility" clause left by the scrub
+#       (compatibility with what, once the predecessor's `fresh_thumb_count` name is gone) —
+#       reworded to name the actual reason it's kept: exported on the public API surface
+#       (engine/src/index.ts) and for unit coverage, not as a live gate② signal. No behavior
+#       change — comment-only.
 #
 # WHY IT MATTERS: #841 (public-launch hygiene) scrubs references to the project's private
 #       predecessor from production code and user-facing docs — a user browsing the shipped
@@ -39,18 +43,21 @@ diff --git a/engine/src/roles/reviewer.ts b/engine/src/roles/reviewer.ts
  // (gate①) is a separate, already-existing signal (forge.getPRStatus().ciGreen) folded in by
  // merge-driver.ts, not duplicated here.
  //
-@@ -35,8 +35,8 @@
+@@ -35,9 +35,10 @@
  }
 
  /**
 - * Legacy timestamp classifier for PR-level `+1` reactions — the predecessor project's pr_gate.sh's
 - * `fresh_thumb_count`. #273 deliberately removed reactions from gate② because they cannot
+- * carry a commit OID; this exported helper remains only for compatibility and unit coverage.
 + * Legacy timestamp classifier for PR-level `+1` reactions. #273 deliberately removed
 + * reactions from gate② because they cannot
-  * carry a commit OID; this exported helper remains only for compatibility and unit coverage.
++ * carry a commit OID; this exported helper is retained on the public API surface
++ * (engine/src/index.ts) and for unit coverage, not as a live gate② signal.
   * A reaction created at/before `cutoffIso` is stale: it predates the engine's review trigger,
   * so it cannot have been a response to it (#92, #55 P1-B). Compared NUMERICALLY (epoch ms),
-@@ -59,7 +59,7 @@
+  * not lexicographically (round-2 P2): the engine pin carries millisecond precision
+@@ -59,7 +60,7 @@
 
  /**
   * Non-author reviews whose `commitOid` equals the CURRENT `headOid`, restricted to
@@ -59,7 +66,7 @@ diff --git a/engine/src/roles/reviewer.ts b/engine/src/roles/reviewer.ts
   * an older head does NOT count (a stale review must never look like a review of the current
   * head — the exact bypass gate② exists to close). Author self-review never counts
   * (producer != reviewer, even if the author is also a configured "trusted" login).
-@@ -100,7 +100,7 @@
+@@ -100,7 +101,7 @@
  }
 
  /**
@@ -68,7 +75,7 @@ diff --git a/engine/src/roles/reviewer.ts b/engine/src/roles/reviewer.ts
   * protocol (CI-flavored actions live in merge-driver.deriveGate, which folds in gate①
   * separately). Fail-safe ordering: unresolved findings / a standing change request outrank an
   * approval signal (Codex PR #42 P1 — approve-then-changes-requested must block); "nothing yet"
-@@ -156,7 +156,7 @@
+@@ -156,7 +157,7 @@
 
  /** GitHub bot logins vary by API surface: REST reactions report `foo[bot]`, GraphQL/pr-view
   *  reviews report `foo`. Normalize by stripping the suffix so an allowlist entry written
@@ -77,7 +84,7 @@ diff --git a/engine/src/roles/reviewer.ts b/engine/src/roles/reviewer.ts
  export function normalizeLogin(login: string): string {
    return login.replace(/\[bot\]$/, "");
  }
-@@ -690,9 +690,9 @@
+@@ -690,9 +691,9 @@
    };
  }
 

@@ -1,7 +1,7 @@
-// Parity tests for the conductor's pure scheduling core — mirrors a reference assert table
-// row-for-row. Same semantics, TS types (booleans for
-// the bash 0/1 sentinel/flag args, string[] for the CSV label args). If a row here
-// disagrees with the bash row it mirrors, that's a parity regression.
+// Parity tests for the conductor's pure scheduling core — these rows ARE the frozen parity
+// contract, not ordinary test cases to prune or rewrite freely: booleans stand in for 0/1
+// sentinel/flag values, string[] for CSV-style label lists. Changing a row's expected
+// outcome is a parity regression, not a refactor.
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
