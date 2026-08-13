@@ -26,11 +26,18 @@ start: it names failure classes this repo's reviewers have flagged more than onc
 {{doctrine}}
 </review-doctrine>
 
-## Working language
+## Working language & comments
 
 Write code comments in `{{lang.codeComments}}` and any documentation you edit in `{{lang.docs}}`
 — BCP-47-ish tags configured in `sapwood.config.yaml` (`language.codeComments` /
 `language.docs`), both `en` by default.
+
+- Don't write a comment that only restates what the code already says.
+- Comment the *why* — a non-obvious constraint, a workaround, an invariant the reader can't
+  derive from the code itself — not the *what*.
+- A deliberate simplification gets one line naming the ceiling and the upgrade trigger, not a
+  paragraph defending it.
+- A comment that no longer matches the code it sits on gets deleted, not left for later.
 
 ## Non-negotiables (do not deviate)
 

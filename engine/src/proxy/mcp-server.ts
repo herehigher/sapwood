@@ -18,14 +18,11 @@
 // argument schema anywhere in proxy/tools.ts accepts an owner/repo field, so there is no argument
 // shape that could even ASK for a different repo.
 //
-// KNOWN LIMITATION (#234 F7, PR #252 review, Codex #5 — accepted, not fixed in this PR): the
-// bearer token travels to the `claude` child process embedded in the inline `--mcp-config` JSON
-// argv value (peripheral.ts's RoleRunner), so any OTHER process running as the SAME UID as the
-// engine can read it off that child's argv via `ps`/`/proc`. This is accepted because a same-UID
-// process is already inside this system's trust boundary — it can read the engine's OWN forge
-// credentials, config, and state DB directly, so a leaked proxy token grants it nothing it didn't
-// already have. Revisit if the transport ever moves off argv (e.g. an fd/temp-file handoff) —
-// deliberately NOT attempted here (out of scope for this PR, see the PR body).
+// KNOWN LIMITATION (#234 F7, PR #252 review, Codex #5 — accepted): the bearer token is readable
+// via `ps`/`/proc` by any other process sharing the engine's UID, since it's embedded in the
+// `claude` child's `--mcp-config` argv (peripheral.ts's RoleRunner). Accepted because that same-UID
+// process already has direct access to the engine's forge credentials/config/state DB, so this
+// grants it nothing new. Revisit if the transport ever moves off argv (e.g. an fd/temp-file handoff).
 //
 // HARD INVARIANT (worker.test.ts's #69 grep-invariant test, engine-wide): no node:child_process
 // import, no subprocess call, anywhere in this module — only worker.ts (spawn) and forge/gh.ts
