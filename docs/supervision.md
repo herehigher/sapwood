@@ -743,8 +743,13 @@ recipe below is that same mechanism, not new machinery:
 
 ```bash
 # Zero ambient MCP servers except the one browser-automation server this session needs, named
-# explicitly — the same shape as worker.ts's EMPTY_MCP_CONFIG_JSON, with one server added back in.
-MCP_CONFIG='{"mcpServers":{"browser":{"command":"npx","args":["@playwright/mcp@latest"]}}}'
+# explicitly — the same shape as worker.ts's EMPTY_MCP_CONFIG_JSON, with one server added back in,
+# itself launched origin-restricted to wherever `sapwood dashboard` actually serves (default port
+# 4517, engine/src/state/read-model.ts's DEFAULT_DASHBOARD_PORT — adjust if launched with --port)
+# and `--isolated` so the browser gets a fresh, ephemeral profile with no saved cookies/auth state
+# to inherit from the operator's own logged-in browser.
+DASHBOARD_ORIGIN="http://localhost:4517"
+MCP_CONFIG='{"mcpServers":{"browser":{"command":"npx","args":["@playwright/mcp@latest","--isolated","--allowed-origins","'"$DASHBOARD_ORIGIN"'","--blocked-origins","https://github.com;https://api.github.com;https://*.github.com"]}}}'
 
 claude \
   --strict-mcp-config --mcp-config "$MCP_CONFIG" \
@@ -761,15 +766,29 @@ claude \
   WITHIN that already-closed surface, not what closes it.
 - `--setting-sources ""` loads zero file-based settings sources, closing the `user`-scope ambient
   inheritance gap the same doctrine names.
+- **The browser server itself is the widest tool in this grant** — navigation, click, and form
+  actions are a channel to anywhere a browser can reach, not just the dashboard, so closing the
+  MCP surface down to "one server" is not by itself enough. Two of `@playwright/mcp`'s own launch
+  flags narrow that channel: `--allowed-origins "$DASHBOARD_ORIGIN"` rejects navigation to
+  anything but the dashboard's own origin (so a page can't be driven to `github.com` even if
+  asked), and `--blocked-origins` names GitHub's own hosts as a second, belt-and-suspenders deny
+  in case the allow-list is ever loosened for a future journey that needs a second origin.
+  `--isolated` additionally guarantees the browser context is fresh and ephemeral every launch —
+  no persisted cookies, no saved login, nothing an accidental cross-origin navigation could ride
+  on even if the origin lists were misconfigured. State the residual honestly: this is the
+  MCP server's own origin-enforcement behaving as documented, not sapwood's PreToolUse guard hook
+  — a bug in that enforcement is a channel this doesn't defend against. It is a real, configured
+  control, though, not merely an unenforced instruction.
 - `--allowedTools "Read,Write(data/review/ux/**),mcp__browser__*"` grants exactly: reading any
   file (to consult its own report contract), writing only under `data/review/ux/` (to file its
   ledger, nothing else), and the browser-automation tools to walk the journeys.
-- `--disallowedTools "Bash,mcp__forge__*,mcp__github__*"` is a second, belt-and-suspenders veto —
+- `--disallowedTools "Bash,mcp__forge__*,mcp__github__*"` is a third, belt-and-suspenders veto —
   in case a future edit to `$MCP_CONFIG` ever names a forge-authority or exec-capable server, this
   still blocks it by name, the same defense-in-depth stance `worker.ts`'s own denylist takes.
-- No `gh`, no board access, no issue filing: with the MCP surface closed to one read-only browser
-  server and `Bash` denied, there is no channel left for the session to reach the forge through,
-  structurally — not because it was asked not to.
+- No `gh`, no `Bash`, no forge-authority MCP tool name, and the one browser tool it does have is
+  both origin-restricted to the dashboard and running with no authenticated state to inherit — the
+  session has no path to GitHub or a project board left that isn't already closed by one of the
+  controls above.
 
 ### Findings routing
 
