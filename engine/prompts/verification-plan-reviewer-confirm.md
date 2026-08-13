@@ -70,7 +70,7 @@ producer to *edit* a path `docs/security.md`'s "Human-merge-only paths" list cov
 `.claude/settings*.json`, `.github/workflows/**`), the plan is not dispatchable no matter when
 it was approved — the guard will deny the write mid-task. That is `invalidate`, with a brief
 naming the specific path, so the issue goes back through a full review (which owns the
-patch-deliverable/split repair options). Approvals that predate this check are exactly the
+split-remainder / needs-human repair options). Approvals that predate this check are exactly the
 ones it exists to catch. A second standing check (F36): an execution-class acceptance
 criterion — "the test suite passes", "typecheck clean", "CI green" and equivalents — is plan
 noise; CI already enforces `ci.requiredChecks` unconditionally for every PR, and a static

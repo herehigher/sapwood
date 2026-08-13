@@ -3,7 +3,8 @@
 // assertions below pin issue-specific language and structural output contracts.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { defaultPoolPromptPath, defaultPoPromptPath } from "../loop/align.js";
 import { defaultPoDecomposePromptPath } from "../loop/decompose.js";
@@ -91,7 +92,8 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #701: new "Working language" section states the configured `language.issuesAndPrs` default
   // (`{{lang.issuesAndPrs}}`) for prose this role originates; the pre-existing "(English is
   // fine)" parenthetical now points at it instead of naming a literal language.
-  "po.md": "f75ad07d5f88d777cbf977c6b0957b20cce5250dbddaf119c3c6ea62f15753ee",
+  // #848: retired the paste-ready-patch deliverable from the human-merge-only resolution — carve-out remainder / needs-human only.
+  "po.md": "71fa561626a89345d43be2722fb4d98fb0806022011c03bc48e52809dbf3008d",
   // #529: the categorical "no tool call of yours reaches GitHub" denial is replaced with the
   // conditional form — true whether or not the forge MCP proxy is attached to this session.
   // #529 D1 (gate② round 2): the fallback clause's "no GitHub access at all" was itself false —
@@ -179,7 +181,8 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #701: appends a sentence naming `{{lang.issuesAndPrs}}` as the configured default working
   // language for prose with nothing existing to match, right after the pre-existing "use the
   // issue's own language" sentence.
-  "verification-plan-reviewer.md": "a86677917c8e0a3d024dd5a8807a05ff3e8be09792a11992edd715ada0e21edb",
+  // #848: retired the paste-ready-patch escape from both the outcome-2 brief and the outcome-4 prerequisite case — carve-out remainder / needs-human only.
+  "verification-plan-reviewer.md": "8d097e29309faf3c8577a9a4a090140d164b9e3a34e9a05db94cb2e254d15e2f",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above —
   // the confirm pass's one question (repo drift) is answered by its own READ-ONLY worktree
   // grant OR, now again, its forge lookup when attached; the prose no longer claims totality
@@ -201,7 +204,8 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #672: same UNTRUSTED DATA reword as verification-plan-reviewer.md above, verbatim (the two
   // files share the identical comment-stream intro paragraph).
   // #701: same appended working-language sentence as verification-plan-reviewer.md above.
-  "verification-plan-reviewer-confirm.md": "73770c8ca68b85addaa4b3a0081aed5ecad99ca43c72690aa4229e1c0ed895ed",
+  // #848: the drift re-check now points at the split-remainder / needs-human repair options, not the retired patch-deliverable.
+  "verification-plan-reviewer-confirm.md": "191f0a14101b764957f17e0fd02734054e431f3b92c1a4b9c0496e6fb74d467a",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — the
   // drafter's brief is still its primary instruction set; the forge grant (never removed) is a
   // read-only aid, never a write path, exactly as this file has always said.
@@ -219,7 +223,8 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // list as po.md above — hash moved for that addition.
   // #701: new "Working language" section states the configured `language.issuesAndPrs` default;
   // the pre-existing "(English is fine)" parenthetical now points at it.
-  "verification-plan-drafter.md": "8e7b5ac585051ba4e061790fd02af3c31d1f0015932d7fab6a5fa8e5be56f93c",
+  // #848: retired the paste-ready-patch deliverable from the human-merge-only-conflict handling — carve-out remainder / needs-human only.
+  "verification-plan-drafter.md": "627c25d9d845c05de196f4e4a6ffa5c23de63f2b61cf47bb7fc94f2a2edcd992",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — targets
   // still arrive as bare #N and comments are still round-stats boilerplate; harvest's forge
   // grant was never removed, so the capability paragraph again names it (when attached) instead
@@ -281,8 +286,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // structural fact — this session's entire deliverable is a list of issue numbers, and any write
   // that results is the engine's, never a tool call the session makes.
   "po-pool.md": "cc3232b2115fea765ff0e5d76c7d26ad69bdff295e6a07211962ddf78a456a78",
-  // retro round #284: same fix as po.md above, mirrored for a `remainder` child instead of a
-  // paste-ready-patch criterion.
+  // retro round #284: same fix as po.md above, mirrored for a `remainder` child.
+  // #848: retired the paste-ready-patch deliverable from the human-merge-only resolution here and
+  // in po.md/drafter/reviewer/reviewer-confirm — carve-out remainder / needs-human is the only escape.
   // #618: "call GitHub" in the opening role-scope sentence's prohibition list asserted a closure
   // over the session's whole tool inventory that the very next sentence already covers correctly
   // ("the deterministic engine performs all validated issue, label, comment, board, and native
@@ -291,7 +297,7 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // retro round #363: same fix as po.md above, mirrored for decomposed child issues.
   // #701: new "Working language" section states the configured `language.issuesAndPrs` default;
   // the pre-existing "(English is fine)" parenthetical now points at it.
-  "po-decompose.md": "49929fcfc775d4c9bb3009ed4f0476bccad4f57b9e726f0f60ee59cf7a24d542",
+  "po-decompose.md": "9d4cac3cfd3f42b8979f28051f1d9a520d91c0ad4a5f8b2778bd562ee5027c7e",
 };
 
 test("prompt snapshot: po.md hash matches the pinned revision", () => {
@@ -781,13 +787,30 @@ test("#457/#591 verification-plan-reviewer-confirm.md: execution-class ACs inval
   assert.match(body, /preserve its\s+original-language content/);
 });
 
-test("retro round #284: po.md (both modes) and po-decompose.md resolve a human-merge-only acceptance criterion at draft time — paste-ready patch or a carved-out remainder/section — instead of leaving it for gate⓪ to bounce", () => {
+test("#848: no shipped prompt teaches the retired paste-ready-patch deliverable — a human-merge-only path is changed only by a direct human-merged edit, never a producer-handed artifact", () => {
+  // Negative-form closure over the ACTUAL shipped-prompt set — derived from a `readdir` of
+  // engine/prompts (recursing into issue-templates/), never a hand-enumerated subset, so a prompt
+  // added later is swept automatically. The machine analog of "the mechanism is gone everywhere",
+  // checkable in a way a prose completeness claim is not.
+  const promptsDir = dirname(defaultPromptPath());
+  const shippedPrompts = readdirSync(promptsDir, { recursive: true }).filter(
+    (f): f is string => typeof f === "string" && f.endsWith(".md"),
+  );
+  assert.ok(shippedPrompts.length >= 14, `sanity: expected the full prompts dir, got ${shippedPrompts.length} .md files`);
+  for (const rel of shippedPrompts) {
+    assert.doesNotMatch(
+      readFileSync(join(promptsDir, rel), "utf8"),
+      /paste-ready|patch-deliverable/i,
+      `${rel}: the paste-ready-patch mechanism is retired (#848) — carve-out remainder / needs-human only`,
+    );
+  }
+
+  // The surviving escape — carve-out remainder — is still taught where it was (retro round #284):
   const po = readPrompt(defaultPoPromptPath());
   assert.ok(
     po.includes("## If an acceptance criterion would touch a human-merge-only path"),
     "po.md carries the check, shared across align/triage",
   );
-  assert.match(po, /paste-ready patch\/diff for a human to apply/);
   assert.match(po, /## Human-owned remainder\s*\(protected paths — not dispatched\)/);
 
   const decompose = readPrompt(defaultPoDecomposePromptPath());

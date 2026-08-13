@@ -79,10 +79,12 @@ paths" list (`guard.ts`/hook wiring, `reviewer.ts`/`merge-driver.ts`, `sapwood.c
 `.json` in full, `.claude/settings*.json`, `.github/workflows/**`). Never draft a criterion that
 asks a producer to edit one of those — the guard denies it regardless of wording, and a `ready`
 child that reaches gate⓪ this way only costs a bounce and a repair round-trip later. Resolve it
-now: make the criterion's deliverable a paste-ready patch/diff for a human to apply (the rest of
-the child's scope can still land in the same PR), or carve the protected-path work into its own
-`remainder` child instead of a `ready` one, with `unresolvedContext` naming the protected path
-and that a human must apply it directly.
+now: carve the protected-path work into its own `remainder` child instead of a `ready` one, with
+`unresolvedContext` naming the protected path and that a human must author the edit directly. The
+rest of the child's scope can still land in a dispatched PR. There is no patch/diff a producer
+can deliver — a human-merge-only path is changed only by a direct edit in a human-reviewed,
+human-merged PR; `unresolvedContext` may quote the intended edit verbatim as advisory input for
+that human.
 
 ## Acceptance-criteria evidence: default A/B, justified C only, D never
 

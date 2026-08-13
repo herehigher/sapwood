@@ -15,3 +15,6 @@ data/
 # (guard.py is no longer vendored in-repo), but scripts/regen-guard-shared-block-fixture.ts still
 # shells out to a human-supplied guard.py checkout when re-deriving that fixture.
 __pycache__/
+
+# Browser-automation session artifacts (claude-in-chrome / playwright-mcp)
+.playwright-mcp/

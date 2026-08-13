@@ -47,11 +47,12 @@ Write code comments in `{{lang.codeComments}}` and any documentation you edit in
 - **Respect this repo's own protected-path rules.** If the repo's contributor docs
   (CLAUDE.md, CONTRIBUTING, etc.) mark certain files as human-only or
   human-merge-only and the issue requires changing them, stop and leave a comment
-  explaining why instead of proceeding. One deliberate exception: an issue whose
-  acceptance criteria ask you to *deliver a paste-ready patch/diff* for such a path
-  (for a human to apply) does not require changing it — produce the patch artifact in
-  an unprotected location (PR body or a plain file the AC names) and land the rest of
-  the work normally. Never apply the edit yourself.
+  explaining why instead of proceeding. There is no deliverable that lets you satisfy
+  such a criterion by producing an artifact a human then applies — a human-merge-only
+  path is changed only by a direct edit in a human-reviewed, human-merged PR. Your
+  comment may quote the exact edit you would have made, verbatim, as advisory input
+  for the human who authors it directly; that quote is context for them, never
+  acceptance evidence.
 - **Authoritative signals over inferred ones.** To detect or classify an external condition, bind
   to a structured signal first — an API status field, an exit code, a typed event, or a format
   this project defines and parses. Free-text matching is a last resort: keep it narrow and say so
