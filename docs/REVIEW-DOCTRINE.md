@@ -168,6 +168,20 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   operator-owned, not producer-owned) rather than writing it identically to a producer-fixable
   gap: an unlabeled operator-owned gap reads exactly like a producer failure to the convergence
   classifier (`review/convergence.ts`) and to any human reading the thread.
+- **A fully operator-owned rejection still pays for a fix leg it cannot use** (round #377 retro,
+  PRs #862/#863) — the residual gap in the rule above. Labeling a tier-C gap `operator-owned`
+  changes what the finding SAYS, not what `driveDecision` (`conductor.ts`) DOES: the gate is still
+  `FIXABLE`, so a paid leg dispatches regardless of whether any finding is producer-actionable.
+  Both PRs this round hit a rejected verdict whose only outstanding finding was already labeled
+  operator-owned; both spent a fix leg on it anyway, disputed, and escalated `needs-human`, where
+  the operator sided with the producer both times — the only possible outcome once the sole gap is
+  a record only an operator can post, per the rule above. Not new information the engine was
+  waiting to learn. This needs a code fix past what this prose file can move (a STRUCTURED
+  per-finding owner tag on the review agent's output, so `driveDecision` can route an
+  all-operator-owned verdict straight to `ESCALATE` and skip the leg, while a mixed verdict still
+  gets `FIXUP` for its producer-fixable share) — filed as a follow-up issue, not patched here.
+  Grounding: `docs/security.md`'s AC-evidence-tier doctrine (Decision #8, `docs/PLAN.md`); the
+  wasted leg is exactly the spend `docs/PLAN.md`'s Cost ceiling section treats as a constraint.
 
 How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbatim principles):
 
