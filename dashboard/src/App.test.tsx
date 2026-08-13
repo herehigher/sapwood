@@ -1,17 +1,33 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { App, appContent, resolveActiveFold, resolveFixCap, resolveRoundSpend, toggleConfigOpen } from "./App.tsx";
-import { demoFixtureQuery, eventsQuery, loopStateQuery, roundsQuery, spendQuery } from "./api/queries.ts";
-import type { SpendRow } from "./api/types.ts";
+import {
+  App,
+  appContent,
+  loadInspectorRoundEvents,
+  resolveActiveFold,
+  resolveFixCap,
+  resolveInspectorArtifact,
+  resolveInspectorRound,
+  resolveRoundSpend,
+  toggleConfigOpen,
+} from "./App.tsx";
+import { demoFixtureQuery, eventsQuery, loopStateQuery, MAX_EVENT_HISTORY, roundsQuery, spendQuery } from "./api/queries.ts";
+import type { Round, SpendRow } from "./api/types.ts";
 import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
 import type { DemoBundle } from "./demo/types.ts";
 import type { DomainEvent } from "./domain-event.ts";
+import type { EntityTitles } from "./entities.ts";
 import { foldEvents, type HeroState, initialHeroState } from "./hero/state.ts";
 import { initialReplayState } from "./replay/reducer.ts";
 import { bucketSpendByPhase, phaseSpendBars } from "./replay/spend-replay.ts";
+import { registerRealDom } from "./test-dom.ts";
+
+registerRealDom();
 
 /** Same tree-walk IconRail.test.tsx uses — finds a node in a REAL React element tree (never a
  *  `renderToStaticMarkup` string, which strips function props) by exact `className`. */
@@ -58,6 +74,16 @@ function minimalAppViewModel(
      *  or the replay view is an impossible one `useReplay` itself could never actually produce. */
     rounds?: unknown[];
     selectedRoundId?: number | null;
+    repoUrl?: string;
+    activeEvents?: unknown[];
+    activeTitles?: EntityTitles;
+    // #861
+    inspectorNode?: string | null;
+    setInspectorNode?: (updater: unknown) => void;
+    inspectorArtifact?: unknown;
+    // #868 gate② finding [1]
+    inspectorEvents?: unknown[];
+    roundEvents?: unknown[];
   } = {},
 ) {
   return {
@@ -66,13 +92,21 @@ function minimalAppViewModel(
     events: { events: [], titles: {}, openAttention: [], hero: initialHeroState(null), steps: [], error: undefined, isPending: false },
     disconnected: false,
     parked: false,
-    repoUrl: undefined,
+    repoUrl: overrides.repoUrl,
     fixCap: 2,
     byModel: { title: "by model", bars: [] },
     byLane: { title: "by lane", bars: [] },
     byPhase: { title: "by phase", bars: [] },
     configOpen: overrides.configOpen ?? false,
     setConfigOpen: overrides.setConfigOpen ?? (() => {}),
+    inspectorNode: overrides.inspectorNode ?? null,
+    setInspectorNode: overrides.setInspectorNode ?? (() => {}),
+    inspectorArtifact: overrides.inspectorArtifact ?? null,
+    // #868 gate② finding [1]: defaults to whatever `activeEvents` resolved to, so every
+    // pre-existing test (which only ever set `activeEvents`) keeps feeding the drawer's
+    // event-derived counts the SAME fixture it always did, unchanged — a test proving the
+    // round-scoping fix sets `inspectorEvents` explicitly, distinct from `activeEvents`.
+    inspectorEvents: overrides.inspectorEvents ?? overrides.activeEvents ?? [],
     // #741: a minimal live-mode replay view — this fixture never exercises replay itself, only
     // App's config-trigger wiring, so every replay field is the same "nothing selected" shape
     // `useReplay` starts in.
@@ -92,11 +126,12 @@ function minimalAppViewModel(
       scrub: () => {},
       spendThroughCursor: [],
       phaseWindows: [],
+      roundEvents: overrides.roundEvents ?? [],
     },
     activeHero: overrides.activeHero ?? initialHeroState(null),
     activeSteps: [],
-    activeEvents: [],
-    activeTitles: {},
+    activeEvents: overrides.activeEvents ?? [],
+    activeTitles: overrides.activeTitles ?? {},
     activeOpenAttention: [],
     // Mirrors real `App()`: `spendFacts` is always `loop.data?.spend`, straight through.
     spendFacts: (overrides.loop as { data?: { spend?: unknown } } | undefined)?.data?.spend,
@@ -164,6 +199,48 @@ async function renderSettledApp(
       <App now={now} initialConfigOpen={initialConfigOpen} />
     </QueryClientProvider>,
   );
+}
+
+/**
+ * #861 verification plan: "click interactions use a real DOM via `registerRealDom()` ... with
+ * `act()`, because `renderToStaticMarkup` runs no effects and dispatches no events." Same
+ * settled-query setup as `renderSettledApp` above, but mounted into a real container via
+ * `createRoot` so `onClick`/`onKeyDown`/`Escape` actually fire. `fetchCalls` lets a test assert
+ * exactly which URLs were ever fetched (AC5: "no fetch call is made" for the log content).
+ */
+async function mountSettledApp(byPath: Record<string, { status: number; body: unknown }>, now?: Date) {
+  const fetchCalls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    fetchCalls.push(url);
+    const path = url.split("?")[0]!;
+    const resp = { ...SPEND_EMPTY, ...ROUNDS_EMPTY, ...byPath }[path];
+    if (!resp) throw new Error(`unstubbed fetch: ${url}`);
+    return new Response(JSON.stringify(resp.body), { status: resp.status, headers: { "content-type": "application/json" } });
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await Promise.allSettled([
+    client.prefetchQuery(loopStateQuery()),
+    client.prefetchQuery(eventsQuery(0)),
+    client.prefetchQuery(spendQuery(0)),
+    client.prefetchQuery(roundsQuery()),
+  ]);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={client}>
+        <App now={now} />
+      </QueryClientProvider>,
+    );
+  });
+  const unmount = async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  };
+  return { container, fetchCalls, unmount };
 }
 
 test.afterEach(() => mock.restoreAll());
@@ -934,4 +1011,782 @@ test("#742: ?demo's fixture data actually drives the transport player — a fixt
     new RegExp(DEMO_ISSUE_TITLE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
     "the fixture's distinguishable issue title must be folded and rendered — proof the fixture's events actually reached the shared reducer, not just its rounds list",
   );
+});
+
+// ── #861 phase inspector ─────────────────────────────────────────────────────────────────────
+//
+// Content-correctness assertions (AC2–AC6) go through `appContent` — this repo's own WIRING
+// doctrine names it directly as a real production entry point (`review/REVIEW-DOCTRINE.md`'s
+// "App/appContent" example), the same treatment `#803`/`#766` use above for hero/cost-strip
+// content. Click MECHANICS (AC1, AC7) go through a real mounted DOM (`mountSettledApp`,
+// `registerRealDom()` above) — `renderToStaticMarkup` strips event handlers, so only a real DOM
+// can prove a click/keydown actually reaches the production `onClick`/`onKeyDown` wiring.
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Extracts just the `<aside aria-label="phase inspector">…</aside>` fragment — content
+ *  assertions must be scoped to it, never the whole page: the hero SVG renders the SAME
+ *  model·effort/review-mode captions next to its own stage nodes regardless of drawer state, so
+ *  an unscoped "does this string appear anywhere" check would be a false positive/negative. */
+function extractDrawerHtml(html: string): string {
+  const match = html.match(/<aside[^>]*aria-label="phase inspector"[^>]*>[\s\S]*?<\/aside>/);
+  assert.ok(match, "phase inspector drawer not found in rendered html");
+  return match[0];
+}
+
+/** A `<dt>label</dt><dd>value</dd>` row, adjacent with no gap (the real JSX these components
+ *  render) — the label's own row, not a later one that happens to start with the same text. */
+function assertRow(html: string, label: string, value: string | number): void {
+  const re = new RegExp(`${escapeRegExp(label)}[^<]*</dt><dd[^>]*>${escapeRegExp(String(value))}</dd>`);
+  assert.match(html, re, `expected row "${label}: ${value}"`);
+}
+
+const INSPECTOR_CONFIG = {
+  board: { owner: "acme-inspector", repo: "widgets-inspector" },
+  worker: { model: "worker-model-861", effort: "high" },
+  roles: {
+    po: { model: "po-model-861", effort: "medium" },
+    architect: { model: "arch-model-861", effort: "medium" },
+    verificationPlanReviewer: { model: "verify-model-861", effort: "low" },
+    harvest: { model: "harvest-model-861", effort: "low" },
+    retro: { model: "retro-model-861", effort: "low" },
+  },
+  reviewer: { mode: "engine-agent-861" },
+};
+
+const INSPECTOR_REPO_URL = "https://github.com/acme-inspector/widgets-inspector";
+
+// Distinguishable, mutually-unequal, none 0/1 (verification plan's own fixture-quality bar):
+// dispatches 3, merges 2, handoffs 5, spendUsd 37.25.
+const INSPECTOR_ARTIFACT = {
+  schemaVersion: 1,
+  roundId: 4242,
+  startedAt: "2026-08-10T09:00:00Z",
+  endedAt: "2026-08-10T10:00:00Z",
+  dispatches: [
+    { issue: 701, worker: "w1" },
+    { issue: 702, worker: "w2" },
+    { issue: 703, worker: "w1" },
+  ],
+  merges: [
+    { issue: 701, worker: "w1", pr: 9001 },
+    { issue: 702, worker: "w2", pr: 9002 },
+  ],
+  prsOpened: 5,
+  prsMerged: 2,
+  issuesClosed: 2,
+  spendUsd: 37.25,
+  roundBudgetUsd: 80,
+  retries: { gatedReentries: 4, gatedReentryCapped: 2, rollbacksRecovered: 3, rollbacksEscalated: 6 },
+  reviewRounds: { reviewerFallbackSwitches: 0, reviewerFallbackReverts: 0 },
+  escalations: { needsHuman: [811, 812, 813], ceiling: 9, driveNoPr: 8 },
+  egressSuspects: [],
+  handoffs: 5,
+  degradedPhases: [
+    { phase: "architect", outcome: "escalated", session: "sess-arch-861" },
+    { phase: "plan_review", outcome: "escalated", session: "sess-verify-861" },
+    // Harvest's own degraded session — must never leak into the Arch review / Verify drawer.
+    { phase: "harvest", outcome: "escalated", session: "sess-harvest-861" },
+  ],
+  roundStops: [],
+  retro: { opened: { pr: 9099, branch: "retro/branch-861" }, degraded: null },
+  align: {
+    created: [{ issue: 601, title: "Distinguishable created title 861", hasPlan: true }],
+    triaged: [{ issue: 602, drafted: false }],
+  },
+  concerns: [],
+  concernsReconciled: [],
+};
+
+function inspectorEvent(id: number, kind: string, payload: Record<string, unknown>): DomainEvent {
+  return { known: true, id, ts: `2026-08-10T09:0${id}:00Z`, kind, payload } as DomainEvent;
+}
+
+// 3 plan-review-escalated + 2 no-plan-after-draft — distinguishable counts for the Arch
+// review / Verify drawer's event-derived numbers (AC2).
+const INSPECTOR_EVENTS: DomainEvent[] = [
+  inspectorEvent(1, "plan-review-escalated", { issue: 901 }),
+  inspectorEvent(2, "plan-review-escalated", { issue: 902 }),
+  inspectorEvent(3, "plan-review-escalated", { issue: 903 }),
+  inspectorEvent(4, "no-plan-after-draft", { issue: 904 }),
+  inspectorEvent(5, "no-plan-after-draft", { issue: 905 }),
+];
+
+function inspectorViewModel(overrides: {
+  inspectorNode: string;
+  inspectorArtifact?: unknown;
+  activeEvents?: DomainEvent[];
+  mode?: "live" | "replay";
+  logPath?: string | null;
+}) {
+  return minimalAppViewModel({
+    inspectorNode: overrides.inspectorNode,
+    inspectorArtifact: "inspectorArtifact" in overrides ? overrides.inspectorArtifact : INSPECTOR_ARTIFACT,
+    activeEvents: overrides.activeEvents ?? INSPECTOR_EVENTS,
+    repoUrl: INSPECTOR_REPO_URL,
+    mode: overrides.mode ?? "live",
+    loop: { data: { ...LOOP_STATE_OK, config: INSPECTOR_CONFIG, logPath: overrides.logPath ?? null }, isPending: false },
+  });
+}
+
+// ── resolveInspectorArtifact (§6 mode-purity binding) ───────────────────────────────────────
+
+test("resolveInspectorArtifact: live mode reads the round matching the live open round's id", () => {
+  const rounds = [
+    { roundId: 1, artifact: { a: 1 } },
+    { roundId: 2, artifact: { a: 2 } },
+  ] as unknown as Round[];
+  assert.deepEqual(resolveInspectorArtifact("live", rounds, 2, null), { a: 2 });
+});
+
+test("resolveInspectorArtifact: replay mode reads the round matching the SELECTED round id, ignoring the live open round entirely", () => {
+  const rounds = [
+    { roundId: 1, artifact: { a: 1 } },
+    { roundId: 2, artifact: { a: 2 } },
+  ] as unknown as Round[];
+  assert.deepEqual(resolveInspectorArtifact("replay", rounds, 2, 1), { a: 1 });
+});
+
+test("resolveInspectorArtifact: no matching round row (open round not yet in /api/rounds, or nothing selected) is an honest null, never a throw", () => {
+  assert.equal(resolveInspectorArtifact("live", [], 5, null), null);
+  assert.equal(resolveInspectorArtifact("replay", [], null, null), null);
+});
+
+// ── #868 gate② finding [1] (live-event-counts-cross-round): round-scoped event counts ──────────
+//
+// AC2's Arch review / Verify counts must bind to the INSPECTED round, not `useEventHistory`'s
+// process-wide, window-bounded display tail — a prior round's matching events must not inflate
+// the count (contamination), and a round longer than that display window must not lose any of
+// its own events (truncation). `resolveInspectorRound` + `loadInspectorRoundEvents` are the two
+// halves LiveApp wires together; both failure directions get their own test below.
+
+test("resolveInspectorRound: finds the round matching the live open round's id, same lookup resolveInspectorArtifact uses", () => {
+  const rounds = [
+    { roundId: 1, startEventId: 0, eventCount: 3 },
+    { roundId: 2, startEventId: 3, eventCount: 1 },
+  ] as unknown as Round[];
+  assert.equal(resolveInspectorRound(rounds, 2)?.roundId, 2);
+});
+
+test("resolveInspectorRound: no matching round row (open round not yet in /api/rounds, or none live) is an honest null, never a throw", () => {
+  assert.equal(resolveInspectorRound([], 5), null);
+  assert.equal(resolveInspectorRound([{ roundId: 1 } as unknown as Round], null), null);
+});
+
+function roundLogRow(id: number, kind: string): { id: number; ts: string; kind: string; payload: Record<string, unknown> | null } {
+  return { id, ts: `2026-08-10T09:${String(id).padStart(2, "0")}:00Z`, kind, payload: {} };
+}
+
+function inspectorRound(overrides: Partial<Round> = {}): Round {
+  return {
+    roundId: 2,
+    status: "in_progress",
+    startedAt: "2026-08-10T09:03:00Z",
+    endedAt: null,
+    startEventId: 3,
+    startSpendId: 0,
+    eventCount: 1,
+    schemaVersion: null,
+    artifact: null,
+    ...overrides,
+  };
+}
+
+test("#868 gate② finding [1] direction 1 (contamination): loadInspectorRoundEvents excludes events at/before the round's own startEventId", async () => {
+  const ledger = [
+    roundLogRow(1, "plan-review-escalated"), // the PRIOR round's own event — must not count for round 2
+    roundLogRow(2, "plan-review-escalated"), // the PRIOR round's own event — must not count for round 2
+    roundLogRow(3, "plan-review-escalated"), // the round-1/round-2 boundary row itself — excluded (exclusive cursor)
+    roundLogRow(4, "plan-review-escalated"), // round 2's OWN event — must count
+  ];
+  const round = inspectorRound({ startEventId: 3, eventCount: 1 });
+  const fetchPage = async (after: number, limit: number) => {
+    const page = ledger.filter((e) => e.id > after).slice(0, limit);
+    return { events: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after };
+  };
+  const events = await loadInspectorRoundEvents(round, fetchPage);
+  assert.deepEqual(
+    events.map((e) => e.id),
+    [4],
+    "only the event strictly AFTER the round's own startEventId belongs to it — the prior round's matching events must not appear at all",
+  );
+});
+
+test("#868 gate② finding [1] direction 2 (truncation): loadInspectorRoundEvents collects every one of a round's events, even past useEventHistory's own display-window cap", async () => {
+  const total = MAX_EVENT_HISTORY + 5; // deliberately more than the live display window ever retains
+  const ledger = Array.from({ length: total }, (_, i) => roundLogRow(i + 1, "plan-review-escalated"));
+  const round = inspectorRound({ startEventId: 0, eventCount: total });
+  let calls = 0;
+  const fetchPage = async (after: number, limit: number) => {
+    calls++;
+    const page = ledger.filter((e) => e.id > after).slice(0, limit);
+    return { events: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after };
+  };
+  const events = await loadInspectorRoundEvents(round, fetchPage);
+  assert.equal(events.length, total, "a round longer than useEventHistory's display-window cap must not lose any of its own events");
+  assert.ok(calls > 1, "the fixture only proves the property if collecting the round actually took more than one page");
+});
+
+// The real-App wiring-level regression: the reviewer's own words for why the prior fixture missed
+// this — "the real-App wiring fixture starts at event zero and contains no prior-round matching
+// events, so it cannot detect this." This one does: two real rounds, a prior CLOSED one with its
+// own matching events, and the CURRENT open one — mounted through the real `<App>` tree with a
+// fetch mock that (unlike this file's other `stubFetch`) actually respects `/api/events`'s
+// `after`/`limit` query params, the same way the real server does.
+test("#868 gate② finding [1]: the real live wiring excludes a PRIOR round's matching events from the currently open round's Verify drawer count", async () => {
+  const PRIOR_ROUND_ID = 70020;
+  const OPEN_ROUND_ID = 70021;
+  const ledger = [
+    roundLogRow(1, "plan-review-escalated"), // prior round's own event
+    roundLogRow(2, "plan-review-escalated"), // prior round's own event
+    roundLogRow(3, "no-plan-after-draft"), // prior round's own last event (the boundary row)
+    roundLogRow(4, "plan-review-escalated"), // the OPEN round's own event
+  ];
+  const rounds = [
+    {
+      roundId: PRIOR_ROUND_ID,
+      status: "done",
+      startedAt: "2026-08-10T09:00:00Z",
+      endedAt: "2026-08-10T09:03:00Z",
+      startEventId: 0,
+      startSpendId: 0,
+      eventCount: 3,
+      schemaVersion: null,
+      artifact: null,
+    },
+    {
+      roundId: OPEN_ROUND_ID,
+      status: "in_progress",
+      startedAt: "2026-08-10T09:03:00Z",
+      endedAt: null,
+      startEventId: 3,
+      startSpendId: 0,
+      eventCount: 1,
+      schemaVersion: null,
+      artifact: null,
+    },
+  ];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const parsed = new URL(url, "http://localhost");
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (parsed.pathname === "/api/loop/state") {
+      return json({ ...LOOP_STATE_OK, config: INSPECTOR_CONFIG, round: { id: OPEN_ROUND_ID, phase: "executing" } });
+    }
+    if (parsed.pathname === "/api/rounds") return json({ rounds });
+    if (parsed.pathname === "/api/spend") return json({ spend: [], lastId: 0 });
+    if (parsed.pathname === "/api/events") {
+      const after = Number(parsed.searchParams.get("after") ?? 0);
+      const limit = Number(parsed.searchParams.get("limit") ?? 200);
+      const page = ledger.filter((e) => e.id > after).slice(0, limit);
+      return json({ events: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
+    }
+    throw new Error(`unstubbed fetch: ${url}`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await Promise.allSettled([
+    client.prefetchQuery(loopStateQuery()),
+    client.prefetchQuery(eventsQuery(0)),
+    client.prefetchQuery(spendQuery(0)),
+    client.prefetchQuery(roundsQuery()),
+  ]);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+  });
+  try {
+    const verifyNode = container.querySelector('[aria-label="inspect Verify"]');
+    assert.ok(verifyNode, "the verify stage node must render");
+    await act(async () => {
+      verifyNode.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    // The round-scoped fetch this finding's fix adds is itself async — flush its effect+promise
+    // chain before reading the rendered count.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    assert.ok(drawer);
+    assertRow(
+      drawer!.innerHTML,
+      "plan-review escalations",
+      1,
+      // Contaminated (the shared `activeEvents` tail, no round filter) would read 3 — both of the
+      // PRIOR round's matching events plus the open round's own one.
+    );
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+});
+
+// ── AC2 / AC3 / AC4: drawer content per node class ──────────────────────────────────────────
+
+// gate② finding [0] (ac2-app-wiring): every AC2 content test below injects `inspectorArtifact`/
+// `activeEvents` directly into `appContent` — that proves the DRAWER renders whatever it's given
+// correctly, but stays green even if `LiveApp` bound the drawer to the wrong artifact or event
+// fold entirely. This test instead mounts the REAL `<App>` (`mountSettledApp`) with a
+// distinguishable `/api/rounds` artifact and `/api/events` response and opens nodes through real
+// clicks — proving the query-to-drawer wiring itself, not just the drawer's own rendering.
+test("gate② finding [0]: the real /api/rounds artifact and /api/events response flow through the live query hooks into the drawer — not just a hand-injected prop", async () => {
+  const WIRING_ROUND_ID = 70019;
+  const { container, unmount } = await mountSettledApp({
+    "/api/loop/state": {
+      status: 200,
+      body: { ...LOOP_STATE_OK, config: INSPECTOR_CONFIG, round: { id: WIRING_ROUND_ID, phase: "executing" } },
+    },
+    "/api/rounds": {
+      status: 200,
+      body: {
+        rounds: [
+          {
+            roundId: WIRING_ROUND_ID,
+            status: "in_progress",
+            startedAt: "2026-08-10T09:00:00Z",
+            endedAt: null,
+            startEventId: 0,
+            startSpendId: 0,
+            eventCount: INSPECTOR_EVENTS.length,
+            schemaVersion: 1,
+            artifact: INSPECTOR_ARTIFACT,
+          },
+        ],
+      },
+    },
+    "/api/events": {
+      status: 200,
+      body: {
+        events: INSPECTOR_EVENTS.map((e) => ({ id: e.id, ts: e.ts, kind: e.kind, payload: e.payload })),
+        lastId: INSPECTOR_EVENTS.length,
+      },
+    },
+  });
+  try {
+    const goalAlignNode = container.querySelector('[aria-label="inspect Goal & align"]');
+    assert.ok(goalAlignNode, "the goal-align stage node must render");
+    await act(async () => {
+      goalAlignNode.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    let drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    assert.ok(drawer);
+    assert.match(
+      drawer.textContent ?? "",
+      /Distinguishable created title 861/,
+      "the REAL /api/rounds artifact for the currently open round must flow into the drawer",
+    );
+
+    const verifyNode = container.querySelector('[aria-label="inspect Verify"]');
+    assert.ok(verifyNode, "the verify stage node must render");
+    await act(async () => {
+      verifyNode.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    assert.ok(drawer);
+    assert.match(
+      drawer.textContent ?? "",
+      /sess-verify-861/,
+      "the REAL /api/rounds artifact's degradedPhases must flow into the Arch review / Verify drawer",
+    );
+    assertRow(drawer.innerHTML, "plan-review escalations", 3);
+
+    const laneNode = container.querySelector('[aria-label^="inspect w"]');
+    assert.ok(laneNode, "a lane stage node must render");
+    await act(async () => {
+      laneNode.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    assert.ok(drawer);
+    assertRow(drawer.innerHTML, "dispatches", 3);
+    assertRow(drawer.innerHTML, "merges", 2);
+  } finally {
+    await unmount();
+  }
+});
+
+// gate② finding [0] (second half): the Retro drawer's OWN AC2 content test (below) exercises
+// only the opened-PR outcome — degraded and neither are the other two outcomes §6's own table
+// names explicitly. Both are covered here, through the same real `appContent` entry point.
+test("AC2: Retro drawer — a degraded proposal renders its reason/branch, distinct from the opened-PR outcome", () => {
+  const artifact = {
+    ...INSPECTOR_ARTIFACT,
+    retro: { opened: null, degraded: { branch: "retro/degraded-861", title: "t", reason: "no findings this round 861" } },
+  };
+  const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: "retro", inspectorArtifact: artifact })));
+  const drawer = extractDrawerHtml(html);
+  assert.match(drawer, /retro\/degraded-861/);
+  assert.match(drawer, /no findings this round 861/);
+  assert.doesNotMatch(drawer, /href="/, "a degraded proposal never opened a PR, so no GitHub link renders");
+});
+
+test("AC2: Retro drawer — neither outcome (no proposal this round) renders honestly, distinct from both opened and degraded", () => {
+  const artifact = { ...INSPECTOR_ARTIFACT, retro: { opened: null, degraded: null } };
+  const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: "retro", inspectorArtifact: artifact })));
+  const drawer = extractDrawerHtml(html);
+  assert.match(drawer, /no proposal this round/);
+  assert.doesNotMatch(drawer, /href="/, "no proposal means no GitHub link renders");
+});
+
+test("AC2/AC3/AC4: Goal & align drawer — the artifact's align section verbatim, GitHub links to issues only, po's model·effort caption, no other phase's fields", () => {
+  const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: "goal-align" })));
+  const drawer = extractDrawerHtml(html);
+  assert.match(drawer, /Goal &amp; align/);
+  assert.match(drawer, new RegExp(escapeRegExp("po-model-861 · medium")));
+  assert.match(drawer, /Distinguishable created title 861/);
+  assert.match(drawer, new RegExp(`href="${escapeRegExp(INSPECTOR_REPO_URL)}/issues/601"`));
+  assert.match(drawer, new RegExp(`href="${escapeRegExp(INSPECTOR_REPO_URL)}/issues/602"`));
+  assert.match(drawer, /still planless/);
+  assert.doesNotMatch(drawer, /37\.25/, "Summary's spend must not leak into Goal & align");
+  assert.doesNotMatch(drawer, /gated reentries/, "Lanes counters must not leak into Goal & align");
+  assert.doesNotMatch(drawer, /retro\/branch-861/, "Retro's fields must not leak into Goal & align");
+});
+
+for (const node of ["arch-review", "verify"] as const) {
+  test(`AC2/AC3: Arch review / Verify drawer (opened via ${node}) — degradedPhases limited to architect/plan_review, event-derived escalation counts, ${node}'s own caption`, () => {
+    const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: node })));
+    const drawer = extractDrawerHtml(html);
+    assert.match(drawer, /Arch review \/ Verify/);
+    assert.match(drawer, /sess-arch-861/);
+    assert.match(drawer, /sess-verify-861/);
+    assert.doesNotMatch(drawer, /sess-harvest-861/, "harvest's own degraded session belongs to Summary, not here");
+    assertRow(drawer, "plan-review escalations", 3);
+    assertRow(drawer, "no plan after draft", 2);
+    const expectedCaption = node === "arch-review" ? "arch-model-861 · medium" : "verify-model-861 · low";
+    assert.match(drawer, new RegExp(escapeRegExp(expectedCaption)));
+    assert.doesNotMatch(drawer, /Distinguishable created title 861/, "Goal & align's own fields must not leak here");
+  });
+}
+
+const LANES_NODE_CAPTION: Record<string, string | null> = {
+  lane: "worker-model-861 · high",
+  ci: null,
+  review: "engine-agent-861",
+  merge: null,
+};
+for (const [node, caption] of Object.entries(LANES_NODE_CAPTION)) {
+  test(`AC2/AC3: Lanes / CI / Review / merge drawer (opened via ${node}) — the artifact's counters, ${caption ? "its own caption" : "no caption"}`, () => {
+    const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: node })));
+    const drawer = extractDrawerHtml(html);
+    assert.match(drawer, /Lanes \/ CI \/ Review \/ merge/);
+    assertRow(drawer, "dispatches", 3);
+    assertRow(drawer, "merges", 2);
+    assertRow(drawer, "handoffs", 5);
+    assertRow(drawer, "gated reentries", 4);
+    assertRow(drawer, "gated reentries capped", 2);
+    assertRow(drawer, "rollbacks recovered", 3);
+    assertRow(drawer, "rollbacks escalated", 6);
+    assertRow(drawer, "needs-human escalations", 3);
+    assertRow(drawer, "ceiling escalations", 9);
+    assertRow(drawer, "drive-no-pr", 8);
+    if (caption) {
+      assert.match(drawer, new RegExp(escapeRegExp(caption)));
+    } else {
+      assert.doesNotMatch(drawer, /worker-model-861/, "CI/merge carry no caption at all (AC3)");
+      assert.doesNotMatch(drawer, /engine-agent-861/, "CI/merge carry no caption at all (AC3)");
+    }
+    assert.doesNotMatch(drawer, /Distinguishable created title 861/, "other phases' fields must not leak here");
+  });
+}
+
+test("AC2/AC3/AC4: Summary drawer — the artifact's own top-line numbers, harvest's model·effort caption, no other phase's fields", () => {
+  const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: "summary" })));
+  const drawer = extractDrawerHtml(html);
+  assert.match(drawer, /Summary/);
+  assert.match(drawer, /\$37\.25 of \$80\.00/);
+  assertRow(drawer, "PRs opened", 5);
+  assertRow(drawer, "PRs merged", 2);
+  assertRow(drawer, "issues closed", 2);
+  assert.match(drawer, new RegExp(escapeRegExp("harvest-model-861 · low")));
+  assert.doesNotMatch(drawer, /gated reentries/, "Lanes counters must not leak into Summary");
+  assert.doesNotMatch(drawer, /Distinguishable created title 861/, "Goal & align's own fields must not leak into Summary");
+});
+
+test("AC2/AC3/AC4: Retro drawer — the artifact's retro outcome object, a PR link with no comment anchor, retro's model·effort caption", () => {
+  const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: "retro" })));
+  const drawer = extractDrawerHtml(html);
+  assert.match(drawer, /Retro/);
+  assert.match(drawer, new RegExp(`href="${escapeRegExp(INSPECTOR_REPO_URL)}/pull/9099"`));
+  assert.match(drawer, /retro\/branch-861/);
+  assert.match(drawer, new RegExp(escapeRegExp("retro-model-861 · low")));
+  assert.doesNotMatch(drawer, /37\.25/, "Summary's own fields must not leak into Retro");
+});
+
+test("AC4: every GitHub link inside the drawer matches the issue/PR URL form exactly — never a comment anchor", () => {
+  for (const node of ["goal-align", "retro"] as const) {
+    const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: node })));
+    const drawer = extractDrawerHtml(html);
+    const hrefs = [...drawer.matchAll(/href="([^"]+)"/g)].map((m) => m[1] as string);
+    assert.ok(hrefs.length > 0, `expected at least one GitHub link in the ${node} drawer`);
+    for (const href of hrefs) {
+      assert.match(href, new RegExp(`^${escapeRegExp(INSPECTOR_REPO_URL)}/(issues|pull)/\\d+$`), `unexpected link shape: ${href}`);
+    }
+  }
+});
+
+// ── AC5: view log — text only, live-only ────────────────────────────────────────────────────
+
+test("AC5: the view-log row renders logPath as plain text in live view, and is absent entirely for a replayed (closed) round", () => {
+  const liveHtml = renderToStaticMarkup(
+    appContent(inspectorViewModel({ inspectorNode: "summary", mode: "live", logPath: "/var/log/sapwood/run-861-unique.log" })),
+  );
+  assert.match(extractDrawerHtml(liveHtml), /run-861-unique\.log/);
+
+  const replayHtml = renderToStaticMarkup(
+    appContent(inspectorViewModel({ inspectorNode: "summary", mode: "replay", logPath: "/var/log/sapwood/run-861-unique.log" })),
+  );
+  assert.doesNotMatch(extractDrawerHtml(replayHtml), /run-861-unique\.log/, "a replayed/closed round must never show the live log path");
+});
+
+// ── AC6: honest-unknown, never synthesized ──────────────────────────────────────────────────
+
+test("AC6: a null artifact renders every phase's rows as an explicit not-recorded state, never a throw", () => {
+  for (const node of ["goal-align", "arch-review", "lane", "summary", "retro"] as const) {
+    const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: node, inspectorArtifact: null, activeEvents: [] })));
+    const drawer = extractDrawerHtml(html);
+    assert.match(drawer, /not recorded/, `${node} drawer must show an honest not-recorded state`);
+  }
+});
+
+test("AC6: an artifact missing the fields a node reads (empty object) degrades to not-recorded, never a throw, never a fabricated 0", () => {
+  const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: "lane", inspectorArtifact: {} })));
+  const drawer = extractDrawerHtml(html);
+  assertRow(drawer, "dispatches", "not recorded");
+  assertRow(drawer, "merges", "not recorded");
+  assertRow(drawer, "handoffs", "not recorded");
+  assertRow(drawer, "gated reentries", "not recorded");
+  assertRow(drawer, "needs-human escalations", "not recorded");
+});
+
+test("AC6: an artifact whose field is the wrong type degrades to not-recorded, never a throw", () => {
+  const malformed = { dispatches: "nope", merges: 5, retries: "nope", escalations: null, handoffs: "nope" };
+  const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: "lane", inspectorArtifact: malformed })));
+  const drawer = extractDrawerHtml(html);
+  assertRow(drawer, "dispatches", "not recorded");
+  assertRow(drawer, "merges", "not recorded");
+  assertRow(drawer, "handoffs", "not recorded");
+  assertRow(drawer, "gated reentries", "not recorded");
+});
+
+// ── AC1: real-DOM click mechanics ────────────────────────────────────────────────────────────
+
+test("AC1: every §6 phase-inspector stage node renders as a keyboard-reachable, accessibly-named button", async () => {
+  const { container, unmount } = await mountSettledApp({
+    "/api/loop/state": { status: 200, body: { ...LOOP_STATE_OK, round: { id: 1, phase: "aligning" }, lanes: { max: 1, items: [] } } },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  try {
+    for (const label of [
+      "inspect Goal & align",
+      "inspect Arch review",
+      "inspect Verify",
+      "inspect w1",
+      "inspect CI",
+      "inspect Review",
+      "inspect merge",
+      "inspect Summary",
+      "inspect Retro",
+    ]) {
+      const el = container.querySelector(`[aria-label="${label}"]`);
+      assert.ok(el, `expected a clickable node labeled "${label}"`);
+      assert.equal(el.getAttribute("role"), "button");
+      assert.equal(el.getAttribute("tabindex"), "0");
+    }
+  } finally {
+    await unmount();
+  }
+});
+
+test("AC1/AC5: clicking a hero stage node opens its phase inspector drawer; the close control and Escape both close it; the node is keyboard-operable; no unexpected fetch happens", async () => {
+  const { container, fetchCalls, unmount } = await mountSettledApp({
+    "/api/loop/state": {
+      status: 200,
+      body: { ...LOOP_STATE_OK, controlsEnabled: true, round: { id: 1, phase: "aligning" }, config: INSPECTOR_CONFIG },
+    },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  try {
+    const node = container.querySelector('[aria-label="inspect Goal & align"]');
+    assert.ok(node, "the goal-align stage node must render with its accessible name");
+
+    await act(async () => {
+      node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    assert.ok(container.querySelector('aside[aria-label="phase inspector"]'), "clicking the node must open the drawer");
+    assert.match(container.querySelector('aside[aria-label="phase inspector"]')?.textContent ?? "", /Goal & align/);
+
+    const closeButton = container.querySelector('[aria-label="close phase inspector"]');
+    assert.ok(closeButton, "the drawer must render a close control");
+    await act(async () => {
+      closeButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    assert.equal(container.querySelector('aside[aria-label="phase inspector"]'), null, "the close control must close the drawer");
+
+    // Keyboard: Enter on the focused node opens it too — proves keyboard operability, not just click.
+    await act(async () => {
+      node.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    assert.ok(container.querySelector('aside[aria-label="phase inspector"]'), "Enter on the node must open the drawer too");
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    assert.equal(container.querySelector('aside[aria-label="phase inspector"]'), null, "Escape must close the drawer");
+
+    assert.ok(
+      fetchCalls.every(
+        (u) => u.startsWith("/api/loop/state") || u.startsWith("/api/events") || u.startsWith("/api/spend") || u.startsWith("/api/rounds"),
+      ),
+      `opening/closing the drawer must never trigger an unexpected (log content) fetch; saw: ${fetchCalls.join(", ")}`,
+    );
+  } finally {
+    await unmount();
+  }
+});
+
+// gate② finding [1] (ac5-fetch-proof-vacuous): the test above uses LOOP_STATE_OK, whose logPath
+// is null — its fetch-call assertion never actually exercises the condition under which an
+// implementation might wrongly fetch log content. This one supplies a genuine, unique, non-null
+// logPath through the real /api/loop/state response, opens the drawer through the real mounted
+// DOM, and asserts BOTH that the path renders as plain text AND that no fetch call ever names it.
+test("AC5: a real non-null logPath renders as plain text once the drawer opens, and is never itself fetched", async () => {
+  const LOG_PATH = "/var/log/sapwood/run-861-gate2-unique.log";
+  const { container, fetchCalls, unmount } = await mountSettledApp({
+    "/api/loop/state": {
+      status: 200,
+      body: { ...LOOP_STATE_OK, round: { id: 1, phase: "aligning" }, config: INSPECTOR_CONFIG, logPath: LOG_PATH },
+    },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  try {
+    const node = container.querySelector('[aria-label="inspect Summary"]');
+    assert.ok(node, "the summary stage node must render");
+    await act(async () => {
+      node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    assert.ok(drawer, "clicking the node must open the drawer");
+    assert.match(drawer.textContent ?? "", /run-861-gate2-unique\.log/, "the real, query-sourced logPath must render as plain text");
+
+    assert.ok(
+      fetchCalls.every((u) => !u.includes(LOG_PATH)),
+      `the log path itself must never be fetched — saw: ${fetchCalls.join(", ")}`,
+    );
+    assert.ok(
+      fetchCalls.every(
+        (u) => u.startsWith("/api/loop/state") || u.startsWith("/api/events") || u.startsWith("/api/spend") || u.startsWith("/api/rounds"),
+      ),
+      `opening the drawer must never trigger an unexpected fetch; saw: ${fetchCalls.join(", ")}`,
+    );
+  } finally {
+    await unmount();
+  }
+});
+
+// ── AC7: needs-attention strip inspect controls ─────────────────────────────────────────────
+
+// gate② finding [3] (ac7-interactions-incomplete): the previous round of this test only ever
+// COUNTED the two "inspect verify" buttons and clicked the CI one — it never clicked the
+// plan-review-escalated or verify-na-proposed controls individually (proving EACH one, not just
+// their count, opens the right drawer) and never clicked a mapped row's own GitHub link (proving
+// link activation does NOT also open the drawer). Both are exercised below, per-row.
+test("AC7: plan-review-escalated/verify-na-proposed/ci-inert-escalated rows each render an independent inspect control that opens its own drawer when clicked; clicking the row's own GitHub link never does; an unmapped kind renders no control", async () => {
+  const { container, unmount } = await mountSettledApp({
+    "/api/loop/state": { status: 200, body: { ...LOOP_STATE_OK, config: INSPECTOR_CONFIG } },
+    "/api/events": {
+      status: 200,
+      body: {
+        events: [
+          { id: 1, ts: "2026-08-10T09:00:00Z", kind: "plan-review-escalated", payload: { issue: 8001 } },
+          { id: 2, ts: "2026-08-10T09:01:00Z", kind: "verify-na-proposed", payload: { issue: 8002 } },
+          {
+            id: 3,
+            ts: "2026-08-10T09:02:00Z",
+            kind: "ci-inert-escalated",
+            payload: { pr: 8003, issue: 8013, checks: [{ name: "build", conclusion: "neutral" }] },
+          },
+          { id: 4, ts: "2026-08-10T09:03:00Z", kind: "drive-needs-human", payload: { pr: 8005, issue: 8006 } },
+        ],
+        lastId: 4,
+      },
+    },
+  });
+  try {
+    const planReviewLink = container.querySelector('a[href$="/issues/8001"]');
+    assert.ok(planReviewLink, "the plan-review-escalated row's own GitHub link must render");
+    const planReviewRow = planReviewLink.closest("li");
+    assert.ok(planReviewRow);
+    const planReviewButton = planReviewRow.querySelector(".attention-inspect");
+    assert.ok(planReviewButton, "the plan-review-escalated row must render its own inspect control");
+
+    const verifyNaLink = container.querySelector('a[href$="/issues/8002"]');
+    assert.ok(verifyNaLink, "the verify-na-proposed row's own GitHub link must render");
+    const verifyNaRow = verifyNaLink.closest("li");
+    assert.ok(verifyNaRow);
+    const verifyNaButton = verifyNaRow.querySelector(".attention-inspect");
+    assert.ok(verifyNaButton, "the verify-na-proposed row must render its own inspect control");
+
+    assert.notEqual(planReviewButton, verifyNaButton, "each row owns its own distinct inspect control, not a shared one");
+    assert.ok(!planReviewLink.closest(".attention-inspect"), "the link must not be nested inside the inspect control");
+    assert.ok(!planReviewButton.contains(planReviewLink), "the inspect control must not contain the link");
+
+    // Clicking the row's own GitHub link must never open the drawer. `preventDefault` stops
+    // happy-dom from actually following the real `target="_blank"` href during the test.
+    planReviewLink.addEventListener("click", (e) => e.preventDefault());
+    await act(async () => {
+      planReviewLink.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    assert.equal(
+      container.querySelector('aside[aria-label="phase inspector"]'),
+      null,
+      "clicking the row's GitHub link must never open the drawer",
+    );
+
+    // Each row's OWN inspect control, clicked individually, opens Arch review / Verify.
+    await act(async () => {
+      planReviewButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    let drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    assert.ok(drawer, "the plan-review-escalated row's inspect control must open a drawer");
+    assert.match(drawer.textContent ?? "", /Arch review \/ Verify/, "plan-review-escalated must open the Arch review / Verify drawer");
+
+    await act(async () => {
+      verifyNaButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    assert.ok(drawer, "the verify-na-proposed row's inspect control must open a drawer");
+    assert.match(drawer.textContent ?? "", /Arch review \/ Verify/, "verify-na-proposed must open the Arch review / Verify drawer");
+
+    const ciButton = container.querySelector('[aria-label="inspect ci"]');
+    assert.ok(ciButton, "the ci-inert-escalated row must render an inspect control");
+    const ciRow = ciButton.closest("li");
+    assert.ok(ciRow);
+    const ciLink = ciRow.querySelector('a[href$="/pull/8003"]');
+    assert.ok(ciLink, "the row's own GitHub link to the PR must still be present");
+    assert.ok(!ciLink.closest(".attention-inspect"), "the link must not be nested inside the inspect control");
+    assert.ok(!ciButton.contains(ciLink), "the inspect control must not contain the link");
+
+    await act(async () => {
+      ciButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    assert.ok(drawer, "clicking the inspect control must open the drawer");
+    assert.match(drawer.textContent ?? "", /Lanes \/ CI \/ Review \/ merge/, "ci-inert-escalated must open the CI/lanes drawer");
+
+    const unmappedLink = container.querySelector('a[href$="/pull/8005"]');
+    assert.ok(unmappedLink, "drive-needs-human's own GitHub link must still render, unchanged");
+    const unmappedRow = unmappedLink.closest("li");
+    assert.ok(unmappedRow);
+    assert.equal(unmappedRow.querySelector(".attention-inspect"), null, "an unmapped kind must render no inspect control at all");
+  } finally {
+    await unmount();
+  }
 });

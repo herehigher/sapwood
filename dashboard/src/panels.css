@@ -169,6 +169,16 @@
   margin-left: auto;
 }
 
+/* AC7 (#861): a sibling control next to the sentence's own GitHub anchor, never nested inside
+ * it — its own hit target and accessible name. */
+.attention-inspect {
+  background: var(--panel);
+  border: var(--hairline);
+  border-radius: var(--radius-card);
+  padding: 2px var(--space-2);
+  cursor: pointer;
+}
+
 /* ---- operations controls (§3 Operations, #361) ---------------------------- */
 
 .controls {

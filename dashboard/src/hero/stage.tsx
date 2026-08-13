@@ -13,8 +13,9 @@
  * dimmed "reserved" row — issue #144's AC forbids any reserved/dormant slot on the stage.
  */
 
-import type { Ref } from "react";
+import type { KeyboardEvent, Ref } from "react";
 import { readConfigPath } from "../config-captions.ts";
+import type { StageNode } from "../inspector.ts";
 import {
   activePlanningNode,
   activeReflectionNode,
@@ -24,6 +25,28 @@ import {
   isPendingConfident,
   withVisibleLanes,
 } from "./state.ts";
+
+/**
+ * §6 phase inspector (#861): the accessible-activation props for one clickable stage node —
+ * `role="button"`/`tabIndex` (an SVG `<g>` isn't natively focusable/operable) plus a real
+ * `onKeyDown` for Enter/Space, mirroring `Controls.tsx`'s own keyboard-activation posture for
+ * its non-native-button controls. Returns `{}` (no affordance at all) when the caller passes no
+ * `onInspect` — the stage still renders identically with the inspector feature entirely absent.
+ */
+function inspectProps(node: StageNode, label: string, onInspect?: ((node: StageNode) => void) | undefined) {
+  if (!onInspect) return {};
+  return {
+    role: "button" as const,
+    tabIndex: 0,
+    "aria-label": label,
+    onClick: () => onInspect(node),
+    onKeyDown: (e: KeyboardEvent<SVGGElement>) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      onInspect(node);
+    },
+  };
+}
 
 // ── Geometry ──────────────────────────────────────────────────────────────────
 // One coordinate space, shared with Hero.tsx's timelines so travel always lands where
@@ -312,13 +335,16 @@ export type HeroStageProps = {
    * `liveLanes` — the live overlay does not exist there (§6).
    */
   mergedPrs?: readonly number[];
+  /** §6 phase inspector (#861): fired with the clicked node's identity. Absent renders every
+   *  stage node with no click/keyboard affordance at all (the feature is additive-only). */
+  onInspect?: ((node: StageNode) => void) | undefined;
   ref?: Ref<SVGSVGElement>;
 };
 
 /** `roles.<role>.model`/`.effort`, or top-level `worker.model`/`.effort` when `rolePath` is
  *  already the leaf ("worker") — §3 C's mono `model · effort` caption, config-sourced only,
  *  never a live telemetry guess. `null` when the config doesn't name a model (honest gap). */
-function modelEffortCaption(config: Record<string, unknown> | null | undefined, rolePath: string): string | null {
+export function modelEffortCaption(config: Record<string, unknown> | null | undefined, rolePath: string): string | null {
   if (!config) return null;
   const model = readConfigPath(config, `${rolePath}.model`);
   if (typeof model !== "string") return null;
@@ -348,6 +374,7 @@ export function HeroStage({
   now,
   liveLanes = [],
   mergedPrs = [],
+  onInspect,
   ref,
 }: HeroStageProps) {
   // #716 gate② P1-9: every downstream position/render computation reads the CAPPED,
@@ -461,7 +488,11 @@ export function HeroStage({
         {PLANNING_NODES.map((n) => {
           const caption = modelEffortCaption(config, n.role);
           return (
-            <g key={n.node} data-active={activePlanning === n.node ? "true" : "false"}>
+            <g
+              key={n.node}
+              data-active={activePlanning === n.node ? "true" : "false"}
+              {...inspectProps(n.node, `inspect ${n.label}`, onInspect)}
+            >
               <title>{n.hint}</title>
               <circle className="hero-planning-node" cx={PLANNING.x} cy={n.y} r={17} />
               <text className="hero-node-label" x={PLANNING.x + 28} y={n.y + 4}>
@@ -493,6 +524,7 @@ export function HeroStage({
               data-lane-index={lane.channel}
               data-phase={lane.phase}
               data-issue={lane.issue ?? ""}
+              {...inspectProps("lane", `inspect w${lane.channel + 1}`, onInspect)}
             >
               <line className="hero-channel" x1={LANES.x} y1={laneY(lane.channel)} x2={LANES.x + LANES.w} y2={laneY(lane.channel)} />
               <text className="hero-node-label" x={LANES.x} y={laneY(lane.channel) - 10}>
@@ -560,7 +592,7 @@ export function HeroStage({
        * Plain labels only — CI / Review, never gate①/gate②.
        */}
       <g className="hero-gates">
-        <g className="hero-gate" data-gate="ci" data-state={gateState}>
+        <g className="hero-gate" data-gate="ci" data-state={gateState} {...inspectProps("ci", "inspect CI", onInspect)}>
           <rect x={GATES.ci - 34} y={GATES.y - 20} width={68} height={40} rx={6} />
           <text className="hero-node-label" x={GATES.ci} y={GATES.y + 5} textAnchor="middle">
             CI
@@ -573,7 +605,7 @@ export function HeroStage({
             ✓
           </text>
         </g>
-        <g className="hero-gate" data-gate="review" data-state={gateState}>
+        <g className="hero-gate" data-gate="review" data-state={gateState} {...inspectProps("review", "inspect Review", onInspect)}>
           <rect x={GATES.review - 42} y={GATES.y - 20} width={84} height={40} rx={6} />
           <text className="hero-node-label" x={GATES.review} y={GATES.y + 5} textAnchor="middle">
             Review
@@ -599,7 +631,12 @@ export function HeroStage({
           )}
         </g>
         <line className="hero-arm" x1={GATES.ci + 34} y1={GATES.y} x2={GATES.review - 42} y2={GATES.y} />
-        <line className="hero-arm" x1={GATES.review + 42} y1={GATES.y} x2={TRUNK.x - 40} y2={TRUNK.y} />
+        {/* The merge arm — §6: "answers only to review", the segment carrying a merged PR into
+         * the trunk. Its own clickable node (AC3's "the merge arm carries no caption") — distinct
+         * from CI/Review, which sit above it. */}
+        <g {...inspectProps("merge", "inspect merge", onInspect)}>
+          <line className="hero-arm" x1={GATES.review + 42} y1={GATES.y} x2={TRUNK.x - 40} y2={TRUNK.y} />
+        </g>
       </g>
 
       {/* Escalation branch — the one place rust appears on the stage. */}
@@ -658,7 +695,11 @@ export function HeroStage({
         {REFLECTION_NODES.map((n) => {
           const caption = modelEffortCaption(config, n.role);
           return (
-            <g key={n.node} data-active={activeReflection === n.node ? "true" : "false"}>
+            <g
+              key={n.node}
+              data-active={activeReflection === n.node ? "true" : "false"}
+              {...inspectProps(n.node, `inspect ${n.label}`, onInspect)}
+            >
               <circle className="hero-planning-node" cx={REFLECTION.x} cy={n.y} r={13} />
               <text className="hero-node-label" x={REFLECTION.x} y={n.y + 30} textAnchor="middle">
                 {n.label}

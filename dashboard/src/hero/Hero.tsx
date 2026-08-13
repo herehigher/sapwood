@@ -10,6 +10,7 @@
 import { createTimeline, utils } from "animejs";
 import { useEffect, useRef, useState } from "react";
 import type { EngineState } from "../api/types.ts";
+import type { StageNode } from "../inspector.ts";
 // hero.css is pulled in via app.css's @import (same pattern as panels.css) rather than a
 // direct module-level import here: a direct `import "./hero.css"` only resolves under Vite's
 // bundler and breaks the plain `node --import tsx --test` runner App.test.tsx (and any other
@@ -54,6 +55,8 @@ export type HeroProps = {
   /** Allowlisted config (§3 E) — threaded straight to `HeroStage` for the model·effort /
    *  review-mode captions (#716 gate② P2-8). `null`/absent draws no captions. */
   config?: Record<string, unknown> | null;
+  /** §6 phase inspector (#861) — threaded straight to `HeroStage`; see its own doc. */
+  onInspect?: ((node: StageNode) => void) | undefined;
 };
 
 export function Hero({
@@ -67,6 +70,7 @@ export function Hero({
   roundPhase = null,
   speed = 1,
   config = null,
+  onInspect,
 }: HeroProps) {
   const reducedMotion = useReducedMotion();
   const svgRef = useRef<SVGSVGElement>(null);
@@ -108,6 +112,7 @@ export function Hero({
       config={config}
       liveLanes={lanes}
       mergedPrs={mergedPrs}
+      onInspect={onInspect}
     />
   );
 }

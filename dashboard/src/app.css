@@ -256,6 +256,30 @@ code,
   grid-column: 1 / -1;
 }
 
+/*
+ * #868 gate② finding [0] (phase-inspector-not-side-drawer): `.phase-inspector` (PhaseInspectorDrawer.tsx)
+ * shares `.config-drawer`'s class, panel look, and head/row markup, but §6 calls it a SIDE drawer —
+ * the stage's paper trail alongside the hero, not another full-width row stacked at the bottom of
+ * the page. `position: fixed` is what actually delivers that: an out-of-flow element takes no part
+ * in `.stack`'s grid at all, so the `grid-column: 1 / -1` rule above has no effect on it (per spec)
+ * regardless of ordering — docking it to the viewport's right edge and giving it a bounded width is
+ * what turns "not in the grid" into "a side panel" rather than an invisible/collapsed one. Reuses
+ * `.panel`'s existing `--panel`/`--hairline` tokens (already theme-correct in both light and dark via
+ * `light-dark()`, tokens.css) — only the shape changes here, never the palette.
+ */
+.phase-inspector {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 20;
+  width: min(88vw, 380px);
+  height: 100vh;
+  overflow-y: auto;
+  border-width: 0 0 0 1px;
+  border-radius: 0;
+  box-shadow: -4px 0 16px color-mix(in srgb, black 30%, transparent);
+}
+
 /* A real ≤720px single-column breakpoint (auto-fit's own wrap is only an approximation of
  * this — it can still show two narrow columns above 720px depending on viewport width). */
 @media (max-width: 720px) {

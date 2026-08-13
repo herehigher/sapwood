@@ -103,6 +103,13 @@ export interface ReplayView {
   /** Spend rows through the current cursor, timestamp-mapped (§8) — empty outside replay. */
   spendThroughCursor: SpendRow[];
   phaseWindows: PhaseWindow[];
+  /** #868 gate② finding [1]: the selected round's OWN full event log — loaded once by
+   *  `loadRoundLog`/`loadRoundEvents` and never capped by any display window (unlike
+   *  `position.state.events`, `foldReplay`'s bounded tail). The phase inspector's round-scoped
+   *  Arch review/Verify counts read this rather than the folded tail, so a round longer than the
+   *  live display window's cap is never undercounted in replay either. Empty outside replay, and
+   *  during the selected round's own loading window (`activeLog` is `null` until it resolves). */
+  roundEvents: DomainEvent[];
 }
 
 /**
@@ -229,5 +236,6 @@ export function useReplay(rounds: Round[], lanesMax: number | null): ReplayView 
     scrub,
     spendThroughCursor,
     phaseWindows: activeLog?.phaseWindows ?? [],
+    roundEvents: activeLog?.events ?? [],
   };
 }
