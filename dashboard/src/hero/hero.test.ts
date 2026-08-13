@@ -1014,6 +1014,57 @@ const circleBox = (centerX: number, centerY: number, r: number): Box => ({
   bottom: centerY + r,
 });
 
+/**
+ * #808: `textBox()`'s 0.8 ASCENT undershoots real rendered ink — measured by rendering this
+ * file's own `HeroStage` markup + `hero.css`/`tokens.css` in a real Chromium tab (chrome-devtools
+ * MCP), 1700px container width over the 1200×380 viewBox (1.417× scale, converted back to
+ * SVG-unit space via `getBoundingClientRect` and the SVG's own screen-CTM scale factor — SVG
+ * `width:100%` scales uniformly, so unit-space clearance is scale-invariant regardless of which
+ * physical viewport width renders it). `--font-data` resolved to ui-monospace/SF Mono on that
+ * Chrome; both the 10px droplet chip label (`hero-num.hero-small`) and the 9px caption
+ * (`hero-node-caption`) measured a real ascent of ~0.92–0.94em above baseline, against
+ * `textBox()`'s modeled 0.8em — a ~15% underestimate, exactly the gap #808's PR #791 live-DOM
+ * probe found (a checkpoint chip's label-box bottom edge shaving the Review gate's
+ * "engine-agent" caption top, real ink contact `textBox()`'s model could not see). 1.0em here
+ * adds a safety margin above the measured ~0.94em for font stacks that one macOS measurement
+ * never sampled — CI's Linux font fallback in particular, since `dashboard/package.json` ships
+ * no Playwright/e2e harness to measure it directly there. DESCENT/CHAR_ADVANCE are untouched:
+ * the same measurement found `textBox()`'s existing 0.25/0.62 already conservative (real
+ * ~0.21–0.24 / ~0.60–0.61) — #808's probe named an ascent-side gap specifically, not those.
+ */
+const CAPTION_SAFE_ASCENT = 1.0;
+
+/** Same shape as `textBox()`, refined per `CAPTION_SAFE_ASCENT` above; `anchor` matches the
+ *  element's own `text-anchor` (default SVG behavior — no attribute — is "start", i.e. `x` is
+ *  the left edge, not the center `textBox()` always assumes). */
+const captionSafeTextBox = (text: string, x: number, baselineY: number, fontPx: number, anchor: "start" | "middle" = "middle"): Box => {
+  const width = text.length * fontPx * CHAR_ADVANCE;
+  const left = anchor === "middle" ? x - width / 2 : x;
+  return { left, right: left + width, top: baselineY - fontPx * CAPTION_SAFE_ASCENT, bottom: baselineY + fontPx * DESCENT };
+};
+
+/**
+ * #808 gate② finding [0] (run 9c57bd50): the font-size arguments fed to `captionSafeTextBox`
+ * below used to be hand-copied literals (9/10/12) — a silent duplicate of `hero.css`'s own
+ * `.hero-node-caption`/`.hero-small`/`.hero-node-label` rules with nothing tying the two
+ * together, so a future CSS size edit could desync the oracle from what actually renders while
+ * this test stayed green. Reads the effective px straight from `heroCss` instead. All three
+ * selectors below are single, non-combined rules — no cascade ambiguity to resolve here, unlike
+ * `.hero-small` vs. `.hero-node-caption`'s own declared-AFTER precedence (already pinned by the
+ * `#728 gate② finding [0]` source-order test above, which is why `.hero-small`'s 10px — not
+ * `.hero-num`'s 11px — is the effective droplet-label size read below).
+ */
+function cssFontSizePx(selector: string): number {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = heroCss.match(new RegExp(`${escaped}\\s*\\{[^}]*font-size:\\s*(\\d+)px`));
+  if (!match) throw new Error(`${selector} must declare a pixel font-size in hero.css`);
+  return Number(match[1]);
+}
+
+const CAPTION_FONT_PX = cssFontSizePx(".hero-node-caption");
+const DROPLET_LABEL_FONT_PX = cssFontSizePx(".hero-small");
+const GATE_NODE_LABEL_FONT_PX = cssFontSizePx(".hero-node-label");
+
 const boxesOverlap = (a: Box, b: Box): boolean => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
 
 /** Every pairwise combination of `boxes` must be collision-free. */
@@ -1338,6 +1389,157 @@ test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any
         !boxesOverlap(chip.box, gate.box),
         `${chip.label} ${JSON.stringify(chip.box)} overlaps ${gate.label} ${JSON.stringify(gate.box)}`,
       );
+    }
+  }
+
+  // #808: the loop above is `textBox()`'s plain model — the exact one that "already showed
+  // clearance" for this pair while the real 1700px live-DOM probe still found a marginal
+  // ink-level shave (`CAPTION_SAFE_ASCENT`'s own doc comment). `textBox()` cannot see that gap
+  // by construction: it is font-metric/leading blindness in the oracle, not a defect in this
+  // specific pair's geometry (this second pass re-checks the SAME ranks against the SAME
+  // cluster and stays green — the margin `CHECKPOINT_BASE_OFFSET`/`GATES.y+26` already carry is
+  // wide enough to absorb the refined ascent too). Re-run with `captionSafeTextBox` as the
+  // regression guard against a FUTURE geometry change that narrows this pair back down to
+  // something only the refined oracle would catch.
+  const gateBoxesRefined: { label: string; box: Box }[] = [
+    { label: "CI gate rect", box: { left: GATES.ci - 34, right: GATES.ci + 34, top: GATES.y - 20, bottom: GATES.y + 20 } },
+    { label: "CI gate label", box: captionSafeTextBox("CI", GATES.ci, GATES.y + 5, GATE_NODE_LABEL_FONT_PX) },
+    { label: "Review gate rect", box: { left: GATES.review - 42, right: GATES.review + 42, top: GATES.y - 20, bottom: GATES.y + 20 } },
+    { label: "Review gate label", box: captionSafeTextBox("Review", GATES.review, GATES.y + 5, GATE_NODE_LABEL_FONT_PX) },
+    {
+      label: "Review gate mode caption (engine-agent)",
+      box: captionSafeTextBox("engine-agent", Number(capXRaw), Number(capYRaw), CAPTION_FONT_PX, "middle"),
+    },
+  ];
+  const checkpointBoxesRefined: { label: string; box: Box }[] = checkpointed.map((d) => {
+    const { x, y } = dropletPoint(state, d);
+    return { label: `checkpoint #${d.issue} label (refined)`, box: captionSafeTextBox(`⤳ ${d.pr}`, x, y - 14, DROPLET_LABEL_FONT_PX) };
+  });
+  for (const chip of checkpointBoxesRefined) {
+    for (const gate of gateBoxesRefined) {
+      assert.ok(
+        !boxesOverlap(chip.box, gate.box),
+        `${chip.label} ${JSON.stringify(chip.box)} overlaps ${gate.label} ${JSON.stringify(gate.box)} (refined ascent)`,
+      );
+    }
+  }
+});
+
+// ── #808: refined font-metric oracle — every droplet chip label vs. every hero-node-caption ──
+//
+// AC1/AC2: `textBox()`'s ASCENT undershoots real rendered ink (`CAPTION_SAFE_ASCENT`'s doc
+// comment records the measured basis), so this test rebuilds every drawn droplet chip label
+// and every drawn `hero-node-caption` element with `captionSafeTextBox` and cross-checks the
+// full set — every zone the stage draws captions in (planning trio, lanes, Review, reflection
+// pair) against every droplet state (backlog incl. a handed-off 3-row chip, a plain lane, a
+// fixing lane, a full CHECKPOINT_DRAW_CAP of checkpoint chips, needs-human, and a merged/trunk
+// droplet) at once — not just the checkpoint-vs-Review-gate pair #745 already covered.
+test("#808 AC1: every droplet chip label and every hero-node-caption element stay collision-free under the refined ascent, across every zone at once", () => {
+  const config = {
+    roles: {
+      po: { model: "opus", effort: "high" },
+      architect: { model: "sonnet", effort: "medium" },
+      verificationPlanReviewer: { model: "sonnet", effort: "medium" },
+      harvest: { model: "sonnet", effort: "low" },
+      retro: { model: "sonnet", effort: "low" },
+    },
+    worker: { model: "sonnet", effort: "medium" },
+    reviewer: { mode: "engine-agent" },
+  };
+
+  const events: DomainEvent[] = [ev("pool-selected", { round_id: 1, issues: [90, 91] })];
+  for (let i = 0; i < 6; i++) {
+    // fills CHECKPOINT_DRAW_CAP — every rank the grid draws
+    events.push(ev("dispatched", { worker: `c${i}`, issue: 10 + i }));
+    events.push(ev("reclaim-done", { worker: `c${i}`, issue: 10 + i, next: "DRIVING", pr: 700 + i }));
+  }
+  events.push(ev("dispatched", { worker: "w9", issue: 50 }));
+  events.push(ev("reclaim-done", { worker: "w9", issue: 50, next: "DRIVING", pr: 500 }));
+  events.push(ev("drive-needs-human", { worker: "w9", issue: 50, pr: 500, reason: "flaky", cap: 2, fixRounds: 2 }));
+  events.push(ev("dispatched", { worker: "w10", issue: 60 }));
+  events.push(ev("reclaim-done", { worker: "w10", issue: 60, next: "DRIVING", pr: 600 }));
+  events.push(ev("merged", { worker: "w10", issue: 60, pr: 600, headOid: "abc" })); // trunk droplet
+  events.push(ev("dispatched", { worker: "w11", issue: 70 }));
+  events.push(ev("handoff", { worker: "w11", issue: 70 })); // handed-off backlog droplet (3-row chip)
+  // #808 gate② finding [0] (run a343c343): the plain/fixing lane droplets are dispatched LAST,
+  // deliberately — `withVisibleLanes` caps `state.lanes` at `lanesMax` and (same-tier) keeps the
+  // MOST recently touched (`state.ts`'s `visibleLanes` tie-break); with 8 active-tier lane
+  // workers open (`c0`..`c5` + these two) against `lanesMax: 6` below, whichever 2 were touched
+  // LEAST recently lose their slot — and #716 gate② round 2 P1-1's rule then DROPS any droplet
+  // still `at: "lane"` whose lane lost that slot, never drawing it at all. Dispatching `w1`/`w2`
+  // last makes THEM the most-recently-touched pair instead, so both survive and actually render
+  // (the earlier ordering silently evicted them, the exact gap the finding caught below).
+  events.push(ev("dispatched", { worker: "w1", issue: 1 })); // plain lane droplet
+  events.push(ev("dispatched", { worker: "w2", issue: 2 }));
+  events.push(ev("reclaim-done", { worker: "w2", issue: 2, next: "DRIVING", pr: 200 }));
+  events.push(
+    ev("drive-fixup", {
+      worker: "w2",
+      issue: 2,
+      pr: 200,
+      fixRounds: 1,
+      reason: "gate:FIXABLE:REQUEST_CHANGES:unresolvedThreads=2:ciRed=false",
+    }),
+  );
+  events.push(ev("fix-leg-started", { worker: "w2", issue: 2, pr: 200, fixRounds: 1 })); // fixing lane
+
+  // `markup()` renders the fixed 1200×380 viewBox `stage.tsx` always draws — the same shape a
+  // ≥1600px real viewport shows, per `hero.css`'s `width:100%;height:auto` (`#728`'s own "scales
+  // as one unit" test above): SVG percentage-width scaling is uniform, so this file's SVG-UNIT
+  // boxes are the same at 1600px, 1700px (the value `CAPTION_SAFE_ASCENT` was measured against),
+  // or any other width — there is no separate "render at 1600px" step to simulate here.
+  const { state } = run(events, 6);
+  const html = markup(state, { config, lanesMax: 6 });
+
+  // Same regex-based extraction the round 5 gate-cluster test above already uses for the
+  // Review caption, generalized to every `hero-node-caption` element the stage draws (planning
+  // trio + lanes + Review + reflection pair) — `text-anchor` is captured too since PLANNING/lane
+  // captions render with no `text-anchor` attribute (SVG default "start", `x` = left edge) while
+  // Review/reflection render `text-anchor="middle"` (`x` = center) — `captionSafeTextBox`'s
+  // `anchor` param needs the right one or its horizontal box is wrong.
+  const captionRe =
+    /<text class="[^"]*hero-node-caption[^"]*" x="(-?[\d.]+)" y="(-?[\d.]+)"(?: text-anchor="(middle|end)")?>([^<]*)<\/text>/g;
+  const captionBoxes: { label: string; box: Box }[] = [];
+  for (const [, xRaw, yRaw, anchorRaw, text] of html.matchAll(captionRe)) {
+    const anchor = anchorRaw === "middle" ? "middle" : "start";
+    captionBoxes.push({
+      label: `caption "${text}" @ (${xRaw},${yRaw})`,
+      box: captionSafeTextBox(text as string, Number(xRaw), Number(yRaw), CAPTION_FONT_PX, anchor),
+    });
+  }
+  // Sanity: the fixture must actually exercise every caption zone, or this test silently checks
+  // fewer pairs than it claims to (planning×3 + lanes×6 + Review×1 + reflection×2 = 12).
+  assert.equal(captionBoxes.length, 12, "fixture must mount every hero-node-caption zone (planning×3, lanes×6, Review×1, reflection×2)");
+
+  // #808 gate② finding [0] (run a343c343): parse every RENDERED `hero-droplet` group's own
+  // transform + label text straight from `html`, never reconstruct from `state.droplets` —
+  // reconstructing from state (via `dropletPoint`/a hand-copied label formula) proves nothing
+  // about what actually drew, and silently asserted against 2 droplets `withVisibleLanes` had
+  // already dropped from the markup entirely (see the event-ordering comment above).
+  const dropletRe =
+    /<g class="hero-droplet" data-issue="(\d+)" data-at="([a-z-]+)"[^>]*transform="translate\((-?[\d.]+) (-?[\d.]+)\)">([\s\S]*?)<\/g>/g;
+  const dropletBoxes: { label: string; box: Box }[] = [];
+  for (const [, issue, at, xRaw, yRaw, inner] of html.matchAll(dropletRe)) {
+    const labelMatch = (inner ?? "").match(/<text class="hero-num hero-small" x="0" y="-14" text-anchor="middle">([^<]*)<\/text>/);
+    assert.ok(labelMatch, `droplet #${issue} (at=${at}) must render its own chip label`);
+    const text = labelMatch?.[1] as string;
+    dropletBoxes.push({
+      label: `droplet #${issue} ("${text}", at=${at}) @ (${xRaw},${yRaw})`,
+      box: captionSafeTextBox(text, Number(xRaw), Number(yRaw) - 14, DROPLET_LABEL_FONT_PX),
+    });
+  }
+  // Sanity: the fixture must actually RENDER every droplet state under test — checkpoint×6 +
+  // needs-human + trunk + handed-off backlog + plain lane + fixing lane — or this test silently
+  // checks fewer pairs than it claims to (the exact failure mode the finding caught: 11 states
+  // folded, only 9 actually drawn, under the ORIGINAL event order above).
+  assert.equal(dropletBoxes.length, 11, "fixture must RENDER every droplet state under test, not just fold it into state.droplets");
+
+  // Cross-product only, same as the round 5 test above — captions/droplets overlapping their
+  // OWN zone furniture is out of #808's scope (#745/#728/#744 already cover those pairs); what
+  // must never overlap is a droplet chip label against a caption from a DIFFERENT zone.
+  for (const d of dropletBoxes) {
+    for (const c of captionBoxes) {
+      assert.ok(!boxesOverlap(d.box, c.box), `${d.label} ${JSON.stringify(d.box)} overlaps ${c.label} ${JSON.stringify(c.box)}`);
     }
   }
 });
