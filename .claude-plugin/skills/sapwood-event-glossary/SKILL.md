@@ -47,6 +47,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `round-stop` — **investigate** [round-artifact]: a round loop stopped early, with the sentinel/breaker name and detail that caused the stop.
 - `reconcile-completed` — **routine**: a reconcile pass over lane/PR state finished, carrying its own ok/count/orphans/overflow summary.
 - `role-debris-swept` — **routine**: leftover session/worktree debris from a peripheral role session was cleaned up.
+- `worktree-janitor-rollup` — **routine**: one dead-owner/unlocked present-directory worktree sweep cycle finished — carries reaped/retained/skipped/failed counts, never a per-directory event for the stock (#834 Phase 2). (see #834)
 - `ceiling-breach-entered` — **investigate**: a cost-ceiling reason (per-run/per-day/...) newly joined the set of currently-breached reasons.
 - `ceiling-breach-cleared` — **routine**: a cost-ceiling reason left the set of currently-breached reasons (including the total-clear case).
 - `emergency-stop` — **intervene**: the EMERGENCY_STOP sentinel was detected — every running/fixing lane was hard-killed immediately, no drain window (#293). (see #293)
@@ -93,6 +94,8 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `ceiling-escalated` — **intervene** [retro, round-artifact, escalation-source:never]: a lane was drained for a cost/wall-clock ceiling breach; `never` a proof of the needs-human label (the drain's own label write is best-effort).
 - `worktree-retained` — **investigate**: a lane's worktree was kept on disk (dirty/uncommitted state) instead of being deleted on reclaim, for a human to salvage.
 - `worktree-released` — **routine**: a lane's worktree was deleted after reclaim (clean, nothing to salvage).
+- `merged-lane-worktree-settled` — **routine**: a MERGED lane's worktree was clean at close-out — deleted, and its git-worktree registration pruned (#834 Phase 1, the merged-lane close-out settlement). (see #834)
+- `merged-lane-worktree-retained` — **investigate**: a MERGED lane's worktree held possibly-uncommitted state at close-out and was left in place — event-only, no needs-human label: the PR is already merged and nothing is blocked (#834 Phase 1). (see #834)
 - `orphan-detected` — **investigate**: a worktree/branch with no matching worker row was found (#384 mid-run sweep or startup reconcile). (see #384)
 - `orphan-healed` — **routine**: a detected orphan was reconciled back into a tracked lane.
 - `orphan-heal-failed` — **investigate**: healing a detected orphan failed; it remains untracked for the next sweep.

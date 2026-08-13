@@ -74,6 +74,7 @@ import {
 } from "./fix-response.js";
 import { syncLaneStateLabels } from "./lane-state-label.js";
 import { reviveEnvFailedPrLanes, sweepMidRunOrphanPrs } from "./reconcile.js";
+import { pruneSettledWorktreeRegistration } from "./worktree-janitor.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure scheduling core (parity targets — keep semantics identical to guard's bash twin)
@@ -1410,6 +1411,14 @@ export interface Supervisor {
    *  Optional for the same reason `durablePidAlive` is — and, per that field's own P2-3 doc, the
    *  SAME capability: implement both or neither. */
   signalDurablePid?(worker: string, signal: "SIGTERM" | "SIGKILL"): void;
+  /** #834 Phase 1: settles a MERGED lane's worktree at close-out (purity check against the
+   *  worktree's OWN git-index mtime, never dispatchedBaselineMs — see worker.ts's
+   *  settleMergedWorktree for the full doc). Reuses ReclaimResult's shape; `worktreeRetained`
+   *  here never triggers escalation the way reclaim()'s does — settleMergedLane decides what
+   *  to do with it. Optional: a Supervisor test double with no opinion on worktree settlement
+   *  (most fixtures) simply settles nothing, same "additive, degrades to zero behavior change"
+   *  stance durablePidAlive/signalDurablePid above already take on this interface. */
+  settleMergedWorktree?(worker: string): ReclaimResult;
 }
 
 /** The conductor's only handle on the review + merge gate (#13). merge-driver.ts's
@@ -1629,6 +1638,13 @@ export interface TickDeps {
    *  no gate/merge activity this tick (pre-#13 behavior — M2 dogfood / callers that haven't
    *  wired a reviewer yet keep working unchanged). */
   mergeGate?: MergeGate;
+  /** #834 Phase 1: best-effort git-worktree REGISTRATION cleanup (unlock+remove+prune, trusted
+   *  main-repo `-C` git) for a MERGED lane whose worktree DIRECTORY settleMergedLane just
+   *  deleted. Omitted -> the real default (worktree-janitor.ts's own
+   *  pruneSettledWorktreeRegistration / createWorktreeJanitorDeps()); test doubles inject a fake
+   *  so unit tests never shell out to real git — same optional-seam convention `mergeGate`
+   *  itself already takes on this interface. */
+  worktreeRegistrationPruner?: (worktreePath: string) => Promise<void>;
   /** #288: production engine-agent lane binding. Kept outside MergeGate because worker-row
    *  identity/state access belongs to conductor; classic reviewer modes never call it. */
   engineAgentDriveDeps?: (worker: WorkerRow, pr: number) => Omit<EngineAgentDriveDeps, "forge" | "cfg" | "reviewerAdapter">;
@@ -1917,7 +1933,13 @@ async function handleRollbackFailure(
  *  "proven merged but not yet reflected" window for a later tick to lose. The remaining crash
  *  window (between `state.upsertWorker` below and `forge.setBoardStatus`) is the SAME one
  *  `attemptRollback`'s pending-rollback recovery already covers for every other merge settlement —
- *  not a new risk this introduces. */
+ *  not a new risk this introduces.
+ *
+ *  #834 Phase 1: also the ONE place a MERGED lane's WORKTREE gets settled — the gap #834 traced:
+ *  a lane that succeeds never otherwise passes through worker.ts's dirty-worktree retention
+ *  (reclaim()/retainOrDeleteWorktree only ever run from the DEAD/teardown paths). `supervisor`
+ *  and `pruneRegistration` are additive/optional-shaped params (see their own inline docs) —
+ *  omitting worktree-settlement support degrades to exactly today's behavior. */
 async function settleMergedLane(
   forge: IForge,
   state: State,
@@ -1928,7 +1950,16 @@ async function settleMergedLane(
   w: WorkerRow,
   pr: number,
   headOid: string,
-  title?: string,
+  title: string | undefined,
+  /** #834 Phase 1: a Supervisor with no opinion on worktree settlement (most test doubles)
+   *  simply settles nothing — same "additive, degrades to zero behavior change" stance the
+   *  interface's own durablePidAlive/signalDurablePid already take. */
+  supervisor: Pick<Supervisor, "settleMergedWorktree">,
+  /** #834 Phase 1: best-effort git-worktree registration cleanup for a settled-clean directory —
+   *  defaults to worktree-janitor.ts's real production deps; test callers inject a fake so unit
+   *  tests never shell out to real git (mirrors mergeGate/supervisor's own optional-seam
+   *  convention elsewhere in this file). */
+  pruneRegistration: (worktreePath: string) => Promise<void> = pruneSettledWorktreeRegistration,
 ): Promise<DrivenOutcome> {
   state.upsertWorker({ ...w, state: "done", ended_at: iso() });
   if (state.parkRow("forge") != null) {
@@ -1979,6 +2010,31 @@ async function settleMergedLane(
   // longer 'pr-held' by the time this runs, so the check below skips a duplicate append).
   if (state.lastHoldEvent(w.name, pr) === "pr-held") {
     state.appendEvent("pr-released", { worker: w.name, issue: w.issue, pr });
+  }
+  // #834 Phase 1: settle the lane's worktree at MERGED close-out — see this function's own doc
+  // for the gap this closes. Guarded by `typeof`, never a hard requirement: a Supervisor with
+  // no opinion on worktree settlement (most test doubles) leaves this whole block a no-op,
+  // exactly today's behavior. Wrapped so a settlement-side failure (an unexpected throw from a
+  // caller-injected pruneRegistration, say) can never turn a successful MERGE settlement into a
+  // failed tick — this is disk hygiene, not correctness the rest of settleMergedLane depends on.
+  if (typeof supervisor.settleMergedWorktree === "function") {
+    try {
+      const settlement = supervisor.settleMergedWorktree(w.name);
+      if (settlement.worktreePath !== null) {
+        if (settlement.worktreeRetained) {
+          // Dirty — left on disk. #834's own ruling: EVENT-ONLY, no needs-human label, no
+          // escalation. The PR is already merged; nothing is blocked on this worktree.
+          state.appendEvent("merged-lane-worktree-retained", { worker: w.name, issue: w.issue, pr, worktreePath: settlement.worktreePath });
+        } else {
+          // Clean — the directory is already gone (settleMergedWorktree's own job); prune the
+          // now-orphaned git-worktree REGISTRATION through the trusted main-repo git path.
+          await pruneRegistration(settlement.worktreePath);
+          state.appendEvent("merged-lane-worktree-settled", { worker: w.name, issue: w.issue, pr, worktreePath: settlement.worktreePath });
+        }
+      }
+    } catch (error) {
+      log?.(`[sapwood:drive] lane ${w.name} pr #${pr}: worktree settlement failed (non-fatal): ${String(error)}`);
+    }
   }
   return { kind: "merged", worker: w.name, issue: w.issue, pr };
 }
@@ -3759,6 +3815,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   const now = deps.now;
   const iso = () => now().toISOString();
   const threshold = cfg.worker.heartbeatStaleSecs;
+  // #834 Phase 1: both settleMergedLane call sites below share this one seam — see TickDeps'
+  // own worktreeRegistrationPruner doc for the real-vs-test-double rationale.
+  const pruneRegistration = deps.worktreeRegistrationPruner ?? pruneSettledWorktreeRegistration;
 
   // #210: retained-worktree release scan — before the kill-switch gate on purpose. It is an
   // OBSERVATION of state the engine already owns (no forge call, no spawn, no board write), and
@@ -4433,7 +4492,22 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         // collected.
         state.appendEvent("gated-reentry-merged", { worker: w.name, issue: w.issue, pr, attempts });
         gatedReclaimed.push({ kind: "merged", worker: w.name, issue: w.issue, pr, attempts });
-        driven.push(await settleMergedLane(forge, state, cfg, iso, deps.log, rollbacks, w, pr, prStatus.headOid, prStatus.title));
+        driven.push(
+          await settleMergedLane(
+            forge,
+            state,
+            cfg,
+            iso,
+            deps.log,
+            rollbacks,
+            w,
+            pr,
+            prStatus.headOid,
+            prStatus.title,
+            supervisor,
+            pruneRegistration,
+          ),
+        );
         continue;
       }
       const issueState = (await forge.getIssueMeta(w.issue)).state;
@@ -5135,7 +5209,22 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       switch (outcome.kind) {
         case "merged":
           // #826: shared with GATED RECLAIM's own MERGED branch — see settleMergedLane's own doc.
-          driven.push(await settleMergedLane(forge, state, cfg, iso, deps.log, rollbacks, w, pr, outcome.headOid, outcome.title));
+          driven.push(
+            await settleMergedLane(
+              forge,
+              state,
+              cfg,
+              iso,
+              deps.log,
+              rollbacks,
+              w,
+              pr,
+              outcome.headOid,
+              outcome.title,
+              supervisor,
+              pruneRegistration,
+            ),
+          );
           break;
         case "needs-human":
           // #397 bucket 2: "a human must MERGE this PR" is a DIFFERENT required action from "the

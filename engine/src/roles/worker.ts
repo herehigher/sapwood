@@ -53,6 +53,7 @@ import {
   capturePreSpawnManifestData,
   KNOWN_UNPROBED_NOTE,
   type PreSpawnManifestCapture,
+  resolveWorktreeIndexBaselineMs,
 } from "./context-manifest.js";
 import { type SkillsSessionKind, shouldInjectSkillsPlugin } from "./skills-plugin.js";
 
@@ -4148,6 +4149,51 @@ export class WorkerSupervisor implements Supervisor {
     // for correctness; shows up as a prunable entry in `git worktree list`. A `git worktree
     // prune` (which runs in the TRUSTED main repo, not a worker tree) is a future operator/
     // housekeeping step, deliberately not run here to keep this path git-free.
+    return { worktreePath, worktreeRetained: false };
+  }
+
+  /** #834 Phase 1 (the merged-lane close-out "faucet" fix): purity-checks and, when clean,
+   *  DELETES a MERGED lane's worktree DIRECTORY — the counterpart to retainOrDeleteWorktree for
+   *  the one path that function never covers. reclaim() (and therefore retainOrDeleteWorktree)
+   *  only ever runs from the DEAD/teardown paths; a lane whose PR simply merged while the row
+   *  was still `driving` is never reclaim()'d at all, so every merged lane's worktree,
+   *  registration, and branch were left behind forever (#834's own root-cause finding) — this is
+   *  the ordinary-success counterpart role sessions already have via peripheral.ts's
+   *  maybeRetainWorktree.
+   *
+   *  BASELINE (#834 owner ruling, supersedes the either/or framing #834 was filed under): the
+   *  worktree's OWN git-index mtime (resolveWorktreeIndexBaselineMs — the SAME glue
+   *  peripheral.ts's maybeRetainWorktree uses), NEVER dispatchedBaselineMs. A lane that
+   *  SUCCEEDED necessarily committed files after its own dispatch time, so baselining this check
+   *  on dispatched_at would read every productive lane as "dirty" and turn this into a ~100%
+   *  false-positive retention stream on the happy path. Git rewrites the index on every
+   *  checkout/add/commit, so a lane whose last write was a reviewed-and-merged commit reads
+   *  clean against it. Unreadable/missing index -> NaN -> worktreeMaybeDirty's own fail-safe-
+   *  dirty branch (never assumes clean without proof).
+   *
+   *  DELETES THE DIRECTORY ONLY (fs, no git) — this class's #69 grep-invariant forbids running
+   *  git at all (see this file's header doc). The caller (conductor.ts's settleMergedLane) owns
+   *  pruning the now-directory-less `git worktree` REGISTRATION, through worktree-janitor.ts's
+   *  trusted main-repo `-C` git (worktree-janitor.ts's pruneSettledWorktreeRegistration) — one of
+   *  the handful of modules this codebase permits to shell out at all (worktree-janitor.ts's own
+   *  header doc names the full, closed list). Reuses ReclaimResult's shape (`worktreeRetained:
+   *  true` == dirty/left in place, `worktreePath: null` == nothing was ever there) — a DIFFERENT policy from
+   *  retainOrDeleteWorktree's (baseline, and never an escalation trigger: a MERGED lane's
+   *  retained worktree is event-only per #834's ruling, decided entirely by the caller, since
+   *  this class has no forge access either way). */
+  settleMergedWorktree(name: string): ReclaimResult {
+    const worktreePath = join(this.worktreeRoot, name);
+    if (!existsSync(worktreePath)) return { worktreePath: null, worktreeRetained: false };
+    const indexMs = resolveWorktreeIndexBaselineMs(worktreePath);
+    if (worktreeMaybeDirty(worktreePath, indexMs)) {
+      return { worktreePath, worktreeRetained: true }; // left on disk — event-only, no escalation
+    }
+    try {
+      rmSync(worktreePath, { recursive: true, force: true });
+    } catch {
+      // Best-effort, same stance as retainOrDeleteWorktree: an unremovable clean worktree is a
+      // disk-hygiene issue, not data loss (nothing to lose — it was clean).
+    }
     return { worktreePath, worktreeRetained: false };
   }
 

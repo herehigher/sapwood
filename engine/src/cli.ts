@@ -61,7 +61,12 @@ import { type PeripheralPhase, RoundScopedForge, type RoundStopHit, type RoundsR
 import { createDefaultPeripherals } from "./loop/round-defaults.js";
 import { detectConsecutiveStalls } from "./loop/stall-breaker.js";
 import { createUserSettingsWatch } from "./loop/user-settings-watch.js";
-import { createWorktreeJanitorDeps, sweepWorktreeJanitorOnce } from "./loop/worktree-janitor.js";
+import {
+  createPresentDirectorySweepDeps,
+  createWorktreeJanitorDeps,
+  sweepPresentDirectoryWorktreesAndReport,
+  sweepWorktreeJanitorOnce,
+} from "./loop/worktree-janitor.js";
 import { createProxyMint } from "./proxy/mint.js";
 import { makeProductionEngineAgent } from "./review/production.js";
 import { MergeDriver } from "./roles/merge-driver.js";
@@ -2312,8 +2317,13 @@ export async function normalizeUnplacedBoardItems(
  *  never-a-startup-blocker posture as normalizeUnplacedBoardItems above. Bounding to a single
  *  cycle here is deliberate: a backlog of hundreds must never stall startup; the next engine
  *  start (or the operator-run one-shot backlog-clearance path, `runWorktreeJanitorToCompletion`)
- *  picks up whatever this cycle didn't reach. */
-async function sweepWorktreeJanitorStartup(log: (message: string) => void): Promise<void> {
+ *  picks up whatever this cycle didn't reach.
+ *
+ *  #834 Phase 2: also runs ONE bounded cycle of the present-directory sweep, in its OWN try/
+ *  catch (a failure in either pass must never mask or be masked by the other — each is
+ *  independently best-effort) — see sweepPresentDirectoryWorktreesAndReport's own doc for the
+ *  single rollup event this emits. */
+async function sweepWorktreeJanitorStartup(state: Pick<State, "appendEvent">, log: (message: string) => void): Promise<void> {
   try {
     const result = await sweepWorktreeJanitorOnce(createWorktreeJanitorDeps());
     if (result.reaped.length > 0 || result.failed.length > 0) {
@@ -2324,6 +2334,17 @@ async function sweepWorktreeJanitorStartup(log: (message: string) => void): Prom
     }
   } catch (error) {
     log(`[sapwood:startup] worktree janitor sweep failed; continuing: ${String(error)}`);
+  }
+  try {
+    const result = await sweepPresentDirectoryWorktreesAndReport(createPresentDirectorySweepDeps(), state, log);
+    if (result.reaped.length > 0 || result.retained.length > 0 || result.failed.length > 0) {
+      log(
+        `[sapwood:startup] worktree janitor (present-directory arm): reaped ${result.reaped.length}, ` +
+          `retained ${result.retained.length} dirty, skipped ${result.skipped}, ${result.failed.length} failed`,
+      );
+    }
+  } catch (error) {
+    log(`[sapwood:startup] worktree janitor present-directory sweep failed; continuing: ${String(error)}`);
   }
 }
 
@@ -2883,7 +2904,7 @@ async function runTickEngine(
     // (overrides.forge unset) — same gating as checkBranchProtection above, for the same reason
     // (this shells real `git worktree` commands).
     const worktreeJanitorSweep =
-      overrides.worktreeJanitorSweep ?? (overrides.forge === undefined ? () => sweepWorktreeJanitorStartup(log) : async () => {});
+      overrides.worktreeJanitorSweep ?? (overrides.forge === undefined ? () => sweepWorktreeJanitorStartup(state, log) : async () => {});
     await worktreeJanitorSweep();
     // #379 F1: same best-effort startup-pass stance as the board normalization above — provisions
     // any workflow label this repo is missing so the round's own label writes can land.
@@ -3136,7 +3157,7 @@ async function runRoundsEngine(
     // (overrides.forge unset) — same gating as checkBranchProtection above, for the same reason
     // (this shells real `git worktree` commands).
     const worktreeJanitorSweep =
-      overrides.worktreeJanitorSweep ?? (overrides.forge === undefined ? () => sweepWorktreeJanitorStartup(log) : async () => {});
+      overrides.worktreeJanitorSweep ?? (overrides.forge === undefined ? () => sweepWorktreeJanitorStartup(state, log) : async () => {});
     await worktreeJanitorSweep();
     // #379 F1: same best-effort startup-pass stance as the board normalization above — provisions
     // any workflow label this repo is missing so the round's own label writes can land.

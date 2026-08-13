@@ -211,6 +211,20 @@ export const LANE_EVENT_KINDS = defineKinds({
     meaning: "a lane's worktree was deleted after reclaim (clean, nothing to salvage).",
     actionability: "routine",
   },
+  "merged-lane-worktree-settled": {
+    tags: [],
+    meaning:
+      "a MERGED lane's worktree was clean at close-out — deleted, and its git-worktree registration pruned (#834 Phase 1, the merged-lane close-out settlement).",
+    actionability: "routine",
+    see: "#834",
+  },
+  "merged-lane-worktree-retained": {
+    tags: [],
+    meaning:
+      "a MERGED lane's worktree held possibly-uncommitted state at close-out and was left in place — event-only, no needs-human label: the PR is already merged and nothing is blocked (#834 Phase 1).",
+    actionability: "investigate",
+    see: "#834",
+  },
 
   // Orphan detection + the mid-run orphan sweep (#384).
   "orphan-detected": {
