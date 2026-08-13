@@ -1010,6 +1010,11 @@ in `readOnly` mode, binds `127.0.0.1` (default port 4517), and dispatches
 through a pathname→method route table. There is no CLI entry point yet — until
 `sapwood dashboard` lands, the server is started from code.
 
+Security posture (loopback-only, no auth boundary, raw event feed) is
+documented in [`docs/security.md` "Dashboard: loopback bind, not an auth
+boundary"](security.md#dashboard-loopback-bind-not-an-auth-boundary) — that
+page, not this one, is the canonical statement of the boundary.
+
 Wire details the frontend can rely on:
 
 - Both paged feeds answer `{ <name>: [...], "lastId": n }` — `events` for

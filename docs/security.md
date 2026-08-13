@@ -420,6 +420,36 @@ stance the Bash tripwire above already takes. The engine deliberately keeps this
 for every session kind: an attempted egress through a tool a session was never granted is
 exactly what a post-hoc tripwire should surface, not suppress.
 
+## Dashboard: loopback bind, not an auth boundary
+
+`dashboard/server.ts` (contract: [`docs/frontend-design.md` §8](frontend-design.md#8-data-contract))
+serves a local, read-only view of the engine's own ledger. Its posture:
+
+- **Binds `127.0.0.1` only, no CORS.** The listener never binds `0.0.0.0`
+  (`server.ts`'s `listen(opts.port ?? DEFAULT_PORT, "127.0.0.1", resolve)`), and no route
+  ever sends an `Access-Control-Allow-Origin` header — the dashboard is same-origin with
+  this server, and granting none is deliberate, not an oversight.
+- **Read-only projection.** The SQLite handle is opened in read-only mode, so no route —
+  including the single write route — can write through it even by accident. The four
+  `GET` routes (`/api/loop/state`, `/api/events`, `/api/spend`, `/api/rounds`) and the
+  static asset handler only ever read; the one `POST /api/control` route, present only
+  when `dashboard.controls` is enabled, does not touch the database at all — its sole
+  effect is creating/removing the engine's own file sentinels (PAUSE, kill switch).
+- **Not an auth boundary.** The bind above is the *only* access control: there is no
+  authentication, session, or per-request authorization layer in front of any route.
+  **Never reverse-proxy this port to a public host.** Anyone who can reach it sees
+  operator-grade data — full lane state, cost figures, and the raw event feed below —
+  with no login screen standing in the way.
+- **The raw event feed is verbatim by contract, not scrubbed.** `/api/events` serves
+  ledger events as written, which by design can include `egress-suspect` command
+  snippets and raw error text (see the egress-scanning discussion above) — the forensic
+  value of that feed depends on it being unredacted. This is distinct from the *served
+  config* surface, which is already allowlisted (`CONFIG_ALLOWLIST`,
+  `engine/src/state/read-model.ts`) so a config key added later doesn't silently start
+  serving on the wire. There is no public export of a live run's raw feed; the only
+  public-facing surface is the curated recorded-run demo fixture served under `?demo`,
+  which is a separate, hand-vetted artifact rather than a redaction of live data.
+
 ## Worker credential tiers
 
 **Core property: producer≠merger enforced by credential ABSENCE, not by deny rules.** Every
