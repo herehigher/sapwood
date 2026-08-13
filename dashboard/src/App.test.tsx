@@ -1145,6 +1145,110 @@ test("resolveInspectorArtifact: no matching round row (open round not yet in /ap
 
 // ── AC2 / AC3 / AC4: drawer content per node class ──────────────────────────────────────────
 
+// gate② finding [0] (ac2-app-wiring): every AC2 content test below injects `inspectorArtifact`/
+// `activeEvents` directly into `appContent` — that proves the DRAWER renders whatever it's given
+// correctly, but stays green even if `LiveApp` bound the drawer to the wrong artifact or event
+// fold entirely. This test instead mounts the REAL `<App>` (`mountSettledApp`) with a
+// distinguishable `/api/rounds` artifact and `/api/events` response and opens nodes through real
+// clicks — proving the query-to-drawer wiring itself, not just the drawer's own rendering.
+test("gate② finding [0]: the real /api/rounds artifact and /api/events response flow through the live query hooks into the drawer — not just a hand-injected prop", async () => {
+  const WIRING_ROUND_ID = 70019;
+  const { container, unmount } = await mountSettledApp({
+    "/api/loop/state": {
+      status: 200,
+      body: { ...LOOP_STATE_OK, config: INSPECTOR_CONFIG, round: { id: WIRING_ROUND_ID, phase: "executing" } },
+    },
+    "/api/rounds": {
+      status: 200,
+      body: {
+        rounds: [
+          {
+            roundId: WIRING_ROUND_ID,
+            status: "in_progress",
+            startedAt: "2026-08-10T09:00:00Z",
+            endedAt: null,
+            startEventId: 0,
+            startSpendId: 0,
+            eventCount: INSPECTOR_EVENTS.length,
+            schemaVersion: 1,
+            artifact: INSPECTOR_ARTIFACT,
+          },
+        ],
+      },
+    },
+    "/api/events": {
+      status: 200,
+      body: {
+        events: INSPECTOR_EVENTS.map((e) => ({ id: e.id, ts: e.ts, kind: e.kind, payload: e.payload })),
+        lastId: INSPECTOR_EVENTS.length,
+      },
+    },
+  });
+  try {
+    const goalAlignNode = container.querySelector('[aria-label="inspect Goal & align"]');
+    assert.ok(goalAlignNode, "the goal-align stage node must render");
+    await act(async () => {
+      goalAlignNode.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    let drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    assert.ok(drawer);
+    assert.match(
+      drawer.textContent ?? "",
+      /Distinguishable created title 861/,
+      "the REAL /api/rounds artifact for the currently open round must flow into the drawer",
+    );
+
+    const verifyNode = container.querySelector('[aria-label="inspect Verify"]');
+    assert.ok(verifyNode, "the verify stage node must render");
+    await act(async () => {
+      verifyNode.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    assert.ok(drawer);
+    assert.match(
+      drawer.textContent ?? "",
+      /sess-verify-861/,
+      "the REAL /api/rounds artifact's degradedPhases must flow into the Arch review / Verify drawer",
+    );
+    assertRow(drawer.innerHTML, "plan-review escalations", 3);
+
+    const laneNode = container.querySelector('[aria-label^="inspect w"]');
+    assert.ok(laneNode, "a lane stage node must render");
+    await act(async () => {
+      laneNode.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    assert.ok(drawer);
+    assertRow(drawer.innerHTML, "dispatches", 3);
+    assertRow(drawer.innerHTML, "merges", 2);
+  } finally {
+    await unmount();
+  }
+});
+
+// gate② finding [0] (second half): the Retro drawer's OWN AC2 content test (below) exercises
+// only the opened-PR outcome — degraded and neither are the other two outcomes §6's own table
+// names explicitly. Both are covered here, through the same real `appContent` entry point.
+test("AC2: Retro drawer — a degraded proposal renders its reason/branch, distinct from the opened-PR outcome", () => {
+  const artifact = {
+    ...INSPECTOR_ARTIFACT,
+    retro: { opened: null, degraded: { branch: "retro/degraded-861", title: "t", reason: "no findings this round 861" } },
+  };
+  const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: "retro", inspectorArtifact: artifact })));
+  const drawer = extractDrawerHtml(html);
+  assert.match(drawer, /retro\/degraded-861/);
+  assert.match(drawer, /no findings this round 861/);
+  assert.doesNotMatch(drawer, /href="/, "a degraded proposal never opened a PR, so no GitHub link renders");
+});
+
+test("AC2: Retro drawer — neither outcome (no proposal this round) renders honestly, distinct from both opened and degraded", () => {
+  const artifact = { ...INSPECTOR_ARTIFACT, retro: { opened: null, degraded: null } };
+  const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: "retro", inspectorArtifact: artifact })));
+  const drawer = extractDrawerHtml(html);
+  assert.match(drawer, /no proposal this round/);
+  assert.doesNotMatch(drawer, /href="/, "no proposal means no GitHub link renders");
+});
+
 test("AC2/AC3/AC4: Goal & align drawer — the artifact's align section verbatim, GitHub links to issues only, po's model·effort caption, no other phase's fields", () => {
   const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: "goal-align" })));
   const drawer = extractDrawerHtml(html);
@@ -1361,9 +1465,53 @@ test("AC1/AC5: clicking a hero stage node opens its phase inspector drawer; the 
   }
 });
 
+// gate② finding [1] (ac5-fetch-proof-vacuous): the test above uses LOOP_STATE_OK, whose logPath
+// is null — its fetch-call assertion never actually exercises the condition under which an
+// implementation might wrongly fetch log content. This one supplies a genuine, unique, non-null
+// logPath through the real /api/loop/state response, opens the drawer through the real mounted
+// DOM, and asserts BOTH that the path renders as plain text AND that no fetch call ever names it.
+test("AC5: a real non-null logPath renders as plain text once the drawer opens, and is never itself fetched", async () => {
+  const LOG_PATH = "/var/log/sapwood/run-861-gate2-unique.log";
+  const { container, fetchCalls, unmount } = await mountSettledApp({
+    "/api/loop/state": {
+      status: 200,
+      body: { ...LOOP_STATE_OK, round: { id: 1, phase: "aligning" }, config: INSPECTOR_CONFIG, logPath: LOG_PATH },
+    },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  try {
+    const node = container.querySelector('[aria-label="inspect Summary"]');
+    assert.ok(node, "the summary stage node must render");
+    await act(async () => {
+      node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    assert.ok(drawer, "clicking the node must open the drawer");
+    assert.match(drawer.textContent ?? "", /run-861-gate2-unique\.log/, "the real, query-sourced logPath must render as plain text");
+
+    assert.ok(
+      fetchCalls.every((u) => !u.includes(LOG_PATH)),
+      `the log path itself must never be fetched — saw: ${fetchCalls.join(", ")}`,
+    );
+    assert.ok(
+      fetchCalls.every(
+        (u) => u.startsWith("/api/loop/state") || u.startsWith("/api/events") || u.startsWith("/api/spend") || u.startsWith("/api/rounds"),
+      ),
+      `opening the drawer must never trigger an unexpected fetch; saw: ${fetchCalls.join(", ")}`,
+    );
+  } finally {
+    await unmount();
+  }
+});
+
 // ── AC7: needs-attention strip inspect controls ─────────────────────────────────────────────
 
-test("AC7: plan-review-escalated/verify-na-proposed/ci-inert-escalated rows each render an independent inspect control (sibling to, never nested with, the row's own GitHub link); an unmapped kind renders none", async () => {
+// gate② finding [3] (ac7-interactions-incomplete): the previous round of this test only ever
+// COUNTED the two "inspect verify" buttons and clicked the CI one — it never clicked the
+// plan-review-escalated or verify-na-proposed controls individually (proving EACH one, not just
+// their count, opens the right drawer) and never clicked a mapped row's own GitHub link (proving
+// link activation does NOT also open the drawer). Both are exercised below, per-row.
+test("AC7: plan-review-escalated/verify-na-proposed/ci-inert-escalated rows each render an independent inspect control that opens its own drawer when clicked; clicking the row's own GitHub link never does; an unmapped kind renders no control", async () => {
   const { container, unmount } = await mountSettledApp({
     "/api/loop/state": { status: 200, body: { ...LOOP_STATE_OK, config: INSPECTOR_CONFIG } },
     "/api/events": {
@@ -1385,12 +1533,50 @@ test("AC7: plan-review-escalated/verify-na-proposed/ci-inert-escalated rows each
     },
   });
   try {
-    const verifyButtons = container.querySelectorAll('[aria-label="inspect verify"]');
+    const planReviewLink = container.querySelector('a[href$="/issues/8001"]');
+    assert.ok(planReviewLink, "the plan-review-escalated row's own GitHub link must render");
+    const planReviewRow = planReviewLink.closest("li");
+    assert.ok(planReviewRow);
+    const planReviewButton = planReviewRow.querySelector(".attention-inspect");
+    assert.ok(planReviewButton, "the plan-review-escalated row must render its own inspect control");
+
+    const verifyNaLink = container.querySelector('a[href$="/issues/8002"]');
+    assert.ok(verifyNaLink, "the verify-na-proposed row's own GitHub link must render");
+    const verifyNaRow = verifyNaLink.closest("li");
+    assert.ok(verifyNaRow);
+    const verifyNaButton = verifyNaRow.querySelector(".attention-inspect");
+    assert.ok(verifyNaButton, "the verify-na-proposed row must render its own inspect control");
+
+    assert.notEqual(planReviewButton, verifyNaButton, "each row owns its own distinct inspect control, not a shared one");
+    assert.ok(!planReviewLink.closest(".attention-inspect"), "the link must not be nested inside the inspect control");
+    assert.ok(!planReviewButton.contains(planReviewLink), "the inspect control must not contain the link");
+
+    // Clicking the row's own GitHub link must never open the drawer. `preventDefault` stops
+    // happy-dom from actually following the real `target="_blank"` href during the test.
+    planReviewLink.addEventListener("click", (e) => e.preventDefault());
+    await act(async () => {
+      planReviewLink.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
     assert.equal(
-      verifyButtons.length,
-      2,
-      "both the plan-review-escalated and verify-na-proposed rows must render their own inspect control",
+      container.querySelector('aside[aria-label="phase inspector"]'),
+      null,
+      "clicking the row's GitHub link must never open the drawer",
     );
+
+    // Each row's OWN inspect control, clicked individually, opens Arch review / Verify.
+    await act(async () => {
+      planReviewButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    let drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    assert.ok(drawer, "the plan-review-escalated row's inspect control must open a drawer");
+    assert.match(drawer.textContent ?? "", /Arch review \/ Verify/, "plan-review-escalated must open the Arch review / Verify drawer");
+
+    await act(async () => {
+      verifyNaButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    assert.ok(drawer, "the verify-na-proposed row's inspect control must open a drawer");
+    assert.match(drawer.textContent ?? "", /Arch review \/ Verify/, "verify-na-proposed must open the Arch review / Verify drawer");
 
     const ciButton = container.querySelector('[aria-label="inspect ci"]');
     assert.ok(ciButton, "the ci-inert-escalated row must render an inspect control");
@@ -1404,7 +1590,7 @@ test("AC7: plan-review-escalated/verify-na-proposed/ci-inert-escalated rows each
     await act(async () => {
       ciButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    const drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    drawer = container.querySelector('aside[aria-label="phase inspector"]');
     assert.ok(drawer, "clicking the inspect control must open the drawer");
     assert.match(drawer.textContent ?? "", /Lanes \/ CI \/ Review \/ merge/, "ci-inert-escalated must open the CI/lanes drawer");
 

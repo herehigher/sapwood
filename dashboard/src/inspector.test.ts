@@ -193,3 +193,53 @@ test("readRetro: a missing retro object is honest-unknown, distinct from the rea
   assert.deepEqual(readRetro({}), { known: false, opened: null, degraded: null });
   assert.deepEqual(readRetro(null), { known: false, opened: null, degraded: null });
 });
+
+// ── gate② finding [2] (malformed-artifact-fabricates-results): a field with SOME valid and
+// SOME invalid entries must invalidate the WHOLE field — never silently drop just the bad
+// entries and report the survivors as a trustworthy (often falsely-empty) recorded value.
+
+test("readAlign: a created array with one valid entry and one malformed entry invalidates the WHOLE field, never a silently-shortened list", () => {
+  const artifact = {
+    align: {
+      created: [{ issue: 1, title: "ok", hasPlan: true }, { issue: "not-a-number" }],
+      triaged: [{ issue: 2, drafted: true }],
+    },
+  };
+  const { created, triaged } = readAlign(artifact);
+  assert.equal(created, null, "one malformed member must invalidate the whole created list, not just drop it");
+  assert.deepEqual(triaged, [{ issue: 2, drafted: true }], "triaged is validated independently and stays intact");
+});
+
+test("readDegradedPhases: one malformed entry among otherwise-valid ones invalidates the whole field, never an emptied 'none this round'", () => {
+  const artifact = {
+    degradedPhases: [
+      { phase: "architect", outcome: "escalated", session: "s1" },
+      { phase: "architect", outcome: 42 },
+    ],
+  };
+  assert.equal(readDegradedPhases(artifact, ["architect"]), null);
+});
+
+test("readLanesCounters: a dispatches/merges array with one garbage member invalidates that field's count, never counts the garbage as a real row", () => {
+  const artifact = {
+    dispatches: [{ issue: 1, worker: "w1" }, "garbage"],
+    merges: [{ issue: 1, worker: "w1", pr: 5 }, { issue: 2 }],
+    retries: { gatedReentries: 0, gatedReentryCapped: 0, rollbacksRecovered: 0, rollbacksEscalated: 0 },
+    escalations: { needsHuman: [1, "nope", 2], ceiling: 0, driveNoPr: 0 },
+    handoffs: 0,
+  };
+  const c = readLanesCounters(artifact);
+  assert.equal(c.dispatches, null, "a non-object member must invalidate the dispatches count, never be silently skipped");
+  assert.equal(c.merges, null, "a member missing pr must invalidate the merges count");
+  assert.equal(c.escalations, null, "a non-number needsHuman member must invalidate the whole escalations field");
+});
+
+test("readRetro: a malformed (present but wrong-shaped) opened value is honest-unknown, never the real 'neither' outcome", () => {
+  const artifact = { retro: { opened: { pr: "not-a-number", branch: "x" }, degraded: null } };
+  assert.deepEqual(readRetro(artifact), { known: false, opened: null, degraded: null });
+});
+
+test("readRetro: a malformed (present but wrong-shaped) degraded value is honest-unknown, never the real 'neither' outcome", () => {
+  const artifact = { retro: { opened: null, degraded: { branch: "x" } } };
+  assert.deepEqual(readRetro(artifact), { known: false, opened: null, degraded: null });
+});
