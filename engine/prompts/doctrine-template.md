@@ -1,5 +1,5 @@
 <!--
-  sapwood review doctrine (#167) — repo-level review knowledge the loop carries forward across
+  sapwood review doctrine — repo-level review knowledge the loop carries forward across
   rounds, instead of it living only in a human/conductor's memory and evaporating. Read by the
   worker dispatch brief and the architect pass every round, and cited by the gated-reentry
   escalation comment when automatic fix attempts are exhausted.
@@ -8,11 +8,18 @@
   Absent entirely -> the loop proceeds with an explicit 'none' placeholder, behavior unchanged
   (this file is optional, unlike the north-star goal file).
 
-  This file was scaffolded because none existed yet. It ships with the review doctrine distilled
-  from the 2026-07-13 M5 wave-3 session (11 PRs, 20+ verified findings) — edit it as this repo's
-  own review history accumulates its own recurring findings and adjudication calls. Deliberately
-  PROSE, not a lint/DSL: these are judgment rules for an LLM reviewer, not machine-checkable
-  patterns.
+  Mechanism note: the reviewer applies the doctrine loaded at engine construction time, never a
+  version edited on the PR's own branch — a PR that modifies this file cannot influence the
+  doctrine used for its own review, but it can still pass under the prior rules. Flag a PR that
+  edits this file for human attention rather than auto-merge, so a rule change gets a person's
+  confirmation before it takes effect next round.
+
+  This file was scaffolded because none existed yet — there is no review history to distill a
+  real doctrine from on a fresh repo. It ships with placeholder EXAMPLE entries showing the shape
+  a real entry takes (see "Technical invariants" below); replace them with this project's own
+  recurring findings as they accumulate, and delete the placeholders once real entries exist.
+  Deliberately PROSE, not a lint/DSL: these are judgment rules for an LLM reviewer, not
+  machine-checkable patterns.
 -->
 
 # Review doctrine
@@ -25,40 +32,37 @@ than once, and doctrine for how the loop should treat review findings in general
 Recurring failure classes, stated as judgment rules for LLM reviewers — deliberately NOT a
 lint/DSL, since spotting a violation requires reading design intent, not matching a pattern.
 
-- **Disabled-consumer rule.** Any "is there work?" probe/signal must be gated on whether the
-  role that consumes it is enabled/present. An unconsumable signal pins the probe true forever,
-  defeats standby, and burns peripheral sessions on work nothing will ever read.
-- **Same-tick window rule.** `tick()` reclaims before it dispatches. Any ledger-read dispatch
-  gate must be a thunk evaluated post-reclaim, inside `tick()` itself — never a pre-tick scalar
-  snapshot, and never a post-tick check that races the same tick's own reclaim.
-- **Crash-rerun set.** Persist state before any terminal transition. Use id cursors, not
-  timestamps, for resumable reads. A resumed drain must never re-dispatch what an earlier attempt
-  already dispatched. Reruns must be idempotent — update-in-place, never a counter derived from
-  how many times a probe happened to run.
-- **Safety-layer cross-check rule.** Any new engine state machine or dispatch path must be
-  reviewed against each existing safety layer — kill switch, pause, cost/wall-clock ceiling, and
-  both drain paths (graceful handoff and hard escalation) — one at a time: what does this
-  mechanism do while that layer is active, and what does that layer's firing do to this
-  mechanism's state? (From #168: paid probes running past a breached ceiling, and drains either
-  falsely clearing or permanently wedging a canary episode, were all misses of exactly this
-  cross-product.)
-- **Unwired-function rule.** A shipped recovery/cleanup function with zero production callers is
-  a defect, not a reserve: verify every new cleanup, resume, or clear entry point has a live
-  caller on the path that needs it. (Recurring class: `supervisor.resume()` in #172,
-  `clearEscalationMarker()` in #168's first round.)
 - **Authoritative signals over inferred text.** Detection and classification bind to a structured
   signal first — an API status field, an exit code, a typed event. Formats this project defines
-  and parses fail-closed are contracts, not text matching. When only uncontrolled free text is
-  available, enumerate rather than wildcard, name the failure direction, state the blind spot.
-- **Doctrine self-modification rule.** A PR that modifies this review-doctrine file itself must
-  be prominently flagged in review, with a recommendation to route it needs-human rather than
-  auto-merge. The reviewer applies the doctrine loaded at engine construction, never the version
-  on the PR's branch — the change cannot influence the doctrine used for its own review, but it
-  can still pass under the prior rules, so a human should confirm rule changes.
+  and parses fail-closed are contracts, not text matching, even when they travel as text. Only
+  genuinely uncontrolled free text is last-resort: match narrow, signature-shaped patterns, never
+  a wildcard, and name the failure direction (false-positive vs. false-negative) the choice
+  favors. Generic engineering discipline, not project-specific — kept as a real default rather
+  than an illustrative placeholder, unlike the two examples below.
+
+The two entries below ARE fictional placeholder examples — there is no real review history yet on
+a fresh repo. Replace them with this project's own recurring findings, in the same form, once
+this project's own review history has flagged something more than once; delete them if nothing
+has recurred yet.
+
+- **Example (illustrative, not a real finding): currency-rounding boundary rule.** If this were a
+  payments service, a rule distilled from two independent review findings might read: "A monetary
+  amount is rounded to the currency's minor unit exactly ONCE, at the boundary where it leaves
+  this service (an API response, a ledger write) — never inside an intermediate calculation.
+  Rounding early and again later compounds into off-by-one-cent drift that only surfaces in
+  reconciliation, days after the code that caused it shipped." That is the SHAPE a real entry
+  takes: a specific, testable judgment call tied to a concrete failure mechanism, not a style
+  preference.
+- **Example (illustrative, not a real finding): cache-invalidation ordering rule.** If this were a
+  content-management system, a rule might read: "A write that changes a resource's visibility
+  (publish/unpublish, a permission change) invalidates any cache keyed on that resource BEFORE the
+  write's transaction commits, never after. A commit-then-invalidate ordering leaves a window
+  where a cached read can return content whose access was just revoked."
 
 ## Adjudication doctrine
 
-How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbatim principles):
+How the loop should treat review findings in general — this half is project-agnostic; keep it as
+a sensible default, or edit it to match this project's own norms:
 
 1. **Review findings are INPUTS, not truth.** Judge each finding against reality before acting;
    reject low-ROI or misdirecting findings WITH recorded reasons rather than applying every
@@ -70,6 +74,6 @@ How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbati
    is signal for adjudication, not automatic compliance — weigh it, don't just apply it.
 4. **Runaway complexity escalates to the top of the loop, not more patches.** When a feature's
    implementation effort turns counterintuitive or runaway-complex, re-examine the feature's
-   design/technical direction (architect/plan re-review) instead of grinding through more fix
-   rounds. The nearest mechanism today is the fix-round cap escalating to a human — but the
+   design/technical direction (an architect/plan re-review) instead of grinding through more fix
+   rounds. The nearest mechanism for this is the fix-round cap escalating to a human — but the
    doctrine names DESIGN RE-ENTRY, not just human escalation, as the intended response.

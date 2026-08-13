@@ -23,7 +23,7 @@ const warningMessage = (path: string): string =>
   `deny, the Write/Edit/MultiEdit deny, the Agent/Task spawn deny) is VOID on this host; only ` +
   `managed-settings permission rules are respected. Two exits: mirror sapwood's deny rules into ` +
   `managed settings yourself, or consciously accept this posture. Either way, see ` +
-  `docs/security.md#managed-settings-allowmanagedpermissionrulesonly-exception-554 for the exact ` +
+  `docs/security.md#managed-settings-allowmanagedpermissionrulesonly-exception for the exact ` +
   `rule list and both options in full. No action is taken automatically.`;
 
 /** Run once per engine start (cli.ts, next to detectRapidRestart/detectConsecutiveStalls). Never

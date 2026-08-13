@@ -49,7 +49,7 @@ Alternatively, do not link it and replace every `sapwood <cmd>` below with
 CLI verbs include `sapwood init`, `sapwood validate`, `sapwood run`, `sapwood status`,
 `sapwood events`, `sapwood park clear`, and the stop-control verbs `sapwood pause`/`stop`/
 `estop` (each with a `clear` form; `estop` additionally requires `--confirm` to activate —
-#731, see `sapwood estop --help`).
+see `sapwood estop --help`).
 
 ### Channel B — Claude Code plugin/marketplace install: not yet available
 
@@ -98,8 +98,9 @@ sapwood init
    `sapwood:verify:n/a`, `sapwood:plan:approved`, `sapwood:origin:agent`) — detection is
    case-insensitive and missing labels are created lowercase, so it never clobbers labels
    you've already customized. Set `labels.prefix: ""` for bare defaults; explicitly configured
-   workflow-label values are used verbatim. Existing pre-#199 repositories must complete the
-   [label migration before restarting sapwood](configuration.md#upgrading-from-pre-199).
+   workflow-label values are used verbatim. Existing repositories still carrying the older
+   bare (unprefixed) label taxonomy must complete the
+   [label migration before restarting sapwood](configuration.md#upgrading-from-unprefixed-labels).
    The **engine repeats this same provisioning pass at every `sapwood run` startup**, from the
    same list — so a repo initialized before a newer workflow label existed (say
    `sapwood:round:pool`) simply gets that label created on the next start, with no manual
@@ -109,7 +110,7 @@ sapwood init
    sapwood only needs labels + board lanes, milestones are your organizational choice).
 5. **Ensures the ProjectV2 board's `Status` field has the configured lanes**
    (`Ready` / `In Progress` / `Done` by default).
-6. **Provisions the L1 worker deploy key (#606 gate② round 1–2) — the default onboarding path
+6. **Provisions the L1 worker deploy key — the default onboarding path
    for the worker's write capability.** `init` generates a per-repo ed25519 SSH key
    (`ssh-keygen`), registers it as a **write** deploy key (`gh repo deploy-key add --allow-write
    --title sapwood-worker`) under your own logged-in `gh` credential (requires repo admin), runs a
@@ -125,7 +126,7 @@ sapwood init
    through this key, with **no forge API credential in its environment at all**: it structurally
    cannot open a PR, approve a review, label an issue, or touch the board — the engine does all of
    that from its own, separately-held credential (see
-   [Worker credential tiers](security.md#worker-credential-tiers-351-606) for the full L0/L1
+   [Worker credential tiers](security.md#worker-credential-tiers) for the full L0/L1
    picture and honest residuals). If you don't have repo admin, `init` logs exactly what to do by
    hand (or skip — the engine runs fully functional either way, at L0, today's fuller-credentialed
    default) and moves on; it never fails `init` over this. On a LATER run, if the recorded key
@@ -176,13 +177,13 @@ configured lanes exist.
 > ```
 >
 > `reviewer.mode` defaults to `engine-agent`, which is a second paid, headless Claude session.
-> With the shipped empty `ci.requiredChecks` list, `sapwood run` now refuses to start rather than
-> queueing every PR fail-closed forever (#784) — `sapwood validate` reports the same refusal.
+> With the shipped empty `ci.requiredChecks` list, `sapwood run` refuses to start rather than
+> queueing every PR fail-closed forever — `sapwood validate` reports the same refusal.
 > Configure the check above before your first run. Do not start an unattended run until the
 > pull-request check above is visible and green on a human-authored test PR.
 
 For the operational distinction between a healthy wait, standby, a frozen ceiling, and a
-genuine wedge, use the [engine-state truth table in loop walkthrough §6](loop-walkthrough-v0.2.md#6-the-state-truth-table--reading-the-engine-at-a-glance).
+genuine wedge, use the [engine-state reference table](troubleshooting.md#reading-engine-state-at-a-glance).
 
 ## Trust model prerequisites
 
@@ -216,8 +217,8 @@ Complete this setup before choosing L3.
 Credential isolation has deliberate limits: the L1 environment removes the normal forge
 credential path, but it is not OS-level confinement from arbitrary code or the host's
 credential store. Read Security's [Accepted blind spots](security.md#accepted-blind-spots),
-[Worker credential tiers (#351, #606)](security.md#worker-credential-tiers-351-606), and
-[Worker-leg user-settings persistence vector — detect & disclose (#615)](security.md#worker-leg-user-settings-persistence-vector--detect--disclose-615)
+[Worker credential tiers](security.md#worker-credential-tiers), and
+[Worker-leg user-settings persistence vector — detect & disclose](security.md#worker-leg-user-settings-persistence-vector--detect--disclose)
 before relying on unattended merge.
 
 ## L0–L3 autonomy ladder
@@ -392,7 +393,7 @@ shapes are:
 
 At every level, `sapwood status` tells you what's happening without needing a live
 session. Channel A's controls are file sentinels in the target repo (the repo containing
-`data/`), reachable either as raw `touch`/`rm` or (#731) as first-class `sapwood` CLI
+`data/`), reachable either as raw `touch`/`rm` or as first-class `sapwood` CLI
 verbs — both act on the exact same three files:
 
 ```sh
@@ -435,7 +436,7 @@ ships instead is a **supervision contract** the engine holds up its end of:
   script notices). A **self-diagnosed stall** — the progress watchdog observing a whole
   window with zero durable events — writes `engine-stalled` and exits **nonzero**: that
   nonzero exit is the restart request. A crash writes nothing, and that absence is
-  itself meaningful (see [troubleshooting.md](troubleshooting.md#how-a-dead-engine-says-why-it-died-407)).
+  itself meaningful (see [troubleshooting.md](troubleshooting.md#how-a-dead-engine-says-why-it-died)).
 - **Restart is always safe.** Startup is rerun-not-resume: reconcile recovers the round
   in flight, adopts still-alive detached workers, and a restart after a stall records
   `engine-restart-after-stall` for the audit trail — no manual step, no state surgery.
@@ -450,7 +451,7 @@ ships instead is a **supervision contract** the engine holds up its end of:
   the breaker (the engine cannot observe the intent behind a signal and does not infer
   it). An established `consecutive-stalls` park **never auto-clears**: it stands, with
   its single escalation, across any number of restarts until you clear it explicitly —
-  see [troubleshooting.md](troubleshooting.md#consecutive-stalls-park-407) for the
+  see [troubleshooting.md](troubleshooting.md#consecutive-stalls-park) for the
   operator-clear step. These are backstops, not a substitute: configure the
   supervisor's **own** circuit-breaker too — a *prerequisite* for unattended supervised
   runs ([security.md](security.md)'s supervisor prerequisite).
@@ -500,7 +501,7 @@ burst, which makes the engine's own two backstops — and checking
 These thin wrappers are available only in a Claude Code session that has loaded the sapwood
 plugin. They are **not** loaded by Channel A's clone/build/link install, and Channel B's
 marketplace installation is not yet available. Channel A users should use the file-sentinel
-commands (raw or the `sapwood pause`/`stop`/`estop` CLI verbs, #731) above for stop/pause
+commands (raw or the `sapwood pause`/`stop`/`estop` CLI verbs) above for stop/pause
 control and the linked CLI for run/status.
 
 - **`/sapwood-run [--once|--until-idle|--dry-run]`** — runs `sapwood run` with the given
@@ -545,23 +546,23 @@ doc-gate path (the reviewer checks that the described durable-knowledge change a
 landed) rather than a red/green test cycle. `sapwood init` provisions the `sapwood:verify:n/a`
 label for you.
 
-As of gate⓪ (#88), a plan being present isn't enough on its own either: the configured
+A plan being present isn't enough on its own either: the configured
 `labels.planApproved` label (`sapwood:plan:approved` by default) is also required before
 `getReadyIssues` will dispatch an issue without `labels.verifyNa` — it
-means the verification-plan-reviewer peripheral judged the acceptance criteria and verification plan
+means the gate⓪ verification-plan-reviewer peripheral judged the acceptance criteria and verification plan
 actually executable, not just present. See
-[`security.md`](security.md#the-planapproved-label-and-gate-88) for the full gate. The default rounds driver
+[`security.md`](security.md#the-planapproved-label-and-gate) for the full gate. The default rounds driver
 runs the verification-plan-reviewer peripheral each round and applies it automatically when it approves
 a plan; `sapwood init` provisions the label like `sapwood:verify:n/a` and
 `sapwood:origin:agent` above.
 
 Acceptance criteria must be written as literal checkbox lines — `- [ ] ...` — under the
-`## Acceptance criteria` heading, never as prose (#283). The engine parses exactly this
+`## Acceptance criteria` heading, never as prose. The engine parses exactly this
 shape into the authoritative AC set a worker is dispatched against; a malformed or empty
 checkbox set blocks dispatch even with `plan:approved` applied. The engine also snapshots
 the full issue body BEFORE a worker ever spawns, and re-checks it for drift at review
 time — see
-[`security.md`](security.md#the-ac-authority-dispatch-snapshot-283-design-279-5) for the
+[`security.md`](security.md#the-ac-authority-dispatch-snapshot) for the
 full mechanism.
 
 Any issue a human didn't personally author — including one an agent role opens on your
@@ -569,7 +570,7 @@ behalf — should carry the configured `labels.originAgent` label (`sapwood:orig
 default); see
 [`security.md`](security.md#the-originagent-label-convention) for why.
 
-### The `Origin:` line on agent-filed issues (#442)
+### The `Origin:` line on agent-filed issues
 
 An issue the PO's align pass files ends its body with a one-line `Origin:` statement naming
 the **evidence that triggered it** — the event id(s), lane, episode, or parent issue it came
@@ -596,7 +597,7 @@ day something tries to consume the line, it fails loudly rather than quietly.
 The line is shipped default prompt text, so it is overridable like any other role prompt —
 point `roles.po.promptFile` at your own copy to change it.
 
-### What the `Ready` gate does *not* check: duplicates (#560)
+### What the `Ready` gate does *not* check: duplicates
 
 **Nothing in the loop checks whether an issue you move to `Ready` duplicates another open
 issue.** That is a decision, not an oversight. Move two issues describing the same work to

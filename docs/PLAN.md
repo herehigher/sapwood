@@ -466,7 +466,7 @@ says stop.
   reply/resolve responses the leg emits, rather than relaying free-text back through a
   prompt. The `fixing → driving` edge clears the review-trigger pin, reusing `driveOne`'s
   own re-trigger machinery exactly like #147's gated reentry does. See
-  [`security.md`](security.md#fix-loop-fixing-lane-state-245) for the full mechanism.
+  [`security.md`](security.md#fix-loop-fixing-lane-state) for the full mechanism.
   **Narrowed by #147 (gated-PR reentry, 2026-07-13):** a `needs-human` escalated on
   gate②'s findings (`gate:HUMAN:HANDLE_THREADS`, the most frequent shape per the #122
   live-run report) is no longer a dead end requiring a manual fix→re-review→merge
@@ -858,7 +858,7 @@ throwaway directory with explicit `--system-prompt`/`--add-dir`/`--mcp-config`
 injection — `--bare` is MANDATORY in that recipe, not optional, since only it makes
 passed flags the sole inputs) — never production, since `--bare` also disables hooks
 and the guard hook is the actual safety boundary. See
-[`security.md`](security.md#ambient-repo-context-record-dont-seal-236) for the full
+[`security.md`](security.md#ambient-repo-context-record-dont-seal) for the full
 model and the isolation recipe.
 
 **Honest framing (2026-07-17, issue #238).** This same broad, recorded read access is
@@ -1661,7 +1661,7 @@ to when v0.2 implementation issues are cut, not locked here.
   machinery) and trusted-repos-first; a keyword-match dup warning at the gate would fire on
   unrelated issues sharing vocabulary, and a warning humans learn to ignore costs more than
   the duplicate. Stated for users in
-  [`getting-started.md`](getting-started.md#what-the-ready-gate-does-not-check-duplicates-560).
+  [`getting-started.md`](getting-started.md#what-the-ready-gate-does-not-check-duplicates).
   Revisit only if a real run is actually bitten.
 
 ## Verification (how we'll prove v1)

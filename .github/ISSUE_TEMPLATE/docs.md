@@ -36,6 +36,7 @@ Out of scope: <!-- Encouraged: name one adjacent documentation change this issue
 <!-- sapwood:verification -->
 
 Most docs-only work is inherently unverifiable by test/command — if that's the case
-here, say so and apply the `verify:n/a` label instead of filling this section (the
-doc-gate path, see CLAUDE.md). If there IS something checkable (a link resolves, a
-generated doc matches source, etc.), describe it here.
+here, say so and apply the `verify:n/a` label instead of filling this section (this
+routes the issue through the doc-gate path instead of the usual verification gate).
+If there IS something checkable (a link resolves, a generated doc matches source,
+etc.), describe it here.

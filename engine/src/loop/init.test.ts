@@ -754,12 +754,22 @@ test("defaultDoctrineTemplatePath resolves to a real, readable shipped file with
   const text = readFileSync(path, "utf8");
   assert.match(text, /^# Review doctrine/m);
   assert.match(text, /^## Technical invariants/m);
-  assert.match(text, /disabled-consumer rule/i);
-  assert.match(text, /same-tick window rule/i);
-  assert.match(text, /crash-rerun set/i);
-  assert.match(text, /doctrine self-modification rule/i);
-  assert.match(text, /safety-layer cross-check rule/i);
-  assert.match(text, /unwired-function rule/i);
+  // #409: the one rule every target repo inherits as a real standing default, not an example.
+  assert.match(text, /authoritative signals over inferred text/i);
+  // The rest of "Technical invariants" is explicitly fictional/illustrative — a fresh repo has
+  // no review history yet, so seeding it with sapwood's own real internal rules would be
+  // meaningless to whatever project this template actually ships into.
+  assert.match(text, /fictional placeholder/i);
+  assert.doesNotMatch(
+    text,
+    /disabled-consumer rule/i,
+    "sapwood's own internal engine rule must not leak into the generic starter template",
+  );
+  assert.doesNotMatch(
+    text,
+    /\btick\(\)|supervisor\.resume\(\)/,
+    "sapwood's own source symbols must not leak into the generic starter template",
+  );
   assert.match(text, /^## Adjudication doctrine/m);
   assert.match(text, /inputs, not truth/i);
 });

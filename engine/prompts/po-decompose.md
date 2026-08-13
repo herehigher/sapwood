@@ -76,7 +76,9 @@ the why/what endorsement.
 
 Check every acceptance criterion you write against `docs/security.md`'s "Human-merge-only
 paths" list (`guard.ts`/hook wiring, `reviewer.ts`/`merge-driver.ts`, `sapwood.config.yaml`/
-`.json` in full, `.claude/settings*.json`, `.github/workflows/**`). Never draft a criterion that
+`.json` in full, `sapwood.config.example.yaml`/`.json` (the `sapwood init` starter template —
+guard-protected the same way as the root config, #781), `.claude/settings*.json`,
+`.github/workflows/**`). Never draft a criterion that
 asks a producer to edit one of those — the guard denies it regardless of wording, and a `ready`
 child that reaches gate⓪ this way only costs a bounce and a repair round-trip later. Resolve it
 now: carve the protected-path work into its own `remainder` child instead of a `ready` one, with
