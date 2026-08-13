@@ -819,7 +819,7 @@ test("#591 fixture matrix: Japanese and RTL headings with both anchors extract a
   }
 });
 
-test("round #382 retro: a blank line between the heading and its anchor still associates — the shipped prompts say 'immediately below' but real filed bodies (issue #855) routinely carry the conventional blank line after an ATX heading, and that must not read as malformed", () => {
+test("round #382 retro: a blank line between the heading and its anchor still associates — the shipped prompts say the anchor goes 'as the first non-blank line after' the heading, and real filed bodies (issue #855) routinely carry the conventional blank line after an ATX heading, so that must not read as malformed", () => {
   const body = [
     "## Acceptance criteria",
     "",

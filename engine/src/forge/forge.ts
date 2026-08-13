@@ -2111,15 +2111,16 @@ type MarkedSection = { start: number; level: number };
 type MarkedSectionAssociation = Record<MarkedSectionRole, string> & { plan: string };
 
 /**
- * Associate exact sapwood section markers with the ATX heading immediately above each marker.
- * "Immediately" tolerates any number of BLANK lines between the heading and the marker (the
- * shipped prompts say "immediately below"/"immediately after" the heading, but every
- * role — and every human editing a role's output by hand — routinely leaves the one blank
- * line ATX headings conventionally get before their body; round #382's retro found a
- * real, well-formed issue #855 bounced twice by gate⓪ over exactly this byte-exact gap,
- * even though a human reading the rendered issue would call it obviously well-formed). Any
- * OTHER content between the heading and the marker still breaks the association — this
- * loosens whitespace tolerance only, not "marker anywhere below its heading".
+ * Associate exact sapwood section markers with the ATX heading above each marker, where the
+ * marker must be the first non-blank line after that heading. This tolerates any number of
+ * BLANK lines between the heading and the marker (the shipped prompts say the marker goes "as
+ * the first non-blank line after" the heading, matching this grammar, but every role — and
+ * every human editing a role's output by hand — routinely leaves the one blank line ATX
+ * headings conventionally get before their body; round #382's retro found a real, well-formed
+ * issue #855 bounced twice by gate⓪ over exactly this byte-exact gap, even though a human
+ * reading the rendered issue would call it obviously well-formed). Any OTHER content between
+ * the heading and the marker still breaks the association — this loosens whitespace tolerance
+ * only, not "marker anywhere below its heading".
  *
  * `undefined` means no markers occurred outside fences, so callers must retain the legacy
  * English-heading parser unchanged. `null` means marked mode was selected but its protocol was
@@ -2134,8 +2135,10 @@ function associateMarkedSections(body: string): MarkedSectionAssociation | null 
   let fence: { character: "`" | "~"; length: number } | null = null;
   // Tracks whether every line since the most recent heading has been blank — the marker
   // still has to be the FIRST non-blank content after its heading, just not necessarily the
-  // very next physical line. Reset true on every new heading; cleared by any non-blank,
-  // non-marker line (including a fence opener) and left alone by a marker line itself.
+  // very next physical line. Reset true on every new heading; cleared by any non-blank line,
+  // including a fence opener, a marker line itself (closing its own association window so a
+  // second marker reached only via more blank lines can't bind to the same heading), or any
+  // other non-blank content.
   let blankSinceHeading = true;
 
   for (const [lineNumber, rawLine] of body.split("\n").entries()) {
