@@ -164,12 +164,14 @@ manual cleanup needed:
   the index, so a lane that finished successfully reads clean against this baseline,
   where anchoring on dispatch time would flag every successful lane as dirty). This runs
   as part of the same close-out that moves the board item to `done`. A worktree that's
-  still present and passes the check is deleted and its git-worktree registration
-  pruned; one that's already gone is left alone entirely — no event, nothing to prune.
-  One that's present but fails the check is left in place, recorded event-only: the PR
-  is already merged, so nothing is blocked on it, and this never applies
-  `labels.needsHuman` or posts an escalation comment — check `sapwood events` for the
-  lane, not the issue thread.
+  still present and passes the check is deleted, and a best-effort attempt is made to
+  prune its now-orphaned git-worktree registration too — that cleanup step can fail
+  silently (a stale `git worktree list` entry left behind) without affecting the
+  directory deletion already done. One that's already gone is left alone entirely — no
+  event, nothing to prune. One that's present but fails the check is left in place,
+  recorded event-only: the PR is already merged, so nothing is blocked on it, and this
+  never applies `labels.needsHuman` or posts an escalation comment — check `sapwood
+  events` for the lane, not the issue thread.
 
   **Parked human-merge-only lanes are the exception**, not this path: once a human
   merges one of those by hand, sapwood closes it out on its own next tick using the same
