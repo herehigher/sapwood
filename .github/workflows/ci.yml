@@ -68,6 +68,30 @@ jobs:
       - run: timeout --kill-after=30s 600 npm --workspace engine test
       - run: timeout --kill-after=30s 300 npm --workspace dashboard test
 
+  # #799 (PLAN.md:129's CI-enforcement half — the engine-side half ships in ordinary commits, this
+  # job is the human-merge-only remainder on this human-merge-only `.github/workflows/**` path):
+  # installs the EXACT floor CLI version and asserts its --help output offers every long flag
+  # the engine's worker/probe argv depends on — zero spend, no auth, no -p. A future engine
+  # change that starts depending on a flag the pinned floor doesn't support fails HERE instead
+  # of failing silently for every operator still on the floor version.
+  claude-cli-floor:
+    runs-on: [self-hosted, mac-mini-docker-runner] # pre-public; see the `test` job's own note above
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: Install the floor Claude Code CLI version (no auth, no spend — package install only)
+        run: npm i -g @anthropic-ai/claude-code@2.1.209
+      - name: Assert claude --help offers every long flag the engine's argv depends on
+        run: npx tsx engine/scripts/check-claude-cli-flags.ts
+
   # The auxiliary hosted arm (`test-hosted`, owner directive 2026-08-10) lives in
   # ci-hosted-aux.yml with its own `on: push: branches: [main]` trigger — NOT here as
   # an `if: github.event_name == 'push'` job: a job-level `if` reports a SKIPPED check

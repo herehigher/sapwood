@@ -44,6 +44,10 @@ merge:
   mode: produce-pr-and-stop
 
 # These are the documented defaults. Uncomment to override them.
+# language: # default: en for every surface — see docs/configuration.md's "language" section
+#   codeComments: en # BCP-47-ish tag (e.g. ja, zh-Hans, pt-BR); passed through opaquely
+#   issuesAndPrs: en
+#   docs: en
 # envFailure:
 #   llmPatterns: [rate_limit_error, "rate limit exceeded", "usage limit reached",
 #                 "credit balance is too low", insufficient_quota, overloaded_error,

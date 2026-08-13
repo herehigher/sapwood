@@ -795,8 +795,8 @@ export function discoverClaudeBin(env: Record<string, string | undefined>): stri
  *  `worker` section (claude-version-startup-check.test.ts's AC1/AC2 test) — changing this value
  *  without updating both docs to the SAME exact string fails that test. Consumed by
  *  claude-version-startup-check.ts's once-per-engine-start WARN-only startup detector — never a
- *  gate, see that module's own doc — and by the human-owned CI remainder
- *  (docs/patches/799-ci-claude-cli-version-floor.patch) via `ENGINE_CLAUDE_LONG_FLAGS` below. */
+ *  gate, see that module's own doc — and by the CI floor-check job (ci.yml's `claude-cli-floor`)
+ *  via `ENGINE_CLAUDE_LONG_FLAGS` below. */
 export const MIN_CLAUDE_CLI_VERSION = "2.1.209";
 
 /** #168: the ping probe's outcome. `detail` is set on FAILURE only — the first stderr (or
@@ -1355,8 +1355,8 @@ function isLongFlag(token: string): boolean {
  *  version-floor startup check ALSO spawns `claude` (`probeClaudeVersion`, `["--version"]`), and
  *  that argv had never been folded in, so a real installed CLI's true fresh+resume+ping+version
  *  union (24 flags) exceeded what this set asserted (23). This is what the CI floor-check
- *  (`docs/patches/799-ci-claude-cli-version-floor.patch`'s `check-claude-cli-flags.ts`) asserts
- *  `claude --help` advertises — the human-owned CI remainder's own promise to check EVERY long
+ *  (`engine/scripts/check-claude-cli-flags.ts`, run by ci.yml's `claude-cli-floor` job) asserts
+ *  `claude --help` advertises — its own promise to check EVERY long
  *  flag the engine emits across EVERY shape it spawns `claude` in, not a curated subset. */
 export const ENGINE_CLAUDE_LONG_FLAGS: readonly string[] = (() => {
   const { resumeSessionId: _resumeSessionId, ...freshOpts } = MAXIMAL_CLAUDE_ARGS_OPTS;

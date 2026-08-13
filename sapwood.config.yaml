@@ -94,6 +94,16 @@ worker:
   #                   rate-table approximation (see pricingFile below), not the real billed
   #                   cost; it's reconciled against the real total_cost_usd (logged) once the
   #                   worker finishes.
+  #                   CALIBRATION (#386, dogfood 2026-07-24): this default suits SMALL-to-
+  #                   MEDIUM work. With the shipped opus/high profile above, one leg of a
+  #                   substantive implementation issue costs ~$8-20 — at 10, every substantive
+  #                   first leg handed off before opening a PR (3/3 observed); 20 carried them
+  #                   through in one go. Nothing broke: the handoff is graceful and maxResumes
+  #                   resumes the same branch — a low cap costs re-priming, not work. It does
+  #                   NOT move alone: budgetUsdSoft x lanes.max should stay under
+  #                   cost.roundBudgetUsd (10 x 3 = exactly the shipped 30), or the round
+  #                   throttle just becomes the new bottleneck. See docs/configuration.md
+  #                   "Calibrating budgetUsdSoft".
   # maxResumes: 2   # Fresh budgeted legs allowed after the initial leg hands off. 0 disables
   #                   automatic resume; exhaustion latches the lane + adds needs-human once.
   # pricingFile: pricing/my-rates.yaml
@@ -149,7 +159,7 @@ reviewer:
   # engine-agent: a static, different-Claude-model review session the engine runs locally,
   # on the same Claude CLI sapwood itself needs — default (#501, 2026-08-01). No extra
   # install: a fresh sapwood user already has everything this kind requires.
-  # different-model-codex: predecessor-project-style gate② instead — a fresh non-author review from the
+  # different-model-codex: gate② instead — a fresh non-author review from the
   # hosted `@codex review` GitHub App. Requires that App installed on this repo; was the
   # default before #501. same-model-trusted | human are the other reviewer kinds.
   # produce-pr-and-stop is configured separately at merge.mode.
@@ -461,6 +471,18 @@ doctrine:
   maxChars: 20000 # deterministic truncation cap (same marked-cut-never-silent-drop contract
                    # as round.directiveMaxChars / roles.architect.lastMergedMaxChars).
 
+# #701: the development-language policy — the working language every role composes free text
+# in, per surface (code comments, issue/PR prose, docs). Every key defaults to `en`; this
+# repo's own working language is English, so the section is left commented — equivalent to
+# leaving `language` unset (the schema default resolves every surface to `en`), not a claim
+# that applying this patch is byte-identical either way. Uncomment and set a BCP-47-ish tag
+# per surface to change it — see docs/configuration.md's "language" section for the full
+# mechanics, the #167 CLAUDE.md fallback precedence, and the #591 issues/PRs-surface interplay.
+# language:
+#   codeComments: en
+#   issuesAndPrs: en
+#   docs: en
+
 # #168: environment-failure park — an LLM-provider outage (429/usage-limit/credit-exhausted) or
 # a forge outage (GitHub down, network partition, gh token expiry) is ONE class: never escalate
 # the issue, never spend a gated-reentry attempt, park the engine (no new dispatch; one episode
@@ -525,9 +547,9 @@ doctrine:
 # set over a bearer-token-authenticated local HTTP server, minted per session, revoked at
 # teardown — issue-oriented tools (issue_details/issue_comments/issue_relations/search_issues,
 # #234) for peripheral roles, PR-facing tools (pr_details/pr_reviews/pr_review_threads/pr_checks/
-# getPRAuditComments [camelCase wire name, the odd one out; #556 tracks normalizing it],
-# #244 — the fix-loop worker leg's PR-review evidence channel) for the `worker` role. No gate/
-# verdict logic lives in any tool; that stays in reviewer.ts/merge-driver.ts.
+# pr_audit_comments, #244 — the fix-loop worker leg's PR-review evidence channel) for the
+# `worker` role. No gate/verdict logic lives in any tool; that stays in reviewer.ts/
+# merge-driver.ts.
 # proxy:
 #   enabled: true  # #551 default; set to false to opt out (fully inert)
 #   caps:
@@ -577,11 +599,11 @@ doctrine:
 #   # recursive `**`. Paths must be trimmed canonical repo-relative forms (no ./, /, .. segment,
 #   # //, or trailing /). A list at GitHub's 3,000-file ceiling escalates as unverifiable. Set
 #   # to [] to deliberately disable the mechanism (then sapwood does not fetch changed files).
-#   # #527: the reviewer's OWN doctrine file is covered too, DERIVED from doctrine.file (so a
-#   # repointed doctrine path stays covered) — it is never listed here. engine/prompts/** covers
-#   # the shipped reviewer prompt; inert unless the target repo IS the engine's source tree. A
-#   # repointed reviewer.agent.promptFile outside that glob is NOT covered — add it by hand
-#   # (docs/security.md, "Which carriers are covered").
+#   # #527/#549: the reviewer's OWN carriers are covered too, DERIVED from doctrine.file and
+#   # reviewer.agent.promptFile (so a repointed path stays covered) — neither is listed here.
+#   # engine/prompts/** covers the shipped reviewer prompt; inert unless the target repo IS the
+#   # engine's source tree. A derived path outside the repo (absolute or ..-escaping) is skipped
+#   # rather than smuggled in (docs/security.md, "Which carriers are covered").
 #   instructionPaths: [CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md, .claude/rules/**, AGENTS.md, engine/prompts/**]
 #   holdLabels: [sapwood:hold]  # #248: human-applied WAIT-tier hold (three-tier escalation
 #                                # model: hold/needs-human/blocked, each one fact). Matched by

@@ -568,7 +568,7 @@ startup or dispatch.
   `guard.ts` had no `git push` handling at all, so a worker leg holding `Bash(git *)` (L0 host
   credentials, or an L1 deploy key on an unprotected default branch) could run `git push origin
   HEAD:<default-branch>` and skip gate①/gate② entirely. The engine now denies this at the guard
-  layer too: a deny rule (paste-ready as a human-applied patch, `docs/patches/`, since guard.ts /
+  layer too: a deny rule (authored as a human-merge-only edit, since guard.ts /
   the guard hook wiring is human-merge-only — see "Human-merge-only paths" below) blocks refspec
   destinations naming the default branch, `--delete`, and `--mirror`/`--all`, active only when the
   engine's trusted spawn env `SAPWOOD_DEFAULT_BRANCH` is set (worker.ts resolves it from the same
@@ -1739,6 +1739,13 @@ discharge**. Such issues are best written to ask for a paste-ready patch (which 
 *can* produce, in the PR body or a plain file) rather than for the edit itself, so the
 work is dispatchable and the acceptance criteria are honestly satisfiable.
 
+> **RETIRED (owner ruling, 2026-08-13):** `.patch` files are no longer committed to the
+> repo — the `docs/patches/` folder is deleted. The paste-ready-patch mechanism described
+> in the rest of this section is retired; a human-merge-only acceptance criterion is now
+> satisfied by a **direct edit in the PR whose diff a human reviews and merges** (or a
+> carved-out human-owned remainder), never a committed `.patch` artifact. The prose below
+> is preserved for context pending its full rewrite in **#848**.
+
 **Resolved at issue-authoring time, not just caught at gate⓪ (retro round #284).**
 `verification-plan-reviewer.md`/`verification-plan-drafter.md` catch an acceptance criterion that
 still asks for a direct edit to one of these paths — but until #284 that was the *only* check,
@@ -1878,17 +1885,13 @@ Bash access can invoke by name. They resolve the sentinel path internally
 `data/PAUSE`/`data/KILL_SWITCH`/`data/EMERGENCY_STOP` token ever appears on the Bash
 command line for `checkControlSentinelArg` to match — including `sapwood estop clear`,
 which lifts an already-fired EMERGENCY_STOP with no sentinel path in sight. `guard.ts` is
-human-merge-only, so #731 cannot close this gap with a source edit in the same PR that
-opens it; instead, PR #818 ships **`docs/patches/731-guard-stop-control-verbs.patch`** — a
-paste-ready guard.ts/guard.test.ts diff (same route as
-`docs/patches/679-guard-default-branch-push.patch`) extending
+human-merge-only, so #731's guard change was authored as a human-merge-only edit (PR #818,
+merged by a human) rather than by the worker that opened the gap — extending
 `checkControlSentinelArg`'s Bash-argument accident fence to recognize the three
-stop-control verbs, apply-checked by `engine/src/guard/patch-731-apply-check.test.ts`.
-**Until a human applies that patch, this specific gap stands open** — treat it as live,
-not as a documented-and-accepted residual, and apply the patch before relying on the
-guard to cover these verbs.
+stop-control verbs, the same route as the #679 default-branch-push deny rule. **This fence
+is now in place.**
 
-**Once applied, the patch fences the *discoverable* stop-control invocation forms** — the
+**The fence covers the *discoverable* stop-control invocation forms** — the
 bare `sapwood` binary, `node .../cli.js`/`cli.ts` (path-prefixed or direct-executed), and
 `npx sapwood[@version]` (npm's own documented "run a specific/latest version" syntax) —
 the shapes this repo's own operator docs and `--help` text teach. An invocation that hides

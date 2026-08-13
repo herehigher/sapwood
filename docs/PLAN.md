@@ -1179,7 +1179,7 @@ marker idempotency, output schema, escalation path) see
   shrank gate② input would be the invisible weakening this project refuses. Delivered in
   two halves because the consuming code is human-merge-only: the `forge.ts` data plumbing
   through the normal loop, the `reviewer.ts`/`merge-driver.ts` consumption as a
-  human-apply patch (`docs/patches/378-resolved-thread-head-freshness.patch`).
+  human-merged change (#378).
   **Commands + status CLI + first-run trust ramp delivered
   (#15, PR TBD):** `sapwood status [db-path]` reads the SQLite state DB directly (no
   live engine session) and reports active lanes, PRs awaiting the review gate, spend

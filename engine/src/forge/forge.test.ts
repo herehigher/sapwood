@@ -2209,7 +2209,7 @@ test("parseReviewThreadsPage: absent/malformed shape -> 0 + terminal, never thro
 // had been human-adjudicated and thread-resolved. Gate② could not tell an already-adjudicated
 // re-raise from a fresh finding because the only per-thread data it ever saw was an aggregate
 // unresolved COUNT. These fields (span + GitHub's own isOutdated + the resolution-time commit
-// reference) are what reviewer.ts needs to make that distinction — see docs/patches/378-*.patch.
+// reference) are what reviewer.ts needs to make that distinction (#378).
 
 /** A reviewThreads page carrying the full #378 node shape (the helper above deliberately keeps
  *  the OLD, field-less node shape so the degradation tests below stay honest). */
