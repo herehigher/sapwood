@@ -2176,6 +2176,12 @@ function associateMarkedSections(body: string): MarkedSectionAssociation | null 
               role: marker[1]!,
               heading: previous && blankSinceHeading ? previous : undefined,
             });
+            // Close the association window: the marker line itself is "content" for every
+            // subsequent line under this heading, so a SECOND marker line reached only via
+            // more blank lines (or via this marker line) never re-associates with the same
+            // heading. Without this, "heading / blank / <ac> / blank / <verification>" bound
+            // BOTH markers to one heading instead of failing closed as malformed.
+            blankSinceHeading = false;
           } else if (line.trim() !== "") {
             blankSinceHeading = false;
           }

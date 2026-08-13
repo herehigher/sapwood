@@ -860,6 +860,128 @@ test("round #382 retro: a marker separated from its heading by REAL content (not
   assert.equal(extractAcceptanceCriteria(body), null);
 });
 
+test("gate② #870: a SECOND marker reached only via blank lines after the first marker never re-associates with the same heading — the association window closes once a marker is consumed", () => {
+  const body = ["## One heading", "", "<!-- sapwood:ac -->", "", "<!-- sapwood:verification -->"].join("\n");
+  assert.equal(extractVerificationPlan(body), null);
+  assert.equal(extractVerificationSection(body), null);
+  assert.equal(extractAcceptanceCriteria(body), null);
+});
+
+test("gate② #870: a list item between the heading and the marker still fails closed as malformed", () => {
+  const body = [
+    "## Acceptance criteria",
+    "",
+    "- a list item, not the marker",
+    "<!-- sapwood:ac -->",
+    "",
+    "- [ ] one",
+    "",
+    "## Verification plan",
+    "",
+    "<!-- sapwood:verification -->",
+    "",
+    "- run test",
+  ].join("\n");
+  assert.equal(extractVerificationPlan(body), null);
+  assert.equal(extractVerificationSection(body), null);
+  assert.equal(extractAcceptanceCriteria(body), null);
+});
+
+test("gate② #870: a code-fence opener swallows a marker placed directly inside it, leaving only one usable anchor, so the body fails closed as malformed rather than dispatching on the survivor alone", () => {
+  const body = [
+    "## Acceptance criteria",
+    "",
+    "```",
+    "<!-- sapwood:ac -->",
+    "```",
+    "",
+    "## Verification plan",
+    "",
+    "<!-- sapwood:verification -->",
+    "",
+    "- run test",
+  ].join("\n");
+  assert.equal(extractVerificationPlan(body), null);
+  assert.equal(extractVerificationSection(body), null);
+  assert.equal(extractAcceptanceCriteria(body), null);
+});
+
+test("gate② #870: a CLOSED code-fence pair between the heading and the marker still fails closed as malformed", () => {
+  const body = [
+    "## Acceptance criteria",
+    "",
+    "```",
+    "some fenced content",
+    "```",
+    "<!-- sapwood:ac -->",
+    "",
+    "- [ ] one",
+    "",
+    "## Verification plan",
+    "",
+    "<!-- sapwood:verification -->",
+    "",
+    "- run test",
+  ].join("\n");
+  assert.equal(extractVerificationPlan(body), null);
+  assert.equal(extractVerificationSection(body), null);
+  assert.equal(extractAcceptanceCriteria(body), null);
+});
+
+test("gate② #870: an ordinary HTML comment (not a sapwood marker) between the heading and the marker still fails closed as malformed", () => {
+  const body = [
+    "## Acceptance criteria",
+    "",
+    "<!-- just a note, not a protocol token -->",
+    "<!-- sapwood:ac -->",
+    "",
+    "- [ ] one",
+    "",
+    "## Verification plan",
+    "",
+    "<!-- sapwood:verification -->",
+    "",
+    "- run test",
+  ].join("\n");
+  assert.equal(extractVerificationPlan(body), null);
+  assert.equal(extractVerificationSection(body), null);
+  assert.equal(extractAcceptanceCriteria(body), null);
+});
+
+test("gate② #870: a consecutive SECOND heading right before both markers pulls them BOTH onto itself — the same one-heading/two-role collision Finding 1 closes, reached via a heading instead of a repeated marker", () => {
+  const body = ["## Acceptance criteria", "", "## Verification plan", "", "<!-- sapwood:ac -->", "", "<!-- sapwood:verification -->"].join(
+    "\n",
+  );
+  assert.equal(extractVerificationPlan(body), null);
+  assert.equal(extractVerificationSection(body), null);
+  assert.equal(extractAcceptanceCriteria(body), null);
+});
+
+test("round #382 retro: MULTIPLE consecutive blank lines between the heading and its anchor still associate — the tolerance is for any number of blanks, not just one", () => {
+  const body = [
+    "## Acceptance criteria",
+    "",
+    "",
+    "",
+    "<!-- sapwood:ac -->",
+    "",
+    "- [ ] one",
+    "",
+    "## Verification plan",
+    "",
+    "",
+    "<!-- sapwood:verification -->",
+    "",
+    "- run test",
+  ].join("\n");
+  assert.ok(extractVerificationPlan(body)?.includes("<!-- sapwood:ac -->"));
+  assert.ok(extractVerificationSection(body)?.includes("<!-- sapwood:verification -->"));
+  assert.deepEqual(
+    extractAcceptanceCriteria(body)?.map((item) => item.text),
+    ["one"],
+  );
+});
+
 test("#591: Japanese and RTL anchored issues dispatch once plan:approved is labelled", () => {
   const project = parseProject(
     JSON.stringify({
