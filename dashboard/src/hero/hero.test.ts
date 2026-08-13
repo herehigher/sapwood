@@ -1043,6 +1043,28 @@ const captionSafeTextBox = (text: string, x: number, baselineY: number, fontPx: 
   return { left, right: left + width, top: baselineY - fontPx * CAPTION_SAFE_ASCENT, bottom: baselineY + fontPx * DESCENT };
 };
 
+/**
+ * #808 gate② finding [0] (run 9c57bd50): the font-size arguments fed to `captionSafeTextBox`
+ * below used to be hand-copied literals (9/10/12) — a silent duplicate of `hero.css`'s own
+ * `.hero-node-caption`/`.hero-small`/`.hero-node-label` rules with nothing tying the two
+ * together, so a future CSS size edit could desync the oracle from what actually renders while
+ * this test stayed green. Reads the effective px straight from `heroCss` instead. All three
+ * selectors below are single, non-combined rules — no cascade ambiguity to resolve here, unlike
+ * `.hero-small` vs. `.hero-node-caption`'s own declared-AFTER precedence (already pinned by the
+ * `#728 gate② finding [0]` source-order test above, which is why `.hero-small`'s 10px — not
+ * `.hero-num`'s 11px — is the effective droplet-label size read below).
+ */
+function cssFontSizePx(selector: string): number {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = heroCss.match(new RegExp(`${escaped}\\s*\\{[^}]*font-size:\\s*(\\d+)px`));
+  if (!match) throw new Error(`${selector} must declare a pixel font-size in hero.css`);
+  return Number(match[1]);
+}
+
+const CAPTION_FONT_PX = cssFontSizePx(".hero-node-caption");
+const DROPLET_LABEL_FONT_PX = cssFontSizePx(".hero-small");
+const GATE_NODE_LABEL_FONT_PX = cssFontSizePx(".hero-node-label");
+
 const boxesOverlap = (a: Box, b: Box): boolean => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
 
 /** Every pairwise combination of `boxes` must be collision-free. */
@@ -1381,17 +1403,17 @@ test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any
   // something only the refined oracle would catch.
   const gateBoxesRefined: { label: string; box: Box }[] = [
     { label: "CI gate rect", box: { left: GATES.ci - 34, right: GATES.ci + 34, top: GATES.y - 20, bottom: GATES.y + 20 } },
-    { label: "CI gate label", box: captionSafeTextBox("CI", GATES.ci, GATES.y + 5, 12) },
+    { label: "CI gate label", box: captionSafeTextBox("CI", GATES.ci, GATES.y + 5, GATE_NODE_LABEL_FONT_PX) },
     { label: "Review gate rect", box: { left: GATES.review - 42, right: GATES.review + 42, top: GATES.y - 20, bottom: GATES.y + 20 } },
-    { label: "Review gate label", box: captionSafeTextBox("Review", GATES.review, GATES.y + 5, 12) },
+    { label: "Review gate label", box: captionSafeTextBox("Review", GATES.review, GATES.y + 5, GATE_NODE_LABEL_FONT_PX) },
     {
       label: "Review gate mode caption (engine-agent)",
-      box: captionSafeTextBox("engine-agent", Number(capXRaw), Number(capYRaw), 9, "middle"),
+      box: captionSafeTextBox("engine-agent", Number(capXRaw), Number(capYRaw), CAPTION_FONT_PX, "middle"),
     },
   ];
   const checkpointBoxesRefined: { label: string; box: Box }[] = checkpointed.map((d) => {
     const { x, y } = dropletPoint(state, d);
-    return { label: `checkpoint #${d.issue} label (refined)`, box: captionSafeTextBox(`⤳ ${d.pr}`, x, y - 14, 10) };
+    return { label: `checkpoint #${d.issue} label (refined)`, box: captionSafeTextBox(`⤳ ${d.pr}`, x, y - 14, DROPLET_LABEL_FONT_PX) };
   });
   for (const chip of checkpointBoxesRefined) {
     for (const gate of gateBoxesRefined) {
@@ -1482,7 +1504,7 @@ test("#808 AC1: every droplet chip label and every hero-node-caption element sta
     const anchor = anchorRaw === "middle" ? "middle" : "start";
     captionBoxes.push({
       label: `caption "${text}" @ (${xRaw},${yRaw})`,
-      box: captionSafeTextBox(text as string, Number(xRaw), Number(yRaw), 9, anchor),
+      box: captionSafeTextBox(text as string, Number(xRaw), Number(yRaw), CAPTION_FONT_PX, anchor),
     });
   }
   // Sanity: the fixture must actually exercise every caption zone, or this test silently checks
@@ -1503,7 +1525,7 @@ test("#808 AC1: every droplet chip label and every hero-node-caption element sta
     const text = labelMatch?.[1] as string;
     dropletBoxes.push({
       label: `droplet #${issue} ("${text}", at=${at}) @ (${xRaw},${yRaw})`,
-      box: captionSafeTextBox(text, Number(xRaw), Number(yRaw) - 14, 10),
+      box: captionSafeTextBox(text, Number(xRaw), Number(yRaw) - 14, DROPLET_LABEL_FONT_PX),
     });
   }
   // Sanity: the fixture must actually RENDER every droplet state under test — checkpoint×6 +
