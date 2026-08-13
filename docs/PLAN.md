@@ -200,10 +200,11 @@ predecessor project's `guard.py`, **not proprietary application behavior** (CLAU
   on malformed JSON, a non-object payload, a guarded tool with malformed `tool_input`, or
   any thrown guard. A safety hook disable-able with garbage isn't one.
 - **Verification:** a BLOCK/ALLOW bypass matrix (`guard.test.ts`) **plus** a differential
-  fuzz (`guard.fuzz.test.ts`) running 1500 seeded commands through both `guard.ts` and
-  `guard.py`, asserting sapwood is **at least as strict as guard.py** on the shared
-  surface (0 divergences). The guard survived a 6-round adversarial review (18 bypass
-  vectors found + closed).
+  fuzz (`guard.fuzz.test.ts`) running 1500 seeded commands through `guard.ts`, asserted
+  against a static table of `guard.py`'s shared-block verdicts (captured once, no Python
+  at test time as of #840 — see `docs/dev-guide/05-core-modules.md`), asserting sapwood
+  is **at least as strict as guard.py** on the shared surface (0 divergences). The guard
+  survived a 6-round adversarial review (18 bypass vectors found + closed).
 
 **M2 engine core (locked, delivered in PRs #30 / #32 / #34, dogfood #35→#36)**
 

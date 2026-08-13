@@ -11,5 +11,7 @@ data/
 .codegraph/
 .worktrees/
 
-# python bytecode from the vendored guard.py fixture (engine/src/guard/fixtures)
+# python bytecode: guard.fuzz.test.ts's differential oracle is a static TS fixture since #840
+# (guard.py is no longer vendored in-repo), but scripts/regen-guard-shared-block-fixture.ts still
+# shells out to a human-supplied guard.py checkout when re-deriving that fixture.
 __pycache__/
