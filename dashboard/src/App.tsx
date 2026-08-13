@@ -1,7 +1,8 @@
 import type { Dispatch, SetStateAction } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { fetchEvents } from "./api/client.ts";
 import { spendByWorkerForDay, useDemoFixture, useEventHistory, useLoopState, useRounds, useSpendHistory } from "./api/queries.ts";
-import type { Round } from "./api/types.ts";
+import type { EventsPage, Round } from "./api/types.ts";
 import { ActivityFeed } from "./components/ActivityFeed.tsx";
 import { ConfigDrawer } from "./components/ConfigDrawer.tsx";
 import { Controls } from "./components/Controls.tsx";
@@ -24,6 +25,7 @@ import { type FoldStep, type HeroState, initialHeroState } from "./hero/state.ts
 import type { StageNode } from "./inspector.ts";
 import type { ReplayPosition } from "./replay/player.ts";
 import { initialReplayState } from "./replay/reducer.ts";
+import { loadRoundEvents } from "./replay/round-log.ts";
 import { bucketSpendByPhase, phaseSpendBars } from "./replay/spend-replay.ts";
 import { type ReplayView, useReplay } from "./replay/useReplay.ts";
 
@@ -87,6 +89,71 @@ export function resolveInspectorArtifact(
   return rounds.find((r) => r.roundId === id)?.artifact ?? null;
 }
 
+/**
+ * #868 gate② finding [1] (live-event-counts-cross-round): `resolveInspectorArtifact`'s own live
+ * round lookup, reused to bind the drawer's event-derived counts (Arch review / Verify) to the
+ * SAME round its other fields already read — `rounds` carries the exact `startEventId`/
+ * `eventCount` cursors `replay/round-log.ts` already uses to load a closed round's full log; the
+ * live open round's own row (once `/api/rounds` has caught up to it) is no different in shape.
+ * `null` when the round hasn't appeared in `/api/rounds` yet — `useInspectorRoundEvents` degrades
+ * to an empty round-scoped list for that case, the same honest "not yet known" posture
+ * `resolveInspectorArtifact` already documents for its own null.
+ */
+export function resolveInspectorRound(rounds: readonly Round[], liveRoundId: number | null): Round | null {
+  return rounds.find((r) => r.roundId === liveRoundId) ?? null;
+}
+
+/**
+ * #868 gate② finding [1]: the actual round-scoped load `useInspectorRoundEvents` awaits inside its
+ * effect — factored out (the same treatment `replay/useReplay.ts`'s `loadRoundLog` already gets)
+ * so a test can call it directly instead of mounting a component to reach an effect's inline
+ * promise. Delegates straight to `replay/round-log.ts`'s `loadRoundEvents` — the SAME mechanism
+ * replay's one-time full-round load already uses — with `ceilingId: null`: this only ever loads
+ * the CURRENT open round (a closed round's own events already flow through `useReplay`'s
+ * round-scoped `roundEvents`, wired in below), and an open round has no NEXT round yet to bound
+ * it, so "no ceiling" is the honest boundary, not a missing one.
+ *
+ * Unlike `useEventHistory`'s `events` (window-capped at `MAX_EVENT_HISTORY`, `api/queries.ts`),
+ * `loadRoundEvents` takes no window parameter at all — it keeps paging `/api/events` until
+ * `round.eventCount` rows are collected (`replay/round-log.test.ts` already pins that property),
+ * so a round longer than the live display window is never undercounted by reading this instead.
+ */
+export function loadInspectorRoundEvents(
+  round: Round,
+  fetchEventsPage: (after: number, limit: number) => Promise<EventsPage> = (after, limit) => fetchEvents({ after, limit }),
+): Promise<DomainEvent[]> {
+  return loadRoundEvents(round, null, fetchEventsPage);
+}
+
+/**
+ * #868 gate② finding [1]: the drawer's own live-round-scoped event source. `round: null` (drawer
+ * closed, or the live round hasn't appeared in `/api/rounds` yet) returns `[]` without fetching —
+ * the same "nothing to load" posture `useReplay`'s own load effect takes for
+ * `selectedRoundId === null`. Re-fetches whenever the round's identity OR its own `eventCount`
+ * changes — `/api/rounds`' 3 s poll recomputes `eventCount` live for the currently open round
+ * (`engine/src/state/state.ts`'s `listRounds` doc), so the drawer's counts keep pace with a round
+ * still in progress while it's open. Mirrors `useReplay.ts`'s `resolveActiveLog`: a result whose
+ * OWN round no longer matches the round CURRENTLY requested reads as absent (empty), never a
+ * stale prior round's counts shown under a freshly-opened round's drawer.
+ */
+export function useInspectorRoundEvents(round: Round | null): DomainEvent[] {
+  const [state, setState] = useState<{ roundId: number | null; events: DomainEvent[] }>({ roundId: null, events: [] });
+  // `round` itself is a fresh object reference every `/api/rounds` poll — its own `roundId`/
+  // `eventCount` are the only two fields that decide whether a re-fetch is warranted.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: see the comment above.
+  useEffect(() => {
+    if (!round) return;
+    let cancelled = false;
+    loadInspectorRoundEvents(round).then((events) => {
+      if (!cancelled) setState({ roundId: round.roundId, events });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [round?.roundId, round?.eventCount]);
+  return round && state.roundId === round.roundId ? state.events : [];
+}
+
 type ActiveFold = {
   hero: HeroState;
   steps: FoldStep[];
@@ -144,6 +211,12 @@ type AppViewModel = {
   inspectorNode: StageNode | null;
   setInspectorNode: Dispatch<SetStateAction<StageNode | null>>;
   inspectorArtifact: unknown;
+  /** #868 gate② finding [1]: the round-scoped source for the drawer's Arch review/Verify
+   *  event-derived counts — NEVER `activeEvents` (the shared display tail: process-wide,
+   *  window-bounded, and in live mode not filtered to the open round at all). Live mode reads
+   *  `useInspectorRoundEvents`'s own round-scoped fetch; replay/demo read `replay.roundEvents`
+   *  (the selected round's already-loaded, uncapped full log) — see those two hooks' own docs. */
+  inspectorEvents: DomainEvent[];
   // #741: the round navigator's list + the replay transport/mode it drives — §3 A's "the round
   // navigator IS the mode", so every replayable panel below reads whichever fold is active.
   mode: "live" | "replay";
@@ -191,6 +264,7 @@ export function appContent(vm: AppViewModel) {
     inspectorNode,
     setInspectorNode,
     inspectorArtifact,
+    inspectorEvents,
     mode,
     rounds,
     replay,
@@ -303,12 +377,14 @@ export function appContent(vm: AppViewModel) {
         )}
 
         {/* §6 phase inspector (#861) — unlike ConfigDrawer, this is NOT live-only: §6's own mode
-         *  purity rule binds it to whichever round (live open, or replay cursor) is active. */}
+         *  purity rule binds it to whichever round (live open, or replay cursor) is active.
+         *  #868 gate② finding [1]: `events` is `inspectorEvents` (the round-scoped source), NEVER
+         *  `activeEvents` — the shared display tail, process-wide and window-bounded. */}
         <PhaseInspectorDrawer
           node={inspectorNode}
           onClose={() => setInspectorNode(null)}
           artifact={inspectorArtifact}
-          events={activeEvents}
+          events={inspectorEvents}
           config={loop.data?.config ?? null}
           logPath={mode === "live" ? (loop.data?.logPath ?? null) : null}
           repoUrl={repoUrl}
@@ -418,6 +494,14 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
       : undefined;
   // #861: bound per §6's mode-purity rule — see `resolveInspectorArtifact`'s own doc.
   const inspectorArtifact = resolveInspectorArtifact(mode, rounds.data?.rounds ?? [], loop.data?.round?.id ?? null, replay.selectedRoundId);
+  // #868 gate② finding [1]: the round-scoped event source for the drawer's Arch review/Verify
+  // counts — live mode fetches it fresh (only while the drawer is actually open, `inspectorNode
+  // !== null`, so a closed drawer never polls a round log nobody is looking at); replay reads
+  // `replay.roundEvents`, the selected round's own already-loaded, uncapped full log (`useReplay`'s
+  // own doc) rather than a second parallel fetch.
+  const inspectorRound = resolveInspectorRound(rounds.data?.rounds ?? [], loop.data?.round?.id ?? null);
+  const inspectorLiveEvents = useInspectorRoundEvents(mode === "live" && inspectorNode !== null ? inspectorRound : null);
+  const inspectorEvents = mode === "live" ? inspectorLiveEvents : replay.roundEvents;
 
   return appContent({
     clock,
@@ -435,6 +519,7 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
     inspectorNode,
     setInspectorNode,
     inspectorArtifact,
+    inspectorEvents,
     mode,
     rounds: rounds.data?.rounds ?? [],
     replay,
@@ -536,6 +621,10 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
     inspectorNode,
     setInspectorNode,
     inspectorArtifact,
+    // #868 gate② finding [1]: demo mode is always "replay" once loaded — the fixture's
+    // round-scoped `replay.roundEvents` (already uncapped, already the selected round's own
+    // events, `useDemoReplay`'s own doc) is the only source this route ever needs.
+    inspectorEvents: replay.roundEvents,
     mode,
     rounds,
     replay,

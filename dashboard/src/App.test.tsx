@@ -7,13 +7,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   App,
   appContent,
+  loadInspectorRoundEvents,
   resolveActiveFold,
   resolveFixCap,
   resolveInspectorArtifact,
+  resolveInspectorRound,
   resolveRoundSpend,
   toggleConfigOpen,
 } from "./App.tsx";
-import { demoFixtureQuery, eventsQuery, loopStateQuery, roundsQuery, spendQuery } from "./api/queries.ts";
+import { demoFixtureQuery, eventsQuery, loopStateQuery, MAX_EVENT_HISTORY, roundsQuery, spendQuery } from "./api/queries.ts";
 import type { Round, SpendRow } from "./api/types.ts";
 import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
@@ -79,6 +81,9 @@ function minimalAppViewModel(
     inspectorNode?: string | null;
     setInspectorNode?: (updater: unknown) => void;
     inspectorArtifact?: unknown;
+    // #868 gate② finding [1]
+    inspectorEvents?: unknown[];
+    roundEvents?: unknown[];
   } = {},
 ) {
   return {
@@ -97,6 +102,11 @@ function minimalAppViewModel(
     inspectorNode: overrides.inspectorNode ?? null,
     setInspectorNode: overrides.setInspectorNode ?? (() => {}),
     inspectorArtifact: overrides.inspectorArtifact ?? null,
+    // #868 gate② finding [1]: defaults to whatever `activeEvents` resolved to, so every
+    // pre-existing test (which only ever set `activeEvents`) keeps feeding the drawer's
+    // event-derived counts the SAME fixture it always did, unchanged — a test proving the
+    // round-scoping fix sets `inspectorEvents` explicitly, distinct from `activeEvents`.
+    inspectorEvents: overrides.inspectorEvents ?? overrides.activeEvents ?? [],
     // #741: a minimal live-mode replay view — this fixture never exercises replay itself, only
     // App's config-trigger wiring, so every replay field is the same "nothing selected" shape
     // `useReplay` starts in.
@@ -116,6 +126,7 @@ function minimalAppViewModel(
       scrub: () => {},
       spendThroughCursor: [],
       phaseWindows: [],
+      roundEvents: overrides.roundEvents ?? [],
     },
     activeHero: overrides.activeHero ?? initialHeroState(null),
     activeSteps: [],
@@ -1141,6 +1152,182 @@ test("resolveInspectorArtifact: replay mode reads the round matching the SELECTE
 test("resolveInspectorArtifact: no matching round row (open round not yet in /api/rounds, or nothing selected) is an honest null, never a throw", () => {
   assert.equal(resolveInspectorArtifact("live", [], 5, null), null);
   assert.equal(resolveInspectorArtifact("replay", [], null, null), null);
+});
+
+// ── #868 gate② finding [1] (live-event-counts-cross-round): round-scoped event counts ──────────
+//
+// AC2's Arch review / Verify counts must bind to the INSPECTED round, not `useEventHistory`'s
+// process-wide, window-bounded display tail — a prior round's matching events must not inflate
+// the count (contamination), and a round longer than that display window must not lose any of
+// its own events (truncation). `resolveInspectorRound` + `loadInspectorRoundEvents` are the two
+// halves LiveApp wires together; both failure directions get their own test below.
+
+test("resolveInspectorRound: finds the round matching the live open round's id, same lookup resolveInspectorArtifact uses", () => {
+  const rounds = [
+    { roundId: 1, startEventId: 0, eventCount: 3 },
+    { roundId: 2, startEventId: 3, eventCount: 1 },
+  ] as unknown as Round[];
+  assert.equal(resolveInspectorRound(rounds, 2)?.roundId, 2);
+});
+
+test("resolveInspectorRound: no matching round row (open round not yet in /api/rounds, or none live) is an honest null, never a throw", () => {
+  assert.equal(resolveInspectorRound([], 5), null);
+  assert.equal(resolveInspectorRound([{ roundId: 1 } as unknown as Round], null), null);
+});
+
+function roundLogRow(id: number, kind: string): { id: number; ts: string; kind: string; payload: Record<string, unknown> | null } {
+  return { id, ts: `2026-08-10T09:${String(id).padStart(2, "0")}:00Z`, kind, payload: {} };
+}
+
+function inspectorRound(overrides: Partial<Round> = {}): Round {
+  return {
+    roundId: 2,
+    status: "in_progress",
+    startedAt: "2026-08-10T09:03:00Z",
+    endedAt: null,
+    startEventId: 3,
+    startSpendId: 0,
+    eventCount: 1,
+    schemaVersion: null,
+    artifact: null,
+    ...overrides,
+  };
+}
+
+test("#868 gate② finding [1] direction 1 (contamination): loadInspectorRoundEvents excludes events at/before the round's own startEventId", async () => {
+  const ledger = [
+    roundLogRow(1, "plan-review-escalated"), // the PRIOR round's own event — must not count for round 2
+    roundLogRow(2, "plan-review-escalated"), // the PRIOR round's own event — must not count for round 2
+    roundLogRow(3, "plan-review-escalated"), // the round-1/round-2 boundary row itself — excluded (exclusive cursor)
+    roundLogRow(4, "plan-review-escalated"), // round 2's OWN event — must count
+  ];
+  const round = inspectorRound({ startEventId: 3, eventCount: 1 });
+  const fetchPage = async (after: number, limit: number) => {
+    const page = ledger.filter((e) => e.id > after).slice(0, limit);
+    return { events: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after };
+  };
+  const events = await loadInspectorRoundEvents(round, fetchPage);
+  assert.deepEqual(
+    events.map((e) => e.id),
+    [4],
+    "only the event strictly AFTER the round's own startEventId belongs to it — the prior round's matching events must not appear at all",
+  );
+});
+
+test("#868 gate② finding [1] direction 2 (truncation): loadInspectorRoundEvents collects every one of a round's events, even past useEventHistory's own display-window cap", async () => {
+  const total = MAX_EVENT_HISTORY + 5; // deliberately more than the live display window ever retains
+  const ledger = Array.from({ length: total }, (_, i) => roundLogRow(i + 1, "plan-review-escalated"));
+  const round = inspectorRound({ startEventId: 0, eventCount: total });
+  let calls = 0;
+  const fetchPage = async (after: number, limit: number) => {
+    calls++;
+    const page = ledger.filter((e) => e.id > after).slice(0, limit);
+    return { events: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after };
+  };
+  const events = await loadInspectorRoundEvents(round, fetchPage);
+  assert.equal(events.length, total, "a round longer than useEventHistory's display-window cap must not lose any of its own events");
+  assert.ok(calls > 1, "the fixture only proves the property if collecting the round actually took more than one page");
+});
+
+// The real-App wiring-level regression: the reviewer's own words for why the prior fixture missed
+// this — "the real-App wiring fixture starts at event zero and contains no prior-round matching
+// events, so it cannot detect this." This one does: two real rounds, a prior CLOSED one with its
+// own matching events, and the CURRENT open one — mounted through the real `<App>` tree with a
+// fetch mock that (unlike this file's other `stubFetch`) actually respects `/api/events`'s
+// `after`/`limit` query params, the same way the real server does.
+test("#868 gate② finding [1]: the real live wiring excludes a PRIOR round's matching events from the currently open round's Verify drawer count", async () => {
+  const PRIOR_ROUND_ID = 70020;
+  const OPEN_ROUND_ID = 70021;
+  const ledger = [
+    roundLogRow(1, "plan-review-escalated"), // prior round's own event
+    roundLogRow(2, "plan-review-escalated"), // prior round's own event
+    roundLogRow(3, "no-plan-after-draft"), // prior round's own last event (the boundary row)
+    roundLogRow(4, "plan-review-escalated"), // the OPEN round's own event
+  ];
+  const rounds = [
+    {
+      roundId: PRIOR_ROUND_ID,
+      status: "done",
+      startedAt: "2026-08-10T09:00:00Z",
+      endedAt: "2026-08-10T09:03:00Z",
+      startEventId: 0,
+      startSpendId: 0,
+      eventCount: 3,
+      schemaVersion: null,
+      artifact: null,
+    },
+    {
+      roundId: OPEN_ROUND_ID,
+      status: "in_progress",
+      startedAt: "2026-08-10T09:03:00Z",
+      endedAt: null,
+      startEventId: 3,
+      startSpendId: 0,
+      eventCount: 1,
+      schemaVersion: null,
+      artifact: null,
+    },
+  ];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const parsed = new URL(url, "http://localhost");
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (parsed.pathname === "/api/loop/state") {
+      return json({ ...LOOP_STATE_OK, config: INSPECTOR_CONFIG, round: { id: OPEN_ROUND_ID, phase: "executing" } });
+    }
+    if (parsed.pathname === "/api/rounds") return json({ rounds });
+    if (parsed.pathname === "/api/spend") return json({ spend: [], lastId: 0 });
+    if (parsed.pathname === "/api/events") {
+      const after = Number(parsed.searchParams.get("after") ?? 0);
+      const limit = Number(parsed.searchParams.get("limit") ?? 200);
+      const page = ledger.filter((e) => e.id > after).slice(0, limit);
+      return json({ events: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
+    }
+    throw new Error(`unstubbed fetch: ${url}`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await Promise.allSettled([
+    client.prefetchQuery(loopStateQuery()),
+    client.prefetchQuery(eventsQuery(0)),
+    client.prefetchQuery(spendQuery(0)),
+    client.prefetchQuery(roundsQuery()),
+  ]);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+  });
+  try {
+    const verifyNode = container.querySelector('[aria-label="inspect Verify"]');
+    assert.ok(verifyNode, "the verify stage node must render");
+    await act(async () => {
+      verifyNode.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    // The round-scoped fetch this finding's fix adds is itself async — flush its effect+promise
+    // chain before reading the rendered count.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    assert.ok(drawer);
+    assertRow(
+      drawer!.innerHTML,
+      "plan-review escalations",
+      1,
+      // Contaminated (the shared `activeEvents` tail, no round filter) would read 3 — both of the
+      // PRIOR round's matching events plus the open round's own one.
+    );
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
 });
 
 // ── AC2 / AC3 / AC4: drawer content per node class ──────────────────────────────────────────
