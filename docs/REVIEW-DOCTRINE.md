@@ -122,6 +122,18 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     are outside this rule. Distinct from VALUE above: that sub-case governs which VALUE an
     assertion checks, this one governs which TREE produces it.
 
+### Documentation claims
+
+- **Doc-claim grounding rule.** Ground every behavioral/guarantee claim in a doc change in the
+  exact function/branch it describes, not a plausible generalization from a partial read. A
+  fallible operation (delete, prune) is best-effort unless the code checks and reports the
+  outcome; a policy specific to one call path isn't generalized to every lane in that state when
+  another path (e.g. a human-merge-only exception) handles it differently. A documented procedure
+  or recipe is itself a claim: either it has actually been run, or it isn't asserted as working. A
+  docs-only PR has no test suite to catch a false claim the way code does, so name the exact
+  symbol/branch backing a claim rather than writing it from memory of "roughly how it works"
+  (#854, #700).
+
 ### Signal classification & escalation
 
 - **Authoritative signals over inferred text.** Bind detection and classification to a structured
