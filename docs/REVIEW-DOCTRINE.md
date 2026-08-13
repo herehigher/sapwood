@@ -170,7 +170,8 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   classifier (`review/convergence.ts`) and to any human reading the thread.
 - **A fully operator-owned rejection still pays for a fix leg it cannot use** — the residual gap
   in the rule above. Labeling a tier-C gap `operator-owned` changes what the finding SAYS, not what
-  `driveDecision` (`conductor.ts`) DOES: the gate is still `FIXABLE`, so a paid leg dispatches even
+  `driveDecision` (`conductor.ts`) DOES: the gate is still `FIXABLE`, so — whenever the ordinary
+  scheduling and admission conditions permit a fix leg at all — a paid leg dispatches even
   when no finding is producer-actionable, and the leg can only dispute and escalate `needs-human`
   — the leg itself can never close the gap, whichever way the operator then rules (posting the
   demanded record or narrowing the finding), so its spend buys no information. Today's only
