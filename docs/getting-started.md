@@ -624,6 +624,29 @@ duplicate warning you learn to ignore costs more than the duplicate it was meant
 If your backlog outgrows this, the fix belongs where the decision already lives: search
 before you hit `Ready`, not a label after.
 
+## Running the dashboard
+
+sapwood ships a web dashboard over the same state DB `sapwood status` reads. Its data
+views are always read-only; a single write route also lets it issue pause/stop/estop
+control actions, which is enabled by default. Build the bundle once, then launch it:
+
+```
+npm run build -w dashboard
+sapwood dashboard
+```
+
+`sapwood dashboard [--port PORT] [--config PATH]` starts the dashboard's data server
+(`dashboard/server.ts`) and opens it in your default browser (or prints the URL in a
+headless environment). It runs on `4517` by default — override with `--port` or
+`SAPWOOD_DASHBOARD_PORT`. `--config PATH` loads config from that path instead of
+probing the defaults, matching `status --config`/`events --config`.
+
+The control actions (pause, stop, estop) exposed in the dashboard UI go through that
+one write route, `POST /api/control`, gated by the `dashboard.controls` config key —
+`true` by default; set it to `false` for a pure-spectator deployment where the
+dashboard can only ever read. See [`security.md`](security.md) for the dashboard's
+full trust posture.
+
 ## Next steps
 
 - [`configuration.md`](configuration.md) — every config key.
