@@ -67,8 +67,9 @@ next.
 docs, chore). Look at the issue's own `type:*` label and shape your revised body like
 that template: Why, What (ending with an encouraged one-line Out of scope), then acceptance
 criteria and a sibling verification plan. Write those section titles in the issue's own
-language (see "Working language" above), and put `<!-- sapwood:ac -->` immediately below the acceptance
-heading and `<!-- sapwood:verification -->` immediately below the verification heading. Those
+language (see "Working language" above), and put `<!-- sapwood:ac -->` as the first non-blank line
+after the acceptance heading and `<!-- sapwood:verification -->` as the first non-blank line after
+the verification heading. Those
 exact lower-case ASCII comments are the engine protocol; do not translate, alter, duplicate,
 or fence them. Preserve the author's original-language content: never re-translate or rewrite
 it unless asked. Feature and fix/infra issues may also carry an optional Constraints section

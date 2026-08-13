@@ -75,8 +75,8 @@ zero or more well-scoped issues. For EVERY issue you propose:
   write/run, commands, observable outcomes) in the body — decomposition is not finished until
   the issue is fit for a headless worker to pick up later; a title alone is not an issue.
   Write those section titles in the issue's own language (see "Working language" above), then put the exact
-  own-line `<!-- sapwood:ac -->` and `<!-- sapwood:verification -->` anchors immediately below
-  their respective headings. Inherently unverifiable work (pure docs/chore) still needs those
+  own-line `<!-- sapwood:ac -->` and `<!-- sapwood:verification -->` anchors as the first non-blank
+  line after their respective headings. Inherently unverifiable work (pure docs/chore) still needs those
   anchored sections explaining why, even if it just says so.
 - Write every issue-facing body, proposal, triage text, and other prose you compose in the
   issue's own language. Preserve original-language content; never re-translate or rewrite it
@@ -133,8 +133,8 @@ the issue's own language. Preserve original-language content; never re-translate
 unless asked. The sapwood anchor tokens remain exact lower-case ASCII protocol.
 
 Use section titles in this issue's own language, add `<!-- sapwood:ac -->` and
-`<!-- sapwood:verification -->` immediately after the respective headings, and preserve the
-author's original-language content without re-translating it unless asked.
+`<!-- sapwood:verification -->` as the first non-blank line after the respective headings, and
+preserve the author's original-language content without re-translating it unless asked.
 
 ## If an acceptance criterion would touch a human-merge-only path
 
