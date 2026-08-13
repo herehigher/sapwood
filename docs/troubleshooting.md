@@ -159,19 +159,27 @@ manual cleanup needed:
 
 - **Merged-lane close-out (ordinary lanes).** The moment an ordinary driving lane's PR
   reads MERGED — through the regular gate①/gate② drive loop, or gated reclaim's own
-  MERGED branch — sapwood checks that lane's worktree against a purity baseline: the
-  mtime of the worktree's own git index file, not its dispatch time (committing rewrites
-  the index, so a lane that finished successfully reads clean against this baseline,
-  where anchoring on dispatch time would flag every successful lane as dirty). This runs
-  as part of the same close-out that moves the board item to `done`. A worktree that's
-  still present and passes the check is deleted, and a best-effort attempt is made to
-  prune its now-orphaned git-worktree registration too — that cleanup step can fail
-  silently (a stale `git worktree list` entry left behind) without affecting the
-  directory deletion already done. One that's already gone is left alone entirely — no
-  event, nothing to prune. One that's present but fails the check is left in place,
-  recorded event-only: the PR is already merged, so nothing is blocked on it, and this
-  never applies `labels.needsHuman` or posts an escalation comment — check `sapwood
-  events` for the lane, not the issue thread.
+  MERGED branch — sapwood checks that lane's worktree two ways before it will touch it:
+  nothing staged but not yet committed (checked directly against the index), and nothing
+  changed since a purity baseline — the mtime of the worktree's own git index file, not
+  its dispatch time (committing rewrites the index, so a lane that finished successfully
+  reads clean against this baseline, where anchoring on dispatch time would flag every
+  successful lane as dirty). Either check failing — including an inconclusive read of
+  either one — is treated as dirty, never guessed clean. This runs as part of the same
+  close-out that moves the board item to `done`. A worktree that's still present and
+  clears both checks is deleted, and a best-effort attempt is made to prune its
+  now-orphaned git-worktree registration too — that cleanup step can fail silently (a
+  stale `git worktree list` entry left behind) without affecting the directory deletion
+  already done. One that's already gone is left alone entirely — no event, nothing to
+  prune. One that's present but dirty is left untouched at its original path, recorded
+  event-only. A rarer third case — an attempted deletion that didn't complete cleanly —
+  is also recorded event-only, but is *not* guaranteed to still be at the original path:
+  sapwood renames the directory aside before deleting it (closing a race between the
+  clean-check and the delete), and if that attempt fails partway the surviving content
+  can be found at the renamed path the event records, not the worktree's usual location.
+  Neither case is ever escalated: the PR is already merged, so nothing is blocked on it,
+  and this never applies `labels.needsHuman` or posts an escalation comment — check
+  `sapwood events` for the lane, not the issue thread.
 
   **Parked human-merge-only lanes are the exception**, not this path: once a human
   merges one of those by hand, sapwood closes it out on its own next tick using the same
@@ -184,9 +192,10 @@ manual cleanup needed:
   registrations an owner no longer alive left behind. A *locked* registration whose
   recorded pid is dead and whose directory is already gone is reaped unconditionally —
   there's nothing left to check. A directory that's still present has to clear the same
-  index-mtime purity check the merged-lane close-out above uses, plus one structural
-  guard: its admin HEAD must resolve to an actual branch — a detached worktree is never
-  touched, since deleting its registration would make its commits unreachable. An
+  two checks the merged-lane close-out above uses (nothing staged, nothing changed since
+  the index-mtime baseline), plus one structural guard: its admin HEAD must resolve to
+  an actual branch — a detached worktree is never touched, since deleting its
+  registration would make its commits unreachable. An
   *unlocked* registration is only ever a candidate for this present-directory check, and
   only once it's old enough (past a fixed 24h floor) that nothing is plausibly still
   using it; an unlocked registration whose directory is already missing sits outside
@@ -197,10 +206,13 @@ manual cleanup needed:
   without waiting on restarts, run the one-shot sweep by hand from the `engine/`
   directory: `npx tsx scripts/worktree-janitor.ts`.
 
-Every path above only ever reaches a worktree it can prove is clean; anything that fails
-its check is left exactly where it was, the same as the degrade path above. So the
-doctrine holds unqualified no matter which path is looking: **sapwood never deletes a
-worktree it cannot prove is clean.**
+Every path above only ever *deletes* a worktree it can prove is clean. A candidate that
+fails either check is never touched — left exactly where it was, the same as the degrade
+path above. The one nuance: on the rare attempted-but-incomplete deletion described
+above, "never touched" applies to the check itself, not necessarily to the worktree's
+final resting place — but nothing is ever removed without first being proven clean. So
+the doctrine holds unqualified no matter which path is looking: **sapwood never deletes
+a worktree it cannot prove is clean.**
 
 ## Kill switch recovery
 

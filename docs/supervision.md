@@ -582,10 +582,11 @@ flow — sapwood closes the lane out on its own next tick once the merge lands: 
 item moves to `done`, `labels.inProgress` comes off the issue, and the worktree goes
 through the same clean/dirty check as the [dirty-worktree
 degrade](troubleshooting.md#dirty-worktree-degrade) path above. A clean worktree (or one
-that never existed) is deleted as part of that close-out — nothing else to do. A dirty
-one is retained and escalated with `labels.needsHuman` exactly like any other
-dirty-worktree degrade; that's the one case still left to a human, and it's salvaged the
-same way.
+that never existed) gets a best-effort deletion attempt as part of that close-out —
+nothing else for you to do, though an unremovable-but-clean directory doesn't block the
+close-out either, so it can rarely survive on disk as a harmless leftover. A dirty one is
+retained and escalated with `labels.needsHuman` exactly like any other dirty-worktree
+degrade; that's the one case still left to a human, and it's salvaged the same way.
 
 ## Governance lines
 
