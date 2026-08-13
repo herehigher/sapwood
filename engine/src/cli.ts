@@ -66,6 +66,7 @@ import {
   createWorktreeJanitorDeps,
   sweepPresentDirectoryWorktreesAndReport,
   sweepWorktreeJanitorOnce,
+  WORKTREE_JANITOR_BATCH_SIZE,
 } from "./loop/worktree-janitor.js";
 import { createProxyMint } from "./proxy/mint.js";
 import { makeProductionEngineAgent } from "./review/production.js";
@@ -2322,7 +2323,13 @@ export async function normalizeUnplacedBoardItems(
  *  #834 Phase 2: also runs ONE bounded cycle of the present-directory sweep, in its OWN try/
  *  catch (a failure in either pass must never mask or be masked by the other — each is
  *  independently best-effort) — see sweepPresentDirectoryWorktreesAndReport's own doc for the
- *  single rollup event this emits. */
+ *  single rollup event this emits. #834 (gate② round 1, F5): the cycle starts from a RANDOMIZED
+ *  offset (never a fixed 0) so repeated single-cycle startup sweeps don't deterministically
+ *  re-examine only the same window of the candidate list forever — a minimal mechanism that
+ *  needs no durable cross-restart cursor: `sweepPresentDirectoryWorktreesOnce` mods any offset
+ *  into range internally, so an oversized random value is always safe regardless of how many
+ *  candidates actually exist this cycle. Full-coverage-in-one-run is
+ *  `runPresentDirectoryWorktreeSweepToCompletion` (the operator one-shot script), not this path. */
 async function sweepWorktreeJanitorStartup(state: Pick<State, "appendEvent">, log: (message: string) => void): Promise<void> {
   try {
     const result = await sweepWorktreeJanitorOnce(createWorktreeJanitorDeps());
@@ -2336,7 +2343,14 @@ async function sweepWorktreeJanitorStartup(state: Pick<State, "appendEvent">, lo
     log(`[sapwood:startup] worktree janitor sweep failed; continuing: ${String(error)}`);
   }
   try {
-    const result = await sweepPresentDirectoryWorktreesAndReport(createPresentDirectorySweepDeps(), state, log);
+    const startOffset = Math.floor(Math.random() * 1_000_000);
+    const result = await sweepPresentDirectoryWorktreesAndReport(
+      createPresentDirectorySweepDeps(),
+      state,
+      log,
+      WORKTREE_JANITOR_BATCH_SIZE,
+      startOffset,
+    );
     if (result.reaped.length > 0 || result.retained.length > 0 || result.failed.length > 0) {
       log(
         `[sapwood:startup] worktree janitor (present-directory arm): reaped ${result.reaped.length}, ` +

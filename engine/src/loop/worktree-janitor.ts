@@ -30,11 +30,11 @@
 // git call against a still-present worker-controlled tree), so every git call here ever only
 // ever touches an ALREADY-missing path — see sweepPresentDirectoryWorktreesOnce's own doc.
 import { execFile } from "node:child_process";
-import { existsSync, rmSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { resolveWorktreeGitDir, resolveWorktreeIndexBaselineMs } from "../roles/context-manifest.js";
-import { worktreeMaybeDirty } from "../roles/worker.js";
+import { settleWorktreeDirectory, type WorktreeDirectorySettleOutcome } from "../roles/worker.js";
 import type { State } from "../state/state.js";
 import { pidIsAlive } from "./instance-lock.js";
 
@@ -297,6 +297,25 @@ export async function runWorktreeJanitorToCompletion(
  *  weeks-old backlog (#825's own census). */
 export const WORKTREE_JANITOR_MIN_REGISTRATION_AGE_MS = 24 * 60 * 60 * 1000;
 
+/** #834 (gate② round 1, F2): resolves the repo's DEFAULT BRANCH ref via `git symbolic-ref
+ *  refs/remotes/origin/HEAD` — the standard git plumbing fact for "what branch does origin
+ *  consider default", INDEPENDENT of whatever branch the trusted checkout HAPPENS to currently
+ *  be on. This is a real, previously-fixed bug: nothing pins the checkout this janitor runs
+ *  from to the default branch, so an engine invoked from an integration/release branch would
+ *  otherwise silently judge ancestry against ITS OWN transient checkout state, reading an
+ *  UNMERGED candidate as "merged" the moment it merges into that other branch. `null` on any
+ *  resolution failure (no `origin` remote, no configured HEAD for it) — the fail-safe direction:
+ *  isBranchMerged then never treats anything as a merge candidate rather than guessing. */
+async function resolveDefaultBranchRef(repoRoot: string): Promise<string | null> {
+  try {
+    const { stdout } = await pexecFile("git", ["-C", repoRoot, "symbolic-ref", "refs/remotes/origin/HEAD"]);
+    const ref = stdout.trim();
+    return ref.length > 0 ? ref : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface PresentDirectorySweepDeps extends WorktreeJanitorClassifyDeps {
   listRegistrations(): Promise<WorktreeRegistration[]>;
   /** Resolves the git-index-mtime PURITY BASELINE for a present directory — NaN when
@@ -304,28 +323,32 @@ export interface PresentDirectorySweepDeps extends WorktreeJanitorClassifyDeps {
    *  resolveWorktreeIndexBaselineMs (context-manifest.ts), the SAME baseline peripheral.ts's
    *  maybeRetainWorktree and worker.ts's settleMergedWorktree (#834 Phase 1) already use. */
   indexBaselineMs(path: string): number;
-  /** worker.ts's worktreeMaybeDirty, unchanged — the ONE purity scan every caller in this
-   *  codebase shares; only the baseline differs. */
-  isDirty(path: string, sinceMs: number): boolean;
-  /** fs-only directory deletion — MUST run, and MUST succeed, before either `unlock` or `remove`
-   *  below ever touches the path: git must never clean-check a still-PRESENT worker-controlled
-   *  tree (the #65 RCE class worker.ts's retainOrDeleteWorktree doc explains at length). Real
-   *  default: `rmSync(path, { recursive: true, force: true })`. */
-  removeDirectory(path: string): void;
-  /** Elapsed ms since this registration was created — NaN when unresolvable (fail-safe: never a
-   *  candidate, the conservative direction). Real default resolves the linked worktree's git
-   *  ADMIN directory (resolveWorktreeGitDir) and reads ITS OWN mtime: `git worktree add` creates
-   *  that directory once and, short of `git worktree repair`/relocation, nothing an ordinary
-   *  commit/checkout inside the worktree ever touches its entry set again — a stable
-   *  "registration age" proxy without a second, less-portable birthtime read. */
+  /** #834 (gate② round 1, F4): the shared TOCTOU-safe rename-tombstone-verify-delete primitive
+   *  (worker.ts's settleWorktreeDirectory) — ONE implementation, reused by Phase 1 (worker.ts's
+   *  own settleMergedWorktree) and this arm, per the owner's explicit "one implementation, two
+   *  callers" instruction; see that function's own doc for the full TOCTOU-closing rationale
+   *  (rename first, re-verify the tombstone, only then delete — never a plain check-then-rmSync).
+   *  Injectable so classification-only tests (batch bound, age gate, branch-merged gate) can
+   *  fake it without touching real fs; F7's composition tests use the REAL implementation
+   *  against a real fixture. */
+  settleDirectory(worktreePath: string, worktreeRoot: string, baselineMs: number): WorktreeDirectorySettleOutcome;
+  /** Elapsed ms since this registration's last git activity — NaN when unresolvable (fail-safe:
+   *  never a candidate, the conservative direction). Real default resolves the linked worktree's
+   *  git ADMIN directory (resolveWorktreeGitDir) and reads ITS OWN mtime. #834 (gate② round 1,
+   *  F9): this is honestly a LAST-GIT-ACTIVITY (quiescence) proxy, not a pure creation-time one
+   *  — ordinary git operations run INSIDE the worktree (commit, checkout, even a plain `git
+   *  status` under some configurations) create and remove an `index.lock` file in this exact
+   *  admin directory, which bumps its mtime each time. That is actually the BETTER gate for this
+   *  arm's purpose: "how long has NOTHING touched this worktree via git", not merely "how long
+   *  ago was it created" — a worktree whose lane is still alive and running normal git commands
+   *  keeps resetting this clock, exactly the "still in use, leave it" signal this gate wants. */
   registrationAgeMs(path: string): number;
-  /** `true` when `branch` (a full `refs/heads/...` ref) is already an ancestor of the TRUSTED
-   *  main checkout's current HEAD — this janitor's own operational convention (every module in
-   *  this file only ever runs from the trusted main-repo cwd, never a worker worktree) makes
-   *  "ancestor of HEAD" and "merged into the default branch" the same fact without a second
-   *  default-branch-resolution path (forge.ts's getDefaultBranchChecks) this module has no forge
-   *  handle to call anyway. `false` on ANY git error (unresolvable branch, detached HEAD, etc.)
-   *  — fail-safe: never a merge candidate without proof. */
+  /** `true` when `branch` (a full `refs/heads/...` ref) is already an ancestor of the repo's
+   *  DEFAULT BRANCH (resolveDefaultBranchRef — `git symbolic-ref refs/remotes/origin/HEAD`,
+   *  #834 gate② round 1 F2), never merely the trusted checkout's current HEAD (see
+   *  resolveDefaultBranchRef's own doc for why those two are NOT the same fact). `false` on ANY
+   *  git error (unresolvable branch, unresolvable default-branch ref, detached HEAD, etc.) —
+   *  fail-safe: never a merge candidate without proof. */
   isBranchMerged(branch: string): Promise<boolean>;
   unlock(path: string): Promise<void>;
   remove(path: string): Promise<void>;
@@ -334,15 +357,29 @@ export interface PresentDirectorySweepDeps extends WorktreeJanitorClassifyDeps {
 
 export interface PresentDirectorySweepResult {
   reaped: string[];
-  /** Purity-dirty candidates left untouched in place — counted, never per-directory-escalated
-   *  (the issue's own explicit "never per-directory events for the stock" line). */
+  /** Purity-dirty (or a failed-attempt-but-untouched) candidates left in place — counted, never
+   *  per-directory-escalated (the issue's own explicit "never per-directory events for the
+   *  stock" line). */
   retained: string[];
   /** Every registration this arm looked at but did not reap: alive-owner, under-age, unmerged-
-   *  branch, detached/branchless, or candidates beyond this cycle's batch bound. One number —
-   *  the whole POINT of the rollup is that the stock never generates per-entry noise. */
+   *  branch, detached/branchless, beyond this cycle's window (see nextOffset), or a prune-step
+   *  failure (#834 gate② round 1, F6 — counted here under a sentinel path since it isn't about
+   *  any ONE directory). One number — the whole POINT of the rollup is that the stock never
+   *  generates per-entry noise. */
   skipped: number;
   failed: Array<{ path: string; error: string }>;
+  /** #834 (gate② round 1, F5): where the NEXT cycle's window should start, so a permanently-
+   *  dirty/unmerged HEAD candidate can never starve everything behind it across repeated calls
+   *  — see sweepPresentDirectoryWorktreesOnce's own windowing doc. `0` once a full lap over the
+   *  candidate list completes (including the trivial zero-candidate case). */
+  nextOffset: number;
 }
+
+/** #834 (gate② round 1, F6): the sentinel `path` a whole-sweep prune-step failure is recorded
+ *  under — the result shape has no separate slot for a failure that isn't about any one
+ *  directory (the reaped directories are already gone from disk either way; only the git
+ *  registration-metadata prune step itself failed). */
+const PRUNE_FAILURE_SENTINEL_PATH = "<worktree-janitor-prune>";
 
 type PresentDirectoryCandidate =
   | { path: string; kind: "locked-dead" }
@@ -355,18 +392,32 @@ type PresentDirectoryCandidate =
  *     pid already proves nobody is driving it).
  *   - UNLOCKED + directory present — a MUCH weaker signal (no pid to check at all), so gated by
  *     ALL THREE of: a real branch to check (never detached), registration age past
- *     WORKTREE_JANITOR_MIN_REGISTRATION_AGE_MS, and that branch fully merged into the trusted
- *     checkout's HEAD (isBranchMerged) — checked LAST, since it is the only per-candidate git
- *     call, after the batch bound below has already shrunk the candidate set.
- *  Bounded to `batchSize` REAPABLE candidates (reusing WORKTREE_JANITOR_BATCH_SIZE, the issue's
- *  own instruction) — the expensive isBranchMerged check runs only inside that bound, so a
- *  147-registration backlog costs at most `batchSize` subprocess calls per cycle, not 147.
- *  Every candidate, clean or dirty, is fs-DELETED (removeDirectory) BEFORE any git call — see
- *  PresentDirectorySweepDeps.removeDirectory's own doc for why that ordering is load-bearing,
- *  never just tidiness. */
+ *     WORKTREE_JANITOR_MIN_REGISTRATION_AGE_MS, and that branch fully merged into the repo's
+ *     DEFAULT branch (isBranchMerged) — checked LAST, since it is the only per-candidate git
+ *     call, after the window below has already shrunk the candidate set.
+ *
+ *  WINDOWING (#834 gate② round 1, F5 — the head-of-line starvation fix): the CLASSIFICATION pass
+ *  above always scans every registration (cheap: no subprocess calls), but the batch of
+ *  candidates this cycle actually EXAMINES through the merge/purity gates is a `batchSize`-wide
+ *  WINDOW starting at `offset % candidates.length` (never index 0 unless `offset` is 0 or the
+ *  list wraps) — NOT a fixed head slice. Without this, a persistently-dirty or perpetually-
+ *  unmerged registration sitting in the first `batchSize` positions would be re-selected every
+ *  single cycle forever, and everything BEHIND it in the list would never even be examined,
+ *  regardless of how many times this function is called. `nextOffset` in the result is where the
+ *  window ends (wrapping to 0 once it reaches the end of the list) — callers that want FULL
+ *  coverage loop, feeding each call's `nextOffset` back in as the next call's `offset`, until it
+ *  returns to 0 (runPresentDirectoryWorktreeSweepToCompletion does exactly this); a single-cycle
+ *  caller (engine startup) that wants to avoid ALWAYS re-examining the same window across
+ *  restarts instead starts from a RANDOMIZED offset — see cli.ts's own startup wiring.
+ *
+ *  Every candidate this cycle actually reaches, clean or dirty, goes through settleDirectory
+ *  (the shared rename-tombstone-verify-delete primitive, #834 gate② round 1 F1/F4) — never a
+ *  separate check-then-delete pair, which would leave a TOCTOU window between the purity read
+ *  and the deletion. */
 export async function sweepPresentDirectoryWorktreesOnce(
   deps: PresentDirectorySweepDeps,
   batchSize: number = WORKTREE_JANITOR_BATCH_SIZE,
+  offset = 0,
 ): Promise<PresentDirectorySweepResult> {
   const registrations = await deps.listRegistrations();
   const candidates: PresentDirectoryCandidate[] = [];
@@ -391,8 +442,15 @@ export async function sweepPresentDirectoryWorktreesOnce(
     }
     // "reap"/"alive"/"out-of-root"/(unlocked, no directory): not this arm's concern.
   }
-  const batch = candidates.slice(0, batchSize);
-  skipped += candidates.length - batch.length; // overflow beyond this cycle's bound
+
+  const total = candidates.length;
+  const startIdx = total === 0 ? 0 : offset % total;
+  const endIdx = Math.min(startIdx + batchSize, total);
+  const batch = candidates.slice(startIdx, endIdx);
+  const consumed = endIdx - startIdx;
+  skipped += total - consumed; // candidates outside this cycle's window
+  const nextOffset = total === 0 || endIdx >= total ? 0 : endIdx;
+
   const reaped: string[] = [];
   const retained: string[] = [];
   const failed: Array<{ path: string; error: string }> = [];
@@ -405,16 +463,16 @@ export async function sweepPresentDirectoryWorktreesOnce(
       }
     }
     const baseline = deps.indexBaselineMs(c.path);
-    if (deps.isDirty(c.path, baseline)) {
+    const settled = deps.settleDirectory(c.path, deps.worktreeRoot, baseline);
+    if (settled.verdict === "retained") {
       retained.push(c.path);
       continue;
     }
-    try {
-      deps.removeDirectory(c.path);
-    } catch (error) {
-      failed.push({ path: c.path, error: String(error) });
-      continue; // never call git against a directory we failed to remove — see doc above
+    if (settled.verdict === "failed") {
+      failed.push({ path: c.path, error: settled.reason ?? "settle failed" });
+      continue; // never call git against a directory that isn't PROVEN gone
     }
+    // settled.verdict === "settled" — the directory is provably gone; prune its registration.
     try {
       if (c.kind === "locked-dead") {
         try {
@@ -429,21 +487,36 @@ export async function sweepPresentDirectoryWorktreesOnce(
       failed.push({ path: c.path, error: String(error) });
     }
   }
-  if (reaped.length > 0) await deps.prune();
-  return { reaped, retained, skipped, failed };
+  if (reaped.length > 0) {
+    try {
+      await deps.prune();
+    } catch (error) {
+      // #834 (gate② round 1, F6): a prune failure must never escape this function — every
+      // reaped directory is ALREADY gone from disk either way, and letting this throw would
+      // skip sweepPresentDirectoryWorktreesAndReport's own single rollup event entirely.
+      failed.push({ path: PRUNE_FAILURE_SENTINEL_PATH, error: String(error) });
+    }
+  }
+  return { reaped, retained, skipped, failed, nextOffset };
 }
 
 /** Real deps for sweepPresentDirectoryWorktreesOnce — reuses createWorktreeJanitorDeps's own
  *  git-backed listRegistrations/isPidAlive/directoryExists/unlock/remove/prune wholesale (#834's
  *  own "reuse the janitor's existing deps machinery" instruction) rather than growing a second
- *  git-wiring implementation, and adds only the purity/age/merged reads this arm needs on top. */
+ *  git-wiring implementation, and adds only the purity/age/merged reads this arm needs on top.
+ *  The default-branch ref (#834 gate② round 1, F2) is resolved AT MOST ONCE per deps object —
+ *  memoized in this closure, not re-resolved per candidate — since it cannot change mid-sweep. */
 export function createPresentDirectorySweepDeps(repoRoot: string = process.cwd()): PresentDirectorySweepDeps {
   const base = createWorktreeJanitorDeps(repoRoot);
+  let defaultBranchRefPromise: Promise<string | null> | undefined;
+  const resolveDefaultBranchRefOnce = (): Promise<string | null> => {
+    if (defaultBranchRefPromise === undefined) defaultBranchRefPromise = resolveDefaultBranchRef(repoRoot);
+    return defaultBranchRefPromise;
+  };
   return {
     ...base,
     indexBaselineMs: resolveWorktreeIndexBaselineMs,
-    isDirty: worktreeMaybeDirty,
-    removeDirectory: (path) => rmSync(path, { recursive: true, force: true }),
+    settleDirectory: settleWorktreeDirectory,
     registrationAgeMs(path) {
       const gitDir = resolveWorktreeGitDir(path);
       if (gitDir === null) return Number.NaN;
@@ -454,8 +527,10 @@ export function createPresentDirectorySweepDeps(repoRoot: string = process.cwd()
       }
     },
     async isBranchMerged(branch) {
+      const defaultRef = await resolveDefaultBranchRefOnce();
+      if (defaultRef === null) return false; // no resolvable default branch -> never a candidate
       try {
-        await pexecFile("git", ["-C", repoRoot, "merge-base", "--is-ancestor", branch, "HEAD"]);
+        await pexecFile("git", ["-C", repoRoot, "merge-base", "--is-ancestor", branch, defaultRef]);
         return true;
       } catch {
         return false; // not an ancestor, or unresolvable — never a merge candidate without proof
@@ -468,14 +543,18 @@ export function createPresentDirectorySweepDeps(repoRoot: string = process.cwd()
  *  directory event for the present-directory stock (retained/skipped counts alone are the
  *  honest signal; a per-entry escalation storm is exactly what #825's own missing-directory reap
  *  design already rejected for its class too). Best-effort: a failed event append is logged,
- *  never thrown — same posture as cli.ts's other best-effort startup passes. */
+ *  never thrown — same posture as cli.ts's other best-effort startup passes. `offset` (#834
+ *  gate② round 1, F5) threads through to sweepPresentDirectoryWorktreesOnce's own windowing —
+ *  see that function's own doc; cli.ts's startup call passes a RANDOMIZED offset so repeated
+ *  single-cycle sweeps don't deterministically re-examine only the same window forever. */
 export async function sweepPresentDirectoryWorktreesAndReport(
   deps: PresentDirectorySweepDeps,
   state: Pick<State, "appendEvent">,
   log: (message: string) => void = console.error,
   batchSize: number = WORKTREE_JANITOR_BATCH_SIZE,
+  offset = 0,
 ): Promise<PresentDirectorySweepResult> {
-  const result = await sweepPresentDirectoryWorktreesOnce(deps, batchSize);
+  const result = await sweepPresentDirectoryWorktreesOnce(deps, batchSize, offset);
   try {
     state.appendEvent("worktree-janitor-rollup", {
       reaped: result.reaped.length,
@@ -487,4 +566,46 @@ export async function sweepPresentDirectoryWorktreesAndReport(
     log(`[sapwood:worktree-janitor] rollup event append failed (non-fatal): ${String(error)}`);
   }
   return result;
+}
+
+/** #834 (gate② round 1, F5) — the present-directory arm's own to-completion path, the AC5
+ *  operator one-shot counterpart to runWorktreeJanitorToCompletion above, but with a DIFFERENT
+ *  termination rule: unlike the missing-directory reap (where a successfully-reaped candidate
+ *  LEAVES the candidate list, so the list itself shrinks toward empty across cycles), a
+ *  retained/skipped present-directory candidate is NOT removed from the registration list and
+ *  reappears at the SAME position on every re-scan — "no more work to do" here means "every
+ *  candidate has now been examined once in this run", not "the list is empty". Loops
+ *  sweepPresentDirectoryWorktreesOnce, feeding each cycle's `nextOffset` back in as the next
+ *  cycle's `offset`, until it returns to `0` — by that function's own windowing contract this is
+ *  EXACTLY ONE LAP over the full candidate list (each cycle's window is disjoint from every
+ *  other cycle's in the same lap), so counts from every cycle are accumulated, never just the
+ *  last one. A second lap would only re-examine the SAME still-present directories and report
+ *  nothing new, so this stops after exactly one. This is the SAME code path
+ *  scripts/worktree-janitor.ts (the operator one-shot script) now runs alongside the existing
+ *  missing-directory pass. */
+export async function runPresentDirectoryWorktreeSweepToCompletion(
+  deps: PresentDirectorySweepDeps,
+  log: (message: string) => void = console.error,
+  batchSize: number = WORKTREE_JANITOR_BATCH_SIZE,
+): Promise<PresentDirectorySweepResult> {
+  const totalReaped: string[] = [];
+  const totalRetained: string[] = [];
+  const totalFailed: Array<{ path: string; error: string }> = [];
+  let totalSkipped = 0;
+  let offset = 0;
+  let cycle = 0;
+  do {
+    cycle++;
+    const result = await sweepPresentDirectoryWorktreesOnce(deps, batchSize, offset);
+    totalReaped.push(...result.reaped);
+    totalRetained.push(...result.retained);
+    totalSkipped += result.skipped;
+    totalFailed.push(...result.failed);
+    log(
+      `[sapwood:worktree-janitor] present-dir cycle ${cycle}: reaped ${result.reaped.length}, retained ${result.retained.length}, ` +
+        `skipped ${result.skipped}, failed ${result.failed.length}`,
+    );
+    offset = result.nextOffset;
+  } while (offset !== 0);
+  return { reaped: totalReaped, retained: totalRetained, skipped: totalSkipped, failed: totalFailed, nextOffset: 0 };
 }

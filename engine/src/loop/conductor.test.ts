@@ -67,6 +67,7 @@ import {
   type Supervisor,
   startFixLeg,
   tick,
+  type WorktreeSettleOutcome,
 } from "./conductor.js";
 import { reconcileEscalations } from "./escalation-reconcile.js";
 import { sweepResolvedHolds } from "./escalation-sweep.js";
@@ -548,14 +549,14 @@ class FakeSupervisor implements Supervisor {
    *  fixture callers never touch worktree settlement at all, and settleMergedLane's own `typeof`
    *  guard must see the real "no opinion" absence, not a fake opinion of "nothing to settle" —
    *  same optional-capability stance durablePidAlive/signalDurablePid already take above. */
-  settleResults: Record<string, ReclaimResult> = {};
+  settleResults: Record<string, WorktreeSettleOutcome> = {};
   settleCalls: string[] = [];
-  settleMergedWorktree?: (worker: string) => ReclaimResult;
-  enableWorktreeSettlement(results: Record<string, ReclaimResult> = {}): void {
+  settleMergedWorktree?: (worker: string) => WorktreeSettleOutcome;
+  enableWorktreeSettlement(results: Record<string, WorktreeSettleOutcome> = {}): void {
     this.settleResults = results;
     this.settleMergedWorktree = (w) => {
       this.settleCalls.push(w);
-      return this.settleResults[w] ?? { worktreePath: null, worktreeRetained: false };
+      return this.settleResults[w] ?? { worktreePath: null, verdict: "absent" };
     };
   }
 }
@@ -2934,7 +2935,7 @@ test("#834: a merged lane whose worktree settles CLEAN gets its registration pru
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
-  sup.enableWorktreeSettlement({ "lane-a": { worktreePath: "/repo/.claude/worktrees/lane-a", worktreeRetained: false } });
+  sup.enableWorktreeSettlement({ "lane-a": { worktreePath: "/repo/.claude/worktrees/lane-a", verdict: "settled" } });
   seedRunning(st, "lane-a", 2);
   sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
   const gate = new FakeMergeGate();
@@ -2965,7 +2966,7 @@ test("#834: a merged lane whose worktree settles DIRTY is retained event-only �
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
-  sup.enableWorktreeSettlement({ "lane-a": { worktreePath: "/repo/.claude/worktrees/lane-a", worktreeRetained: true } });
+  sup.enableWorktreeSettlement({ "lane-a": { worktreePath: "/repo/.claude/worktrees/lane-a", verdict: "retained" } });
   seedRunning(st, "lane-a", 2);
   sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
   const gate = new FakeMergeGate();
@@ -2991,6 +2992,44 @@ test("#834: a merged lane whose worktree settles DIRTY is retained event-only �
   st.close();
 });
 
+test("#834 (gate② round 1, F1): a merged lane whose worktree settlement FAILED (attempted deletion did not complete cleanly) never prunes a registration and never claims settled — merged-lane-worktree-settle-failed, event-only, carrying the reason", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  sup.enableWorktreeSettlement({
+    "lane-a": { worktreePath: "/repo/.claude/worktrees/lane-a", verdict: "failed", reason: "tombstone removal failed: boom" },
+  });
+  seedRunning(st, "lane-a", 2);
+  sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "merged", pr: 55, headOid: "H" };
+  const pruneCalls: string[] = [];
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    worktreeRegistrationPruner: async (path) => void pruneCalls.push(path),
+  });
+  assert.deepEqual(r.driven, [{ kind: "merged", worker: "lane-a", issue: 2, pr: 55 }]);
+  assert.deepEqual(pruneCalls, [], "F1: a failed settlement must produce NO git calls — nothing was proven deleted");
+  const failed = st.eventsSince("1970-01-01T00:00:00.000Z", ["merged-lane-worktree-settle-failed"]);
+  assert.equal(failed.length, 1);
+  assert.deepEqual(failed[0]!.payload, {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    worktreePath: "/repo/.claude/worktrees/lane-a",
+    reason: "tombstone removal failed: boom",
+  });
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["merged-lane-worktree-settled", "merged-lane-worktree-retained"]), []);
+  assert.deepEqual(forge.labelsAdded, [], "F1: never escalated — event-only, same as retained");
+  assert.deepEqual(forge.issueComments, []);
+  st.close();
+});
+
 test("#834: a Supervisor with no opinion on worktree settlement (settleMergedWorktree unset) leaves the merged path exactly as before — zero new events, zero behavior change", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
@@ -3009,7 +3048,7 @@ test("#834: settleMergedWorktree returning a null worktreePath (nothing on disk 
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
-  sup.enableWorktreeSettlement({ "lane-a": { worktreePath: null, worktreeRetained: false } });
+  sup.enableWorktreeSettlement({ "lane-a": { worktreePath: null, verdict: "absent" } });
   seedRunning(st, "lane-a", 2);
   sup.probes["lane-a"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 55 };
   const gate = new FakeMergeGate();
@@ -3024,7 +3063,7 @@ test("#834: settleMergedWorktree also runs for the GATED RECLAIM merged path (#8
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
-  sup.enableWorktreeSettlement({ "lane-a": { worktreePath: "/repo/.claude/worktrees/lane-a", worktreeRetained: false } });
+  sup.enableWorktreeSettlement({ "lane-a": { worktreePath: "/repo/.claude/worktrees/lane-a", verdict: "settled" } });
   // Mirrors the #484 AC1 fixture shape immediately below this block: a gated-reentry lane whose
   // PR a human merged by hand — the GATED RECLAIM branch settles it directly via settleMergedLane,
   // never through gate.driveOne (no FakeMergeGate is even configured here).

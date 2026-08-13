@@ -36,13 +36,13 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
 import { loadDoctrine } from "../config/doctrine.js";
 import { estimateUsd, loadPricingTable, type PricingTable } from "../config/pricing.js";
 import type { Issue, LanePrOutcome } from "../forge/forge.js";
-import type { LaneProbe, ReclaimResult, ResumeIntentState, Supervisor } from "../loop/conductor.js";
+import type { LaneProbe, ReclaimResult, ResumeIntentState, Supervisor, WorktreeSettleOutcome } from "../loop/conductor.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import { sanitizeUpstreamError } from "../proxy/tools.js";
 import type { CategorizedTokenUsage, ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
@@ -2165,6 +2165,186 @@ export function worktreeMaybeDirty(worktreePath: string, sinceMs: number): boole
   return false;
 }
 
+/** #834 (gate② round 1, F4): re-verifies a FRESHLY-RENAMED tombstone directory against the SAME
+ *  purity baseline settleWorktreeDirectory's first (pre-rename) pass already confirmed clean,
+ *  WITHOUT the rename operation itself producing a false "dirty" verdict. `rename()` bumps the
+ *  renamed directory's OWN ctime (observed OS behavior, not POSIX-mandated but real on every
+ *  filesystem this engine ships against) — `worktreeMaybeDirty`'s inclusive ctime check would
+ *  therefore ALWAYS read a just-renamed tombstone as dirty, even when nothing under it actually
+ *  changed. The fix is LOCAL and NARROW, never a change to `worktreeMaybeDirty` itself (other
+ *  callers — peripheral.ts's retention check, this file's own dispatch-baselined checks — must
+ *  keep the full mtime-or-ctime rule unweakened): the tombstone's OWN top-level entry is checked
+ *  by MTIME ONLY (a top-level add/remove still bumps mtime, so that half of the race-detection
+ *  invariant survives intact); every entry BELOW the top level is untouched by the rename (moving
+ *  a directory changes only the moved inode's own parent-pointer, never its children's metadata),
+ *  so those are checked with the FULL, UNMODIFIED `worktreeMaybeDirty` — a directory's real
+ *  purity coverage is unchanged one level down and beyond.
+ *
+ *  Exported (not module-private) SOLELY for direct unit coverage of this exact discrimination —
+ *  the top-level-ctime-exclusion behavior is otherwise only reachable through a REAL rename
+ *  (settleWorktreeDirectory's own tests), which cannot deterministically construct the "old
+ *  mtime, fresh ctime" shape without either real elapsed time or exactly the fixed-past-date
+ *  trick worker.test.ts's own dedicated test for this function uses. Production code only ever
+ *  reaches it through settleWorktreeDirectory, immediately after its own rename. */
+export function tombstoneMaybeDirty(tombstonePath: string, sinceMs: number): boolean {
+  if (!Number.isFinite(sinceMs)) return true;
+  let topStat: ReturnType<typeof lstatSync>;
+  let entries: Dirent[];
+  try {
+    topStat = lstatSync(tombstonePath);
+    if (topStat.mtimeMs >= sinceMs) return true; // a top-level add/remove -> genuinely dirty
+    entries = readdirSync(tombstonePath, { withFileTypes: true });
+  } catch {
+    return true; // unreadable -> fail-safe dirty, same stance as worktreeMaybeDirty
+  }
+  for (const e of entries) {
+    if (e.name === ".git") continue;
+    const p = join(tombstonePath, e.name);
+    if (e.isDirectory()) {
+      if (worktreeMaybeDirty(p, sinceMs)) return true; // full mtime-or-ctime scan, unmodified
+      continue;
+    }
+    try {
+      const s = lstatSync(p);
+      if (s.mtimeMs >= sinceMs || s.ctimeMs >= sinceMs) return true;
+    } catch {
+      return true; // unstatable -> fail-safe dirty
+    }
+  }
+  return false;
+}
+
+/** #834 (gate② round 1, F1/F4): the verdict settleWorktreeDirectory reaches. `"settled"` is the
+ *  ONLY verdict under which the directory is PROVABLY gone from disk — the sole state a caller
+ *  may act on by pruning the (now-orphaned) git-worktree registration. `"retained"` covers both
+ *  a genuinely dirty tree AND a rename that failed outright (the directory is untouched, still
+ *  at its original path, either way) — a caller cannot tell the two apart from this verdict
+ *  alone and must not need to: neither one is ever safe to delete or prune. `"failed"` is the
+ *  narrow TOCTOU/partial-removal residue: something was ALREADY moved (or a re-verified-dirty
+ *  tombstone's rename-back itself failed) and the directory may no longer be at its original
+ *  path — a caller must never claim "settled" (nothing proven deleted) NOR silently reuse the
+ *  "retained" label (that would misreport a WIP-preserving skip as this operation's own
+ *  in-progress mutation); `reason` carries a short diagnostic for the event/log a caller
+ *  attaches. */
+export type WorktreeDirectorySettleVerdict = "settled" | "retained" | "failed";
+
+export interface WorktreeDirectorySettleOutcome {
+  verdict: WorktreeDirectorySettleVerdict;
+  /** Present only for `"failed"`. */
+  reason?: string;
+}
+
+/** #834 (gate② round 1, F1 + F4): the ONE clean-worktree-deletion primitive shared by worker.ts's
+ *  own settleMergedWorktree (Phase 1) and worktree-janitor.ts's present-directory sweep (Phase
+ *  2) — a single implementation, two callers, per the owner's explicit instruction. Callers own
+ *  their own existence/root-containment checks and the purity baseline; this function assumes
+ *  `worktreePath` exists, is already proven inside `worktreeRoot`, and `baselineMs` is the
+ *  correct baseline for the caller's own policy (Phase 1: the worktree's own git-index mtime;
+ *  Phase 2: the same, resolved per-candidate).
+ *
+ *  TOCTOU discipline (F4): a plain "check dirty, then rmSync" has a race window between the
+ *  purity read and the deletion — a writer can land a file in that window and lose it silently.
+ *  This closes the window with a RENAME-THEN-VERIFY tombstone step: `renameSync` the directory
+ *  to a fresh tombstone path INSIDE `worktreeRoot` FIRST (an atomic, single-syscall operation —
+ *  once it succeeds, no writer can find the original path to land a new file in), THEN
+ *  re-verify the TOMBSTONE (not the original path, which no longer exists) against the SAME
+ *  baseline via tombstoneMaybeDirty (see its own doc for why a plain worktreeMaybeDirty call
+ *  would false-positive here), and only THEN rmSync the tombstone. A re-verified-dirty tombstone
+ *  is renamed BACK to its original path when possible (nothing about the lane's on-disk state
+ *  changes from a failed attempt) — if even the rename-back fails, the tombstone (data intact,
+ *  never at the original path) is left in place and reported as `"failed"`, never silently lost.
+ *
+ *  F1 (deletion-safety): `"settled"` is returned ONLY after `existsSync(tombstonePath)` confirms
+ *  the tombstone is actually gone post-`rmSync` — an rmSync that throws, or one that reports
+ *  success while something still occupies the path (a mount-point oddity, a permissions quirk),
+ *  is `"failed"`, never a lied-about `"settled"`. This is the exact fix for gate①'s finding: the
+ *  old code swallowed rmSync's error and unconditionally claimed clean, which let the CONDUCTOR
+ *  run `git worktree unlock/remove` against a still-present, worker-controlled directory — the
+ *  #65 clean-check RCE class this whole file's discipline exists to close.
+ *
+ *  Honest crash-window disclosure: a process kill between the rename and a would-be rename-back
+ *  leaves a tombstone directory (under `<name>-settle-tombstone-*`) whose data is fully
+ *  preserved on disk, with the git-worktree registration for the ORIGINAL path now dangling
+ *  (its directory moved out from under it). That dangling registration is exactly the shape
+ *  #825's own missing-directory janitor pass already reaps (dead-pid/no-directory -> "reap") —
+ *  no new recovery machinery is needed; the existing food source just gained one more producer. */
+/** #834 (gate② round 1, F1): the two raw fs primitives settleWorktreeDirectory needs, as an
+ *  injectable seam — real defaults (`renameSync`/`rmSync`) for production, a fake for tests that
+ *  need to exercise the "removal didn't actually complete" path DETERMINISTICALLY (a real
+ *  permission-based failure is OS/filesystem/uid dependent — e.g. root ignores mode bits on many
+ *  systems — so a seam is the reliable way to pin the F1 regression, not a race against the
+ *  platform). */
+export interface WorktreeDirectoryFsOps {
+  rename(oldPath: string, newPath: string): void;
+  rm(path: string): void;
+}
+
+const defaultWorktreeDirectoryFsOps: WorktreeDirectoryFsOps = {
+  rename: renameSync,
+  rm: (path) => rmSync(path, { recursive: true, force: true }),
+};
+
+export function settleWorktreeDirectory(
+  worktreePath: string,
+  worktreeRoot: string,
+  baselineMs: number,
+  fsOps: WorktreeDirectoryFsOps = defaultWorktreeDirectoryFsOps,
+): WorktreeDirectorySettleOutcome {
+  if (worktreeMaybeDirty(worktreePath, baselineMs)) return { verdict: "retained" };
+  const tombstonePath = join(worktreeRoot, `.settle-tombstone-${randomUUID()}`);
+  try {
+    fsOps.rename(worktreePath, tombstonePath);
+  } catch {
+    return { verdict: "retained" }; // untouched at its original path — the safe default
+  }
+  let stillDirty: boolean;
+  try {
+    stillDirty = tombstoneMaybeDirty(tombstonePath, baselineMs);
+  } catch {
+    stillDirty = true; // fail-safe: never proceed to delete on an unreadable re-verify
+  }
+  if (stillDirty) {
+    // A writer raced in between the first purity read and the rename. Put it back where it was
+    // — a failed attempt must change nothing about the lane's on-disk state.
+    try {
+      fsOps.rename(tombstonePath, worktreePath);
+      return { verdict: "retained" };
+    } catch (error) {
+      // The data is intact, just no longer at the original path. Never delete data that
+      // re-verified dirty — leave the tombstone in place and say so honestly.
+      return { verdict: "failed", reason: `re-verified dirty; rename-back failed: ${String(error)}` };
+    }
+  }
+  try {
+    fsOps.rm(tombstonePath);
+  } catch (error) {
+    // F1 (gate② round 1): a swallowed rmSync error used to fall through to an unconditional
+    // "clean, settled" claim — the caller would then run `git worktree unlock/remove` against a
+    // directory that (per this catch) may still be fully present, the exact #65 clean-check RCE
+    // class this file's whole discipline exists to close. Report the truth instead: never
+    // "settled" unless deletion is PROVEN, below.
+    return { verdict: "failed", reason: `tombstone removal failed: ${String(error)}` };
+  }
+  if (existsSync(tombstonePath)) {
+    // F1: a `rm` that reports success without actually removing everything (a mount-point
+    // oddity, a fake in a test) must not be trusted at face value either — verify the tombstone
+    // is PROVABLY gone before ever claiming "settled".
+    return { verdict: "failed", reason: "tombstone still present after removal" };
+  }
+  return { verdict: "settled" };
+}
+
+/** #834 (gate② round 1, F3): the same out-of-root discipline worktree-janitor.ts's own
+ *  `classifyRegistration`/`isUnderRoot` already applies to every registration it touches —
+ *  duplicated here (a genuinely tiny, three-line pure function) rather than imported, since
+ *  worktree-janitor.ts already imports FROM this file (`worktreeMaybeDirty`) and importing back
+ *  the other way would create a circular module dependency for zero real benefit. Never equal to
+ *  `root` itself (the root directory is never a single lane's worktree). */
+function isUnderWorktreeRoot(candidatePath: string, root: string): boolean {
+  const rel = relative(resolve(root), resolve(candidatePath));
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
 export class WorkerSupervisor implements Supervisor {
   private readonly dir: string;
   private readonly worktreeRoot: string;
@@ -4171,30 +4351,32 @@ export class WorkerSupervisor implements Supervisor {
    *  clean against it. Unreadable/missing index -> NaN -> worktreeMaybeDirty's own fail-safe-
    *  dirty branch (never assumes clean without proof).
    *
-   *  DELETES THE DIRECTORY ONLY (fs, no git) — this class's #69 grep-invariant forbids running
-   *  git at all (see this file's header doc). The caller (conductor.ts's settleMergedLane) owns
-   *  pruning the now-directory-less `git worktree` REGISTRATION, through worktree-janitor.ts's
-   *  trusted main-repo `-C` git (worktree-janitor.ts's pruneSettledWorktreeRegistration) — one of
+   *  #834 (gate② round 1, F3): `name` is caller-supplied — before it ever becomes a filesystem
+   *  path this checks the resolved path is STRICTLY inside `this.worktreeRoot` (the same
+   *  discipline worktree-janitor.ts's classifyRegistration already applies to every
+   *  registration path it touches). A `..`-carrying or absolute-path-injecting name is treated
+   *  as "nothing to settle" — never scanned, never deleted — rather than trusting `join()` to
+   *  keep it contained (it does not).
+   *
+   *  DELETES THE DIRECTORY via the shared TOCTOU-safe rename-tombstone primitive
+   *  (settleWorktreeDirectory, module-level — see its own doc for the F1/F4 fixes: an honest
+   *  "settled" only after the tombstone is PROVEN gone, never a swallowed rmSync error, and a
+   *  purity re-verification after the rename closes the race window between the first purity
+   *  read and the actual deletion). Never runs git — this class's #69 grep-invariant forbids it
+   *  (see this file's header doc). The caller (conductor.ts's settleMergedLane) owns pruning the
+   *  now-directory-less `git worktree` REGISTRATION, ONLY on a `"settled"` verdict, through
+   *  worktree-janitor.ts's trusted main-repo `-C` git (pruneSettledWorktreeRegistration) — one of
    *  the handful of modules this codebase permits to shell out at all (worktree-janitor.ts's own
-   *  header doc names the full, closed list). Reuses ReclaimResult's shape (`worktreeRetained:
-   *  true` == dirty/left in place, `worktreePath: null` == nothing was ever there) — a DIFFERENT policy from
-   *  retainOrDeleteWorktree's (baseline, and never an escalation trigger: a MERGED lane's
-   *  retained worktree is event-only per #834's ruling, decided entirely by the caller, since
-   *  this class has no forge access either way). */
-  settleMergedWorktree(name: string): ReclaimResult {
+   *  header doc names the full, closed list). A MERGED lane's retained/failed worktree is never
+   *  an escalation trigger per #834's ruling — event-only, decided entirely by the caller, since
+   *  this class has no forge access either way. */
+  settleMergedWorktree(name: string): WorktreeSettleOutcome {
     const worktreePath = join(this.worktreeRoot, name);
-    if (!existsSync(worktreePath)) return { worktreePath: null, worktreeRetained: false };
+    if (!isUnderWorktreeRoot(worktreePath, this.worktreeRoot)) return { worktreePath: null, verdict: "absent" };
+    if (!existsSync(worktreePath)) return { worktreePath: null, verdict: "absent" };
     const indexMs = resolveWorktreeIndexBaselineMs(worktreePath);
-    if (worktreeMaybeDirty(worktreePath, indexMs)) {
-      return { worktreePath, worktreeRetained: true }; // left on disk — event-only, no escalation
-    }
-    try {
-      rmSync(worktreePath, { recursive: true, force: true });
-    } catch {
-      // Best-effort, same stance as retainOrDeleteWorktree: an unremovable clean worktree is a
-      // disk-hygiene issue, not data loss (nothing to lose — it was clean).
-    }
-    return { worktreePath, worktreeRetained: false };
+    const outcome = settleWorktreeDirectory(worktreePath, this.worktreeRoot, indexMs);
+    return { worktreePath, verdict: outcome.verdict, ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}) };
   }
 
   /** The IMMUTABLE first-dispatch time (`dispatched_at`) that the dirty-worktree retention

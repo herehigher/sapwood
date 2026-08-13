@@ -96,6 +96,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `worktree-released` — **routine**: a lane's worktree was deleted after reclaim (clean, nothing to salvage).
 - `merged-lane-worktree-settled` — **routine**: a MERGED lane's worktree was clean at close-out — deleted, and its git-worktree registration pruned (#834 Phase 1, the merged-lane close-out settlement). (see #834)
 - `merged-lane-worktree-retained` — **investigate**: a MERGED lane's worktree held possibly-uncommitted state at close-out and was left in place — event-only, no needs-human label: the PR is already merged and nothing is blocked (#834 Phase 1). (see #834)
+- `merged-lane-worktree-settle-failed` — **investigate**: a MERGED lane's worktree was purity-clean but its deletion did not complete cleanly (TOCTOU re-verify or the removal itself failed) — left in place, its git-worktree registration untouched; carries a `reason` (#834 Phase 1, gate② round 1 F1/F4). (see #834)
 - `orphan-detected` — **investigate**: a worktree/branch with no matching worker row was found (#384 mid-run sweep or startup reconcile). (see #384)
 - `orphan-healed` — **routine**: a detected orphan was reconciled back into a tracked lane.
 - `orphan-heal-failed` — **investigate**: healing a detected orphan failed; it remains untracked for the next sweep.

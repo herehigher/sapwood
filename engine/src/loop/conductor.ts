@@ -1342,6 +1342,20 @@ export interface ReclaimResult {
   worktreeRetained: boolean;
 }
 
+/** #834 Phase 1 (gate② round 1, F1): what settleMergedWorktree (worker.ts) did with a MERGED
+ *  lane's worktree — a DIFFERENT, richer shape than ReclaimResult's, because a merged lane's
+ *  settlement has a state ReclaimResult's boolean can't represent: an attempted-but-incomplete
+ *  deletion (`"failed"`), distinct from both a genuinely dirty worktree (`"retained"`, left
+ *  untouched) and a provably-deleted one (`"settled"`, the only verdict a caller may prune a
+ *  git-worktree registration on). `worktreePath` is `null` only for `"absent"` (nothing on disk
+ *  to settle, or the resolved path failed root-containment — see worker.ts's own doc). `reason`
+ *  is present only for `"failed"`, a short diagnostic for the caller's own log/event. */
+export interface WorktreeSettleOutcome {
+  worktreePath: string | null;
+  verdict: "absent" | "retained" | "settled" | "failed";
+  reason?: string;
+}
+
 /** The conductor's only handle on workers. worker.ts (M2 #11) implements this.
  *
  *  #705: `dispatch`/`resume` both return OPTIONAL `pid`/`worktreePath` — worker.ts's real
@@ -1413,12 +1427,14 @@ export interface Supervisor {
   signalDurablePid?(worker: string, signal: "SIGTERM" | "SIGKILL"): void;
   /** #834 Phase 1: settles a MERGED lane's worktree at close-out (purity check against the
    *  worktree's OWN git-index mtime, never dispatchedBaselineMs — see worker.ts's
-   *  settleMergedWorktree for the full doc). Reuses ReclaimResult's shape; `worktreeRetained`
-   *  here never triggers escalation the way reclaim()'s does — settleMergedLane decides what
-   *  to do with it. Optional: a Supervisor test double with no opinion on worktree settlement
-   *  (most fixtures) simply settles nothing, same "additive, degrades to zero behavior change"
-   *  stance durablePidAlive/signalDurablePid above already take on this interface. */
-  settleMergedWorktree?(worker: string): ReclaimResult;
+   *  settleMergedWorktree for the full doc). Returns a WorktreeSettleOutcome — `verdict:
+   *  "retained"`/`"failed"` here never trigger escalation the way reclaim()'s `worktreeRetained`
+   *  does — settleMergedLane decides what to do with it, and NEVER prunes a git-worktree
+   *  registration except on `"settled"` (gate② round 1, F1). Optional: a Supervisor test double
+   *  with no opinion on worktree settlement (most fixtures) simply settles nothing, same
+   *  "additive, degrades to zero behavior change" stance durablePidAlive/signalDurablePid above
+   *  already take on this interface. */
+  settleMergedWorktree?(worker: string): WorktreeSettleOutcome;
 }
 
 /** The conductor's only handle on the review + merge gate (#13). merge-driver.ts's
@@ -2020,17 +2036,42 @@ async function settleMergedLane(
   if (typeof supervisor.settleMergedWorktree === "function") {
     try {
       const settlement = supervisor.settleMergedWorktree(w.name);
-      if (settlement.worktreePath !== null) {
-        if (settlement.worktreeRetained) {
-          // Dirty — left on disk. #834's own ruling: EVENT-ONLY, no needs-human label, no
-          // escalation. The PR is already merged; nothing is blocked on this worktree.
-          state.appendEvent("merged-lane-worktree-retained", { worker: w.name, issue: w.issue, pr, worktreePath: settlement.worktreePath });
-        } else {
-          // Clean — the directory is already gone (settleMergedWorktree's own job); prune the
-          // now-orphaned git-worktree REGISTRATION through the trusted main-repo git path.
-          await pruneRegistration(settlement.worktreePath);
-          state.appendEvent("merged-lane-worktree-settled", { worker: w.name, issue: w.issue, pr, worktreePath: settlement.worktreePath });
-        }
+      // #834 (gate② round 1, F1): the registration is pruned — and "settled" is ever claimed —
+      // ONLY on verdict "settled": the one state settleMergedWorktree proves the directory is
+      // actually gone. "retained" (dirty, or an untouched failed-rename attempt) and "failed"
+      // (an attempted-but-incomplete deletion) both leave git untouched and both stay honest in
+      // their own event, never conflated with a clean settlement.
+      switch (settlement.verdict) {
+        case "absent":
+          break; // nothing on disk to settle (or a root-containment failure) — no event
+        case "retained":
+          // Left on disk. #834's own ruling: EVENT-ONLY, no needs-human label, no escalation —
+          // the PR is already merged; nothing is blocked on this worktree.
+          state.appendEvent("merged-lane-worktree-retained", {
+            worker: w.name,
+            issue: w.issue,
+            pr,
+            worktreePath: settlement.worktreePath!,
+          });
+          break;
+        case "settled":
+          // Clean and PROVABLY gone (settleMergedWorktree's own job) — prune the now-orphaned
+          // git-worktree REGISTRATION through the trusted main-repo git path.
+          await pruneRegistration(settlement.worktreePath!);
+          state.appendEvent("merged-lane-worktree-settled", { worker: w.name, issue: w.issue, pr, worktreePath: settlement.worktreePath! });
+          break;
+        case "failed":
+          // An attempted deletion did not complete cleanly (TOCTOU re-verify, or the removal
+          // itself failed) — never prune a registration for a directory that isn't PROVEN gone,
+          // and never claim "settled". Event-only, same no-escalation stance as "retained".
+          state.appendEvent("merged-lane-worktree-settle-failed", {
+            worker: w.name,
+            issue: w.issue,
+            pr,
+            worktreePath: settlement.worktreePath!,
+            reason: settlement.reason ?? "unknown",
+          });
+          break;
       }
     } catch (error) {
       log?.(`[sapwood:drive] lane ${w.name} pr #${pr}: worktree settlement failed (non-fatal): ${String(error)}`);

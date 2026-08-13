@@ -225,6 +225,13 @@ export const LANE_EVENT_KINDS = defineKinds({
     actionability: "investigate",
     see: "#834",
   },
+  "merged-lane-worktree-settle-failed": {
+    tags: [],
+    meaning:
+      "a MERGED lane's worktree was purity-clean but its deletion did not complete cleanly (TOCTOU re-verify or the removal itself failed) — left in place, its git-worktree registration untouched; carries a `reason` (#834 Phase 1, gate② round 1 F1/F4).",
+    actionability: "investigate",
+    see: "#834",
+  },
 
   // Orphan detection + the mid-run orphan sweep (#384).
   "orphan-detected": {
