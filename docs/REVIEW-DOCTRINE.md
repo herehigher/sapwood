@@ -128,14 +128,11 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   exact function/branch it describes, not a plausible generalization from a partial read. A
   fallible operation (delete, prune) is best-effort unless the code checks and reports the
   outcome; a policy specific to one call path isn't generalized to every lane in that state when
-  another path (e.g. a human-merge-only exception) handles it differently. Round #375, same shape
-  twice: PR #858 (#854) took 3 fix rounds, each catching a new instance — one lane's policy stated
-  as universal, a best-effort delete stated as unconditional, an index-mtime baseline stated as
-  "last commit." PR #857 (#700) passed review with a launch recipe a later PO live-fire dry-run
-  found doesn't work as written — review checked the prose's internal consistency, never that the
-  recipe had actually been run. A docs-only PR has no test suite to catch a false claim the way
-  code does; name the exact symbol/branch backing a claim (or actually run a described procedure)
-  before asserting it, rather than writing from memory of "roughly how it works."
+  another path (e.g. a human-merge-only exception) handles it differently. A documented procedure
+  or recipe is itself a claim: either it has actually been run, or it isn't asserted as working. A
+  docs-only PR has no test suite to catch a false claim the way code does, so name the exact
+  symbol/branch backing a claim rather than writing it from memory of "roughly how it works"
+  (#854, #700).
 
 ### Signal classification & escalation
 
