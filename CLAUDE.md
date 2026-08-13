@@ -7,8 +7,9 @@ detail lives in [`docs/PLAN.md`](docs/PLAN.md) — **read that first.**
 
 sapwood = "the autonomous coding loop with governance built in." A Claude Code
 plugin that turns a GitHub backlog into reviewed PRs: *issues in → reviewed PRs
-out*. It is the dev-loop **framework** extracted from a private predecessor project and
-re-implemented as a standalone, public tool. Status: **early development, pre-v1.**
+out*. It packages the autonomous development loop as a standalone, public
+**framework** — the engine, safety hook, and skills all ship in this repo.
+Status: **early development, pre-v1.**
 
 ## Where things are
 
@@ -16,9 +17,6 @@ re-implemented as a standalone, public tool. Status: **early development, pre-v1
 - `engine/prompts/worker.md` ("Working language & comments") — code-comment discipline
   (why, not what). It's the copy guaranteed to reach workers on any target repo; applies
   here too when writing code interactively.
-- Source to port FROM: the private predecessor repo (sibling checkout). The framework
-  lives in its loop conductor, worker, merge-driver, GitHub-plumbing, and safety-hook
-  sources. Port the *generic logic*, not application-specific behavior.
 
 ## Non-negotiables
 
@@ -39,6 +37,10 @@ re-implemented as a standalone, public tool. Status: **early development, pre-v1
   triggers a graceful handoff (commit+push WIP, progress note, `.handoff` sentinel,
   clean exit), not a SIGKILL. Hard stop is reserved for the engine safety ceiling /
   kill switch, and even there drains before killing. (PLAN.md Security model.)
+- **Framework code stays generic.** `engine/`, the skills, and the shipped prompts
+  encode only the *generic* dev-loop mechanics (scheduling, safety, review, merge) —
+  never behavior specific to one team's workflow. Deployment-specific needs belong in
+  a target repo's own config/prompts, not in the framework core.
 
 ## Documentation principle (source-of-truth partition)
 
@@ -64,11 +66,10 @@ part of an issue's definition-of-done. Distilled outcomes, never issue transcrip
 TypeScript engine · Claude Code plugin form factor · trusted repos first · default
 merge gate: Conductor merges on CI green + a fresh local **engine-agent** review, a
 different Claude model (#501, 2026-08-01; hosted different-model Codex review stays
-selectable — the pre-#501 predecessor-project-style default; produce-PR-and-stop also selectable) ·
+selectable — the pre-#501 default; produce-PR-and-stop also selectable) ·
 dashboard deferred to
 v0.2 (built *by* sapwood as the flagship dogfood) · YAML config default (commented;
-JSON also accepted) · the predecessor project's
-TDD/two-gate method as overridable defaults.
+JSON also accepted) · TDD/two-gate method as overridable defaults.
 
 ## This repo's own governance
 

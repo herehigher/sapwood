@@ -5,12 +5,11 @@
 // "Host-delegated capability management" section (DR #616). Pure function: zero IO, zero
 // deps, deterministic.
 //
-// Ported from the predecessor project's guard.py. We port the *generic
-// safety mechanism* — command tokenizing, fragment splitting, exec-prefix stripping,
-// opaque-construct fail-closed detection, and the gh-overreach category (the worker, a
-// PR *producer*, must never merge/approve/release) — plus a Write-path protection for the
-// guard's own boundary files. The predecessor project's application-specific categories are
-// intentionally NOT ported (CLAUDE.md: "port the generic logic, not application-specific behavior").
+// Implements the *generic safety mechanism* — command tokenizing, fragment splitting,
+// exec-prefix stripping, opaque-construct fail-closed detection, and the gh-overreach category
+// (the worker, a PR *producer*, must never merge/approve/release) — plus a Write-path
+// protection for the guard's own boundary files. Application-specific categories are
+// intentionally not included — this module stays generic and application-agnostic.
 //
 // Decision order for a Bash command:
 //   1. split into fragments by shell chain operators; $()/`` substitutions recurse.
@@ -18,6 +17,8 @@
 //   3. opaque constructs (eval / shell -c / interpreter -e / process substitution) =>
 //      BLOCK fail-closed (a worker could hide anything inside them).
 //   4. gh-overreach semantic check.
+//   5. (#679) raw git-transport `git push` reaching the default branch — same producer≠merger
+//      boundary as step 4, active only when defaultBranch is set (see docs/security.md).
 // For Write/Edit tools: deny writes to the guard's boundary files.
 // For Read/Grep/Glob/NotebookRead (#235 PR-A): confine the resolved target path to the session's
 // worktree, when the engine told us what that worktree is (worktreeRoot param — see below).
@@ -520,6 +521,166 @@ function scanGhOverreach(tokens: string[]): string | null {
   return null;
 }
 
+// ── category D: raw git-transport push to the default branch (#679) ─────────
+// Blocks `git push` whose destination reaches `defaultBranch`, at the git-transport layer
+// (Category C above only covers the `gh` layer). Active only when `defaultBranch` is non-empty
+// (SAPWOOD_DEFAULT_BRANCH, engine-set at spawn, never worker-writable). Not a replacement for
+// GitHub branch protection — that's the backstop of record (DR #616), see docs/security.md.
+const GIT_GLOBAL_VALUE_FLAGS = new Set(["-C", "--git-dir", "--work-tree", "--namespace", "-c", "--exec-path"]);
+
+/** Skip `git`'s own global flags (e.g. `git -C dir push ...`) so the subcommand check below
+ *  can't be defeated by a leading global flag pushing "push" out of position. Mirrors
+ *  ghSkipGlobalFlags' shape for the same reason: a wrapper-tolerant, position-independent scan
+ *  needs the SAME tolerance for the command it wraps. */
+function gitSkipGlobalFlags(tokens: string[]): string[] {
+  let i = 1; // tokens[0] is "git"
+  while (i < tokens.length) {
+    const tok = tokens[i]!;
+    if (!tok.startsWith("-")) break;
+    if (tok.includes("=")) {
+      i += 1;
+      continue;
+    }
+    if (GIT_GLOBAL_VALUE_FLAGS.has(tok)) {
+      i += 2;
+      continue;
+    }
+    i += 1;
+  }
+  return tokens.slice(i);
+}
+
+const ALIAS_CONFIG_KEY_RE = /^alias\./i;
+
+function gitConfigValueDefinesAlias(value: string): boolean {
+  const key = value.includes("=") ? value.slice(0, value.indexOf("=")) : value;
+  return ALIAS_CONFIG_KEY_RE.test(key);
+}
+
+/** A `-c`/`--config alias.*=` redefines what a later bare subcommand token means, so once one is
+ *  present the effective subcommand can never be trusted from argv alone — opaque, unconditional
+ *  block, same doctrine as `eval`/`sh -c`. */
+function gitHasAliasInjection(tokens: string[]): boolean {
+  for (let i = 1; i < tokens.length; i++) {
+    const tok = tokens[i]!;
+    if ((tok === "-c" || tok === "--config") && i + 1 < tokens.length) {
+      if (gitConfigValueDefinesAlias(tokens[i + 1]!)) return true;
+    } else if (tok.startsWith("-c") && tok.length > 2 && tok[2] !== "=") {
+      if (gitConfigValueDefinesAlias(tok.slice(2))) return true;
+    } else if (tok.startsWith("--config=")) {
+      if (gitConfigValueDefinesAlias(tok.slice("--config=".length))) return true;
+    }
+  }
+  return false;
+}
+
+// An unresolved shell variable/command-substitution ($FOO/${FOO}/$(...)/backtick) can expand to
+// the default branch at runtime after the guard only sees the literal token; a `*` wildcard
+// destination can match it without ever naming it — neither can be proven safe, so both block.
+const UNPROVABLE_REFSPEC_RE = /[$`*]/;
+
+// Value-taking push options, split out so their separate-token VALUE (e.g. `-o main`'s "main")
+// is never scanned as a candidate refspec destination.
+const PUSH_VALUE_FLAGS = new Set(["-o", "--push-option", "--receive-pack", "--exec", "--repo"]);
+
+/** Split git-push's OWN args (everything after "push") into flags and POSITIONAL args, properly
+ *  skipping a value-taking flag's separate value so it never masquerades as a remote/refspec.
+ *  `--` ends option parsing (everything after is positional), matching git's own convention.
+ *  `repoFromFlag` is true when `--repo`/`--repo=` supplied the repository directly — there is
+ *  then no positional remote to skip, so every positional is a candidate refspec. */
+function parsePushArgs(args: string[]): { flags: string[]; positional: string[]; repoFromFlag: boolean } {
+  const flags: string[] = [];
+  const positional: string[] = [];
+  let repoFromFlag = false;
+  let i = 0;
+  while (i < args.length) {
+    const tok = args[i]!;
+    if (tok === "--") {
+      positional.push(...args.slice(i + 1));
+      break;
+    }
+    if (tok.startsWith("-")) {
+      flags.push(tok);
+      if (tok === "--repo" || tok.startsWith("--repo=")) repoFromFlag = true;
+      if (!tok.includes("=") && PUSH_VALUE_FLAGS.has(tok) && i + 1 < args.length) {
+        i += 2; // skip the flag's separate value entirely — never a candidate refspec
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    positional.push(tok);
+    i += 1;
+  }
+  return { flags, positional, repoFromFlag };
+}
+
+/**
+ * `tokens` starts at (and includes) `git`. Returns a BLOCK reason when this invocation is a
+ * `git push` whose effect can reach `defaultBranch`, else null. `--force`/`-f`/
+ * `--force-with-lease` are deliberately NOT special-cased: they don't change WHICH ref is
+ * targeted, only how the push is applied, so the same refspec-destination check already
+ * subsumes them — a forced push at the default branch is still a push at the default branch.
+ */
+function checkGitPushDefaultBranch(tokens: string[], defaultBranch: string): string | null {
+  if (!defaultBranch) return null;
+  if (tokens.length < 2 || basename(tokens[0]!).toLowerCase() !== "git") return null;
+
+  // Checked before anything else — an alias injection means the "push" token itself is untrustworthy.
+  if (gitHasAliasInjection(tokens)) {
+    return `BLOCK [git-push] git -c/--config alias injection makes the effective subcommand opaque — cannot verify this does not reach the default branch (${defaultBranch}); human-merge-only, see docs/security.md`;
+  }
+
+  const afterGlobal = gitSkipGlobalFlags(tokens);
+  if (afterGlobal.length === 0 || afterGlobal[0]!.toLowerCase() !== "push") return null;
+
+  const { flags, positional, repoFromFlag } = parsePushArgs(afterGlobal.slice(1));
+
+  // --mirror / --all push every ref (or every branch) the remote has room for — either can
+  // carry the default branch regardless of what other args are present.
+  if (flags.includes("--mirror")) {
+    return `BLOCK [git-push] --mirror can reach the default branch (${defaultBranch}) — raw git-transport push is human-merge-only, see docs/security.md`;
+  }
+  if (flags.includes("--all")) {
+    return `BLOCK [git-push] --all can reach the default branch (${defaultBranch}) — raw git-transport push is human-merge-only, see docs/security.md`;
+  }
+
+  // positional[0] is the remote/repository (per git's own `push [<repo> [<refspec>…]]` syntax) —
+  // NEVER itself compared against defaultBranch (a remote literally named "main" is legitimate) —
+  // unless repoFromFlag, in which case every positional is a candidate refspec.
+  const refspecs = repoFromFlag ? positional : positional.slice(1);
+  for (const raw of refspecs) {
+    if (UNPROVABLE_REFSPEC_RE.test(raw)) {
+      return `BLOCK [git-push] refspec argument "${raw}" cannot be proven safe against the default branch (${defaultBranch}) — contains an unresolved variable, command substitution, or wildcard; human-merge-only, see docs/security.md`;
+    }
+    // A bare name ("main"), a "<src>:<dst>" pair (dst after the FIRST colon — also covers the
+    // ":main" delete-refspec form, where src is empty), and an optional leading "+" (the
+    // refspec force-push marker) or "refs/heads/" prefix are all normalized to the same
+    // destination-name comparison.
+    const unforced = raw.startsWith("+") ? raw.slice(1) : raw;
+    const dst = unforced.includes(":") ? unforced.slice(unforced.indexOf(":") + 1) : unforced;
+    if (!dst) continue;
+    const normalized = dst.startsWith("refs/heads/") ? dst.slice("refs/heads/".length) : dst;
+    if (normalized === defaultBranch) {
+      return `BLOCK [git-push] raw git-transport push reaches the default branch (${defaultBranch}) — producer must not merge via raw git transport (human-merge-only, see docs/security.md)`;
+    }
+  }
+  return null;
+}
+
+/** Find a `git push ...` sequence reaching the default branch at ANY position (same
+ *  wrapper-tolerance rationale as scanGhOverreach). No-op when `defaultBranch` is empty. */
+function scanGitPushDefaultBranch(tokens: string[], defaultBranch: string): string | null {
+  if (!defaultBranch) return null;
+  for (let i = 0; i < tokens.length; i++) {
+    if (basename(tokens[i]!).toLowerCase() === "git") {
+      const r = checkGitPushDefaultBranch(tokens.slice(i), defaultBranch);
+      if (r) return r;
+    }
+  }
+  return null;
+}
+
 // ── env -S split-string extraction ───────────────────────────────────────────
 // GNU env -S splits the string into argv, then APPENDS any trailing COMMAND [ARG] tokens.
 // So `env -S gh pr merge 1` runs `gh pr merge 1` — we must judge the split string plus
@@ -560,7 +721,7 @@ function envSplitInner(tokens: string[]): string | null {
 }
 
 // ── single-fragment judgement ────────────────────────────────────────────────
-function judgeFragment(fragment: string, cwd: string, depth = 0): string | null {
+function judgeFragment(fragment: string, cwd: string, depth = 0, defaultBranch = ""): string | null {
   if (depth > 8) return null;
   let tokens = safeSplit(fragment);
   if (tokens.length === 0) return null;
@@ -578,7 +739,7 @@ function judgeFragment(fragment: string, cwd: string, depth = 0): string | null 
 
   if (tokens[0]!.toLowerCase() === "env") {
     const inner = envSplitInner(tokens);
-    if (inner !== null) return judgeFragment(inner, cwd, depth + 1);
+    if (inner !== null) return judgeFragment(inner, cwd, depth + 1, defaultBranch);
   }
 
   let stripped = stripExecPrefix(tokens);
@@ -592,13 +753,23 @@ function judgeFragment(fragment: string, cwd: string, depth = 0): string | null 
   const w = checkBashWritePath(tokens, cwd);
   if (w) return w;
 
+  // #731: sapwood pause/stop/estop CLI verbs — same control-sentinel boundary as the check
+  // below; see docs/security.md.
+  const sv = checkStopControlVerb(tokens);
+  if (sv) return sv;
+
   // #81: control sentinel referenced as a literal arg to any command (e.g. a node script
   // invoked with the sentinel path), scanned on the original tokens same as the write check.
   const cs = checkControlSentinelArg(tokens, cwd);
   if (cs) return cs;
 
   // gh overreach, scanned at any position on both the stripped and the original tokens.
-  return scanGhOverreach(stripped) ?? scanGhOverreach(tokens);
+  const gh = scanGhOverreach(stripped) ?? scanGhOverreach(tokens);
+  if (gh) return gh;
+
+  // #679: raw git-transport push to the default branch, same any-position/wrapper-tolerant
+  // scan as the gh check above. No-op when defaultBranch is empty (rule inactive).
+  return scanGitPushDefaultBranch(stripped, defaultBranch) ?? scanGitPushDefaultBranch(tokens, defaultBranch);
 }
 
 // ── Write-path protection (issue #9) ─────────────────────────────────────────
@@ -781,6 +952,35 @@ function checkControlSentinelArg(tokens: string[], cwd: string): string | null {
   return null;
 }
 
+// ── #731: sapwood pause/stop/estop CLI verbs — same control-sentinel boundary as the check
+// above; they resolve the sentinel path INTERNALLY, so checkControlSentinelArg never sees it —
+// the reason this function exists. Scope: the three stop-control verbs only, by design (park/
+// run/status/events stay out of scope) — see docs/security.md.
+const STOP_CONTROL_VERBS = new Set(["pause", "stop", "estop"]);
+
+/** Matches the sapwood CLI entrypoint by basename: the `sapwood` binary, `cli.js`/`cli.ts`
+ *  (source or dist). Also matches an `npx`-style `sapwood@<version>` package spec. */
+function isSapwoodCliEntrypoint(tok: string): boolean {
+  const base = basename(tok).toLowerCase();
+  return base === "sapwood" || base === "cli.js" || base === "cli.ts" || base.startsWith("sapwood@");
+}
+
+/** BLOCKs when a sapwood-CLI-entrypoint token is immediately followed by one of the three
+ *  stop-control verbs — mirrors cli.ts's own argv[2] contract; a flag between would over-match. */
+function checkStopControlVerb(tokens: string[]): string | null {
+  for (let i = 0; i < tokens.length - 1; i++) {
+    if (!isSapwoodCliEntrypoint(tokens[i]!)) continue;
+    const verb = tokens[i + 1]!;
+    if (STOP_CONTROL_VERBS.has(verb)) {
+      return (
+        `BLOCK [stop-control] sapwood ${verb} is a control-sentinel CLI verb (same boundary as ` +
+        `data/PAUSE, data/KILL_SWITCH, data/EMERGENCY_STOP) — human-merge-only, see docs/security.md`
+      );
+    }
+  }
+  return null;
+}
+
 /**
  * Detect a Bash command writing to a boundary file. Redirections and write commands are
  * scanned at ANY position (not just token[0]) so a wrapper (`uv run --with rich tee X`)
@@ -883,14 +1083,15 @@ function checkReadContainment(tool: string, input: GuardInput, cwd: string, work
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 
 /**
- * The PreToolUse safety decision. Pure & deterministic — worktreeRoot is a plain string
- * argument (never read from env inside this function; guard-hook.ts's IO layer reads
- * SAPWOOD_WORKTREE_ROOT and threads it in). Bash commands are guarded for opaque
- * constructs + gh overreach; Write/Edit/MultiEdit/NotebookEdit are guarded for boundary files; Read/Grep/Glob/NotebookRead are
- * guarded for worktree containment (#235 PR-A) when a worktreeRoot is known; every other
- * tool is allowed.
+ * The PreToolUse safety decision. Pure & deterministic — worktreeRoot/defaultBranch are plain
+ * string arguments (never read from env inside this function; guard-hook.ts's IO layer reads
+ * SAPWOOD_WORKTREE_ROOT/SAPWOOD_DEFAULT_BRANCH and threads them in). Bash commands are guarded
+ * for opaque constructs + gh overreach + (#679, when defaultBranch is given) raw git-transport
+ * pushes reaching it; Write/Edit/MultiEdit/NotebookEdit are guarded for boundary files; Read/
+ * Grep/Glob/NotebookRead are guarded for worktree containment (#235 PR-A) when a worktreeRoot
+ * is known; every other tool is allowed.
  */
-export function guardDecision(tool: string, input: GuardInput, cwd: string, worktreeRoot?: string): Decision {
+export function guardDecision(tool: string, input: GuardInput, cwd: string, worktreeRoot?: string, defaultBranch?: string): Decision {
   if (WRITE_TOOLS.has(tool)) {
     const fp = (tool === "NotebookEdit" ? input.notebook_path : input.file_path) ?? "";
     if (fp) {
@@ -904,7 +1105,7 @@ export function guardDecision(tool: string, input: GuardInput, cwd: string, work
   if (tool !== "Bash") return ALLOW;
   const command = input.command ?? "";
   for (const frag of splitFragments(command)) {
-    const reason = judgeFragment(frag, cwd);
+    const reason = judgeFragment(frag, cwd, 0, defaultBranch ?? "");
     if (reason) return block(reason);
   }
   return ALLOW;

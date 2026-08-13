@@ -269,6 +269,103 @@ test("BLOCK reason text: node kill.js ../../data/EMERGENCY_STOP names all three 
   assert.ok(d.reason.includes("control sentinel"), `reason must name the category: ${d.reason}`);
 });
 
+// ── #731: sapwood pause/stop/estop CLI verbs — same control-sentinel boundary as the section
+// above, reached through the CLI verb instead of a literal path argument. Scope is deliberately
+// minimal: only the three stop-control verbs; park/run/status/events stay OUT of scope (see the
+// ALLOW cases below, which prove exactly that).
+const STOP_CONTROL_BLOCK: string[] = [
+  // direct verb, all three tiers, activate form
+  "sapwood pause",
+  "sapwood stop",
+  "sapwood estop --confirm",
+  // clear form — #731 PR discussion's own example: lifting an already-fired EMERGENCY_STOP
+  // is JUST as invisible to the literal-path sentinel check as activating it
+  "sapwood pause clear",
+  "sapwood stop clear",
+  "sapwood estop clear",
+  // extra flags/positionals after the verb, in either order relative to each other — nothing
+  // after the verb token changes the match
+  "sapwood estop --confirm --config sapwood.config.yaml",
+  "sapwood estop --config sapwood.config.yaml --confirm",
+  "sapwood stop --config sapwood.config.yaml",
+  // node-from-source indirection (dist and src forms — the exact invocation shape
+  // commands/sapwood-status.md and docs/getting-started.md Channel A instructions use)
+  "node engine/dist/cli.js pause",
+  "node engine/dist/cli.js estop --confirm",
+  "node --import tsx engine/src/cli.ts stop",
+  "node --import tsx engine/src/cli.ts estop clear",
+  // path-prefixed direct execution (no `node` prefix) — judgeFragment's own tokens[0]
+  // basename-normalization (hasPathSep) already turns this into a bare "cli.js" before this
+  // check runs, same as it does for any other path-prefixed command word in this file.
+  "./cli.js pause",
+  "./engine/dist/cli.js stop",
+  // npx/wrapper indirection — bare package name
+  "npx sapwood pause",
+  "npx -y sapwood estop --confirm",
+  // gate② P1 (sol, #731): npx's own documented "run a specific/latest version" syntax — a
+  // DISCOVERABLE shape (npm's own docs teach it), not an adversarial one. Confirms
+  // isSapwoodCliEntrypoint's `sapwood@` prefix recognition actually fires.
+  "npx sapwood@latest stop",
+  "npx sapwood@1.2.3 pause",
+  "npx sapwood@latest estop --confirm",
+];
+for (const command of STOP_CONTROL_BLOCK) {
+  test(`BLOCK (#731 stop-control verb): ${command}`, () => {
+    const d = bash(command);
+    assert.equal(d.allow, false, `should block: ${command}`);
+    assert.ok(d.reason.toLowerCase().includes("stop-control"), `reason must name the category: ${d.reason}`);
+    assert.ok(d.reason.includes("control-sentinel"), `reason must tie to the sentinel boundary: ${d.reason}`);
+  });
+}
+
+// Reverse cases: the fence must not over-block. Other sapwood subcommands (an ordinary worker
+// has legitimate reason to run these), a substring near-miss on the entrypoint name, and a
+// near-miss verb (a different subcommand that merely shares a prefix with a stop-control verb)
+// all stay allowed.
+const STOP_CONTROL_ALLOW: string[] = [
+  "sapwood status",
+  "sapwood events",
+  "sapwood run",
+  "sapwood run --once",
+  "sapwood park clear",
+  "sapwood validate",
+  "sapwood --help",
+  // a stop-control-looking token that is NOT the verb immediately after the entrypoint (a
+  // milestone name, here) must not false-trip the fence — only the token right after the
+  // entrypoint is ever inspected.
+  "sapwood run --milestone stop",
+  // near-miss command word: NOT the sapwood entrypoint (basename differs)
+  "mysapwood stop",
+  "node engine/dist/other-cli.js pause",
+  // near-miss verb: NOT one of the three exact verbs (Set.has is an exact match, no prefix)
+  "sapwood stopwatch",
+  "sapwood paused",
+  // sapwood entrypoint with a benign verb, through the same node-from-source/npx indirection
+  // the BLOCK cases above use — proves the entrypoint detection itself doesn't over-trigger
+  "node engine/dist/cli.js status",
+  "npx sapwood events",
+];
+for (const command of STOP_CONTROL_ALLOW) {
+  test(`ALLOW (#731 stop-control reverse test): ${command}`, () => {
+    const d = bash(command);
+    assert.equal(d.allow, true, `should allow: ${command} (reason=${d.reason})`);
+  });
+}
+
+// gate② P1 (sol, #731): a KNOWN, ACCEPTED residual, pinned so a future reader sees this ALLOW
+// was a deliberate boundary — not an oversight nobody caught. An npx local-package/`file:` spec
+// (or an equivalent scoped-package/aliased invocation) hides the `sapwood` command word entirely
+// behind a directory path the fence has no way to distinguish from an arbitrary unrelated
+// package: this is the SAME residual class checkControlSentinelArg's own doc already accepts for
+// "a script that hardcodes the sentinel path inside its own source" — an accident fence, never a
+// hostile jail (docs/security.md's own framing, "Sentinel isolation boundary"). If this
+// assertion ever starts failing, that's a signal the fence's scope changed underneath this test —
+// update docs/security.md's residual note in the same change, don't just delete this test.
+test("ALLOW (#731 KNOWN RESIDUAL, accepted — see docs/security.md 'Sentinel isolation boundary'): npx --offline file:<path>/engine hides the command word behind a local-package spec", () => {
+  const d = bash("npx --offline file:../engine stop");
+  assert.equal(d.allow, true, `documented residual, not a bug: ${d.reason}`);
+});
+
 // ── ALLOW matrix (benign / read-only) ────────────────────────────────────────
 const ALLOW: string[] = [
   "git push origin feat/m1-guard",
@@ -377,6 +474,157 @@ for (const command of ALLOW) {
     assert.equal(d.allow, true, `should allow: ${command} (reason=${d.reason})`);
   });
 }
+
+// ── category D: raw git-transport push to the default branch (#679) ─────────
+// Active ONLY when defaultBranch is supplied (mirrors SAPWOOD_DEFAULT_BRANCH being set at
+// spawn) — bashDefaultBranch below threads it through; the plain `bash()` helper above never
+// does, so every "git push origin feat/*"-style case already in the BLOCK/ALLOW matrices
+// above stays a rule-inactive ALLOW, unchanged by this addition.
+const bashDefaultBranch = (command: string, defaultBranch = "main", cwd = CWD) =>
+  guardDecision("Bash", { command }, cwd, undefined, defaultBranch);
+
+// Every reason this category returns names both its category tag and the default branch it
+// couldn't prove safety against — a single shared assertion covers every BLOCK row below,
+// including the gate② round-1 additions (unresolved var / alias injection / wildcard), which
+// deliberately phrase their reason to carry the SAME two keywords as the literal-match rows.
+const assertGitPushBlock = (command: string, defaultBranch = "main") => {
+  const d = bashDefaultBranch(command, defaultBranch);
+  assert.equal(d.allow, false, `should block: ${command}`);
+  assert.ok(d.reason.toLowerCase().includes("default branch"), `reason must name the default branch: ${d.reason}`);
+  assert.ok(d.reason.toLowerCase().includes("git-push"), `reason must name the git-push category: ${d.reason}`);
+};
+
+// Literal-destination forms (AC1's enumerated matrix).
+const GIT_PUSH_BLOCK: string[] = [
+  "git push origin main",
+  "git push origin HEAD:main",
+  "git push origin feature:main",
+  "git push origin :main",
+  "git push --delete origin main",
+  "git push --mirror origin",
+  "git push --all origin",
+  "git push -f origin main",
+  // exec-prefix-wrapped form: stripExecPrefix must strip the `env X=1` wrapper first.
+  "env X=1 git push origin main",
+];
+for (const command of GIT_PUSH_BLOCK) {
+  test(`BLOCK (git-push default-branch, #679): ${command}`, () => assertGitPushBlock(command));
+}
+
+// #679 gate② round 1 (sol P2 e): matrix-completeness rows the issue's own `What` section
+// enumerates but round 1's shipped matrix was missing — `refs/heads/main`, the `--force`/
+// `--force-with-lease` LONG forms (round 1 only pinned `-f`), and a `git -C dir push ...`
+// row pinning gitSkipGlobalFlags' own defense (manually probed working in round 1, never
+// pinned by CI).
+const GIT_PUSH_BLOCK_MATRIX_COMPLETENESS: string[] = [
+  "git push origin refs/heads/main",
+  "git push --force origin HEAD:main",
+  "git push --force-with-lease origin main",
+  "git -C dir push origin HEAD:main",
+];
+for (const command of GIT_PUSH_BLOCK_MATRIX_COMPLETENESS) {
+  test(`BLOCK (git-push default-branch, #679 gate② e): ${command}`, () => assertGitPushBlock(command));
+}
+
+// #679 gate② round 1 (sol P1 a/c): "cannot prove this is safe" rows — an unresolved shell
+// variable/command-substitution (the guard only ever sees the LITERAL argv text; the worker's
+// OWN shell expands these before git ever runs — `$SAPWOOD_DEFAULT_BRANCH` expands to the exact
+// value this guard call's own `defaultBranch` argument carries) or a `*` wildcard destination
+// (matches without ever spelling out the branch name) both defeat exact-match comparison, so
+// BOTH are blocked outright rather than string-compared.
+const GIT_PUSH_BLOCK_UNPROVABLE: string[] = [
+  "git push origin HEAD:$SAPWOOD_DEFAULT_BRANCH",
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal — the exact unexpanded-shell-variable bypass #679's guard must block
+  "git push origin HEAD:${SAPWOOD_DEFAULT_BRANCH}",
+  "git push origin HEAD:$(cat)",
+  "git push origin HEAD:`cat`",
+  "git push origin 'refs/heads/*:refs/heads/*'",
+  "git push origin main:refs/heads/*",
+];
+for (const command of GIT_PUSH_BLOCK_UNPROVABLE) {
+  test(`BLOCK (git-push default-branch, #679 gate② a/c — unprovable refspec): ${command}`, () => assertGitPushBlock(command));
+}
+
+// #679 gate② round 1 (sol P1 b): `-c`/`--config` alias injection makes ANY later subcommand
+// token untrustworthy (`p` becomes a real `push` once `alias.p=push` is defined for this one
+// invocation) — opaque, same doctrine as eval/`sh -c`: blocked regardless of what the apparent
+// subcommand is. Covers the space-separated, `--config` long, and glued `-cKEY=VALUE` forms.
+const GIT_PUSH_BLOCK_ALIAS_INJECTION: string[] = [
+  "git -c alias.p=push p origin HEAD:main",
+  "git --config alias.p=push p origin HEAD:main",
+  "git -calias.p=push p origin HEAD:main",
+];
+for (const command of GIT_PUSH_BLOCK_ALIAS_INJECTION) {
+  test(`BLOCK (git-push default-branch, #679 gate② b — alias injection): ${command}`, () => assertGitPushBlock(command));
+}
+
+// #679 gate② round 2 (sol P1): `--repo`/`--repo=` supplies the repository WITHOUT a positional
+// remote — the parser must not ALSO skip the next positional as if it were an unwritten remote,
+// or the real refspec destination is silently discarded from the scan (confirmed executable
+// against a real bare remote by sol-high: both spellings reached `refs/heads/main`).
+const GIT_PUSH_BLOCK_REPO_FLAG: string[] = ["git push --repo origin main", "git push --repo=origin main"];
+for (const command of GIT_PUSH_BLOCK_REPO_FLAG) {
+  test(`BLOCK (git-push default-branch, #679 gate② round 2 — --repo flag): ${command}`, () => assertGitPushBlock(command));
+}
+
+const GIT_PUSH_ALLOW: string[] = ["git push", "git push origin lane-123-abc", "git push --force-with-lease origin lane-123-abc"];
+for (const command of GIT_PUSH_ALLOW) {
+  test(`ALLOW (git-push default-branch, #679): ${command}`, () => {
+    const d = bashDefaultBranch(command);
+    assert.equal(d.allow, true, `should allow: ${command} (reason=${d.reason})`);
+  });
+}
+
+// #679 gate② round 1 (sol P2 d): a value-taking push OPTION whose value happens to equal the
+// default branch name, or a REMOTE literally named "main", must not be treated as a refspec
+// destination — both are legitimate lane-only pushes the issue's own ALLOW contract covers.
+// #679 gate② round 2: the `--repo` form of the same class — a lane-only push via `--repo`
+// must not be over-blocked just because the fix above now scans every positional in that mode.
+const GIT_PUSH_ALLOW_NOT_A_REFSPEC: string[] = [
+  "git push -o main origin lane-123-abc", // -o's VALUE, not a destination
+  "git push --push-option=main origin lane-123-abc", // same, glued form
+  "git push main lane-123-abc", // "main" is the REMOTE here, not a destination
+  "git push --repo origin lane-123-abc", // --repo's VALUE is the repo; the refspec is lane-only
+  "git push --repo=origin lane-123-abc", // same, glued form
+];
+for (const command of GIT_PUSH_ALLOW_NOT_A_REFSPEC) {
+  test(`ALLOW (git-push default-branch, #679 gate② d — not a refspec): ${command}`, () => {
+    const d = bashDefaultBranch(command);
+    assert.equal(d.allow, true, `should allow: ${command} (reason=${d.reason})`);
+  });
+}
+
+// Every BLOCK case above (including the gate② round-1/round-2 additions) stays allowed when
+// SAPWOOD_DEFAULT_BRANCH is unset — the rule is inactive outside an engine-dispatched session
+// (same "unset == not engine-dispatched" stance checkReadContainment already takes for
+// worktreeRoot).
+for (const command of [
+  ...GIT_PUSH_BLOCK,
+  ...GIT_PUSH_BLOCK_MATRIX_COMPLETENESS,
+  ...GIT_PUSH_BLOCK_UNPROVABLE,
+  ...GIT_PUSH_BLOCK_ALIAS_INJECTION,
+  ...GIT_PUSH_BLOCK_REPO_FLAG,
+]) {
+  test(`ALLOW (git-push default-branch UNSET, #679): ${command}`, () => {
+    const d = bash(command); // bash() never threads a defaultBranch — rule inactive
+    assert.equal(d.allow, true, `should allow with SAPWOOD_DEFAULT_BRANCH unset: ${command} (reason=${d.reason})`);
+  });
+}
+
+// #679 gate② round 2 (sol P1, PM ruling — ACCEPTED RESIDUAL, not fixed): the malicious intent
+// here lives in git STATE the argv scan cannot see — a PRE-PERSISTED `git config alias.*` (or
+// `GIT_CONFIG_*` environment aliases) resolved by a LATER, argv-innocent invocation. Extending
+// the alias-injection check to recognize `p` as `push` here would require modeling git's own
+// config resolution, not scanning one more token spelling — the same class of boundary
+// checkControlSentinelArg's "hardcoded path in a script" residual already accepts. GitHub branch
+// protection (DR #616) is the backstop of record for this class; see docs/security.md's #679
+// section, "argv-visible forms only" paragraph. Pinned here, deliberately, as a KNOWN ALLOW —
+// not a silent gap: a future reader (or a future gate②) should see this was a decided boundary,
+// not an oversight.
+test("KNOWN RESIDUAL (#679 gate② round 2, PM-ruled accepted — see docs/security.md): a PRE-PERSISTED git-config alias is not detected by an argv scan — the guard sees only 'git p ...', never the earlier 'git config alias.p push' that made 'p' mean 'push'", () => {
+  const d = bashDefaultBranch("git config alias.p push && git p origin HEAD:main");
+  assert.equal(d.allow, true, "documented residual — accepted by PM ruling, not a regression");
+});
 
 test("a tool the guard doesn't inspect (e.g. WebFetch) is always allowed", () => {
   assert.equal(guardDecision("WebFetch", {}, CWD).allow, true);

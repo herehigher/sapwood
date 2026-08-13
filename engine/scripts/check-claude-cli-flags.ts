@@ -1,6 +1,6 @@
 #!/usr/bin/env -S npx tsx
-// check-claude-cli-flags.ts (#799 human-owned CI remainder — docs/patches/799-ci-claude-cli-
-// version-floor.patch adds the workflow step that invokes this): the CI-side half of
+// check-claude-cli-flags.ts (#799 — invoked by ci.yml's human-merge-only `claude-cli-floor`
+// job): the CI-side half of
 // docs/PLAN.md:129 ("state a minimum Claude Code CLI version and test against it in CI"). Asserts
 // the INSTALLED `claude` binary's `--help` output offers EVERY long flag the engine's OWN `claude`
 // invocations can ever emit — `worker.ts`'s `ENGINE_CLAUDE_LONG_FLAGS`, itself DERIVED by calling

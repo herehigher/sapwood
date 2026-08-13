@@ -1,7 +1,7 @@
 // PreToolUse hook adapter. Wires the pure `guardDecision` to Claude Code's hook protocol:
 // reads the hook event JSON on stdin, emits a `permissionDecision: deny` on a BLOCK.
 //
-// FAIL-CLOSED (PLAN requirement, a divergence from the predecessor project which fails open): any error —
+// FAIL-CLOSED (PLAN requirement): any error —
 // malformed JSON, an unexpected payload shape, or the guard throwing — yields a DENY, not
 // a silent allow. A safety hook that can be disabled by feeding it garbage is not a
 // safety hook. The pure mapping (`hookResponse`) is offline-testable; only `main()` does IO.
@@ -39,8 +39,12 @@ const deny = (reason: string): DenyOutput => ({
  * discipline as cwd already gets. Optional: main() passes process.env.SAPWOOD_WORKTREE_ROOT;
  * callers/tests that omit it get containment-inactive Read/Grep/Glob (see guard.ts's doc
  * comment on checkReadContainment for what "unset" is defined to mean).
+ *
+ * defaultBranch (#679) is the same IO layer's read of SAPWOOD_DEFAULT_BRANCH, threaded into
+ * guardDecision the same way — omitted/empty leaves the raw-git-transport-push rule inactive
+ * (see guard.ts's checkGitPushDefaultBranch doc for what "unset" means there).
  */
-export function hookResponse(payload: unknown, worktreeRoot?: string): DenyOutput | null {
+export function hookResponse(payload: unknown, worktreeRoot?: string, defaultBranch?: string): DenyOutput | null {
   if (typeof payload !== "object" || payload === null) {
     return deny("BLOCK [fail-closed] malformed hook payload (not an object)");
   }
@@ -59,7 +63,7 @@ export function hookResponse(payload: unknown, worktreeRoot?: string): DenyOutpu
     const toolInput = (inputIsObject ? rawInput : {}) as GuardInput;
     // biome-ignore lint/complexity/useLiteralKeys: external hook payload keys intentionally use bracket access.
     const cwd = typeof p["cwd"] === "string" ? p["cwd"] : "";
-    const decision = guardDecision(tool, toolInput, cwd, worktreeRoot);
+    const decision = guardDecision(tool, toolInput, cwd, worktreeRoot, defaultBranch);
     return decision.allow ? null : deny(decision.reason);
   } catch (e) {
     return deny(`BLOCK [fail-closed] guard error: ${e instanceof Error ? e.message : String(e)}`);
@@ -91,14 +95,14 @@ export function applyGuardMode(decision: DenyOutput | null, mode: GuardMode): { 
 }
 
 /** Parse hook stdin text and decide. Fail-closed: a JSON parse error → deny. */
-export function responseFromText(text: string, worktreeRoot?: string): DenyOutput | null {
+export function responseFromText(text: string, worktreeRoot?: string, defaultBranch?: string): DenyOutput | null {
   let payload: unknown;
   try {
     payload = JSON.parse(text);
   } catch {
     return deny("BLOCK [fail-closed] unparseable hook input (invalid JSON)");
   }
-  return hookResponse(payload, worktreeRoot);
+  return hookResponse(payload, worktreeRoot, defaultBranch);
 }
 
 async function readStdin(): Promise<string> {
@@ -110,8 +114,13 @@ async function readStdin(): Promise<string> {
 export async function main(): Promise<number> {
   let decision: DenyOutput | null;
   try {
-    // biome-ignore lint/complexity/useLiteralKeys: environment key is intentionally bracket-addressed.
-    decision = responseFromText(await readStdin(), process.env["SAPWOOD_WORKTREE_ROOT"]);
+    decision = responseFromText(
+      await readStdin(),
+      // biome-ignore lint/complexity/useLiteralKeys: environment key is intentionally bracket-addressed.
+      process.env["SAPWOOD_WORKTREE_ROOT"],
+      // biome-ignore lint/complexity/useLiteralKeys: environment key is intentionally bracket-addressed.
+      process.env["SAPWOOD_DEFAULT_BRANCH"],
+    );
   } catch (e) {
     // Even an stdin read failure fails closed.
     decision = deny(`BLOCK [fail-closed] hook IO error: ${e instanceof Error ? e.message : String(e)}`);
