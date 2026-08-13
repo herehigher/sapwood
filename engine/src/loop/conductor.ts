@@ -1342,21 +1342,20 @@ export interface ReclaimResult {
   worktreeRetained: boolean;
 }
 
-/** #834 Phase 1 (gate② round 1, F1): what settleMergedWorktree (worker.ts) did with a MERGED
- *  lane's worktree — a DIFFERENT, richer shape than ReclaimResult's, because a merged lane's
- *  settlement has a state ReclaimResult's boolean can't represent: an attempted-but-incomplete
- *  deletion (`"failed"`), distinct from both a genuinely dirty worktree (`"retained"`, left
- *  untouched) and a provably-deleted one (`"settled"`, the only verdict a caller may prune a
- *  git-worktree registration on). `worktreePath` is `null` only for `"absent"` (nothing on disk
- *  to settle, or the resolved path failed root-containment — see worker.ts's own doc). `reason`
- *  is present only for `"failed"`, a short diagnostic for the caller's own log/event.
+/** #834 Phase 1: what settleMergedWorktree (worker.ts) did with a MERGED lane's worktree — a
+ *  DIFFERENT, richer shape than ReclaimResult's, because a merged lane's settlement has a state
+ *  ReclaimResult's boolean can't represent: an attempted-but-incomplete deletion (`"failed"`),
+ *  distinct from both a genuinely dirty worktree (`"retained"`, left untouched) and a
+ *  provably-deleted one (`"settled"`, the only verdict a caller may prune a git-worktree
+ *  registration on). `worktreePath` is `null` only for `"absent"` (nothing on disk to settle, or
+ *  the resolved path failed root-containment — see worker.ts's own doc). `reason` is present
+ *  only for `"failed"`, a short diagnostic for the caller's own log/event.
  *
- *  `tombstonePath` (gate② round 2, G2; wording corrected round 3, W1): present on EVERY
- *  `"failed"` verdict this chain can reach (all happen strictly after a successful rename — see
- *  worker.ts's settleWorktreeDirectory doc) — the path where any SURVIVING residue would be
- *  found, not a guarantee everything survives (a recursive removal can delete several entries
- *  before failing on a later one). A caller reporting a failure MUST surface this path, never
- *  the now-stale `worktreePath`, when it's present. */
+ *  `tombstonePath`: present on EVERY `"failed"` verdict this chain can reach (all happen strictly
+ *  after a successful rename — see worker.ts's settleWorktreeDirectory doc) — the path where any
+ *  SURVIVING residue would be found, not a guarantee everything survives (a recursive removal can
+ *  delete several entries before failing on a later one). A caller reporting a failure MUST
+ *  surface this path, never the now-stale `worktreePath`, when it's present. */
 export interface WorktreeSettleOutcome {
   worktreePath: string | null;
   verdict: "absent" | "retained" | "settled" | "failed";
@@ -1438,7 +1437,7 @@ export interface Supervisor {
    *  settleMergedWorktree for the full doc). Returns a WorktreeSettleOutcome — `verdict:
    *  "retained"`/`"failed"` here never trigger escalation the way reclaim()'s `worktreeRetained`
    *  does — settleMergedLane decides what to do with it, and NEVER prunes a git-worktree
-   *  registration except on `"settled"` (gate② round 1, F1). Optional: a Supervisor test double
+   *  registration except on `"settled"`. Optional: a Supervisor test double
    *  with no opinion on worktree settlement (most fixtures) simply settles nothing, same
    *  "additive, degrades to zero behavior change" stance durablePidAlive/signalDurablePid above
    *  already take on this interface. */
@@ -1669,20 +1668,30 @@ export interface TickDeps {
    *  so unit tests never shell out to real git — same optional-seam convention `mergeGate`
    *  itself already takes on this interface. */
   worktreeRegistrationPruner?: (worktreePath: string) => Promise<void>;
-  /** #834 (gate② round 1, P1 D3): the Phase-1 counterpart of the present-directory sweep's D2
-   *  fix — the index-mtime purity check Supervisor.settleMergedWorktree runs (worker.ts) has the
-   *  SAME staged-but-uncommitted blind spot worktree-janitor.ts's D2 fix closed for the sweep
-   *  arm (`git add` writes the index AFTER the staged file's own mtime, so an aged tree reads
-   *  clean even with real staged content sitting in it). worker.ts's #69 grep-invariant forbids
-   *  git there, so this is gated in the CALLER instead: settleMergedLane runs this check BEFORE
-   *  ever invoking `supervisor.settleMergedWorktree` — `true` (no staged changes) proceeds to
-   *  settlement as before; `false` (real staged content OR any resolution error) skips settlement
-   *  entirely and retains the worktree, event-only (`merged-lane-worktree-retained`), same
-   *  no-escalation stance as the "retained"/"failed" verdicts settleMergedWorktree itself can
-   *  already produce. Omitted -> the real default (worktree-janitor.ts's own
-   *  hasNoStagedWorktreeChanges — the IDENTICAL helper the D2 fix uses); test doubles inject a
-   *  fake so unit tests never shell out to real git — same optional-seam convention
-   *  `worktreeRegistrationPruner` itself already takes on this interface. */
+  /** #834: the Phase-1 counterpart of the present-directory sweep's staged-content fix — the
+   *  index-mtime purity check Supervisor.settleMergedWorktree runs (worker.ts) has the SAME
+   *  staged-but-uncommitted blind spot worktree-janitor.ts closes for the sweep arm (`git add`
+   *  writes the index AFTER the staged file's own mtime, so an aged tree reads clean even with
+   *  real staged content sitting in it). worker.ts's #69 grep-invariant forbids git there, so
+   *  this is gated in the CALLER instead: settleMergedLane resolves the lane's durably-recorded
+   *  worktree path (`state.latestLaneSpawnFact`) and runs this check BEFORE ever invoking
+   *  `supervisor.settleMergedWorktree` — its own deletion is a synchronous rename-then-delete, so
+   *  there is no "check, then still decide" once it's been called.
+   *   - no resolvable worktree path at all -> settlement is SKIPPED ENTIRELY (log line, no
+   *     event) — nothing is provably on disk to report about.
+   *   - a resolvable path that no longer EXISTS on disk -> this check is never even consulted;
+   *     falls through to settleMergedWorktree's own `"absent"` verdict (no event either way) —
+   *     an unresolvable git-dir there would otherwise read `false` (fail-safe dirty) and wrongly
+   *     emit a retained event for a worktree that isn't there at all.
+   *   - an EXISTING path: `true` (no staged changes) proceeds to settlement as before; `false`
+   *     (real staged content OR any resolution error) skips settlement entirely and retains the
+   *     worktree, event-only (`merged-lane-worktree-retained`) — IT IS a dirty-class retention,
+   *     same no-escalation stance as the "retained"/"failed" verdicts settleMergedWorktree itself
+   *     can already produce.
+   *  Omitted -> the real default (worktree-janitor.ts's own hasNoStagedWorktreeChanges — the
+   *  IDENTICAL helper the present-directory sweep uses); test doubles inject a fake so unit tests
+   *  never shell out to real git — same optional-seam convention `worktreeRegistrationPruner`
+   *  itself already takes on this interface. */
   mergedLaneStagedWorkChecker?: (worktreePath: string) => Promise<boolean>;
   /** #288: production engine-agent lane binding. Kept outside MergeGate because worker-row
    *  identity/state access belongs to conductor; classic reviewer modes never call it. */
@@ -1979,9 +1988,9 @@ async function handleRollbackFailure(
  *  (reclaim()/retainOrDeleteWorktree only ever run from the DEAD/teardown paths). `supervisor`,
  *  `pruneRegistration`, and `hasNoStagedWorktreeChangesCheck` are additive/optional-shaped params
  *  (see their own inline docs) — omitting worktree-settlement support degrades to exactly today's
- *  behavior. #834 (gate② round 1, D3): `hasNoStagedWorktreeChangesCheck` runs BEFORE
- *  `supervisor.settleMergedWorktree` is ever called — see TickDeps.mergedLaneStagedWorkChecker's
- *  own doc for why that ordering is load-bearing (settlement's own deletion is synchronous). */
+ *  behavior. `hasNoStagedWorktreeChangesCheck` runs BEFORE `supervisor.settleMergedWorktree` is
+ *  ever called — see TickDeps.mergedLaneStagedWorkChecker's own doc for why that ordering is
+ *  load-bearing (settlement's own deletion is synchronous). */
 async function settleMergedLane(
   forge: IForge,
   state: State,
@@ -2002,9 +2011,9 @@ async function settleMergedLane(
    *  tests never shell out to real git (mirrors mergeGate/supervisor's own optional-seam
    *  convention elsewhere in this file). */
   pruneRegistration: (worktreePath: string) => Promise<void> = pruneSettledWorktreeRegistration,
-  /** #834 (gate② round 1, P1 D3): see TickDeps.mergedLaneStagedWorkChecker's own doc — the SAME
-   *  staged-content blind spot D2 closed for the present-directory sweep, closed here for
-   *  merged-lane close-out since worker.ts stays git-free. Defaults to worktree-janitor.ts's real
+  /** See TickDeps.mergedLaneStagedWorkChecker's own doc — the SAME staged-content blind spot
+   *  closed for the present-directory sweep, closed here for merged-lane close-out since
+   *  worker.ts stays git-free. Defaults to worktree-janitor.ts's real
    *  hasNoStagedWorktreeChanges. */
   hasNoStagedWorktreeChangesCheck: (worktreePath: string) => Promise<boolean> = hasNoStagedWorktreeChanges,
 ): Promise<DrivenOutcome> {
@@ -2066,22 +2075,31 @@ async function settleMergedLane(
   // failed tick — this is disk hygiene, not correctness the rest of settleMergedLane depends on.
   if (typeof supervisor.settleMergedWorktree === "function") {
     try {
-      // #834 (gate② round 1, D3): staged-but-uncommitted content is invisible to
-      // settleMergedWorktree's own index-mtime purity check (worker.ts's #69 grep-invariant
-      // forbids git there, so this is closed in the CALLER instead — see
-      // TickDeps.mergedLaneStagedWorkChecker's own doc). Resolved via the lane's OWN durably
-      // recorded spawn-fact worktree path (the same fact `status`'s runtime anchors read) —
-      // BEFORE settleMergedWorktree is ever invoked, because its deletion is a synchronous
-      // rename-then-delete: there is no "check, then still decide" once it's been called. A lane
-      // with no resolvable spawn fact (most unit-test fixtures) skips this NEW gate entirely and
-      // falls through to today's behavior unchanged, same "additive" stance every other optional
-      // seam on this interface takes.
+      // #834: staged-but-uncommitted content is invisible to settleMergedWorktree's own
+      // index-mtime purity check (worker.ts's #69 grep-invariant forbids git there, so this runs
+      // in the CALLER instead — see TickDeps.mergedLaneStagedWorkChecker's own doc). Resolved via
+      // the lane's OWN durably recorded spawn-fact worktree path, BEFORE settleMergedWorktree is
+      // ever invoked: its deletion is a synchronous rename-then-delete, so there is no "check,
+      // then still decide" once it's been called.
+      //
+      // No resolvable spawn-fact path at all -> settlement is SKIPPED ENTIRELY (log line, no
+      // event): with no known path there is nothing PROVABLY on disk to report about, and
+      // falling through to settleMergedWorktree's own purity-only check would silently reintroduce
+      // the staged-content blind spot this gate exists to close.
+      //
+      // A resolvable path that no longer EXISTS on disk is NOT run through the staged check —
+      // an unresolvable git-dir there would read `false` (fail-safe dirty) and wrongly emit a
+      // retained event for a worktree that isn't there at all. It falls through to
+      // settleMergedWorktree's own "absent" verdict below instead (no event either way).
       const spawnedWorktreePath = state.latestLaneSpawnFact(w.name, w.issue)?.worktreePath;
-      if (spawnedWorktreePath !== undefined && !(await hasNoStagedWorktreeChangesCheck(spawnedWorktreePath))) {
-        // Staged content (or an unresolvable check, folded into `false` by the checker's own
-        // fail-safe contract) — retained, event-only, IT IS a dirty-class retention (no new
-        // event kind, same no-escalation stance as settleMergedWorktree's own "retained" verdict
-        // below): the PR is already merged; nothing is blocked on this worktree.
+      if (spawnedWorktreePath === undefined) {
+        log?.(`[sapwood:drive] lane ${w.name} pr #${pr}: no recorded worktree path — worktree settlement skipped`);
+      } else if (existsSync(spawnedWorktreePath) && !(await hasNoStagedWorktreeChangesCheck(spawnedWorktreePath))) {
+        // Staged content (or an unresolvable check on an EXISTING directory, folded into `false`
+        // by the checker's own fail-safe contract) — retained, event-only. IT IS a dirty-class
+        // retention (no new event kind, same no-escalation stance as settleMergedWorktree's own
+        // "retained" verdict below): the PR is already merged; nothing is blocked on this
+        // worktree.
         state.appendEvent("merged-lane-worktree-retained", {
           worker: w.name,
           issue: w.issue,
@@ -2090,10 +2108,10 @@ async function settleMergedLane(
         });
       } else {
         const settlement = supervisor.settleMergedWorktree(w.name);
-        // #834 (gate② round 1, F1): the registration is pruned — and "settled" is ever claimed —
-        // ONLY on verdict "settled": the one state settleMergedWorktree proves the directory is
-        // actually gone. "retained" (dirty, or an untouched failed-rename attempt) and "failed"
-        // (an attempted-but-incomplete deletion) both leave git untouched and both stay honest in
+        // The registration is pruned — and "settled" is ever claimed — ONLY on verdict
+        // "settled": the one state settleMergedWorktree proves the directory is actually gone.
+        // "retained" (dirty, or an untouched failed-rename attempt) and "failed" (an
+        // attempted-but-incomplete deletion) both leave git untouched and both stay honest in
         // their own event, never conflated with a clean settlement.
         switch (settlement.verdict) {
           case "absent":
@@ -2123,10 +2141,10 @@ async function settleMergedLane(
             // An attempted deletion did not complete cleanly (TOCTOU re-verify, or the removal
             // itself failed) — never prune a registration for a directory that isn't PROVEN gone,
             // and never claim "settled". Event-only, same no-escalation stance as "retained".
-            // #834 (gate② round 2, G2; wording corrected round 3, W1): `tombstonePath`, when
-            // present, is where any SURVIVING residue would be, not at `worktreePath` (which the
-            // rename already vacated) — carried into the event so a human salvaging this doesn't
-            // go looking in the wrong place. Deletion was incomplete, never assume full recovery.
+            // `tombstonePath`, when present, is where any SURVIVING residue would be, not at
+            // `worktreePath` (which the rename already vacated) — carried into the event so a
+            // human salvaging this doesn't go looking in the wrong place. Deletion was
+            // incomplete, never assume full recovery.
             state.appendEvent("merged-lane-worktree-settle-failed", {
               worker: w.name,
               issue: w.issue,
@@ -3924,8 +3942,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // #834 Phase 1: both settleMergedLane call sites below share this one seam — see TickDeps'
   // own worktreeRegistrationPruner doc for the real-vs-test-double rationale.
   const pruneRegistration = deps.worktreeRegistrationPruner ?? pruneSettledWorktreeRegistration;
-  // #834 (gate② round 1, D3): both settleMergedLane call sites below share this one seam too —
-  // see TickDeps' own mergedLaneStagedWorkChecker doc.
+  // #834: both settleMergedLane call sites below share this one seam too — see TickDeps' own
+  // mergedLaneStagedWorkChecker doc.
   const checkNoStagedWorktreeChanges = deps.mergedLaneStagedWorkChecker ?? hasNoStagedWorktreeChanges;
 
   // #210: retained-worktree release scan — before the kill-switch gate on purpose. It is an

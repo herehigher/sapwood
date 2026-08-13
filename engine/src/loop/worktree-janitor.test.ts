@@ -5,7 +5,7 @@
 // reaped (scope boundary), and per-cycle batching.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,6 +14,7 @@ import {
   classifyRegistration,
   createPresentDirectorySweepDeps,
   extractLockPid,
+  hasNoStagedWorktreeChanges,
   type PresentDirectorySweepDeps,
   parseWorktreeListPorcelain,
   pruneSettledWorktreeRegistration,
@@ -27,8 +28,8 @@ import {
   type WorktreeRegistration,
 } from "./worktree-janitor.js";
 
-/** Shared real-git helper for the D1/D2 real-composition fixtures below — runs a git command
- *  against `repoRoot` via `-C`, matching this module's own subprocess discipline. */
+/** Shared real-git helper for the real-composition fixtures below — runs a git command against
+ *  `repoRoot` via `-C`, matching this module's own subprocess discipline. */
 function git(repoRoot: string, ...args: string[]): string {
   return execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8" });
 }
@@ -371,7 +372,7 @@ test("sweepPresentDirectoryWorktreesOnce: a LOCKED dead-pid present-directory re
   assert.equal(deps.pruneCalls, 0);
 });
 
-test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F1): a LOCKED dead-pid present-directory registration whose deletion FAILED (attempted but incomplete) is counted in failed, never in reaped — no unlock/remove/prune", async () => {
+test("sweepPresentDirectoryWorktreesOnce (#834): a LOCKED dead-pid present-directory registration whose deletion FAILED (attempted but incomplete) is counted in failed, never in reaped — no unlock/remove/prune", async () => {
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/role-x", lockReason: "claude session role-x (pid 111 start now)" };
   const deps = fakePresentDeps({
     registrations: [reg],
@@ -388,7 +389,7 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F1): a LOCKED dead-pi
   assert.equal(deps.pruneCalls, 0);
 });
 
-test("sweepPresentDirectoryWorktreesOnce (gate② round 2, G2): a failed settlement's tombstonePath, when present, is threaded into the failed entry", async () => {
+test("sweepPresentDirectoryWorktreesOnce (#834): a failed settlement's tombstonePath, when present, is threaded into the failed entry", async () => {
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/role-x", lockReason: "claude session role-x (pid 111 start now)" };
   const tombstonePath = "/repo/.claude/worktrees/.settle-tombstone-abc123";
   const deps = fakePresentDeps({
@@ -426,7 +427,7 @@ test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registra
   assert.equal(deps.pruneCalls, 1);
 });
 
-test("sweepPresentDirectoryWorktreesOnce (#834 Ruling addendum): an UNLOCKED present-directory registration with no porcelain branch info at all is eligible exactly like any other — the merged-branch gate that used to key off a `branch` field is gone; eligibility now depends solely on hasSymbolicHead (D1) + age + purity", async () => {
+test("sweepPresentDirectoryWorktreesOnce (#834 Ruling addendum): an UNLOCKED present-directory registration with no porcelain branch info at all is eligible exactly like any other — the merged-branch gate that used to key off a `branch` field is gone; eligibility now depends solely on hasSymbolicHead + age + purity", async () => {
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/no-branch-field-1", lockReason: null };
   const deps = fakePresentDeps({ registrations: [reg], directoryExists: () => true, registrationAgeMs: () => AGE_OLD });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
@@ -435,7 +436,7 @@ test("sweepPresentDirectoryWorktreesOnce (#834 Ruling addendum): an UNLOCKED pre
   assert.deepEqual(deps.removed, [reg.path]);
 });
 
-test("sweepPresentDirectoryWorktreesOnce (#834 gate② round 1, D1): an UNLOCKED present-directory registration whose admin HEAD is NOT symbolic (detached, or unresolvable) is classification-skipped — never becomes a candidate, never reaches the age check or settleDirectory", async () => {
+test("sweepPresentDirectoryWorktreesOnce (#834): an UNLOCKED present-directory registration whose admin HEAD is NOT symbolic (detached, or unresolvable) is classification-skipped — never becomes a candidate, never reaches the age check or settleDirectory", async () => {
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/detached-1", lockReason: null };
   const deps = fakePresentDeps({
     registrations: [reg],
@@ -448,7 +449,27 @@ test("sweepPresentDirectoryWorktreesOnce (#834 gate② round 1, D1): an UNLOCKED
   assert.deepEqual(deps.settleCalls, [], "never reaches the purity gate — filtered out at classification");
 });
 
-test("sweepPresentDirectoryWorktreesOnce (#834 gate② round 1, D2): a candidate with staged-but-uncommitted content is RETAINED, never settled — applies to the LOCKED dead-pid class too, not just UNLOCKED", async () => {
+test("sweepPresentDirectoryWorktreesOnce (#834): a LOCKED dead-pid present-directory registration whose admin HEAD is NOT symbolic is ALSO classification-skipped — the durable-ref gate applies to every deletable class, not only UNLOCKED", async () => {
+  const reg: WorktreeRegistration = {
+    path: "/repo/.claude/worktrees/role-detached",
+    lockReason: "claude session role-detached (pid 111 start now)",
+  };
+  const deps = fakePresentDeps({
+    registrations: [reg],
+    isPidAlive: () => false,
+    directoryExists: () => true,
+    hasSymbolicHead: () => false,
+  });
+  const result = await sweepPresentDirectoryWorktreesOnce(deps);
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, failed: [], examinedPaths: [] });
+  assert.deepEqual(
+    deps.settleCalls,
+    [],
+    "a dead pid alone is never enough — a detached HEAD is filtered out at classification regardless of lock state",
+  );
+});
+
+test("sweepPresentDirectoryWorktreesOnce (#834): a candidate with staged-but-uncommitted content is RETAINED, never settled — applies to the LOCKED dead-pid class too, not just UNLOCKED", async () => {
   const lockedDeadStaged: WorktreeRegistration = {
     path: "/repo/.claude/worktrees/locked-staged",
     lockReason: "claude session locked-staged (pid 1 start now)",
@@ -490,7 +511,7 @@ test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED registration whose directo
   assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, failed: [], examinedPaths: [] });
 });
 
-test("sweepPresentDirectoryWorktreesOnce: per-cycle work is bounded to batchSize — overflow candidates are counted as skipped, not touched (gate② round 4, A2: window is now simply the first batchSize candidates from the head — no more offset rotation)", async () => {
+test("sweepPresentDirectoryWorktreesOnce: per-cycle work is bounded to batchSize — overflow candidates are counted as skipped, not touched (the window is simply the first batchSize candidates from the head — no offset rotation)", async () => {
   const registrations: WorktreeRegistration[] = Array.from({ length: 5 }, (_, i) => ({
     path: `/repo/.claude/worktrees/role-${i}`,
     lockReason: `claude session role-${i} (pid ${i} start now)`,
@@ -521,17 +542,16 @@ test("sweepPresentDirectoryWorktreesOnce: a mixed batch (locked-dead-clean, lock
   assert.deepEqual(result.failed, []);
 });
 
-// ── #834 (gate② round 1, F5; dual-mode DELETED round 4, A2 — owner ruling): head-of-line
-//    starvation used to be fenced by TWO windowing strategies (a randomized-offset rotation for
-//    the single-cycle caller, plus the identity-based `alreadyExamined` cursor for the
-//    to-completion caller). The owner ruled that dual-mode split unjustified complexity and had
-//    the offset mode deleted outright — there is now exactly ONE windowing rule (see
-//    sweepPresentDirectoryWorktreesOnce's own doc). A single bounded cycle with no
-//    `alreadyExamined` set is now honestly OPPORTUNISTIC, not starvation-proof — the test below
-//    pins that plainly, and the actual starvation-proof guarantee is exercised ONLY through the
-//    identity-based to-completion tests further down (the one caller that still needs it). ──
+// ── #834: head-of-line starvation used to be fenced by TWO windowing strategies (a
+//    randomized-offset rotation for the single-cycle caller, plus the identity-based
+//    `alreadyExamined` cursor for the to-completion caller). The owner ruled that dual-mode split
+//    unjustified complexity and had the offset mode deleted outright — there is now exactly ONE
+//    windowing rule (see sweepPresentDirectoryWorktreesOnce's own doc). A single bounded cycle
+//    with no `alreadyExamined` set is now honestly OPPORTUNISTIC, not starvation-proof — the test
+//    below pins that plainly, and the actual starvation-proof guarantee is exercised ONLY through
+//    the identity-based to-completion tests further down (the one caller that still needs it). ──
 
-test("sweepPresentDirectoryWorktreesOnce (gate② round 4, A2): a single bounded cycle with no alreadyExamined set is a plain HEAD window — a permanently-dirty head candidate is NOT starvation-proof within one call (that guarantee now belongs solely to the to-completion identity cursor, tested separately)", async () => {
+test("sweepPresentDirectoryWorktreesOnce (#834): a single bounded cycle with no alreadyExamined set is a plain HEAD window — a permanently-dirty head candidate is NOT starvation-proof within one call (that guarantee now belongs solely to the to-completion identity cursor, tested separately)", async () => {
   const dirtyHead: WorktreeRegistration[] = Array.from({ length: 3 }, (_, i) => ({
     path: `/repo/.claude/worktrees/dirty-${i}`,
     lockReason: `claude session dirty-${i} (pid ${i} start now)`,
@@ -562,13 +582,12 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 4, A2): a single bounded
   );
 });
 
-/** #834 (gate② round 2, G1): a listRegistrations fake that REFLECTS removals — `remove()` deletes
- *  the matching entry from the live list, exactly like a real `git worktree remove` does. This
- *  is the load-bearing difference from `fakePresentDeps` above (whose `registrations` array
- *  never shrinks): round 1's own to-completion test used the STATIC version, which is exactly
- *  why the index-based cursor bug (G1) slipped through gate② round 1 — a candidate list that
- *  never actually shrinks can never expose an index cursor pointing past the end of a shrunken
- *  one. Every to-completion test below uses THIS fake. */
+/** #834: a listRegistrations fake that REFLECTS removals — `remove()` deletes the matching entry
+ *  from the live list, exactly like a real `git worktree remove` does. This is the load-bearing
+ *  difference from `fakePresentDeps` above (whose `registrations` array never shrinks): a STATIC
+ *  registration list can never expose an index-based cursor pointing past the end of a shrunken
+ *  one, which is exactly the class of bug an identity-based cursor (below) exists to avoid. Every
+ *  to-completion test below uses THIS fake. */
 function fakeShrinkingPresentDeps(
   initial: WorktreeRegistration[],
   overrides: Partial<PresentDirectorySweepDeps> = {},
@@ -599,7 +618,7 @@ function fakeShrinkingPresentDeps(
   return { ...base, ...overrides, settleCalls, removedCalls };
 }
 
-test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 1, F5): reaches the ENTIRE candidate list in one call, accumulating every cycle's counts — the operator one-shot's own full-coverage guarantee (SHRINKING registrations, per gate② round 2 G1)", async () => {
+test("runPresentDirectoryWorktreeSweepToCompletion (#834): reaches the ENTIRE candidate list in one call, accumulating every cycle's counts — the operator one-shot's own full-coverage guarantee (SHRINKING registrations, via the identity-based cursor)", async () => {
   const registrations: WorktreeRegistration[] = Array.from({ length: 7 }, (_, i) => ({
     path: `/repo/.claude/worktrees/role-${i}`,
     lockReason: `claude session role-${i} (pid ${i} start now)`,
@@ -620,7 +639,7 @@ test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 1, F5): reache
   );
 });
 
-test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 2, G1 — the reviewer's own reproduction): 7 candidates, batchSize=3 — cycle 1 reaps indices 0-2 and SHRINKS the list to 4; the OLD index-based cursor (nextOffset: 3) would then point at the last element and silently skip candidates 3-5. The identity-based cursor must reach ALL 7.", async () => {
+test("runPresentDirectoryWorktreeSweepToCompletion (#834): 7 candidates, batchSize=3 — cycle 1 reaps indices 0-2 and SHRINKS the list to 4; the OLD index-based cursor (nextOffset: 3) would then point at the last element and silently skip candidates 3-5. The identity-based cursor must reach ALL 7.", async () => {
   const registrations: WorktreeRegistration[] = Array.from({ length: 7 }, (_, i) => ({
     path: `/repo/.claude/worktrees/role-${i}`,
     lockReason: `claude session role-${i} (pid ${i} start now)`,
@@ -636,7 +655,7 @@ test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 2, G1 — the 
   assert.deepEqual(new Set(deps.removedCalls), new Set(registrations.map((r) => r.path)));
 });
 
-test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 3, W4 — the PO's own finding): the returned `skipped` is the TERMINATING cycle's count, never the sum across cycles — a run spanning multiple cycles must not inflate the permanently-skipped total", async () => {
+test("runPresentDirectoryWorktreeSweepToCompletion (#834): the returned `skipped` is the TERMINATING cycle's count, never the sum across cycles — a run spanning multiple cycles must not inflate the permanently-skipped total", async () => {
   // 3 reapable (LOCKED dead-pid, purity-clean) candidates, batchSize=2 -> forces 3 cycles
   // (reap 2, reap 1, terminate) via the identity cursor. 2 PERMANENTLY-skipped (UNLOCKED,
   // under-age) registrations sit alongside them — classification re-counts these on EVERY
@@ -665,7 +684,7 @@ test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 3, W4 — the 
   assert.ok(logs.length >= 3, "this run genuinely spanned multiple cycles (the scenario the inflation bug needed)");
 });
 
-test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 4, A2, adapted for #834's Ruling addendum): a mixed run (1 reapable + 1 permanently-classification-skipped) pins the exact total — 1 skipped, never inflated or undercounted", async () => {
+test("runPresentDirectoryWorktreeSweepToCompletion (#834, adapted for the Ruling addendum): a mixed run (1 reapable + 1 permanently-classification-skipped) pins the exact total — 1 skipped, never inflated or undercounted", async () => {
   const reapable: WorktreeRegistration = {
     path: "/repo/.claude/worktrees/reapable-1",
     lockReason: "claude session reapable-1 (pid 1 start now)",
@@ -686,11 +705,11 @@ test("runPresentDirectoryWorktreeSweepToCompletion: an empty candidate list term
   assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, failed: [], examinedPaths: [] });
 });
 
-// ── #834 (gate② round 1, F6): a prune-step failure must never escape sweepPresentDirectoryWorktreesOnce
-//    — every reaped directory is already gone from disk either way; only the rollup event
+// ── #834: a prune-step failure must never escape sweepPresentDirectoryWorktreesOnce — every
+//    reaped directory is already gone from disk either way; only the rollup event
 //    (sweepPresentDirectoryWorktreesAndReport) must still land. ──
 
-test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F6): a prune() failure is counted in failed, never thrown — the reaped directories still count as reaped (they ARE gone from disk)", async () => {
+test("sweepPresentDirectoryWorktreesOnce (#834): a prune() failure is counted in failed, never thrown — the reaped directories still count as reaped (they ARE gone from disk)", async () => {
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/role-x", lockReason: "claude session role-x (pid 111 start now)" };
   const deps = fakePresentDeps({
     registrations: [reg],
@@ -706,7 +725,7 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F6): a prune() failur
   assert.match(result.failed[0]!.error, /git worktree prune boom/);
 });
 
-test("sweepPresentDirectoryWorktreesAndReport (gate② round 1, F6): the rollup event still lands exactly once even when the sweep partially failed (a prune failure)", async () => {
+test("sweepPresentDirectoryWorktreesAndReport (#834): the rollup event still lands exactly once even when the sweep partially failed (a prune failure)", async () => {
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/role-x", lockReason: "claude session role-x (pid 111 start now)" };
   const deps = fakePresentDeps({
     registrations: [reg],
@@ -769,7 +788,7 @@ test("sweepPresentDirectoryWorktreesAndReport: a failing appendEvent never throw
   assert.match(logs[0]!, /rollup event append failed/);
 });
 
-// ── #834 (gate② round 1, F7): REAL composition — createPresentDirectorySweepDeps wired to the
+// ── #834: REAL composition — createPresentDirectorySweepDeps wired to the
 //    REAL resolveWorktreeIndexBaselineMs -> settleWorktreeDirectory -> worktreeMaybeDirty chain
 //    against a REAL temp directory with a REAL git index file (the fake-verdict doctrine rule:
 //    no preset verdicts for the purity check itself). Only listRegistrations/liveness/git-backed
@@ -787,7 +806,7 @@ function mkGitIndexFixture(worktreeRoot: string, name: string): { worktreePath: 
   return { worktreePath, indexPath };
 }
 
-test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F7, real composition): a REAL purity-clean present directory is actually deleted from disk and its registration reaped", async () => {
+test("sweepPresentDirectoryWorktreesOnce (#834, real composition): a REAL purity-clean present directory is actually deleted from disk and its registration reaped", async () => {
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-real-"));
   try {
     const name = "role-real-clean";
@@ -803,10 +822,12 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F7, real composition)
       worktreeRoot,
       listRegistrations: async () => [reg],
       isPidAlive: () => false,
-      // These F7 fixtures use a synthetic `.git` pointer (mkGitIndexFixture), not a real git
-      // repository — no HEAD/objects/refs — so the REAL hasNoStagedChanges (D2) would always
-      // read false against them. Overridden here to isolate the PURITY mechanism this test suite
-      // targets; D2's own real-git behavior gets dedicated fixtures below.
+      // These F7 fixtures use a synthetic `.git` pointer (mkGitIndexFixture) or none at all, not
+      // a real git repository — no HEAD/objects/refs — so the REAL hasSymbolicHead/
+      // hasNoStagedChanges would always read false/dirty against them. Both overridden here to
+      // isolate the PURITY mechanism this test suite targets; the real-git behavior of each gets
+      // its own dedicated fixtures below.
+      hasSymbolicHead: () => true,
       hasNoStagedChanges: async () => true,
       unlock: async () => {},
       remove: async () => {},
@@ -820,7 +841,7 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F7, real composition)
   }
 });
 
-test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F7, real composition): a REAL dirty present directory (a file written after the index) is retained, not deleted", async () => {
+test("sweepPresentDirectoryWorktreesOnce (#834, real composition): a REAL dirty present directory (a file written after the index) is retained, not deleted", async () => {
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-real-"));
   try {
     const name = "role-real-dirty";
@@ -834,10 +855,12 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F7, real composition)
       worktreeRoot,
       listRegistrations: async () => [reg],
       isPidAlive: () => false,
-      // These F7 fixtures use a synthetic `.git` pointer (mkGitIndexFixture), not a real git
-      // repository — no HEAD/objects/refs — so the REAL hasNoStagedChanges (D2) would always
-      // read false against them. Overridden here to isolate the PURITY mechanism this test suite
-      // targets; D2's own real-git behavior gets dedicated fixtures below.
+      // These F7 fixtures use a synthetic `.git` pointer (mkGitIndexFixture) or none at all, not
+      // a real git repository — no HEAD/objects/refs — so the REAL hasSymbolicHead/
+      // hasNoStagedChanges would always read false/dirty against them. Both overridden here to
+      // isolate the PURITY mechanism this test suite targets; the real-git behavior of each gets
+      // its own dedicated fixtures below.
+      hasSymbolicHead: () => true,
       hasNoStagedChanges: async () => true,
       unlock: async () => {},
       remove: async () => {},
@@ -852,7 +875,7 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F7, real composition)
   }
 });
 
-test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F7, real composition): a MISSING git index (NaN baseline) is retained — fail-safe, never guessed clean", async () => {
+test("sweepPresentDirectoryWorktreesOnce (#834, real composition): a MISSING git index (NaN baseline) is retained — fail-safe, never guessed clean", async () => {
   const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-real-"));
   try {
     const name = "role-real-no-index";
@@ -867,10 +890,12 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F7, real composition)
       worktreeRoot,
       listRegistrations: async () => [reg],
       isPidAlive: () => false,
-      // These F7 fixtures use a synthetic `.git` pointer (mkGitIndexFixture), not a real git
-      // repository — no HEAD/objects/refs — so the REAL hasNoStagedChanges (D2) would always
-      // read false against them. Overridden here to isolate the PURITY mechanism this test suite
-      // targets; D2's own real-git behavior gets dedicated fixtures below.
+      // These F7 fixtures use a synthetic `.git` pointer (mkGitIndexFixture) or none at all, not
+      // a real git repository — no HEAD/objects/refs — so the REAL hasSymbolicHead/
+      // hasNoStagedChanges would always read false/dirty against them. Both overridden here to
+      // isolate the PURITY mechanism this test suite targets; the real-git behavior of each gets
+      // its own dedicated fixtures below.
+      hasSymbolicHead: () => true,
       hasNoStagedChanges: async () => true,
       unlock: async () => {},
       remove: async () => {},
@@ -893,10 +918,10 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F7, real composition)
 // fixture coverage that used to live here (default-branch-vs-current-HEAD disambiguation,
 // unresolvable-origin/HEAD fail-safe) went with it.
 
-// ── #834 gate② round 1, P1 D1 (real-git repro): a DETACHED worktree's commits can be reachable
-//    ONLY via that worktree's own admin HEAD/reflog — deleting the registration deletes the admin
-//    directory, and a detached-only commit goes unreachable (GC-eligible) the instant it does.
-//    hasSymbolicHead must gate this out at classification time, before it's ever a candidate. ──
+// ── #834: a DETACHED worktree's commits can be reachable ONLY via that worktree's own admin
+//    HEAD/reflog — deleting the registration deletes the admin directory, and a detached-only
+//    commit goes unreachable (GC-eligible) the instant it does. hasSymbolicHead must gate this
+//    out at classification time, before it's ever a candidate. ──
 
 function commonSetup(repoRoot: string): void {
   git(repoRoot, "init", "-q", "-b", "main");
@@ -908,7 +933,7 @@ function commonSetup(repoRoot: string): void {
   git(repoRoot, "commit", "-q", "-m", "base");
 }
 
-test("sweepPresentDirectoryWorktreesOnce (#834 gate② round 1, D1, real composition): a DETACHED worktree with a commit reachable ONLY via its own admin HEAD is classification-skipped, never reaped — proven against a real `git fsck --unreachable` repro", async () => {
+test("sweepPresentDirectoryWorktreesOnce (#834, real composition): a DETACHED worktree with a commit reachable ONLY via its own admin HEAD is classification-skipped, never reaped — proven against a real `git fsck --unreachable` repro", async () => {
   const repoRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-detached-"));
   try {
     commonSetup(repoRoot);
@@ -953,12 +978,12 @@ test("sweepPresentDirectoryWorktreesOnce (#834 gate② round 1, D1, real composi
   }
 });
 
-// ── #834 gate② round 1, P1 D2 (real-git repro): `git add` writes the index AFTER the staged
-//    file's own mtime, so an artificially-aged index reads purity-CLEAN by mtime comparison alone
-//    even with real staged content sitting in it. hasNoStagedChanges (`git diff --cached --quiet`
-//    against the worktree's admin dir) must catch what the mtime baseline structurally cannot. ──
+// ── #834: `git add` writes the index AFTER the staged file's own mtime, so an artificially-aged
+//    index reads purity-CLEAN by mtime comparison alone even with real staged content sitting in
+//    it. hasNoStagedChanges (`git diff --cached --quiet` against the worktree's admin dir) must
+//    catch what the mtime baseline structurally cannot. ──
 
-test("sweepPresentDirectoryWorktreesOnce (#834 gate② round 1, D2, real composition): a STAGED-but-uncommitted file with an artificially-aged index reads purity-clean by mtime alone but is RETAINED — the reviewer's exact repro shape", async () => {
+test("sweepPresentDirectoryWorktreesOnce (#834, real composition): a STAGED-but-uncommitted file with an artificially-aged index reads purity-clean by mtime alone but is RETAINED", async () => {
   const repoRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-staged-"));
   try {
     commonSetup(repoRoot);
@@ -998,7 +1023,7 @@ test("sweepPresentDirectoryWorktreesOnce (#834 gate② round 1, D2, real composi
   }
 });
 
-test("sweepPresentDirectoryWorktreesOnce (#834 gate② round 1, D2, real composition): a fully-COMMITTED clean worktree (nothing staged) is still reaped", async () => {
+test("sweepPresentDirectoryWorktreesOnce (#834, real composition): a fully-COMMITTED clean worktree (nothing staged) is still reaped", async () => {
   const repoRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-staged-"));
   try {
     commonSetup(repoRoot);
@@ -1030,5 +1055,213 @@ test("sweepPresentDirectoryWorktreesOnce (#834 gate② round 1, D2, real composi
     assert.ok(!existsSync(worktreePath), "the clean, fully-committed worktree is actually deleted");
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+// ── #834: the durable-ref gate (hasSymbolicHead) must cover every deletable class, not
+//    only UNLOCKED — a dead pid proves nobody is DRIVING a worktree, but says nothing about what
+//    its HEAD points at. Real repro extending the detached-worktree fixture to the LOCKED
+//    dead-pid class. ──
+
+test("sweepPresentDirectoryWorktreesOnce (#834, real composition): a LOCKED dead-pid DETACHED worktree with a commit reachable ONLY via its own admin HEAD is ALSO classification-skipped, never reaped", async () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-locked-detached-"));
+  try {
+    commonSetup(repoRoot);
+    const baseSha = git(repoRoot, "rev-parse", "HEAD").trim();
+
+    const worktreePath = join(repoRoot, "wt-locked-detached");
+    git(repoRoot, "worktree", "add", "-q", "--detach", worktreePath, baseSha);
+
+    writeFileSync(join(worktreePath, "detached-only.txt"), "only reachable via this worktree\n");
+    git(worktreePath, "add", "detached-only.txt");
+    git(worktreePath, "commit", "-q", "-m", "detached-only commit");
+    const detachedSha = git(worktreePath, "rev-parse", "HEAD").trim();
+
+    const real = createPresentDirectorySweepDeps(repoRoot);
+    // LOCKED + dead pid: the "present" classification verdict, exactly the class this test
+    // extends the durable-ref gate to.
+    const reg: WorktreeRegistration = {
+      path: worktreePath,
+      lockReason: "claude session wt-locked-detached (pid 111 start now)",
+    };
+    const deps: PresentDirectorySweepDeps = {
+      ...real,
+      worktreeRoot: repoRoot,
+      listRegistrations: async () => [reg],
+      isPidAlive: () => false,
+      unlock: async () => {},
+      remove: async () => {},
+      prune: async () => {},
+    };
+    const result = await sweepPresentDirectoryWorktreesOnce(deps);
+    assert.deepEqual(result.reaped, [], "a dead pid alone never overrides the durable-ref gate");
+    assert.equal(result.skipped, 1);
+    assert.ok(existsSync(worktreePath), "the worktree — and its only-reachable-here commit — survives untouched");
+
+    // Same fsck confirmation as the UNLOCKED detached-worktree fixture: prove what WOULD have happened had this
+    // been reaped.
+    git(repoRoot, "worktree", "remove", "--force", worktreePath);
+    git(repoRoot, "reflog", "expire", "--expire=now", "--all");
+    const fsckOutput = git(repoRoot, "fsck", "--unreachable", "--no-reflogs");
+    assert.ok(fsckOutput.includes(detachedSha), "confirms the real accident this gate exists to prevent, for the LOCKED class too");
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+// ── #834: hasNoStagedWorktreeChanges must not become an execution vector itself. The
+//    shared repo config is writable by any worker with an ordinary `Bash(git *)` grant — `git
+//    config --local` inside a LINKED worktree writes the shared `.git/config` (a worktree has no
+//    config of its own by default) — so a worker can plant a diff driver, a textconv, or an
+//    fsmonitor hook that this function's own git invocation would otherwise execute. ──
+
+function mkCanaryDiffFixture(repoRoot: string): { worktreePath: string; canaryPath: string } {
+  commonSetup(repoRoot);
+  writeFileSync(join(repoRoot, "tracked.txt"), "line1\n");
+  writeFileSync(join(repoRoot, ".gitattributes"), "tracked.txt diff=evil\n");
+  git(repoRoot, "add", "tracked.txt", ".gitattributes");
+  git(repoRoot, "commit", "-q", "-m", "tracked + attrs");
+
+  const worktreePath = join(repoRoot, "wt-canary");
+  git(repoRoot, "worktree", "add", "-q", "-b", "wt-canary-branch", worktreePath);
+
+  const canaryPath = join(repoRoot, "canary-extdiff");
+  // The exact reviewer repro shape: a diff driver PLUS trustExitCode, which makes git honor the
+  // driver's own exit code (and therefore actually INVOKE it) even under `--quiet`/`--exit-code`
+  // — `git config --local` here writes the SHARED `.git/config`, exactly what a worker's ordinary
+  // `Bash(git *)` grant can do from inside the worktree.
+  git(worktreePath, "config", "diff.evil.command", `touch ${canaryPath}; exit 1`);
+  git(worktreePath, "config", "diff.evil.trustExitCode", "true");
+  return { worktreePath, canaryPath };
+}
+
+test("hasNoStagedWorktreeChanges (#834, real composition): a planted diff.evil.command + trustExitCode driver in the SHARED config never executes — the canary is never created, in EITHER direction (staged or clean)", async () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-canary-"));
+  try {
+    const { worktreePath, canaryPath } = mkCanaryDiffFixture(repoRoot);
+
+    // Direction 1: staged (dirty) — modify the attributed file and stage it.
+    writeFileSync(join(worktreePath, "tracked.txt"), "line1\nline2\n");
+    git(worktreePath, "add", "tracked.txt");
+    assert.ok(!existsSync(canaryPath));
+    const stagedResult = await hasNoStagedWorktreeChanges(worktreePath);
+    assert.equal(stagedResult, false, "real staged content still reads dirty, from git's OWN judgment, not the driver's planted exit code");
+    assert.ok(!existsSync(canaryPath), "the evil driver was never executed for the staged (dirty) direction");
+
+    // Direction 2: clean — commit the change, nothing left staged.
+    git(worktreePath, "commit", "-q", "-m", "commit tracked change");
+    const cleanResult = await hasNoStagedWorktreeChanges(worktreePath);
+    assert.equal(cleanResult, true, "nothing staged reads clean");
+    assert.ok(!existsSync(canaryPath), "the evil driver was never executed for the clean direction either");
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("hasNoStagedWorktreeChanges (#834, real composition): a planted core.fsmonitor hook in the SHARED config never executes", async () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-fsmon-"));
+  try {
+    commonSetup(repoRoot);
+    const worktreePath = join(repoRoot, "wt-fsmon");
+    git(repoRoot, "worktree", "add", "-q", "-b", "wt-fsmon-branch", worktreePath);
+
+    const canaryPath = join(repoRoot, "canary-fsmon");
+    const hookScript = join(repoRoot, "fsmon-hook.sh");
+    writeFileSync(hookScript, `#!/bin/sh\ntouch ${canaryPath}\necho "1"\necho ""\n`);
+    chmodSync(hookScript, 0o755);
+    git(worktreePath, "config", "core.fsmonitor", hookScript);
+
+    assert.ok(!existsSync(canaryPath));
+    const result = await hasNoStagedWorktreeChanges(worktreePath);
+    assert.equal(result, true, "nothing staged reads clean");
+    assert.ok(!existsSync(canaryPath), "the planted fsmonitor hook was never executed — pinned off by -c core.fsmonitor=");
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+// ── #834: worktreeHeadIsSymbolic must be a STRICT parser, not a mere `startsWith` —
+//    trailing garbage after the ref name, an extra non-empty line, or a SYMLINK HEAD (git itself
+//    never creates one) must all read false. Exercised through createPresentDirectorySweepDeps's
+//    real hasSymbolicHead wiring against hand-built admin-dir fixtures (no full git repo needed —
+//    this targets the pure parsing logic, not git's own worktree machinery). ──
+
+function mkHeadFixture(worktreeRoot: string, name: string): { worktreePath: string; headPath: string; gitDir: string } {
+  const worktreePath = join(worktreeRoot, name);
+  const gitDir = join(worktreeRoot, `${name}-gitdir`);
+  mkdirSync(worktreePath, { recursive: true });
+  mkdirSync(gitDir, { recursive: true });
+  writeFileSync(join(worktreePath, ".git"), `gitdir: ${gitDir}\n`);
+  return { worktreePath, headPath: join(gitDir, "HEAD"), gitDir };
+}
+
+test("createPresentDirectorySweepDeps().hasSymbolicHead (#834): a well-formed symbolic HEAD (with or without a trailing newline) reads true", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-headparse-"));
+  try {
+    const { worktreePath: wt1, headPath: head1 } = mkHeadFixture(worktreeRoot, "wt-lf");
+    writeFileSync(head1, "ref: refs/heads/main\n");
+    const { worktreePath: wt2, headPath: head2 } = mkHeadFixture(worktreeRoot, "wt-no-lf");
+    writeFileSync(head2, "ref: refs/heads/main");
+    const { worktreePath: wt3, headPath: head3 } = mkHeadFixture(worktreeRoot, "wt-crlf");
+    writeFileSync(head3, "ref: refs/heads/main\r\n");
+
+    const deps = createPresentDirectorySweepDeps(worktreeRoot);
+    assert.equal(deps.hasSymbolicHead(wt1), true, "LF-terminated");
+    assert.equal(deps.hasSymbolicHead(wt2), true, "no trailing newline at all");
+    assert.equal(deps.hasSymbolicHead(wt3), true, "CRLF-terminated");
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("createPresentDirectorySweepDeps().hasSymbolicHead (#834): trailing garbage after the ref name on the SAME line reads false — a strict anchored regex, not startsWith", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-headparse-"));
+  try {
+    const { worktreePath, headPath } = mkHeadFixture(worktreeRoot, "wt-garbage");
+    writeFileSync(headPath, "ref: refs/heads/main garbage\n");
+    const deps = createPresentDirectorySweepDeps(worktreeRoot);
+    assert.equal(deps.hasSymbolicHead(worktreePath), false);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("createPresentDirectorySweepDeps().hasSymbolicHead (#834): an additional non-empty line after a well-formed ref line reads false", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-headparse-"));
+  try {
+    const { worktreePath, headPath } = mkHeadFixture(worktreeRoot, "wt-extraline");
+    writeFileSync(headPath, "ref: refs/heads/main\nextra line\n");
+    const deps = createPresentDirectorySweepDeps(worktreeRoot);
+    assert.equal(deps.hasSymbolicHead(worktreePath), false);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("createPresentDirectorySweepDeps().hasSymbolicHead (#834): a raw 40-hex SHA (detached) reads false", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-headparse-"));
+  try {
+    const { worktreePath, headPath } = mkHeadFixture(worktreeRoot, "wt-sha");
+    writeFileSync(headPath, "7c0435be57e5ba2595d6ccfd2a6ca9dfd3bc9a47\n");
+    const deps = createPresentDirectorySweepDeps(worktreeRoot);
+    assert.equal(deps.hasSymbolicHead(worktreePath), false);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+});
+
+test("createPresentDirectorySweepDeps().hasSymbolicHead (#834): a SYMLINK HEAD is rejected via lstat, never followed — modern git itself never creates one", async () => {
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-headparse-"));
+  try {
+    const { worktreePath, headPath, gitDir } = mkHeadFixture(worktreeRoot, "wt-symlink");
+    // The symlink's TARGET is a perfectly well-formed symbolic ref — proving this is rejected on
+    // the symlink-ness alone, not on its content.
+    const targetPath = join(gitDir, "HEAD-real");
+    writeFileSync(targetPath, "ref: refs/heads/main\n");
+    symlinkSync(targetPath, headPath);
+    const deps = createPresentDirectorySweepDeps(worktreeRoot);
+    assert.equal(deps.hasSymbolicHead(worktreePath), false);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
   }
 });
