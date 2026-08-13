@@ -81,7 +81,7 @@ sapwood/
 ├── .claude-plugin/          # plugin manifest (skills, commands, hooks)
 ├── skills/                  # dev-round, dev-loop
 ├── commands/                # /sapwood-init, /sapwood-run, /sapwood-status, /sapwood-stop ...
-├── engine/                  # TS orchestration engine (the port)
+├── engine/                  # TS orchestration engine
 │   ├── conductor.ts         # scheduler: tick (reclaim→drive→resume→dispatch), state machine
 │   ├── worker.ts            # headless `claude -p` wrapper in a worktree + sentinels
 │   ├── merge-driver.ts      # the only place a merge happens (autonomous-merge mode)
@@ -109,8 +109,8 @@ sapwood/
   actually scheduled. Config carries no repository-specific hard-coding — `PROJECT_NUMBER`,
   owner kind, literal board lane names, and the trusted-reviewer login are all configurable
   per deployment.
-- **SQLite (WAL) state.** Replaces a non-atomic file read-modify-write with no
-  locking. Conductor stays single-writer-serial;
+- **SQLite (WAL) state** — atomic writes, no read-modify-write races. Conductor
+  stays single-writer-serial;
   WAL gives atomic writes + concurrent reads (for `sapwood status`). Fully durable
   → engine restart is always a clean resume. Schema is versioned (migration path).
 - **Structured tick results** (typed discriminated union) replace the stringly-typed
@@ -143,7 +143,7 @@ Zero-runtime-dependency-where-possible, fail-closed-by-default:
   (unknown keys / typos error, never silently drop) and **`.finite()`** on budget
   ceilings (overflow can't disable the cap). `loadConfig()` probes
   `sapwood.config.{yaml,yml,json}`. Every config value is a named, defaulted,
-  documented field (mapping in `engine/src/config/config.ts`), never a bare env var.
+  documented field (defined in `engine/src/config/config.ts`), never a bare env var.
 - **Forge:** all subprocess calls use `execFile` with argv arrays — never `shell:true`.
 - **CI-green is fail-closed:** an empty `statusCheckRollup` is **not** green (checks
   may be uncreated on a fresh PR); genuinely CI-less repos opt in via `ci.requireChecks`
@@ -177,7 +177,7 @@ Zero-runtime-dependency-where-possible, fail-closed-by-default:
 `guardDecision(tool, input, cwd)`. It implements the *generic safety mechanism*,
 **not proprietary application behavior** (CLAUDE.md):
 
-- **Ported:** shlex-equivalent tokenizer, fragment splitting (`$()`/`` `` `` recurse),
+- **Included:** shlex-equivalent tokenizer, fragment splitting (`$()`/`` `` `` recurse),
   recursive exec-prefix stripping (env/uv/npx/poetry/`command`/`stdbuf`/leading
   assignments), opaque-construct fail-closed detection (`eval`, shell `-c`, interpreter
   `-e`/`-c` incl. versioned `python3.11`, process substitution, `env -S`), and **Category
@@ -205,8 +205,8 @@ Zero-runtime-dependency-where-possible, fail-closed-by-default:
 The scheduler + worker + live guard — the *generic scheduling/worker mechanics
 only*, never application-specific behavior.
 
-- **`conductor.ts`** — pure scheduling core is parity-tested row-for-row against a
-  frozen reference (`classifyLane` 4-signal lane state, `issuePriority` [matches configured-prefix `prio:N`, bare when the prefix is empty, and suffixed],
+- **`conductor.ts`** — pure scheduling core is parity-tested row-for-row against
+  `conductor.test.ts`'s frozen reference (`classifyLane` 4-signal lane state, `issuePriority` [matches configured-prefix `prio:N`, bare when the prefix is empty, and suffixed],
   `labelsBlockers`, `budgetExceeded`, `codingFloor`/`isCodingRank`/`metaLaneAllowed`
   anti-starvation, `laneOnReclaim*`, `driveDecision`). **Structured discriminated-union tick
   result**, not a stringly-typed text protocol. `tick()` =
@@ -266,7 +266,8 @@ says stop.
 - **`merge-driver.ts` (#13)** — gate① (CI green, fail-closed: an empty check rollup is
   NOT green) + gate② → squash-merge pinned by **`--match-head-commit`** (TOCTOU: a push
   after the gates fails the merge command itself). `mergeDecision` is a **23-case,
-  row-for-row parity-tested** function, checked against a frozen reference. Both gate reads must observe
+  row-for-row parity-tested** function, checked against `merge-driver.test.ts`'s
+  frozen reference. Both gate reads must observe
   the **same head** (split observation → requeue). An already-**MERGED** PR resolves as
   done (the designed happy path of `produce-pr-and-stop`, where a human merges);
   **CONFLICTING** → the FIXABLE fix lane (#270: conflict resolution is producer work —
@@ -872,11 +873,11 @@ The committee's keystone finding remains: sapwood's guard is built for a *truste
 on a *private* repo. v1 stays in that deployment context, **but we build the seams so
 public-repo hardening is additive, not a rewrite.** v1 requirements:
 
-- **Guard port hardening (M1, ships green before anything autonomous runs):**
-  `guard.ts` is a **zero-dependency** module; reproduce ~100 bypass cases
-  **and** add differential/fuzz testing against `guard.py` on random shell strings
-  (the tokenizer divergence — `shlex` vs TS — is the real bypass surface, e.g.
-  `guard.py:36-93`). **Fail-closed on hook error/timeout/malformed output** is a
+- **Guard hardening (M1, ships green before anything autonomous runs):**
+  `guard.ts` is a **zero-dependency** module; reproduce the full captured
+  bypass-attempt suite (~100 cases) **and** add differential/fuzz testing against
+  `guard.py` on random shell strings (the tokenizer divergence — `shlex` vs TS —
+  is the real bypass surface). **Fail-closed on hook error/timeout/malformed output** is a
   tested requirement. Engine must use `execFile`/`spawn` with arg arrays — never
   `child_process.exec`/`shell:true`.
 - **Structural producer≠merger (not just the argv guard):** the merge is always
@@ -898,9 +899,8 @@ public-repo hardening is additive, not a rewrite.** v1 requirements:
     a `.handoff` sentinel carrying the resumable `session_id`, then exit clean. The
     Conductor treats handoff as "incomplete, resumable" and may `--resume` later. Work
     is always durable because the worker checkpoints (commit + push + note) at **every
-    green step**, not just at exit — so the latest pushed state is itself a handoff,
-    never a hard budget cutoff with only crash-`--resume` recovery and no pre-budget
-    handoff.
+    green step**, not just at exit — so the latest pushed state is itself a handoff:
+    a graceful, resumable design, never a hard budget cutoff with crash-only recovery.
     **Auto-enforced (#33) via live token estimation:** stream-json carries no in-progress
     `total_cost_usd` (only the terminal result line has it), so `worker.ts` accumulates a
     running USD estimate from every streamed `assistant` message's token usage — priced by a
