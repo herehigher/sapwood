@@ -103,12 +103,16 @@ test("#411: this repo's own sapwood.config.yaml resolves doctrine.file and loads
   assert.ok(loaded.length > 0, "expected non-empty doctrine content");
 });
 
-test("#411: the loaded doctrine contains the authoritative-signals-over-inferred-text invariant, traceable to env-failure.ts:31-91", () => {
+test("#838: the loaded doctrine contains the authoritative-signals-over-inferred-text invariant, traceable to classifyEnvFailure/DEFAULT_LLM_FAILURE_PATTERNS (symbol citation, not a line-range — #838 de-rotted the stale env-failure.ts:31-91 range)", () => {
   const cfg = loadConfig(REPO_CONFIG_PATH);
   const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
   assert.match(loaded, /Authoritative signals over inferred text/);
-  // Traceable to the source file this invariant was distilled from.
-  assert.ok(loaded.includes("env-failure.ts:31-91"), "expected a citation to engine/src/loop/env-failure.ts:31-91");
+  // Traceable to the source file this invariant was distilled from, by SYMBOL rather than a line
+  // range that rots the moment the file grows (#838): classifyEnvFailure is the structured-
+  // signals-first function, DEFAULT_LLM_FAILURE_PATTERNS is the enumerated fallback list.
+  assert.ok(loaded.includes("classifyEnvFailure"), "expected a citation to classifyEnvFailure");
+  assert.ok(loaded.includes("engine/src/loop/env-failure.ts"), "expected a citation to engine/src/loop/env-failure.ts");
+  assert.ok(loaded.includes("DEFAULT_LLM_FAILURE_PATTERNS"), "expected a citation to DEFAULT_LLM_FAILURE_PATTERNS");
   // The false-positive-vs-false-negative asymmetry this file's own comments name explicitly.
   assert.match(loaded, /false\s+NEGATIVE/);
   assert.match(loaded, /false\s+POSITIVE/);
@@ -120,14 +124,20 @@ test("#411: the loaded doctrine contains the authoritative-signals-over-inferred
 });
 
 // #419 review round 2 (Codex sol high, P2-1): the ORIGINAL wording here called a missed
-// classification "bounded and recoverable" on its own — false against env-failure.ts:93-104,
-// which states a WORKER-lane miss is bounded by nothing in that file (it can recur on every
-// subsequently dispatched issue); only the engine's own outer cost ceiling bounds it. These
-// assertions pin the corrected claim so a future edit can't silently reintroduce the overclaim.
-test("#419 review: the authoritative-signals invariant names the OUTER safety ceiling (not local boundedness) as what actually bounds a recurring worker-lane miss, traceable to env-failure.ts:93-104", () => {
+// classification "bounded and recoverable" on its own — false against env-failure.ts's
+// DEFAULT_LLM_FAILURE_PATTERNS-comment accounting, which states a WORKER-lane miss is bounded by
+// nothing in that file (it can recur on every subsequently dispatched issue); only the engine's
+// own outer cost ceiling bounds it. These assertions pin the corrected claim so a future edit
+// can't silently reintroduce the overclaim. #838 de-rotted the stale env-failure.ts:93-104
+// line-range citation to a symbol citation (same DEFAULT_LLM_FAILURE_PATTERNS symbol the
+// preceding invariant already cites, since that's where this accounting actually lives).
+test("#838: the authoritative-signals invariant names the OUTER safety ceiling (not local boundedness) as what actually bounds a recurring worker-lane miss, traceable to DEFAULT_LLM_FAILURE_PATTERNS's own accounting (symbol citation, not a line-range)", () => {
   const cfg = loadConfig(REPO_CONFIG_PATH);
   const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
-  assert.ok(loaded.includes("env-failure.ts:93-104"), "expected a citation to engine/src/loop/env-failure.ts:93-104");
+  assert.ok(
+    loaded.includes("DEFAULT_LLM_FAILURE_PATTERNS`'s own accounting"),
+    "expected the peripheral-vs-worker-lane citation to reference DEFAULT_LLM_FAILURE_PATTERNS's own accounting",
+  );
   assert.match(loaded, /OUTER safety ceiling/);
   assert.ok(loaded.includes("cost.roundBudgetUsd"), "expected a citation to the cost.roundBudgetUsd config key");
   // The overclaim this review round retracted: must NOT appear anywhere in the loaded text.
