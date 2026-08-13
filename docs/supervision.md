@@ -723,6 +723,12 @@ commit SHA and the fixture/replay id (e.g. the demo fixture's round id, or a rec
 id) the walk was run against — so a finding is reproducible against the exact panel state it
 describes, not a moving target.
 
+That path lives inside the engine's runtime `data/` directory, gitignored repo-wide by design — the
+ledger is an operator-side artifact, never a tracked file a PR tree could contain. A reviewer
+cannot confirm a walk by inspecting the tree; the reviewable evidence for any given session is the
+operator's witness record posted on the relevant PR/issue (actor, steps, timestamp, findings
+summary, artifact path), per the tier-C human-witnessed-probe doctrine below.
+
 **Evidence class.** Per [`docs/security.md`](security.md)'s evidence tiers, the simulated user's
 report is producer-side session output — **trust-origin evidence class C at best** (a
 human/PO-witnessed probe, never self-attested). It informs PM triage; it never auto-satisfies any
@@ -754,7 +760,7 @@ MCP_CONFIG='{"mcpServers":{"browser":{"command":"npx","args":["@playwright/mcp@l
 claude \
   --strict-mcp-config --mcp-config "$MCP_CONFIG" \
   --setting-sources "" \
-  --allowedTools "Read,Write(data/review/ux/**),mcp__browser__*" \
+  --allowedTools "Read,Edit(data/review/ux/**),mcp__browser__*" \
   --disallowedTools "Bash,mcp__forge__*,mcp__github__*" \
   --append-system-prompt "$(cat docs/prompts/ux-simulated-user.md)"
 ```
@@ -779,7 +785,7 @@ claude \
   MCP server's own origin-enforcement behaving as documented, not sapwood's PreToolUse guard hook
   — a bug in that enforcement is a channel this doesn't defend against. It is a real, configured
   control, though, not merely an unenforced instruction.
-- `--allowedTools "Read,Write(data/review/ux/**),mcp__browser__*"` grants exactly: reading any
+- `--allowedTools "Read,Edit(data/review/ux/**),mcp__browser__*"` grants exactly: reading any
   file (to consult its own report contract), writing only under `data/review/ux/` (to file its
   ledger, nothing else), and the browser-automation tools to walk the journeys.
 - `--disallowedTools "Bash,mcp__forge__*,mcp__github__*"` is a third, belt-and-suspenders veto —
