@@ -1,6 +1,6 @@
-// Durable engine state. Replaces the predecessor project's non-atomic jq read-modify-write
-// (loop_conductor.sh:738-762). Conductor stays single-writer-serial; WAL gives atomic
-// writes + concurrent reads (so `sapwood status` reads a live DB without blocking).
+// Durable engine state — atomic writes, no read-modify-write races. Conductor stays
+// single-writer-serial; WAL gives atomic writes + concurrent reads (so `sapwood status`
+// reads a live DB without blocking).
 // Fully durable -> engine restart is a clean resume.
 //
 // Uses Node's built-in node:sqlite (unflagged since Node 22.13 — see engines floor).

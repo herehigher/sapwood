@@ -129,7 +129,7 @@ export function generateFuzzCorpus(): string[] {
 }
 
 /**
- * Hand-picked opaque / Category C cases from the predecessor project's authoritative bypass
+ * Hand-picked opaque / Category C cases from guard.py's authoritative bypass
  * matrix (originally test 5 in guard.fuzz.test.ts, pre-#840). Not RNG-generated; curated to
  * exercise specific wrapper/casing/method-override shapes. Folded into the same static
  * shared-block fixture as the generated corpus.

@@ -1,11 +1,11 @@
 // The conductor: the scheduler. One tick = reclaim -> drive -> resume -> dispatch.
 //
-// This file is a TS port of the predecessor project's loop conductor — but ONLY the generic
-// scheduling core, never application-specific behavior.
-// The pure functions below mirror test_loop_conductor.sh row-for-row (see conductor.test.ts).
+// This file is the loop conductor. Only the generic scheduling core lives here, never
+// application-specific behavior. The pure functions below mirror a reference assert table
+// row-for-row (see conductor.test.ts).
 //
 // Design (PLAN.md):
-//  - Structured, typed tick result (discriminated unions) replaces the predecessor project's stringly-typed
+//  - Structured, typed tick result (discriminated unions) replaces a stringly-typed
 //    DISPATCHED.../RECLAIMED... text protocol greped by skills.
 //  - The tick takes its side-effecting collaborators by injection (IForge, a dispatch fn,
 //    a clock, State) so it is fully unit-testable without spawning a real `claude`.
@@ -453,7 +453,7 @@ export type DriveAction = "MERGE" | "WAIT" | "FIXUP" | "ESCALATE";
  * its FIXABLE semantics for a converging (or unclassified) lane did not.
  *
  * NOTE: this is the conductor's drive_decision only. The PR-gate ACTION->action map
- * (the predecessor project's merge_decision / pr_gate) belongs to M3's reviewer.ts + merge-driver.ts.
+ * belongs to M3's reviewer.ts + merge-driver.ts.
  */
 export function driveDecision(
   gate: string,
@@ -6105,7 +6105,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // switch never reaches this loop; see the global gate at the top of tick(). #75: same
       // reasoning applies to pause — `paused` is captured once at the top of tick(), not
       // re-read per issue.
-      // Claim BEFORE launching (matches the predecessor project's claim_issue.sh order). The board transition
+      // Claim BEFORE launching. The board transition
       // takes the issue out of the Ready lane first, so a launch failure can't leave an
       // untracked worker running while the issue stays dispatchable (Codex P1, PR #30). If
       // the launch fails after the claim, roll the board back to Ready so it's reclaimable.

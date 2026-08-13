@@ -1,6 +1,6 @@
 // IForge: the seam between the conductor and the code host. v1 impl is GithubForge
 // (gh CLI + GraphQL). Making GitLab/Gitea an implementation, not a rewrite. Every
-// Predecessor-project hard-coding (PROJECT_NUMBER, user-vs-org, literal status names, reviewer
+// repo/board-specific value (PROJECT_NUMBER, user-vs-org, literal status names, reviewer
 // login) lives in SapwoodConfig and is passed in here — never baked into the impl.
 //
 // SECURITY: all subprocess calls go through gh.ts (execFile with an argv array — never
@@ -218,13 +218,13 @@ export interface PRReview {
   submittedAt?: string;
 }
 
-/** Everything reviewer.ts needs to derive gate②'s ACTION (the predecessor project's pr_gate.sh, review half —
- *  CI/gate① stays on PRStatus.ciGreen). Assembled from 3 read-only gh calls (reactions, pr
- *  view, review threads) — see GithubForge.getPRReviewData. */
+/** Everything reviewer.ts needs to derive gate②'s ACTION (the review half — CI/gate① stays on
+ *  PRStatus.ciGreen). Assembled from 3 read-only gh calls (reactions, pr view, review threads) —
+ *  see GithubForge.getPRReviewData. */
 export interface PRReviewData {
   headOid: string;
   author: string;
-  updatedAt: string; // ISO — the freshness cutoff for reactions (the predecessor project's pr_gate.sh #92)
+  updatedAt: string; // ISO — the freshness cutoff for reactions (#92)
   isDraft: boolean;
   labels: string[];
   state: "OPEN" | "CLOSED" | "MERGED";
@@ -1060,8 +1060,7 @@ export class GithubForge implements IForge {
 
   async mergePR(pr: number, headOid: string): Promise<void> {
     // --match-head-commit pins the reviewed head: TOCTOU guard against a push between
-    // review and merge (the predecessor project's loop_merge_driver.sh). producer != merger: only the
-    // conductor calls this, never a worker.
+    // review and merge. producer != merger: only the conductor calls this, never a worker.
     await this.gh([
       "pr",
       "merge",
@@ -1176,7 +1175,7 @@ export class GithubForge implements IForge {
   }
 
   async getPRReviewData(pr: number): Promise<PRReviewData> {
-    // Read-only gh calls (the predecessor project's pr_gate.sh): PR metadata + reviews, reactions (--paginate), and
+    // Read-only gh calls: PR metadata + reviews, reactions (--paginate), and
     // the review-threads connection PAGED TO EXHAUSTION (Codex PR #42 P2 — a first-100-only
     // fetch could report zero findings while an unresolved thread sits on a later page).
     // Never touches merge/approve/ready — this is a read surface only.

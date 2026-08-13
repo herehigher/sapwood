@@ -1,22 +1,8 @@
 // sapwood config: load sapwood.config.yaml (YAML default; JSON parses for free via
 // the YAML parser, YAML ⊃ JSON), validate with Zod, apply defaults. Decision #7/#3.
 //
-// Every predecessor-project LOOP_* env var becomes a named, documented, defaulted field here — no
-// hidden hard-coding. Source map (predecessor-project env -> field):
-//   LOOP_MAX_LANES        -> lanes.max
-//   LOOP_ROUND_DISPATCH_CAP -> lanes.roundDispatchCap
-//   LOOP_RESERVE_CAP      -> lanes.reserveCap
-//   LOOP_PR_FIX_CAP       -> lanes.prFixCap
-//   LOOP_BUDGET_USD       -> worker.budgetUsdSoft   (SOFT — graceful handoff, never a mid-work kill)
-//   LOOP_ROUND_BUDGET_USD -> cost.roundBudgetUsd
-//   LOOP_TIMEOUT          -> worker.timeoutSec
-//   LOOP_MODEL            -> worker.model
-//   LOOP_EFFORT           -> worker.effort
-//   LOOP_HB_STALE_SECS    -> worker.heartbeatStaleSecs
-//   LOOP_HUMAN_LABELS     -> escalation.humanLabels
-//   LOOP_TRUSTED_REVIEWERS-> reviewer.trustedReviewers
-//   LOOP_FRICTION_MIN     -> lanes.frictionMin
-//   LOOP_OPTIM_RECUR      -> optimize.recur
+// Every configurable behavior is a named, documented, defaulted field here — no hidden
+// hard-coding.
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
@@ -49,7 +35,8 @@ export const DEFAULT_EGRESS_SUSPECT_COMMANDS = [
 
 const Board = z
   .object({
-    // Removes the predecessor project's hard-coded PROJECT_NUMBER / user-vs-org / literal status names.
+    // No hard-coded PROJECT_NUMBER / user-vs-org / literal status names — board identity and
+    // status labels are configured per repo, not baked into the engine.
     owner: z.string().min(1),
     repo: z.string().min(1), // every gh call targets owner/repo — required, no silent default
     ownerKind: z.enum(["user", "org"]).optional(), // auto-detected at init if omitted
@@ -74,7 +61,7 @@ const Lanes = z
     // two unless an operator explicitly chooses a larger multi-wave quota for their deployment.
     roundDispatchCap: z.number().int().positive().default(2),
     reserveCap: z.number().int().nonnegative().default(1),
-    // #246: the FIXABLE gate's fix_rounds cap (predecessor-project LOOP_PR_FIX_CAP) — deriveGate
+    // #246: the FIXABLE gate's fix_rounds cap — deriveGate
     // (merge-driver.ts) folds HANDLE_THREADS/CI_RED straight to its pre-#246 behavior
     // (HUMAN/WAIT) whenever this is 0, so an operator who wants zero automatic fix legs gets
     // BYTE-FOR-BYTE today's behavior, not a differently-shaped escalation. Above 0, driveDecision
@@ -98,7 +85,7 @@ const Lanes = z
     // unaffected — same number, same semantics; only the default-relying case changes.
     prFixCap: z.number().int().nonnegative().default(4),
     frictionMin: z.number().nonnegative().default(0),
-    // #147: sapwood-native (no predecessor-project LOOP_* counterpart) — bounds the GATED RECLAIM phase
+    // #147: bounds the GATED RECLAIM phase
     // (conductor.ts tick()): how many times a gate②-escalated PR may be reclaimed back to
     // `driving` and re-driven after a human removes needs-human from its issue, before a further
     // removal is rejected (re-escalated + permanently capped, never retried forever). Same
@@ -526,7 +513,7 @@ const Reviewer = z
 
 const Merge = z
   .object({
-    // conductor-merge (predecessor-project-style default): gate① (CI green) + gate② (fresh non-author review on
+    // conductor-merge (the default): gate① (CI green) + gate② (fresh non-author review on
     // the current head) both pass -> the Conductor squash-merges with --match-head-commit pinned
     // to the head that passed the gates (TOCTOU guard). produce-pr-and-stop: the driver still
     // computes + reports both gates every tick but NEVER calls forge.mergePR — a human merges.
@@ -999,7 +986,7 @@ const Engine = z
     // The loop's tick cadence (#46): how often the drivers call tick() — the inter-tick sleep
     // and the #395 watchdog window. (#431 deleted the wall-clock session-gap scaling this used
     // to feed; the wall clock now anchors to in-memory process start and never reads the
-    // cadence.) Conservative default: 1 minute (the predecessor project's loop ticks minutes apart, PLAN.md).
+    // cadence.) Conservative default: 1 minute (PLAN.md).
     tickIntervalSec: z.number().int().positive().default(60),
     // #431 (owner amendment 1): the rapid-restart detector — the crash-loop protection that
     // REPLACES the deleted session-gap heuristic without reviving F29. At startup the engine
