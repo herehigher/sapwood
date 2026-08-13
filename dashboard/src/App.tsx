@@ -12,6 +12,7 @@ import { IconRail } from "./components/IconRail.tsx";
 import { LaneBoard } from "./components/LaneBoard.tsx";
 import { LiveOnly } from "./components/LiveOnly.tsx";
 import { NeedsAttention } from "./components/NeedsAttention.tsx";
+import { PhaseInspectorDrawer } from "./components/PhaseInspectorDrawer.tsx";
 import { Transport } from "./components/Transport.tsx";
 import { readConfigPath } from "./config-captions.ts";
 import { useDemoReplay } from "./demo/useDemoReplay.ts";
@@ -20,6 +21,7 @@ import type { EntityTitles } from "./entities.ts";
 import { Hero } from "./hero/Hero.tsx";
 import { Legend } from "./hero/Legend.tsx";
 import { type FoldStep, type HeroState, initialHeroState } from "./hero/state.ts";
+import type { StageNode } from "./inspector.ts";
 import type { ReplayPosition } from "./replay/player.ts";
 import { initialReplayState } from "./replay/reducer.ts";
 import { bucketSpendByPhase, phaseSpendBars } from "./replay/spend-replay.ts";
@@ -63,6 +65,26 @@ export function resolveRoundSpend(replayUsd: number, artifact: unknown): RoundSp
       ? ((artifact as Record<string, unknown>).roundBudgetUsd as number)
       : null;
   return { usedUsd: replayUsd, budgetUsd };
+}
+
+/**
+ * §6 phase inspector (#861), mode-purity binding: "in live mode the drawer binds to the open
+ * round; in replay it binds to the scrubbed round at the cursor". `rounds` only carries a
+ * PERSISTED artifact (closed rounds) — an open live round's own row (if `/api/rounds` has
+ * caught up to it at all) still reads `artifact: null`, which is exactly AC6's "open round"
+ * honest-unknown case, not a bug this function needs to route around. The design doc's further
+ * "falling back to the most recent CLOSED round" per-phase behavior is deliberately not built
+ * here — no acceptance criterion exercises it, and every phase already has a correct, honest
+ * empty state without it.
+ */
+export function resolveInspectorArtifact(
+  mode: "live" | "replay",
+  rounds: readonly Round[],
+  liveRoundId: number | null,
+  selectedRoundId: number | null,
+): unknown {
+  const id = mode === "live" ? liveRoundId : selectedRoundId;
+  return rounds.find((r) => r.roundId === id)?.artifact ?? null;
 }
 
 type ActiveFold = {
@@ -118,6 +140,10 @@ type AppViewModel = {
   byPhase: CostBarGroup;
   configOpen: boolean;
   setConfigOpen: Dispatch<SetStateAction<boolean>>;
+  // #861: which stage node's drawer is open (null = closed) + the round data it reads.
+  inspectorNode: StageNode | null;
+  setInspectorNode: Dispatch<SetStateAction<StageNode | null>>;
+  inspectorArtifact: unknown;
   // #741: the round navigator's list + the replay transport/mode it drives — §3 A's "the round
   // navigator IS the mode", so every replayable panel below reads whichever fold is active.
   mode: "live" | "replay";
@@ -162,6 +188,9 @@ export function appContent(vm: AppViewModel) {
     byPhase,
     configOpen,
     setConfigOpen,
+    inspectorNode,
+    setInspectorNode,
+    inspectorArtifact,
     mode,
     rounds,
     replay,
@@ -173,6 +202,7 @@ export function appContent(vm: AppViewModel) {
     spendFacts,
     roundSpend,
   } = vm;
+  const onInspect = (node: StageNode) => setInspectorNode(node);
   return (
     <div className="app-shell">
       <IconRail onOpenConfig={() => setConfigOpen(toggleConfigOpen)} />
@@ -222,7 +252,7 @@ export function appContent(vm: AppViewModel) {
           now={clock}
         />
 
-        <NeedsAttention items={activeOpenAttention} titles={activeTitles} repoUrl={repoUrl} now={clock} />
+        <NeedsAttention items={activeOpenAttention} titles={activeTitles} repoUrl={repoUrl} now={clock} onInspect={onInspect} />
 
         {loop.data && (
           <Hero
@@ -235,6 +265,7 @@ export function appContent(vm: AppViewModel) {
             fixCap={fixCap}
             roundPhase={mode === "live" ? (loop.data.round?.phase ?? null) : null}
             config={loop.data.config}
+            onInspect={onInspect}
           />
         )}
 
@@ -270,6 +301,19 @@ export function appContent(vm: AppViewModel) {
             <ConfigDrawer config={loop.data?.config ?? null} open onClose={() => setConfigOpen(false)} />
           </LiveOnly>
         )}
+
+        {/* §6 phase inspector (#861) — unlike ConfigDrawer, this is NOT live-only: §6's own mode
+         *  purity rule binds it to whichever round (live open, or replay cursor) is active. */}
+        <PhaseInspectorDrawer
+          node={inspectorNode}
+          onClose={() => setInspectorNode(null)}
+          artifact={inspectorArtifact}
+          events={activeEvents}
+          config={loop.data?.config ?? null}
+          logPath={mode === "live" ? (loop.data?.logPath ?? null) : null}
+          repoUrl={repoUrl}
+          titles={activeTitles}
+        />
       </main>
     </div>
   );
@@ -294,6 +338,7 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
   const events = useEventHistory(lanesMax);
   const spend = useSpendHistory();
   const [configOpen, setConfigOpen] = useState(initialConfigOpen ?? false);
+  const [inspectorNode, setInspectorNode] = useState<StageNode | null>(null);
 
   // #741: the round navigator's list (§8 `/api/rounds`) and the replay transport it drives
   // (play/pause/speed/scrub, §6). `mode` is carried by round selection, not a separate toggle —
@@ -371,6 +416,8 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
           selectedRoundArtifact,
         )
       : undefined;
+  // #861: bound per §6's mode-purity rule — see `resolveInspectorArtifact`'s own doc.
+  const inspectorArtifact = resolveInspectorArtifact(mode, rounds.data?.rounds ?? [], loop.data?.round?.id ?? null, replay.selectedRoundId);
 
   return appContent({
     clock,
@@ -385,6 +432,9 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
     byPhase,
     configOpen,
     setConfigOpen,
+    inspectorNode,
+    setInspectorNode,
+    inspectorArtifact,
     mode,
     rounds: rounds.data?.rounds ?? [],
     replay,
@@ -411,6 +461,7 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
 function DemoApp({ now, initialConfigOpen }: AppProps) {
   const clock = now ?? new Date();
   const [configOpen, setConfigOpen] = useState(initialConfigOpen ?? false);
+  const [inspectorNode, setInspectorNode] = useState<StageNode | null>(null);
 
   const fixture = useDemoFixture();
   const bundle = fixture.data;
@@ -466,6 +517,8 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
           selectedRoundArtifact,
         )
       : undefined;
+  // #861: demo mode has no live open round at all — see this function's own doc.
+  const inspectorArtifact = resolveInspectorArtifact(mode, rounds, null, replay.selectedRoundId);
 
   return appContent({
     clock,
@@ -480,6 +533,9 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
     byPhase,
     configOpen,
     setConfigOpen,
+    inspectorNode,
+    setInspectorNode,
+    inspectorArtifact,
     mode,
     rounds,
     replay,

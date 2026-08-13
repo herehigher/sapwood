@@ -1,17 +1,31 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { App, appContent, resolveActiveFold, resolveFixCap, resolveRoundSpend, toggleConfigOpen } from "./App.tsx";
+import {
+  App,
+  appContent,
+  resolveActiveFold,
+  resolveFixCap,
+  resolveInspectorArtifact,
+  resolveRoundSpend,
+  toggleConfigOpen,
+} from "./App.tsx";
 import { demoFixtureQuery, eventsQuery, loopStateQuery, roundsQuery, spendQuery } from "./api/queries.ts";
-import type { SpendRow } from "./api/types.ts";
+import type { Round, SpendRow } from "./api/types.ts";
 import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
 import type { DemoBundle } from "./demo/types.ts";
 import type { DomainEvent } from "./domain-event.ts";
+import type { EntityTitles } from "./entities.ts";
 import { foldEvents, type HeroState, initialHeroState } from "./hero/state.ts";
 import { initialReplayState } from "./replay/reducer.ts";
 import { bucketSpendByPhase, phaseSpendBars } from "./replay/spend-replay.ts";
+import { registerRealDom } from "./test-dom.ts";
+
+registerRealDom();
 
 /** Same tree-walk IconRail.test.tsx uses — finds a node in a REAL React element tree (never a
  *  `renderToStaticMarkup` string, which strips function props) by exact `className`. */
@@ -58,6 +72,13 @@ function minimalAppViewModel(
      *  or the replay view is an impossible one `useReplay` itself could never actually produce. */
     rounds?: unknown[];
     selectedRoundId?: number | null;
+    repoUrl?: string;
+    activeEvents?: unknown[];
+    activeTitles?: EntityTitles;
+    // #861
+    inspectorNode?: string | null;
+    setInspectorNode?: (updater: unknown) => void;
+    inspectorArtifact?: unknown;
   } = {},
 ) {
   return {
@@ -66,13 +87,16 @@ function minimalAppViewModel(
     events: { events: [], titles: {}, openAttention: [], hero: initialHeroState(null), steps: [], error: undefined, isPending: false },
     disconnected: false,
     parked: false,
-    repoUrl: undefined,
+    repoUrl: overrides.repoUrl,
     fixCap: 2,
     byModel: { title: "by model", bars: [] },
     byLane: { title: "by lane", bars: [] },
     byPhase: { title: "by phase", bars: [] },
     configOpen: overrides.configOpen ?? false,
     setConfigOpen: overrides.setConfigOpen ?? (() => {}),
+    inspectorNode: overrides.inspectorNode ?? null,
+    setInspectorNode: overrides.setInspectorNode ?? (() => {}),
+    inspectorArtifact: overrides.inspectorArtifact ?? null,
     // #741: a minimal live-mode replay view — this fixture never exercises replay itself, only
     // App's config-trigger wiring, so every replay field is the same "nothing selected" shape
     // `useReplay` starts in.
@@ -95,8 +119,8 @@ function minimalAppViewModel(
     },
     activeHero: overrides.activeHero ?? initialHeroState(null),
     activeSteps: [],
-    activeEvents: [],
-    activeTitles: {},
+    activeEvents: overrides.activeEvents ?? [],
+    activeTitles: overrides.activeTitles ?? {},
     activeOpenAttention: [],
     // Mirrors real `App()`: `spendFacts` is always `loop.data?.spend`, straight through.
     spendFacts: (overrides.loop as { data?: { spend?: unknown } } | undefined)?.data?.spend,
@@ -164,6 +188,48 @@ async function renderSettledApp(
       <App now={now} initialConfigOpen={initialConfigOpen} />
     </QueryClientProvider>,
   );
+}
+
+/**
+ * #861 verification plan: "click interactions use a real DOM via `registerRealDom()` ... with
+ * `act()`, because `renderToStaticMarkup` runs no effects and dispatches no events." Same
+ * settled-query setup as `renderSettledApp` above, but mounted into a real container via
+ * `createRoot` so `onClick`/`onKeyDown`/`Escape` actually fire. `fetchCalls` lets a test assert
+ * exactly which URLs were ever fetched (AC5: "no fetch call is made" for the log content).
+ */
+async function mountSettledApp(byPath: Record<string, { status: number; body: unknown }>, now?: Date) {
+  const fetchCalls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    fetchCalls.push(url);
+    const path = url.split("?")[0]!;
+    const resp = { ...SPEND_EMPTY, ...ROUNDS_EMPTY, ...byPath }[path];
+    if (!resp) throw new Error(`unstubbed fetch: ${url}`);
+    return new Response(JSON.stringify(resp.body), { status: resp.status, headers: { "content-type": "application/json" } });
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await Promise.allSettled([
+    client.prefetchQuery(loopStateQuery()),
+    client.prefetchQuery(eventsQuery(0)),
+    client.prefetchQuery(spendQuery(0)),
+    client.prefetchQuery(roundsQuery()),
+  ]);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={client}>
+        <App now={now} />
+      </QueryClientProvider>,
+    );
+  });
+  const unmount = async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  };
+  return { container, fetchCalls, unmount };
 }
 
 test.afterEach(() => mock.restoreAll());
@@ -934,4 +1000,420 @@ test("#742: ?demo's fixture data actually drives the transport player — a fixt
     new RegExp(DEMO_ISSUE_TITLE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
     "the fixture's distinguishable issue title must be folded and rendered — proof the fixture's events actually reached the shared reducer, not just its rounds list",
   );
+});
+
+// ── #861 phase inspector ─────────────────────────────────────────────────────────────────────
+//
+// Content-correctness assertions (AC2–AC6) go through `appContent` — this repo's own WIRING
+// doctrine names it directly as a real production entry point (`review/REVIEW-DOCTRINE.md`'s
+// "App/appContent" example), the same treatment `#803`/`#766` use above for hero/cost-strip
+// content. Click MECHANICS (AC1, AC7) go through a real mounted DOM (`mountSettledApp`,
+// `registerRealDom()` above) — `renderToStaticMarkup` strips event handlers, so only a real DOM
+// can prove a click/keydown actually reaches the production `onClick`/`onKeyDown` wiring.
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Extracts just the `<aside aria-label="phase inspector">…</aside>` fragment — content
+ *  assertions must be scoped to it, never the whole page: the hero SVG renders the SAME
+ *  model·effort/review-mode captions next to its own stage nodes regardless of drawer state, so
+ *  an unscoped "does this string appear anywhere" check would be a false positive/negative. */
+function extractDrawerHtml(html: string): string {
+  const match = html.match(/<aside[^>]*aria-label="phase inspector"[^>]*>[\s\S]*?<\/aside>/);
+  assert.ok(match, "phase inspector drawer not found in rendered html");
+  return match[0];
+}
+
+/** A `<dt>label</dt><dd>value</dd>` row, adjacent with no gap (the real JSX these components
+ *  render) — the label's own row, not a later one that happens to start with the same text. */
+function assertRow(html: string, label: string, value: string | number): void {
+  const re = new RegExp(`${escapeRegExp(label)}[^<]*</dt><dd[^>]*>${escapeRegExp(String(value))}</dd>`);
+  assert.match(html, re, `expected row "${label}: ${value}"`);
+}
+
+const INSPECTOR_CONFIG = {
+  board: { owner: "acme-inspector", repo: "widgets-inspector" },
+  worker: { model: "worker-model-861", effort: "high" },
+  roles: {
+    po: { model: "po-model-861", effort: "medium" },
+    architect: { model: "arch-model-861", effort: "medium" },
+    verificationPlanReviewer: { model: "verify-model-861", effort: "low" },
+    harvest: { model: "harvest-model-861", effort: "low" },
+    retro: { model: "retro-model-861", effort: "low" },
+  },
+  reviewer: { mode: "engine-agent-861" },
+};
+
+const INSPECTOR_REPO_URL = "https://github.com/acme-inspector/widgets-inspector";
+
+// Distinguishable, mutually-unequal, none 0/1 (verification plan's own fixture-quality bar):
+// dispatches 3, merges 2, handoffs 5, spendUsd 37.25.
+const INSPECTOR_ARTIFACT = {
+  schemaVersion: 1,
+  roundId: 4242,
+  startedAt: "2026-08-10T09:00:00Z",
+  endedAt: "2026-08-10T10:00:00Z",
+  dispatches: [
+    { issue: 701, worker: "w1" },
+    { issue: 702, worker: "w2" },
+    { issue: 703, worker: "w1" },
+  ],
+  merges: [
+    { issue: 701, worker: "w1", pr: 9001 },
+    { issue: 702, worker: "w2", pr: 9002 },
+  ],
+  prsOpened: 5,
+  prsMerged: 2,
+  issuesClosed: 2,
+  spendUsd: 37.25,
+  roundBudgetUsd: 80,
+  retries: { gatedReentries: 4, gatedReentryCapped: 2, rollbacksRecovered: 3, rollbacksEscalated: 6 },
+  reviewRounds: { reviewerFallbackSwitches: 0, reviewerFallbackReverts: 0 },
+  escalations: { needsHuman: [811, 812, 813], ceiling: 9, driveNoPr: 8 },
+  egressSuspects: [],
+  handoffs: 5,
+  degradedPhases: [
+    { phase: "architect", outcome: "escalated", session: "sess-arch-861" },
+    { phase: "plan_review", outcome: "escalated", session: "sess-verify-861" },
+    // Harvest's own degraded session — must never leak into the Arch review / Verify drawer.
+    { phase: "harvest", outcome: "escalated", session: "sess-harvest-861" },
+  ],
+  roundStops: [],
+  retro: { opened: { pr: 9099, branch: "retro/branch-861" }, degraded: null },
+  align: {
+    created: [{ issue: 601, title: "Distinguishable created title 861", hasPlan: true }],
+    triaged: [{ issue: 602, drafted: false }],
+  },
+  concerns: [],
+  concernsReconciled: [],
+};
+
+function inspectorEvent(id: number, kind: string, payload: Record<string, unknown>): DomainEvent {
+  return { known: true, id, ts: `2026-08-10T09:0${id}:00Z`, kind, payload } as DomainEvent;
+}
+
+// 3 plan-review-escalated + 2 no-plan-after-draft — distinguishable counts for the Arch
+// review / Verify drawer's event-derived numbers (AC2).
+const INSPECTOR_EVENTS: DomainEvent[] = [
+  inspectorEvent(1, "plan-review-escalated", { issue: 901 }),
+  inspectorEvent(2, "plan-review-escalated", { issue: 902 }),
+  inspectorEvent(3, "plan-review-escalated", { issue: 903 }),
+  inspectorEvent(4, "no-plan-after-draft", { issue: 904 }),
+  inspectorEvent(5, "no-plan-after-draft", { issue: 905 }),
+];
+
+function inspectorViewModel(overrides: {
+  inspectorNode: string;
+  inspectorArtifact?: unknown;
+  activeEvents?: DomainEvent[];
+  mode?: "live" | "replay";
+  logPath?: string | null;
+}) {
+  return minimalAppViewModel({
+    inspectorNode: overrides.inspectorNode,
+    inspectorArtifact: "inspectorArtifact" in overrides ? overrides.inspectorArtifact : INSPECTOR_ARTIFACT,
+    activeEvents: overrides.activeEvents ?? INSPECTOR_EVENTS,
+    repoUrl: INSPECTOR_REPO_URL,
+    mode: overrides.mode ?? "live",
+    loop: { data: { ...LOOP_STATE_OK, config: INSPECTOR_CONFIG, logPath: overrides.logPath ?? null }, isPending: false },
+  });
+}
+
+// ── resolveInspectorArtifact (§6 mode-purity binding) ───────────────────────────────────────
+
+test("resolveInspectorArtifact: live mode reads the round matching the live open round's id", () => {
+  const rounds = [
+    { roundId: 1, artifact: { a: 1 } },
+    { roundId: 2, artifact: { a: 2 } },
+  ] as unknown as Round[];
+  assert.deepEqual(resolveInspectorArtifact("live", rounds, 2, null), { a: 2 });
+});
+
+test("resolveInspectorArtifact: replay mode reads the round matching the SELECTED round id, ignoring the live open round entirely", () => {
+  const rounds = [
+    { roundId: 1, artifact: { a: 1 } },
+    { roundId: 2, artifact: { a: 2 } },
+  ] as unknown as Round[];
+  assert.deepEqual(resolveInspectorArtifact("replay", rounds, 2, 1), { a: 1 });
+});
+
+test("resolveInspectorArtifact: no matching round row (open round not yet in /api/rounds, or nothing selected) is an honest null, never a throw", () => {
+  assert.equal(resolveInspectorArtifact("live", [], 5, null), null);
+  assert.equal(resolveInspectorArtifact("replay", [], null, null), null);
+});
+
+// ── AC2 / AC3 / AC4: drawer content per node class ──────────────────────────────────────────
+
+test("AC2/AC3/AC4: Goal & align drawer — the artifact's align section verbatim, GitHub links to issues only, po's model·effort caption, no other phase's fields", () => {
+  const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: "goal-align" })));
+  const drawer = extractDrawerHtml(html);
+  assert.match(drawer, /Goal &amp; align/);
+  assert.match(drawer, new RegExp(escapeRegExp("po-model-861 · medium")));
+  assert.match(drawer, /Distinguishable created title 861/);
+  assert.match(drawer, new RegExp(`href="${escapeRegExp(INSPECTOR_REPO_URL)}/issues/601"`));
+  assert.match(drawer, new RegExp(`href="${escapeRegExp(INSPECTOR_REPO_URL)}/issues/602"`));
+  assert.match(drawer, /still planless/);
+  assert.doesNotMatch(drawer, /37\.25/, "Summary's spend must not leak into Goal & align");
+  assert.doesNotMatch(drawer, /gated reentries/, "Lanes counters must not leak into Goal & align");
+  assert.doesNotMatch(drawer, /retro\/branch-861/, "Retro's fields must not leak into Goal & align");
+});
+
+for (const node of ["arch-review", "verify"] as const) {
+  test(`AC2/AC3: Arch review / Verify drawer (opened via ${node}) — degradedPhases limited to architect/plan_review, event-derived escalation counts, ${node}'s own caption`, () => {
+    const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: node })));
+    const drawer = extractDrawerHtml(html);
+    assert.match(drawer, /Arch review \/ Verify/);
+    assert.match(drawer, /sess-arch-861/);
+    assert.match(drawer, /sess-verify-861/);
+    assert.doesNotMatch(drawer, /sess-harvest-861/, "harvest's own degraded session belongs to Summary, not here");
+    assertRow(drawer, "plan-review escalations", 3);
+    assertRow(drawer, "no plan after draft", 2);
+    const expectedCaption = node === "arch-review" ? "arch-model-861 · medium" : "verify-model-861 · low";
+    assert.match(drawer, new RegExp(escapeRegExp(expectedCaption)));
+    assert.doesNotMatch(drawer, /Distinguishable created title 861/, "Goal & align's own fields must not leak here");
+  });
+}
+
+const LANES_NODE_CAPTION: Record<string, string | null> = {
+  lane: "worker-model-861 · high",
+  ci: null,
+  review: "engine-agent-861",
+  merge: null,
+};
+for (const [node, caption] of Object.entries(LANES_NODE_CAPTION)) {
+  test(`AC2/AC3: Lanes / CI / Review / merge drawer (opened via ${node}) — the artifact's counters, ${caption ? "its own caption" : "no caption"}`, () => {
+    const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: node })));
+    const drawer = extractDrawerHtml(html);
+    assert.match(drawer, /Lanes \/ CI \/ Review \/ merge/);
+    assertRow(drawer, "dispatches", 3);
+    assertRow(drawer, "merges", 2);
+    assertRow(drawer, "handoffs", 5);
+    assertRow(drawer, "gated reentries", 4);
+    assertRow(drawer, "gated reentries capped", 2);
+    assertRow(drawer, "rollbacks recovered", 3);
+    assertRow(drawer, "rollbacks escalated", 6);
+    assertRow(drawer, "needs-human escalations", 3);
+    assertRow(drawer, "ceiling escalations", 9);
+    assertRow(drawer, "drive-no-pr", 8);
+    if (caption) {
+      assert.match(drawer, new RegExp(escapeRegExp(caption)));
+    } else {
+      assert.doesNotMatch(drawer, /worker-model-861/, "CI/merge carry no caption at all (AC3)");
+      assert.doesNotMatch(drawer, /engine-agent-861/, "CI/merge carry no caption at all (AC3)");
+    }
+    assert.doesNotMatch(drawer, /Distinguishable created title 861/, "other phases' fields must not leak here");
+  });
+}
+
+test("AC2/AC3/AC4: Summary drawer — the artifact's own top-line numbers, harvest's model·effort caption, no other phase's fields", () => {
+  const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: "summary" })));
+  const drawer = extractDrawerHtml(html);
+  assert.match(drawer, /Summary/);
+  assert.match(drawer, /\$37\.25 of \$80\.00/);
+  assertRow(drawer, "PRs opened", 5);
+  assertRow(drawer, "PRs merged", 2);
+  assertRow(drawer, "issues closed", 2);
+  assert.match(drawer, new RegExp(escapeRegExp("harvest-model-861 · low")));
+  assert.doesNotMatch(drawer, /gated reentries/, "Lanes counters must not leak into Summary");
+  assert.doesNotMatch(drawer, /Distinguishable created title 861/, "Goal & align's own fields must not leak into Summary");
+});
+
+test("AC2/AC3/AC4: Retro drawer — the artifact's retro outcome object, a PR link with no comment anchor, retro's model·effort caption", () => {
+  const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: "retro" })));
+  const drawer = extractDrawerHtml(html);
+  assert.match(drawer, /Retro/);
+  assert.match(drawer, new RegExp(`href="${escapeRegExp(INSPECTOR_REPO_URL)}/pull/9099"`));
+  assert.match(drawer, /retro\/branch-861/);
+  assert.match(drawer, new RegExp(escapeRegExp("retro-model-861 · low")));
+  assert.doesNotMatch(drawer, /37\.25/, "Summary's own fields must not leak into Retro");
+});
+
+test("AC4: every GitHub link inside the drawer matches the issue/PR URL form exactly — never a comment anchor", () => {
+  for (const node of ["goal-align", "retro"] as const) {
+    const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: node })));
+    const drawer = extractDrawerHtml(html);
+    const hrefs = [...drawer.matchAll(/href="([^"]+)"/g)].map((m) => m[1] as string);
+    assert.ok(hrefs.length > 0, `expected at least one GitHub link in the ${node} drawer`);
+    for (const href of hrefs) {
+      assert.match(href, new RegExp(`^${escapeRegExp(INSPECTOR_REPO_URL)}/(issues|pull)/\\d+$`), `unexpected link shape: ${href}`);
+    }
+  }
+});
+
+// ── AC5: view log — text only, live-only ────────────────────────────────────────────────────
+
+test("AC5: the view-log row renders logPath as plain text in live view, and is absent entirely for a replayed (closed) round", () => {
+  const liveHtml = renderToStaticMarkup(
+    appContent(inspectorViewModel({ inspectorNode: "summary", mode: "live", logPath: "/var/log/sapwood/run-861-unique.log" })),
+  );
+  assert.match(extractDrawerHtml(liveHtml), /run-861-unique\.log/);
+
+  const replayHtml = renderToStaticMarkup(
+    appContent(inspectorViewModel({ inspectorNode: "summary", mode: "replay", logPath: "/var/log/sapwood/run-861-unique.log" })),
+  );
+  assert.doesNotMatch(extractDrawerHtml(replayHtml), /run-861-unique\.log/, "a replayed/closed round must never show the live log path");
+});
+
+// ── AC6: honest-unknown, never synthesized ──────────────────────────────────────────────────
+
+test("AC6: a null artifact renders every phase's rows as an explicit not-recorded state, never a throw", () => {
+  for (const node of ["goal-align", "arch-review", "lane", "summary", "retro"] as const) {
+    const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: node, inspectorArtifact: null, activeEvents: [] })));
+    const drawer = extractDrawerHtml(html);
+    assert.match(drawer, /not recorded/, `${node} drawer must show an honest not-recorded state`);
+  }
+});
+
+test("AC6: an artifact missing the fields a node reads (empty object) degrades to not-recorded, never a throw, never a fabricated 0", () => {
+  const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: "lane", inspectorArtifact: {} })));
+  const drawer = extractDrawerHtml(html);
+  assertRow(drawer, "dispatches", "not recorded");
+  assertRow(drawer, "merges", "not recorded");
+  assertRow(drawer, "handoffs", "not recorded");
+  assertRow(drawer, "gated reentries", "not recorded");
+  assertRow(drawer, "needs-human escalations", "not recorded");
+});
+
+test("AC6: an artifact whose field is the wrong type degrades to not-recorded, never a throw", () => {
+  const malformed = { dispatches: "nope", merges: 5, retries: "nope", escalations: null, handoffs: "nope" };
+  const html = renderToStaticMarkup(appContent(inspectorViewModel({ inspectorNode: "lane", inspectorArtifact: malformed })));
+  const drawer = extractDrawerHtml(html);
+  assertRow(drawer, "dispatches", "not recorded");
+  assertRow(drawer, "merges", "not recorded");
+  assertRow(drawer, "handoffs", "not recorded");
+  assertRow(drawer, "gated reentries", "not recorded");
+});
+
+// ── AC1: real-DOM click mechanics ────────────────────────────────────────────────────────────
+
+test("AC1: every §6 phase-inspector stage node renders as a keyboard-reachable, accessibly-named button", async () => {
+  const { container, unmount } = await mountSettledApp({
+    "/api/loop/state": { status: 200, body: { ...LOOP_STATE_OK, round: { id: 1, phase: "aligning" }, lanes: { max: 1, items: [] } } },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  try {
+    for (const label of [
+      "inspect Goal & align",
+      "inspect Arch review",
+      "inspect Verify",
+      "inspect w1",
+      "inspect CI",
+      "inspect Review",
+      "inspect merge",
+      "inspect Summary",
+      "inspect Retro",
+    ]) {
+      const el = container.querySelector(`[aria-label="${label}"]`);
+      assert.ok(el, `expected a clickable node labeled "${label}"`);
+      assert.equal(el.getAttribute("role"), "button");
+      assert.equal(el.getAttribute("tabindex"), "0");
+    }
+  } finally {
+    await unmount();
+  }
+});
+
+test("AC1/AC5: clicking a hero stage node opens its phase inspector drawer; the close control and Escape both close it; the node is keyboard-operable; no unexpected fetch happens", async () => {
+  const { container, fetchCalls, unmount } = await mountSettledApp({
+    "/api/loop/state": {
+      status: 200,
+      body: { ...LOOP_STATE_OK, controlsEnabled: true, round: { id: 1, phase: "aligning" }, config: INSPECTOR_CONFIG },
+    },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  try {
+    const node = container.querySelector('[aria-label="inspect Goal & align"]');
+    assert.ok(node, "the goal-align stage node must render with its accessible name");
+
+    await act(async () => {
+      node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    assert.ok(container.querySelector('aside[aria-label="phase inspector"]'), "clicking the node must open the drawer");
+    assert.match(container.querySelector('aside[aria-label="phase inspector"]')?.textContent ?? "", /Goal & align/);
+
+    const closeButton = container.querySelector('[aria-label="close phase inspector"]');
+    assert.ok(closeButton, "the drawer must render a close control");
+    await act(async () => {
+      closeButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    assert.equal(container.querySelector('aside[aria-label="phase inspector"]'), null, "the close control must close the drawer");
+
+    // Keyboard: Enter on the focused node opens it too — proves keyboard operability, not just click.
+    await act(async () => {
+      node.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    assert.ok(container.querySelector('aside[aria-label="phase inspector"]'), "Enter on the node must open the drawer too");
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    assert.equal(container.querySelector('aside[aria-label="phase inspector"]'), null, "Escape must close the drawer");
+
+    assert.ok(
+      fetchCalls.every(
+        (u) => u.startsWith("/api/loop/state") || u.startsWith("/api/events") || u.startsWith("/api/spend") || u.startsWith("/api/rounds"),
+      ),
+      `opening/closing the drawer must never trigger an unexpected (log content) fetch; saw: ${fetchCalls.join(", ")}`,
+    );
+  } finally {
+    await unmount();
+  }
+});
+
+// ── AC7: needs-attention strip inspect controls ─────────────────────────────────────────────
+
+test("AC7: plan-review-escalated/verify-na-proposed/ci-inert-escalated rows each render an independent inspect control (sibling to, never nested with, the row's own GitHub link); an unmapped kind renders none", async () => {
+  const { container, unmount } = await mountSettledApp({
+    "/api/loop/state": { status: 200, body: { ...LOOP_STATE_OK, config: INSPECTOR_CONFIG } },
+    "/api/events": {
+      status: 200,
+      body: {
+        events: [
+          { id: 1, ts: "2026-08-10T09:00:00Z", kind: "plan-review-escalated", payload: { issue: 8001 } },
+          { id: 2, ts: "2026-08-10T09:01:00Z", kind: "verify-na-proposed", payload: { issue: 8002 } },
+          {
+            id: 3,
+            ts: "2026-08-10T09:02:00Z",
+            kind: "ci-inert-escalated",
+            payload: { pr: 8003, issue: 8013, checks: [{ name: "build", conclusion: "neutral" }] },
+          },
+          { id: 4, ts: "2026-08-10T09:03:00Z", kind: "drive-needs-human", payload: { pr: 8005, issue: 8006 } },
+        ],
+        lastId: 4,
+      },
+    },
+  });
+  try {
+    const verifyButtons = container.querySelectorAll('[aria-label="inspect verify"]');
+    assert.equal(
+      verifyButtons.length,
+      2,
+      "both the plan-review-escalated and verify-na-proposed rows must render their own inspect control",
+    );
+
+    const ciButton = container.querySelector('[aria-label="inspect ci"]');
+    assert.ok(ciButton, "the ci-inert-escalated row must render an inspect control");
+    const ciRow = ciButton.closest("li");
+    assert.ok(ciRow);
+    const ciLink = ciRow.querySelector('a[href$="/pull/8003"]');
+    assert.ok(ciLink, "the row's own GitHub link to the PR must still be present");
+    assert.ok(!ciLink.closest(".attention-inspect"), "the link must not be nested inside the inspect control");
+    assert.ok(!ciButton.contains(ciLink), "the inspect control must not contain the link");
+
+    await act(async () => {
+      ciButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    assert.ok(drawer, "clicking the inspect control must open the drawer");
+    assert.match(drawer.textContent ?? "", /Lanes \/ CI \/ Review \/ merge/, "ci-inert-escalated must open the CI/lanes drawer");
+
+    const unmappedLink = container.querySelector('a[href$="/pull/8005"]');
+    assert.ok(unmappedLink, "drive-needs-human's own GitHub link must still render, unchanged");
+    const unmappedRow = unmappedLink.closest("li");
+    assert.ok(unmappedRow);
+    assert.equal(unmappedRow.querySelector(".attention-inspect"), null, "an unmapped kind must render no inspect control at all");
+  } finally {
+    await unmount();
+  }
 });
