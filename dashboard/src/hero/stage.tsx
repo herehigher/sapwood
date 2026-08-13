@@ -122,13 +122,29 @@ const NEEDS_HUMAN_ROW_STEP = 34;
  * caption further down (stage.tsx's REVIEW node caption `y`) — the cheap half on each side.
  * `hero.test.ts`'s own gate-cluster bbox check (covering every rank up to
  * `CHECKPOINT_DRAW_CAP - 1`) is the regression guard for this specific pair.
+ *
+ * #808: that round-5 fix still left a real-font-metric residual (40.8×3.35px live-probe shave),
+ * closed at the Tier A oracle level by `hero.test.ts`'s `captionSafeTextBox`/`CAPTION_SAFE_ASCENT`
+ * (real ascent runs ~15% over the plain model). Root-caused here for the PRODUCTION side: no
+ * *settled* checkpoint rank (0..`CHECKPOINT_DRAW_CAP-1`, this offset) is ever within tens of px of
+ * the Review caption — the actual "ghost droplet" a live probe can catch is a droplet mid-`escalate`
+ * (state.ts `transitionOrigin`: `escalate` always originates at `checkpoint`), whose straight-line
+ * anime.js translate from a checkpoint rank to a `needs-human` rank necessarily crosses the gate
+ * row, and both zones anchor their columns at the same x (`(GATES.ci + GATES.review) / 2` here,
+ * `ESCALATION.x` there). This offset bump (and the caption's matching push below) is a genuine,
+ * if modest, extra margin for the SETTLED positions this file's own bbox tests check — it does
+ * NOT close the escalate-transit crossing itself (a y-margin bump can't fix an x-column
+ * coincidence; there is no detour room either, see `Hero.tsx`'s own note). That crossing is
+ * closed at the animation layer instead: `Hero.tsx`'s `fadeAcross` (the `escalate` case) never
+ * renders the droplet at any point OTHER than its settled checkpoint/needs-human position — no
+ * interpolated frame exists to intersect the caption with.
  */
 const CHECKPOINT_COLS = 2;
 const CHECKPOINT_COL_STEP = 38;
 const CHECKPOINT_ROW_STEP = 34;
 const CHECKPOINT_ROWS_MAX = 3;
 /** Vertical distance from `GATES.y` to checkpoint rank 0 — the grid's closest row to the gates. */
-const CHECKPOINT_BASE_OFFSET = 52;
+const CHECKPOINT_BASE_OFFSET = 60;
 /** No badge needed at or under this many simultaneous checkpoint droplets — the grid draws all
  *  of them normally, exactly as before. */
 const CHECKPOINT_DRAW_CAP = CHECKPOINT_COLS * CHECKPOINT_ROWS_MAX;
@@ -571,9 +587,13 @@ export function HeroStage({
            * #745 gate② round 5 PO pre-merge Tier-C probe (1700px, live DB): a drawn checkpoint
            * chip's label bbox-intersected this caption — pushed further from the gate box
            * (was `GATES.y + 18`) as the cheap half of the fix, paired with the checkpoint
-           * grid's own extra clearance below (`dropletPoint`'s checkpoint case). */}
+           * grid's own extra clearance below (`dropletPoint`'s checkpoint case).
+           * #808: pushed once more (was `GATES.y + 26`) alongside `CHECKPOINT_BASE_OFFSET`'s own
+           * bump — extra settled-position margin only. See that constant's doc for the real root
+           * cause (an `escalate` transition's flight, not any settled rank, is what a live probe
+           * actually catches crossing here) and `Hero.tsx`'s `fadeAcross` for the actual fix. */}
           {typeof reviewMode === "string" && (
-            <text className="hero-node-caption" x={GATES.review} y={GATES.y + 26} textAnchor="middle">
+            <text className="hero-node-caption" x={GATES.review} y={GATES.y + 34} textAnchor="middle">
               {reviewMode}
             </text>
           )}
