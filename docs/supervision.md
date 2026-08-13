@@ -656,6 +656,164 @@ does not replay exact next-tick occupancy). This is pure supervisor-side bookkee
 no new engine machinery backs it, and none should: the per-lane reconciliation the
 engine already does is the authoritative number.
 
+## UX dogfood harness: simulated-user supervision
+
+Everything above watches the **ENGINE** loop — dispatch, gates, budgets. This section is the
+second, parallel channel (#700, owner design 2026-08-06): a **sonnet 5 session simulating a real
+user watches the FRONTEND** (the dashboard, #146/#144/#145) — walking the panel the way a person
+would and reporting what the experience is actually like. It separates "is the panel's code
+correct" (gate②'s job, ordinary review) from "is the panel usable" (nobody's job otherwise), and
+reuses this doc's own separation discipline: the simulated user observes and reports **one-way**;
+it never produces, approves, merges, or files.
+
+### Activation threshold
+
+Capability-gated, not milestone-gated (owner ruling 2026-08-07): the replay phase below activates
+once [`sapwood dashboard`](#146) AND at least one content module ([hero](#144) or
+[lane board](#145)) are merged to `main`, **and** the dev server renders the seeded demo fixture
+end-to-end (panel paints; not a blank shell). No calendar gate, no dedicated hardening milestone —
+the first walk is scheduled by the PM immediately after the second of those two PRs merges,
+PO-supervised. Met as of this writing: `sapwood dashboard` (the launcher), `Hero`, `LaneBoard`,
+and the `?demo` fixture (`dashboard/src/demo/source.ts`, round 5001) all ship on `main`.
+
+### Personas and journey scripts
+
+Two to start; may grow with evidence gathered during replay-phase walks — this list is not a
+ceiling.
+
+**First-time user** — no docs read. Can they tell what the engine is doing and why?
+
+1. Open `sapwood dashboard` against the demo fixture (`?demo`) cold, with no explanation. What do
+   they think the Header word and Hero stage are telling them right now?
+2. Scan the lane board — can they tell, from the panel alone, how many lanes are active and what
+   each one is doing?
+3. Read the activity feed / needs-attention list — do the sentences read as plain English, or do
+   they require glossary knowledge (event kinds, park sources) the panel doesn't supply?
+4. Find the cost strip — can they tell what it's showing and whether it's something to worry
+   about?
+
+**Operator mid-incident** — a lane is wedged. Can they find it, understand it, and reach the right
+control?
+
+1. Given a fixture/replay state with a stalled lane, can they locate it on the lane board without
+   being told which one?
+2. Can they tell *why* it's wedged (reason text) and how urgent it is, from the panel's own
+   language and visual weight?
+3. Can they find the right control (kill switch / pause, via Controls/IconRail) and do they
+   understand the confirm step before anything actually fires?
+4. Using the round navigator / transport scrubber, can they scrub back to the moment before the
+   stall and see what led to it?
+
+### Two operating phases
+
+- **Replay phase.** v0.2 batches: after each merged dashboard increment, walk both journey scripts
+  above against the demo fixture / replay data (`?demo`, or a recorded round played back through
+  the transport scrubber). Bounded, single-journey-set sessions.
+- **Live phase.** Once the panel attaches to a real engine run: continuous observation during the
+  flagship recorded dogfood run ([`docs/PLAN.md`](PLAN.md)'s dashboard dogfood), operator persona
+  first. Runs only during an owner-authorized dogfood run, never ad hoc.
+
+### Report contract
+
+One ledger per supervised session, one-way to the PM supervisor. Per finding:
+
+| Field | Meaning |
+|---|---|
+| `persona` | `first-time-user` or `operator-mid-incident` (or a later-added persona) |
+| `journeyStep` | which numbered step above the finding occurred on |
+| `expectation` | what the persona expected to see/happen |
+| `observed` | what the panel actually showed |
+| `severity` | one of `blocks-comprehension`, `friction`, `polish` |
+| `suggestion` | phrased as user experience ("the wedge reason isn't visible without a click"), **never** as an implementation directive ("change `NeedsAttention.tsx` to...") |
+
+A session that finds nothing records an explicit clean pass — "no findings" is a valid, complete
+ledger, not an omission.
+
+Ledgers are archived at `data/review/ux/` (one file per session), each pinned with the dashboard
+commit SHA and the fixture/replay id (e.g. the demo fixture's round id, or a recorded round's own
+id) the walk was run against — so a finding is reproducible against the exact panel state it
+describes, not a moving target.
+
+That path lives inside the engine's runtime `data/` directory, gitignored repo-wide by design — the
+ledger is an operator-side artifact, never a tracked file a PR tree could contain. A reviewer
+cannot confirm a walk by inspecting the tree; the reviewable evidence for any given session is the
+operator's witness record posted on the relevant PR/issue (actor, steps, timestamp, findings
+summary, artifact path), per the tier-C human-witnessed-probe doctrine below.
+
+**Evidence class.** Per [`docs/security.md`](security.md)'s evidence tiers, the simulated user's
+report is producer-side session output — **trust-origin evidence class C at best** (a
+human/PO-witnessed probe, never self-attested). It informs PM triage; it never auto-satisfies any
+acceptance criterion on its own.
+
+### Discipline boundaries and tool surface
+
+The session is read/browse/screenshot only. This is a supervisor-launched session, not an
+engine-dispatched one, so there is no `commands/*.md`/`engine/prompts/` loader to hang enforcement
+off of — the boundary has to be real at the CLI invocation itself, or it is nothing.
+`docs/security.md`'s own doctrine is explicit that `--allowedTools`/`--disallowedTools` alone is
+**noise reduction, not a seal**: an ambient host MCP server from settings sources stays loadable
+and callable "regardless of `--allowedTools`" unless the MCP surface itself is closed. The only
+sealing floor this repo documents (and the one `engine/src/roles/worker.ts`'s `strictMcpConfig`/
+`settingSources` options and every credential-free/gate②-review leg already use in production) is
+`--strict-mcp-config` plus an explicit `--mcp-config` and `--setting-sources ""`. The launch
+recipe below is that same mechanism, not new machinery:
+
+```bash
+# Zero ambient MCP servers except the one browser-automation server this session needs, named
+# explicitly — the same shape as worker.ts's EMPTY_MCP_CONFIG_JSON, with one server added back in,
+# itself launched origin-restricted to wherever `sapwood dashboard` actually serves (default port
+# 4517, engine/src/state/read-model.ts's DEFAULT_DASHBOARD_PORT — adjust if launched with --port)
+# and `--isolated` so the browser gets a fresh, ephemeral profile with no saved cookies/auth state
+# to inherit from the operator's own logged-in browser.
+DASHBOARD_ORIGIN="http://localhost:4517"
+MCP_CONFIG='{"mcpServers":{"browser":{"command":"npx","args":["@playwright/mcp@latest","--isolated","--allowed-origins","'"$DASHBOARD_ORIGIN"'","--blocked-origins","https://github.com;https://api.github.com;https://*.github.com"]}}}'
+
+claude \
+  --strict-mcp-config --mcp-config "$MCP_CONFIG" \
+  --setting-sources "" \
+  --allowedTools "Read,Edit(data/review/ux/**),mcp__browser__*" \
+  --disallowedTools "Bash,mcp__forge__*,mcp__github__*" \
+  --append-system-prompt "$(cat docs/prompts/ux-simulated-user.md)"
+```
+
+- `--strict-mcp-config` + the explicit `--mcp-config` above discards every MCP server from every
+  OTHER source (project `.mcp.json`, user/project/local settings, any ambient host config) — only
+  the one named `browser` server loads, regardless of what else is configured on the launching
+  host. This is the actual perimeter; the tool names in `--allowedTools` below are what's usable
+  WITHIN that already-closed surface, not what closes it.
+- `--setting-sources ""` loads zero file-based settings sources, closing the `user`-scope ambient
+  inheritance gap the same doctrine names.
+- **The browser server itself is the widest tool in this grant** — navigation, click, and form
+  actions are a channel to anywhere a browser can reach, not just the dashboard, so closing the
+  MCP surface down to "one server" is not by itself enough. Two of `@playwright/mcp`'s own launch
+  flags narrow that channel: `--allowed-origins "$DASHBOARD_ORIGIN"` rejects navigation to
+  anything but the dashboard's own origin (so a page can't be driven to `github.com` even if
+  asked), and `--blocked-origins` names GitHub's own hosts as a second, belt-and-suspenders deny
+  in case the allow-list is ever loosened for a future journey that needs a second origin.
+  `--isolated` additionally guarantees the browser context is fresh and ephemeral every launch —
+  no persisted cookies, no saved login, nothing an accidental cross-origin navigation could ride
+  on even if the origin lists were misconfigured. State the residual honestly: this is the
+  MCP server's own origin-enforcement behaving as documented, not sapwood's PreToolUse guard hook
+  — a bug in that enforcement is a channel this doesn't defend against. It is a real, configured
+  control, though, not merely an unenforced instruction.
+- `--allowedTools "Read,Edit(data/review/ux/**),mcp__browser__*"` grants exactly: reading any
+  file (to consult its own report contract), writing only under `data/review/ux/` (to file its
+  ledger, nothing else), and the browser-automation tools to walk the journeys.
+- `--disallowedTools "Bash,mcp__forge__*,mcp__github__*"` is a third, belt-and-suspenders veto —
+  in case a future edit to `$MCP_CONFIG` ever names a forge-authority or exec-capable server, this
+  still blocks it by name, the same defense-in-depth stance `worker.ts`'s own denylist takes.
+- No `gh`, no `Bash`, no forge-authority MCP tool name, and the one browser tool it does have is
+  both origin-restricted to the dashboard and running with no authenticated state to inherit — the
+  session has no path to GitHub or a project board left that isn't already closed by one of the
+  controls above.
+
+### Findings routing
+
+**Findings-routing statement.** Findings route exclusively through PM triage → owner why/what
+gate; no direct issue creation by the simulated-user session. It never creates, files, or comments
+on a GitHub issue itself — anything a finding suggests should become an issue passes through PM
+triage and the owner why/what gate as agent-origin, the same as any other proposed work.
+
 ## See also
 
 - [`docs/security.md`](security.md) — the trust/governance model: the guard hook,
@@ -671,3 +829,5 @@ engine already does is the authoritative number.
 - `sapwood-event-glossary` skill
   (`.claude-plugin/skills/sapwood-event-glossary/SKILL.md`) — what every event
   kind/park source/escalation bucket means and how actionable it is.
+- [`docs/prompts/ux-simulated-user.md`](prompts/ux-simulated-user.md) — the session prompt for
+  the [UX dogfood harness](#ux-dogfood-harness-simulated-user-supervision) above.
