@@ -730,16 +730,46 @@ acceptance criterion on its own.
 
 ### Discipline boundaries and tool surface
 
-The session is read/browse/screenshot only, enforced structurally by its tool allowlist (see
-[`docs/prompts/ux-simulated-user.md`](prompts/ux-simulated-user.md)'s frontmatter — the same
-`allowed-tools` mechanism `commands/*.md` already uses, a host-enforced allowlist, not a prompt
-request the session could talk itself out of):
+The session is read/browse/screenshot only. This is a supervisor-launched session, not an
+engine-dispatched one, so there is no `commands/*.md`/`engine/prompts/` loader to hang enforcement
+off of — the boundary has to be real at the CLI invocation itself, or it is nothing.
+`docs/security.md`'s own doctrine is explicit that `--allowedTools`/`--disallowedTools` alone is
+**noise reduction, not a seal**: an ambient host MCP server from settings sources stays loadable
+and callable "regardless of `--allowedTools`" unless the MCP surface itself is closed. The only
+sealing floor this repo documents (and the one `engine/src/roles/worker.ts`'s `strictMcpConfig`/
+`settingSources` options and every credential-free/gate②-review leg already use in production) is
+`--strict-mcp-config` plus an explicit `--mcp-config` and `--setting-sources ""`. The launch
+recipe below is that same mechanism, not new machinery:
 
-- Browser navigation, snapshot, click/type, and screenshot tools — to walk the journeys.
-- `Read` — to consult its own report contract/schema.
-- `Write`, scoped to `data/review/ux/` only — to file its own ledger, nothing else.
-- No `Bash`, no `gh`, no forge-write MCP tools, no board access. The session cannot file an
-  issue, comment, label, or touch any file outside its own report path even if it wanted to.
+```bash
+# Zero ambient MCP servers except the one browser-automation server this session needs, named
+# explicitly — the same shape as worker.ts's EMPTY_MCP_CONFIG_JSON, with one server added back in.
+MCP_CONFIG='{"mcpServers":{"browser":{"command":"npx","args":["@playwright/mcp@latest"]}}}'
+
+claude \
+  --strict-mcp-config --mcp-config "$MCP_CONFIG" \
+  --setting-sources "" \
+  --allowedTools "Read,Write(data/review/ux/**),mcp__browser__*" \
+  --disallowedTools "Bash,mcp__forge__*,mcp__github__*" \
+  --append-system-prompt "$(cat docs/prompts/ux-simulated-user.md)"
+```
+
+- `--strict-mcp-config` + the explicit `--mcp-config` above discards every MCP server from every
+  OTHER source (project `.mcp.json`, user/project/local settings, any ambient host config) — only
+  the one named `browser` server loads, regardless of what else is configured on the launching
+  host. This is the actual perimeter; the tool names in `--allowedTools` below are what's usable
+  WITHIN that already-closed surface, not what closes it.
+- `--setting-sources ""` loads zero file-based settings sources, closing the `user`-scope ambient
+  inheritance gap the same doctrine names.
+- `--allowedTools "Read,Write(data/review/ux/**),mcp__browser__*"` grants exactly: reading any
+  file (to consult its own report contract), writing only under `data/review/ux/` (to file its
+  ledger, nothing else), and the browser-automation tools to walk the journeys.
+- `--disallowedTools "Bash,mcp__forge__*,mcp__github__*"` is a second, belt-and-suspenders veto —
+  in case a future edit to `$MCP_CONFIG` ever names a forge-authority or exec-capable server, this
+  still blocks it by name, the same defense-in-depth stance `worker.ts`'s own denylist takes.
+- No `gh`, no board access, no issue filing: with the MCP surface closed to one read-only browser
+  server and `Bash` denied, there is no channel left for the session to reach the forge through,
+  structurally — not because it was asked not to.
 
 ### Findings routing
 
