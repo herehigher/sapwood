@@ -46,8 +46,8 @@ Hard target for every `ready` child:
 - Its acceptance criteria are verifiable inside that PR's own CI plus gate②. Give it a real
   acceptance-criteria section with literal checkbox items and a distinct verification-plan
   section. Write those headings in the parent's language (see "Working language" above), then put the exact
-  own-line `<!-- sapwood:ac -->` and `<!-- sapwood:verification -->` anchors immediately below
-  their respective headings. Never write CI/suite/typecheck status itself as a criterion
+  own-line `<!-- sapwood:ac -->` and `<!-- sapwood:verification -->` anchors as the first non-blank
+  line after their respective headings. Never write CI/suite/typecheck status itself as a criterion
   ("the test suite passes", "CI green") — CI enforces those unconditionally; execution steps
   belong in the child's verification-plan section.
 

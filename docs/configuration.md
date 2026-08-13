@@ -461,8 +461,8 @@ shipped `.github/ISSUE_TEMPLATE/*.md` already do). Setting `language.codeComment
 `language.docs` carries no such dependency — sapwood never parses code comments or doc prose as
 protocol.
 
-**Issue-body headings may use any language.** Put an exact own-line marker immediately after
-each semantic section heading:
+**Issue-body headings may use any language.** Put an exact own-line marker as the first non-blank
+line after each semantic section heading:
 
 ```md
 ## 受け入れ条件
