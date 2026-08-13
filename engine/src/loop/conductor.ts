@@ -1351,11 +1351,12 @@ export interface ReclaimResult {
  *  to settle, or the resolved path failed root-containment — see worker.ts's own doc). `reason`
  *  is present only for `"failed"`, a short diagnostic for the caller's own log/event.
  *
- *  `tombstonePath` (gate② round 2, G2): present WHENEVER a `"failed"` verdict's data actually
- *  survives at a rename-tombstone path rather than `worktreePath` (every `"failed"` verdict this
- *  chain can reach happens strictly after a successful rename — see worker.ts's
- *  settleWorktreeDirectory doc). A caller reporting a failure MUST surface this path, never the
- *  now-stale `worktreePath`, when it's present. */
+ *  `tombstonePath` (gate② round 2, G2; wording corrected round 3, W1): present on EVERY
+ *  `"failed"` verdict this chain can reach (all happen strictly after a successful rename — see
+ *  worker.ts's settleWorktreeDirectory doc) — the path where any SURVIVING residue would be
+ *  found, not a guarantee everything survives (a recursive removal can delete several entries
+ *  before failing on a later one). A caller reporting a failure MUST surface this path, never
+ *  the now-stale `worktreePath`, when it's present. */
 export interface WorktreeSettleOutcome {
   worktreePath: string | null;
   verdict: "absent" | "retained" | "settled" | "failed";
@@ -2071,9 +2072,10 @@ async function settleMergedLane(
           // An attempted deletion did not complete cleanly (TOCTOU re-verify, or the removal
           // itself failed) — never prune a registration for a directory that isn't PROVEN gone,
           // and never claim "settled". Event-only, same no-escalation stance as "retained".
-          // #834 (gate② round 2, G2): `tombstonePath`, when present, means the data actually
-          // survives THERE, not at `worktreePath` (which the rename already vacated) — carried
-          // into the event so a human salvaging this doesn't go looking in the wrong place.
+          // #834 (gate② round 2, G2; wording corrected round 3, W1): `tombstonePath`, when
+          // present, is where any SURVIVING residue would be, not at `worktreePath` (which the
+          // rename already vacated) — carried into the event so a human salvaging this doesn't
+          // go looking in the wrong place. Deletion was incomplete, never assume full recovery.
           state.appendEvent("merged-lane-worktree-settle-failed", {
             worker: w.name,
             issue: w.issue,

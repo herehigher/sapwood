@@ -2187,16 +2187,24 @@ export function worktreeMaybeDirty(worktreePath: string, sinceMs: number): boole
  *  trick worker.test.ts's own dedicated test for this function uses. Production code only ever
  *  reaches it through settleWorktreeDirectory, immediately after its own rename.
  *
- *  THREAT MODEL (gate② round 2, G4 — the PO's own adjudication): this function, like the
- *  worktreeMaybeDirty family it composes with, assumes a TIMESTAMP-HONEST writer — it fences
- *  ACCIDENTS (a lane that happened to still be writing), never ADVERSARIES. A writer that
- *  deliberately unlinks an entry and then forges the parent directory's mtime backward via
- *  `utimes` (to make the removal look like it never happened) evades this check — but that same
- *  forgery defeats EVERY mtime/ctime-based check in this file equally, including the
- *  dispatch-baselined worktreeMaybeDirty calls this PR never touched; it indicts the whole
- *  scanner family's long-standing assumption, not this function's own delta, and is out of scope
- *  for the same reason the rest of this file's mtime/ctime discipline has always been: this
- *  machinery has never claimed to jail an adversary with write access to the tree it's judging. */
+ *  THREAT MODEL (gate② round 2, G4 — the PO's own adjudication; wording corrected round 3, W3):
+ *  this function, like the worktreeMaybeDirty family it composes with, assumes a
+ *  TIMESTAMP-HONEST writer — it fences ACCIDENTS (a lane that happened to still be writing),
+ *  never ADVERSARIES. A writer that deliberately unlinks a TOP-LEVEL entry and then forges the
+ *  tombstone root's OWN mtime backward via `utimes` (to make the removal look like it never
+ *  happened) evades THIS function specifically — but NOT the family equally: `worktreeMaybeDirty`
+ *  itself, run against the SAME shape, still catches it, because it checks the top-level
+ *  directory's CTIME too, and ctime cannot be backdated (the very entry-removal that forged the
+ *  mtime necessarily bumps it fresh). `tombstoneMaybeDirty` alone misses it, precisely BECAUSE it
+ *  deliberately excludes the tombstone root's ctime (the top-level-ctime-exclusion this whole
+ *  function exists for, per its own doc above) — worker.test.ts's own top-level-exclusion test
+ *  demonstrates the exact mechanism this blind spot rides on. So this is an ACCEPTED, NARROW
+ *  blind spot specific to this one function's tombstone-root check, opened by the very
+ *  rename-ctime exclusion that makes it work at all — not a claim that every mtime/ctime check in
+ *  this file is equally exposed. It is still out of scope, under the SAME accident-fence-not-
+ *  adversary-jail threat model the rest of this file's mtime/ctime discipline has always had:
+ *  this machinery has never claimed to jail an adversary with write access to the tree it's
+ *  judging, and closing this one function's narrow gap would not change that posture. */
 export function tombstoneMaybeDirty(tombstonePath: string, sinceMs: number): boolean {
   if (!Number.isFinite(sinceMs)) return true;
   let topStat: ReturnType<typeof lstatSync>;
@@ -2243,14 +2251,19 @@ export interface WorktreeDirectorySettleOutcome {
   verdict: WorktreeDirectorySettleVerdict;
   /** Present only for `"failed"`. */
   reason?: string;
-  /** #834 (gate② round 2, G2): present WHENEVER this outcome's data survives at a TOMBSTONE
-   *  path rather than the original — i.e. every `"failed"` verdict this function can reach
-   *  (both happen strictly AFTER the first rename already succeeded: a re-verified-dirty
-   *  tombstone whose rename-back itself failed, or a post-rename removal that didn't complete).
+  /** #834 (gate② round 2, G2; wording corrected round 3, W1): present on EVERY `"failed"`
+   *  verdict this function can reach (all three happen strictly AFTER the first rename already
+   *  succeeded: a re-verified-dirty tombstone whose rename-back itself failed, a post-rename
+   *  `rm` that threw, or one that reported success while the tombstone was still present). This
+   *  is where any SURVIVING residue would be found — NOT a claim that everything survives: a
+   *  recursive removal can delete several entries before failing on a later one, so a `"failed"`
+   *  verdict from the two post-rm branches may find only PARTIAL residue at this path (the
+   *  rename-back-failure branch is the one exception where nothing was ever deleted, since `rm`
+   *  is never reached on that path — see settleWorktreeDirectory's own per-branch comments).
    *  Absent on `"retained"` (data is always still at the ORIGINAL path there — either genuinely
    *  dirty and never touched, or the very first rename failed outright) and on `"settled"`
-   *  (nothing survives anywhere). Callers must surface this path, never the stale original one,
-   *  when reporting a `"failed"` verdict — see settleMergedLane's own doc. */
+   *  (deletion is PROVEN complete). Callers must surface this path, never the stale original
+   *  one, when reporting a `"failed"` verdict — see settleMergedLane's own doc. */
   tombstonePath?: string;
 }
 
@@ -2271,8 +2284,11 @@ export interface WorktreeDirectorySettleOutcome {
  *  baseline via tombstoneMaybeDirty (see its own doc for why a plain worktreeMaybeDirty call
  *  would false-positive here), and only THEN rmSync the tombstone. A re-verified-dirty tombstone
  *  is renamed BACK to its original path when possible (nothing about the lane's on-disk state
- *  changes from a failed attempt) — if even the rename-back fails, the tombstone (data intact,
- *  never at the original path) is left in place and reported as `"failed"`, never silently lost.
+ *  changes from a failed attempt) — if even the rename-back fails, the tombstone is left in
+ *  place (never at the original path) and reported as `"failed"`, never silently lost. (Round 3,
+ *  W1: "left in place" here is exact — no `rm` has run yet on this branch, so nothing has been
+ *  deleted. The OTHER two `"failed"` branches, below, run AFTER `rm` — deletion there may be only
+ *  PARTIALLY complete, never assume full preservation from the verdict alone.)
  *
  *  F1 (deletion-safety): `"settled"` is returned ONLY after `existsSync(tombstonePath)` confirms
  *  the tombstone is actually gone post-`rmSync` — an rmSync that throws, or one that reports
@@ -2303,10 +2319,13 @@ export interface WorktreeDirectorySettleOutcome {
  *  it is out of proportion for the classes this function actually gates — Phase 1 only ever
  *  calls this AFTER the lane's own process has exited at MERGED close-out (no live writer to
  *  race), and Phase 2 only ever calls this for a dead-pid or 24h-git-quiescent registration (no
- *  plausible fd-holder either). The rename is still worth doing: it shrinks the exposed window
- *  from "the whole scan-plus-delete duration, at a path anyone can still find" down to
- *  "microseconds, at a path nothing else has any reason to know" — a real, if not total,
- *  reduction. */
+ *  plausible fd-holder either). The rename is still worth doing — a real, if not total,
+ *  reduction: it shrinks the exposed window from "the whole scan-plus-delete duration, at a
+ *  path anyone can still find" down to the re-verify-plus-recursive-removal interval, at a
+ *  path nothing else has any reason to know about. (Round 3, W2: no numeric bound is claimed —
+ *  that interval scales with the tree's size and the filesystem's speed, and the paragraph
+ *  above already admits a writer can land a change DURING `fsOps.rm`'s own walk; "microseconds"
+ *  was false on a large tree or a slow filesystem.) */
 /** #834 (gate② round 1, F1): the two raw fs primitives settleWorktreeDirectory needs, as an
  *  injectable seam — real defaults (`renameSync`/`rmSync`) for production, a fake for tests that
  *  need to exercise the "removal didn't actually complete" path DETERMINISTICALLY (a real
@@ -4417,8 +4436,10 @@ export class WorkerSupervisor implements Supervisor {
     if (!existsSync(worktreePath)) return { worktreePath: null, verdict: "absent" };
     const indexMs = resolveWorktreeIndexBaselineMs(worktreePath);
     const outcome = settleWorktreeDirectory(worktreePath, this.worktreeRoot, indexMs);
-    // #834 (gate② round 2, G2): tombstonePath threads through unmodified — present exactly when
-    // outcome.verdict is "failed" and data survives at that path rather than `worktreePath`.
+    // #834 (gate② round 2, G2; wording corrected round 3, W1): tombstonePath threads through
+    // unmodified — present exactly when outcome.verdict is "failed"; deletion did not complete
+    // and any SURVIVING residue (possibly only partial — see WorktreeDirectorySettleOutcome's
+    // own doc) is at that path rather than `worktreePath`.
     return {
       worktreePath,
       verdict: outcome.verdict,

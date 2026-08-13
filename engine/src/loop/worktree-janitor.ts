@@ -370,9 +370,10 @@ export interface PresentDirectorySweepResult {
   skipped: number;
   /** An attempted-but-incomplete deletion (settleDirectory's own `"failed"` verdict) or a whole-
    *  sweep prune failure (F6, under PRUNE_FAILURE_SENTINEL_PATH). `tombstonePath` (#834 gate②
-   *  round 2, G2) is present exactly when the data survives THERE rather than at `path` — see
-   *  WorktreeDirectorySettleOutcome's own doc for why every reachable "failed" verdict carries
-   *  one. */
+   *  round 2, G2; wording corrected round 3, W1) is present on every reachable `"failed"`
+   *  verdict — the path where any SURVIVING residue would be, never a guarantee everything
+   *  survives (a recursive removal can delete several entries before failing on a later one) —
+   *  see WorktreeDirectorySettleOutcome's own doc. */
   failed: Array<{ path: string; error: string; tombstonePath?: string }>;
   /** #834 (gate② round 1, F5): where the NEXT cycle's window should start, so a permanently-
    *  dirty/unmerged HEAD candidate can never starve everything behind it across repeated calls
@@ -496,8 +497,9 @@ export async function sweepPresentDirectoryWorktreesOnce(
       continue;
     }
     if (settled.verdict === "failed") {
-      // #834 (gate② round 2, G2): tombstonePath, when present, is where this candidate's data
-      // ACTUALLY survives — see WorktreeDirectorySettleOutcome's own doc.
+      // #834 (gate② round 2, G2; wording corrected round 3, W1): tombstonePath, when present, is
+      // where any SURVIVING residue would be — deletion may be only partially complete, never
+      // assume full recovery — see WorktreeDirectorySettleOutcome's own doc.
       failed.push({
         path: c.path,
         error: settled.reason ?? "settle failed",
@@ -618,9 +620,10 @@ export async function sweepPresentDirectoryWorktreesAndReport(
  *  cycles, passed as `sweepPresentDirectoryWorktreesOnce`'s `alreadyExamined` — each cycle
  *  examines the first `batchSize` candidates NOT already in `seen` (see that function's own doc),
  *  which is correct regardless of how the underlying list reshuffles or shrinks between calls.
- *  Terminates the instant a cycle's `examinedPaths` comes back empty (no unseen candidates left);
- *  every cycle's counts are accumulated (never just the last one), since each cycle's window is
- *  disjoint from every earlier one in the same run.
+ *  Terminates the instant a cycle's `examinedPaths` comes back empty (no unseen candidates left).
+ *  `reaped`/`retained`/`failed` accumulate across every cycle, since each cycle's window is
+ *  disjoint from every earlier one in the same run — but `skipped` does NOT (gate② round 3, W4):
+ *  see this function's own body for why summing it would inflate the total.
  *
  *  This is the SAME code path scripts/worktree-janitor.ts (the operator one-shot script) now runs
  *  alongside the existing missing-directory pass. */
@@ -632,7 +635,7 @@ export async function runPresentDirectoryWorktreeSweepToCompletion(
   const totalReaped: string[] = [];
   const totalRetained: string[] = [];
   const totalFailed: Array<{ path: string; error: string; tombstonePath?: string }> = [];
-  let totalSkipped = 0;
+  let finalSkipped = 0;
   const seen = new Set<string>();
   let cycle = 0;
   for (;;) {
@@ -640,14 +643,26 @@ export async function runPresentDirectoryWorktreeSweepToCompletion(
     const result = await sweepPresentDirectoryWorktreesOnce(deps, batchSize, 0, seen);
     totalReaped.push(...result.reaped);
     totalRetained.push(...result.retained);
-    totalSkipped += result.skipped;
     totalFailed.push(...result.failed);
     log(
       `[sapwood:worktree-janitor] present-dir cycle ${cycle}: reaped ${result.reaped.length}, retained ${result.retained.length}, ` +
         `skipped ${result.skipped}, failed ${result.failed.length}`,
     );
-    if (result.examinedPaths.length === 0) break; // #834 G1: no unseen candidates left -> done
+    if (result.examinedPaths.length === 0) {
+      // #834 (gate② round 3, W4 — the PO's own finding): the TERMINATING (final, empty-window)
+      // cycle's own `skipped` is the run's honest total, NEVER a sum across cycles. Every
+      // earlier cycle re-scans the FULL current registration list from scratch (classification
+      // is cheap, no subprocess calls), so summing `result.skipped` across cycles re-counts the
+      // SAME permanently-classification-skipped candidates (under-age, no-branch/detached) once
+      // per cycle, plus any not-yet-examined window overflow — inflating the returned total far
+      // beyond the real number. By construction this final call's `total` (its own internal
+      // candidate count) is 0 — the loop only reaches here once nothing remains unexamined — so
+      // its `skipped` is exactly the count of permanently-skipped candidates as of THIS scan,
+      // each counted exactly once, with zero window-overflow component.
+      finalSkipped = result.skipped;
+      break;
+    }
     for (const p of result.examinedPaths) seen.add(p);
   }
-  return { reaped: totalReaped, retained: totalRetained, skipped: totalSkipped, failed: totalFailed, nextOffset: 0, examinedPaths: [] };
+  return { reaped: totalReaped, retained: totalRetained, skipped: finalSkipped, failed: totalFailed, nextOffset: 0, examinedPaths: [] };
 }

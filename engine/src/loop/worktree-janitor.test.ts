@@ -640,6 +640,33 @@ test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 2, G1 — the 
   assert.deepEqual(new Set(deps.removedCalls), new Set(registrations.map((r) => r.path)));
 });
 
+test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 3, W4 — the PO's own finding): the returned `skipped` is the TERMINATING cycle's count, never the sum across cycles — a run spanning multiple cycles must not inflate the permanently-skipped total", async () => {
+  // 3 reapable (LOCKED dead-pid, purity-clean) candidates, batchSize=2 -> forces 3 cycles
+  // (reap 2, reap 1, terminate) via the identity cursor. 2 PERMANENTLY-skipped (detached, no
+  // branch line) registrations sit alongside them — classification re-counts these on EVERY
+  // cycle's full re-scan (they never enter `candidates`, so they're never added to `seen`), which
+  // is exactly the inflation source: summing would report 3 cycles * 2 = 6 (or more, once
+  // window-overflow is folded in too), never the true count of 2.
+  const reapable: WorktreeRegistration[] = Array.from({ length: 3 }, (_, i) => ({
+    path: `/repo/.claude/worktrees/reapable-${i}`,
+    lockReason: `claude session reapable-${i} (pid ${i} start now)`,
+  }));
+  const permanentlySkipped: WorktreeRegistration[] = Array.from({ length: 2 }, (_, i) => ({
+    path: `/repo/.claude/worktrees/detached-${i}`,
+    lockReason: null, // unlocked + present + no `branch` -> classification-skipped, every scan
+  }));
+  const deps = fakeShrinkingPresentDeps([...reapable, ...permanentlySkipped]);
+  const logs: string[] = [];
+  const result = await runPresentDirectoryWorktreeSweepToCompletion(deps, (m) => logs.push(m), 2);
+  assert.equal(result.reaped.length, 3, "all 3 reapable candidates still reached, across multiple cycles");
+  assert.equal(
+    result.skipped,
+    2,
+    "exactly the 2 permanently-skipped candidates — NOT inflated by however many cycles it took to drain the reapable set",
+  );
+  assert.ok(logs.length >= 3, "this run genuinely spanned multiple cycles (the scenario the inflation bug needed)");
+});
+
 test("runPresentDirectoryWorktreeSweepToCompletion: an empty candidate list terminates after one no-op cycle", async () => {
   const deps = fakePresentDeps({ registrations: [] });
   const result = await runPresentDirectoryWorktreeSweepToCompletion(deps);
