@@ -201,8 +201,25 @@ function play(
       }
 
       // Onto the rust escalation branch. Still, not loud.
+      //
+      // #808 gate② finding [0]: `travelOn` draws a STRAIGHT LINE from the checkpoint rank to
+      // the needs-human rank. Both zones anchor their columns at the same x
+      // (`(GATES.ci + GATES.review) / 2` in stage.tsx, `ESCALATION.x` here) directly under the
+      // Review gate's mode caption, and the two zones straddle the gate row vertically — ANY
+      // straight line between them crosses the gate row, and there is no slack left to route
+      // around it: left is the LANES zone's own right-edge content (channel line + PR-chip
+      // "hero-mark" run right up to `LANES.x + LANES.w + 12`), right is boxed in by the Review
+      // gate rect and the trunk rings' leftmost reach (`TRUNK.x - TRUNK.max * TRUNK.step`) with
+      // only ~20px between them — too narrow a corridor to route a detour waypoint through
+      // safely at every checkpoint-rank × needs-human-rank pairing. `fadeAcross` sidesteps the
+      // crossing itself instead of threading it: the droplet fades out AT its settled
+      // checkpoint point, jumps instantly (fully transparent, so invisible) straight to its
+      // settled needs-human point, then fades back in — it is NEVER rendered at any
+      // interpolated point in between, so it cannot bbox-intersect anything that only lives
+      // between the two zones (the caption included). Both endpoints are themselves already
+      // proven collision-free by `hero.test.ts`'s settled-position oracles (#745/#808 AC1).
       case "escalate": {
-        travelOn(tl, root, transition.issue, from, to, TRAVEL, offset);
+        fadeAcross(tl, root, transition.issue, from, to, TRAVEL, offset);
         const branch = root.querySelector<SVGPathElement>(".hero-branch");
         if (branch) tl.add(branch, { opacity: [0.4, 1], duration: BEAT }, offset + TRAVEL - BEAT);
         break;
@@ -307,6 +324,28 @@ function travelOn(
   if (!el) return;
   utils.set(el, { translateX: from.x, translateY: from.y });
   tl.add(el, { translateX: [from.x, to.x], translateY: [from.y, to.y], duration }, offset);
+}
+
+/** See the `escalate` case's own doc for why this exists instead of `travelOn`: it renders the
+ *  droplet at exactly TWO positions — `from` and `to`, snapped via `utils.set`, never tweened —
+ *  with an opacity fade bridging the gap so the jump itself isn't a visible pop. */
+function fadeAcross(
+  tl: Timeline,
+  root: SVGSVGElement,
+  issue: number,
+  from: Point | null,
+  to: Point | null,
+  duration: number,
+  offset: number,
+): void {
+  if (!from || !to) return;
+  const el = droplet(root, issue);
+  if (!el) return;
+  const half = duration / 2;
+  utils.set(el, { translateX: from.x, translateY: from.y, opacity: 1 });
+  tl.add(el, { opacity: [1, 0], duration: half }, offset);
+  tl.call(() => utils.set(el, { translateX: to.x, translateY: to.y }), offset + half);
+  tl.add(el, { opacity: [0, 1], duration: half }, offset + half);
 }
 
 function lightLane(tl: Timeline, root: SVGSVGElement, laneChannel: number | null, offset: number): void {

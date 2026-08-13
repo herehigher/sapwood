@@ -131,15 +131,13 @@ const NEEDS_HUMAN_ROW_STEP = 34;
  * (state.ts `transitionOrigin`: `escalate` always originates at `checkpoint`), whose straight-line
  * anime.js translate from a checkpoint rank to a `needs-human` rank necessarily crosses the gate
  * row, and both zones anchor their columns at the same x (`(GATES.ci + GATES.review) / 2` here,
- * `ESCALATION.x` there) — a same-column pairing puts the flight dead-center through the caption
- * for its full crossing. This offset bump (and the caption's matching push below) doesn't erase
- * that crossing (it's an x-column coincidence, not a y-margin one) — it widens the checkpoint↔gate
- * distance so the same 900ms `TRAVEL` duration crosses the caption's ~9px-tall band faster, cutting
- * worst-case dwell/overlap. A deterministic fix (decouple the two zones' x columns, or give
- * `escalate` a detour waypoint) needs a wider blast-radius check — `ESCALATION.x`'s own leftward
- * room is bounded by the LANES zone's right edge (`LANES.x + LANES.w` = 702, `hero-mark`/PR-chip
- * content lives right there) — deferred as follow-up scope for a prio:3 cosmetic pin, not
- * force-fit into this round.
+ * `ESCALATION.x` there). This offset bump (and the caption's matching push below) is a genuine,
+ * if modest, extra margin for the SETTLED positions this file's own bbox tests check — it does
+ * NOT close the escalate-transit crossing itself (a y-margin bump can't fix an x-column
+ * coincidence; there is no detour room either, see `Hero.tsx`'s own note). That crossing is
+ * closed at the animation layer instead: `Hero.tsx`'s `fadeAcross` (the `escalate` case) never
+ * renders the droplet at any point OTHER than its settled checkpoint/needs-human position — no
+ * interpolated frame exists to intersect the caption with.
  */
 const CHECKPOINT_COLS = 2;
 const CHECKPOINT_COL_STEP = 38;
@@ -572,8 +570,9 @@ export function HeroStage({
            * (was `GATES.y + 18`) as the cheap half of the fix, paired with the checkpoint
            * grid's own extra clearance below (`dropletPoint`'s checkpoint case).
            * #808: pushed once more (was `GATES.y + 26`) alongside `CHECKPOINT_BASE_OFFSET`'s own
-           * bump — see that constant's doc for the real root cause (an `escalate` transition's
-           * flight, not any settled rank, is what a live probe actually catches crossing here). */}
+           * bump — extra settled-position margin only. See that constant's doc for the real root
+           * cause (an `escalate` transition's flight, not any settled rank, is what a live probe
+           * actually catches crossing here) and `Hero.tsx`'s `fadeAcross` for the actual fix. */}
           {typeof reviewMode === "string" && (
             <text className="hero-node-caption" x={GATES.review} y={GATES.y + 34} textAnchor="middle">
               {reviewMode}

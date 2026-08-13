@@ -1544,6 +1544,47 @@ test("#808 AC1: every droplet chip label and every hero-node-caption element sta
   }
 });
 
+// ── #808 gate② finding [0]: escalate never tweens through the caption — a trajectory-level pin ──
+//
+// No y-margin bump can close the escalate-transit crossing (see `CHECKPOINT_BASE_OFFSET`'s own
+// doc in stage.tsx) — checkpoint and needs-human share an x column with the Review caption, and
+// there is no safe detour corridor (LANES content on the left, the trunk rings/Review rect boxing
+// in the right). The actual fix is architectural: `Hero.tsx`'s `escalate` case renders the
+// droplet at exactly its settled checkpoint/needs-human points and NEVER at anything interpolated
+// between them (`fadeAcross`, an opacity cross-fade with a `utils.set` snap at the midpoint, not a
+// `travelOn` translate tween) — so there is no in-between frame left for a live probe to catch
+// crossing the caption. This can't be proven by rendering (no DOM/anime.js harness here, and
+// Hero.tsx's own DOM-querying half is established as untestable in this suite —
+// `animator.test.ts`'s own doc), so it pins the SOURCE structure instead: the `escalate` case
+// must route through `fadeAcross`, and `fadeAcross` itself must never build a continuous
+// translateX/Y tween array — the same "read the real declaration, don't hand-copy it" discipline
+// `cssFontSizePx` already uses for `heroCss`, applied to `Hero.tsx`.
+test("#808 gate② finding [0]: the escalate transition never tweens through an interpolated point — fadeAcross snaps, it doesn't travel", () => {
+  const heroTsx = readFileSync(new URL("./Hero.tsx", import.meta.url), "utf8");
+
+  const escalateCaseMatch = heroTsx.match(/case "escalate": \{([\s\S]*?)\n {6}\}/);
+  assert.ok(escalateCaseMatch, "Hero.tsx must still define an `escalate` transition case");
+  const escalateBody = escalateCaseMatch?.[1] as string;
+  assert.match(escalateBody, /fadeAcross\(/, "escalate must route through fadeAcross, not a straight-line travel");
+  assert.doesNotMatch(escalateBody, /travelOn\(/, "escalate must not fall back to travelOn's straight-line tween");
+
+  const fadeAcrossMatch = heroTsx.match(/function fadeAcross\([\s\S]*?\n\}/);
+  assert.ok(fadeAcrossMatch, "Hero.tsx must define fadeAcross");
+  const fadeAcrossBody = fadeAcrossMatch?.[0] as string;
+  // A continuous tween looks like `translateX: [a, b]` (an anime.js keyframe array) — fadeAcross
+  // must only ever assign translateX/Y as single discrete values via `utils.set`, one at `from`
+  // (synchronous, before the timeline plays) and one at `to` (via `tl.call`, at the fade's
+  // midpoint) — never an array a tween would interpolate through.
+  assert.doesNotMatch(fadeAcrossBody, /translateX:\s*\[/, "fadeAcross must never tween translateX through an array of values");
+  assert.doesNotMatch(fadeAcrossBody, /translateY:\s*\[/, "fadeAcross must never tween translateY through an array of values");
+  assert.match(fadeAcrossBody, /utils\.set\(el,\s*\{\s*translateX:\s*from\.x/, "fadeAcross must snap straight to `from` first");
+  assert.match(
+    fadeAcrossBody,
+    /utils\.set\(el,\s*\{\s*translateX:\s*to\.x/,
+    "fadeAcross must snap straight to `to` at the midpoint, not tween there",
+  );
+});
+
 // ── #745 gate② round 4 finding [0]: checkpoint zone overflow bound — never above-viewBox growth ──
 
 test("#745 gate② round 4 finding [0]: 39 simultaneous checkpoint droplets — the reported scale — draws only the grid's documented capacity plus a correct '+N more' badge, all within the stage bounds", () => {
