@@ -4,7 +4,6 @@
 // reaped, alive-pid never touched (any directory state), dead-pid/present-directory never
 // reaped (scope boundary), and per-cycle batching.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -76,13 +75,12 @@ test("parseWorktreeListPorcelain extracts path + lock reason from real porcelain
   ].join("\n");
   const regs = parseWorktreeListPorcelain(output);
   assert.deepEqual(regs, [
-    { path: "/repo", lockReason: null, branch: "refs/heads/main" },
+    { path: "/repo", lockReason: null },
     {
       path: "/repo/.claude/worktrees/role-retro-9756358f",
       lockReason: "claude session role-retro-9756358f (pid 12345 start Tue Aug 11 07:02:48 2026)",
-      branch: "refs/heads/worktree-role-retro-9756358f",
     },
-    { path: "/repo/.claude/worktrees/fix-382", lockReason: null, branch: "refs/heads/feat/382" },
+    { path: "/repo/.claude/worktrees/fix-382", lockReason: null },
   ]);
 });
 
@@ -307,18 +305,15 @@ function fakePresentDeps(
   removed: string[];
   settleCalls: string[];
   pruneCalls: number;
-  branchMergedCalls: string[];
 } {
   const unlocked: string[] = [];
   const removed: string[] = [];
   const settleCalls: string[] = [];
-  const branchMergedCalls: string[] = [];
   let pruneCalls = 0;
   return {
     unlocked,
     removed,
     settleCalls,
-    branchMergedCalls,
     get pruneCalls() {
       return pruneCalls;
     },
@@ -334,12 +329,6 @@ function fakePresentDeps(
         return { verdict: "settled" };
       }),
     registrationAgeMs: over.registrationAgeMs ?? (() => AGE_OLD),
-    isBranchMerged:
-      over.isBranchMerged ??
-      (async (branch) => {
-        branchMergedCalls.push(branch);
-        return true;
-      }),
     unlock: over.unlock ?? (async (path) => void unlocked.push(path)),
     remove: over.remove ?? (async (path) => void removed.push(path)),
     prune: over.prune ?? (async () => void pruneCalls++),
@@ -350,7 +339,7 @@ test("sweepPresentDirectoryWorktreesOnce: a LOCKED dead-pid present-directory re
   const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/role-x", lockReason: "claude session role-x (pid 111 start now)" };
   const deps = fakePresentDeps({ registrations: [reg], isPidAlive: () => false, directoryExists: () => true });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [reg.path], retained: [], skipped: 0, mergeGateSkipped: 0, failed: [], examinedPaths: [reg.path] });
+  assert.deepEqual(result, { reaped: [reg.path], retained: [], skipped: 0, failed: [], examinedPaths: [reg.path] });
   assert.deepEqual(deps.settleCalls, [reg.path]);
   assert.deepEqual(deps.unlocked, [reg.path]);
   assert.deepEqual(deps.removed, [reg.path]);
@@ -366,7 +355,7 @@ test("sweepPresentDirectoryWorktreesOnce: a LOCKED dead-pid present-directory re
     settleDirectory: () => ({ verdict: "retained" }),
   });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [reg.path], skipped: 0, mergeGateSkipped: 0, failed: [], examinedPaths: [reg.path] });
+  assert.deepEqual(result, { reaped: [], retained: [reg.path], skipped: 0, failed: [], examinedPaths: [reg.path] });
   assert.deepEqual(deps.unlocked, []);
   assert.deepEqual(deps.removed, []);
   assert.equal(deps.pruneCalls, 0);
@@ -412,71 +401,50 @@ test("sweepPresentDirectoryWorktreesOnce: an alive-pid LOCKED present-directory 
   assert.deepEqual(deps.unlocked, []);
 });
 
-test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registration whose branch is merged and old enough and purity-clean is reaped (remove+prune, but NEVER unlock — it was never locked)", async () => {
-  const reg: WorktreeRegistration = {
-    path: "/repo/.claude/worktrees/fix-382",
-    lockReason: null,
-    branch: "refs/heads/fix-382",
-  };
+test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registration that is old enough and purity-clean is reaped (remove+prune, but NEVER unlock — it was never locked)", async () => {
+  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/fix-382", lockReason: null };
   const deps = fakePresentDeps({
     registrations: [reg],
     directoryExists: () => true,
     registrationAgeMs: () => AGE_OLD,
-    // Deliberately the DEFAULT isBranchMerged (records into branchMergedCalls and returns true)
-    // — not overridden, so the call-recorded assertion below actually proves something.
   });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [reg.path], retained: [], skipped: 0, mergeGateSkipped: 0, failed: [], examinedPaths: [reg.path] });
+  assert.deepEqual(result, { reaped: [reg.path], retained: [], skipped: 0, failed: [], examinedPaths: [reg.path] });
   assert.deepEqual(deps.settleCalls, [reg.path]);
   assert.deepEqual(deps.unlocked, [], "an unlocked registration is never unlock()'d");
   assert.deepEqual(deps.removed, [reg.path]);
   assert.equal(deps.pruneCalls, 1);
-  assert.deepEqual(deps.branchMergedCalls, [reg.branch]);
 });
 
-test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registration UNDER the age threshold is skipped and NEVER reaches the branch-merged git check", async () => {
-  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/fix-382", lockReason: null, branch: "refs/heads/fix-382" };
+test("sweepPresentDirectoryWorktreesOnce (#834 Ruling addendum): a BRANCHLESS/detached UNLOCKED present-directory registration is eligible exactly like any other — the merged-branch gate that used to make 'detached' permanently unreachable is gone", async () => {
+  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/detached-1", lockReason: null };
+  const deps = fakePresentDeps({ registrations: [reg], directoryExists: () => true, registrationAgeMs: () => AGE_OLD });
+  const result = await sweepPresentDirectoryWorktreesOnce(deps);
+  assert.deepEqual(result, { reaped: [reg.path], retained: [], skipped: 0, failed: [], examinedPaths: [reg.path] });
+  assert.deepEqual(deps.settleCalls, [reg.path]);
+  assert.deepEqual(deps.removed, [reg.path]);
+});
+
+test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registration UNDER the age threshold is skipped and never reaches settleDirectory", async () => {
+  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/fix-382", lockReason: null };
   const deps = fakePresentDeps({ registrations: [reg], directoryExists: () => true, registrationAgeMs: () => AGE_YOUNG });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, mergeGateSkipped: 0, failed: [], examinedPaths: [] });
-  assert.deepEqual(deps.branchMergedCalls, [], "the expensive git check never runs for an under-age candidate");
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, failed: [], examinedPaths: [] });
   assert.deepEqual(deps.settleCalls, []);
 });
 
 test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registration with an UNRESOLVABLE age (NaN) is skipped — fail-safe, never a candidate", async () => {
-  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/fix-382", lockReason: null, branch: "refs/heads/fix-382" };
+  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/fix-382", lockReason: null };
   const deps = fakePresentDeps({ registrations: [reg], directoryExists: () => true, registrationAgeMs: () => Number.NaN });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, mergeGateSkipped: 0, failed: [], examinedPaths: [] });
-  assert.deepEqual(deps.branchMergedCalls, []);
-});
-
-test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registration whose branch is NOT merged is skipped, never even reaches settleDirectory", async () => {
-  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/fix-382", lockReason: null, branch: "refs/heads/fix-382" };
-  const deps = fakePresentDeps({
-    registrations: [reg],
-    directoryExists: () => true,
-    registrationAgeMs: () => AGE_OLD,
-    isBranchMerged: async () => false,
-  });
-  const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, mergeGateSkipped: 1, failed: [], examinedPaths: [reg.path] });
-  assert.deepEqual(deps.settleCalls, [], "never fs-deleted without proof of a merged branch");
-});
-
-test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED present-directory registration with NO branch (detached) is skipped — never a merge candidate", async () => {
-  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/detached-1", lockReason: null };
-  const deps = fakePresentDeps({ registrations: [reg], directoryExists: () => true });
-  const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, mergeGateSkipped: 0, failed: [], examinedPaths: [] });
-  assert.deepEqual(deps.branchMergedCalls, []);
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 1, failed: [], examinedPaths: [] });
 });
 
 test("sweepPresentDirectoryWorktreesOnce: an UNLOCKED registration whose directory is MISSING is out of this arm's scope entirely (not skipped, not reaped — sweepWorktreeJanitorOnce's own 'unlocked' verdict is untouched)", async () => {
-  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/fix-382", lockReason: null, branch: "refs/heads/fix-382" };
+  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/fix-382", lockReason: null };
   const deps = fakePresentDeps({ registrations: [reg], directoryExists: () => false });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, mergeGateSkipped: 0, failed: [], examinedPaths: [] });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, failed: [], examinedPaths: [] });
 });
 
 test("sweepPresentDirectoryWorktreesOnce: per-cycle work is bounded to batchSize — overflow candidates are counted as skipped, not touched (gate② round 4, A2: window is now simply the first batchSize candidates from the head — no more offset rotation)", async () => {
@@ -491,21 +459,20 @@ test("sweepPresentDirectoryWorktreesOnce: per-cycle work is bounded to batchSize
   assert.equal(result.examinedPaths.length, 2, "only the head window was examined — the rest counted skipped, not touched");
 });
 
-test("sweepPresentDirectoryWorktreesOnce: a mixed batch (locked-dead-clean, locked-dead-dirty, unlocked-merged-clean) reaps/retains/skips correctly in one cycle", async () => {
+test("sweepPresentDirectoryWorktreesOnce: a mixed batch (locked-dead-clean, locked-dead-dirty, unlocked-old-clean) reaps/retains/skips correctly in one cycle", async () => {
   const lockedClean: WorktreeRegistration = { path: "/repo/.claude/worktrees/a", lockReason: "claude session a (pid 1 start now)" };
   const lockedDirty: WorktreeRegistration = { path: "/repo/.claude/worktrees/b", lockReason: "claude session b (pid 2 start now)" };
-  const unlockedMerged: WorktreeRegistration = { path: "/repo/.claude/worktrees/c", lockReason: null, branch: "refs/heads/c" };
+  const unlockedOld: WorktreeRegistration = { path: "/repo/.claude/worktrees/c", lockReason: null };
   const alive: WorktreeRegistration = { path: "/repo/.claude/worktrees/d", lockReason: "claude session d (pid 3 start now)" };
   const deps = fakePresentDeps({
-    registrations: [lockedClean, lockedDirty, unlockedMerged, alive],
+    registrations: [lockedClean, lockedDirty, unlockedOld, alive],
     isPidAlive: (pid) => pid === 3,
     directoryExists: () => true,
     settleDirectory: (path) => (path === lockedDirty.path ? { verdict: "retained" } : { verdict: "settled" }),
     registrationAgeMs: () => AGE_OLD,
-    isBranchMerged: async () => true,
   });
   const result = await sweepPresentDirectoryWorktreesOnce(deps);
-  assert.deepEqual(result.reaped.sort(), [lockedClean.path, unlockedMerged.path].sort());
+  assert.deepEqual(result.reaped.sort(), [lockedClean.path, unlockedOld.path].sort());
   assert.deepEqual(result.retained, [lockedDirty.path]);
   assert.equal(result.skipped, 0);
   assert.deepEqual(result.failed, []);
@@ -577,7 +544,6 @@ function fakeShrinkingPresentDeps(
       return { verdict: "settled" };
     },
     registrationAgeMs: () => AGE_OLD,
-    isBranchMerged: async () => true,
     unlock: async () => {},
     remove: async (path) => {
       removedCalls.push(path);
@@ -627,8 +593,8 @@ test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 2, G1 — the 
 
 test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 3, W4 — the PO's own finding): the returned `skipped` is the TERMINATING cycle's count, never the sum across cycles — a run spanning multiple cycles must not inflate the permanently-skipped total", async () => {
   // 3 reapable (LOCKED dead-pid, purity-clean) candidates, batchSize=2 -> forces 3 cycles
-  // (reap 2, reap 1, terminate) via the identity cursor. 2 PERMANENTLY-skipped (detached, no
-  // branch line) registrations sit alongside them — classification re-counts these on EVERY
+  // (reap 2, reap 1, terminate) via the identity cursor. 2 PERMANENTLY-skipped (UNLOCKED,
+  // under-age) registrations sit alongside them — classification re-counts these on EVERY
   // cycle's full re-scan (they never enter `candidates`, so they're never added to `seen`), which
   // is exactly the inflation source: summing would report 3 cycles * 2 = 6 (or more, once
   // window-overflow is folded in too), never the true count of 2.
@@ -637,10 +603,12 @@ test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 3, W4 — the 
     lockReason: `claude session reapable-${i} (pid ${i} start now)`,
   }));
   const permanentlySkipped: WorktreeRegistration[] = Array.from({ length: 2 }, (_, i) => ({
-    path: `/repo/.claude/worktrees/detached-${i}`,
-    lockReason: null, // unlocked + present + no `branch` -> classification-skipped, every scan
+    path: `/repo/.claude/worktrees/young-${i}`,
+    lockReason: null, // unlocked + present + under-age -> classification-skipped, every scan
   }));
-  const deps = fakeShrinkingPresentDeps([...reapable, ...permanentlySkipped]);
+  const deps = fakeShrinkingPresentDeps([...reapable, ...permanentlySkipped], {
+    registrationAgeMs: (path) => (path.includes("/young-") ? AGE_YOUNG : AGE_OLD),
+  });
   const logs: string[] = [];
   const result = await runPresentDirectoryWorktreeSweepToCompletion(deps, (m) => logs.push(m), 2);
   assert.equal(result.reaped.length, 3, "all 3 reapable candidates still reached, across multiple cycles");
@@ -652,44 +620,25 @@ test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 3, W4 — the 
   assert.ok(logs.length >= 3, "this run genuinely spanned multiple cycles (the scenario the inflation bug needed)");
 });
 
-test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 4, A2 — the reviewer's own reproduction): a single unmerged candidate must land in `skipped`, not vanish from every bucket", async () => {
-  // The exact bug: cycle 1 examines the candidate, its merge-gate skip (skipped++) is folded
-  // into that CYCLE's own combined `skipped` — then the candidate joins `seen`. Cycle 2 (the
-  // terminating, empty-window cycle) never re-examines it (it's in `seen`, so classification's
-  // re-scan doesn't matter), and W4's own fix (round 3) used ONLY the terminating cycle's
-  // `skipped`, which is 0 here — the candidate was in NO bucket at all.
-  const reg: WorktreeRegistration = { path: "/repo/.claude/worktrees/unmerged-1", lockReason: null, branch: "refs/heads/unmerged-1" };
-  const deps = fakeShrinkingPresentDeps([reg], { isBranchMerged: async () => false });
-  const result = await runPresentDirectoryWorktreeSweepToCompletion(deps, () => {}, 25);
-  assert.equal(result.reaped.length, 0);
-  assert.equal(result.retained.length, 0);
-  assert.equal(
-    result.skipped,
-    1,
-    "the single unmerged candidate must be counted exactly once — the reviewer's reported bug returned 0 here",
-  );
-});
-
-test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 4, A2): a mixed run (1 reapable + 1 permanently-classification-skipped + 1 merge-gate-skipped) pins the exact total — 2 skipped, never 1 (undercount) or inflated", async () => {
+test("runPresentDirectoryWorktreeSweepToCompletion (gate② round 4, A2, adapted for #834's Ruling addendum): a mixed run (1 reapable + 1 permanently-classification-skipped) pins the exact total — 1 skipped, never inflated or undercounted", async () => {
   const reapable: WorktreeRegistration = {
     path: "/repo/.claude/worktrees/reapable-1",
     lockReason: "claude session reapable-1 (pid 1 start now)",
   };
-  const detached: WorktreeRegistration = { path: "/repo/.claude/worktrees/detached-1", lockReason: null }; // no branch -> classification-skipped
-  const unmerged: WorktreeRegistration = { path: "/repo/.claude/worktrees/unmerged-1", lockReason: null, branch: "refs/heads/unmerged-1" };
-  const deps = fakeShrinkingPresentDeps([reapable, detached, unmerged], {
-    isBranchMerged: async (branch) => branch !== unmerged.branch,
+  const young: WorktreeRegistration = { path: "/repo/.claude/worktrees/young-1", lockReason: null }; // under-age -> classification-skipped
+  const deps = fakeShrinkingPresentDeps([reapable, young], {
+    registrationAgeMs: (path) => (path === young.path ? AGE_YOUNG : AGE_OLD),
   });
   const result = await runPresentDirectoryWorktreeSweepToCompletion(deps, () => {}, 25);
   assert.deepEqual(result.reaped, [reapable.path]);
   assert.equal(result.retained.length, 0);
-  assert.equal(result.skipped, 2, "detached (classification) + unmerged (merge-gate) — each counted exactly once");
+  assert.equal(result.skipped, 1, "the under-age candidate, counted exactly once");
 });
 
 test("runPresentDirectoryWorktreeSweepToCompletion: an empty candidate list terminates after one no-op cycle", async () => {
   const deps = fakePresentDeps({ registrations: [] });
   const result = await runPresentDirectoryWorktreeSweepToCompletion(deps);
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, mergeGateSkipped: 0, failed: [], examinedPaths: [] });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, failed: [], examinedPaths: [] });
 });
 
 // ── #834 (gate② round 1, F6): a prune-step failure must never escape sweepPresentDirectoryWorktreesOnce
@@ -770,7 +719,7 @@ test("sweepPresentDirectoryWorktreesAndReport: a failing appendEvent never throw
   };
   const logs: string[] = [];
   const result = await sweepPresentDirectoryWorktreesAndReport(deps, state, (m) => logs.push(m));
-  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, mergeGateSkipped: 0, failed: [], examinedPaths: [] });
+  assert.deepEqual(result, { reaped: [], retained: [], skipped: 0, failed: [], examinedPaths: [] });
   assert.equal(logs.length, 1);
   assert.match(logs[0]!, /rollup event append failed/);
 });
@@ -779,7 +728,7 @@ test("sweepPresentDirectoryWorktreesAndReport: a failing appendEvent never throw
 //    REAL resolveWorktreeIndexBaselineMs -> settleWorktreeDirectory -> worktreeMaybeDirty chain
 //    against a REAL temp directory with a REAL git index file (the fake-verdict doctrine rule:
 //    no preset verdicts for the purity check itself). Only listRegistrations/liveness/git-backed
-//    deps (unlock/remove/prune/isBranchMerged) are overridden — everything purity-related is the
+//    deps (unlock/remove/prune) are overridden — everything purity-related is the
 //    genuine production path. Mirrors worker.test.ts's own #834 mkGitIndexFixture shape. ──
 
 function mkGitIndexFixture(worktreeRoot: string, name: string): { worktreePath: string; indexPath: string } {
@@ -876,79 +825,10 @@ test("sweepPresentDirectoryWorktreesOnce (gate② round 1, F7, real composition)
   }
 });
 
-// ── #834 (gate② round 1, F2): isBranchMerged must prove ancestry against the repo's DEFAULT
-//    branch, never merely the trusted checkout's CURRENT HEAD — a real git fixture where those
-//    two disagree. ──
-
-function git(repoRoot: string, ...args: string[]): string {
-  return execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8" });
-}
-
-test("createPresentDirectorySweepDeps().isBranchMerged (gate② round 1, F2): a branch merged into a NON-default current-HEAD branch, but NOT into the default branch, reads UNMERGED", async () => {
-  const repoRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-defbranch-"));
-  try {
-    git(repoRoot, "init", "-q", "-b", "main");
-    git(repoRoot, "config", "user.email", "a@b.com");
-    git(repoRoot, "config", "user.name", "a");
-    git(repoRoot, "config", "commit.gpgsign", "false");
-    writeFileSync(join(repoRoot, "base.txt"), "base\n");
-    git(repoRoot, "add", "base.txt");
-    git(repoRoot, "commit", "-q", "-m", "base");
-
-    // A fake "origin" remote whose default branch is `main` — no network needed, `origin/main`
-    // is set directly via update-ref, exactly what a real `git fetch` would have produced.
-    git(repoRoot, "remote", "add", "origin", repoRoot);
-    git(repoRoot, "update-ref", "refs/remotes/origin/main", "refs/heads/main");
-    git(repoRoot, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
-
-    // `feature` branches off main, gets a commit, and merges into `integration` — but NEVER
-    // into `main` itself.
-    git(repoRoot, "checkout", "-q", "-b", "feature");
-    writeFileSync(join(repoRoot, "feature.txt"), "feature\n");
-    git(repoRoot, "add", "feature.txt");
-    git(repoRoot, "commit", "-q", "-m", "feature work");
-
-    git(repoRoot, "checkout", "-q", "main");
-    git(repoRoot, "checkout", "-q", "-b", "integration");
-    git(repoRoot, "merge", "-q", "--no-ff", "feature", "-m", "merge feature into integration");
-    // The trusted checkout's CURRENT HEAD is now `integration`, which DOES contain `feature` —
-    // the exact scenario a HEAD-based check would wrongly call "merged".
-
-    // Also prove the POSITIVE case still works: a branch that IS merged into the real default
-    // branch (main) reads merged.
-    git(repoRoot, "branch", "already-in-main", "main");
-
-    const deps = createPresentDirectorySweepDeps(repoRoot);
-    assert.equal(
-      await deps.isBranchMerged("refs/heads/feature"),
-      false,
-      "feature is merged into the CURRENT checkout (integration) but NOT into the default branch (main) -> must read false",
-    );
-    assert.equal(
-      await deps.isBranchMerged("refs/heads/already-in-main"),
-      true,
-      "a branch actually merged into the default branch reads true",
-    );
-  } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
-  }
-});
-
-test("createPresentDirectorySweepDeps().isBranchMerged: an unresolvable default-branch ref (no origin/HEAD configured) reads UNMERGED — fail-safe, never a candidate", async () => {
-  const repoRoot = mkdtempSync(join(tmpdir(), "sapwood-janitor-defbranch-"));
-  try {
-    git(repoRoot, "init", "-q", "-b", "main");
-    git(repoRoot, "config", "user.email", "a@b.com");
-    git(repoRoot, "config", "user.name", "a");
-    git(repoRoot, "config", "commit.gpgsign", "false");
-    writeFileSync(join(repoRoot, "base.txt"), "base\n");
-    git(repoRoot, "add", "base.txt");
-    git(repoRoot, "commit", "-q", "-m", "base");
-    // No `origin` remote configured at all -> refs/remotes/origin/HEAD cannot resolve.
-
-    const deps = createPresentDirectorySweepDeps(repoRoot);
-    assert.equal(await deps.isBranchMerged("refs/heads/main"), false);
-  } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
-  }
-});
+// #834's Ruling addendum (see worktree-janitor.ts's own header doc): the default-branch-ancestry
+// check (isBranchMerged / resolveDefaultBranchRef) this module used to expose here was DROPPED —
+// it was structurally dead in a squash-merge repo (a squashed lane branch is never an ancestor of
+// the default branch), and deleting a worktree directory loses no committed work regardless of
+// merge state (the branch ref and its commits survive `git worktree remove`). The real-git
+// fixture coverage that used to live here (default-branch-vs-current-HEAD disambiguation,
+// unresolvable-origin/HEAD fail-safe) went with it.

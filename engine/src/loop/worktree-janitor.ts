@@ -14,11 +14,21 @@
 // found ZERO dead-pid/missing-directory members) extends this module with a SECOND, separate
 // pass — sweepPresentDirectoryWorktreesOnce — that DOES reach present directories, but only
 // behind the SAME purity check (worktreeMaybeDirty, baselined on the worktree's own git-index
-// mtime, resolveWorktreeIndexBaselineMs — see that function's doc) plus conservative liveness/
-// age/merged-branch gates per class. See that function's own doc for the full policy; the
-// PRINCIPLE above is unchanged — nothing here ever deletes a present directory without first
-// proving it clean via the filesystem purity check, never git's own status/clean-filter path
-// (the #65 RCE class worker.ts's retainOrDeleteWorktree doc explains at length).
+// mtime, resolveWorktreeIndexBaselineMs — see that function's doc) plus a conservative
+// liveness/age gate per class. See that function's own doc for the full policy; the PRINCIPLE
+// above is unchanged — nothing here ever deletes a present directory without first proving it
+// clean via the filesystem purity check, never git's own status/clean-filter path (the #65 RCE
+// class worker.ts's retainOrDeleteWorktree doc explains at length).
+//
+// #834's Ruling addendum (owner, live Tier C run 2026-08-13): the UNLOCKED arm originally also
+// gated on the candidate's branch being merged into the default branch (`isBranchMerged`,
+// `merge-base --is-ancestor`). That gate was structurally dead in THIS repo: a squash-merged lane
+// branch is never an ancestor of the default branch, so the check returned false for every one of
+// 137 of 146 live candidates, permanently. DROPPED — the UNLOCKED gate is registration age plus
+// the purity check alone. Safety argument: deleting a worktree DIRECTORY loses no committed
+// work — the branch ref and its commits survive `git worktree remove` regardless of merge state —
+// and the purity check already protects any uncommitted work; the merged-branch condition was
+// guarding a fact those two already cover.
 //
 // #69 SIXTH legitimate child_process importer (worker.test.ts's grep-invariant enumerates the
 // other five). execFile only, every git invocation targets the repo via `-C`, never a subprocess
@@ -51,28 +61,21 @@ export interface WorktreeRegistration {
    *  worktree — out of scope for this janitor). Empty string is a real, if unusual, possibility
    *  (`git worktree lock` with no `--reason`). */
   lockReason: string | null;
-  /** #834 Phase 2: the worktree's checked-out branch (`branch refs/heads/X` porcelain line),
-   *  full ref form. Omitted for a DETACHED worktree (a bare `detached` line, no `branch` line at
-   *  all) — the present-directory sweep's UNLOCKED arm treats a missing branch as "never a merge
-   *  candidate": there is nothing to prove "fully merged into the default branch" against. */
-  branch?: string;
 }
 
 /** Pure parser for `git worktree list --porcelain` output. Entries are blank-line-separated
- *  blocks; this janitor only needs the `worktree`/`locked`/`branch` lines out of each. */
+ *  blocks; this janitor only needs the `worktree`/`locked` lines out of each. */
 export function parseWorktreeListPorcelain(output: string): WorktreeRegistration[] {
   const registrations: WorktreeRegistration[] = [];
   for (const block of output.split("\n\n")) {
     let path: string | null = null;
     let lockReason: string | null = null;
-    let branch: string | undefined;
     for (const line of block.split("\n")) {
       if (line.startsWith("worktree ")) path = line.slice("worktree ".length);
       else if (line === "locked") lockReason = "";
       else if (line.startsWith("locked ")) lockReason = line.slice("locked ".length);
-      else if (line.startsWith("branch ")) branch = line.slice("branch ".length);
     }
-    if (path !== null) registrations.push({ path, lockReason, ...(branch !== undefined ? { branch } : {}) });
+    if (path !== null) registrations.push({ path, lockReason });
   }
   return registrations;
 }
@@ -289,32 +292,13 @@ export async function runWorktreeJanitorToCompletion(
 /** #834 Phase 2: how old an UNLOCKED, directory-present registration's registration must be
  *  before it is even a CANDIDATE for this sweep — a FIXED CONSTANT, never a config key (the
  *  issue's own explicit scope line). A freshly-created worktree a still-driving lane owns must
- *  never be swept just because its branch happens to already be merged (a fast-follow fix-leg
- *  can merge before its OWN worktree naturally winds down) — this is the one signal standing in
- *  for "nothing is actively using this" where the UNLOCKED class carries no pid to check at all.
- *  24h comfortably clears any single lane's realistic lifetime (worker.ts's own heartbeat-stale/
- *  timeout bounds are all well under an hour) while still being tight enough to clear a real,
- *  weeks-old backlog (#825's own census). */
+ *  never be swept just because it happens to look old enough at a glance — this is the one signal
+ *  standing in for "nothing is actively using this" where the UNLOCKED class carries no pid to
+ *  check at all (per #834's Ruling addendum, the ONLY such signal now that the merged-branch gate
+ *  is gone — see this module's own header doc). 24h comfortably clears any single lane's
+ *  realistic lifetime (worker.ts's own heartbeat-stale/timeout bounds are all well under an hour)
+ *  while still being tight enough to clear a real, weeks-old backlog (#825's own census). */
 export const WORKTREE_JANITOR_MIN_REGISTRATION_AGE_MS = 24 * 60 * 60 * 1000;
-
-/** #834 (gate② round 1, F2): resolves the repo's DEFAULT BRANCH ref via `git symbolic-ref
- *  refs/remotes/origin/HEAD` — the standard git plumbing fact for "what branch does origin
- *  consider default", INDEPENDENT of whatever branch the trusted checkout HAPPENS to currently
- *  be on. This is a real, previously-fixed bug: nothing pins the checkout this janitor runs
- *  from to the default branch, so an engine invoked from an integration/release branch would
- *  otherwise silently judge ancestry against ITS OWN transient checkout state, reading an
- *  UNMERGED candidate as "merged" the moment it merges into that other branch. `null` on any
- *  resolution failure (no `origin` remote, no configured HEAD for it) — the fail-safe direction:
- *  isBranchMerged then never treats anything as a merge candidate rather than guessing. */
-async function resolveDefaultBranchRef(repoRoot: string): Promise<string | null> {
-  try {
-    const { stdout } = await pexecFile("git", ["-C", repoRoot, "symbolic-ref", "refs/remotes/origin/HEAD"]);
-    const ref = stdout.trim();
-    return ref.length > 0 ? ref : null;
-  } catch {
-    return null;
-  }
-}
 
 export interface PresentDirectorySweepDeps extends WorktreeJanitorClassifyDeps {
   listRegistrations(): Promise<WorktreeRegistration[]>;
@@ -328,9 +312,9 @@ export interface PresentDirectorySweepDeps extends WorktreeJanitorClassifyDeps {
    *  own settleMergedWorktree) and this arm, per the owner's explicit "one implementation, two
    *  callers" instruction; see that function's own doc for the full TOCTOU-closing rationale
    *  (rename first, re-verify the tombstone, only then delete — never a plain check-then-rmSync).
-   *  Injectable so classification-only tests (batch bound, age gate, branch-merged gate) can
-   *  fake it without touching real fs; F7's composition tests use the REAL implementation
-   *  against a real fixture. */
+   *  Injectable so classification-only tests (batch bound, age gate) can fake it without
+   *  touching real fs; F7's composition tests use the REAL implementation against a real
+   *  fixture. */
   settleDirectory(worktreePath: string, worktreeRoot: string, baselineMs: number): WorktreeDirectorySettleOutcome;
   /** Elapsed ms since this registration's last git activity — NaN when unresolvable (fail-safe:
    *  never a candidate, the conservative direction). Real default resolves the linked worktree's
@@ -341,15 +325,11 @@ export interface PresentDirectorySweepDeps extends WorktreeJanitorClassifyDeps {
    *  admin directory, which bumps its mtime each time. That is actually the BETTER gate for this
    *  arm's purpose: "how long has NOTHING touched this worktree via git", not merely "how long
    *  ago was it created" — a worktree whose lane is still alive and running normal git commands
-   *  keeps resetting this clock, exactly the "still in use, leave it" signal this gate wants. */
+   *  keeps resetting this clock, exactly the "still in use, leave it" signal this gate wants.
+   *  Per #834's Ruling addendum, this (plus the purity check) is now the ENTIRE UNLOCKED gate —
+   *  see this module's own header doc for why the formerly-paired merged-branch check was
+   *  dropped. */
   registrationAgeMs(path: string): number;
-  /** `true` when `branch` (a full `refs/heads/...` ref) is already an ancestor of the repo's
-   *  DEFAULT BRANCH (resolveDefaultBranchRef — `git symbolic-ref refs/remotes/origin/HEAD`,
-   *  #834 gate② round 1 F2), never merely the trusted checkout's current HEAD (see
-   *  resolveDefaultBranchRef's own doc for why those two are NOT the same fact). `false` on ANY
-   *  git error (unresolvable branch, unresolvable default-branch ref, detached HEAD, etc.) —
-   *  fail-safe: never a merge candidate without proof. */
-  isBranchMerged(branch: string): Promise<boolean>;
   unlock(path: string): Promise<void>;
   remove(path: string): Promise<void>;
   prune(): Promise<void>;
@@ -362,24 +342,16 @@ export interface PresentDirectorySweepResult {
    *  per-directory-escalated (the issue's own explicit "never per-directory events for the
    *  stock" line). An attempted-but-INCOMPLETE deletion is a DIFFERENT bucket: `failed`, below. */
   retained: string[];
-  /** Every registration this arm looked at but did not reap: alive-owner, under-age, unmerged-
-   *  branch, detached/branchless, beyond this cycle's window, or a prune-step failure (#834
-   *  gate② round 1, F6 — counted here under a sentinel path since it isn't about any ONE
-   *  directory). One number — the whole POINT of the rollup is that the stock never generates
-   *  per-entry noise. For a SINGLE cycle this is the complete picture; a caller that runs
-   *  MULTIPLE cycles against the same candidate pool (the to-completion path) must NOT simply
-   *  sum this field across cycles — see `mergeGateSkipped`'s own doc and
-   *  runPresentDirectoryWorktreeSweepToCompletion's doc for why. */
+  /** Every registration this arm looked at but did not reap: alive-owner, under-age (or an
+   *  unresolvable age reading), beyond this cycle's window, or a prune-step failure (#834 gate②
+   *  round 1, F6 — counted here under a sentinel path since it isn't about any ONE directory).
+   *  One number — the whole POINT of the rollup is that the stock never generates per-entry
+   *  noise. Every candidate this cycle's window actually REACHES (i.e. every entry counted in
+   *  `examinedPaths`) ends in exactly one of `reaped`/`retained`/`failed` — never `skipped` — so
+   *  a caller running multiple cycles against the same candidate pool (the to-completion path)
+   *  can safely take the TERMINATING (final, empty-window) cycle's own `skipped` as the run's
+   *  total; see runPresentDirectoryWorktreeSweepToCompletion's own doc. */
   skipped: number;
-  /** #834 (gate② round 4, A2): the subset of `skipped` produced specifically by the in-batch
-   *  `isBranchMerged` gate (an unlocked-merged-candidate whose branch turned out NOT to be
-   *  merged) — broken out because the to-completion runner needs it separately: once a candidate
-   *  is examined at all (added to the identity-based `seen` set, regardless of verdict), it never
-   *  reappears in any LATER cycle's classification pass, so a merge-gate skip from an early cycle
-   *  would otherwise vanish from the run's final total instead of landing in either `skipped` or
-   *  any other bucket. Always `0` for a candidate that never reached the merge-gate check
-   *  (classification-skipped, or LOCKED+dead-pid, which has no merge gate at all). */
-  mergeGateSkipped: number;
   /** An attempted-but-incomplete deletion (settleDirectory's own `"failed"` verdict) or a whole-
    *  sweep prune failure (F6, under PRUNE_FAILURE_SENTINEL_PATH). `tombstonePath` (#834 gate②
    *  round 2, G2; wording corrected round 3, W1) is present on every reachable `"failed"`
@@ -400,9 +372,7 @@ export interface PresentDirectorySweepResult {
  *  registration-metadata prune step itself failed). */
 const PRUNE_FAILURE_SENTINEL_PATH = "<worktree-janitor-prune>";
 
-type PresentDirectoryCandidate =
-  | { path: string; kind: "locked-dead" }
-  | { path: string; kind: "unlocked-merged-candidate"; branch: string };
+type PresentDirectoryCandidate = { path: string; kind: "locked-dead" } | { path: string; kind: "unlocked-candidate" };
 
 /** #834 Phase 2: ONE bounded cycle over the present-directory stock, covering exactly the two
  *  conservative classes the issue names:
@@ -410,16 +380,21 @@ type PresentDirectoryCandidate =
  *     today's 5-member class per #825's census) — purity-checked, no other gate needed (a dead
  *     pid already proves nobody is driving it).
  *   - UNLOCKED + directory present — a MUCH weaker signal (no pid to check at all), so gated by
- *     ALL THREE of: a real branch to check (never detached), registration age past
- *     WORKTREE_JANITOR_MIN_REGISTRATION_AGE_MS, and that branch fully merged into the repo's
- *     DEFAULT branch (isBranchMerged) — checked LAST, since it is the only per-candidate git
- *     call, after the window below has already shrunk the candidate set.
+ *     registration age past WORKTREE_JANITOR_MIN_REGISTRATION_AGE_MS, then the SAME purity check
+ *     as every other class. Per #834's Ruling addendum (see this module's own header doc), a
+ *     THIRD gate — the candidate's branch fully merged into the repo's default branch — used to
+ *     sit here too; it was DROPPED as structurally dead under squash merges. Age + purity is now
+ *     the whole gate: deleting a worktree DIRECTORY loses no committed work (the branch ref and
+ *     its commits survive `git worktree remove` regardless of merge state), and purity already
+ *     protects any uncommitted work — merge state adds no coverage those two don't already give.
+ *     A BRANCHLESS/detached unlocked registration is therefore eligible exactly like any other
+ *     unlocked one now — there is nothing left to check about its branch at all.
  *
  *  WINDOWING (#834 gate② round 1, F5; collapsed to ONE mode round 4, A2 — the owner's own
  *  architecture ruling): the CLASSIFICATION pass above always scans every registration (cheap:
  *  no subprocess calls), but the batch of candidates this cycle actually EXAMINES through the
- *  merge/purity gates is a `batchSize`-wide WINDOW, never the WHOLE candidate list at once. There
- *  used to be a SECOND windowing mode (a randomized numeric `offset`, for the single-cycle
+ *  purity gate is a `batchSize`-wide WINDOW, never the WHOLE candidate list at once. There used
+ *  to be a SECOND windowing mode (a randomized numeric `offset`, for the single-cycle
  *  engine-startup caller) alongside this one — the owner ruled that dual-mode split unjustified
  *  complexity and had it deleted; there is now exactly ONE windowing rule, for every caller:
  *   - `alreadyExamined` provided (the to-completion caller, gate② round 2 G1): candidates whose
@@ -438,7 +413,8 @@ type PresentDirectoryCandidate =
  *  Every candidate this cycle actually reaches, clean or dirty, goes through settleDirectory
  *  (the shared rename-tombstone-verify-delete primitive, #834 gate② round 1 F1/F4) — never a
  *  separate check-then-delete pair, which would leave a TOCTOU window between the purity read
- *  and the deletion. */
+ *  and the deletion. With the merged-branch gate gone, every candidate this cycle's window
+ *  reaches ends in exactly one of `reaped`/`retained`/`failed` — never `skipped`. */
 export async function sweepPresentDirectoryWorktreesOnce(
   deps: PresentDirectorySweepDeps,
   batchSize: number = WORKTREE_JANITOR_BATCH_SIZE,
@@ -454,16 +430,12 @@ export async function sweepPresentDirectoryWorktreesOnce(
       continue;
     }
     if (verdict === "unlocked" && deps.directoryExists(reg.path)) {
-      if (!reg.branch) {
-        skipped++; // detached/no branch line -> never provably "fully merged"
-        continue;
-      }
       const ageMs = deps.registrationAgeMs(reg.path);
       if (!Number.isFinite(ageMs) || ageMs < WORKTREE_JANITOR_MIN_REGISTRATION_AGE_MS) {
         skipped++; // unresolvable or too young -> the conservative "leave it" direction
         continue;
       }
-      candidates.push({ path: reg.path, kind: "unlocked-merged-candidate", branch: reg.branch });
+      candidates.push({ path: reg.path, kind: "unlocked-candidate" });
     }
     // "reap"/"alive"/"out-of-root"/(unlocked, no directory): not this arm's concern.
   }
@@ -480,16 +452,7 @@ export async function sweepPresentDirectoryWorktreesOnce(
   const reaped: string[] = [];
   const retained: string[] = [];
   const failed: Array<{ path: string; error: string; tombstonePath?: string }> = [];
-  let mergeGateSkipped = 0;
   for (const c of batch) {
-    if (c.kind === "unlocked-merged-candidate") {
-      const merged = await deps.isBranchMerged(c.branch);
-      if (!merged) {
-        skipped++;
-        mergeGateSkipped++; // #834 (gate② round 4, A2) — see this field's own doc
-        continue;
-      }
-    }
     const baseline = deps.indexBaselineMs(c.path);
     const settled = deps.settleDirectory(c.path, deps.worktreeRoot, baseline);
     if (settled.verdict === "retained") {
@@ -532,22 +495,17 @@ export async function sweepPresentDirectoryWorktreesOnce(
       failed.push({ path: PRUNE_FAILURE_SENTINEL_PATH, error: String(error) });
     }
   }
-  return { reaped, retained, skipped, mergeGateSkipped, failed, examinedPaths: batch.map((c) => c.path) };
+  return { reaped, retained, skipped, failed, examinedPaths: batch.map((c) => c.path) };
 }
 
 /** Real deps for sweepPresentDirectoryWorktreesOnce — reuses createWorktreeJanitorDeps's own
  *  git-backed listRegistrations/isPidAlive/directoryExists/unlock/remove/prune wholesale (#834's
  *  own "reuse the janitor's existing deps machinery" instruction) rather than growing a second
- *  git-wiring implementation, and adds only the purity/age/merged reads this arm needs on top.
- *  The default-branch ref (#834 gate② round 1, F2) is resolved AT MOST ONCE per deps object —
- *  memoized in this closure, not re-resolved per candidate — since it cannot change mid-sweep. */
+ *  git-wiring implementation, and adds only the purity/age reads this arm needs on top. (The
+ *  default-branch-ancestry read this used to also wire up here was removed per #834's Ruling
+ *  addendum — see this module's own header doc.) */
 export function createPresentDirectorySweepDeps(repoRoot: string = process.cwd()): PresentDirectorySweepDeps {
   const base = createWorktreeJanitorDeps(repoRoot);
-  let defaultBranchRefPromise: Promise<string | null> | undefined;
-  const resolveDefaultBranchRefOnce = (): Promise<string | null> => {
-    if (defaultBranchRefPromise === undefined) defaultBranchRefPromise = resolveDefaultBranchRef(repoRoot);
-    return defaultBranchRefPromise;
-  };
   return {
     ...base,
     indexBaselineMs: resolveWorktreeIndexBaselineMs,
@@ -559,16 +517,6 @@ export function createPresentDirectorySweepDeps(repoRoot: string = process.cwd()
         return Date.now() - statSync(gitDir).mtimeMs;
       } catch {
         return Number.NaN;
-      }
-    },
-    async isBranchMerged(branch) {
-      const defaultRef = await resolveDefaultBranchRefOnce();
-      if (defaultRef === null) return false; // no resolvable default branch -> never a candidate
-      try {
-        await pexecFile("git", ["-C", repoRoot, "merge-base", "--is-ancestor", branch, defaultRef]);
-        return true;
-      } catch {
-        return false; // not an ancestor, or unresolvable — never a merge candidate without proof
       }
     },
   };
@@ -604,14 +552,15 @@ export async function sweepPresentDirectoryWorktreesAndReport(
   return result;
 }
 
-/** #834 (gate② round 1, F5; cursor fixed round 2, G1; skipped-count fixed round 4, A2) — the
- *  present-directory arm's own to-completion path, the AC5 operator one-shot counterpart to
- *  runWorktreeJanitorToCompletion above, but with a DIFFERENT termination rule: unlike the
- *  missing-directory reap (where a successfully-reaped candidate LEAVES the candidate list, so
- *  the list itself shrinks toward empty across cycles), a retained/skipped present-directory
- *  candidate is NOT removed from the registration list and reappears at the SAME position on
- *  every re-scan — "no more work to do" here means "every candidate has now been examined once
- *  in this run", not "the list is empty". This is the ONLY caller that ever passes
+/** #834 (gate② round 1, F5; cursor fixed round 2, G1; skipped-count fixed round 4, A2; the
+ *  merge-gate that motivated A2's two-component arithmetic dropped entirely per #834's Ruling
+ *  addendum) — the present-directory arm's own to-completion path, the AC5 operator one-shot
+ *  counterpart to runWorktreeJanitorToCompletion above, but with a DIFFERENT termination rule:
+ *  unlike the missing-directory reap (where a successfully-reaped candidate LEAVES the candidate
+ *  list, so the list itself shrinks toward empty across cycles), a retained/skipped
+ *  present-directory candidate is NOT removed from the registration list and reappears at the
+ *  SAME position on every re-scan — "no more work to do" here means "every candidate has now been
+ *  examined once in this run", not "the list is empty". This is the ONLY caller that ever passes
  *  `alreadyExamined` to sweepPresentDirectoryWorktreesOnce (#834 gate② round 4, A2 — the
  *  single-cycle engine-startup caller never does, by owner ruling: see that function's own
  *  windowing doc).
@@ -624,26 +573,18 @@ export async function sweepPresentDirectoryWorktreesAndReport(
  *  list points past the end of the new one; this was the exact bug the reviewer reproduced in
  *  gate② round 2). Terminates the instant a cycle's `examinedPaths` comes back empty.
  *
- *  SKIPPED-COUNT ARITHMETIC (#834 gate② round 4, A2 — found independently by both the reviewer
- *  and the PO): `reaped`/`retained`/`failed` accumulate across every cycle unchanged, since each
- *  cycle's window is disjoint from every earlier one in the same run. `skipped` needs TWO
- *  components, not one:
- *   1. The TERMINATING (final, empty-window) cycle's own `skipped` — by construction that cycle's
- *      internal candidate count is 0, so its `skipped` is exactly the count of permanently
- *      classification-skipped candidates (under-age, no-branch/detached) as of the final scan,
- *      each counted exactly once, with zero window-overflow component (gate② round 3, W4 — a
- *      naive SUM across cycles re-counts these on every single cycle, since they never enter
- *      `candidates` and so never join `seen`).
- *   2. The SUM, across every cycle, of each cycle's own `mergeGateSkipped` — an unlocked-merged-
- *      candidate whose branch fails `isBranchMerged` DOES join `seen` (it was examined, just not
- *      reaped), so it drops out of every later cycle's classification pass and would otherwise
- *      vanish from the terminating cycle's count entirely (gate② round 4, A2's own finding: W4's
- *      fix alone undercounts these). Summing `mergeGateSkipped` specifically — never the whole
- *      combined `skipped` field — is exact, because the identity-based cursor guarantees each
- *      candidate is examined AT MOST ONCE across the whole run, so there is nothing to
- *      double-count.
- *  Two local variables carry this (`finalSkipped`, `mergeGateSkippedSum`) — no new counters or
- *  state beyond that, per the owner's explicit instruction.
+ *  SKIPPED-COUNT ARITHMETIC: `reaped`/`retained`/`failed` accumulate across every cycle unchanged,
+ *  since each cycle's window is disjoint from every earlier one in the same run. With the
+ *  merged-branch gate gone (#834's Ruling addendum — see this module's own header doc), every
+ *  candidate the window ever REACHES ends in reaped/retained/failed, never skipped — a candidate
+ *  can no longer be examined (join `seen`) and then vanish from every bucket the way an
+ *  unmerged-branch candidate used to (gate② round 4, A2's original finding). So `skipped` is back
+ *  to ONE component: the TERMINATING (final, empty-window) cycle's own `skipped` — by
+ *  construction that cycle's internal candidate count is 0, so its `skipped` is exactly the count
+ *  of permanently classification-skipped (under-age, or unresolvable-age) candidates as of the
+ *  final scan, each counted exactly once (gate② round 3, W4 — a naive SUM across cycles would
+ *  re-count these on every single cycle, since they never enter `candidates` and so never join
+ *  `seen`).
  *
  *  This is the SAME code path scripts/worktree-janitor.ts (the operator one-shot script) now runs
  *  alongside the existing missing-directory pass. */
@@ -656,7 +597,6 @@ export async function runPresentDirectoryWorktreeSweepToCompletion(
   const totalRetained: string[] = [];
   const totalFailed: Array<{ path: string; error: string; tombstonePath?: string }> = [];
   let finalSkipped = 0;
-  let mergeGateSkippedSum = 0;
   const seen = new Set<string>();
   let cycle = 0;
   for (;;) {
@@ -665,15 +605,15 @@ export async function runPresentDirectoryWorktreeSweepToCompletion(
     totalReaped.push(...result.reaped);
     totalRetained.push(...result.retained);
     totalFailed.push(...result.failed);
-    mergeGateSkippedSum += result.mergeGateSkipped;
     log(
       `[sapwood:worktree-janitor] present-dir cycle ${cycle}: reaped ${result.reaped.length}, retained ${result.retained.length}, ` +
         `skipped ${result.skipped}, failed ${result.failed.length}`,
     );
     if (result.examinedPaths.length === 0) {
-      // See this function's own doc for the full arithmetic: the terminating cycle's `skipped`
-      // (classification-only, by construction) plus the run-wide sum of merge-gate skips.
-      finalSkipped = result.skipped + mergeGateSkippedSum;
+      // See this function's own doc: the terminating (empty-window) cycle's own `skipped` IS the
+      // run's total — nothing else to add now that every reached candidate ends in
+      // reaped/retained/failed.
+      finalSkipped = result.skipped;
       break;
     }
     for (const p of result.examinedPaths) seen.add(p);
@@ -682,7 +622,6 @@ export async function runPresentDirectoryWorktreeSweepToCompletion(
     reaped: totalReaped,
     retained: totalRetained,
     skipped: finalSkipped,
-    mergeGateSkipped: mergeGateSkippedSum,
     failed: totalFailed,
     examinedPaths: [],
   };
