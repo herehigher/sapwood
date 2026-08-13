@@ -227,6 +227,7 @@ export function appContent(vm: AppViewModel) {
             lanesMax={loop.data.lanes.max}
             engine={loop.data.engine.state}
             lanes={mode === "live" ? loop.data.lanes.items : []}
+            mergedPrs={mode === "live" ? loop.data.mergedPrs : []}
             fixCap={fixCap}
             roundPhase={mode === "live" ? (loop.data.round?.phase ?? null) : null}
             config={loop.data.config}

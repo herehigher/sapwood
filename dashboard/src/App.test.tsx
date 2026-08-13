@@ -9,7 +9,7 @@ import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
 import type { DemoBundle } from "./demo/types.ts";
 import type { DomainEvent } from "./domain-event.ts";
-import { initialHeroState } from "./hero/state.ts";
+import { foldEvents, type HeroState, initialHeroState } from "./hero/state.ts";
 import { initialReplayState } from "./replay/reducer.ts";
 import { bucketSpendByPhase, phaseSpendBars } from "./replay/spend-replay.ts";
 
@@ -51,6 +51,7 @@ function minimalAppViewModel(
     mode?: "live" | "replay";
     loop?: unknown;
     roundSpend?: unknown;
+    activeHero?: HeroState;
   } = {},
 ) {
   return {
@@ -86,7 +87,7 @@ function minimalAppViewModel(
       spendThroughCursor: [],
       phaseWindows: [],
     },
-    activeHero: initialHeroState(null),
+    activeHero: overrides.activeHero ?? initialHeroState(null),
     activeSteps: [],
     activeEvents: [],
     activeTitles: {},
@@ -113,6 +114,7 @@ const LOOP_STATE_OK = {
   round: null,
   spend: { todayUsd: 0, dailyBudgetUsd: null, runUsd: null, runBudgetUsd: null, byModel: [] },
   rings: 0,
+  mergedPrs: [],
   logPath: null,
   config: {},
   controlsEnabled: false,
@@ -632,6 +634,53 @@ test("#766 gate② finding [2]: neither LaneBoard's nor ConfigDrawer's own rende
   assert.doesNotMatch(html, /aria-label="config"/, "ConfigDrawer's own aria-label must not render while replaying");
 });
 
+// ── #803: App's REAL wiring of `/api/loop/state`'s `mergedPrs` into the hero tally ────────────
+//
+// hero.test.ts proves `HeroStage` itself honors `mergedPrs` in isolation — this proves App.tsx
+// actually THREADS the server's field there (WIRING sub-case of the test-realism doctrine family):
+// a real fold (`foldEvents`, not a hand-built droplet) produces a checkpoint droplet whose PR the
+// fold's own reducer never resolves (state.ts only handles the plain `merged` kind), and
+// `appContent`'s real tree is rendered end to end through `loop.data.mergedPrs`.
+function heroWithCheckpointDroplet(pr: number): HeroState {
+  const events: DomainEvent[] = [
+    { known: false, id: 1, ts: "2026-08-13T10:00:00Z", kind: "dispatched", payload: { worker: "w-803", issue: 803 } },
+    {
+      known: false,
+      id: 2,
+      ts: "2026-08-13T10:05:00Z",
+      kind: "reclaim-done",
+      payload: { worker: "w-803", issue: 803, next: "DRIVING", pr },
+    },
+  ];
+  return foldEvents(initialHeroState(3), events).state;
+}
+
+test("#803: App's real tree excludes a droplet from the pending tally when its PR is in loop.data.mergedPrs", () => {
+  const pr = 90391;
+  const vm = minimalAppViewModel({
+    mode: "live",
+    loop: { data: { ...LOOP_STATE_OK, mergedPrs: [pr] }, isPending: false },
+    activeHero: heroWithCheckpointDroplet(pr),
+  });
+  const html = renderToStaticMarkup(appContent(vm));
+  assert.match(html, /0 merged · 0 pending · 0 needs human/, "the real App tree must exclude the merged-witnessed PR from the tally");
+});
+
+test("#803: the SAME droplet renders under the #745 windowed qualifier when loop.data.mergedPrs does not name its PR", () => {
+  const pr = 90392;
+  const vm = minimalAppViewModel({
+    mode: "live",
+    loop: { data: { ...LOOP_STATE_OK, mergedPrs: [] }, isPending: false },
+    activeHero: heroWithCheckpointDroplet(pr),
+  });
+  const html = renderToStaticMarkup(appContent(vm));
+  assert.match(
+    html,
+    /0 merged · 0 pending \(1 unverified\) · 0 needs human/,
+    "with no persisted merged witness, the droplet falls back to the #745 honest qualifier, proving this isn't a hardcoded suppression",
+  );
+});
+
 // ── #766 gate② finding [1] (replay-spend-panel-unexercised) ────────────────────────────────────
 //
 // `spend-replay.test.ts` proves `bucketSpendByPhase`/`phaseSpendBars` as pure array transforms, and
@@ -694,6 +743,7 @@ function demoBundleFixture(): DemoBundle {
       round: null,
       spend: { todayUsd: 0, dailyBudgetUsd: null, runUsd: null, runBudgetUsd: null, byModel: [] },
       rings: 1,
+      mergedPrs: [],
       logPath: null,
       config: {},
       controlsEnabled: false,

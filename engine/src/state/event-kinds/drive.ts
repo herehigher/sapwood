@@ -48,7 +48,7 @@ export const DRIVE_EVENT_KINDS = defineKinds({
 
   // Merge + rollback.
   merged: {
-    tags: ["pr-touched", "round-artifact", "escalation-clear"],
+    tags: ["pr-touched", "round-artifact", "escalation-clear", "merged-witness"],
     meaning: "a PR was merged by the conductor (CI green + a fresh review, per the configured merge gate).",
     actionability: "routine",
   },
@@ -157,7 +157,7 @@ export const DRIVE_EVENT_KINDS = defineKinds({
   // The two GATED RECLAIM collection terminals (no reentry is attempted, so neither burns an
   // attempt and neither is an attention item).
   "gated-reentry-merged": {
-    tags: [],
+    tags: ["merged-witness"],
     meaning: "a gated-reentry lane's PR was found already merged; the lane was collected as done rather than reentered.",
     actionability: "routine",
   },

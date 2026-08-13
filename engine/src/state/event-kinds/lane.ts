@@ -178,14 +178,14 @@ export const LANE_EVENT_KINDS = defineKinds({
     see: "#447",
   },
   "lane-revival-terminal": {
-    tags: [],
+    tags: ["merged-witness"],
     meaning:
       "the revival pass found the lane's PR already MERGED (recorded for the merged case only) and closed it out instead of reviving it (#447).",
     actionability: "routine",
     see: "#447",
   },
   "human-merge-only-closed": {
-    tags: [],
+    tags: ["merged-witness"],
     meaning:
       "a parked human-merge-only lane's PR (#397 bucket 2) was found MERGED and closed out — in-progress cleared, board set done, worktree run through the same mtime/ctime reclaim policy the DEAD path uses, worker row terminalized. Never re-drives the lane (#824).",
     actionability: "routine",

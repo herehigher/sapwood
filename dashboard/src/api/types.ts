@@ -57,6 +57,10 @@ export type LoopState = {
   };
   /** COUNT(events WHERE kind='merged') — the ring count. */
   rings: number;
+  /** #803: PR numbers the persisted event log witnesses as MERGED (merged-witness event kinds) —
+   *  a null-honest projection, never a guessed state. A PR absent here simply has no persisted
+   *  terminal witness (still open, or closed-without-merge, which the engine never persists). */
+  mergedPrs: number[];
   /** Path only; the server never serves log content. */
   logPath: string | null;
   /** Allowlisted subset of the resolved config (§3 E) — never the whole object.

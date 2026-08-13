@@ -285,6 +285,17 @@ export type HeroStageProps = {
    * Empty in replay, where the live overlay does not exist (§6).
    */
   liveLanes?: readonly { issue: number }[];
+  /**
+   * #803: PR numbers the persisted event log witnesses as MERGED (`/api/loop/state`'s
+   * `mergedPrs`, keyed by `State.mergedPrNumbers`'s merged-witness projection). A droplet whose
+   * `pr` appears here never counts as pending — not confident, not the #745 windowed qualifier
+   * either — since three of the four merged-witness kinds (`gated-reentry-merged`,
+   * `lane-revival-terminal`, `human-merge-only-closed`) are never folded into a droplet's own
+   * `at` transition (only plain `merged` is, in state.ts's reducer), so this projection is the
+   * only place those PRs' terminal state ever reaches the tally. Empty in replay, same as
+   * `liveLanes` — the live overlay does not exist there (§6).
+   */
+  mergedPrs?: readonly number[];
   ref?: Ref<SVGSVGElement>;
 };
 
@@ -320,6 +331,7 @@ export function HeroStage({
   config = null,
   now,
   liveLanes = [],
+  mergedPrs = [],
   ref,
 }: HeroStageProps) {
   // #716 gate② P1-9: every downstream position/render computation reads the CAPPED,
@@ -347,7 +359,14 @@ export function HeroStage({
   // count named separately. `foldTruncated` only picks the qualifier's WORDING: "in window"
   // while genuinely still catching up (transient), "unverified" once caught up but still
   // unvouched (persistent) — never a silent deletion, never a silently smaller or wrong number.
-  const pendingDroplets = state.droplets.filter((d) => d.at === "backlog" || d.at === "lane" || d.at === "checkpoint");
+  // #803: a droplet whose PR the persisted event log witnesses as MERGED is excluded from the
+  // pending set entirely — checked BEFORE the #745 confident/windowed split, so such a droplet
+  // never lands in either bucket (see mergedPrs's own doc for why three of the four
+  // merged-witness kinds never reach here via the fold's own `at` transitions).
+  const mergedPrSet = new Set(mergedPrs);
+  const pendingDroplets = state.droplets
+    .filter((d) => d.at === "backlog" || d.at === "lane" || d.at === "checkpoint")
+    .filter((d) => d.pr === null || !mergedPrSet.has(d.pr));
   const liveIssues = new Set(liveLanes.map((l) => l.issue));
   const windowedCount = pendingDroplets.filter((d) => !isPendingConfident(d, liveIssues)).length;
   const pendingCount = pendingDroplets.length - windowedCount;

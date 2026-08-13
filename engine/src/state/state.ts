@@ -11,8 +11,15 @@ import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { capDigest } from "../retro/retro-digest.js";
 import type { AcceptanceCriterion, AcSnapshot } from "../review/ac-snapshot.js";
-import type { EventKind, KindGlossary } from "./event-kinds/index.js";
+import { type EventKind, type KindGlossary, kindsTagged } from "./event-kinds/index.js";
 import type { EventPayloadFor, EventPayloads, PayloadTypedKind } from "./event-kinds/payloads.js";
+
+/** #803: every event kind that durably records the engine having observed a PR's terminal MERGED
+ *  state — `merged` itself, plus the three collection-terminal kinds that record a PR already
+ *  found merged instead of driving/reviving it. Derived from the registry's `merged-witness` tag
+ *  (#425 pattern, event-kinds.test.ts's cross-manifest test) rather than hand-enumerated here, so
+ *  a future merged-witness kind can't silently fall out of `State.mergedPrNumbers`'s projection. */
+export const MERGED_WITNESS_KINDS = kindsTagged("merged-witness");
 
 // Ordered migrations. index N upgrades schema from user_version N to N+1. Append-only:
 // never edit a shipped migration, add a new one. user_version (a SQLite builtin) is the
@@ -4127,6 +4134,22 @@ export class State {
    *  JSON.parse per row for a number the caller only wants to display. */
   countEvents(kind: string): number {
     return (this.db.prepare("SELECT COUNT(*) AS n FROM events WHERE kind = ?").get(kind) as { n: number }).n;
+  }
+
+  /** #803: every PR number the persisted event log witnesses as MERGED — DISTINCT `pr` across
+   *  MERGED_WITNESS_KINDS, extracted SQLite-side (`laneEventRecorded`'s json_extract pattern)
+   *  rather than a JSON.parse per row, hitting the `events(kind)` index for the IN(...) predicate.
+   *  Null-honest: a PR absent here simply carries no persisted terminal witness (still open, or
+   *  closed-without-merge, which the engine never persists) — never a guessed state. §8's hero
+   *  tally binds its confident-pending count to this projection instead of inferring from lane-row
+   *  presence (a live lane row can never carry a terminal PR state — the tick that first observes
+   *  a terminal PR state settles the lane out of activeWorkers() in the same synchronous step). */
+  mergedPrNumbers(): number[] {
+    const placeholders = MERGED_WITNESS_KINDS.map(() => "?").join(",");
+    const rows = this.db
+      .prepare(`SELECT DISTINCT json_extract(payload, '$.pr') AS pr FROM events WHERE kind IN (${placeholders})`)
+      .all(...MERGED_WITNESS_KINDS) as { pr: number | null }[];
+    return rows.map((r) => r.pr).filter((pr): pr is number => typeof pr === "number");
   }
 
   /** One ascending page of the RAW event ledger — §8's `/api/events` transport. Unlike

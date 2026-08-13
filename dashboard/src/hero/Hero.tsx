@@ -42,6 +42,9 @@ export type HeroProps = {
    * lane list still tracks it" confidence check, matched by issue.
    */
   lanes?: readonly { lane: string; pr: number | null; issue: number }[];
+  /** #803: `/api/loop/state`'s `mergedPrs` — the persisted merged-witness projection, threaded
+   *  straight through to `HeroStage` (see its own doc). Empty in replay, same as `lanes`. */
+  mergedPrs?: readonly number[];
   /** `lanes.prFixCap` — the "round n of cap" denominator. */
   fixCap?: number;
   /** Live round-phase cursor (`/api/loop/state`'s `round.phase`); null when no round is open. */
@@ -59,6 +62,7 @@ export function Hero({
   lanesMax,
   engine,
   lanes = [],
+  mergedPrs = [],
   fixCap = 2,
   roundPhase = null,
   speed = 1,
@@ -103,6 +107,7 @@ export function Hero({
       reducedMotion={reducedMotion}
       config={config}
       liveLanes={lanes}
+      mergedPrs={mergedPrs}
     />
   );
 }

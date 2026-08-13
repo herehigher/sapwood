@@ -89,8 +89,8 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `lane-adopted` — **routine**: the engine adopted a lane it found already running/pushed at startup rather than treating it as orphaned.
 - `lane-pr-unknown` — **expected-noise**: a lane's PR association came back UNKNOWN (transient forge write failure); the lane is deferred rather than settled (#377). (see #377)
 - `lane-revived` — **routine** [escalation-clear]: an env-failed lane holding an OPEN PR was revived back to `driving` rather than left stranded between owners (#447). (see #447)
-- `lane-revival-terminal` — **routine**: the revival pass found the lane's PR already MERGED (recorded for the merged case only) and closed it out instead of reviving it (#447). (see #447)
-- `human-merge-only-closed` — **routine**: a parked human-merge-only lane's PR (#397 bucket 2) was found MERGED and closed out — in-progress cleared, board set done, worktree run through the same mtime/ctime reclaim policy the DEAD path uses, worker row terminalized. Never re-drives the lane (#824). (see #824)
+- `lane-revival-terminal` — **routine** [merged-witness]: the revival pass found the lane's PR already MERGED (recorded for the merged case only) and closed it out instead of reviving it (#447). (see #447)
+- `human-merge-only-closed` — **routine** [merged-witness]: a parked human-merge-only lane's PR (#397 bucket 2) was found MERGED and closed out — in-progress cleared, board set done, worktree run through the same mtime/ctime reclaim policy the DEAD path uses, worker row terminalized. Never re-drives the lane (#824). (see #824)
 - `ceiling-escalated` — **intervene** [retro, round-artifact, escalation-source:never]: a lane was drained for a cost/wall-clock ceiling breach; `never` a proof of the needs-human label (the drain's own label write is best-effort).
 - `worktree-retained` — **investigate**: a lane's worktree was kept on disk (dirty/uncommitted state) instead of being deleted on reclaim, for a human to salvage.
 - `worktree-released` — **routine**: a lane's worktree was deleted after reclaim (clean, nothing to salvage).
@@ -122,7 +122,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `drive-fixup` — **routine**: gate② returned FIXUP — a fix leg was dispatched against the PR's outstanding findings.
 - `drive-human-merge-only` — **intervene**: gate② classified the PR as human-merge-only (bucket 2, #397/#292 instruction-path trust chain) — the PR is fine, but its merge decision is a human's, one-way and never re-decided. (see #292)
 - `drive-thread-writes-pending` — **routine**: a fix leg's review-thread reply/resolve writes are still queued for this PR; driving deferred until they drain.
-- `merged` — **routine** [pr-touched, round-artifact, escalation-clear]: a PR was merged by the conductor (CI green + a fresh review, per the configured merge gate).
+- `merged` — **routine** [pr-touched, round-artifact, escalation-clear, merged-witness]: a PR was merged by the conductor (CI green + a fresh review, per the configured merge gate).
 - `rollback-recovered` — **routine** [round-artifact]: a pending board-status rollback (#31) succeeded on retry; the durable rollback record is cleared.
 - `rollback-escalated` — **intervene** [round-artifact, escalation-source:never]: a pending board-status rollback exhausted its retry cap; `never` a proof of the needs-human label (the write attempted here is itself best-effort).
 - `rollback-retry-failed` — **expected-noise**: one attempt at a pending board-status rollback failed, under the retry cap; retried next tick.
@@ -137,7 +137,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `gated-reentry` — **routine** [round-artifact, escalation-clear]: a human removed a lane's escalation label, and the #147 handshake re-admitted the lane for one bounded reentry attempt. (see #147)
 - `gated-reentry-capped` — **intervene** [round-artifact, escalation-source:always]: a lane exhausted its bounded #147 gated-reentry attempts; always proven by presence. (see #147)
 - `gated-reentry-capped-label-failed` — **investigate** [escalation-source:never]: the needs-human re-apply write for a gated-reentry-capped lane failed; `never` a proof (the write's own failure is the point).
-- `gated-reentry-merged` — **routine**: a gated-reentry lane's PR was found already merged; the lane was collected as done rather than reentered.
+- `gated-reentry-merged` — **routine** [merged-witness]: a gated-reentry lane's PR was found already merged; the lane was collected as done rather than reentered.
 - `gated-reentry-issue-closed` — **routine**: a gated-reentry lane's issue was found already closed; the lane was collected as done rather than reentered.
 - `gated-reentry-candidate-staged` — **routine**: a gated-reentry lane whose escalation never pinned a body-hash candidate (comment-cursor-stale) had one staged from the live body on this tick's first observation of the cleared hold; reentry itself waits for a later tick to reconfirm it. (see #685)
 - `fix-leg-started` — **routine** [fix-leg]: a fresh fix leg was dispatched against a PR's outstanding findings/verdict.
