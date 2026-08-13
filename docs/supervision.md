@@ -577,6 +577,17 @@ gh pr list    --repo OWNER/REPO --label "sapwood:hold" --state open
 list` queries above rather than treating either alone as the complete picture: a PR can
 be `driving` in the DB and simultaneously carry a human hold label on GitHub.
 
+Merging a `sapwood:human-merge-only` PR by hand is the only manual step left in that
+flow — sapwood closes the lane out on its own next tick once the merge lands: the board
+item moves to `done`, `labels.inProgress` comes off the issue, and the worktree goes
+through the same clean/dirty check as the [dirty-worktree
+degrade](troubleshooting.md#dirty-worktree-degrade) path above. A clean worktree (or one
+that never existed) gets a best-effort deletion attempt as part of that close-out —
+nothing else for you to do, though an unremovable-but-clean directory doesn't block the
+close-out either, so it can rarely survive on disk as a harmless leftover. A dirty one is
+retained and escalated with `labels.needsHuman` exactly like any other dirty-worktree
+degrade; that's the one case still left to a human, and it's salvaged the same way.
+
 ## Governance lines
 
 - **List-never-merge.** A supervisor session's job is visibility and, where authorized,
