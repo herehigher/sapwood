@@ -44,7 +44,7 @@ behavior tied to any one team's workflow.
 ## What the framework does
 
 A 3-layer nested loop: `/loop` (harness) ⊃ `/dev-round` (one full round A–E) ⊃
-`/dev-loop` → `loop_conductor.sh tick` (one scheduling beat).
+`/dev-loop` → the engine's `tick()` (one scheduling beat).
 
 - **Work queue = GitHub itself**: a ProjectV2 board `Status` field + issue labels
   *are* the task state (no DB). All via `gh` CLI (REST + GraphQL).
@@ -205,8 +205,8 @@ Zero-runtime-dependency-where-possible, fail-closed-by-default:
 The scheduler + worker + live guard — the *generic scheduling/worker mechanics
 only*, never application-specific behavior.
 
-- **`conductor.ts`** — pure scheduling core mirrors `test_loop_conductor.sh` row-for-row
-  (`classifyLane` 4-signal lane state, `issuePriority` [matches configured-prefix `prio:N`, bare when the prefix is empty, and suffixed],
+- **`conductor.ts`** — pure scheduling core is parity-tested row-for-row against a
+  frozen reference (`classifyLane` 4-signal lane state, `issuePriority` [matches configured-prefix `prio:N`, bare when the prefix is empty, and suffixed],
   `labelsBlockers`, `budgetExceeded`, `codingFloor`/`isCodingRank`/`metaLaneAllowed`
   anti-starvation, `laneOnReclaim*`, `driveDecision`). **Structured discriminated-union tick
   result**, not a stringly-typed text protocol. `tick()` =
@@ -265,8 +265,8 @@ says stop.
   never skips or softens gate②.**
 - **`merge-driver.ts` (#13)** — gate① (CI green, fail-closed: an empty check rollup is
   NOT green) + gate② → squash-merge pinned by **`--match-head-commit`** (TOCTOU: a push
-  after the gates fails the merge command itself). `mergeDecision` is a **23-case
-  row-for-row parity port** of `test_loop_merge_driver.sh`. Both gate reads must observe
+  after the gates fails the merge command itself). `mergeDecision` is a **23-case,
+  row-for-row parity-tested** function, checked against a frozen reference. Both gate reads must observe
   the **same head** (split observation → requeue). An already-**MERGED** PR resolves as
   done (the designed happy path of `produce-pr-and-stop`, where a human merges);
   **CONFLICTING** → the FIXABLE fix lane (#270: conflict resolution is producer work —
@@ -961,8 +961,7 @@ public-repo hardening is additive, not a rewrite.** v1 requirements:
 - **Designed-for-public seams (built as interfaces in v1, enforced in v1.1):**
   scoped ephemeral GitHub App tokens per worker (replacing host `gh` auth); a written
   threat model treating issue text as hostile data; fixing the public-repo merge-gate
-  hole so `MERGE_OK` requires an *allowlisted* reviewer, not any non-author review
-  (`pr_gate.sh:240-242` vs `loop_merge_driver.sh:33-34`).
+  hole so `MERGE_OK` requires an *allowlisted* reviewer, not any non-author review.
 
 ### Validation depth ∝ decision weight (the structured-output write inventory)
 
@@ -1075,14 +1074,14 @@ marker idempotency, output schema, escalation path) see
   pure functions (the frozen regression contract, `conductor.test.ts`); **dogfooded end-to-end**
   (claim→worktree→TDD→PR, guard live, no
   self-merge). Key decisions + deferrals (#31/#33/#37) in "M2 engine core" above.
-  `merge_decision` + parity vs `test_loop_merge_driver.sh` move to M3 with the merge-driver.
+  `merge_decision` + parity testing move to M3 with the merge-driver.
 - **M3 — Review gate + merge modes:** ✅ **delivered (PRs #41, #42, #43, #44; hardening
   #39, #40).** `reviewer.ts` + `merge-driver.ts` shipped with the **pre-#501 default**:
   autonomous-merge gated on a fresh non-author Codex review (gate②) + CI green (gate①),
   merged by the Conductor; produce-PR-and-stop selectable. Pluggable reviewer
   (different-model Codex / same-model-trusted-only / human; engine-agent added in M10 —
   Decision #10), engine cost ceiling + kill switch (#14), rollback hardening (#31). 23-case
-  parity vs `test_loop_merge_driver.sh`;
+  row-for-row parity testing;
   `--match-head-commit` TOCTOU pin. Key decisions + deferrals in "M3 review gate + merge
   modes" above. ~~Live end-to-end merge-gate run moves to M4 with the loop driver.~~
 - **M4 — UX surface + CLI:** ✅ **loop driver delivered (#46, PR TBD):** `driver.ts`
