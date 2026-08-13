@@ -502,7 +502,7 @@ export function laneStateCaption(state: string): string {
 /** §3 Operations / §7: the misfire-protection confirm copy for each control verb, verbatim from
  *  the design doc's own table + confirm-wording examples — sourced from here, never an inline
  *  string in the Controls component, so a reviewer checking §7 compliance has one place to look. */
-export const CONTROL_COPY: Record<"start" | "pause" | "resume" | "stop", { label: string; confirm: string }> = {
+export const CONTROL_COPY: Record<"start" | "pause" | "resume" | "stop" | "estop", { label: string; confirm: string }> = {
   start: { label: "Start", confirm: "Start — clears any pause or stop signal so the next tick runs." },
   pause: { label: "Pause", confirm: "Pause — lanes finish their current work, nothing new dispatches." },
   resume: { label: "Resume", confirm: "Resume — removes the pause; the next tick continues the run." },
@@ -510,6 +510,10 @@ export const CONTROL_COPY: Record<"start" | "pause" | "resume" | "stop", { label
     label: "Stop",
     confirm: "Stop — lanes get the drain window to finish or hand off; any lane still running after that is stopped hard.",
   },
+  // §3 Operations, 2026-07-21 label rule: spelled out, never "E-STOP" — misreads as "E-SHOP" at
+  // small type, and the full form matches the engine signal name (EMERGENCY_STOP) exactly. The
+  // confirm sentence is the locked verbatim consequence wording from the same amendment.
+  estop: { label: "EMERGENCY STOP", confirm: "EMERGENCY STOP — in-flight work is killed, WIP may be lost." },
 };
 
 /** #723: the same §7 caption convention applied to the header's ENGINE state word (frontend-

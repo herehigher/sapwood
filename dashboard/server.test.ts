@@ -323,7 +323,15 @@ test("/api/loop/state matches the §8 shape against a seeded DB", async () => {
       "round",
       "spend",
     ]);
-    assert.deepEqual(Object.keys(body.engine).sort(), ["lastTickAt", "pauseActive", "reasons", "standbyNextCheckSec", "state", "terminal"]);
+    assert.deepEqual(Object.keys(body.engine).sort(), [
+      "estopActive",
+      "lastTickAt",
+      "pauseActive",
+      "reasons",
+      "standbyNextCheckSec",
+      "state",
+      "terminal",
+    ]);
     assert.equal(body.engine.standbyNextCheckSec, null, "not in standby in this fixture");
     assert.deepEqual(body.engine.reasons, []);
     assert.equal(body.engine.terminal, null, "#407: no terminal has been written for the newest run");
@@ -424,6 +432,21 @@ test("#361 /api/loop/state: staleness beats PAUSE in `state`, but `pauseActive` 
   }
 });
 
+test("#733 /api/loop/state serves the raw EMERGENCY_STOP sentinel independently, same posture as pauseActive", async () => {
+  const fx = await fixture(
+    (s) => {
+      s.touchLastTick(new Date("2026-07-24T11:59:30.000Z"));
+    },
+    { estop: true },
+  );
+  try {
+    const body = await getJson(fx, "/api/loop/state");
+    assert.equal(body.engine.estopActive, true);
+  } finally {
+    fx.close();
+  }
+});
+
 test("#361 /api/loop/state: controlsEnabled mirrors dashboard.controls, true by default, false when set, false when config unreadable", async () => {
   const on = await fixture(undefined, { controls: true });
   const off = await fixture(undefined, { controls: false });
@@ -464,7 +487,15 @@ test("#642 AC1: /api/loop/state, /api/events, /api/spend are byte-identical to t
     assert.deepEqual(loop, {
       // No heartbeat was ever seeded (lastTickAt null -> infinite tick age -> stale, and no
       // terminal event -> the bare "crashed or killed" reading, deriveEngineState's own doc).
-      engine: { state: "stalled", reasons: [], lastTickAt: null, standbyNextCheckSec: null, terminal: null, pauseActive: false },
+      engine: {
+        state: "stalled",
+        reasons: [],
+        lastTickAt: null,
+        standbyNextCheckSec: null,
+        terminal: null,
+        pauseActive: false,
+        estopActive: false,
+      },
       lanes: {
         max: 3,
         items: [
@@ -898,14 +929,12 @@ test("/api/rounds is an empty list on a fresh DB, never an error", async () => {
 
 const ticking = (s: State) => s.touchLastTick(new Date());
 
-test("POST /api/control accepts exactly the four verbs; estop and garbage are 400", async () => {
+test("POST /api/control accepts exactly the five verbs; garbage is 400", async () => {
   const fx = await fixture(ticking);
   try {
-    for (const verb of ["start", "pause", "resume", "stop"]) {
+    for (const verb of ["start", "pause", "resume", "stop", "estop"]) {
       assert.equal((await control(fx, verb)).status, 200, `${verb} should be allowlisted`);
     }
-    // estop stays OFF the allowlist until the #293 EMERGENCY_STOP engine sentinel exists.
-    assert.equal((await control(fx, "estop")).status, 400);
     for (const verb of ["", "STOP", "restart", 7, null, { verb: "stop" }]) {
       assert.equal((await control(fx, verb)).status, 400, `unexpected acceptance of ${JSON.stringify(verb)}`);
     }
@@ -970,6 +999,39 @@ test("POST /api/control's only effect is sentinel create/remove, and it answers 
     assert.deepEqual(await (await control(fx, "start")).json(), { state: "running" });
     assert.equal(existsSync(killPath), false);
     assert.equal(existsSync(pausePath), false);
+  } finally {
+    fx.close();
+  }
+});
+
+test("#733 POST /api/control estop writes the EMERGENCY_STOP sentinel and its response names the real consequence, never an unqualified 'lost'", async () => {
+  const fx = await fixture(ticking);
+  const estopPath = join(fx.dir, "EMERGENCY_STOP");
+  try {
+    assert.equal(existsSync(estopPath), false);
+    const res = await control(fx, "estop");
+    assert.equal(res.status, 200);
+    assert.equal(existsSync(estopPath), true);
+    const body = (await res.json()) as { state: string; message: string };
+    // #733 engine-agent finding [0]: the AC requires the response text to state the consequence
+    // as an IMMEDIATE HARD KILL with NO DRAIN — assert those claims directly rather than only the
+    // retained/stranded half, so the test actually reds if either claim is removed or contradicted.
+    assert.match(body.message, /immediate/i, "must state the kill is immediate");
+    assert.match(body.message, /hard kill/i, "must state the kill is a HARD kill, not the drain-first Stop tier");
+    assert.match(body.message, /no drain/i, "must state there is no drain window at all");
+    assert.doesNotMatch(body.message, /\blost\b/i, "WIP is stranded pending review, never unconditionally 'lost'");
+    assert.match(body.message, /stranded|retained/i);
+    assert.match(body.message, /human review|needs-human/i);
+  } finally {
+    fx.close();
+  }
+});
+
+test("#733 dashboard.controls: false rejects estop exactly like the other four verbs", async () => {
+  const fx = await fixture(ticking, { controls: false });
+  try {
+    assert.equal((await control(fx, "estop")).status, 404);
+    assert.equal(existsSync(join(fx.dir, "EMERGENCY_STOP")), false);
   } finally {
     fx.close();
   }
@@ -1107,6 +1169,7 @@ interface FixtureOpts {
   config?: boolean;
   killSwitch?: boolean;
   pause?: boolean;
+  estop?: boolean;
   /** Written as `dashboard.controls` — omitted leaves the schema default (true). */
   controls?: boolean;
   staticDir?: string;
@@ -1129,6 +1192,7 @@ async function fixture(seed?: (s: State) => void, opts: FixtureOpts = {}): Promi
   // it the same way an operator or `/sapwood-stop` would, so isKillSwitchActive() reads true.
   if (opts.killSwitch) writeFileSync(join(dir, "KILL_SWITCH"), "", "utf8");
   if (opts.pause) writeFileSync(join(dir, "PAUSE"), "", "utf8");
+  if (opts.estop) writeFileSync(join(dir, "EMERGENCY_STOP"), "", "utf8");
 
   let configPath: string | undefined;
   if (opts.config !== false) {

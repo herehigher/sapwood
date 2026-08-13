@@ -308,7 +308,7 @@ own control signals:
 | Resume | Remove the PAUSE sentinel; the next tick continues the run. |
 | Stop | Create the kill-switch sentinel — the PLAN.md safety tier, described honestly: active lanes get the bounded drain window (`cost.drainWindowSec`) to finish or hand off; a lane still running after it is hard-stopped by the engine. Drain-first with the existing hard backstop — the dashboard adds no new stop mechanism and must not promise a softer one than the engine has. |
 | Start | Clear stop/pause sentinels so the next tick runs. If the engine *process* is dead, the dashboard cannot spawn it — the button flips to showing the CLI launch command instead (honest boundary; process supervision is not a browser feature). |
-| Emergency stop | **Immediate hard stop, no drain window** — every running lane's process group is killed at once; in-flight work is lost and lanes escalate `needs-human`. Requires the additive `EMERGENCY_STOP` engine sentinel (#293, `type:security`, human-merge-only) — the button does not render until that signal exists. Verified 2026-07-21: the existing kill switch is drain-first by design (SIGTERM handoff requests, hard kill only past `cost.drainWindowSec`), so Stop ≠ Emergency stop and the UI must never describe either tier as softer or harder than the engine's actual behavior. **Label rule (2026-07-21):** the button reads **EMERGENCY STOP** spelled out — the industrial abbreviation "E-STOP" is standard on hardware (ISO 13850) but misreads as "E-SHOP" at small type in a web header, and the full form matches the engine signal name exactly. It carries a small **octagon outline icon** (stop-sign shape) — the page's only icon-bearing control button and, like rust, page-unique; Pause/Stop stay text-only (the asymmetry *is* the tier hierarchy). |
+| Emergency stop | **Immediate hard stop, no drain window** — every running lane's process group is killed at once; in-flight work is lost and lanes escalate `needs-human`. Requires the additive `EMERGENCY_STOP` engine sentinel (#293, `type:security`, human-merge-only) — **landed** (sentinel #724, button+verb #733); the button renders only while the engine is actually running (verb-legality). Verified 2026-07-21: the existing kill switch is drain-first by design (SIGTERM handoff requests, hard kill only past `cost.drainWindowSec`), so Stop ≠ Emergency stop and the UI must never describe either tier as softer or harder than the engine's actual behavior. **Label rule (2026-07-21):** the button reads **EMERGENCY STOP** spelled out — the industrial abbreviation "E-STOP" is standard on hardware (ISO 13850) but misreads as "E-SHOP" at small type in a web header, and the full form matches the engine signal name exactly. It carries a small **octagon outline icon** (stop-sign shape) — the page's only icon-bearing control button and, like rust, page-unique; Pause/Stop stay text-only (the asymmetry *is* the tier hierarchy). |
 
 **Misfire protection is mandatory**: every verb is two-step — the control
 opens a confirm that names the consequence in §7 plain language ("Stop —
@@ -945,11 +945,9 @@ opened read-only, serves `dashboard/dist` statics plus these four GET
 routes and exactly one write route:
 
 **`POST /api/control`** — body `{ "verb": "start" | "pause" | "resume" |
-"stop" | "estop" }`, allowlist-validated; anything else is 400. `estop` is
-registered only once the #293 `EMERGENCY_STOP` engine sentinel exists —
-until then it is not in the allowlist and the button does not render. Effect is sentinel-file
-creation/removal only (§3 Operations) — the SQLite handle stays read-only,
-no config or GitHub writes exist. Requests must be same-origin JSON:
+"stop" | "estop" }`, allowlist-validated; anything else is 400. Effect is
+sentinel-file creation/removal only (§3 Operations) — the SQLite handle stays
+read-only, no config or GitHub writes exist. Requests must be same-origin JSON:
 `Content-Type: application/json` plus the `X-Sapwood-Control` header (§3
 Operations); the server grants no CORS, so a foreign page cannot preflight
 through. Response is the §8 engine state after the signal — for Stop that
@@ -1044,12 +1042,15 @@ Five things about it are decisions, not implementation detail:
   preflight this server never grants), an `application/json` content-type (so a
   no-preflight form POST cannot reach a verb), and an `Origin` that, when
   present, must be this server's. Its verb allowlist is exactly `start`,
-  `pause`, `resume`, `stop` — `estop` joins it in the same change that lands the
-  #293 `EMERGENCY_STOP` sentinel, never before, because a verb that reports
-  success while signalling nothing is worse than a 400. The only effect is
-  creating/removing the engine's own `PAUSE`/`KILL_SWITCH` files, and the reply
-  is the engine state read back *after* the signal (`stop` answers `stopping`
-  while lanes drain), so the UI renders the real transition.
+  `pause`, `resume`, `stop`, `estop` — `estop` joined once #293's
+  `EMERGENCY_STOP` sentinel landed (#724), because a verb that reports success
+  while signalling nothing would have been worse than a 400. The only effect is
+  creating/removing the engine's own `PAUSE`/`KILL_SWITCH`/`EMERGENCY_STOP`
+  files, and the reply is the engine state read back *after* the signal (`stop`
+  answers `stopping` while lanes drain; `estop`'s reply additionally carries a
+  `message` naming the real consequence — immediate hard kill, WIP stranded
+  pending human review, never an unqualified "lost"), so the UI renders the
+  real transition.
 
 - **The config surface is an allowlist**, `CONFIG_ALLOWLIST` in the same file —
   the §3 E groups' named leaves plus the per-role `model`/`effort` keys. A
@@ -1252,15 +1253,19 @@ the overlay is the named boundary.
    (`docs/configuration.md`); gates the §3 Operations verbs and the §8
    `POST /api/control` route. `false` = pure-spectator dashboard. Schema
    only: the dashboard reads it, the engine does not.
-6. **`EMERGENCY_STOP` sentinel** (#293, third amendment) — immediate hard
-   stop, no drain window: detection hard-kills every running/fixing lane's
+6. **`EMERGENCY_STOP` sentinel** (#293, third amendment) — **LANDED** (engine
+   sentinel #724; the §3 Operations button and `estop` verb #733) — immediate
+   hard stop, no drain window: detection hard-kills every running/fixing lane's
    process group in the same tick via the existing kill path, with the
    existing post-drain escalation treatment. Precedence EMERGENCY_STOP >
    KILL_SWITCH > PAUSE. Safety machinery — the implementing PR is
-   human-merge-only. Powers the §3 Operations emergency-stop tier; the button and
-   the `estop` verb do not exist until it lands. State-word mapping: an
-   emergency stop renders through the existing stopping/stopped words — no
-   new state word (same no-eighth-word doctrine as env-park).
+   human-merge-only. State-word mapping: an emergency stop renders through the
+   existing stopping/stopped words — no new state word (same no-eighth-word
+   doctrine as env-park). `start` clears PAUSE/KILL_SWITCH but deliberately
+   never EMERGENCY_STOP — the only release lever is the CLI-only `sapwood
+   estop clear` (#731); the dashboard's Start control is disabled with an
+   explicit persists-indicator while the sentinel is active, per
+   `engine.estopActive` served alongside `state`.
 7. **Hold-visibility events → #294** (`pr-held` / `pr-released`) — a held PR
    (`escalation.holdLabels`) is indistinguishable from "waiting on review"
    in persisted data: the gate observes the label live and appends nothing.

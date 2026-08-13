@@ -38,6 +38,11 @@ export type LoopState = {
      *  rule can mask a live PAUSE file from `state` (a stale/kill-switched engine never reads
      *  `paused`), so the header's secondary "PAUSE set" chip needs this independently. */
     pauseActive: boolean;
+    /** #733: the raw EMERGENCY_STOP sentinel, served the same posture as `pauseActive` above —
+     *  §8's precedence can mask it from the derived `state` too. `start` clears PAUSE/KILL_SWITCH
+     *  but never this sentinel, so the UI needs it independently to keep Start honest about a
+     *  persisting halt (`sapwood estop clear` is the only release lever, #731). */
+    estopActive: boolean;
     /** #723: seconds until the next standby probe, served only while `state === "standby"` —
      *  null otherwise (never a stale countdown left over from a prior standby dwell). */
     standbyNextCheckSec: number | null;
@@ -72,12 +77,11 @@ export type LoopState = {
   controlsEnabled: boolean;
 };
 
-/** §3 Operations / §8: the exhaustive verb set `POST /api/control` accepts. `estop` is
- *  deliberately absent (frontend-design.md's own note: the emergency-stop tier needs the
- *  additive `EMERGENCY_STOP` engine sentinel first, out of scope for #361). */
-export type ControlVerb = "start" | "pause" | "resume" | "stop";
+/** §3 Operations / §8: the exhaustive verb set `POST /api/control` accepts. `estop` joined once
+ *  #724 landed the additive `EMERGENCY_STOP` engine sentinel (#293). */
+export type ControlVerb = "start" | "pause" | "resume" | "stop" | "estop";
 
-export const CONTROL_VERBS: readonly ControlVerb[] = ["start", "pause", "resume", "stop"];
+export const CONTROL_VERBS: readonly ControlVerb[] = ["start", "pause", "resume", "stop", "estop"];
 
 export type LoopEvent = {
   id: number;

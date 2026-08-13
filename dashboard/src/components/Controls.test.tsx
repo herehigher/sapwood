@@ -62,13 +62,50 @@ test("controlsReducer: no sequence of request/cancel actions alone (no confirm) 
 
 // ── rendering ────────────────────────────────────────────────────────────────────────────────
 
-test("renders exactly the four allowed verbs, and no E-STOP button, regardless of engine state", () => {
+const NON_ESTOP_VERBS = CONTROL_VERBS.filter((v) => v !== "estop");
+
+test("renders the four non-estop verbs while the engine isn't running — EMERGENCY STOP is verb-legality gated", () => {
   const html = renderToStaticMarkup(<Controls enabled />);
-  for (const verb of CONTROL_VERBS) {
+  for (const verb of NON_ESTOP_VERBS) {
     assert.match(html, new RegExp(CONTROL_COPY[verb].label));
   }
-  assert.doesNotMatch(html, /E-?STOP/i);
-  assert.doesNotMatch(html, /emergency/i);
+  assert.doesNotMatch(html, /EMERGENCY STOP/);
+});
+
+// §3 Operations: "verb-legality rendering (only shown when the engine is actually running)".
+test("EMERGENCY STOP renders only while the engine reports running — spelled-out label, octagon icon, rust-red class, far-right (last)", () => {
+  const notRunning = renderToStaticMarkup(<Controls enabled running={false} />);
+  assert.doesNotMatch(notRunning, /EMERGENCY STOP/);
+
+  const html = renderToStaticMarkup(<Controls enabled running />);
+  assert.match(html, /EMERGENCY STOP/, "spelled out, never the abbreviation");
+  assert.doesNotMatch(html, /E-STOP/);
+  assert.match(html, /class="control-estop"/, "rust-red styling hook");
+  assert.match(html, /<svg/, "octagon icon — the page's only icon-bearing control");
+  const buttons = html.match(/<button[\s\S]*?<\/button>/g) ?? [];
+  assert.ok(buttons.length > 0);
+  assert.match(buttons[buttons.length - 1] as string, /control-estop/, "far-right: last in the control group");
+});
+
+// #733 engine-agent finding [1]: `currentEngineState` never folds EMERGENCY_STOP into the derived
+// word (engine/src/state/read-model.ts's `deriveEngineState`), so the REAL server can answer
+// `engine.state: "running"` at the same time `engine.estopActive: true` — the window between the
+// sentinel landing and the engine's own next tick observing it (or a dead engine's tick going
+// stale before it ever ticks again). This is the actual combination App.tsx's `running={state ===
+// "running"}` can pass straight through, not a hand-picked one the earlier tests avoided.
+test("EMERGENCY STOP stays hidden when estopActive is true even though running is also true — the exact combination the real server can serve", () => {
+  const html = renderToStaticMarkup(<Controls enabled running estopActive />);
+  // Not a bare /EMERGENCY STOP/ check — the Start persists-notice ALSO legitimately says
+  // "EMERGENCY STOP is active…" (that text must still render, per AC4). The button itself carries
+  // the "control-estop" class the notice doesn't, so that's the precise signal for "did the button
+  // render", distinct from the notice.
+  assert.doesNotMatch(html, /class="control-estop"/, "nothing left to stop once the halt has already landed");
+  assert.match(html, /EMERGENCY STOP is active/, "the Start persists-notice still renders, unaffected");
+
+  // Sanity: the SAME `running` value with `estopActive` false DOES render the button — proves
+  // this is a real regression guard on the AND, not a fixture where estop never renders regardless.
+  const normalHtml = renderToStaticMarkup(<Controls enabled running estopActive={false} />);
+  assert.match(normalHtml, /class="control-estop"/);
 });
 
 test("dashboard.controls: false renders no control buttons at all", () => {
@@ -79,7 +116,31 @@ test("dashboard.controls: false renders no control buttons at all", () => {
 test("every verb is a native <button> — keyboard-reachable by construction, no div-as-button", () => {
   const html = renderToStaticMarkup(<Controls enabled />);
   const buttonCount = html.match(/<button/g)?.length ?? 0;
-  assert.equal(buttonCount, CONTROL_VERBS.length);
+  assert.equal(buttonCount, NON_ESTOP_VERBS.length, "estop stays hidden while not running");
+
+  const runningHtml = renderToStaticMarkup(<Controls enabled running />);
+  const runningButtonCount = runningHtml.match(/<button/g)?.length ?? 0;
+  assert.equal(runningButtonCount, CONTROL_VERBS.length);
+});
+
+test("§7 locked consequence sentence: the estop confirm dialog carries it verbatim", () => {
+  const html = renderToStaticMarkup(<Controls enabled initialState={{ phase: "confirming", verb: "estop" }} />);
+  assert.match(html, /role="alertdialog"/);
+  assert.ok(html.includes("in-flight work is killed, WIP may be lost"), "the locked #293 consequence sentence, verbatim");
+});
+
+// #733 AC4: when EMERGENCY_STOP is active, Start must never render/report a "resumed" outcome.
+test("estopActive disables Start and names the real release lever (sapwood estop clear), without changing the other verbs", () => {
+  const normal = renderToStaticMarkup(<Controls enabled estopActive={false} />);
+  assert.doesNotMatch(normal, /sapwood estop clear/);
+
+  const html = renderToStaticMarkup(<Controls enabled estopActive />);
+  assert.match(html, /sapwood estop clear/);
+  const startButton = html.match(/<button[^>]*>Start<\/button>/);
+  assert.ok(startButton, "Start still renders (per the AC's disabled-or-indicator choice)");
+  assert.match(startButton[0], /disabled/, "Start must not report a resumed outcome while the halt persists");
+  // Pause/Resume/Stop stay unaffected — only Start reacts to estopActive.
+  assert.doesNotMatch(html.match(/<button[^>]*>Pause<\/button>/)?.[0] ?? "", /disabled/);
 });
 
 test("confirm copy for every verb is sourced from copy.ts, not an inline string", () => {
@@ -233,6 +294,132 @@ test("real DOM: clicking a verb button opens the confirm dialog; clicking Confir
     assert.deepEqual(onControl.mock.calls[0]?.arguments, ["stop"]);
     assert.equal(container.querySelector('[role="alertdialog"]'), null, "the dialog closes once the request settles");
   } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+});
+
+// #733 AC3 / §3 Operations: EMERGENCY STOP is hold-to-arm, not a bare click — "armed is never
+// 'release to fire'". mock.timers is the seam (review doctrine's "no timing-dependent assertions"
+// rule): the component's own setTimeout is a fake clock this test drives deterministically,
+// never a real elapsed-wall-clock wait racing anything.
+test("real DOM: EMERGENCY STOP is hold-to-arm — an early release cancels with zero effect; a completed hold opens the same confirm dialog, and only Confirm fires onControl", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const onControl = mock.fn(async () => undefined);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<Controls enabled running onControl={onControl} />);
+    });
+
+    const estopButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("EMERGENCY STOP"));
+    assert.ok(estopButton, "the real EMERGENCY STOP button renders while running");
+
+    // Release well before the hold threshold — must cancel with no dispatch at all.
+    await act(async () => {
+      estopButton.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    });
+    await act(async () => {
+      estopButton.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    mock.timers.tick(2000);
+    assert.equal(container.querySelector('[role="alertdialog"]'), null, "an early release must never arm the confirm dialog");
+    assert.equal(onControl.mock.calls.length, 0);
+
+    // A completed hold arms it — landing on the SAME confirm dialog every other verb uses.
+    await act(async () => {
+      estopButton.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    });
+    await act(async () => {
+      mock.timers.tick(700);
+    });
+    assert.equal(container.querySelector('[role="alertdialog"]')?.getAttribute("aria-label"), "confirm estop");
+    assert.equal(onControl.mock.calls.length, 0, "the hold alone must never fire the control call — confirm is still required");
+
+    const confirmButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Confirm");
+    assert.ok(confirmButton, "the real confirm button renders");
+    await act(async () => {
+      confirmButton.click();
+    });
+
+    assert.equal(onControl.mock.calls.length, 1, "the production hold -> arm -> confirm -> effect chain fired exactly once");
+    assert.deepEqual(onControl.mock.calls[0]?.arguments, ["estop"]);
+  } finally {
+    mock.timers.reset();
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+});
+
+// #733 engine-agent finding [0] (estop-keyboard-inoperable): the button had ONLY pointer handlers
+// — no click handler at all (by design, see `ESTOP_ARM_KEYS`'s own doc), so a keyboard/switch
+// user focusing it and pressing Enter/Space could do nothing. Enter/Space keydown now arms the
+// SAME hold timer a pointer hold does; keyup before it fires cancels with zero effect, exactly
+// mirroring the pointer test above.
+test("real DOM: EMERGENCY STOP is keyboard-operable — holding Enter/Space arms it exactly like a pointer hold; an early release cancels, OS key-repeat doesn't restart the timer, and only Confirm fires onControl", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const onControl = mock.fn(async () => undefined);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<Controls enabled running onControl={onControl} />);
+    });
+
+    const estopButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("EMERGENCY STOP"));
+    assert.ok(estopButton, "the real EMERGENCY STOP button renders while running");
+
+    // Release Enter well before the hold threshold — must cancel with no dispatch at all.
+    await act(async () => {
+      estopButton.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    await act(async () => {
+      estopButton.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    mock.timers.tick(2000);
+    assert.equal(container.querySelector('[role="alertdialog"]'), null, "an early Enter release must never arm the confirm dialog");
+    assert.equal(onControl.mock.calls.length, 0);
+
+    // Holding Space (OS key-repeat fires intervening keydowns while held) must NOT restart the
+    // timer on each repeat — only the FIRST keydown (repeat: false) may start it.
+    await act(async () => {
+      estopButton.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true, repeat: false }));
+    });
+    await act(async () => {
+      mock.timers.tick(400);
+    });
+    await act(async () => {
+      estopButton.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true, repeat: true }));
+    });
+    await act(async () => {
+      // total 800ms since the FIRST keydown, past ESTOP_HOLD_MS — the repeat above must not have
+      // reset the clock, or this wouldn't be enough time left to complete the hold.
+      mock.timers.tick(400);
+    });
+    assert.equal(
+      container.querySelector('[role="alertdialog"]')?.getAttribute("aria-label"),
+      "confirm estop",
+      "a held Space arms it despite intervening key-repeat keydowns",
+    );
+    assert.equal(onControl.mock.calls.length, 0, "the hold alone must never fire the control call — confirm is still required");
+
+    const confirmButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Confirm");
+    assert.ok(confirmButton, "the real confirm button renders");
+    await act(async () => {
+      confirmButton.click();
+    });
+
+    assert.equal(onControl.mock.calls.length, 1, "the production hold -> arm -> confirm -> effect chain fired exactly once");
+    assert.deepEqual(onControl.mock.calls[0]?.arguments, ["estop"]);
+  } finally {
+    mock.timers.reset();
     await act(async () => {
       root.unmount();
     });
