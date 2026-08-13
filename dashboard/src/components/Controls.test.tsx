@@ -356,3 +356,73 @@ test("real DOM: EMERGENCY STOP is hold-to-arm — an early release cancels with 
     container.remove();
   }
 });
+
+// #733 engine-agent finding [0] (estop-keyboard-inoperable): the button had ONLY pointer handlers
+// — no click handler at all (by design, see `ESTOP_ARM_KEYS`'s own doc), so a keyboard/switch
+// user focusing it and pressing Enter/Space could do nothing. Enter/Space keydown now arms the
+// SAME hold timer a pointer hold does; keyup before it fires cancels with zero effect, exactly
+// mirroring the pointer test above.
+test("real DOM: EMERGENCY STOP is keyboard-operable — holding Enter/Space arms it exactly like a pointer hold; an early release cancels, OS key-repeat doesn't restart the timer, and only Confirm fires onControl", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const onControl = mock.fn(async () => undefined);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<Controls enabled running onControl={onControl} />);
+    });
+
+    const estopButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("EMERGENCY STOP"));
+    assert.ok(estopButton, "the real EMERGENCY STOP button renders while running");
+
+    // Release Enter well before the hold threshold — must cancel with no dispatch at all.
+    await act(async () => {
+      estopButton.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    await act(async () => {
+      estopButton.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    mock.timers.tick(2000);
+    assert.equal(container.querySelector('[role="alertdialog"]'), null, "an early Enter release must never arm the confirm dialog");
+    assert.equal(onControl.mock.calls.length, 0);
+
+    // Holding Space (OS key-repeat fires intervening keydowns while held) must NOT restart the
+    // timer on each repeat — only the FIRST keydown (repeat: false) may start it.
+    await act(async () => {
+      estopButton.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true, repeat: false }));
+    });
+    await act(async () => {
+      mock.timers.tick(400);
+    });
+    await act(async () => {
+      estopButton.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true, repeat: true }));
+    });
+    await act(async () => {
+      // total 800ms since the FIRST keydown, past ESTOP_HOLD_MS — the repeat above must not have
+      // reset the clock, or this wouldn't be enough time left to complete the hold.
+      mock.timers.tick(400);
+    });
+    assert.equal(
+      container.querySelector('[role="alertdialog"]')?.getAttribute("aria-label"),
+      "confirm estop",
+      "a held Space arms it despite intervening key-repeat keydowns",
+    );
+    assert.equal(onControl.mock.calls.length, 0, "the hold alone must never fire the control call — confirm is still required");
+
+    const confirmButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Confirm");
+    assert.ok(confirmButton, "the real confirm button renders");
+    await act(async () => {
+      confirmButton.click();
+    });
+
+    assert.equal(onControl.mock.calls.length, 1, "the production hold -> arm -> confirm -> effect chain fired exactly once");
+    assert.deepEqual(onControl.mock.calls[0]?.arguments, ["estop"]);
+  } finally {
+    mock.timers.reset();
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+});

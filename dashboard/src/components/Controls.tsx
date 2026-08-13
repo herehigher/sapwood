@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { type KeyboardEvent, useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { postControl } from "../api/client.ts";
 import { CONTROL_VERBS, type ControlVerb } from "../api/types.ts";
 import { CONTROL_COPY } from "../copy.ts";
@@ -91,6 +91,37 @@ function useHoldToArm(onArmed: () => void): { start: () => void; cancel: () => v
   return { start, cancel };
 }
 
+/** The two native button-activation keys — a `<button>`'s default behavior fires a synthetic
+ *  `click` from these (Enter on keydown, Space on keyup), which this component must intercept
+ *  rather than let through: the estop button has no `onClick` at all, precisely so a bare
+ *  activation can never bypass the hold. */
+const ESTOP_ARM_KEYS = new Set(["Enter", " "]);
+
+/** #733 engine-agent finding [0] (estop-keyboard-inoperable): the pointer-only hold handlers left
+ *  keyboard/switch-device users with a focusable button that does nothing on Enter/Space — no
+ *  click handler exists to fall back on, by design (see ESTOP_ARM_KEYS above), so activation was a
+ *  dead end. This mirrors the pointer hold exactly: keydown arms the SAME `useHoldToArm` timer,
+ *  keyup before it fires cancels with zero effect, so holding Enter/Space for `ESTOP_HOLD_MS` is
+ *  the keyboard-equivalent gesture to a pointer hold — same two-step (hold, then confirm), same
+ *  "armed is never release-to-fire" guarantee. `e.repeat` (OS key-repeat while held) is ignored so
+ *  each repeat doesn't restart the timer and starve it of ever completing. `preventDefault` stops
+ *  the native click the browser would otherwise synthesize (Enter) or the page scroll Space would
+ *  otherwise trigger. */
+function estopKeyHandlers(hold: { start: () => void; cancel: () => void }) {
+  return {
+    onKeyDown: (e: KeyboardEvent<HTMLButtonElement>) => {
+      if (!ESTOP_ARM_KEYS.has(e.key) || e.repeat) return;
+      e.preventDefault();
+      hold.start();
+    },
+    onKeyUp: (e: KeyboardEvent<HTMLButtonElement>) => {
+      if (!ESTOP_ARM_KEYS.has(e.key)) return;
+      e.preventDefault();
+      hold.cancel();
+    },
+  };
+}
+
 /** The octagon-outline "stop sign" glyph — §3 Operations' page-unique icon-bearing control;
  *  Pause/Stop stay text-only (the asymmetry IS the tier hierarchy). */
 function OctagonIcon() {
@@ -178,6 +209,8 @@ export function Controls({ enabled, running = false, estopActive = false, onCont
             onPointerUp={estopHold.cancel}
             onPointerLeave={estopHold.cancel}
             onPointerCancel={estopHold.cancel}
+            onBlur={estopHold.cancel}
+            {...estopKeyHandlers(estopHold)}
           >
             <OctagonIcon />
             {CONTROL_COPY.estop.label}
