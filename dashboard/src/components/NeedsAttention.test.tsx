@@ -76,6 +76,5 @@ test("scripted sequence: a steady-state re-observation of the same open event ad
   const openTwice = foldAt([wireEvent, wireEvent]);
   assert.deepEqual(Object.keys(openOnce), Object.keys(openTwice));
   const html = renderToStaticMarkup(<NeedsAttention items={Object.values(openTwice)} titles={{}} now={NOW} />);
-  // Exactly one row rendered — not two.
   assert.equal(html.match(/needs a human decision/g)?.length, 1);
 });

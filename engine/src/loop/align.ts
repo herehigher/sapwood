@@ -1607,21 +1607,13 @@ export async function runPoolSelection(deps: PoolSelectionRunDeps): Promise<Issu
       // never an empty pool from a session outage. Otherwise the validated selection itself —
       // a proper subset is a real outcome, not a degrade.
       target = validated.ok ? candidates.filter((c) => new Set(validated.selected).has(c.number)) : candidates;
-      // #212 gate② r3 (finding 2, documented not fixed — this crash window is INHERENT): the
-      // po-pool SESSION above (an external `claude` process, seconds to minutes) and this
-      // sqlite write are two separate operations that cannot be made atomic — no lock spans a
-      // subprocess boundary. A crash between the session returning and this line means the
-      // decision it just made is lost: on rerun, readPersistedPoolSelection finds nothing and
-      // this whole branch runs AGAIN, paying for a SECOND (possibly differently-selected)
-      // po-pool session. A session-started sentinel (persisted before dispatch, not after)
-      // would only trade this for a WORSE failure mode: a crash mid-session would then leave a
-      // sentinel claiming "in progress" forever with no result to replay, wedging every future
-      // attempt behind a decision that never landed — a wedge risk in exchange for avoiding a
-      // rare double-spend. Not worth it. Correctness (as opposed to cost) is preserved
-      // regardless: reconcilePoolLabels REPLACES the label state to match the target, it never
-      // unions — so even if this exact window fires twice in a row, the FINAL attempt's
-      // selection is what the open backlog's labels converge to; a duplicate session only ever
-      // costs money, never a wrong pool.
+      // #212 gate② r3 (finding 2, documented not fixed — INHERENT: the po-pool session and this
+      // sqlite write can't be made atomic across a subprocess boundary). Ceiling: a crash in
+      // that window costs one duplicate po-pool session on rerun, never a wrong pool —
+      // reconcilePoolLabels replaces label state to match the target rather than unioning, so
+      // labels still converge correctly. A session-started sentinel would trade that rare
+      // double-spend for a worse wedge risk (a crash mid-session strands the sentinel forever),
+      // so it's not worth building unless the double-spend itself becomes the real cost driver.
       decisionPersisted = persistPoolSelection(deps.state, deps.roundId, target, log);
     }
   }

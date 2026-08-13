@@ -182,7 +182,6 @@ test("#715 gate② [0]: an open escalation that has aged out of the bounded `eve
   const recentWindow = [ev(9001, "dispatched", { issue: 200 }), ev(9002, "dispatched", { issue: 201 })];
   const html = renderToStaticMarkup(<ActivityFeed events={recentWindow} pinnedAttention={[escalation]} titles={{}} now={NOW} />);
   assert.match(html, /needs a human decision/);
-  // It renders exactly once, not duplicated.
   assert.equal(html.match(/needs a human decision/g)?.length, 1);
 });
 

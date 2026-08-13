@@ -13,6 +13,9 @@ re-implemented as a standalone, public tool. Status: **early development, pre-v1
 ## Where things are
 
 - `docs/PLAN.md` — full goals, architecture, security model, milestones, verification.
+- `engine/prompts/worker.md` ("Working language & comments") — code-comment discipline
+  (why, not what). It's the copy guaranteed to reach workers on any target repo; applies
+  here too when writing code interactively.
 - Source to port FROM: the private predecessor repo (sibling checkout). The framework
   lives in its loop conductor, worker, merge-driver, GitHub-plumbing, and safety-hook
   sources. Port the *generic logic*, not application-specific behavior.
