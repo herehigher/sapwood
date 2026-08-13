@@ -20,10 +20,10 @@
   Above ~85% of `doctrine.maxChars`, an addition must evict or merge at least as much as it adds
   (one-in-one-out). A new rule joins an existing family/sub-case structure where one fits (see the
   test-realism family) rather than opening a new top-level bullet. Incident narrative is banned —
-  but a distilled worked example is not narrative: a rule may keep at most one worked example
-  carrying its discriminating criterion (what to look at, what decides), cited by symbol/file; the
-  blow-by-blow incident story stays in the issue/PR its bare anchor (#NNN) points to, and mechanism
-  claims cite symbols/files, never line ranges (they rot).
+  a distilled worked example is not narrative: keep an example only for the discriminating
+  criterion it carries (what to look at, what decides); the blow-by-blow story lives in the
+  issue/PR its bare anchor (#NNN) points to. Mechanism claims cite symbols/files, never line ranges
+  (they rot).
 -->
 
 # Review doctrine
