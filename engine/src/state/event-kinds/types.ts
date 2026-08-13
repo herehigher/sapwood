@@ -27,7 +27,11 @@
  *  - `dissent-decision` / `dissent-receipt` — dissent.ts's `DECISION_KINDS` / `RECEIPT_KIND`.
  *  - `fix-leg`          — fix-response.ts's journal-cursor kinds; ALSO the payload-typed set
  *    (see `payloads.ts` — the map keys off this tag, so tagging a kind `fix-leg` obliges it to
- *    carry the cursor payload shape and vice versa). */
+ *    carry the cursor payload shape and vice versa).
+ *  - `merged-witness`   — state.ts's `MERGED_WITNESS_KINDS`: every kind that durably records the
+ *    engine having observed a PR's terminal MERGED state (#803). The dashboard's hero tally binds
+ *    to this projection instead of inferring from lane-row presence — a kind tagged here MUST
+ *    carry the PR number in a `pr` field, same convention `laneEventRecorded` already reads. */
 export type EventTag =
   | "retro"
   | "pr-touched"
@@ -38,7 +42,8 @@ export type EventTag =
   | "escalation-clear"
   | "dissent-decision"
   | "dissent-receipt"
-  | "fix-leg";
+  | "fix-leg"
+  | "merged-witness";
 
 /** The three `escalation-source:*` tags, as the ONE list `attentionProof`'s derivation walks —
  *  so a new proof mode is a compile error here rather than a silently-unread tag. */

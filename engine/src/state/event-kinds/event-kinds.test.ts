@@ -15,6 +15,7 @@ import { FIX_LEG_CURSOR_KINDS } from "../../loop/fix-response.js";
 import { ROUND_ARTIFACT_EVENT_KINDS } from "../../loop/round-artifact.js";
 import { RETRO_EVENT_KINDS } from "../../retro/retro.js";
 import { PR_TOUCHED_EVENT_KINDS } from "../../retro/retro-digest.js";
+import { MERGED_WITNESS_KINDS } from "../state.js";
 import {
   ESCALATION_SOURCE_TAGS,
   EVENT_KIND_DOMAINS,
@@ -91,6 +92,10 @@ test("consumer list: dissent's decision/receipt kinds are derived from their tag
 
 test("consumer list: fix-response's journal-cursor kinds are derived from the fix-leg tag", () => {
   assertDerivedFromTag("FIX_LEG_CURSOR_KINDS", "fix-leg", FIX_LEG_CURSOR_KINDS);
+});
+
+test("consumer list: state.ts's MERGED_WITNESS_KINDS is derived from the merged-witness tag (#803)", () => {
+  assertDerivedFromTag("MERGED_WITNESS_KINDS", "merged-witness", MERGED_WITNESS_KINDS);
 });
 
 test("consumer list: ESCALATION_SOURCES is derived from the escalation-source:* tags", () => {

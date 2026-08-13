@@ -1273,6 +1273,65 @@ test('#745 AC1 / round 4 finding [1]: a handoff ("saved for a successor") drople
   );
 });
 
+// ── #803: the merged-witness projection binds the tally to authoritative persisted signal ──
+//
+// PR #791's own round-4 finding: `/api/loop/state`'s `lanes.items[]` carries a PR NUMBER but
+// never its STATE, and a live lane row can never carry a terminal PR state anyway (round-375
+// gate⓪ — the tick that first observes a terminal PR state settles the lane out of `lanes.items`
+// in the same synchronous step). `mergedPrs` (server.ts, sourced from `State.mergedPrNumbers`)
+// is the structural fix: the set of PR numbers the persisted event log witnesses as MERGED,
+// covering paths this fold's own event-driven transitions never handle (`gated-reentry-merged`,
+// `lane-revival-terminal`, `human-merge-only-closed` — only the plain `merged` kind moves a
+// droplet to `at: "trunk"` in state.ts's reducer). A droplet whose `pr` is in that projection
+// must never count as pending, confident OR windowed — the #745 qualifier is reserved for PRs
+// with NO persisted terminal witness at all.
+test("#803 AC2: a droplet whose PR is in the merged-witness projection never counts as pending — not confident, not windowed", () => {
+  const dispatch422 = ev("dispatched", { worker: "w-422", issue: 422 });
+  const toCheckpoint422 = ev("reclaim-done", { worker: "w-422", issue: 422, next: "DRIVING", pr: 900 });
+  const { state } = run([dispatch422, toCheckpoint422], 3);
+  assert.equal(state.foldTruncated, false);
+  assert.equal(
+    droplet(state, 422)?.at,
+    "checkpoint",
+    "the fold's own reducer never handles a gated-reentry/revival/human-merge-only witness",
+  );
+
+  // With no mergedPrs projection at all, this droplet renders under the #745 "unverified"
+  // qualifier — the regression control proving the new behavior below is additive, not a
+  // pre-existing loosening of the #745 rule.
+  assert.match(
+    markup(state).match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
+    /0 merged · 0 pending \(1 unverified\) · 0 needs human/,
+  );
+
+  // The engine's persisted event log witnesses PR 900 as merged (e.g. via `gated-reentry-merged`)
+  // even though nothing folded that specific kind into this droplet's own transitions.
+  const html = markup(state, { mergedPrs: [900] });
+  assert.match(
+    html.match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
+    /0 merged · 0 pending · 0 needs human/,
+    "a persisted merged witness excludes the droplet from the tally entirely — no windowed qualifier either",
+  );
+  assert.equal(
+    droplet(state, 422)?.at,
+    "checkpoint",
+    "the projection only affects the TALLY — the droplet stays drawn on stage, never deleted",
+  );
+});
+
+test("#803 AC2: the projection is keyed by PR number — an unrelated PR in mergedPrs never suppresses a different droplet", () => {
+  const dispatch422 = ev("dispatched", { worker: "w-422", issue: 422 });
+  const toCheckpoint422 = ev("reclaim-done", { worker: "w-422", issue: 422, next: "DRIVING", pr: 900 });
+  const { state } = run([dispatch422, toCheckpoint422], 3);
+
+  const html = markup(state, { mergedPrs: [901] });
+  assert.match(
+    html.match(/class="hero-num hero-small hero-outcome-tally"[^>]*>([^<]*)</)?.[1] as string,
+    /0 merged · 0 pending \(1 unverified\) · 0 needs human/,
+    "a different PR in the projection must not suppress this droplet's own unmatched pending count",
+  );
+});
+
 // ── #745 AC2: simultaneous checkpoint droplets must not collide at one shared coordinate ───
 //
 // #745 gate② round 2 finding [1]: EVERY `at: "checkpoint"` droplet drew at one fixed point —

@@ -3732,6 +3732,23 @@ test("countEvents counts one kind only (§8's ring count)", () => {
   s.close();
 });
 
+test("mergedPrNumbers (#803): DISTINCT pr across every merged-witness kind, absent PRs simply not present", () => {
+  const s = mem();
+  assert.deepEqual(s.mergedPrNumbers(), []);
+  s.appendEvent("merged", { pr: 1 });
+  s.appendEvent("gated-reentry-merged", { pr: 2 });
+  s.appendEvent("lane-revival-terminal", { pr: 3, prState: "MERGED" });
+  s.appendEvent("human-merge-only-closed", { worker: "lane-a", issue: 9, pr: 4 });
+  s.appendEvent("merged", { pr: 1 }); // a second witness of the same PR must not duplicate
+  s.appendEvent("dispatched", { issue: 5 }); // a non-witness kind never contributes a PR
+  s.appendEvent("drive-no-pr", {}); // a kind carrying no `pr` field at all must not surface as `null`/`0`
+  assert.deepEqual(
+    s.mergedPrNumbers().sort((a, b) => a - b),
+    [1, 2, 3, 4],
+  );
+  s.close();
+});
+
 test("eventsPage pages ascending by id across every kind, with id/ts/payload", () => {
   const s = mem();
   // #425: eventsPage is the kind-BLIND read (the dashboard needs every kind), so this fixture

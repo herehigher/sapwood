@@ -306,12 +306,23 @@ test("/api/loop/state matches the §8 shape against a seeded DB", async () => {
     s.appendEvent("merged", { pr: 94 });
     s.appendEvent("merged", { pr: 95 });
     s.appendEvent("dispatched", { issue: 86 });
+    s.appendEvent("gated-reentry-merged", { pr: 96 });
     s.startRound("2026-07-24T10:00:00.000Z");
   });
   try {
     const body = await getJson(fx, "/api/loop/state");
 
-    assert.deepEqual(Object.keys(body).sort(), ["config", "controlsEnabled", "engine", "lanes", "logPath", "rings", "round", "spend"]);
+    assert.deepEqual(Object.keys(body).sort(), [
+      "config",
+      "controlsEnabled",
+      "engine",
+      "lanes",
+      "logPath",
+      "mergedPrs",
+      "rings",
+      "round",
+      "spend",
+    ]);
     assert.deepEqual(Object.keys(body.engine).sort(), ["lastTickAt", "pauseActive", "reasons", "standbyNextCheckSec", "state", "terminal"]);
     assert.equal(body.engine.standbyNextCheckSec, null, "not in standby in this fixture");
     assert.deepEqual(body.engine.reasons, []);
@@ -356,6 +367,11 @@ test("/api/loop/state matches the §8 shape against a seeded DB", async () => {
       { model: "sonnet", usd: 0.75, inputTokens: 50, outputTokens: 10 },
     ]);
     assert.equal(body.rings, 2); // merged events only
+    assert.deepEqual(
+      [...body.mergedPrs].sort((a, b) => a - b),
+      [94, 95, 96],
+      "#803: every merged-witness kind, deduped",
+    );
     assert.ok(String(body.logPath).endsWith("sapwood.log"));
   } finally {
     fx.close();
@@ -475,6 +491,7 @@ test("#642 AC1: /api/loop/state, /api/events, /api/spend are byte-identical to t
         byModel: [{ model: "opus", usd: 2.5, inputTokens: 10, outputTokens: 5 }],
       },
       rings: 1,
+      mergedPrs: [20],
       logPath: loop.logPath, // tmp-dir-dependent path — format checked separately below
       config: loop.config, // static leaf values checked separately below (allowlist coverage
       // already has its own dedicated test) — this route's own SHAPE is what's pinned here

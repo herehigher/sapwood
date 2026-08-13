@@ -16,6 +16,7 @@ export const DEMO_SOURCE: DemoBundle = {
     round: null,
     spend: { todayUsd: 0, dailyBudgetUsd: null, runUsd: null, runBudgetUsd: null, byModel: [] },
     rings: 1,
+    mergedPrs: [9201],
     logPath: "/Users/demo-operator/work/sapwood/dashboard/data/dogfood-run-5001.log",
     config: { board: { owner: "herehigher", repo: "sapwood" }, lanes: { prFixCap: 2 } },
     controlsEnabled: false,

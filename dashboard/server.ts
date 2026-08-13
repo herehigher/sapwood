@@ -162,6 +162,11 @@ export function loopState(state: State, cfg: SapwoodConfig | null, now: Date): R
       byModel: state.spendByModelForDay(now),
     },
     rings: state.countEvents("merged"),
+    // #803: PR numbers the persisted event log witnesses as MERGED (merged-witness event kinds,
+    // engine/src/state/event-kinds/types.ts) — the hero tally's confident-pending count binds to
+    // this instead of inferring from lane-row presence (round-375 gate⓪: a live lane row can
+    // never carry a terminal PR state). A PR absent here has no persisted terminal witness yet.
+    mergedPrs: state.mergedPrNumbers(),
     // Path only, never content (§8) — the phase inspector's "view log" entry opens it locally.
     logPath: cfg?.logging.path ?? null,
     config: cfg ? allowlistedConfig(cfg) : null,
