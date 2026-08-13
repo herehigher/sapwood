@@ -1,4 +1,4 @@
-// Differential / fuzz test of guard.ts against the predecessor project's guard.py (issue #8). The tokenizer
+// Differential / fuzz test of guard.ts against guard.py (issue #8). The tokenizer
 // divergence (TS shlex-equivalent vs Python shlex) is the real bypass surface, so we replay
 // thousands of generated commands and assert the safety invariant:
 //
@@ -184,8 +184,8 @@ test("differential: sapwood is at least as strict as guard.py on opaque + Catego
   );
 });
 
-test("differential: predecessor-project hand-picked shared-surface BLOCK cases all block in guard.ts", () => {
-  // The exact opaque + Category C commands from the predecessor project's authoritative bypass
+test("differential: hand-picked shared-surface BLOCK cases all block in guard.ts", () => {
+  // The exact opaque + Category C commands from guard.py's authoritative bypass
   // matrix (folded into the static fixture alongside the generated corpus — see fuzz-corpus.ts).
   for (const command of HAND_PICKED_SHARED_BLOCK_CASES) {
     assert.ok(command in GUARD_PY_SHARED_BLOCK_VERDICTS, `expected a captured shared-block verdict for hand-picked case: ${command}`);

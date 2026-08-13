@@ -1,5 +1,5 @@
 // merge-driver.ts tests:
-//  1. mergeDecision parity suite — a TS port of the predecessor project's matrix, with #273's stricter
+//  1. mergeDecision parity suite (23 assertions), with #273's stricter
 //     OID-bound rejection of the legacy bare-reaction action.
 //  2. deriveGate — the scheduling-gate glue (gate①/gate②/labels/state -> MERGE/WAIT/HUMAN).
 //  3. MergeDriver.driveOne — end-to-end with a fake IForge + fake Reviewer (no real gh calls).
@@ -32,7 +32,7 @@ import type {
 import { CODEX_REVIEWER_LOGINS, CodexReviewer, HumanReviewer, SameModelTrustedReviewer } from "./reviewer.js";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
-// 1) mergeDecision parity suite (predecessor-project loop merge-driver tests, 23 assertions)
+// 1) mergeDecision parity suite (23 assertions)
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
 test("mergeDecision parity: MERGE_OK + OPEN + clean label -> MERGE (trustedApproval irrelevant to MERGE_OK)", () => {
@@ -79,7 +79,7 @@ test("mergeDecision parity: fail-safe — unknown/empty ACTION never auto-merges
   assert.equal(mergeDecision("", ""), "ESCALATE");
 });
 
-test("mergeDecision (sapwood extension beyond predecessor-project parity): REVIEW_UNAVAILABLE queues (WAIT), never escalates or merges (#13)", () => {
+test("mergeDecision (sapwood extension beyond the parity suite): REVIEW_UNAVAILABLE queues (WAIT), never escalates or merges (#13)", () => {
   assert.equal(mergeDecision("REVIEW_UNAVAILABLE", ""), "WAIT");
   assert.equal(mergeDecision("REVIEW_UNAVAILABLE", "needs-human"), "WAIT"); // even with a risk label present
 });

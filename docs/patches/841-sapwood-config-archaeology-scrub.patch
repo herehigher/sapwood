@@ -1,0 +1,33 @@
+# Pending human-applied patch — issue #841
+#
+# WHAT: drops the "predecessor-project-style" private-repo framing from the
+#       `reviewer.mode: different-model-codex` comment in the live root config. Keeps the
+#       real point (this mode is gate② run as a fresh non-author hosted Codex review). No
+#       behavior change — comment-only.
+#
+# WHY IT MATTERS: #841 (public-launch hygiene) scrubs references to the project's private
+#       predecessor from production code and user-facing docs — a user browsing the shipped
+#       repo has no access to that private repo, and a comment pointing at it only confuses.
+#       See #841's PR body for the full file-by-file classification table.
+#
+# WHY IT IS A PATCH AND NOT A COMMIT: `sapwood.config.yaml` is human-merge-only, the WHOLE
+#       file, no per-field carve-out (docs/security.md "Human-merge-only paths") — enforced
+#       by the guard, not by convention. An autonomous worker's write to it is denied at the
+#       tool level.
+#
+# APPLY (from the repo root), then delete this file:
+#       git apply docs/patches/841-sapwood-config-archaeology-scrub.patch
+#       git rm docs/patches/841-sapwood-config-archaeology-scrub.patch
+#
+diff --git a/sapwood.config.yaml b/sapwood.config.yaml
+--- a/sapwood.config.yaml
++++ b/sapwood.config.yaml
+@@ -149,7 +149,7 @@
+   # engine-agent: a static, different-Claude-model review session the engine runs locally,
+   # on the same Claude CLI sapwood itself needs — default (#501, 2026-08-01). No extra
+   # install: a fresh sapwood user already has everything this kind requires.
+-  # different-model-codex: predecessor-project-style gate② instead — a fresh non-author review from the
++  # different-model-codex: gate② instead — a fresh non-author review from the
+   # hosted `@codex review` GitHub App. Requires that App installed on this repo; was the
+   # default before #501. same-model-trusted | human are the other reviewer kinds.
+   # produce-pr-and-stop is configured separately at merge.mode.

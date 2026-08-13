@@ -408,7 +408,7 @@ const PROJECT_JSON = JSON.stringify({
                 title: "ready but a different repo",
                 state: "OPEN",
                 body: "## Verification\nx",
-                repository: { nameWithOwner: "example/private-predecessor" },
+                repository: { nameWithOwner: "example/other-repo" },
                 labels: { nodes: [] },
               },
               fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] },
@@ -1559,7 +1559,7 @@ test("findItemId: repo-scoped so a multi-repo board can't hit the wrong #N (Code
                     title: "theirs",
                     state: "OPEN",
                     body: "",
-                    repository: { nameWithOwner: "example/private-predecessor" },
+                    repository: { nameWithOwner: "example/other-repo" },
                     labels: { nodes: [] },
                   },
                   fieldValues: { nodes: [] },
@@ -1573,7 +1573,7 @@ test("findItemId: repo-scoped so a multi-repo board can't hit the wrong #N (Code
     "Status",
   );
   assert.equal(findItemId(p, 50, "herehigher/sapwood"), "ITEM_A"); // full owner/repo picks ours
-  assert.equal(findItemId(p, 50, "example/private-predecessor"), "ITEM_B");
+  assert.equal(findItemId(p, 50, "example/other-repo"), "ITEM_B");
   assert.equal(findItemId(p, 50), "ITEM_A"); // no scope -> first match (back-compat)
 });
 

@@ -47,9 +47,9 @@ import {
   validateFindings,
 } from "./reviewer.js";
 
-// ── pure signal helpers (predecessor-project pr_gate.sh parity) ──────────────────────────
+// ── pure signal helpers ──────────────────────────
 
-test("freshThumbCount: only reactions created AFTER the cutoff count (predecessor-project #92 staleness)", () => {
+test("freshThumbCount: only reactions created AFTER the cutoff count (#92 staleness)", () => {
   const cutoff = "2026-06-17T12:00:00Z";
   const reactions = [
     { content: "+1", createdAt: "2026-06-17T10:00:00Z" }, // stale
@@ -78,7 +78,7 @@ test("freshThumbCount: unparseable cutoff or createdAt never counts (fail-closed
 
 const mkReview = (author: string, commitOid: string, state: string): PRReview => ({ author, commitOid, state });
 
-test("freshHeadReviewCount: only non-author reviews on the CURRENT head, in an accepted state, count (predecessor-project #101)", () => {
+test("freshHeadReviewCount: only non-author reviews on the CURRENT head, in an accepted state, count (#101)", () => {
   const reviews = [
     mkReview("codex", "HEAD", "COMMENTED"), // counts
     mkReview("codex", "OLD", "COMMENTED"), // stale head -> doesn't count
