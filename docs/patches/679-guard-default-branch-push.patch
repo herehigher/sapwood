@@ -9,70 +9,9 @@
 #       the trusted spawn env `SAPWOOD_DEFAULT_BRANCH` is set (worker.ts wires it — see this
 #       issue's ordinary-path PR); unset leaves the rule inactive, so non-worker `claude`
 #       sessions are unaffected. Also adds guard.test.ts's BLOCK/ALLOW matrix for the rule
-#       (below), which the applying human's own `npm test` (post-apply) exercises.
-#
-# gate② round 1 (codex sol-high) reproduced three EXECUTABLE bypasses of the round-1 shipped
-# rule and one over-block; this revision closes all four:
-#   (a) `git push origin HEAD:$SAPWOOD_DEFAULT_BRANCH` — the guard sees the literal unexpanded
-#       token, but the worker's OWN shell expands the env value to `HEAD:main` before git ever
-#       runs. Fixed: ANY refspec argument containing an unresolved shell variable ($FOO/${FOO}/
-#       $(...)) or backtick command-substitution is blocked outright — the guard cannot prove
-#       such a token is not the default branch, so it does not try.
-#   (b) `git -c alias.p=push p origin HEAD:main` — a transient `-c alias.p=push` makes the
-#       non-`push` subcommand `p` perform a push, evading the "is the subcommand push" gate.
-#       Fixed: any `-c`/`--config` that defines or overrides an `alias.*` key is treated as an
-#       OPAQUE git invocation — blocked unconditionally, same doctrine already applied to
-#       `eval`/`sh -c` wrappers — since the effective subcommand can no longer be trusted from
-#       argv alone.
-#   (c) `git push origin 'refs/heads/*:refs/heads/*'` — a wildcard destination that matches the
-#       default branch without ever naming it; the prior exact-destination compare missed it.
-#       Fixed: any refspec destination containing a `*` wildcard is blocked (git ref names never
-#       legitimately contain `*`, so this has no legitimate-branch false-positive).
-#   (d) over-block: `git push -o main origin lane-123-abc` and `git push main lane-123-abc`
-#       (remote literally named `main`) were blocked because the scan treated push-option VALUES
-#       and the remote itself as candidate refspecs. Fixed: value-taking push options
-#       (`-o`/`--push-option`, `--receive-pack`, `--exec`, `--repo`) and the remote are now
-#       parsed positionally-separately from actual refspecs, so a non-default lane-only push is
-#       correctly ALLOWed per the issue's own contract.
-# The design frame this revision commits to: "if the guard cannot PROVE a push's destination is
-# not the default branch, block it" — rather than enumerating one more literal form each time a
-# new bypass surfaces. Regression rows for (a)-(d), plus the issue's own enumerated-but-unpinned
-# forms (`refs/heads/main`, `--force`/`--force-with-lease` long forms, and a `git -C dir push`
-# row pinning gitSkipGlobalFlags), are in guard.test.ts's hunk below.
-#
-# gate② round 2 (codex sol-high, "final confirmation") found one more argv-scan-closable gap and
-# one that isn't:
-#   (7) `git push --repo origin main` / `git push --repo=origin main` — `--repo`/`--repo=` SUPPLY
-#       the repository directly; there is no separate positional remote to skip. The round-1
-#       parser didn't know this, so it still discarded positional[0] (here, the actual refspec
-#       `main`) as if it were an unwritten remote, and never scanned it. Fixed: `parsePushArgs`
-#       now tracks whether `--repo`/`--repo=` supplied the repository (`repoFromFlag`) and, when
-#       it did, scans EVERY positional as a refspec rather than skipping the first.
-#   (8) `git config alias.p push && git p origin HEAD:main` (and the one-shot `GIT_CONFIG_COUNT=1
-#       GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push git p ...` env form) — NOT fixed, by PM
-#       ruling. The malicious intent here lives in git STATE the argv scan cannot see: a
-#       PRE-PERSISTED `git config alias.*` (repo-local, set by an EARLIER, separately-judged
-#       command) or `GIT_CONFIG_*` environment aliases resolved by a LATER, argv-innocent
-#       invocation. `gitHasAliasInjection` only ever sees the CURRENT command's own `-c`/
-#       `--config` tokens — extending it to this class would mean modeling git's own config
-#       resolution across commands and env, not scanning one more token spelling, which is a
-#       design-level question the issue's own text already answers: this rule is engine-side
-#       "defense-in-depth," explicitly "never a replacement for" GitHub branch protection (DR
-#       #616), the backstop of record for exactly this class. Accepted as a documented residual,
-#       the same class checkControlSentinelArg's "hardcoded path in a script" residual already
-#       is — see docs/security.md's #679 section for the full paragraph, and guard.test.ts's
-#       "KNOWN RESIDUAL" row below, which pins the current (accepted) ALLOW so a future reader
-#       sees a decided boundary, not an oversight.
-#
-# WHY: Category C already enforces producer≠merger at the `gh` layer (`gh pr merge` etc denied).
-#       It has no `git push` handling at all, so a worker leg holding `Bash(git *)` — with host
-#       credentials at L0, or the #606 L1 deploy key, which docs/security.md itself notes "CAN
-#       still `git push` directly to an unprotected default branch, bypassing the review gate
-#       entirely via raw git transport" — can run `git push origin HEAD:<default-branch>`: a
-#       merge-equivalent that skips gate①/gate② on any repo without branch protection. Branch
-#       protection remains the backstop of record (DR #616) — this is engine-side defense-in-
-#       depth AT the guard's own sanctioned enforcement point, an extension of the existing
-#       Category C mechanism, never a replacement for the backstop.
+#       (below), which the applying human's own `npm test` (post-apply) exercises. Full design
+#       rationale (bypass classes closed, accepted residuals) lives in docs/security.md's #679
+#       section — not duplicated here.
 #
 # WHY IT IS A PATCH AND NOT A COMMIT: guard.ts / the guard hook wiring is human-merge-only
 #       (CLAUDE.md "Non-negotiables"; canonical list docs/security.md "Human-merge-only paths").
@@ -92,75 +31,28 @@
 #       git rm docs/patches/679-guard-default-branch-push.patch
 #       git rm engine/src/guard/patch-679-apply-check.test.ts
 #       npm --workspace engine test    # exercises the new BLOCK/ALLOW rows this patch adds
-#
-# KNOWN, DISCLOSED TRADE-OFF: the alias-injection check in (b) is intentionally unconditional —
-# `git -c alias.p=push status` (an alias DEFINED but never actually invoked by this particular
-# command line) is also blocked, even though that specific invocation is harmless on its own.
-# This is the same "cannot prove it's safe, so block it" stance as (a)/(c), applied to the one
-# case where proving safety would require resolving what the alias itself does. Similarly, (a)/
-# (c)'s `$`/backtick/`*` characters are, in principle, legal (if bizarre) in a git ref name per
-# `git check-ref-format` — this patch accepts that theoretical over-block in exchange for closing
-# a demonstrated, executable bypass; this engine's own lane branches never use these characters
-# (`lane-<issue>-<random>`, docs/security.md), so no real lane push is affected.
-#
-# ACCEPTED RESIDUAL (PM ruling, gate② round 2, item (8) above): a git-STATE-resolved alias — a
-# pre-persisted `git config alias.*` or `GIT_CONFIG_*` environment alias, as opposed to an
-# argv-local `-c`/`--config` injection — is out of scope for this argv-scanning guard, same class
-# as checkControlSentinelArg's hardcoded-path residual. GitHub branch protection (DR #616) is the
-# backstop of record for it. See docs/security.md's #679 section for the full statement.
-#
-# VERIFIED: this diff applies cleanly to main at ada7d4e (`git apply --check`, this issue's own
-#       CI step — see engine/src/guard/patch-679-apply-check.test.ts) and, applied + `npm test`
-#       in a disposable clone, the full engine suite is green, including every BLOCK/ALLOW row
-#       this patch's own guard.test.ts hunk adds. If guard.ts/guard-hook.ts/guard.test.ts have
-#       moved or changed since ada7d4e, the hunks still locate by context (offset-tolerant);
-#       re-check the result and re-run the suite regardless.
 diff --git a/engine/src/guard/guard.ts b/engine/src/guard/guard.ts
-index 12bf2de..99a9d4b 100644
+index 12bf2de..2a00b6e 100644
 --- a/engine/src/guard/guard.ts
 +++ b/engine/src/guard/guard.ts
-@@ -18,6 +18,12 @@
+@@ -18,6 +18,8 @@
  //   3. opaque constructs (eval / shell -c / interpreter -e / process substitution) =>
  //      BLOCK fail-closed (a worker could hide anything inside them).
  //   4. gh-overreach semantic check.
 +//   5. (#679) raw git-transport `git push` reaching the default branch — same producer≠merger
-+//      boundary as step 4, at the git-transport layer instead of the gh-CLI layer. Active only
-+//      when the engine told us the default branch's name (defaultBranch param — see below). The
-+//      frame is "if this push's safety cannot be PROVEN, block it": an unresolved shell
-+//      variable/command-substitution, a `-c alias.*=` injection, or a wildcard destination all
-+//      fail that proof just as surely as a literal `git push origin main` does.
++//      boundary as step 4, active only when defaultBranch is set (see docs/security.md).
  // For Write/Edit tools: deny writes to the guard's boundary files.
  // For Read/Grep/Glob/NotebookRead (#235 PR-A): confine the resolved target path to the session's
  // worktree, when the engine told us what that worktree is (worktreeRoot param — see below).
-@@ -520,6 +526,204 @@ function scanGhOverreach(tokens: string[]): string | null {
+@@ -520,6 +522,166 @@ function scanGhOverreach(tokens: string[]): string | null {
    return null;
  }
  
 +// ── category D: raw git-transport push to the default branch (#679) ─────────
-+// Category C (above) enforces producer≠merger at the `gh` layer. A worker leg holding
-+// `Bash(git *)` can bypass BOTH gate①/gate② with `git push origin HEAD:main` — a merge-
-+// equivalent that never touches `gh` at all. Active ONLY when `defaultBranch` is non-empty
-+// (the guard's IO layer threads in SAPWOOD_DEFAULT_BRANCH, engine-set at spawn, never
-+// worker-writable — same trust class as SAPWOOD_GUARD_MODE/SAPWOOD_WORKTREE_ROOT; unset means
-+// "not an engine-dispatched session" and this rule stays inactive, mirroring how
-+// checkReadContainment treats an absent worktreeRoot). Branch protection remains the backstop
-+// of record (DR #616, docs/security.md); this is engine-side defense-in-depth AT the guard's
-+// own sanctioned enforcement point, never a replacement for it.
-+//
-+// #679 gate② round 1 (sol P1): precise-destination matching alone cannot prove a push is safe —
-+// an unresolved shell variable/command-substitution, a `-c alias.*=` injection that renames an
-+// arbitrary subcommand to `push`, or a wildcard refspec destination can all reach the default
-+// branch without ever spelling it out as a literal token. The frame is "if this push's safety
-+// cannot be PROVEN, block it" rather than enumerating one more literal form.
-+//
-+// #679 gate② round 2 (sol P1): `--repo`/`--repo=` supplies the repository WITHOUT a positional
-+// remote argument (`git push --repo origin main`) — the parser must not also skip the next
-+// positional as if it were an unwritten remote, or the real refspec (`main`) is silently
-+// discarded from the scan. `--repo`'s KNOWN, argv-visible bypass is fixed here (parsePushArgs'
-+// `repoFromFlag`). A DIFFERENT class of bypass — the effective subcommand resolved through git
-+// STATE the argv never reveals at all (a pre-persisted `git config alias.*`, or `GIT_CONFIG_*`
-+// environment aliases) — is a documented, PM-ruled accepted residual, not fixed here: see
-+// docs/security.md's #679 section and the KNOWN RESIDUAL row in guard.test.ts below.
++// Blocks `git push` whose destination reaches `defaultBranch`, at the git-transport layer
++// (Category C above only covers the `gh` layer). Active only when `defaultBranch` is non-empty
++// (SAPWOOD_DEFAULT_BRANCH, engine-set at spawn, never worker-writable). Not a replacement for
++// GitHub branch protection — that's the backstop of record (DR #616), see docs/security.md.
 +const GIT_GLOBAL_VALUE_FLAGS = new Set(["-C", "--git-dir", "--work-tree", "--namespace", "-c", "--exec-path"]);
 +
 +/** Skip `git`'s own global flags (e.g. `git -C dir push ...`) so the subcommand check below
@@ -192,13 +84,9 @@ index 12bf2de..99a9d4b 100644
 +  return ALIAS_CONFIG_KEY_RE.test(key);
 +}
 +
-+/** #679 gate② P1(b): `git -c alias.p=push p ...` (or `--config`) redefines what a LATER bare
-+ *  subcommand token MEANS — a transient alias can turn ANY subcommand name into a real push, so
-+ *  once one is present the effective subcommand can never be trusted from argv alone. Opaque,
-+ *  same doctrine checkOpaque already applies to `eval`/`sh -c` wrappers: block unconditionally
-+ *  rather than try to resolve what the alias actually does. Scanned over the WHOLE tokens slice
-+ *  (not just the pre-subcommand region) — a parse-order edge case is a reason to stay
-+ *  fail-closed, not to narrow the scan. */
++/** A `-c`/`--config alias.*=` redefines what a later bare subcommand token means, so once one is
++ *  present the effective subcommand can never be trusted from argv alone — opaque, unconditional
++ *  block, same doctrine as `eval`/`sh -c`. */
 +function gitHasAliasInjection(tokens: string[]): boolean {
 +  for (let i = 1; i < tokens.length; i++) {
 +    const tok = tokens[i]!;
@@ -213,29 +101,20 @@ index 12bf2de..99a9d4b 100644
 +  return false;
 +}
 +
-+// A refspec argument the guard cannot statically prove safe: an unresolved shell variable
-+// ($FOO/${FOO}/$(...)) or backtick command-substitution — the guard only ever sees the LITERAL
-+// argv text, but the worker's own shell expands these before git ever runs (#679 gate② P1(a):
-+// `git push origin HEAD:$SAPWOOD_DEFAULT_BRANCH` expands to `HEAD:main` at runtime even though
-+// the token equals neither "main" nor anything the exact-match check below recognizes) — or a
-+// `*` wildcard destination, which can match the default branch's ref without ever naming it
-+// (#679 gate② P1(c): `refs/heads/*:refs/heads/*`).
++// An unresolved shell variable/command-substitution ($FOO/${FOO}/$(...)/backtick) can expand to
++// the default branch at runtime after the guard only sees the literal token; a `*` wildcard
++// destination can match it without ever naming it — neither can be proven safe, so both block.
 +const UNPROVABLE_REFSPEC_RE = /[$`*]/;
 +
-+// git-push options that consume a SEPARATE following token as their value (never split across
-+// tokens when given in the glued `flag=value` form, which the generic flag branch below already
-+// handles) — #679 gate② P2(d): without this, a value like `-o main`'s "main" lands in the
-+// positional list and gets judged as a candidate refspec, over-blocking a lane-only push that
-+// merely NAMES the default branch as a push-option value, never a destination.
++// Value-taking push options, split out so their separate-token VALUE (e.g. `-o main`'s "main")
++// is never scanned as a candidate refspec destination.
 +const PUSH_VALUE_FLAGS = new Set(["-o", "--push-option", "--receive-pack", "--exec", "--repo"]);
 +
 +/** Split git-push's OWN args (everything after "push") into flags and POSITIONAL args, properly
-+ *  skipping a value-taking flag's separate value so it never masquerades as a remote/refspec
-+ *  (#679 gate② P2(d)). `--` ends option parsing (everything after is positional), matching
-+ *  git's own convention. `repoFromFlag` is true when `--repo`/`--repo=` supplied the repository
-+ *  (#679 gate② round 2 P1: `git push --repo origin main` — "origin" is `--repo`'s OWN value,
-+ *  never a positional at all, so the caller must not ALSO treat the next positional as "the
-+ *  remote" and skip it from the refspec scan). */
++ *  skipping a value-taking flag's separate value so it never masquerades as a remote/refspec.
++ *  `--` ends option parsing (everything after is positional), matching git's own convention.
++ *  `repoFromFlag` is true when `--repo`/`--repo=` supplied the repository directly — there is
++ *  then no positional remote to skip, so every positional is a candidate refspec. */
 +function parsePushArgs(args: string[]): { flags: string[]; positional: string[]; repoFromFlag: boolean } {
 +  const flags: string[] = [];
 +  const positional: string[] = [];
@@ -274,8 +153,7 @@ index 12bf2de..99a9d4b 100644
 +  if (!defaultBranch) return null;
 +  if (tokens.length < 2 || basename(tokens[0]!).toLowerCase() !== "git") return null;
 +
-+  // #679 gate② P1(b): opaque BEFORE anything else — an alias injection means we cannot even
-+  // trust that a literal "push" token (or its absence) means what it looks like.
++  // Checked before anything else — an alias injection means the "push" token itself is untrustworthy.
 +  if (gitHasAliasInjection(tokens)) {
 +    return `BLOCK [git-push] git -c/--config alias injection makes the effective subcommand opaque — cannot verify this does not reach the default branch (${defaultBranch}); human-merge-only, see docs/security.md`;
 +  }
@@ -295,12 +173,8 @@ index 12bf2de..99a9d4b 100644
 +  }
 +
 +  // positional[0] is the remote/repository (per git's own `push [<repo> [<refspec>…]]` syntax) —
-+  // NEVER compared against defaultBranch (#679 gate② P2(d): a remote literally named "main" is
-+  // legitimate and must not be over-blocked) — UNLESS `--repo`/`--repo=` already supplied the
-+  // repository (#679 gate② round 2 P1), in which case there IS no positional remote to skip and
-+  // every positional is a candidate refspec. Every remaining positional (or, for `--delete`, a
-+  // candidate delete target — the same bare-name check below already covers that form, so
-+  // `--delete` needs no separate branch) is scanned.
++  // NEVER itself compared against defaultBranch (a remote literally named "main" is legitimate) —
++  // unless repoFromFlag, in which case every positional is a candidate refspec.
 +  const refspecs = repoFromFlag ? positional : positional.slice(1);
 +  for (const raw of refspecs) {
 +    if (UNPROVABLE_REFSPEC_RE.test(raw)) {
@@ -337,7 +211,7 @@ index 12bf2de..99a9d4b 100644
  // ── env -S split-string extraction ───────────────────────────────────────────
  // GNU env -S splits the string into argv, then APPENDS any trailing COMMAND [ARG] tokens.
  // So `env -S gh pr merge 1` runs `gh pr merge 1` — we must judge the split string plus
-@@ -560,7 +764,7 @@ function envSplitInner(tokens: string[]): string | null {
+@@ -560,7 +722,7 @@ function envSplitInner(tokens: string[]): string | null {
  }
  
  // ── single-fragment judgement ────────────────────────────────────────────────
@@ -346,7 +220,7 @@ index 12bf2de..99a9d4b 100644
    if (depth > 8) return null;
    let tokens = safeSplit(fragment);
    if (tokens.length === 0) return null;
-@@ -578,7 +782,7 @@ function judgeFragment(fragment: string, cwd: string, depth = 0): string | null
+@@ -578,7 +740,7 @@ function judgeFragment(fragment: string, cwd: string, depth = 0): string | null
  
    if (tokens[0]!.toLowerCase() === "env") {
      const inner = envSplitInner(tokens);
@@ -355,7 +229,7 @@ index 12bf2de..99a9d4b 100644
    }
  
    let stripped = stripExecPrefix(tokens);
-@@ -598,7 +802,12 @@ function judgeFragment(fragment: string, cwd: string, depth = 0): string | null
+@@ -598,7 +760,12 @@ function judgeFragment(fragment: string, cwd: string, depth = 0): string | null
    if (cs) return cs;
  
    // gh overreach, scanned at any position on both the stripped and the original tokens.
@@ -369,7 +243,7 @@ index 12bf2de..99a9d4b 100644
  }
  
  // ── Write-path protection (issue #9) ─────────────────────────────────────────
-@@ -883,14 +1092,15 @@ function checkReadContainment(tool: string, input: GuardInput, cwd: string, work
+@@ -883,14 +1050,15 @@ function checkReadContainment(tool: string, input: GuardInput, cwd: string, work
  const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
  
  /**
@@ -392,7 +266,7 @@ index 12bf2de..99a9d4b 100644
    if (WRITE_TOOLS.has(tool)) {
      const fp = (tool === "NotebookEdit" ? input.notebook_path : input.file_path) ?? "";
      if (fp) {
-@@ -904,7 +1114,7 @@ export function guardDecision(tool: string, input: GuardInput, cwd: string, work
+@@ -904,7 +1072,7 @@ export function guardDecision(tool: string, input: GuardInput, cwd: string, work
    if (tool !== "Bash") return ALLOW;
    const command = input.command ?? "";
    for (const frag of splitFragments(command)) {
