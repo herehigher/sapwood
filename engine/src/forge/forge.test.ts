@@ -819,6 +819,47 @@ test("#591 fixture matrix: Japanese and RTL headings with both anchors extract a
   }
 });
 
+test("round #382 retro: a blank line between the heading and its anchor still associates — the shipped prompts say 'immediately below' but real filed bodies (issue #855) routinely carry the conventional blank line after an ATX heading, and that must not read as malformed", () => {
+  const body = [
+    "## Acceptance criteria",
+    "",
+    "<!-- sapwood:ac -->",
+    "",
+    "- [ ] one",
+    "",
+    "## Verification plan",
+    "",
+    "<!-- sapwood:verification -->",
+    "",
+    "- run test",
+  ].join("\n");
+  assert.ok(extractVerificationPlan(body)?.includes("<!-- sapwood:ac -->"));
+  assert.ok(extractVerificationSection(body)?.includes("<!-- sapwood:verification -->"));
+  assert.deepEqual(
+    extractAcceptanceCriteria(body)?.map((item) => item.text),
+    ["one"],
+  );
+});
+
+test("round #382 retro: a marker separated from its heading by REAL content (not just blank lines) still fails closed as malformed", () => {
+  const body = [
+    "## Acceptance criteria",
+    "",
+    "some prose the marker is not immediately below",
+    "<!-- sapwood:ac -->",
+    "",
+    "- [ ] one",
+    "",
+    "## Verification plan",
+    "<!-- sapwood:verification -->",
+    "",
+    "- run test",
+  ].join("\n");
+  assert.equal(extractVerificationPlan(body), null);
+  assert.equal(extractVerificationSection(body), null);
+  assert.equal(extractAcceptanceCriteria(body), null);
+});
+
 test("#591: Japanese and RTL anchored issues dispatch once plan:approved is labelled", () => {
   const project = parseProject(
     JSON.stringify({
