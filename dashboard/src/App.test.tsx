@@ -109,7 +109,7 @@ function minimalAppViewModel(
  */
 
 const LOOP_STATE_OK = {
-  engine: { state: "running", reasons: [], lastTickAt: null, pauseActive: false, standbyNextCheckSec: null },
+  engine: { state: "running", reasons: [], lastTickAt: null, pauseActive: false, estopActive: false, standbyNextCheckSec: null },
   lanes: { max: 1, items: [] },
   round: null,
   spend: { todayUsd: 0, dailyBudgetUsd: null, runUsd: null, runBudgetUsd: null, byModel: [] },
@@ -217,6 +217,52 @@ test("#766 gate② finding [2]: header ALSO shows disconnected when only /api/ro
   assert.doesNotMatch(html, /no rounds yet/, "a rounds FETCH failure must never be presented as an honest empty history");
 });
 
+// #733 AC4: fed through the REAL App tree (renderSettledApp -> appContent -> Header/Controls),
+// never an isolated Controls render with hand-built props — estopActive is the only field that
+// differs between the two fetches below.
+test("#733 AC4: EMERGENCY_STOP active — Start is disabled and names the real release lever (sapwood estop clear); inactive — Start behaves normally", async () => {
+  const activeHtml = await renderSettledApp({
+    "/api/loop/state": {
+      status: 200,
+      body: { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "stopped", estopActive: true } },
+    },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  assert.match(activeHtml, /sapwood estop clear/);
+  assert.match(activeHtml, /<button[^>]*disabled[^>]*>Start<\/button>/, "Start must not report a resumed outcome while the halt persists");
+
+  const normalHtml = await renderSettledApp({
+    "/api/loop/state": {
+      status: 200,
+      body: { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "stopped", estopActive: false } },
+    },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  assert.doesNotMatch(normalHtml, /sapwood estop clear/);
+  assert.doesNotMatch(normalHtml, /<button[^>]*disabled[^>]*>Start<\/button>/);
+  assert.match(normalHtml, />Start</, "Start renders normally when no halt is active");
+});
+
+// #733 AC5 / §3 Operations "two placement rules": the WHOLE control group — including
+// EMERGENCY STOP — hides entirely while viewing a closed round, since every verb acts on the
+// PRESENT engine while the rest of the page shows an as-of-cursor past.
+test("#733 AC5: the control group (Start/Pause/Resume/Stop/EMERGENCY STOP) is absent in replay mode, present in live mode, for the same otherwise-enabled fixture", () => {
+  const data = { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "running" } };
+  const replayVm = minimalAppViewModel({ mode: "replay", loop: { data, isPending: false } });
+  const replayHtml = renderToStaticMarkup(appContent(replayVm));
+  assert.doesNotMatch(replayHtml, /aria-label="operations"/, "the control group must not render at all while replaying");
+  assert.doesNotMatch(replayHtml, /EMERGENCY STOP/);
+
+  const liveVm = minimalAppViewModel({ mode: "live", loop: { data, isPending: false } });
+  const liveHtml = renderToStaticMarkup(appContent(liveVm));
+  assert.match(
+    liveHtml,
+    /aria-label="operations"/,
+    "same fixture in live mode DOES render the control group — proves this is a real regression guard",
+  );
+  assert.match(liveHtml, /EMERGENCY STOP/, "engine.state running -> EMERGENCY STOP renders too");
+});
+
 test("both queries succeeding renders the normal header, not disconnected", async () => {
   const html = await renderSettledApp({
     "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
@@ -232,7 +278,10 @@ test("#723: header renders the standby word with its plain-language caption and 
   const html = await renderSettledApp({
     "/api/loop/state": {
       status: 200,
-      body: { ...LOOP_STATE_OK, engine: { state: "standby", reasons: [], lastTickAt: null, pauseActive: false, standbyNextCheckSec: 42 } },
+      body: {
+        ...LOOP_STATE_OK,
+        engine: { state: "standby", reasons: [], lastTickAt: null, pauseActive: false, estopActive: false, standbyNextCheckSec: 42 },
+      },
     },
     "/api/events": { status: 200, body: { events: [], lastId: 0 } },
   });
@@ -738,7 +787,7 @@ const DEMO_ISSUE_TITLE = "Distinguishable demo fixture issue — round 987654";
 function demoBundleFixture(): DemoBundle {
   return {
     loopState: {
-      engine: { state: "stopped", reasons: [], lastTickAt: null, pauseActive: false, standbyNextCheckSec: null },
+      engine: { state: "stopped", reasons: [], lastTickAt: null, pauseActive: false, estopActive: false, standbyNextCheckSec: null },
       lanes: { max: 1, items: [] },
       round: null,
       spend: { todayUsd: 0, dailyBudgetUsd: null, runUsd: null, runBudgetUsd: null, byModel: [] },

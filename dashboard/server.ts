@@ -144,6 +144,10 @@ export function loopState(state: State, cfg: SapwoodConfig | null, now: Date): R
       // value regardless of which word `state` ends up rendering, so it is served as its own
       // honest fact rather than left unrecoverable behind the derivation.
       pauseActive: state.isPauseActive(),
+      // #733: the raw EMERGENCY_STOP sentinel, served the same way `pauseActive` is (§8's
+      // precedence can mask it from the derived `state` word too — a stale engine reads `stalled`
+      // regardless) — the Start control needs this independently to know the halt persists.
+      estopActive: state.isEstopActive(),
     },
     lanes: {
       max: cfg?.lanes.max ?? null, // null, never a fabricated 3, when the config is unreadable
@@ -220,20 +224,33 @@ function pagedReply<T extends { id: number }>(url: URL, key: string, page: (afte
 
 // ── POST /api/control (§8 / §3 Operations) ─────────────────────────────────────────────────
 
-/** The EXHAUSTIVE set of verbs the route accepts. `estop` is deliberately absent: §3 Operations'
- *  emergency-stop tier needs the additive `EMERGENCY_STOP` engine sentinel (#293) to mean
- *  anything, and a verb that reported success while signalling nothing is worse than a 400. It
- *  joins this list in the same change that lands the sentinel, not before. */
-const CONTROL_VERBS = ["start", "pause", "resume", "stop"] as const;
+/** The EXHAUSTIVE set of verbs the route accepts. `estop` joined once #724 landed the additive
+ *  `EMERGENCY_STOP` engine sentinel (#293) — before that, a verb that reported success while
+ *  signalling nothing would have been worse than a 400. */
+const CONTROL_VERBS = ["start", "pause", "resume", "stop", "estop"] as const;
 
 /** Which sentinel each verb sets and which it clears (§3 Operations, verbatim engine semantics —
- *  nothing new is invented here). Start clears BOTH so the next tick simply runs. */
-const CONTROL_EFFECT: Record<(typeof CONTROL_VERBS)[number], { set: ("PAUSE" | "KILL_SWITCH")[]; clear: ("PAUSE" | "KILL_SWITCH")[] }> = {
+ *  nothing new is invented here). Start clears PAUSE/KILL_SWITCH so the next tick simply runs,
+ *  but deliberately does NOT clear EMERGENCY_STOP — §3's Start row never mentions estop, so the
+ *  frozen design already implicitly decided Start doesn't touch it; the only release lever is the
+ *  CLI-only `sapwood estop clear` (#731). */
+const CONTROL_EFFECT: Record<
+  (typeof CONTROL_VERBS)[number],
+  { set: ("PAUSE" | "KILL_SWITCH" | "EMERGENCY_STOP")[]; clear: ("PAUSE" | "KILL_SWITCH" | "EMERGENCY_STOP")[] }
+> = {
   pause: { set: ["PAUSE"], clear: [] },
   resume: { set: [], clear: ["PAUSE"] },
   stop: { set: ["KILL_SWITCH"], clear: [] },
   start: { set: [], clear: ["KILL_SWITCH", "PAUSE"] },
+  estop: { set: ["EMERGENCY_STOP"], clear: [] },
 };
+
+/** §3 Operations' emergency-stop consequence, verbatim in the response body — never an
+ *  unqualified "lost": `conductor.ts`'s dirty-worktree retention policy never deletes a worktree
+ *  that may hold uncommitted work, it escalates to a human instead (see `ReclaimResult`'s own
+ *  doc), so WIP is stranded pending review, not destroyed. */
+const ESTOP_CONSEQUENCE =
+  "Immediate hard kill of every running lane's process group, no drain window. In-flight WIP is stranded on disk, not deleted — retained pending human review and escalated needs-human.";
 
 /** A control body is a single short verb; anything larger is not one, so the read is bounded
  *  rather than trusting Content-Length. */
@@ -281,7 +298,7 @@ async function control(_url: URL, ctx: Ctx, req: IncomingMessage): Promise<Reply
     return { status: 400, body: { error: `verb must be one of: ${CONTROL_VERBS.join(", ")}` } };
   }
 
-  const paths = { PAUSE: ctx.state.pausePath(), KILL_SWITCH: ctx.state.killSwitchPath() };
+  const paths = { PAUSE: ctx.state.pausePath(), KILL_SWITCH: ctx.state.killSwitchPath(), EMERGENCY_STOP: ctx.state.estopPath() };
   const effect = CONTROL_EFFECT[verb as (typeof CONTROL_VERBS)[number]];
   for (const name of [...effect.set, ...effect.clear]) {
     if (paths[name] === null) return { status: 500, body: { error: "this data dir has no sentinel path" } };
@@ -291,7 +308,8 @@ async function control(_url: URL, ctx: Ctx, req: IncomingMessage): Promise<Reply
   for (const name of effect.set) writeFileSync(paths[name] as string, "", "utf8");
 
   // Read the state back AFTER the signal — §8: Stop answers `stopping` while lanes drain.
-  return { status: 200, body: { state: currentEngineState(ctx.state, ctx.config, ctx.now()) } };
+  const state = currentEngineState(ctx.state, ctx.config, ctx.now());
+  return verb === "estop" ? { status: 200, body: { state, message: ESTOP_CONSEQUENCE } } : { status: 200, body: { state } };
 }
 
 function sameOrigin(origin: string, host: string | undefined): boolean {

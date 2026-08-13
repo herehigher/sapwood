@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { postControl } from "../api/client.ts";
 import { CONTROL_VERBS, type ControlVerb } from "../api/types.ts";
 import { CONTROL_COPY } from "../copy.ts";
@@ -65,10 +65,54 @@ export async function runControlEffect(
   }
 }
 
+/** §3 Operations' misfire protection for EMERGENCY STOP specifically: a hold, not a bare click —
+ *  releasing before the hold completes cancels with NO dispatch at all ("armed is never 'release
+ *  to fire'", same doctrine Stop's own short hold follows). Only a completed hold fires the normal
+ *  `request` action, landing on the SAME confirm dialog every other verb uses below — hold-to-arm
+ *  plus confirm is two distinct steps, not a replacement for the confirm step. */
+const ESTOP_HOLD_MS = 600;
+
+function useHoldToArm(onArmed: () => void): { start: () => void; cancel: () => void } {
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancel = useCallback(() => {
+    if (timer.current !== null) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
+  }, []);
+  const start = useCallback(() => {
+    cancel();
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      onArmed();
+    }, ESTOP_HOLD_MS);
+  }, [cancel, onArmed]);
+  useEffect(() => cancel, [cancel]);
+  return { start, cancel };
+}
+
+/** The octagon-outline "stop sign" glyph — §3 Operations' page-unique icon-bearing control;
+ *  Pause/Stop stay text-only (the asymmetry IS the tier hierarchy). */
+function OctagonIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <polygon points="7.5,2 16.5,2 22,7.5 22,16.5 16.5,22 7.5,22 2,16.5 2,7.5" />
+    </svg>
+  );
+}
+
 export interface ControlsProps {
   /** `dashboard.controls` (§8) — when false, no buttons render and no handler is ever wired
    *  (the component returns before the button markup, not merely hiding it with CSS). */
   enabled: boolean;
+  /** `engine.state === "running"` (§8) — EMERGENCY STOP is verb-legality gated: §3 Operations
+   *  renders it only while the engine is actually running. Defaults false so every pre-#733 call
+   *  site (none of which know about the tier) keeps rendering the original four verbs unchanged. */
+  running?: boolean;
+  /** The raw EMERGENCY_STOP sentinel (§733's `engine.estopActive`) — while active, `start` must
+   *  not render/report a "resumed" outcome, since the verb clears neither PAUSE nor this
+   *  sentinel; the only release lever is the CLI-only `sapwood estop clear` (#731). */
+  estopActive?: boolean;
   /** Injection seam for tests; defaults to the real `POST /api/control`. */
   onControl?: (verb: ControlVerb) => Promise<unknown>;
   /** Test-only seam (same posture as `App`'s own `now` prop): lets a render-only test put the
@@ -79,12 +123,12 @@ export interface ControlsProps {
 }
 
 /**
- * frontend-design.md §3 Operations: start/pause/resume/stop, each behind a confirm naming the
- * consequence in §7 plain language. Renders exactly the four verbs the server allows — no
- * emergency-stop button (out of scope for #361: the server exposes no client-readable allowlist
- * signal for it to gate on).
+ * frontend-design.md §3 Operations: start/pause/resume/stop/estop, each behind a confirm naming
+ * the consequence in §7 plain language. EMERGENCY STOP additionally requires a hold-to-arm before
+ * that confirm ever opens (`useHoldToArm` above), carries the octagon icon, and only renders while
+ * `running` is true.
  */
-export function Controls({ enabled, onControl, initialState }: ControlsProps) {
+export function Controls({ enabled, running = false, estopActive = false, onControl, initialState }: ControlsProps) {
   const [state, dispatch] = useReducer(controlsReducer, initialState ?? { phase: "idle" });
   // #739 gate② round 2 finding [1]: a failed request must return the UI to an ACTIONABLE state
   // (buttons re-enabled) while surfacing that it failed — never the raw error/status text (same
@@ -103,23 +147,51 @@ export function Controls({ enabled, onControl, initialState }: ControlsProps) {
     };
   }, [state, onControl]);
 
+  const estopHold = useHoldToArm(() => {
+    setFailed(false);
+    dispatch({ type: "request", verb: "estop" });
+  });
+
   if (!enabled) return null;
 
   return (
     <fieldset className="controls" aria-label="operations">
-      {CONTROL_VERBS.map((verb) => (
-        <button
-          key={verb}
-          type="button"
-          disabled={state.phase === "sending"}
-          onClick={() => {
-            setFailed(false);
-            dispatch({ type: "request", verb });
-          }}
-        >
-          {CONTROL_COPY[verb].label}
-        </button>
-      ))}
+      {CONTROL_VERBS.filter((verb) => verb !== "estop" || running).map((verb) =>
+        verb === "estop" ? (
+          <button
+            key={verb}
+            type="button"
+            className="control-estop"
+            disabled={state.phase === "sending"}
+            onPointerDown={estopHold.start}
+            onPointerUp={estopHold.cancel}
+            onPointerLeave={estopHold.cancel}
+            onPointerCancel={estopHold.cancel}
+          >
+            <OctagonIcon />
+            {CONTROL_COPY.estop.label}
+          </button>
+        ) : (
+          <button
+            key={verb}
+            type="button"
+            disabled={state.phase === "sending" || (verb === "start" && estopActive)}
+            onClick={() => {
+              setFailed(false);
+              dispatch({ type: "request", verb });
+            }}
+          >
+            {CONTROL_COPY[verb].label}
+          </button>
+        ),
+      )}
+      {/* #733 AC4: Start must never imply the halt is lifted while EMERGENCY_STOP persists — name
+          the one real release lever instead of staying silent about it. */}
+      {estopActive && (
+        <p className="muted controls-estop-notice">
+          EMERGENCY STOP is active — the halt persists. Release it with <code>sapwood estop clear</code>.
+        </p>
+      )}
       {failed && <p className="muted controls-error">Couldn't reach the engine — try again.</p>}
       {state.phase === "confirming" && (
         <div className="controls-confirm" role="alertdialog" aria-label={`confirm ${state.verb}`}>

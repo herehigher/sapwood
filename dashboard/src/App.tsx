@@ -196,7 +196,11 @@ export function appContent(vm: AppViewModel) {
           />
           {/* §3 Operations: the engine control verbs hide entirely while viewing a closed round —
               they act on the PRESENT engine while every other pixel shows an as-of-cursor past. */}
-          <Controls enabled={(loop.data?.controlsEnabled ?? false) && mode === "live"} />
+          <Controls
+            enabled={(loop.data?.controlsEnabled ?? false) && mode === "live"}
+            running={loop.data?.engine.state === "running"}
+            estopActive={loop.data?.engine.estopActive ?? false}
+          />
           <Legend />
         </header>
 

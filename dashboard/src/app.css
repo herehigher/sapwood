@@ -165,6 +165,32 @@ code,
   justify-content: space-between;
 }
 
+/* ---- §3 Operations control group ------------------------------------------ */
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border: none;
+  padding: 0;
+}
+
+/* Far-right isolation: a hard gap ahead of EMERGENCY STOP, separate from the tighter spacing
+   between Pause/Stop (§3 Operations, 2026-07-21: "the 20-px-hover-slip accident is a design
+   input, not an edge case"). */
+.control-estop {
+  margin-left: var(--space-4);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--rust);
+  border-color: var(--rust);
+}
+
+.controls-estop-notice {
+  color: var(--rust);
+}
+
 /* ---- "?" legend toggle (§7) — the header's whole onboarding surface ------- */
 
 .hero-legend summary {

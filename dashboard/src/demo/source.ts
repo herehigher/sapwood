@@ -11,7 +11,14 @@ import type { DemoBundle } from "./types.ts";
  */
 export const DEMO_SOURCE: DemoBundle = {
   loopState: {
-    engine: { state: "stopped", reasons: [], lastTickAt: "2026-08-09T09:42:00Z", pauseActive: false, standbyNextCheckSec: null },
+    engine: {
+      state: "stopped",
+      reasons: [],
+      lastTickAt: "2026-08-09T09:42:00Z",
+      pauseActive: false,
+      estopActive: false,
+      standbyNextCheckSec: null,
+    },
     lanes: { max: 2, items: [] },
     round: null,
     spend: { todayUsd: 0, dailyBudgetUsd: null, runUsd: null, runBudgetUsd: null, byModel: [] },
