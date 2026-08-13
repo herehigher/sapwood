@@ -14,6 +14,15 @@
   recurring findings and adjudication calls — and by cutting what a mechanism (a guard rule, a
   pinned test, a schema) has since taken over, so the same rule is never carried in both places
   at once.
+
+  Curation rule (#838): this file is a fixed-size cache, not a log — the budget is the design,
+  and hitting it is a curation signal, never a reason to compress a new rule into telegram style.
+  Above ~85% of `doctrine.maxChars`, an addition must evict or merge at least as much as it adds
+  (one-in-one-out). A new rule joins an existing family/sub-case structure where one fits (see the
+  test-realism family) rather than opening a new top-level bullet. Incident narrative is banned: a
+  rule carries its judgment content plus bare anchors (#NNN) only — the incident story lives in
+  the issue/PR the anchor points to, and mechanism claims cite symbols/files, never line ranges
+  (they rot).
 -->
 
 # Review doctrine

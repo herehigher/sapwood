@@ -185,3 +185,13 @@ test("#411: the loaded doctrine is comfortably under doctrine.maxChars with NO t
   // (retro-digest.ts's `capDigest`) — no other string in this file's prose can accidentally match it.
   assert.ok(!loaded.includes("[... digest truncated:"), "expected no capDigest truncation marker in the loaded doctrine text");
 });
+
+// #838 (gate② round 1 owner adjudication): the header's own curation rule ("above ~85% of
+// doctrine.maxChars, an addition must evict or merge at least as much as it adds") must not
+// itself get silently evicted by a future edit that's optimizing for char budget — pin its
+// distinctive "one-in-one-out" substring so a compaction pass that drops the rule fails loudly.
+test("#838: the header's curation rule (one-in-one-out budget discipline) is present, never silently evicted", () => {
+  const cfg = loadConfig(REPO_CONFIG_PATH);
+  const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
+  assert.ok(loaded.includes("one-in-one-out"), "expected the curation rule's 'one-in-one-out' substring in the loaded doctrine text");
+});
