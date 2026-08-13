@@ -446,9 +446,9 @@ serves a local, read-only view of the engine's own ledger. Its posture:
   value of that feed depends on it being unredacted. This is distinct from the *served
   config* surface, which is already allowlisted (`CONFIG_ALLOWLIST`,
   `engine/src/state/read-model.ts`) so a config key added later doesn't silently start
-  serving on the wire. There is no public, redacted export of the raw feed today; that is
-  #146's recorded-real-run fixture (`?demo`), gated as an acceptance criterion there —
-  not this document's concern.
+  serving on the wire. There is no public export of a live run's raw feed; the only
+  public-facing surface is the curated recorded-run demo fixture served under `?demo`,
+  which is a separate, hand-vetted artifact rather than a redaction of live data.
 
 ## Worker credential tiers
 
