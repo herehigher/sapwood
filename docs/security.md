@@ -583,7 +583,7 @@ startup or dispatch.
   AT the guard's own sanctioned enforcement point — it narrows the gap for a worker leg that goes
   through this guard's PreToolUse hook, but it is **not a replacement for branch protection**
   (item 3's own WARN, #633): branch protection is the mandatory backstop of record regardless of
-  whether this rule's patch has been applied, and nothing here closes a leg that bypasses the
+  whether this engine-side rule is active, and nothing here closes a leg that bypasses the
   guard hook itself (a non-`claude`-CLI process, or a session the engine didn't dispatch —
   SAPWOOD_DEFAULT_BRANCH unset leaves the rule inactive by
   design, same fail-safe stance the guard's other engine-set-env rules already take). **What the
@@ -1735,16 +1735,16 @@ the seam a worker could talk its way through.
 
 This is a deliberate trade, not a defect — but it means any issue whose acceptance
 criteria require the protected root YAML to change has a **human-applied step that no worker can
-discharge**. Such issues are best written to ask for a paste-ready patch (which a worker
-*can* produce, in the PR body or a plain file) rather than for the edit itself, so the
-work is dispatchable and the acceptance criteria are honestly satisfiable.
-
-> **RETIRED (owner ruling, 2026-08-13):** `.patch` files are no longer committed to the
-> repo — the `docs/patches/` folder is deleted. The paste-ready-patch mechanism described
-> in the rest of this section is retired; a human-merge-only acceptance criterion is now
-> satisfied by a **direct edit in the PR whose diff a human reviews and merges** (or a
-> carved-out human-owned remainder), never a committed `.patch` artifact. The prose below
-> is preserved for context pending its full rewrite in **#848**.
+discharge**. A human-merge-only path is changed only by a **direct edit in the PR whose diff a
+human reviews and merges** — never by an artifact a worker produces for a human to apply. The
+guard binds engine-spawned sessions' tool calls, never a human's editor or a human-directed
+session, which is why the direct edit is available at all where a worker's write is denied. So an
+issue drafted against such a path carves the protected-path work into a `## Human-owned remainder
+(protected paths — not dispatched)` section, its dispatchable rest landing normally; when the
+protected edit is a prerequisite the whole issue depends on, nothing is left to dispatch and the
+issue belongs to a human directly. Until the human PR lands, the pending protected change lives
+on the open issue's remainder section — the process-truth home for it — not as any committed
+artifact in the tree.
 
 **Resolved at issue-authoring time, not just caught at gate⓪ (retro round #284).**
 `verification-plan-reviewer.md`/`verification-plan-drafter.md` catch an acceptance criterion that
@@ -1753,24 +1753,9 @@ so an issue drafted with such a criterion reliably cost a gate⓪ bounce and a r
 before it could dispatch (round #281's #386 and round #284's #399 both paid this cost, for two
 different specific gaps in the same mechanism). `po.md` (both `align` and `triage` modes) and
 `po-decompose.md` now carry the identical check at the point an issue or `ready` child is first
-drafted, resolving it into a paste-ready-patch criterion or a carved-out human-owned
-remainder/section immediately rather than leaving it for the reviewer to find. The gate⓪ check
-stays in place as the backstop for whatever this upstream pass misses — this narrows how often
-it fires, it does not replace it.
-
-#386 is the worked example, and it shows the shape such a handoff should take. Its
-calibration guidance landed in the docs directly; the matching `worker.budgetUsdSoft`
-comment could not, so it ships as a **checked-in, `git apply`-able patch** at
-`docs/patches/386-budget-calibration.patch`, whose header states what it changes, why it
-is a patch rather than a commit, and the two commands that apply and then delete it. As
-long as that file exists, the YAML-side change is **still pending** — the patch is the
-request, not the delivery. The guard constrains Claude tool calls, never a human's
-editor, so applying it takes an editor and no special ceremony.
-
-A patch file is the right carrier here precisely because it is verifiable from the tree:
-a reviewer (human or engine-agent) can confirm the pending change exists and applies,
-rather than taking a prose claim on trust. Prefer it over describing the edit only in a
-PR body, which the tree does not record and a diff-scoped reviewer cannot see.
+drafted, resolving it into a carved-out human-owned remainder/section immediately rather than
+leaving it for the reviewer to find. The gate⓪ check stays in place as the backstop for whatever
+this upstream pass misses — this narrows how often it fires, it does not replace it.
 
 ### The `sapwood:human-merge-only` label (#397)
 

@@ -131,15 +131,21 @@ non-security edit is covered too), `sapwood.config.example.yaml`/`.json` (the `s
 init` starter template — guard-protected the same way as the root config, #781),
 `.claude/settings*.json`, `.github/workflows/**`),
 do not draft an AC that still asks a producer to make that edit —
-the guard will deny it regardless of how the criterion is worded. Rewrite it so the
-producer's deliverable is a paste-ready patch/diff for a human to apply (the rest of the
-capability can still land in the same PR), or, if the brief asks for a split, draft the
+the guard will deny it regardless of how the criterion is worded. Draft the
 non-human-merge-only portion only — and PRESERVE the dropped portion inside the issue
 body itself, under a section headed exactly `## Human-owned remainder (protected paths —
-not dispatched)`, stating what protected-path work remains and why a human must make it.
-Your final message is NOT a durable channel (the engine only applies the replacement
-body); the body section is what keeps the human-owned work visible on the issue instead
-of silently evaporating with the rewrite.
+not dispatched)`, stating what protected-path work remains and why a human must author it
+directly. There is no patch/diff deliverable a producer can hand off: a human-merge-only
+path is changed only by a direct edit in a human-reviewed, human-merged PR. If no
+independent non-protected slice is left (the protected edit is a prerequisite the rest
+depends on), a defective brief has routed a non-draftable issue to you — that case is the
+reviewer's `needs_human` verdict (outcome 4), not a draft request, and the review cycle
+escalates it; it is not a shape you word around into a plan. Your final message is NOT a
+durable channel (the engine only
+applies the replacement body); the body section is what keeps the human-owned work visible
+on the issue instead of silently evaporating with the rewrite. That section may quote the
+intended protected-path edit verbatim as advisory input for the human — context, never
+acceptance evidence.
 
 ## Non-negotiables
 

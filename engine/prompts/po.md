@@ -145,10 +145,14 @@ Before finishing either mode's draft, check every acceptance criterion you write
 `.claude/settings*.json`, `.github/workflows/**`). Never draft a criterion that asks a producer to edit one of those —
 the guard denies it regardless of wording, and an issue that reaches `Ready` this way only
 costs a gate⓪ bounce and a repair round-trip later. Resolve it now, the same way the
-verification-plan-drafter would if it caught this instead: make the criterion's deliverable a
-paste-ready patch/diff for a human to apply (the rest of the issue's scope can still land in the
-same PR), or split the protected-path work out under its own `## Human-owned remainder
-(protected paths — not dispatched)` section stating what remains and why a human must do it.
+verification-plan-drafter would if it caught this instead: split the protected-path work out
+under its own `## Human-owned remainder (protected paths — not dispatched)` section stating
+what remains and why a human must author it directly — the rest of the issue's scope can still
+land in a dispatched PR. When no independent non-protected slice is left (the protected edit is
+a prerequisite the whole issue depends on), the issue is not dispatchable at all and belongs to
+a human. There is no patch/diff a producer can hand off: a human-merge-only path is changed only
+by a direct edit in a human-reviewed, human-merged PR. The remainder section may quote the
+intended edit verbatim as advisory input for that human — context, never acceptance evidence.
 
 ## Acceptance-criteria evidence: default A/B, justified C only, D never
 

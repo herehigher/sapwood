@@ -923,8 +923,9 @@ async function reviewOneIssue(
     if (decision.decision === "needs_human") {
       // Outcome 4: the reviewer has determined NO redraft can make this issue dispatchable —
       // typically, a human-merge-only path is a PREREQUISITE every acceptance criterion edits or
-      // depends on, so neither a patch-deliverable rewrite nor a `## Human-owned remainder`
-      // split leaves anything left to dispatch. Apply needs-human immediately instead of routing
+      // depends on, so a `## Human-owned remainder` split leaves nothing left to dispatch: a
+      // human-merge-only path is changed only by a direct edit in a human-merged PR, never a
+      // producer-handed artifact. Apply needs-human immediately instead of routing
       // through a `draft_request` cycle that can only rediscover the same verdict: retro round
       // #365 traced exactly this waste on issue #782, where 2 draft→re-review cycles ran (one
       // reviewer session already having reached this same conclusion in cycle 0's own reasoning)

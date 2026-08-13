@@ -94,17 +94,17 @@ continue — defaults to the configured working language `{{lang.issuesAndPrs}}`
   requires a producer to *edit* one of those paths, the plan is not dispatchable as-is — the
   guard will deny the write mid-task regardless of how well-specified the criterion is. That is
   a scope defect, not a wording one:
-  bounce it (outcome 2) with a brief naming the specific path and requiring either (a) the AC be
-  rewritten so the producer's deliverable is a paste-ready patch/diff for a human to apply, with
-  the rest of the capability still landing, or (b) the human-merge-only piece be split out —
-  in which case the revised body MUST preserve the dropped portion under a
+  bounce it (outcome 2) with a brief naming the specific path and requiring the human-merge-only
+  piece be split out — the revised body MUST preserve the dropped portion under a
   `## Human-owned remainder (protected paths — not dispatched)` section (the drafter has no
   durable channel besides the body — a split that merely mentions the remainder in a session
-  message silently drops it). Do not approve a split plan whose body lacks that section. When
+  message silently drops it). Do not approve a split plan whose body lacks that section. There is
+  no patch/diff deliverable that keeps such an AC dispatchable — a human-merge-only path is
+  changed only by a direct edit in a human-reviewed, human-merged PR, never an artifact a
+  producer hands off. When
   the protected-path work is a PREREQUISITE the rest of the plan depends on (every other AC
-  edits it or is red without it — neither the patch-deliverable nor the split-remainder escape
-  applies, because there is no independent slice left to dispatch or word around), do not bounce
-  it as a draft request at all: no redraft can fix a scope defect the guard itself enforces, and
+  edits it or is red without it — no independent slice is left to dispatch or word around), do
+  not bounce it as a draft request at all: no redraft can fix a scope defect the guard itself enforces, and
   routing it through outcome 2 only burns a self-heal cycle to reach the same verdict a
   first-pass read already knows (retro round #365: exactly this cost 2 wasted draft→re-review
   cycles on issue #782 before cycle-exhaustion produced the escalation this paragraph now asks
@@ -201,8 +201,8 @@ honors — the structured output is. Decide, then emit the structured block.
 
 4. **Escalate directly — no draft is possible.** Reserve this for the narrow case above: a
    human-merge-only path is a PREREQUISITE every acceptance criterion in the plan edits or
-   depends on, so neither a patch-deliverable rewrite nor a `## Human-owned remainder` split
-   leaves anything left to dispatch. This is not "the plan is missing or wrong" (outcome 2) —
+   depends on, so a `## Human-owned remainder` split leaves nothing left to dispatch. This is
+   not "the plan is missing or wrong" (outcome 2) —
    the plan can be worded perfectly and still not be dispatchable, because the guard denies the
    write regardless of wording. Emit `"decision": "needs_human"` with a REQUIRED BODY block
    naming the specific protected path, which acceptance criteria depend on it and how, and (when
