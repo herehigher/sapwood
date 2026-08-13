@@ -1,11 +1,13 @@
-# 07 — Dashboard (v0.2 — partly built)
+# 07 — Dashboard (v0.2)
 
-The dashboard is **designed in full and built in part**. The `dashboard/`
-workspace exists and is load-bearing in CI; its data server is complete against
-the design's data contract; the UI is still a scaffold. Read this section as
-"which half is real", not as a specification — the authoritative
-feature-by-feature spec is [frontend-design.md](../frontend-design.md), and this
-guide deliberately does not mirror it.
+The dashboard is **designed in full and built out**. The `dashboard/` workspace
+exists and is load-bearing in CI; its data server is complete against the
+design's data contract, and the §3 UI modules, replay, the `?demo` fixture
+package, and the `sapwood dashboard` launcher have all landed. Read this
+section as "which pieces are real and where they live", not as a
+specification — the authoritative feature-by-feature spec is
+[frontend-design.md](../frontend-design.md), and this guide deliberately does
+not mirror it.
 
 ## What exists today
 
@@ -59,6 +61,27 @@ and happy-dom's `fetch` enforces same-origin/CORS against `window.location`, whi
 `server.test.ts`'s real network calls if registered process-wide — do not add it to the
 dashboard workspace's `test` script's `--import`.
 
+**The UI itself.** `src/App.tsx` wires the full app: the §3 modules — loop/round
+hero (`src/hero/Hero.tsx`, `stage.tsx`), lane board (`src/components/LaneBoard.tsx`),
+activity feed (`ActivityFeed.tsx`), needs-attention strip (`NeedsAttention.tsx`),
+cost strip (`CostStrip.tsx`), the read-only config drawer (`ConfigDrawer.tsx`), the
+controls/confirm flow (`Controls.tsx`), plus `Header.tsx` and `IconRail.tsx` — are
+all mounted, each with its own test file.
+
+**Replay.** `src/replay/` holds the event-folding reducer shared between live and
+replay (`reducer.ts`), the player (`player.ts`), checkpointing (`checkpoint.ts`),
+round-log assembly (`round-log.ts`), spend replay (`spend-replay.ts`), and the
+`useReplay` hook — each with tests. `src/demo/` holds the `?demo` fixture package:
+`source.ts`, `export.ts`/`export-cli.ts`, `useDemoReplay.ts`, and
+`build-round-log.ts`, also each with tests.
+
+**The launcher.** `sapwood dashboard` is a first-class CLI verb
+(`engine/src/cli.ts`'s usage block, `parseDashboardArgs`, `resolveDashboardPort`);
+it builds on `loop/dashboard-launcher.ts`, the only module allowed to spawn the
+browser-open child process for this feature. It starts `createDashboardServer()`
+against the same state DB `sapwood run`/`status` use, then opens the URL in a
+browser (or prints it in a headless environment).
+
 **Upstream of all of it,** the engine already persists the enabling sources:
 append-only `events` and `spend_ledger`, `rounds`/`round_artifacts`, live worker
 telemetry (`est_cost_usd`, `context_tokens`, `token_composition`), and explicit
@@ -67,21 +90,11 @@ transition/degrade/attention events (`engine/src/state/state.ts`,
 
 ## What is still TODO
 
-- **The UI itself.** `src/App.tsx` is a scaffold shell that renders just enough
-  of the payloads to prove the data layer polls and re-renders. The §3 modules —
-  loop/round hero, lane board, activity feed, needs-attention strip, cost strip,
-  read-only config drawer, and the controls/confirm flow — each land in their own
-  issue and none has landed yet.
-- **Replay.** The event-folding reducer shared between live and replay, the
-  player, and the `?demo` fixture package do not exist; no committed dashboard
-  fixture or demo application is in the repo.
-- **The launcher.** There is no `sapwood dashboard` command — `sapwood --help`
-  lists `init`, `run`, `status`, `park`, `validate` only. `createDashboardServer()`
-  has no production caller yet; until the launcher lands the server is started
-  from code (the tests do exactly that), and the frontend runs under `vite` dev
-  with `/api` proxied to port 4517.
-- **`spend.runUsd` stays `null`** until the follow-up that persists the run
-  anchor; the header meter falls back whole to the daily tier by design.
+- **`spend.runUsd` stays `null`** (`dashboard/server.ts` returns `runUsd: null`,
+  asserted by `server.test.ts`) until a follow-up persists a run anchor — there is
+  no honest way to compute a run-scoped sum from the DB alone today; the header
+  meter falls back whole to the round/daily tiers by design
+  (`dashboard/src/App.tsx`'s `resolveRoundSpend`).
 
 The root [`README.md`](../../README.md) roadmap remains the milestone-level
 status view.
