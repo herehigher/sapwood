@@ -15,8 +15,8 @@ replace it.
 - **A lane looks stuck:** [Stale heartbeat reclaim (and restart
   adoption)](#stale-heartbeat-reclaim-and-restart-adoption) · [Interpretation
   pointers](supervision.md#interpretation-pointers)
-- **Crashed mid-round:** [Crash & resume semantics
-  (rerun-not-resume)](loop-walkthrough-v0.2.md#4-crash--resume-semantics-rerun-not-resume)
+- **Crashed mid-round:** [Startup residue after a crash or quota
+  storm](#startup-residue-after-a-crash-or-quota-storm)
 - **I want to change direction:** Pause stops only new dispatch; an in-flight lane runs to completion unless stopped with the [Kill switch](supervision.md#stop-ritual).
   Editing it yields body-hash `needs-human`; follow [Human controls (three tiers)](security.md#human-controls-three-tiers) and [Ready issue never dispatches](#ready-issue-never-dispatches) for re-adjudication and gated re-entry (no redirect).
 
@@ -48,11 +48,11 @@ capacity. A `Ready` board status alone is not enough.
   `needs-human` label write failed, that lane is permanently outside automatic re-entry even if a
   human later adds or removes the label; review and merge its PR manually. It is not evidence that
   a fresh `Ready` issue was silently skipped. A comment that ONLY advances the
-  `sapwood:comments-adjudicated-through` cursor marker (#703's per-comment discipline) does not by
-  itself trigger this (#752) — the AC-authority hash ignores that one well-formed marker line; any
+  `sapwood:comments-adjudicated-through` cursor marker does not by
+  itself trigger this — the AC-authority hash ignores that one well-formed marker line; any
   other body edit still drifts as above. The sibling `comment-cursor-stale` recheck (still ahead of
   gate②) also correctly recognizes that same marker advance rather than bouncing it as pending
-  (#752 PO-adjudication finding 1, fixed in the same change) — a marker-only comment does not
+  — a marker-only comment does not
   produce either escalation.
 
 The run narrative defaults to `data/logs/sapwood.log` and is also teed to stderr; use
@@ -93,8 +93,8 @@ title exactly, including any em-dash/suffix.
 ## `needs-human` label
 
 > [!WARNING]
-> Upgrading a pre-#199 repository? Complete the
-> [label migration before restarting sapwood](configuration.md#upgrading-from-pre-199). Old bare
+> Upgrading a repository that still uses the older bare (unprefixed) label taxonomy? Complete the
+> [label migration before restarting sapwood](configuration.md#upgrading-from-unprefixed-labels). Old bare
 > hold labels are not recognized by the new prefixed defaults.
 
 `labels.needsHuman` (default `sapwood:needs-human`) means: **automation has stopped working
@@ -162,14 +162,14 @@ before moving, deleting, or restoring `data/`. Recovery:
    lanes still draining.
 2. Once you're satisfied it's safe to resume, run `sapwood stop clear` (equivalent to
    `rm -f data/KILL_SWITCH`; or `/sapwood-stop --lift` in a session where the plugin
-   is loaded — #731 added the CLI verb, all three act on the exact same file).
+   is loaded — all three act on the exact same file).
 3. Dispatch and merges resume on the **next tick** — a switch lifted mid-tick doesn't
    take effect within that same tick.
 
 If a drain escalated to a hard kill (the drain window elapsed before a worker handed
 off), that lane's issue/PR will carry `needs-human` — see above.
 
-## Single-instance lock (#382)
+## Single-instance lock
 
 Only one `sapwood run` may drive a given data dir (and therefore a given board) at a
 time — two concurrent engines double-drive: duplicate dispatch, conflicting merges. At
@@ -181,7 +181,7 @@ The lock is released on every normal exit (stop conditions, `--once`, kill switc
 graceful signals). A **crash** leaves it behind by design — the next start checks
 whether the recorded pid is still alive and, if it is dead, takes the stale lock over
 automatically (logged, plus a durable `instance-lock-taken-over` event). Crash + restart,
-including a supervisor's fast restart (#431), therefore needs no manual step.
+including a supervisor's fast restart, therefore needs no manual step.
 
 The one case that can need a hand: the previous engine died without releasing AND the OS
 has since recycled its pid onto some unrelated live process. The liveness check then
@@ -201,7 +201,7 @@ A crash can also leave a stray `sapwood.lock.tmp-*` file in `data/` — a sideca
 atomic create. Its name is unique per process start and is never re-matched by a later
 engine: harmless, safe to delete.
 
-## Environment-failure park (#168)
+## Environment-failure park
 
 A failure whose structured error output matches an environment-failure signature — an
 LLM-provider issue (429 / usage-limit / credit-exhausted) or a forge issue (network unreachable
@@ -286,7 +286,7 @@ invisibly parked-behind-the-park.
    does not lose the park state or its duration clock — it resumes probing, not dispatching —
    and does not, on its own, clear a still-genuinely-broken environment either.
 
-## Rapid-restart park (#431)
+## Rapid-restart park
 
 At startup the engine counts its own recent process births (`run-started` events) —
 `engine.rapidRestart.maxBirths` starts (default 5, the current start included) within
@@ -304,7 +304,7 @@ prerequisite), fix the crash's cause, and start the engine once the window has d
 `sapwood park clear --source rapid-restart` (with the engine stopped) also works but
 should never be necessary.
 
-## Consecutive-stalls park (#407)
+## Consecutive-stalls park
 
 The progress watchdog ([configuration.md](configuration.md)'s `liveness.watchdogTickMultiplier`)
 diagnoses a *single* stall: it appends a durable `engine-stalled` event and exits nonzero so a
@@ -327,7 +327,7 @@ dispatch surface is gone, so the engine deliberately does not read it as recover
 
 1. Diagnose the wedge — each `engine-stalled` event's payload names the open round/phase, the
    last event, and the tick age — and fix the cause.
-2. Stop the engine, then clear the park with the engine's own verb (#475):
+2. Stop the engine, then clear the park with the engine's own verb:
 
    ```sh
    sapwood park clear --source consecutive-stalls
@@ -336,7 +336,7 @@ dispatch surface is gone, so the engine deliberately does not read it as recover
    It performs the clear inside the engine's protocol, **receipt-first**: the `park-resumed`
    receipt (`via: operator-clear`) is appended *before* the `park_state` row is deleted, and the
    `data/ESCALATION` marker comes down last — the same order the engine's startup path uses.
-   It **refuses** while a live engine holds the data dir (the single-instance lock, #382), which
+   It **refuses** while a live engine holds the data dir (the single-instance lock), which
    is exactly the case where a raw row deletion could let a dispatch gate see the absent row
    before any receipt is in the ledger.
 3. Start the engine again. The streak restarts from zero — if the wedge was not actually fixed,
@@ -358,7 +358,7 @@ Until you act, the park and its single, deduped escalation stand across any numb
 — nothing is re-spammed and nothing is lost. A *transient* wedge (a host sleeping mid-round, a
 passing outage) closes rounds between its stalls and never trips the breaker at all.
 
-## Idle-churn park (#470)
+## Idle-churn park
 
 Standby ([configuration.md](configuration.md)'s `round.standby.enabled`) is what stops the loop
 opening rounds it has nothing to do in. It asks one question before each round: *is there
@@ -366,8 +366,7 @@ provably any work?* The failure this park exists for is that question answered *
 a probe signal counting work nothing enabled can ever consume (a role that is switched off, a
 selector reading a superset of what the consumer actually takes, a label nobody will ever remove).
 Standby then never engages, and the loop opens round after round, each one perfectly healthy and
-each one achieving exactly nothing. The live case was six such rounds in twelve minutes (dogfood
-F32, rounds 244–249) — found only because a human happened to be reading the round ledger.
+each one achieving exactly nothing.
 
 The breaker bounds it: once `round.idleChurn.consecutiveIdenticalRoundsThreshold` rounds (default
 5) in a row have closed both **idle** (no dispatch, no lane left in flight) and **state-identical**
@@ -388,7 +387,7 @@ sqlite3 data/sapwood.sqlite \
   "nothing, until a person acts", that signal is missing its terminal — the standing design rule
   is that every signal must name the state in which a deterministic failure stops it counting.
   The signal names come from `probe-signals.ts`'s `PROBE_SIGNALS` registry, where each entry
-  states its consumer and its terminal in so many words (#469) — read the entry with the name
+  states its consumer and its terminal in so many words — read the entry with the name
   the event gave you. Usually the fix is either that terminal, or the
   human-side action the signal is waiting on (promote the issue, clear the hold, remove the label).
 - An **empty** list means the probe never ran at all — standby is disabled, or its
@@ -404,14 +403,37 @@ sapwood park clear --source idle-churn
 ```
 
 The verb is receipt-first and refuses under a live engine — see the
-[consecutive-stalls section](#consecutive-stalls-park-407) for why, and for the raw-SQL
+[consecutive-stalls section](#consecutive-stalls-park) for why, and for the raw-SQL
 break-glass fallback (same shape, `source = 'idle-churn'`). Start the engine again afterwards;
 the running loop also notices the row is gone at its next round-open check. The streak restarts
 from zero — the detection event consumes the rounds that produced it — so if the cause was not
 actually fixed, a fresh set of K rounds re-parks as a new episode rather than re-spamming the old
 one.
 
-## How a dead engine says why it died (#407)
+## Reading engine state at a glance
+
+Every "what is it doing right now?" question has a deterministic answer assembled from four
+sources: sentinel files, the state DB (`workers`, `rounds`, `events`, `spend_ledger`,
+`round_artifacts`), the process itself, and (for PR states) GitHub. The trap is **"alive but
+silent"** — several different truths render identically in a terminal.
+
+| State | The truth | Decisive evidence | What it means |
+|---|---|---|---|
+| **Working** | lanes running / PRs driving | `workers` rows in `running`/`driving`; recent `events` | Normal operation: lanes, phase, spend. |
+| **Standby** | provably nothing to do; parked | `standby-wait` events (attempt n, waitSec) newer than any `dispatched`; no open round | "Standby — nothing Ready; probing every X min (backoff n)." Not an error state. |
+| **Paused** | human froze dispatch; in-flight work continues | `data/PAUSE` exists | "Paused by operator — in-flight lanes finishing; remove `data/PAUSE` to resume." |
+| **Ceiling-frozen** | a hard cost/time ceiling is breached; the engine ticks but dispatches nothing | the current `ceiling_breach` row's reasons; spend ≥ `cost.dailyBudgetUsd`, or process age ≥ `maxWallClockSec` (per process life — a restart starts a fresh clock, so an overnight "hang" here can mean the process genuinely ran a full day) | Needs a person: a daily-budget freeze resumes at midnight; a wall-clock alarm needs a restart to clear. |
+| **Draining to kill** | `KILL_SWITCH` tripped, or a stop signal received; handoff window running | `data/KILL_SWITCH` exists, else the `ceiling_breach` row reads `stop-signal`; workers transitioning to handoff. No sentinel is written for a signal — pair it with a live process before calling it "draining." | Counting down the drain window; exits 1 (sentinel) or 0 once drained (signal). |
+| **Winding down** | a stop condition hit; finishing the round | `round-stop`/stop-condition events; dispatch skipped with reason | "Stop condition met — finishing in-flight work." |
+| **Escalated dry** | board empty because everything needs a human | Ready empty + `needs-human`-labeled issues | The loop is waiting on a human, not broken — see [`needs-human` label](#needs-human-label). |
+| **Stalled PR** | a lane is parked in `driving` on a PR reporting no CI | `driving` lane age far exceeds normal; a conflicted PR builds no merge ref, so GitHub shows zero check-suites — looks like CI never ran, but the engine detects the conflict each tick and (with `prFixCap > 0` and no hold) routes it into the conflict-fix path automatically | In conductor-merge mode this usually self-heals; `prFixCap: 0` escalates to a human instead, and `produce-pr-and-stop` mode reports the conflict without acting (stays `driving` by design — not a bug). If it persists even with self-healing configured, the fix lane itself is stuck — see [Every lane is waiting on CI at once](#every-lane-is-waiting-on-ci-at-once-base-ci-red). |
+| **Dead** | the process is gone; lanes are orphaned | `lastTickAt` age far exceeds `tickIntervalSec`; no live process | See [How a dead engine says why it died](#how-a-dead-engine-says-why-it-died) below. |
+
+Derivation rule: **files beat DB beats staleness** — sentinels are absolute; then the newest
+relevant event; a stale `lastTickAt` overrides everything else ("whatever the DB says it was
+doing, it isn't").
+
+## How a dead engine says why it died
 
 Every run's fate is the **last run-lifecycle event** in the ledger after its `run-started`:
 
@@ -432,7 +454,7 @@ disagree.
 The run log (`logging.path`, default `data/logs/sapwood.log`) is the disposable human/LLM
 narrative: startup, tick and round lifecycle summaries, degradations, and park notices. Merges
 announce themselves here too — one `[sapwood:drive] lane <lane> pr #<n> MERGED (<headOid>)` line
-per merged PR (#570), so the engine's most consequential act is visible to a live `tail -f`
+per merged PR, so the engine's most consequential act is visible to a live `tail -f`
 without querying SQLite. Start here to understand the shape of a run; the previous rotation, when
 present, is `<path>.1`.
 
@@ -472,7 +494,7 @@ Each running worker writes a heartbeat, refreshed by the *engine's* in-process t
 so engine downtime (crash, restart, SIGHUP killing a session-bound `sapwood run`)
 stops the heartbeat while detached workers keep working. What happens when the most
 recent heartbeat is older than `worker.heartbeatStaleSecs` (default 180s) depends on
-whether the worker process itself is still alive (#169):
+whether the worker process itself is still alive:
 
 - **Worker process still alive**, and its first dispatch is within `worker.timeoutSec`:
   the lane is **adopted**, not killed. The engine requests a graceful handoff (SIGTERM),
@@ -566,7 +588,7 @@ What startup does, in order, and the state events it names each repair with:
 | A lane an **environment failure** killed while it held an **open PR**, never escalated (nothing on its issue) | Returns it to `driving`, so the ordinary drive/merge path picks the PR back up. Its rework-round count and preserved worktree are untouched | `lane-revived` |
 
 The last repair also runs mid-run, on the first tick after an [environment-failure
-park](#environment-failure-park-168) resumes. It **waits while the engine is parked** — on a
+park](#environment-failure-park) resumes. It **waits while the engine is parked** — on a
 restart as much as mid-run — because until the episode clears, the environment is still the
 thing that killed the lane.
 

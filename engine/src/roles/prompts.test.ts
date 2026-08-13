@@ -205,7 +205,9 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // files share the identical comment-stream intro paragraph).
   // #701: same appended working-language sentence as verification-plan-reviewer.md above.
   // #848: the drift re-check now points at the split-remainder / needs-human repair options, not the retired patch-deliverable.
-  "verification-plan-reviewer-confirm.md": "191f0a14101b764957f17e0fd02734054e431f3b92c1a4b9c0496e6fb74d467a",
+  // #828: the "security-relevant config" shorthand (the exact phrasing docs/security.md warns
+  // against) is now the full explicit human-merge-only path enumeration, matching the other 4 carriers.
+  "verification-plan-reviewer-confirm.md": "88df006be79a4e653bd60da72f8965389ba30a992b6c153651fd2ee991454ec0",
   // Same grant-preserved, closure-dropped fix as verification-plan-reviewer.md above — the
   // drafter's brief is still its primary instruction set; the forge grant (never removed) is a
   // read-only aid, never a write path, exactly as this file has always said.
@@ -297,7 +299,8 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // retro round #363: same fix as po.md above, mirrored for decomposed child issues.
   // #701: new "Working language" section states the configured `language.issuesAndPrs` default;
   // the pre-existing "(English is fine)" parenthetical now points at it.
-  "po-decompose.md": "9d4cac3cfd3f42b8979f28051f1d9a520d91c0ad4a5f8b2778bd562ee5027c7e",
+  // #828: added the missing sapwood.config.example.yaml/.json entry to the human-merge-only list.
+  "po-decompose.md": "8adaff9c48671de1de1597f51c83c8a6a2d3a7e78325cbf4797f7d644a5272c7",
 };
 
 test("prompt snapshot: po.md hash matches the pinned revision", () => {

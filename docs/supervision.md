@@ -2,7 +2,7 @@
 
 The playbook for whoever is watching a `sapwood run` session — a human, or a trusted
 LLM supervisor session (see [Governance lines](#governance-lines) for what that role
-means). Pre-#407, sapwood ships **no daemon/supervisor process of its own**: `sapwood
+means). sapwood ships **no daemon/supervisor process of its own**: `sapwood
 run` is a foreground engine loop, and something outside it — a terminal, a service
 manager, or an operator session — launches it, watches it, and stops it. This page is
 that "something outside it"'s manual. It is procedure, not new machinery: every verb
@@ -33,7 +33,7 @@ safe):
 **The poll-cursor recipe.** Keep `nextSinceId` from the previous call and feed it back
 as `--since-id` on the next one — every page (including an empty one) advances the
 cursor to the ledger's current tail, so a poller can never get stuck rescanning the same
-range. **Bootstrap the cursor with `--tail 0`** (#709) instead of a raw `select max(id)`
+range. **Bootstrap the cursor with `--tail 0`** instead of a raw `select max(id)`
 against the sqlite file — a monitor's most common need is "stream from NOW," and
 `--tail 0 --json` returns an empty `events` array plus the ledger's CURRENT head as
 `nextSinceId`, with no history read at all:
@@ -102,13 +102,13 @@ ever a best-effort, occasionally-lagging cache of it.
 A `sapwood run` you intend to leave running past your own shell session must be
 **detached from the launching session's lifetime**, never left in a terminal's
 foreground or handed to a session-managed background task. Session-managed background
-tasks carry a runtime ceiling (10 minutes in the incident this section is drawn from,
-wave-2, 2026-08-07); on expiry the harness TERMs the whole process group. The engine
-reads that correctly — two signals are exactly the freeze-drain-then-hard-exit sequence
-[Stop ritual](#stop-ritual)'s drain-semantics bullet already documents — but an operator
-who expected a supervised stop instead got an unattended one: one un-drained hard-exit,
-three lanes killed mid-flight, ~$30 bounded loss. The engine did nothing wrong; the
-launch method never detached it from a clock that was always going to run out.
+tasks carry a runtime ceiling; on expiry the harness TERMs the whole process group. The
+engine reads that correctly — two signals are exactly the freeze-drain-then-hard-exit
+sequence [Stop ritual](#stop-ritual)'s drain-semantics bullet already documents — but an
+operator who expected a supervised stop instead gets an unattended one: an un-drained
+hard-exit that kills in-flight lanes mid-flight. The engine does nothing wrong in this
+case; a launch method that isn't actually detached ties the engine to a clock that will
+eventually run out.
 
 Verified working pattern: `nohup`, backgrounded, and `disown`'d out of the launching
 shell's job table — this defeats `SIGHUP`-on-shell-exit and any other signal the shell
@@ -142,14 +142,11 @@ disown
 The criterion that actually matters here is whether your launcher's job control gives
 the backgrounded process its own process group at all — not whether the shell is
 "interactive" in the abstract. An ordinary interactive shell's job control does this by
-default; the incident below is an **example of a launcher that didn't**: an automation
-harness's shell ran `nohup ... & disown` without job control ever assigning the child a
-group of its own, so it inherited the launcher's process group, and a later
-group-directed signal from that same launching environment killed the "detached" engine
-collaterally. Live-verified 2026-08-07: pid 95193, launched this way, died to an
-external SIGKILL ~23 minutes in, together with its codex-exec review child; the exact
-external signal source was never identified, but the shared-pgid mechanism is
-confirmed.
+default; a launcher that doesn't can silently break detachment: an automation
+harness's shell running `nohup ... & disown` without job control ever assigning the
+child a group of its own leaves it inheriting the launcher's process group, so a later
+group-directed signal from that same launching environment can kill the "detached"
+engine collaterally.
 
 Even a `nohup`+`disown` that DOES land the child in its own process group only clears
 the first of a three-layer hierarchy, and each layer defeats a strictly smaller class of
@@ -214,7 +211,7 @@ absolute path you launched under, never a bare `data/sapwood.lock` typed from wh
 directory the checking shell happens to be in — the lock, like the DB below, is
 cwd-relative by default and resolves to nothing from anywhere else.
 
-Three script-environment gotchas from the same incident apply to any detached script,
+Three script-environment gotchas apply to any detached script,
 not just the launch line above:
 
 - **Hard-code the absolute `node` binary — a bare `node` is not safe outside an
@@ -238,9 +235,9 @@ not just the launch line above:
   exit 127, same as any other typo — this is not a silent failure by itself. Build the
   command as an array (`CLI=(node cli.js)`, invoked `${CLI[@]}`) or force the split
   explicitly (`${=CLI}`) — never rely on an unquoted string variable splitting the way
-  it would in bash. What made this silent in the incident wasn't zsh: the monitor
-  script itself redirected its own stderr to `/dev/null`, which is what actually
-  swallowed the loud 127 and turned a visible typo into a dead poller nobody noticed —
+  it would in bash. What actually makes this silent isn't zsh: a monitor
+  script that redirects its own stderr to `/dev/null` swallows the loud 127 and
+  turns a visible typo into a dead poller nobody notices —
   the general lesson, independent of this specific splitting bug, is don't blind an
   unattended script's own stderr.
 - **The state DB path defaults to `data/sapwood.sqlite`, resolved against the
@@ -369,22 +366,21 @@ Before ending a supervision session:
    a follow-up filed) or it's explicitly carried forward, never silently dropped.
 2. **Owner-ruling recovery ritual.** A ruling recorded ONLY as a comment is not evidence a
    worker will ever see — workers read the issue body only (`{{issue.body}}`, see
-   [`docs/security.md`](security.md#the-comment-adjudication-cursor-652)), and comments
+   [`docs/security.md`](security.md#the-comment-adjudication-cursor)), and comments
    remain audit evidence, never the contract a worker is dispatched against; the body
-   remains the worker contract. Two incidents are the paid-for cost of skipping this: the
-   #604 incident (an owner's verbal endorsement was never recorded, and a later architect
-   pass treated the issue as unresolved and blocked it) and the batch-8 incident (PR #651
-   round 1: a binding owner ruling sat in issue comment #3 while the worker faithfully
-   implemented the stale body — 5 P1s in one PR). Any owner ruling that lands during a
+   remains the worker contract. Skipping this step has a real, paid-for cost: an owner's
+   ruling left only in a comment can go unseen by both a later automated pass (which then
+   treats the issue as still unresolved) and the worker (who faithfully implements the
+   stale body) — producing real defects downstream. Any owner ruling that lands during a
    session — a scope call, a merge authorization, a policy decision — is closed out with
    all four steps below, in order, **in that same session**, before the session ends. Do
    not defer "I'll write it up later," and do not stop partway (recording the ruling
-   without rewriting the body reproduces the exact trap that caused batch-8):
+   without rewriting the body reproduces the exact trap this ritual exists to prevent):
    1. **Record the ruling** as a comment on the relevant issue/PR.
    2. **Rewrite the authoritative body** to fold the ruling in — the comment is evidence
       that a decision was made, not the decision a worker will act on.
-   3. **Advance the [#652 adjudication
-      cursor](security.md#the-comment-adjudication-cursor-652)**
+   3. **Advance the [adjudication
+      cursor](security.md#the-comment-adjudication-cursor)**
       (`<!-- sapwood:comments-adjudicated-through: <comment-id> -->`) to the ruling
       comment or later, so gate⓪ and dispatch see the body as current rather than stale.
    4. **Remove `needs-human`**, if it was applied for this reason.
@@ -403,7 +399,7 @@ Emergency stop (`data/EMERGENCY_STOP`), kill switch (`data/KILL_SWITCH`), and pa
 their distinct semantics. This section covers the supervision-side placement/removal
 discipline layered on top.
 
-(#731) Every `mkdir -p data && touch ...` / `rm -f ...` pair below has an equivalent
+Every `mkdir -p data && touch ...` / `rm -f ...` pair below has an equivalent
 first-class CLI verb — `sapwood pause`/`pause clear`, `sapwood stop`/`stop clear`,
 `sapwood estop --confirm`/`estop clear` — a thin wrapper over the exact same file, so
 either form is fine; the CLI form additionally prints the tier's live semantics and
@@ -422,7 +418,7 @@ either form is fine; the CLI form additionally prints the tier's live semantics 
   path, it hard-kills every running/fixing lane's process group on that same tick: there is no drain
   window, in-flight WIP is lost, and killed lanes escalate to `needs-human` with their
   evidence preserved. The kill itself is forge-free — a synchronous durable-PID signal that runs
-  before any forge call, so a hung or rejecting forge call can never delay or prevent it (#778).
+  before any forge call, so a hung or rejecting forge call can never delay or prevent it.
   Everything after the kill — terminal-state classification/probing, drain escalation, and the
   `needs-human` labels/comments — may still touch the forge, and is best-effort; none of it gates
   process termination anymore. Clear it only after human review of the emergency and of those
@@ -460,11 +456,9 @@ either form is fine; the CLI form additionally prints the tier's live semantics 
   stops advancing across polls, with CPU or RSS still rising, is a reason to look — not
   a diagnosis, and not on its own a reason to stop the engine. Those same signals are
   produced by healthy work: CPU/RSS rise during any real build or test run, and a lane's
-  `worker-heartbeat`/`role-session-heartbeat` is scoped to that lane's own progress (#688
-  fixed a gate that scoped it to the GLOBAL event cursor instead — a live batch-10
-  incident, two concurrent lanes on the same cadence, the earlier lane's heartbeat
-  starved permanently because the LATER lane's own ticks kept advancing the id it was
-  compared against; a single lane run never hit it). Corroborate before acting: check
+  `worker-heartbeat`/`role-session-heartbeat` is scoped to that lane's own progress — not
+  the engine's global event cursor, so one lane's ticks can never starve another
+  concurrent lane's heartbeat comparison. Corroborate before acting: check
   whether that SPECIFIC lane's own heartbeat/drive-queued reason has stopped changing —
   not just whether the global cursor has — and whether that lane's own worker log has
   stopped growing. Only once corroborated, capture the PID/process tree and last event
@@ -510,7 +504,7 @@ kind is reclassified by count; you are just choosing where to look next.
 
 ## Known blind spot: persistent forge-fetch failure in queued arms
 
-**Adjudicated bounded blind spot (#662, 2026-08-06 ruling, Option B).** Several
+**This is an accepted, bounded blind spot.** Several
 `queued`-outcome arms in the drive family — `ac-drift-check-unavailable`
 (`checkAcDriftBeforeDrive`), `comment-cursor-check-unavailable`
 (`checkCommentCursorBeforeDrive`), and the `*-escalation-write-failed` /
@@ -520,8 +514,8 @@ cap: distinguishing "permanently broken" from "rate-limited/network-blip" by a b
 count would either escalate a healthy lane on a bad day or need a second knob to avoid
 that, and no dogfood evidence of an actual silent wedge has shown up to justify the
 complexity (marginal-complexity doctrine — see `REVIEW-DOCTRINE.md`'s adjudication
-principles, and #662 for the full ruling record). The containment is honest visibility —
-one `drive-queued` event per reason change (never per-tick spam, #383 dedup) plus this
+principles). The containment is honest visibility —
+one `drive-queued` event per reason change (never per-tick spam) plus this
 watch recipe — not an automatic escalation.
 
 Spot a wedged lane with the same two read-only verbs from
@@ -562,7 +556,7 @@ meaning (and how each differs from `needs-human`) lives in `docs/configuration.m
 gh issue list --repo OWNER/REPO --label "sapwood:needs-human" --state open
 gh pr list    --repo OWNER/REPO --label "sapwood:needs-human" --state open
 
-# Why is issue N labelled needs-human? The reason is on the carrier itself (#655's own
+# Why is issue N labelled needs-human? The reason is on the carrier itself (a
 # marker-deduped comment on the FIRST escalation) and in the ledger — the latter is one
 # command, no jq projection needed:
 sapwood events --issue N
@@ -594,7 +588,7 @@ be `driving` in the DB and simultaneously carry a human hold label on GitHub.
   are the owner's; a supervisor session's job is to surface the queues that need a
   decision, record the decision once made (see [Batch close ritual](#batch-close-ritual)
   above), and follow up on anything left open — never to decide on the owner's behalf.
-- **Breaker-park clear discipline.** `park clear --reason "<text>"` (#644) records the
+- **Breaker-park clear discipline.** `park clear --reason "<text>"` records the
   operator's reason for clearing a park episode verbatim in the receipt event and echoes
   it in stdout. It's advisory for a human clearing by hand; for an agent supervisor it is
   **required practice** — every clear an agent supervisor performs carries a `--reason`.
@@ -603,7 +597,7 @@ be `driving` in the DB and simultaneously carry a human hold label on GitHub.
   clearing and escalate to a human (apply `needs-human` / raise it explicitly) rather
   than clear a third time.
 
-> **OWNER RULING RECORDED (2026-08-04, PM session, this round):** an LLM supervisor
+> **Supervisor governance ruling.** An LLM supervisor
 > session occupies the TRUSTED OPERATOR role. Interventions (kill-switch sentinel, pause
 > sentinel, `park clear`) are operator surface — producer≠reviewer≠merger does not
 > implicate the supervisor. Auditability requirement: agent-performed breaker-park
@@ -616,7 +610,7 @@ be `driving` in the DB and simultaneously carry a human hold label on GitHub.
 `sapwood run --dry-run` prices a batch BEFORE it starts (`previewUsd` — candidate count
 × the configured soft per-worker budget). `sapwood status --json`'s `spend` section
 prices what actually happened: `todayUsd`, split by real attribution
-(`settledByWorker`/`settledByRole`/`reviewUsd`, #645) plus `unclassifiedUsd` + an
+(`settledByWorker`/`settledByRole`/`reviewUsd`) plus `unclassifiedUsd` + an
 `incomplete` flag so a client can never mistake attribution gaps for zero spend. The
 engine itself already reconciles ITS OWN per-lane estimate against the real terminal
 `total_cost_usd` at terminal settlement (done/failed/handoff alike, not just a clean
@@ -625,21 +619,21 @@ when it is, and logging the estimate as the recorded spend (never a fabricated $
 it isn't (`writeTerminalSentinel`'s own doc, `engine/src/roles/worker.ts`; see
 `docs/PLAN.md`'s Security model) — that is a per-lane mechanism, not a supervision one.
 
-`spend_ledger` also carries a per-row `estimated` flag (#645) so the est-vs-real
+`spend_ledger` also carries a per-row `estimated` flag so the est-vs-real
 divergence above can be queried instead of grepped from logs — populated where the
 engine distinguishes a pinned-price estimate from a real provider-reported total at
-the write site itself: the engine-review site's own `ReviewSessionSpend.kind`, AND
-(as of #645's spend-attribution work) every worker/fix-leg terminal settlement —
-`writeTerminalSentinel`'s own `costEstimated` computation is now persisted onto the
+the write site itself: the engine-review site's own `ReviewSessionSpend.kind`, and
+every worker/fix-leg terminal settlement —
+`writeTerminalSentinel`'s own `costEstimated` computation is persisted onto the
 terminal sentinel, threaded through `LaneProbe.costEstimated`, and lands in
 `spend_ledger.estimated` at `conductor.ts`'s `settleTerminalWorker` call. A
-worker/fix-leg row's `estimated` is `NULL` only for a lane that predates this change or
-whose sentinel never classified the distinction (still never guessed). A
+worker/fix-leg row's `estimated` is `NULL` for older/legacy lane rows or when the
+sentinel never classified the distinction (still never guessed). A
 `peripheral-role` row's `estimated` is still `NULL` always — `peripheral.ts`'s
 `runSessionWithRetry` does not yet thread this signal through — so the dogfood
-estimator-bias series (opus vs. sonnet, per-leg) can now be run by query for
-worker/fix-leg/engine-review lanes, and still needs peripheral-role rows wired by a
-later issue.
+estimator-bias series (opus vs. sonnet, per-leg) can be run by query for
+worker/fix-leg/engine-review lanes; peripheral-role rows still need to be wired in
+a later change.
 
 The supervision-side practice is a coarser, session-scoped series: note the dry-run
 preview at batch open, note the settled spend at batch close, and track the two numbers

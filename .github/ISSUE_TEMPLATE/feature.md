@@ -1,6 +1,6 @@
 ---
 name: Feature
-about: A new capability for sapwood
+about: A new capability for this project
 title: "feat: "
 labels: type:feature
 ---

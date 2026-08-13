@@ -41,15 +41,15 @@ is enforced structurally, not by asking the model nicely:
   `--add-blocked-by`/`--remove-blocked-by`/`--add-blocking`/`--remove-blocking`
   relations remain allowed because no sapwood gate reads those relations (dispatch
   ordering uses `blocked-by:#N` labels, already covered by `--add-label`/`--remove-label`).
-  Under #290/#353, the issue lifecycle itself (close/reopen/transfer/delete) is
+  The issue lifecycle itself (close/reopen/transfer/delete) is
   engine/human-owned: the worker's `gh issue close|reopen|transfer|delete` is blocked at
   the same high-level-CLI-verb layer as the `edit` governance flags, symmetric with the
-  REST/GraphQL mutations #352 already blocks underneath it (`gh api -X PATCH
+  REST/GraphQL mutations already blocked underneath it (`gh api -X PATCH
   repos/*/issues/<n>` state changes match `ISSUE_GOVERNANCE_PATH_RE`; GitHub has no REST
   transfer/delete endpoint, so those reach the guard only as `gh api graphql` mutations,
   already caught by the graphql-mutation check). `gh issue comment`/`view`/`list`/`status`/
-  `create` remain allowed — comment is the worker's refuse/hand-back channel. Since #601, a
-  no-PR escalation no longer depends on a human happening to read that comment: the engine
+  `create` remain allowed — comment is the worker's refuse/hand-back channel. A
+  no-PR escalation does not depend on a human happening to read that comment: the engine
   itself re-surfaces the worker's own final-message text (already parsed, never a new
   capability) as a `reason` field on the escalation event and its own `needs-human` comment.
   The worker's write path is unchanged — this is a READ-side addition, not a new grant.
@@ -95,15 +95,14 @@ The mode reaches the guard hook via a spawn-time environment variable
 worker-writable settings file — so a worker cannot weaken its own guard mode by editing
 config mid-run.
 
-## Host-delegated capability management (DR #616, 2026-08-03)
+## Host-delegated capability management
 
 sapwood adopts **host-delegated capability management: it abandons in-engine
 tool-permission/capability management for producer (worker) legs.** Producer legs officially inherit the operator's host Claude Code environment —
 settings sources, MCP servers, skills — as documented behavior, not an accident of unset
 flags. **No `capabilities.*` config surface will ever be built**; PLAN.md's locked-decisions
 table (Decision #11) records the accepted rationale. Scope is **producer legs only** — the
-reviewer/peripheral sealing floor below is untouched and stays non-negotiable (standing
-#285/#410/#236 rulings).
+reviewer/peripheral sealing floor below is untouched and stays non-negotiable.
 
 A live probe (worker's exact dispatch argv: `--permission-mode auto`,
 `WORKER_ALLOWED_TOOLS`/`WORKER_DISALLOWED_TOOLS` verbatim) confirmed the premise this
@@ -123,8 +122,8 @@ in-engine *tool-permission* management for producer legs is abandoned. Five mech
 1. **The guard hook**, injected as inline `--settings` JSON (self-disable-proof, see
    [producer ≠ reviewer ≠ merger](#producer--reviewer--merger) above) — unchanged.
 2. **Gate② review-session seal** (`--strict-mcp-config` + an empty `--mcp-config`, and
-   `--setting-sources ""`) — the **only** sealing floor; see [Review session mode](#review-session-mode-closed-mcpsettings-surface-forced-hard-guard-285)
-   below. Non-review peripherals stay unsealed (standing #410/#236 rulings).
+   `--setting-sources ""`) — the **only** sealing floor; see [Review session mode](#review-session-mode-closed-mcpsettings-surface-forced-hard-guard)
+   below. Non-review peripherals stay unsealed.
 3. **Human-merge-only write-path enforcement** — the guard's `checkWritePath` — see
    [Human-merge-only paths](#human-merge-only-paths) below.
 4. **Role routing, merge-driver identity/CI binding (the TOCTOU pin), the state ledger, and
@@ -133,8 +132,8 @@ in-engine *tool-permission* management for producer legs is abandoned. Five mech
 5. **`credentialFree` legs additionally force a sealed MCP surface**: `strictMcpConfig: true`
    plus an engine-composed, proxy-only `mcpConfig`, so a credential-free fix leg cannot reach
    an ambient forge-authority MCP server even though it keeps an open `--setting-sources`
-   (the action-side/content-side split from #219: stripping forge credentials is the
-   action-side control, sealing MCP is the content-side complement). Implemented by #617.
+   (stripping forge credentials is the action-side control, sealing MCP is the content-side
+   complement).
 
 ### Accepted blind spots
 
@@ -147,31 +146,30 @@ in-engine *tool-permission* management for producer legs is abandoned. Five mech
   from writing to the repository outside the reviewed PR path; a protected default branch
   (no direct pushes, required reviews/checks) is documented as mandatory, not optional,
   precisely because the in-engine capability boundary was deliberately not built for producer
-  legs. **#633: this backstop's presence is now detected, not just documented.** Once per
+  legs. **This backstop's presence is now detected, not just documented.** Once per
   engine start, `engine/src/loop/branch-protection-warning.ts` reads the target repo's default
   branch protection state (classic branch-protection endpoint, then — only on a 404 — whether
   an active ruleset covers the branch) and logs one warning naming the branch and both operator
-  exits when the branch is POSITIVELY VERIFIED unprotected. This is warn-only observation, same
-  #554 stance as the [managed-settings exception](#managed-settings-allowmanagedpermissionrulesonly-exception-554)
+  exits when the branch is POSITIVELY VERIFIED unprotected. This is warn-only observation, the
+  same stance as the [managed-settings exception](#managed-settings-allowmanagedpermissionrulesonly-exception)
   below: no startup refusal, no label, no gate, and an inconclusive read never fires the
   warning — it never enforces the backstop it names.
-- **(b′) server-granularity MCP deny vs. `allowManagedPermissionRulesOnly` (#554).** The
+- **(b′) server-granularity MCP deny vs. `allowManagedPermissionRulesOnly`.** The
   server-granularity deny for producer legs (known forge-authority/github-class and
-  known write/exec/filesystem-class MCP servers appended to `WORKER_DISALLOWED_TOOLS`,
-  shipped by #617) lands
+  known write/exec/filesystem-class MCP servers appended to `WORKER_DISALLOWED_TOOLS`)
+  lands
   in `--disallowedTools`. As [documented above](#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry),
   a target repo whose managed settings set `allowManagedPermissionRulesOnly: true` causes the
   CLI to discard every CLI-argument permission rule — including this server deny, alongside
-  the rest of sapwood's `--disallowedTools` containment. #554's owner ruling (2026-08-03,
-  shipped by #622) is disclose + detect-and-WARN — one startup warning naming both operator
-  exits, no refusal; see the [managed-settings exception section](#managed-settings-allowmanagedpermissionrulesonly-exception-554)
+  the rest of sapwood's `--disallowedTools` containment. The owner ruling is disclose +
+  detect-and-WARN — one startup warning naming both operator
+  exits, no refusal; see the [managed-settings exception section](#managed-settings-allowmanagedpermissionrulesonly-exception)
   below. The interaction stays named here, never silently accepted.
 
 ### Doctrine lines
 
 <!-- sapwood:skill:ac-evidence-tiers:start -->
-- **AC evidence is tiered by trust origin, not by reproducibility (owner ruling 2026-08-04,
-  #628, superseding #616's original absolute "CI-reproducible" form).** The invariant that
+- **AC evidence is tiered by trust origin, not by reproducibility.** The invariant that
   matters is that **the producer cannot forge the evidence** — CI is the common-case
   implementation of that invariant, not its definition. A verification plan's acceptance-criteria
   evidence is ranked into one of four tiers:
@@ -230,11 +228,11 @@ of the model. sapwood targets trusted repos first, and by owner decision does no
 sessions in a network-isolated sandbox or proxy. Operators must therefore treat worker Bash
 egress as an explicit blind spot when deciding which repositories, host credentials, and
 environment data are safe to expose to a run. This is not the engine's only inherited-capability
-egress gap: capability DR #616 (above) documents a second, broader one — the operator's ambient
+egress gap: host-delegated capability management (above) documents a second, broader one — the operator's ambient
 host MCP surface, which a producer leg inherits regardless of `Bash` and which the guard hook's
 matcher does not mediate either. The two are tracked separately because they arrived from
 different decisions and are detected by different mechanisms (the Bash lexical tripwire below vs.
-`scanEgressSuspects`'s `mcp__*` family, #617), not because either is more or less real than the
+`scanEgressSuspects`'s `mcp__*` family), not because either is more or less real than the
 other.
 
 The engine adds a monitor-only lexical tripwire at lane end. It scans the completed leg's
@@ -247,7 +245,7 @@ It can catch naive or accidental exfiltration attempts and leave an audit trail,
 deliberate adversary can trivially evade lexical executable matching — for example with an
 interpreter one-liner or DNS exfiltration.
 
-### Loopback targets: tagged, never excluded (#387)
+### Loopback targets: tagged, never excluded
 
 A dogfood run flagged `curl http://127.0.0.1:5173/...` dev-server smoke checks with exactly the
 prominence of real public egress the same run caught, which trains an operator to skim the
@@ -262,30 +260,30 @@ block, and `::1`, matched only inside a `scheme://host` URL. Absence of the tag 
 default — "not proven loopback" — and every ambiguity resolves that way: a snippet mixing loopback
 and public URLs, an unparseable authority, a snippet with no URL at all (a `WebSearch` query, an
 `Agent` spawn description), and a schemeless `curl 127.0.0.1:5173` are all left untagged at full
-prominence. That direction is deliberate: a missed loopback URL only restores the pre-#387 status
-quo for a benign hit, whereas the opposite error would downgrade something that genuinely reached
+prominence. That direction is deliberate: a missed loopback URL only restores prior tripwire
+behavior for a benign hit, whereas the opposite error would downgrade something that genuinely reached
 the network. Classification reads the full observed text, not the 200-character evidence snippet,
 so a public URL truncated out of the recorded evidence cannot leave a hit tagged loopback.
 
 Note that loopback is not "safe" in general — a local port can be a proxy onward — which is
 precisely why this is a prominence marker on a retained record, not an exclusion.
 
-## Peripheral network egress: WebSearch/WebFetch, detected not pinned (#410)
+## Peripheral network egress: WebSearch/WebFetch, detected not pinned
 
 Three role sessions — `architect`, `po-align`, `po-triage` — are granted the CLI's built-in
 `WebSearch`/`WebFetch` tools, `webAccess.enabled` (default `true`, a config key can disable it).
 This is a bounded widening, not a relaxation of the posture above: unlike the worker's Bash
 egress, this channel is exactly two named, read-only tools, carries no credential into any
-project system, and every call is journalled (see the audit paragraph below). The decision
-record (issue #410) rejected a domain allowlist (self-defeating — the point is discovering
+project system, and every call is journalled (see the audit paragraph below). This design
+rejected a domain allowlist (self-defeating — the point is discovering
 things nobody knew to look for, and an allowlisted domain accepting an arbitrary path/query is
 itself an egress channel) and MCP delivery (the guard hook has no `mcp__` handling at all, so a
 built-in-tool grant stays visible to the engine's own enforcement layer and journal in a way an
-engine-hosted MCP tool would not) — the same guard-blind-spot fact capability DR #616 (above)
-later documented at doctrine level for producer legs generally; #410's choice of
-`WebSearch`/`WebFetch` over MCP for this specific grant remains sound for the same reason, it
-just no longer needs restating as though the guard's `mcp__` blindness were unique to this
-decision.
+engine-hosted MCP tool would not) — the same guard-blind-spot fact the host-delegated capability
+management doctrine (above) later documented at doctrine level for producer legs generally; this
+choice of `WebSearch`/`WebFetch` over MCP for this specific grant remains sound for the same
+reason, it just no longer needs restating as though the guard's `mcp__` blindness were unique to
+this decision.
 
 **Grant, per-role, named exports.** `peripheral.ts`'s `ARCHITECT_ALLOWED_TOOLS`/
 `PO_ALIGN_ALLOWED_TOOLS`/`PO_TRIAGE_ALLOWED_TOOLS` each widen the base `ROLE_ALLOWED_TOOLS`/
@@ -300,7 +298,8 @@ the ungranted base unconditionally: it renders a distinct prompt (`po-pool.md`),
 review session is actually offline by construction.** `verification-plan-reviewer`,
 `verification-plan-drafter`, `verification-plan-reviewer-confirm`, and every gate②
 `engine-agent` review session never reference `cfg.webAccess` at all — refusal of THAT grant is
-the absence of a wire-up, not a check that could be misconfigured. But under capability DR #616
+the absence of a wire-up, not a check that could be misconfigured. But under host-delegated
+capability management
 that is a narrower claim than "offline": only gate②'s review-session mode (`reviewCwd`, see
 below) actually closes the MCP/settings surface (`--strict-mcp-config`/`--setting-sources ""`),
 so only it is genuinely offline by construction. `verification-plan-reviewer`/`-drafter`/
@@ -313,11 +312,11 @@ outright (thrown, not silently accepted) alongside `reviewCwd`, so even a future
 attempting to widen it would fail loudly rather than reopen the surface. A gate whose
 conclusions could drift run to run over a live web result is not an inspectable gate — this is
 recorded as a deliberate reproducibility property. Gate②'s `--strict-mcp-config`/
-`--setting-sources ""` seal (see [Review session mode](#review-session-mode-closed-mcpsettings-surface-forced-hard-guard-285)
+`--setting-sources ""` seal (see [Review session mode](#review-session-mode-closed-mcpsettings-surface-forced-hard-guard)
 below) is unaffected by anything in this section — it was justified independently, for a
-materialized PR tree, and #410 leaves it exactly as it was.
+materialized PR tree, and this section leaves it exactly as it was.
 
-**The exception, stated exactly (#443, `reviewer.agent.runner: codex-exec`).** An operator can
+**The exception, stated exactly (`reviewer.agent.runner: codex-exec`).** An operator can
 select a locally spawned `codex exec` process as the engine-agent review session's runner. It is
 **off by default** and this section is what an operator should read before turning it on. For a
 remote-provider CLI, "offline by construction" cannot mean a blanket network denial — the CLI needs
@@ -363,7 +362,7 @@ quietly inherited:
   `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` to `/dev/null` with `GIT_TERMINAL_PROMPT=0`. Those remove
   the ambient *handles*; they do not stop a *read* of the underlying files, which remain on disk and
   readable. **Filesystem confinement is what would actually close blind spot 2, and it is
-  deliberately not shipped**: the adjudication (2026-08-01, R2) rules out a new outer OS/container
+  deliberately not shipped**: the adjudication rules out a new outer OS/container
   fence (trusted-repos posture; the marginal-complexity principle). Blind spots 1 and 2 are emitted
   at every codex-exec spawn as named entries in `engine-review-containment-gap`'s `gaps` payload
   (`model-invoked-shell-execution`, `host-wide-filesystem-reads`), so they are on the durable
@@ -376,15 +375,14 @@ quietly inherited:
   session's output goes through the same element-wise validation for both runners, and an
   unidentifiable session model maps to `unavailable` rather than to a verdict.
 
-**Detected, not pinned — the operator's own settings can still silently strip the grant.** An
-earlier version of this feature pinned `--strict-mcp-config`/`--setting-sources ""` for EVERY
-peripheral session (the same triple #285 uses for gate②'s materialized-tree review sessions).
-A live measurement found that `--setting-sources ""` ALSO stops loading the target repo's own
+**Detected, not pinned — the operator's own settings can still silently strip the grant.**
+Sealing every peripheral session with `--strict-mcp-config`/`--setting-sources ""` (the same
+triple gate②'s materialized-tree review sessions use) is not viable here: `--setting-sources ""`
+also stops loading the target repo's own
 `CLAUDE.md` — colliding with the locked ruling below ([Ambient repo context: record, don't
-seal](#ambient-repo-context-record-dont-seal-236)): a peripheral session absorbing the repo's
-own `CLAUDE.md` is a deliberately OPEN channel, never sealed, and pinning would have sealed it
-as a side effect for every non-review session. The owner rejected the pinning and adopted the
-fallback the original decision record reserved for exactly this case: **lightweight startup
+seal](#ambient-repo-context-record-dont-seal)): a peripheral session absorbing the repo's
+own `CLAUDE.md` is a deliberately OPEN channel, never sealed, and pinning would seal it
+as a side effect for every non-review session. Instead the design uses **lightweight startup
 detection**, not containment. `cli.ts`'s `checkWebAccessSettingsDenial` — called from the same
 best-effort startup pass as `normalizeUnplacedBoardItems`, right after `assertStopMilestoneExists`
 — reads ONLY the operator's user-level settings (`$CLAUDE_CONFIG_DIR/settings.json`, or
@@ -392,8 +390,8 @@ best-effort startup pass as `normalizeUnplacedBoardItems`, right after `assertSt
 and an engine worktree carries no local settings of its own) and, when `webAccess.enabled` is
 true and `permissions.deny` names `WebSearch`/`WebFetch` (bare, or a `Tool(...)`-qualified
 prefix like `WebFetch(domain:x)`), emits one warning log line plus one durable
-`web-access-denied-by-operator-settings` state event. This is exactly the failure mode #410's
-own measurement hit: a granted session's own reported tool list simply omits the denied tool,
+`web-access-denied-by-operator-settings` state event. This is exactly the failure mode a live
+measurement hit: a granted session's own reported tool list simply omits the denied tool,
 with **zero** permission-denial signal — indistinguishable from "this CLI version doesn't have
 the tool" without this check. Detection only: it never blocks startup, never spawns a probe
 session, and never mutates the operator's settings. The prompts' first-class abstention wording
@@ -407,14 +405,14 @@ the worker's own Bash lexical tripwire already calls — now ALSO recognizes `We
 (unconditionally, not gated by `worker.egressSuspectCommands`: unlike Bash, where most
 executables are legitimate, these two tool names ARE the entire ENGINE-GRANTED peripheral-egress
 channel), and — by that same unconditional branch — `Agent`/`Task` `tool_use` blocks too (see
-the #534 paragraph below). Capability DR #616 adds a second, INHERITED egress channel — any
-`mcp__*` tool call — scanned unconditionally by the same function (#617, seam 4); see the
+the subagent-spawn deny discussion below). Host-delegated capability management adds a second, INHERITED egress channel — any
+`mcp__*` tool call — scanned unconditionally by the same function; see the
 inheritance doctrine above and the worker-egress blind-spot section below. `RoleRunner.run()` calls it on every session's own completed jsonl and
 emits the identical `egress-suspect` ledger event kind the worker's tripwire uses — `round-artifact.ts`'s
 existing assembler needs no changes to surface either kind. This flagging is deliberately
 **content-driven, not role-gated**: `--allowedTools`/`--disallowedTools` is a noise-reduction
 permission layer, not a schema removal (see [Worker denylist vs. peripheral allowlist](#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry)
-below), so a session without the grant — a worker leg, or a peripheral role the #410 grant
+below), so a session without the grant — a worker leg, or a peripheral role the grant
 doesn't cover — can still EMIT a `WebFetch`/`WebSearch` tool_use block; the CLI's own
 permission layer denies it at the paired `tool_result`, which this scanner does not read. A hit
 therefore records an attempt, never proof of execution — the same "evidence, not a verdict"
@@ -422,15 +420,15 @@ stance the Bash tripwire above already takes. The engine deliberately keeps this
 for every session kind: an attempted egress through a tool a session was never granted is
 exactly what a post-hoc tripwire should surface, not suppress.
 
-## Worker credential tiers (#351, #606)
+## Worker credential tiers
 
 **Core property: producer≠merger enforced by credential ABSENCE, not by deny rules.** Every
 control elsewhere on this page (the guard hook, `WORKER_DISALLOWED_TOOLS`,
 `allowManagedPermissionRulesOnly`'s own caveat) is a rule a sufficiently motivated argv can try
 to route around. A worker that structurally HOLDS NO forge API credential at all cannot open a
 PR, approve a review, or merge — not because a rule says no, but because the capability to do so
-does not exist in its environment. #351's final ruling (owner-confirmed 2026-08-04) names this
-the tier axis; #606 is this tier's L1 implementation. **Naming note:** this is a CREDENTIAL-scope
+does not exist in its environment. This is the tier axis this section describes, with the table
+below naming its L0/L1/L2 implementation. **Naming note:** this is a CREDENTIAL-scope
 axis, distinct from the DISPATCH-autonomy ladder in
 [getting-started.md](getting-started.md#l0l3-autonomy-ladder) (L0 Observe / L1
 Supervise / L2 Delegate / L3 Governed unattended merge) — the two share L0/L1 labels by
@@ -439,9 +437,9 @@ independently be at autonomy-L3 and credential-L0, or autonomy-L1 and credential
 
 | Tier | What the worker leg's env holds | Push mechanism | PR-open mechanism | Theft blast radius |
 | --- | --- | --- | --- | --- |
-| **L0** (today's default, unset `worker.deployKeyPath`/`worker.deployKeyId`) | The operator's REAL, unrestricted environment — `GH_TOKEN`/`gh`'s stored host config/git credential helpers, all inherited verbatim (`process.env`, unchanged) | `git push` over whatever transport the engine's own checkout uses (typically HTTPS via `gh`'s credential helper) | The worker CAN reach `gh pr create` (the `Bash(gh *)` grant is present); in practice the prompt no longer instructs it (#605) and `associateLanePr` opens the PR itself once the branch is confirmed pushed, adopting a worker-opened one via the `sapwood:pr-owner` marker rather than duplicating it | The operator's FULL forge credential — every repo it can reach, every write scope the token carries. Not scoped to this one repo. |
-| **L1** (`worker.deployKeyPath`+`worker.deployKeyId` reconciled green, #606) | `workerDeployKeyEnv()` COMPOSES the exact severing `workerCredentialFreeEnv()` does — `GH_CONFIG_DIR` repointed at a fresh, empty, per-lane directory, `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null`, `GIT_TERMINAL_PROMPT=0`, every `gh`/git credential-lookup env var stripped (`GH_*`, `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GIT_ASKPASS`, `GIT_CONFIG_*`, `SSH_AUTH_SOCK`) — PLUS `GIT_SSH_COMMAND` pinned to the per-repo write deploy key (`-o IdentitiesOnly=yes`, path shell-quoted) and an env-only `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` rewrite of the origin's HTTPS URL to the matching `git@github.com:` SSH form — no file touched, scoped to this one spawn's env. **A fix leg composes the SAME transport overlay onto its own `credentialFree` base** (the leg ALWAYS dispatches with `proxy.credentialFree: true` — `conductor.ts`'s `startFixLeg`) rather than losing L1, so every leg kind — dispatch, resume, fix — gets the deploy key when one is configured and preflight-green. `Bash(gh *)` drops out of the leg's `--allowedTools` grant (`WORKER_ALLOWED_TOOLS_NO_GH`) either way — a grant the env can no longer authenticate through is not offered either. | `git push` over SSH, authenticated ONLY by the deploy key | STRUCTURALLY UNREACHABLE — no forge API credential exists in the env at all, so there is no channel to attempt `gh pr create` through even if the prompt or a producer's own initiative tried. `associateLanePr` (engine-side, the operator's own credential) is the ONLY PR-open channel on this tier, not merely the preferred one. | The deploy key's own scope ONLY: git-transport write to this ONE repo, nothing else. A stolen key opens no other repo, carries no API write capability (label/milestone/board mutation, review approval, merge) in the FIRST place — theft is non-escalating BY CONSTRUCTION, not by a policy that could be bypassed. |
-| **L2** (enterprise guidance — NOT implemented by #606) | See the [L2 enterprise posture checklist](#l2-enterprise-posture-checklist). | — | — | — |
+| **L0** (today's default, unset `worker.deployKeyPath`/`worker.deployKeyId`) | The operator's REAL, unrestricted environment — `GH_TOKEN`/`gh`'s stored host config/git credential helpers, all inherited verbatim (`process.env`, unchanged) | `git push` over whatever transport the engine's own checkout uses (typically HTTPS via `gh`'s credential helper) | The worker CAN reach `gh pr create` (the `Bash(gh *)` grant is present); in practice the prompt no longer instructs it, and `associateLanePr` opens the PR itself once the branch is confirmed pushed, adopting a worker-opened one via the `sapwood:pr-owner` marker rather than duplicating it | The operator's FULL forge credential — every repo it can reach, every write scope the token carries. Not scoped to this one repo. |
+| **L1** (`worker.deployKeyPath`+`worker.deployKeyId` reconciled green) | `workerDeployKeyEnv()` COMPOSES the exact severing `workerCredentialFreeEnv()` does — `GH_CONFIG_DIR` repointed at a fresh, empty, per-lane directory, `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null`, `GIT_TERMINAL_PROMPT=0`, every `gh`/git credential-lookup env var stripped (`GH_*`, `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GIT_ASKPASS`, `GIT_CONFIG_*`, `SSH_AUTH_SOCK`) — PLUS `GIT_SSH_COMMAND` pinned to the per-repo write deploy key (`-o IdentitiesOnly=yes`, path shell-quoted) and an env-only `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` rewrite of the origin's HTTPS URL to the matching `git@github.com:` SSH form — no file touched, scoped to this one spawn's env. **A fix leg composes the SAME transport overlay onto its own `credentialFree` base** (the leg ALWAYS dispatches with `proxy.credentialFree: true` — `conductor.ts`'s `startFixLeg`) rather than losing L1, so every leg kind — dispatch, resume, fix — gets the deploy key when one is configured and preflight-green. `Bash(gh *)` drops out of the leg's `--allowedTools` grant (`WORKER_ALLOWED_TOOLS_NO_GH`) either way — a grant the env can no longer authenticate through is not offered either. | `git push` over SSH, authenticated ONLY by the deploy key | STRUCTURALLY UNREACHABLE — no forge API credential exists in the env at all, so there is no channel to attempt `gh pr create` through even if the prompt or a producer's own initiative tried. `associateLanePr` (engine-side, the operator's own credential) is the ONLY PR-open channel on this tier, not merely the preferred one. | The deploy key's own scope ONLY: git-transport write to this ONE repo, nothing else. A stolen key opens no other repo, carries no API write capability (label/milestone/board mutation, review approval, merge) in the FIRST place — theft is non-escalating BY CONSTRUCTION, not by a policy that could be bypassed. |
+| **L2** (enterprise guidance — not implemented) | See the [L2 enterprise posture checklist](#l2-enterprise-posture-checklist). | — | — | — |
 
 ### L2 enterprise posture checklist
 
@@ -465,27 +463,26 @@ environment:
   does not.
 
 **Activation is opt-in, not default-on.** `worker.deployKeyPath`/`worker.deployKeyId` unset (the
-shipped default, including this repo's own `sapwood.config.yaml` as of #606) is L0 — today's
+shipped default, including this repo's own `sapwood.config.yaml`) is L0 — today's
 behavior, byte-for-byte unchanged (`worker.test.ts`'s own reverse test pins this). `sapwood init`
 provisions L1 autonomously WHEN the operator running it has repo-admin (`ssh-keygen -t ed25519 -N
 ""`; `gh repo deploy-key add --allow-write --title sapwood-worker`; the resolved key path AND the
 key's GitHub-assigned id written into `worker.deployKeyPath`/`worker.deployKeyId` in the config
 file) — every failure along that path degrades to a guidance-carrying WARN naming the exact fix
-(the `#554` pattern this repo already uses for `allowManagedPermissionRulesOnly`, see below) and
+(the same pattern this repo already uses for `allowManagedPermissionRulesOnly`, see below) and
 leaves the engine fully functional at L0, never a startup failure.
 
-**OWNER RULING (gate② round 1, supersedes an earlier title-only-idempotence draft): the LOCAL
-`(deployKeyPath, deployKeyId)` pair is the anchor — a remote key's TITLE is never authoritative
-for "mine".** A `sapwood-worker`-titled key on the repo may validly belong to a DIFFERENT
+**The LOCAL `(deployKeyPath, deployKeyId)` pair is the anchor — a remote key's TITLE is never
+authoritative for "mine".** A `sapwood-worker`-titled key on the repo may validly belong to a DIFFERENT
 machine/operator. The engine never invokes or scripts remote deploy-key deletion or
 modification, owned or not — a stale or foreign key is only ever surfaced in a WARN for a HUMAN
 to review. `worker.deployKeyPath` and `worker.deployKeyId` are config-schema-enforced as a PAIR
-(gate② round 2, R3-6) — a config with only one set fails to parse at all, naming the missing half
+— a config with only one set fails to parse at all, naming the missing half
 and pointing at re-running `sapwood init` (which always writes or clears both together).
 
 Once both ARE set, every `sapwood init` run RECONCILES rather than skipping: the local key file
 must exist; the recorded id must still be listed on the repo; that id-matched remote entry's OWN
-public-key content must match the local `.pub` file byte-for-byte (gate② round 2, R3-1 — proves
+public-key content must match the local `.pub` file byte-for-byte (this proves
 the pair was recorded TOGETHER by this machine's own provisioning, not merely "an id that
 happens to be registered" plus "a local key that happens to authenticate" independently, which a
 hand-edited or foreign id sharing a different but also-registered key could otherwise fake); and
@@ -499,7 +496,7 @@ offered only when `sapwood init` is running interactively (a real TTY):
 registered remotely under someone else's provisioning (treated as foreign, same never-touch
 rule): a numeric suffix (`-2`, `-3`, ...) picks a collision-free sibling path AND title together
 — and register it as an ADDITIONAL deploy key, reading back its GitHub-assigned id from a
-before/after id diff around the `add` call (gate② round 2, R3-1 — never a title match, which a
+before/after id diff around the `add` call (never a title match, which a
 stale/duplicate/racing title could match the wrong entry for; zero or more than one new id is
 treated as an ordinary provisioning failure) — the new `(path, id)` becomes this machine's own
 anchor; or **(b)** leave every remote key untouched, clear the stale local anchor, and proceed
@@ -507,14 +504,13 @@ degraded at L0. A non-interactive `sapwood init` (no TTY — the ordinary autono
 defaults to **(b)**, the no-write, never-wedge path, and the WARN still names (a)'s manual steps.
 Because the stale anchor is CLEARED either way — for a JSON config, a parse → delete → 2-space
 re-serialize → re-parse-and-verify round trip; for YAML, a surgical text edit scoped to the
-top-level `worker:` block's own body only (gate② round 2, R3-2/R3-4 — never a whole-file scan,
+top-level `worker:` block's own body only (never a whole-file scan,
 which could otherwise strip or misread a same-shaped `deployKeyPath:`/`deployKeyId:` line sitting
 inside an unrelated block scalar elsewhere in the file); a flow-style `worker: { ... }` mapping is
 never edited (a hand-edit WARN instead, and this run's own report still degrades to L0 honestly
-regardless of whether the file itself could be cleared) — "re-run `sapwood init`" is now an
+regardless of whether the file itself could be cleared) — "re-run `sapwood init`" is an
 honest instruction: the next run either reconciles cleanly (choice (a) already happened) or
-re-diagnoses the SAME state truthfully, never silently skipping the check the way the superseded
-title-only design did. Any other sapwood-titled key still on the repo is named in the WARN for
+re-diagnoses the SAME state truthfully. Any other sapwood-titled key still on the repo is named in the WARN for
 HUMAN cleanup.
 
 **The private key does not end up staged by an ordinary `git add -A`.** After provisioning (and
@@ -523,14 +519,14 @@ ends with the exact rooted rule `/data/worker-deploy-key*` as its LAST effective
 it, with an explanatory comment, if it isn't already there — creating `.gitignore` if it doesn't
 exist yet). gitignore semantics are last-match-wins, so an earlier, unrelated rule (even a
 negation) can never override a rule sitting at the very end of the file — this is deliberately
-NOT a full gitignore evaluator, just the simplest mechanism that is correct for this one pattern
-(gate② round 2, R3-7). The pattern covers the base key location and every per-host/numeric-
+NOT a full gitignore evaluator, just the simplest mechanism that is correct for this one pattern.
+The pattern covers the base key location and every per-host/numeric-
 suffixed sibling arm (a) can mint, plus each key's `.pub` counterpart. The guarantee is
 best-effort (a WARN, never a reason to fail init, if `.gitignore` itself can't be written): init
 appends a last-position ignore rule so an ordinary `git add -A` will not stage the worker deploy
 key(s); a deliberate `git add -f` still can.
 
-**Startup visibility, not a gate (#671).** `sapwood init` provisions and preflights the key, but
+**Startup visibility, not a gate.** `sapwood init` provisions and preflights the key, but
 a RUNNING engine used to discover key problems only lazily, at the first dispatch's own memoized
 SSH preflight — an operator could run a whole batch at L0 with no indication until they went
 digging in a single leg's logs. At engine startup (`cli.ts`, right after `WorkerSupervisor`
@@ -558,10 +554,10 @@ startup or dispatch.
   not. **This is a NAMING-DISCIPLINE + git-default mitigation, not a cryptographic or API-level
   scope boundary** — a worker leg that explicitly ran `git push --force` against an arbitrary
   branch name it could construct (not itself impossible under the worker's `Bash(git *)` grant)
-  is not stopped by anything L1 adds. #606 does not add branch-scoped git-refs enforcement,
+  is not stopped by anything L1 adds. L1 does not add branch-scoped git-refs enforcement,
   `--force-with-lease`, or any other push-time API check beyond what a worker leg does today;
   this residual is accepted, stated here rather than silently assumed closed.
-- **Raw git-transport push to the default branch — narrowed, not eliminated (#679).** Item 3
+- **Raw git-transport push to the default branch — narrowed, not eliminated.** Item 3
   below (and the "CAN still `git push` directly to an unprotected default branch, bypassing the
   review gate entirely via raw git transport" language it uses) named this as an open gap: the
   guard's Category C (`gh pr merge` etc.) enforces producer≠merger at the `gh` layer only —
@@ -579,10 +575,10 @@ startup or dispatch.
   subcommand token means), and a wildcard refspec destination (`refs/heads/*:refs/heads/*`) can
   all reach the default branch without ever spelling it out as a literal token the guard could
   string-compare — the rule's actual frame is "if this push's safety cannot be PROVEN, block it,"
-  not an enumeration of literal forms (gate② round 1, #679). This is engine-side defense-in-depth
+  not an enumeration of literal forms. This is engine-side defense-in-depth
   AT the guard's own sanctioned enforcement point — it narrows the gap for a worker leg that goes
   through this guard's PreToolUse hook, but it is **not a replacement for branch protection**
-  (item 3's own WARN, #633): branch protection is the mandatory backstop of record regardless of
+  (item 3's own WARN): branch protection is the mandatory backstop of record regardless of
   whether this engine-side rule is active, and nothing here closes a leg that bypasses the
   guard hook itself (a non-`claude`-CLI process, or a session the engine didn't dispatch —
   SAPWOOD_DEFAULT_BRANCH unset leaves the rule inactive by
@@ -598,9 +594,8 @@ startup or dispatch.
   scanning one more token spelling; it is an accepted residual, the same class
   `checkControlSentinelArg`'s "a script that hardcodes the path internally, with no CLI argument"
   residual already is — see [Sentinel isolation boundary](#sentinel-isolation-boundary-honest-statement)
-  — and GitHub branch protection (DR #616) is the backstop of record for it: this rule was always
-  framed as defense-in-depth AT the guard's enforcement point, never a complete jail around it
-  (gate② round 2, #679, PM ruling).
+  — and GitHub branch protection is the backstop of record for it: this rule was always
+  framed as defense-in-depth AT the guard's enforcement point, never a complete jail around it.
 - **Host-credential theft: engine-unpluggable.** L1 removes the forge API credential from the
   worker leg's OWN environment — it does nothing to, and cannot touch, the operator's real
   credential store on the HOST the engine itself runs on (`gh`'s `hosts.yml`, the OS keychain, an
@@ -619,7 +614,7 @@ startup or dispatch.
   Branch protection on the default branch (the WARN this section's own preflight raises when
   it's missing) remains the mandatory backstop regardless.
 
-**Guidance-carrying WARNs (`#554` pattern — every disclosure names its own fix in the same log
+**Guidance-carrying WARNs (every disclosure names its own fix in the same log
 line, never a bare "something's wrong"):**
 
 1. **`sapwood init` without repo-admin.** `gh repo deploy-key add` fails (typically a 403) →
@@ -653,7 +648,7 @@ line, never a bare "something's wrong"):**
 4. **Branch-protection status CANNOT be verified — a DISTINCT WARN from #3.** Any failure to even
    read the repo's default branch, a 403/plan-limit/network/any other error from the legacy
    endpoint that isn't a parseable 404 (e.g. a private-repo plan that can't expose protection
-   status via the API at all — the live probe #606's own issue recorded), or a failure reading
+   status via the API at all, as observed in practice), or a failure reading
    rulesets after a legacy 404, is NOT read as "confirmed unprotected": it gets its own WARN
    naming the underlying error and the same advice ("if this repo's plan cannot expose
    protection, treat the default branch as unprotected and add a rule by hand") without CLAIMING
@@ -678,28 +673,28 @@ required capability shape, not its privilege rank.
 
 The asymmetry is compensated, but not erased, by several independent controls:
 
-- Under the owner ruling in #290, the #305 compensating controls now deny producer
+- Compensating controls deny producer
   label, milestone, and project-board mutations while preserving comment channels;
-  credential removal in #351 remains the endgame rather than a claim that argv
+  credential removal remains the endgame rather than a claim that argv
   inspection removes ambient credentials.
 - `engine/src/roles/peripheral.ts` gives every issues-only role
   `ROLE_ALLOWED_TOOLS = "Read,Grep,Glob"` and a cross-source veto over `Bash` and write tools,
   strips forge credential variables in `peripheralSessionEnv()`, and leaves forge writes to
   validated engine code. Those sessions have no `gh` grant. This is **not** true of every role at
-  L0 (see [Worker credential tiers](#worker-credential-tiers-351-606) above for the full L0/L1
+  L0 (see [Worker credential tiers](#worker-credential-tiers) above for the full L0/L1
   picture): `engine/src/roles/worker.ts` gives an ordinary L0 coding leg `Bash(gh *)` and
   inherits the engine environment, though the stock worker workflow no longer uses it to open a
   PR: the worker's job ends at push, and the engine opens the PR itself once
-  the session is over (#351, #605) — the grant stays for the rest of ordinary `gh` usage
+  the session is over — the grant stays for the rest of ordinary `gh` usage
   (`gh pr comment`, `gh pr view`, `gh issue view`, …) and as the surface a worker could still
   reach for despite the prompt, which `associateLanePr` (`forge.ts`) adopts rather than
   duplicates. Credential-free fix legs remove that grant
   (`WORKER_ALLOWED_TOOLS_NO_GH`) and use `workerCredentialFreeEnv()` to strip token/config
   variables, point `GH_CONFIG_DIR` at an empty per-lane directory, disable global/system git
   config and terminal prompting, and drop `SSH_AUTH_SOCK`; an L1-active leg (`worker.
-  deployKeyPath`/`worker.deployKeyId` reconciled green, #606) gets the SAME `Bash(gh *)`
+  deployKeyPath`/`worker.deployKeyId` reconciled green) gets the SAME `Bash(gh *)`
   narrowing on EVERY leg — dispatch, resume, and fix alike — not just the fix-loop's opt-in
-  credential-free path. Gate② round 1 fix: a fix leg's env COMPOSES the deploy-key transport
+  credential-free path. A fix leg's env COMPOSES the deploy-key transport
   overlay (`GIT_SSH_COMMAND`, `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`) onto its OWN
   `workerCredentialFreeEnv()` base rather than the two postures being mutually exclusive — a
   fix leg with a preflight-green deploy key can push its own fix over SSH while every bit of the
@@ -716,16 +711,16 @@ The asymmetry is compensated, but not erased, by several independent controls:
   The same guard protects
   human-merge-only files and engine control sentinels from recognized write vectors and confines
   guarded read-tool paths to the session worktree. Malformed guarded input fails closed.
-  Since #350, `engine/src/roles/worker.ts`'s `WORKER_DISALLOWED_TOOLS` also denies `gh pr
+  `engine/src/roles/worker.ts`'s `WORKER_DISALLOWED_TOOLS` also denies `gh pr
   review*` and `gh release*` at the CLI permission layer (alongside the pre-existing `gh pr
   merge*`/`gh pr ready*`). This is intentionally broader than the guard's argv block, not a
   duplicate of it: the permission layer denies the entire `gh pr review` and `gh release`
   verbs — including `gh pr review --comment` — while the guard's argv block only stops
   `--approve`/`--request-changes`. The producer's actual comment channels remain `gh pr
   comment` and `gh issue comment`, both left open by both layers.
-  Since #488, that deny-list also carries the **governance-signal** verbs `gh issue edit*`,
+  That deny-list also carries the **governance-signal** verbs `gh issue edit*`,
   `gh label*`, and `gh project*`, so the boundary the guard has enforced at the argv layer
-  since #305/#352/#353 now also holds at the permission layer. It matters because every
+  also holds at the permission layer. It matters because every
   dispatch/merge gate treats issue labels and the board `Status` field as engine-or-human-only
   signals (`plan:approved`, `labels.roundPool`, `escalation.humanLabels`, the `Ready` lane): a
   producer that can set them forges the signals those gates trust. Same intentional coarseness
@@ -734,13 +729,12 @@ The asymmetry is compensated, but not erased, by several independent controls:
   read-only `gh api` is ordinary worker usage and a prefix rule cannot separate it from a
   mutation, which is exactly the argv-shape judgement the guard's `checkGhApi` makes (REST
   label/milestone/state endpoints and GraphQL mutations, including ProjectV2 field writes).
-  This closes design #279 §5a's deferred "standalone hardening issue".
-  Since #617 ((b′), capability DR #616), that same deny-list also carries
+  That same deny-list also carries
   **server-granularity MCP denies** — `mcp__github__*`, `mcp__server-filesystem__*`,
   `mcp__filesystem__*`, `mcp__Google_Drive__*` — the CLI's own documented
-  whole-server wildcard rule shape. DR #616's ruling has producer legs officially
+  whole-server wildcard rule shape. Host-delegated capability management has producer legs officially
   inherit the operator's ENTIRE host MCP surface (no `capabilities.*` config surface
-  will ever be built to narrow it); the live probe backing that ruling found the
+  will ever be built to narrow it); a live probe found the
   inherited surface callable and including write/exec-class tools
   (`server-filesystem__write_file`/`edit_file`/`move_file`, `Google_Drive__create_file`),
   none reaching the guard hook (its PreToolUse matcher is
@@ -751,11 +745,11 @@ The asymmetry is compensated, but not erased, by several independent controls:
   name. **Residual unknown servers are the top-ranked accepted blind spot**: any MCP
   server an operator's own config registers under a different name is simply not
   covered, and this list makes no claim otherwise — **branch protection is the
-  mandatory platform backstop** regardless of what this list denies. **#554
-  interaction**: `allowManagedPermissionRulesOnly` discards `--disallowedTools`
+  mandatory platform backstop** regardless of what this list denies. **The
+  `allowManagedPermissionRulesOnly` interaction**: it discards `--disallowedTools`
   wholesale (see the paragraph above) — a host with that managed-settings mode on
   drops these MCP denies (and every other entry in `WORKER_DISALLOWED_TOOLS`) too,
-  which is exactly why branch protection, not this list, is the backstop of record — and (#633)
+  which is exactly why branch protection, not this list, is the backstop of record — and
   its presence, not just its documentation, is now checked once per engine start; see the
   [Accepted blind spots](#accepted-blind-spots) section above for what that detector does and
   does not do. Warn-only observation, same as everything else in this paragraph — it never
@@ -778,7 +772,7 @@ a socket. In particular it does not contain data exfiltration; see
 The lexical egress tripwire described there is post-hoc evidence only, not a missing enforcement
 layer that this denylist silently supplies.
 
-## Issues-only role sessions: read-only, worktree-confined, no shell (#110, #235)
+## Issues-only role sessions: read-only, worktree-confined, no shell
 
 Workers are guarded by the argv-inspecting hook above. The round orchestrator's
 issues-only peripheral roles — verification-plan-reviewer, verification-plan-drafter, PO/align+triage+pool,
@@ -799,26 +793,25 @@ gate⓪ escalates to `needs-human` with the attempt trail, the advisory roles (P
 harvest, architect) degrade-and-proceed with a durable state event, never a silent
 no-op and never a wedged round.
 
-**On the READ side (#235), every one of these roles is explicitly granted
+**On the READ side, every one of these roles is explicitly granted
 `Read`/`Grep`/`Glob`** — `peripheral.ts`'s `ROLE_ALLOWED_TOOLS` is
 `"Read,Grep,Glob"`, no longer the empty string, and the architect is not a special
-case: the 2026-07-17 owner ruling is that whether to read is the model's own
+case: whether to read is the model's own
 role-scoped judgment (an architect reasoning about a contradiction via an approval
 protocol instead of just reading the code is absurd), because reading is not
 producing/approving/merging. What makes this safe is a **real, fail-closed
 containment mechanism**, not a permission-layer convention: the guard hook's
-`checkReadContainment` (`guard.ts`, landed as #235's PR-A) resolves every
+`checkReadContainment` (`guard.ts`) resolves every
 `Read`/`Grep`/`Glob`/`NotebookRead` call's target path against the session's own
 `SAPWOOD_WORKTREE_ROOT` (an env var the engine sets at spawn time, the same
 credential-stripped, engine-controlled channel `SAPWOOD_GUARD_MODE` already uses) and
 **blocks** anything that resolves outside it — an absolute host path, a
 `../`-traversal, a symlink escape. A live probe (a real `claude -p --worktree`
 session, this role's exact allow/deny pair) is part of this feature's verification:
-host-path and traversal reads are denied, an in-worktree read succeeds. Before #235
-PR-A, this containment did not exist — a real probe found an absolute host path and a
-`../`-traversal BOTH escaped the worktree and returned real host file content, which
-is why the read-only allow-list widening in this section shipped only once that gap
-was closed, never before.
+host-path and traversal reads are denied, an in-worktree read succeeds. This containment
+has to hold before the read-only allow-list can safely widen — a probe run without it found
+an absolute host path and a
+`../`-traversal BOTH escaped the worktree and returned real host file content.
 
 **`--disallowedTools` is the write/exec-side cross-source veto**: `peripheral.ts`'s
 `ROLE_DISALLOWED_TOOLS` denies `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and a
@@ -826,7 +819,7 @@ was closed, never before.
 over allow from ANY source, including a target repo's own checked-out
 `.claude/settings.json`, an authorization surface this engine does not control — so
 this is the real boundary, not a convention a repo's own config could quietly
-override, **with one honest exception (#554), disclosed here and detected, not
+override, **with one honest exception, disclosed here and detected, not
 refused**: a target's managed settings can set `allowManagedPermissionRulesOnly: true`,
 and the shipped CLI's own contract for that mode (verified directly against the binary)
 reads "only permission rules (allow/deny/ask) from managed settings are respected.
@@ -835,12 +828,12 @@ IS a CLI-argument permission rule, so under that mode sapwood's ENTIRE `--disall
 containment layer is discarded wholesale — not just the `Agent`/`Task` deny below, the
 blanket `Bash` and write denies too — and the guard hook is no backstop for the loss,
 since `guardDecision()` only inspects write/read/Bash-shaped calls and passes
-everything else through. The owner ruling (2026-08-03) is disclose + detect-and-WARN,
+everything else through. The ruling is disclose + detect-and-WARN,
 not startup refusal and not a `needs-human` escalation: see the exception section right
 below for the detection contract and both operator exits. Because no shell
 exists for these sessions to reach `gh` (or anything else)
 through at all, the pattern-layer bypass classes earlier hardening closed one glob at
-a time (#102's short `-F`/`-l`/`-p` flag aliases, #108's quoted/escaped `-F`
+a time (short `-F`/`-l`/`-p` flag aliases, quoted/escaped `-F`
 spellings) are structurally moot for them — not closed by a better pattern, but by
 removing the capability the pattern was constraining; the blanket `Bash` deny
 subsumes every one of those old per-pattern entries by construction. Per-role deny
@@ -853,9 +846,9 @@ Read-only git (`git log` etc.) deliberately stays **out** of the allow-list: the
 blanket `Bash` deny already covers it, and adding it back would be a live capability,
 not a trip-wire.
 
-### Managed-settings `allowManagedPermissionRulesOnly` exception (#554)
+### Managed-settings `allowManagedPermissionRulesOnly` exception
 
-Found by the codex re-review on PR #553 (#534): every containment a peripheral role
+Every containment a peripheral role
 session (or the worker) gets from `--disallowedTools`/`--allowedTools` — the blanket
 `Bash` deny, the `Write`/`Edit`/`MultiEdit`/`NotebookEdit` deny, the `Agent`/`Task`
 spawn deny above — is a **CLI-argument permission rule**. On a host whose managed
@@ -864,7 +857,7 @@ permission rules entirely, so this whole list is void — silently, from sapwood
 view, since `guardDecision()` (`guard.ts`) only inspects write/read/Bash-shaped calls and
 is no backstop for a permission mode it never sees.
 
-The owner ruling (2026-08-03) is **disclose + detect-and-WARN**, not refusal:
+The ruling is **disclose + detect-and-WARN**, not refusal:
 
 - **Detection.** At every engine start, the engine reads the platform's fixed managed-settings
   path (`/Library/Application Support/ClaudeCode/managed-settings.json` on macOS,
@@ -873,7 +866,7 @@ The owner ruling (2026-08-03) is **disclose + detect-and-WARN**, not refusal:
   `managed-permission-warning.ts`'s `managedSettingsPath`). If `allowManagedPermissionRulesOnly`
   is `true`, it emits exactly ONE engine-log warning for that start. No startup refusal, no
   `needs-human` escalation. Absent or unreadable managed settings (the normal, unmanaged host)
-  fails open silently — zero behavior change, the same as before #554.
+  fails open silently — zero behavior change.
 - **Operator exit 1 — mirror the deny rules into managed settings.** Add sapwood's own deny
   set to the managed-settings `permissions.deny` list yourself, so the SAME containment is
   enforced by the layer that mode actually respects: `Bash`, `Write`, `Edit`, `MultiEdit`,
@@ -888,7 +881,7 @@ The owner ruling (2026-08-03) is **disclose + detect-and-WARN**, not refusal:
 The warning text itself names both exits and this anchor, so an operator seeing it in the
 engine log never has to come find this section from memory.
 
-**#534: `--disallowedTools` also carries a name-list deny of the subagent-spawn channel —
+**`--disallowedTools` also carries a name-list deny of the subagent-spawn channel —
 `Agent`/`Task` — for every role session whose deny list derives from `ROLE_DISALLOWED_TOOLS`
 (po, architect, verification-plan-reviewer, verification-plan-drafter, harvest, and the verification-plan-reviewer's confirm variant)
 and, because `RoleRunner.run()`'s `reviewMode` branch hardcodes `ROLE_ALLOWED_TOOLS`/
@@ -903,14 +896,14 @@ names `Agent`/`Task` on two separate legs of evidence, neither of which is "a li
 these names in the current CLI's role-shaped tool list": both names' REGISTRY presence was
 confirmed by a direct probe run WITH the deny already in place — both were absent from the
 usable tool surface, but the error text itself ("Agent exists but is not enabled in this
-context") establishes the name is registered — and the pre-deny #534 incident, where a live
+context") establishes the name is registered — and an earlier incident, where a live
 session really did spawn three subagents, is the other leg. Neither leg claims either name is
 live in the role-shaped tool surface; this is never a claim that the session's capability set is
 closed: the same "authorization surface this engine does not control" caveat in the paragraph
 above applies here too — a future CLI version could rename, add, or remove a spawn-shaped tool,
 and only a live probe (not this document) can say what that surface currently contains. **Scoped to the
-`claude` executor**: the #443/#501 executor seam lets gate② run on the `codex-exec` runner
-instead (`reviewer.agent.runner: codex-exec`, see [Peripheral network egress](#peripheral-network-egress-websearchwebfetch-detected-not-pinned-410)
+`claude` executor**: the executor seam lets gate② run on the `codex-exec` runner
+instead (`reviewer.agent.runner: codex-exec`, see [Peripheral network egress](#peripheral-network-egress-websearchwebfetch-detected-not-pinned)
 above, "The exception, stated exactly"), where `--disallowedTools` does not exist as a concept
 at all — that runner's containment is its own, entirely different shape (a read-only sandbox,
 not a tool-name deny list), disclosed separately as `engine-review-containment-gap`. The gate②
@@ -919,14 +912,15 @@ rests on the **declared-contract** argument alone, not a cost argument: that ses
 carries a hard, CLI-enforced `--max-budget-usd` ceiling (`RoleSessionOpts.maxBudgetUsd`), so the
 deny closes an undeclared capability, not an unbounded cost (whether a *child's* spend counts
 against that same ceiling is CLI accounting this repo has not probed; the argument does not rest
-on it). Escape hatch, named in the #534 decision record: if large-diff review quality ever
+on it). Escape hatch: if large-diff review quality ever
 measurably suffers from the loss of parallel sub-reads, split a `REVIEW_DISALLOWED_TOOLS`
 constant at the `reviewMode` branch in `peripheral.ts` — a one-constant change. **The
 code-producing worker deliberately retains spawn capability** — `WORKER_DISALLOWED_TOOLS`
 (`worker.ts::WORKER_DISALLOWED_TOOLS`) does not deny `Agent`/`Task` — so "role sessions cannot
 spawn subagents" names a peripheral-role-and-gate②-reviewer boundary, never a sapwood-wide one.
 
-**#552: the worker's decision, and why it differs from #534's, honestly stated.** #534's deny
+**The worker's decision, and why it differs from the peripheral-role deny above, honestly stated.**
+That earlier deny
 cost nothing — a peripheral role's observed spawn was pure circumvention of its own deliberate
 lack of a shell, zero legitimate benefit. Subagent use is a mainline coding capability for the
 worker (parallel sub-reads on a large refactor), so denying it has a real cost, and the
@@ -951,22 +945,22 @@ tool result returns; every token the child itself spent in between is structural
 the live estimator for the child's entire lifetime — not a one-poll delay, a complete gap bounded
 only by how long the child runs.
 
-**Live measurement (this issue's own worker leg, 2026-08-03):** one real subagent call (`Explore`
+**Live measurement:** one real subagent call (`Explore`
 agent type, a research task comparable to ordinary worker sub-reads) spent 30 input + 1,268
 output + 125,616 cache-creation + 384,230 cache-read tokens over ~37.5 wall-clock seconds
 (15 of its own `assistant` turns) — roughly **$0.61** at this repo's shipped `sonnet` rate
 (`engine/pricing.yaml`). The parent's own jsonl recorded the dispatching tool_use at T+0 and the
 next line — the tool_result, once the child fully finished — 43 seconds later: zero new assistant
 lines from the parent in between, the entire 37.5s child run included.
-Against the dogfooded `opus`/`high` worker-leg soft budget of $8–20 (`docs/configuration.md`,
-#386), one subagent call is roughly 3–8% of the whole per-leg budget — small enough that
+Against the dogfooded `opus`/`high` worker-leg soft budget of $8–20 (`docs/configuration.md`),
+one subagent call is roughly 3–8% of the whole per-leg budget — small enough that
 accepting it unbounded, rather than building accounting for it, is the marginal-complexity call.
 
 **Stated honestly, not overclaimed:** this measurement covers ONE sequential subagent call. A
 worker that fans out several/many children concurrently (the CLI has no cap sapwood imposes) can
 accumulate a correspondingly larger invisible total — nothing in this engine bounds that other
 than the worker's own prompted behavior, which today does not direct large fan-outs. The existing
-`egress-suspect` event (`worker.ts`, #534) already logs every `Agent`/`Task` tool_use a worker
+`egress-suspect` event (`worker.ts`) already logs every `Agent`/`Task` tool_use a worker
 leg makes, but for network-egress containment, not cost — it is not a cost-accounting signal and
 this decision does not lean on it as one. If a future dogfood round measures a worker leg whose
 subagent fan-out meaningfully erodes the soft budget's purpose (frequent late handoffs, or spend
@@ -993,19 +987,19 @@ worker-class, with `Read`/`Grep`/`Glob` + local git only — file edits, commit,
 push inside its own ephemeral worktree (proposals land exclusively as PRs through the
 normal review gate, never a direct write) — the same broader trust level a
 code-producing worker gets, because its job (editing prompts/docs/config from round
-history) genuinely needs it. (`Grep`/`Glob` joined its allow-list in #235 alongside
+history) genuinely needs it. (`Grep`/`Glob` joined its allow-list alongside
 every other role's — retro's job was already code-aware and already carried `Read`;
 it was simply missing the other two read tools.) Its `gh` surface, however, is now **zero** — no `gh` entry of any kind remains in
-its allowedTools (#111, shipped in two halves):
+its allowedTools:
 
-- **Read side (#111 PR-A):** retro never browses GitHub live. Instead the engine
+- **Read side:** retro never browses GitHub live. Instead the engine
   builds a round-scoped digest (PR descriptions + diffs + review signals for every PR
   the round touched, comments/labels for every escalated issue, commit history since
   round start) *before* the session runs, bounded by a hard, deterministically-
   truncated character cap (`roles.retro.digestMaxChars`), and substitutes it into the
   prompt. See [`configuration.md`](configuration.md#roles) for the config key and
   `engine/src/retro/retro-digest.ts` for the assembly.
-- **Write side (#111 PR-B):** PR creation originates in engine TypeScript, never in
+- **Write side:** PR creation originates in engine TypeScript, never in
   the session. The session's job ends at commit+push: it writes its intended PR
   (branch/title/body — or an explicit `none` for a quiet round) to a fixed scratch
   path in its worktree (`.sapwood-retro-pr`; the engine chooses the path). Post-
@@ -1018,15 +1012,13 @@ its allowedTools (#111, shipped in two halves):
 
 The dangerous verbs `guard.ts` already blocks category-C are unchanged, and retro's
 old `gh` deny patterns are kept byte-identical as regression trip-wires — the same
-stance the issues-only roles took after #110.
+stance the issues-only roles take.
 
 **gate⓪'s freshness re-confirm session** ("does this plan still hold against current
-`main`?", #214) needed repo read access before #235 for the same reason every other
-role does now: a plan referencing a file since renamed is otherwise unverifiable. Before
-#235, this was its OWN sanctioned widening (`CONFIRM_ALLOWED_TOOLS`, narrower than
-retro's git-and-file-edit grant) — the base issues-only allow-list carried no `Read` at
-all yet. #235 makes `Read`/`Grep`/`Glob` the UNIVERSAL issues-only baseline, so
-`CONFIRM_ALLOWED_TOOLS`/`CONFIRM_DISALLOWED_TOOLS` are now byte-identical to
+`main`?") needs repo read access for the same reason every other
+role does: a plan referencing a file since renamed is otherwise unverifiable.
+`Read`/`Grep`/`Glob` is the UNIVERSAL issues-only baseline, so
+`CONFIRM_ALLOWED_TOOLS`/`CONFIRM_DISALLOWED_TOOLS` are byte-identical to
 `ROLE_ALLOWED_TOOLS`/`ROLE_DISALLOWED_TOOLS` — kept as their own named exports purely
 for call-site clarity in `plan-review.ts`. The session reads the conductor's own
 checkout, the same ephemeral worktree every role session already gets and the same
@@ -1035,10 +1027,10 @@ conductor's responsibility, not a property this grant controls. This session's
 decision, like every other role's, is read from its structured output only, applied by
 the engine (`plan-review.ts`), never by a tool call of its own.
 
-### The forge MCP proxy's role x tool matrix (#234, #244)
+### The forge MCP proxy's role x tool matrix
 
 `RoleRunner` peripheral sessions and worker legs can be attached (config-gated, ON by default
-since #551 — see [`configuration.md`](configuration.md#roles)) to a per-session, revocable,
+— see [`configuration.md`](configuration.md#roles)) to a per-session, revocable,
 read-only forge MCP proxy that returns sanitized forge data verbatim, with no gate/verdict logic
 of its own (fresh-head counting, identity filtering, trigger-pin checks stay in
 `reviewer.ts`/`merge-driver.ts`). The production-attachment path (state: `proxy.enabled: true`)
@@ -1051,7 +1043,7 @@ in the proxy itself (the CLI's own `--allowedTools` widening is noise reduction 
 as every other allow/deny pair on this page) — a role absent from the table below is granted **no
 tool from this proxy** (deny-by-default, regression-tested, scoped to the proxy's own
 `mcp__forge__*` namespace only — it says nothing about an ambient host MCP server a session may
-separately inherit under capability DR #616, see the worker-egress blind-spot section):
+separately inherit under host-delegated capability management, see the worker-egress blind-spot section):
 
 | Role | Tools granted |
 | --- | --- |
@@ -1063,16 +1055,14 @@ separately inherit under capability DR #616, see the worker-egress blind-spot se
 | `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `pr_audit_comments` |
 | *(any other role id)* | none — deny-by-default |
 
-**This nine-role grant is deliberate, not an oversight to narrow.** Every one of these tools is
+**This ten-role grant is deliberate, not an oversight to narrow.** Every one of these tools is
 read-only and costs nothing when a session never calls it, and a measured zero-call count is not
-evidence that a grant is unneeded: per #529, zero calls means the role's TASK never asked for a
+evidence that a grant is unneeded: zero calls means the role's TASK never asked for a
 lookup, not that the capability itself has no use — the lever for changing that is the task step
 a prompt gives the role, not the grant it holds.
 
-**Scope, updated by #245: `WorkerSupervisor.resume()` now attaches a proxy too.** #244 shipped
-`dispatch()`-only attachment deliberately (the `resume()` crash-consistency machinery was already
-substantial, and consumer-shaped wiring belonged with the actual consumer). #245 (the M9 fix loop)
-is that consumer: a fix leg is a *resumed* leg (same worker row/worktree/branch/session — see
+**`WorkerSupervisor.resume()` also attaches a proxy.** A fix leg is a *resumed* leg (same worker
+row/worktree/branch/session — see
 "Fix-loop `fixing` lane state" below), and it needs `pr_review_threads`/`pr_reviews`/`pr_checks` as
 its evidence channel exactly as much as a fresh dispatch would. `resume()`'s attachment mirrors
 `dispatch()`'s byte-for-byte: mint-before-argv, `--allowedTools` widening with the proxy's own
@@ -1084,9 +1074,8 @@ does **not** delete the jsonl file or the `.handoff` sentinel the way `dispatch(
 its fresh, empty jsonl — a resume's jsonl holds real prior-leg history, and a refused resume must
 leave the lane exactly as resumable as it was before the call, not destroy its record.
 
-**`credentialFree` severs the `gh`/git CREDENTIALED-TOOL reach AND (#617) seals the MCP config
-surface — not a worker leg's forge reach in general.** That distinction matters and is stated
-precisely here after a round-2 delta review (P1) proved the broader claim false: env-VAR stripping
+**`credentialFree` severs the `gh`/git CREDENTIALED-TOOL reach AND seals the MCP config
+surface — not a worker leg's forge reach in general.** That distinction matters: env-VAR stripping
 by itself is NOT sufficient for a Bash-granted worker: `gh` falls back to on-disk stored
 credentials (`$HOME/.config/gh/hosts.yml`) when no token env var is present, and git can still
 reach a credential helper, a cached SSH agent, or an interactive prompt regardless of which env
@@ -1105,12 +1094,11 @@ vars are absent. `worker.ts`'s `workerCredentialFreeEnv` (opt-in via
   git's OWN credential path is severed, same "read is not the boundary, doing is" stance this page
   takes everywhere else.
 
-**MCP seal, closed history (#617, capability DR #616's seam 1).** Until #617, the paragraph and
-list above were the WHOLE of `credentialFree`'s scope, and that was a real gap, not just an
-incomplete description: `--mcp-config` (the proxy's own server, set whenever a proxy attaches) was
-**additive**, so a `credentialFree` leg's ambient host MCP servers still loaded from settings
-sources and — per #616's live probe — stayed **callable regardless of `--allowedTools`**,
-write/exec-class tools included, none reaching the guard hook. That was WORSE than the
+**MCP seal — the ambient-MCP gap is closed.** Without this seal, `--mcp-config`
+(the proxy's own server, set whenever a proxy attaches) would be merely
+**additive**, so a `credentialFree` leg's ambient host MCP servers would still load from settings
+sources and stay **callable regardless of `--allowedTools`**,
+write/exec-class tools included, none reaching the guard hook — worse than the
 `steal.mjs` disk-read residual below: a live network channel, not a local-disk read. `dispatch()`
 and `resume()` now pass `--strict-mcp-config` whenever `credentialFree` is set, alongside the
 already-inline `--mcp-config` — together these make the MCP config **exclusive**: the CLI loads
@@ -1125,10 +1113,10 @@ mint fails) a working evidence channel, so `dispatch()` REFUSES outright rather 
 degraded. Either branch records a durable `proxy-mint-failed` state event (lane/role/sanitized
 reason, via `WorkerDeps.state`) before deciding which way to go.
 
-**HONEST SCOPE — this is NOT full isolation (round-2 delta review, P1; PM ruling 2026-07-18, same
+**HONEST SCOPE — this is NOT full isolation (the same
 "document the residual, don't chase it with more machinery" stance as the Sentinel isolation
 boundary section below).** `workerCredentialFreeEnv` closes `gh`'s and git's OWN credential-lookup
-paths, and (#617) the MCP seal above closes the ambient-MCP gap — together they do NOT structurally
+paths, and the MCP seal above closes the ambient-MCP gap — together they do NOT structurally
 confine what arbitrary code run under this lane's `Bash(node *)`/`Bash(npm *)` grant can read off
 disk — a fix leg genuinely needs those grants to run its own test suite, and it still executes with
 the operator's REAL `$HOME`. A live proof-of-concept (`node steal.mjs`, a script invoked through
@@ -1147,11 +1135,10 @@ instead, which neither this mechanism nor the PoC exposes — the risk this note
 sharpest wherever `gh` ends up with a plaintext on-disk token (Linux, CI images, an explicit
 non-keychain login), not a universal property of every `gh` installation.
 
-#### Worker-leg user-settings persistence vector — detect & disclose (#615)
+#### Worker-leg user-settings persistence vector — detect & disclose
 
 The HONEST SCOPE note above covers the `Bash(node *)`/`Bash(npm *)` filesystem-read residual in
-general; this narrower note is about one SPECIFIC consequence of it that #600 explicitly declined
-to cover: `worker.ts`'s `claudeArgs` passes no `--setting-sources` flag on ANY worker leg
+general; this narrower note is about one SPECIFIC consequence of it: `worker.ts`'s `claudeArgs` passes no `--setting-sources` flag on ANY worker leg
 (dispatch, resume, or fix), so an ordinary worker session loads every file-based settings source —
 project, local, AND the operator's own `~/.claude/settings.json` — unlike the review-session mode
 above, which closes exactly that `user`-scope inheritance with `--setting-sources ""`. Because a
@@ -1160,16 +1147,15 @@ paragraph), a producer leg in round N can in principle write `~/.claude/settings
 (permission grants, hooks, or an `apiKeyHelper`), and every LATER worker leg — any lane, any round
 — inherits whatever that write left behind.
 
-**Owner ruling (2026-08-04, recorded on #615): arm (2), startup detection and disclosure,
-ships.** Two other arms were considered and rejected for this specific vector:
+**Startup detection and disclosure is what ships (arm 2).** Two other arms were considered and rejected for this specific vector:
 
-- **Arm (1), pinning `--setting-sources` on worker legs** — ruled out. The #410 amendment already
-  measured that `--setting-sources ""` also stops the repo's own `CLAUDE.md` from loading, which
-  collides with the locked #236 ruling ("ambient repo context: record, don't seal"). A partial
+- **Arm (1), pinning `--setting-sources` on worker legs** — ruled out. A prior measurement already
+  found that `--setting-sources ""` also stops the repo's own `CLAUDE.md` from loading, which
+  collides with the locked ruling below ("ambient repo context: record, don't seal"). A partial
   source list (e.g. `"project,local"`) is unproven and carries a named `apiKeyHelper`-breakage
   risk on hosts whose Claude auth lives in user settings — config-gating that would add a new
-  config key and a host-compatibility matrix for a vector the #351 L1 direction (worker =
-  transport-only deploy key, #606) is independently shrinking.
+  config key and a host-compatibility matrix for a vector the L1 direction (worker =
+  transport-only deploy key) is independently shrinking.
 - **Arm (3), documentation alone** — insufficient on its own: the vector is producer-influenceable
   across rounds, which warrants observability, not prose alone.
 
@@ -1179,16 +1165,16 @@ user-level settings file at construction, then its returned closure rides each d
 per-tick `onTick` hook to compare the CURRENT file against what was last observed. A later tick
 whose content hash differs, or whose set of containment-weakening keys (`apiKeyHelper`, `hooks`)
 differs from what was last observed, logs one WARN and appends exactly one durable
-`user-settings-drift-detected` event (the #425 event-kind registry) — never blocks, never mutates,
+`user-settings-drift-detected` event — never blocks, never mutates,
 never throws out of the tick loop. Same injected-`readFile`-seam testability convention as
-`checkWebAccessSettingsDenial` (#410).
+`checkWebAccessSettingsDenial`.
 
 This closes nothing structurally — the broader worker-HOME filesystem-confinement residual (the
 `steal.mjs`-class gap the HONEST SCOPE note above describes) remains its own still-open item. If
 detection later shows this vector being exercised in practice, arm (1)'s probe-then-pin gets its
 own issue with that evidence as the Why.
 
-#### Role-session skill injection — an accident fence, not a jail (#639)
+#### Role-session skill injection — an accident fence, not a jail
 
 `engine/src/roles/skills-plugin.ts` renders two v1 reference skills (`human-merge-only-paths`,
 `ac-evidence-tiers`) verbatim from this file's own marker-delimited sections (see the
@@ -1196,11 +1182,11 @@ own issue with that evidence as the Why.
 tiers) into an immutable, content-hash-named plugin directory under
 `data/generated/role-skills/<hash>/`, attached to a session via `claude --plugin-dir`. This
 CONTENT-side-only: the render path's only input is this engine-shipped file — never anything
-issue-body- or PR-derived — and a published hash directory is never overwritten (M12's "accident
+issue-body- or PR-derived — and a published hash directory is never overwritten (the "accident
 fence, not a jail" doctrine: the goal is to stop a mistake, not to withstand an adversary who
 already has code-execution authority in the same repo).
 
-**#640 adds a third skill, `sapwood-labels`, on the same plugin dir.** Unlike the two above, its
+**A third skill, `sapwood-labels`, lives on the same plugin dir.** Unlike the two above, its
 content is NOT extracted from this file's markers — it is rendered from `engine/src/forge/
 labels.ts`'s `LABEL_SEMANTICS` registry (writer/remover/gates/distinguish-from per label) against
 THIS repo's fully-resolved `cfg.labels`/`cfg.escalation.holdLabels`/`cfg.escalation.humanLabels`,
@@ -1208,7 +1194,7 @@ so a `labels.prefix` remap always shows the RESOLVED names a session actually se
 issues/PRs, never a default or a template — and whether a label actually vetoes a PR merge
 (substring match against `escalation.humanLabels`, the merge gate's own rule) or holds an issue
 out of dispatch is likewise rendered from real resolved config using the SAME predicates those
-gates call, never asserted as fixed prose (#658 review rounds 1–4). Dispatch hold is NOT
+gates call, never asserted as fixed prose. Dispatch hold is NOT
 `escalation.humanLabels` membership alone: `needs-human`/`blocked`/`reserve`/`decomposed` hold
 dispatch UNCONDITIONALLY in every config (forge.ts's `isDispatchable`, gate⓪; conductor.ts's
 `orderForDispatch`), regardless of `escalation.humanLabels`; every other label holds dispatch
@@ -1222,33 +1208,34 @@ only when its resolved name actually matches `escalation.humanLabels`. Under def
 exactly like any other label. The
 registry is the PROMOTION of label semantics that used to live only as TS doc
 comments on `labels.ts`, unreadable from any role session — the incidents this closes: a worker
-self-applying `human-merge-only` (#539), an architect blocking a Ready issue via label with no
-engine event (batch 6), and repeated supervisor label-timeline misreads. Same CONTENT-side-only
+self-applying `human-merge-only`, an architect blocking a Ready issue via label with no
+engine event, and repeated supervisor label-timeline misreads. Same CONTENT-side-only
 posture as the two marker-extracted skills: the render path's only input is the engine's own
 resolved config, never issue-body- or PR-derived text.
 
 **Injection policy** (`shouldInjectSkillsPlugin` in the same module): every worker leg (fresh
 dispatch, resume, fix-entry) and every non-review peripheral role session gets `--plugin-dir`
 attached when `roles.skills.enabled` is `true` (default `false` — see config.ts's own comment);
-a review-mode session (`reviewCwd`, #285) NEVER does, enforced structurally in
+a review-mode session (`reviewCwd`) NEVER does, enforced structurally in
 `RoleRunner.run()` itself, the same way that mode already hardcodes its tool profile and closes
 its MCP/settings surface.
 
 **Residual, not machinery-closed:** `data/generated/role-skills/**` is NOT yet a guard
 protected-path (the write-deny addition to `engine/src/guard/guard.ts` is human-merge-only —
-[Human-merge-only paths](#human-merge-only-paths) — and is this issue's own human-owned
+[Human-merge-only paths](#human-merge-only-paths) — and remains a human-owned
 remainder, not shipped here). Until that lands, the same same-uid arbitrary-code-write residual
 this file's HONEST SCOPE notes already describe (a worker leg's `Bash(node *)`/`Bash(npm *)`
 grant runs with the operator's real filesystem access) could in principle write INTO a published
-hash directory rather than only reading it — no worse in kind than the #615 vector above, and
+hash directory rather than only reading it — no worse in kind than the user-settings persistence
+vector above, and
 named here for the same reason: detection/disclosure and an explicit human-owned fix are the
 honest response, not a claim that this doc alone closes it.
 
-### Fix-loop `fixing` lane state (#245)
+### Fix-loop `fixing` lane state
 
-Review findings (`HANDLE_THREADS`) used to fold straight to `needs-human` (`merge-driver.ts`'s
-`deriveGate`) — asking a human to *resolve* a review, which inverts the autonomy principle
-(humans adjudicate reviews, they never resolve them). #245 gives the producing worker its own
+Routing review findings (`HANDLE_THREADS`) straight to `needs-human` (`merge-driver.ts`'s
+`deriveGate`) would ask a human to *resolve* a review, inverting the autonomy principle
+(humans adjudicate reviews, they never resolve them). Instead, the producing worker gets its own
 lane state to address findings itself, *before* human escalation, without ever handing it a new
 dispatch or forge credentials:
 
@@ -1256,37 +1243,37 @@ dispatch or forge credentials:
   LIVE fix-leg worker process reworking that same PR) → back to `driving` once the fix leg
   reaches a terminal outcome. `state.ts`'s `activeWorkers()` counts `running + driving + fixing`
   — a fixing lane occupies capacity exactly like the other two. The actual gate decision that
-  triggers `driving → fixing` (deriving `FIXABLE` from a live review verdict) is sibling issue
-  #246; #245 ships the lane-state machinery and the seam (`conductor.ts`'s `startFixLeg`) #246
-  calls once it decides.
-- **Fix leg = `resume()`, never a new `dispatch()`.** `startFixLeg` reuses #172's resume
+  triggers `driving → fixing` (deriving `FIXABLE` from a live review verdict) is a separate
+  mechanism; this lane state provides the machinery and the seam (`conductor.ts`'s `startFixLeg`)
+  that decision calls once made.
+- **Fix leg = `resume()`, never a new `dispatch()`.** `startFixLeg` reuses the resume
   machinery outright — same worker row, same worktree/branch/session lineage — specifically to
   avoid the squash-branch-reuse hazard a fresh dispatch against this lane's (possibly-stale,
   possibly-ahead) head would create. The fix leg's prompt (`worker.fixPromptFile`, engine-shipped
-  default `prompts/fix.md` — same `#74` config pattern as `worker.promptFile`) instructs the
+  default `prompts/fix.md` — same config pattern as `worker.promptFile`) instructs the
   worker to pull its own PR's review findings via the PR-facing proxy tools
   (`pr_review_threads`/`pr_reviews`/`pr_checks`/`pr_details`) — never via findings text relayed
   through the prompt itself (no prompt-injection transport).
 - **`fix_rounds`** is a new per-PR counter (`workers.fix_rounds`, schema v18→v19), counting
-  rework rounds — deliberately independent of `resume_attempts` (#172's continuation-leg
+  rework rounds — deliberately independent of `resume_attempts` (the continuation-leg
   counter): one axis is "how many times did this PR need fixing", the other is "how many budget-
   exhaustion handoffs did one leg need" — they never share a counter, and a lane can spend both
   independently.
 - **The `fixing` → `driving` edge clears the review-trigger pin** (`review_triggered_head`/`at`
   reset to `null`), reusing `MergeDriver.driveOne`'s own re-trigger machinery to force a fresh
-  review on the fix leg's new head — the same shape as #147's gated-PR reentry.
+  review on the fix leg's new head — the same shape as the engine's existing gated-PR reentry.
 - **Supervision**: a `fixing` lane is a live worker process, so the SAME heartbeat/timeout/soft-
   budget supervision and crash-safety machinery (`reclaimTerminalLane`, dirty-worktree retention,
   the kill-switch drain) applies to it as to a `running` lane. It is NOT scanned by the DRIVE
   loop (`state.drivingWorkers()` excludes `fixing` rows by construction), which is also why
-  #170's review-silence escalation structurally cannot arm while a lane is fixing — that clock
+  the review-silence escalation structurally cannot arm while a lane is fixing — that clock
   only ever fires from inside the DRIVE loop.
-- **Narrowed `gatedFailedWorkers()` semantics**: once #246 wires the `FIXABLE` gate in, ordinary
+- **Narrowed `gatedFailedWorkers()` semantics**: with the `FIXABLE` gate wired in, ordinary
   review findings no longer produce a `failed`+PR row at all (they route to `fixing` instead) —
   the only remaining producer of that shape is the `fix_rounds` cap escalation. Findings no
   longer masquerade as `failed`.
 
-## Ambient repo context: record, don't seal (#236)
+## Ambient repo context: record, don't seal
 
 Every session above — worker or peripheral — spawns `claude -p` **inside a real repo
 worktree**. That means it legitimately absorbs the target repo's `CLAUDE.md`, the
@@ -1296,13 +1283,13 @@ peripheral role sessions got "no repo context beyond what's substituted into the
 prompt" — that was never accurate once sessions ran in a real worktree, and the claim
 is now corrected at its source (`config.ts`'s `RoleSession` schema comment).
 
-**Owner ruling (2026-07-17), Codex concurring after challenge: this channel stays
+**This channel stays
 open in production.** Sealing it — running with no ambient `CLAUDE.md` at all — would
 move the trust boundary to the *content* side, contradicting the locked boundary
 this page already states above and in [PLAN.md](PLAN.md#security--trust-model-trusted-first-designed-toward-public):
-the boundary is what a session can **do** (the zero-write, zero-`Bash` tool allowlist
-— empty until #235, now `Read`/`Grep`/`Glob` guard-confined to the worktree, #110/
-#235; the credential-stripped spawn env, #218), never what it can **read**. Repo
+the boundary is what a session can **do** (the zero-write, zero-`Bash` tool allowlist,
+now `Read`/`Grep`/`Glob` guard-confined to the worktree; the credential-stripped spawn env),
+never what it can **read**. Repo
 conventions
 living in `CLAUDE.md` are exactly what a role session *should* absorb — the same
 reason a human contributor reads it too. The obligation this channel creates is
@@ -1311,20 +1298,18 @@ actually saw, so ambient drift between retries (a `CLAUDE.md` edited between att
 and attempt 2, a dirty worktree, a config change) never makes two attempts of the same
 phase look comparable when they weren't.
 
-**Wired for all 10/10 `runSessionWithRetry` peripheral call sites** — harvest,
-architect, plan-review (the reviewer, drafter, and #214's confirm sessions), retro,
-[#310](https://github.com/herehigher/sapwood/issues/310)'s `decompose.ts` PO
-decompose sub-mode (`po-decompose`), and (as of
-[#251](https://github.com/herehigher/sapwood/issues/251)) `align.ts`'s
-three PO sessions (`po-align`, `po-triage`, `po-pool`) — **plus, as of
-[#617](https://github.com/herehigher/sapwood/issues/617) (capability DR #616's seam
-3), `WorkerSupervisor`'s `dispatch()`/`resume()`**: every worker/producer leg now
+**Wired for every `runSessionWithRetry` peripheral call site** — harvest,
+architect, plan-review (the reviewer, drafter, and confirm sessions), retro,
+`decompose.ts`'s PO
+decompose sub-mode (`po-decompose`), and `align.ts`'s
+three PO sessions (`po-align`, `po-triage`, `po-pool`) — **plus
+`WorkerSupervisor`'s `dispatch()`/`resume()`**: every worker/producer leg
 records the same host-environment fingerprint. The mechanism is the SAME
 `assembleContextManifest`/`capturePreSpawnManifestData` pair, factored out of
 `peripheral.ts` into `context-manifest.ts` so both callers share it rather than
 growing a second implementation — see `WorkerSupervisor.recordLaneContextManifest`'s
 own doc for the worker-specific key/scope choices (a sentinel `roundId: 0, phase:
-"worker"` row per lane name, most-recent-leg-wins on resume). One nuance #616's live
+"worker"` row per lane name, most-recent-leg-wins on resume). One nuance a live
 probe surfaced: a session's stream-json init line reports ZERO `mcp__`-prefixed tool
 names even when ambient MCP servers are actually loaded (tool schemas arrive
 deferred, after init) — the manifest's `mcpTools` field reads the init report's
@@ -1400,14 +1385,14 @@ It records:
   between attempts is also detectable.
 
 Manifests persist in the state DB's `context_manifests` table, keyed by
-`(round, phase, role, session, attempt)` — the same tuple issue #231's separately
+`(round, phase, role, session, attempt)` — the same tuple a separately
 developed input manifest will eventually join on. That linkage is deliberately **not**
 built here: this table is self-contained (its own migration, its own `State` methods),
 so the two features merge independently regardless of order.
 
 **Why no live `git status`.** This engine structurally never execs `git` outside
 worker.ts's `claude` CLI launch and `gh.ts`'s `gh` calls — pinned by a grep-invariant
-test (`worker.test.ts`, #69) that also bans passing a `cwd` to any subprocess, so the
+test (`worker.test.ts`) that also bans passing a `cwd` to any subprocess, so the
 engine cannot exec git *in a worker worktree* even accidentally. The context manifest
 honors that boundary: a worktree's HEAD commit is recovered by reading git's own
 plumbing files directly (`.git`'s `gitdir:` pointer, `HEAD`, loose/packed refs) —
@@ -1427,9 +1412,9 @@ from three distinct, honestly-labeled bases: `"structural-no-write-tools"` (the
 session's ENGINE-GRANTED `--allowedTools` string carries no WRITE-capable tool name —
 `Write`/`Edit`/`MultiEdit`/`NotebookEdit`/any `Bash(...)` entry — the common case, so
 `dirty: false` is a guarantee about that grant, not about the session's total capability;
-capability DR #616 means an unsealed session can still inherit an ambient host MCP server with
+host-delegated capability management means an unsealed session can still inherit an ambient host MCP server with
 its own write-capable tools, invisible to this name-based check — see the worker-egress
-blind-spot section. #235 makes `Read`/`Grep`/`Glob` the universal issues-only baseline, so this
+blind-spot section. `Read`/`Grep`/`Glob` is the universal issues-only baseline, so this
 is no longer the same thing as "the allow-list is empty" — a read-only grant is still
 `dirty: false`); `"unknown-write-capable-session"` (the grant
 DOES include a write-capable tool, e.g. `retro`'s `Write`/`Edit`/`Bash(git ...)` — the
@@ -1438,7 +1423,7 @@ engine cannot rule out a write, so `dirty: true` conservatively, never a false
 all within the bounded wait — a distinct fact from either of the above, not folded
 into a guess).
 
-**What a session actually used (#235).** Alongside HEAD/cleanliness, the manifest also
+**What a session actually used.** Alongside HEAD/cleanliness, the manifest also
 records which tools a session's stream actually INVOKED (`toolUsage`: name → call
 count, parsed from its jsonl `tool_use` blocks — including a DENIED attempt, e.g. a
 blocked `Bash` call, since the attempt itself is diagnostic evidence whether or not it
@@ -1449,9 +1434,9 @@ enforcement; the manifest exists so a session's read footprint is diagnosable af
 the fact, the same "record, don't seal" stance this whole section takes for ambient
 `CLAUDE.md` absorption.
 
-## Review session mode: closed MCP/settings surface, forced-hard guard (#285)
+## Review session mode: closed MCP/settings surface, forced-hard guard
 
-The engine-agent reviewer (design #279) runs a static review session directly against an
+The engine-agent reviewer runs a static review session directly against an
 already-**materialized** tree — `review/materializer.ts`'s private-clone checkout of the exact
 reviewed commit, with no `.git` at all (D1: static-only, no producer-code execution). Unlike an
 ordinary worker/peripheral session, this materialized cwd is **producer-controlled content** — the
@@ -1482,9 +1467,9 @@ hardcoded (not caller-overridable) for every review session:
   loading `user` settings would inherit whatever that earlier influence left behind. Loading no
   file sources at all removes that inheritance path for review specifically, without requiring the
   broader (still-open) worker HOME residual to be solved — ordinary WORKER legs (dispatch/resume/
-  fix, as opposed to this review-session mode) remained uncovered until #615 ruled on them
-  specifically: see "Worker-leg user-settings persistence vector — detect & disclose (#615)" below
-  for that ruling and what shipped.
+  fix, as opposed to this review-session mode) are covered separately: see
+  "Worker-leg user-settings persistence vector — detect & disclose" below
+  for that mechanism.
 - **The guard hook keeps working regardless** — it is mounted via **inline** `--settings`
   (`guardSettings()`'s JSON, passed as a CLI argument value, never a file), which this "Benchmark
   isolation recipe" section already establishes is a *separate* mechanism from file-based settings
@@ -1526,13 +1511,14 @@ non-authoritative and are never read back as gate② approvals.
 
 ### Benchmark isolation recipe (evals only — never production)
 
-**Not to be confused with #235's guard-hook read containment above.** This section's
+**Not to be confused with the guard-hook read containment above.** This section's
 `--bare` recipe seals a session's AMBIENT CONTEXT (no repo/user `CLAUDE.md`, no
-auto-memory, no MCP) for reproducible eval comparisons — a different goal from #235,
+auto-memory, no MCP) for reproducible eval comparisons — a different goal from that
+containment,
 which confines an ordinary (non-`--bare`) production session's explicit
 `Read`/`Grep`/`Glob` tool CALLS to its own worktree via the guard hook, while leaving
 ambient `CLAUDE.md` absorption open (see "Ambient repo context" above). Production
-dispatch uses #235's containment; it never uses `--bare` — see why below.
+dispatch uses that containment; it never uses `--bare` — see why below.
 
 Isolation is the *correct* tool for one use case: comparing models/prompts/configs in
 a controlled eval where ambient repo/user state must NOT leak into the comparison. For
@@ -1566,12 +1552,12 @@ it is running unguarded, full stop, regardless of how convenient the isolation i
 reproducibility. Benchmark runs are a separate, offline, human-supervised activity;
 they never feed sapwood's own dispatch loop.
 
-## Instruction-path changes escalate to human review (#292)
+## Instruction-path changes escalate to human review
 
 Standing reviewer instructions are authority, so sapwood treats their merge history as a trust
 chain. Before either a hosted-bot review trigger or a paid engine-agent session, the merge gate
 checks the PR's rename-aware changed-file list against `escalation.instructionPaths`. A match on
-an old or new path applies `labels.humanMergeOnly` (#397) before review proceeds and posts one
+an old or new path applies `labels.humanMergeOnly` before review proceeds and posts one
 explanatory comment. If GitHub cannot provide a complete changed-file list within its API ceiling,
 the PR also escalates fail-closed. The exact human-merge-only PR label is the latch: later ticks
 neither fetch the file list nor repeat either write.
@@ -1581,9 +1567,9 @@ legitimate work, and denying the edit would mask that intent. The worker may pro
 human must adjudicate it. Setting `escalation.instructionPaths: []` explicitly turns the mechanism
 off.
 
-**Merge authority stays human; review labor should not (#823).** Before #823, this route parked
-the PR needs-human with zero engine review — the human had to arrange an out-of-band review
-themselves. Now, on a FRESH escalation (never on a later, already-`sapwood:human-merge-only`-
+**Merge authority stays human; review labor should not.** Rather than parking
+the PR needs-human with zero engine review and leaving the human to arrange an out-of-band review
+themselves, on a FRESH escalation (never on a later, already-`sapwood:human-merge-only`-
 latched tick — the label write is the idempotence latch, so a repeat tick does not re-run this),
 the engine also makes ONE advisory `evaluate()` call (one logical advisory evaluation — the
 adapter's own `evaluate()` may retry an unparseable/failed attempt internally, engine-agent.ts's
@@ -1592,7 +1578,7 @@ many sessions run underneath it) and posts its verdict as a PR comment before pa
 with a prominent banner marking it "instruction-path change: human-merge-only — ADVISORY, not
 consumed by the merge driver". That evaluation's instructions come from the reviewer's own
 engine-construction-time sources — the doctrine text and prompt template `EngineAgentReviewer`
-loads once at construction (engine-agent.ts), plus the dispatch-time AC snapshot (design #279 §5)
+loads once at construction (engine-agent.ts), plus the dispatch-time AC snapshot
 — never a live re-fetch of the PR's own (now human-merge-only) body, so an in-PR instruction-path
 edit cannot influence how this review of itself is conducted. The verdict is advisory labor for
 the human reviewer only: the route returns `needs-human` unconditionally, whether the evaluation
@@ -1606,7 +1592,7 @@ different reason string a caller could key on. See `review/drive.ts`'s
 for the regression coverage (never-consumed, fail-closed, deadline-bounded, latch-skips-rerun,
 construction-time-instructions).
 
-### Which carriers are covered, and how immediate the protection is (#527)
+### Which carriers are covered, and how immediate the protection is
 
 Two families, protecting two different sessions, with two different timings. Being precise about
 this matters: the general claim "instructions absorbed by a review session were previously
@@ -1615,11 +1601,11 @@ human-vetted" is stronger than what the second family's mechanism actually deliv
 - **The ambient-context family** — `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`,
   `.claude/rules/**`, `AGENTS.md`. These are absorbed from the checkout by **worker** and other
   non-review sessions ([Ambient repo context: record, don't
-  seal](#ambient-repo-context-record-dont-seal-236)), and by a hosted bot reading the PR head.
+  seal](#ambient-repo-context-record-dont-seal)), and by a hosted bot reading the PR head.
   They are **not** absorbed by sapwood's own gate② review session: it spawns with
-  `--setting-sources ""` (see [Review session mode](#review-session-mode-closed-mcpsettings-surface-forced-hard-guard-285)),
-  which also stops the session's own cwd `CLAUDE.md` from loading at all. Re-measured live on
-  2026-08-02 (#527), the same way the earlier measurement recorded in the peripheral-egress
+  `--setting-sources ""` (see [Review session mode](#review-session-mode-closed-mcpsettings-surface-forced-hard-guard)),
+  which also stops the session's own cwd `CLAUDE.md` from loading at all. This was measured live
+  the same way the earlier measurement recorded in the peripheral-egress
   section above was taken — a scratch directory whose `CLAUDE.md` declared a unique marker fact, a
   one-shot `claude -p` asking for that fact: the default run answered with the marker, the
   identical run with `--setting-sources ""` answered `UNKNOWN`. Same machine, same operator
@@ -1630,7 +1616,7 @@ human-vetted" is stronger than what the second family's mechanism actually deliv
   itself (shipped as `engine/prompts/**`, repointable via `reviewer.agent.promptFile`). These are
   what a gate② review session actually reads as standing instruction. **Both paths are derived from
   config**, not literals, so an operator who repoints either one stays covered: `loadConfig`
-  captures the pre-resolution `doctrine.fileRaw` (#527) and `reviewer.agent.promptFileRaw` (#549)
+  captures the pre-resolution `doctrine.fileRaw` and `reviewer.agent.promptFileRaw`
   before resolving each to an absolute local path, and the escalation matches those repo-relative
   raw forms against the PR's changed files. The `engine/prompts/**` glob remains a literal default
   covering the shipped prompt, inert in any target repo that is not the engine's own source tree.
@@ -1645,15 +1631,14 @@ after it merges**. The escalation closes that: the edit cannot reach autonomous 
 un-vetted reviewer instruction ever becomes the authority for a later round. What it does not and
 cannot do is make an in-flight review notice the change.
 
-### The mechanism's own carriers join the escalation surface too (#539)
+### The mechanism's own carriers join the escalation surface too
 
-Live evidence for why this matters: PR #538 (#527, P1 security) merged with zero human eyes,
-touching the #292 matcher itself (`engine/src/review/instruction-path-escalation.ts`), the
+Live evidence for why this matters: a PR once merged with zero human eyes,
+touching the instruction-path matcher itself (`engine/src/review/instruction-path-escalation.ts`), the
 `escalation.instructionPaths` defaults (`engine/src/config/config.ts`), and this file. None of the
 three were on any escalation or human-merge-only list, so the merge was compliant with the letter —
 a PR gutting the matcher or shrinking the defaults would have reached autonomous merge the same
-way. (That instance was benign; the finding is the reachable class.) The owner ruling (comment
-5160942433) put these three paths in the **escalation surface**, alongside the two carrier families
+way. (That instance was benign; the finding is the reachable class.) The ruling put these three paths in the **escalation surface**, alongside the two carrier families
 above — not the guard deny-list: the worker may still produce a change here, a human adjudicates
 the merge.
 
@@ -1667,10 +1652,10 @@ the matcher or its defaults is caught by the very entries this PR adds.
 
 **The exposure window is exactly one bootstrap PR, not an ongoing gap.** Before these three paths
 were deployed in `escalation.instructionPaths`, nothing stopped an autonomous merge to any of them
-(the #538 evidence above). The PR that first adds them (this one, #539) is necessarily evaluated
+(the evidence above). The PR that first adds them is necessarily evaluated
 against the OLD deployed defaults — which do not yet cover its own diff — so it is the one PR that
-cannot be protected by its own change. Every PR after it merges is covered. This is why #539 is
-itself human-merge-expected: the engine has no config-side signal to escalate its own bootstrap PR,
+cannot be protected by its own change. Every PR after it merges is covered. This is why that
+bootstrap PR is itself human-merge-expected: the engine has no config-side signal to escalate its own bootstrap PR,
 so the merge decision for this one PR is a human responsibility, not an engine one.
 
 ## Human-merge-only paths
@@ -1704,14 +1689,14 @@ rule is also a process rule: even a PR that touches these files and somehow pass
 and review is not something the conductor should be configured to auto-merge.
 <!-- sapwood:skill:human-merge-only-paths:end -->
 
-### The protected live config and shipped starter are separate (#386, #577)
+### The protected live config and shipped starter are separate
 
 The path-based denial protects this repository's root `sapwood.config.yaml`: it is the
 live dogfood configuration, and changing it remains human-merge-only through the guard.
 `sapwood init` instead ships `sapwood.config.example.yaml` as the starter template
 (`engine/src/loop/init.ts`'s `sampleConfig()`/`ensureConfig()`). That template belongs
 to the default `escalation.instructionPaths` surface, so edits to it route to human merge
-review, **and** (#781) it is also guard-protected in its own right: `guard.ts`'s
+review, **and** it is also guard-protected in its own right: `guard.ts`'s
 `protectedPathLabel` matches `sapwood.config.example.(ya?ml|json)`, case-insensitively, as a
 sibling rule to the root config's, denying the same recognized write vectors as the root
 config — the `Write`/`Edit` tools, Bash redirection, and the write-command set (`touch`,
@@ -1720,7 +1705,7 @@ config — the `Write`/`Edit` tools, Bash redirection, and the write-command set
 `merge.mode: produce-pr-and-stop` pin every future `sapwood init` inherits from this file
 through any of those routes. This does **not** extend to the literal-argument scan
 (`checkControlSentinelArg`) that catches an arbitrary command merely naming a control
-sentinel — that scanner is deliberately sentinel-only (marginal-complexity ruling on #809),
+sentinel — that scanner is deliberately sentinel-only (a marginal-complexity ruling),
 so a script that takes the template's path as its own CLI argument (e.g. `node
 writer.js sapwood.config.example.yaml`) or hardcodes the path internally is outside the
 guard's coverage — the same residual class the "Sentinel isolation boundary" section below
@@ -1746,30 +1731,29 @@ issue belongs to a human directly. Until the human PR lands, the pending protect
 on the open issue's remainder section — the process-truth home for it — not as any committed
 artifact in the tree.
 
-**Resolved at issue-authoring time, not just caught at gate⓪ (retro round #284).**
+**Resolved at issue-authoring time, not just caught at gate⓪.**
 `verification-plan-reviewer.md`/`verification-plan-drafter.md` catch an acceptance criterion that
-still asks for a direct edit to one of these paths — but until #284 that was the *only* check,
-so an issue drafted with such a criterion reliably cost a gate⓪ bounce and a repair round-trip
-before it could dispatch (round #281's #386 and round #284's #399 both paid this cost, for two
-different specific gaps in the same mechanism). `po.md` (both `align` and `triage` modes) and
+still asks for a direct edit to one of these paths — but that used to be the *only* check,
+so an issue drafted with such a criterion could reliably cost a gate⓪ bounce and a repair round-trip
+before it could dispatch. `po.md` (both `align` and `triage` modes) and
 `po-decompose.md` now carry the identical check at the point an issue or `ready` child is first
 drafted, resolving it into a carved-out human-owned remainder/section immediately rather than
 leaving it for the reviewer to find. The gate⓪ check stays in place as the backstop for whatever
 this upstream pass misses — this narrows how often it fires, it does not replace it.
 
-### The `sapwood:human-merge-only` label (#397)
+### The `sapwood:human-merge-only` label
 
 The same phrase now also names a **label**, deliberately — one fact, one term. Where the
 list above is the *static* set of paths a human must merge, `sapwood:human-merge-only` is
 the *runtime verdict* that a particular PR must be merged by a human. Today the
-instruction-path escalation above (#292) is its only writer: a PR that edits the reviewer
+instruction-path escalation above is its only writer: a PR that edits the reviewer
 instruction graph is not broken and nothing is stuck, but its merge decision is not the
 loop's to take.
 
 Its contract:
 
 - **Engine-written, on the PR, exactly once.** No automated act ever removes it or
-  re-decides it — unlike `sapwood:needs-human`, whose removal *is* the #147 gated-reentry
+  re-decides it — unlike `sapwood:needs-human`, whose removal *is* the gated-reentry
   handshake that hands the lane back to automation.
 - **Not a member of `escalation.humanLabels`.** That array is checked against *issue*-side
   labels (the reclaim fence, `orderForDispatch`, the standby probe), which a PR-only label
@@ -1784,11 +1768,11 @@ Its contract:
   can never be gate-reclaimed, so nothing can re-escalate it or re-apply `needs-human`.
 
 There is deliberately **no** static human-merge-only *path scan* on PRs. Three layers already
-keep an engine PR off those paths (gate⓪ AC screening #376, the `guard.ts` write-path block
-above, and #292); a fourth scanner would be redundant machinery. The label carries the
+keep an engine PR off those paths (gate⓪ AC screening, the `guard.ts` write-path block
+above, and the instruction-path escalation above); a fourth scanner would be redundant machinery. The label carries the
 **verdict**, not a new detection.
 
-### The review-doctrine file is trusted prompt input (#167)
+### The review-doctrine file is trusted prompt input
 
 The review-doctrine file (`doctrine.file`, default `docs/REVIEW-DOCTRINE.md`) is
 user-editable repo prose and is **not** guard-protected — yet its content is injected
@@ -1838,9 +1822,8 @@ The engine's `data/` directory (which holds all three sentinels and the state DB
 outside worker git worktrees as a **permission-layer boundary** — the worker process is
 not launched with `--add-dir data`, so it has no `claude`-tool path into that directory.
 This is **not an OS-level sandbox**, so the guard (`engine/src/guard/guard.ts`) adds
-defense-in-depth (#81) on top of that boundary. The guard's control-sentinel rule covers
-all three tiers — `data/KILL_SWITCH`, `data/PAUSE`, and (#779, closing the gap left by
-#724 adding the strictest tier without a matching guard update) `data/EMERGENCY_STOP`.
+defense-in-depth on top of that boundary. The guard's control-sentinel rule covers
+all three tiers — `data/KILL_SWITCH`, `data/PAUSE`, and `data/EMERGENCY_STOP`.
 For every covered sentinel, any `Write`/`Edit` targeting it (including via relative
 traversal, e.g. `../../data/EMERGENCY_STOP`) is denied, as is `Bash`
 `touch`/`rm`/`mv`/`git rm`/redirect-to-path targeting it, and a sentinel path appearing
@@ -1859,8 +1842,8 @@ documented rather than blocked:
   false-positive on a worker legitimately removing a `data/` dir inside its own repo,
   so this stays a documented residual instead of a guard rule.
 
-**`sapwood pause`/`stop`/`estop` (#731) are NOT an instance of the residual class above —
-they are a NEW, first-class gap the guard does not yet close.** The two bullets above are
+**`sapwood pause`/`stop`/`estop` are NOT an instance of the residual class above —
+they are their own, distinct class the guard fences separately.** The two bullets above are
 obscure hand-rolled forms a worker would have to construct deliberately. `sapwood pause`,
 `sapwood stop`, and `sapwood estop --confirm` are the opposite: a shipped, operator-
 documented CLI verb (docs/getting-started.md, docs/supervision.md,
@@ -1870,11 +1853,10 @@ Bash access can invoke by name. They resolve the sentinel path internally
 `data/PAUSE`/`data/KILL_SWITCH`/`data/EMERGENCY_STOP` token ever appears on the Bash
 command line for `checkControlSentinelArg` to match — including `sapwood estop clear`,
 which lifts an already-fired EMERGENCY_STOP with no sentinel path in sight. `guard.ts` is
-human-merge-only, so #731's guard change was authored as a human-merge-only edit (PR #818,
-merged by a human) rather than by the worker that opened the gap — extending
+human-merge-only, so this fence was authored as a human-merge-only edit — extending
 `checkControlSentinelArg`'s Bash-argument accident fence to recognize the three
-stop-control verbs, the same route as the #679 default-branch-push deny rule. **This fence
-is now in place.**
+stop-control verbs, the same route as the default-branch-push deny rule. **This fence
+is in place.**
 
 **The fence covers the *discoverable* stop-control invocation forms** — the
 bare `sapwood` binary, `node .../cli.js`/`cli.ts` (path-prefixed or direct-executed), and
@@ -1913,14 +1895,14 @@ Two different things are both called "budget," and they behave differently on pu
   gates permit. Each resumed leg gets a fresh soft budget, bounded by
   `worker.maxResumes` (default 2); resumed `total_cost_usd` is per-leg and is ledgered
   directly, so total recorded spend is the sum of the real legs. The live estimate this
-  bullet describes is blind to a spawned subagent's own spend — see #552's paragraph
+  bullet describes is blind to a spawned subagent's own spend — see the paragraph
   under [Worker denylist vs. peripheral allowlist](#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry)
   above for the measured size of that gap and why it's accepted unbounded.
 - **`cost.dailyBudgetUsd` / `cost.maxWallClockSec`** are **hard** engine-wide ceilings.
   Breaching either freezes new dispatch/merges and starts draining in-flight workers
   (`cost.drainWindowSec`'s grace window), same "drain before kill" posture as the kill
   switch: give a worker the chance to hand off cleanly, and only escalate to a hard
-  process-tree kill once the drain window elapses. Their roles differ (#431):
+  process-tree kill once the drain window elapses. Their roles differ:
   `dailyBudgetUsd` is the **durable** runaway-spend boundary — a UTC-calendar-day
   ledger sum that survives restarts. `maxWallClockSec` is a **per-process attention
   alarm** — one clock per process life, anchored at process start in memory, fresh on
@@ -1930,16 +1912,16 @@ Two different things are both called "budget," and they behave differently on pu
   never the wall clock. Entering a breach emits a reason-bearing
   `ceiling-breach-entered` event once per episode.
 
-**Engine-agent review-session spend (#612, atomicity fixed #645 P1-1).** Under
+**Engine-agent review-session spend.** Under
 `reviewer.mode: engine-agent`, gate②'s review session is itself a paid Claude session — its cost
 reaches `spend_ledger` too, recorded once a verdict is decisive
 (`review/production.ts`'s `recordWalDecisiveOutcome`, via `State.recordEngineReviewVerdictAndSpend`),
 so `dailyBudgetUsd`/`roundBudgetUsd` (both plain, worker-unfiltered `SUM(usd)` reads) count it
 like any other spend. The verdict-announcing event, the WAL's `decisive_outcome` write, and this
-spend all land in **one SQLite transaction** — before #645 they were three separate writes (event
-first, spend last), and a crash between them left the verdict durably recorded while the spend
-silently, permanently never landed (the event's own existence is the replay dedup memory, so a
-retry read "already handled" and skipped the spend forever). It is ledgered under a key
+spend all land in **one SQLite transaction** — doing this as separate writes (event
+first, spend last) would let a crash between them leave the verdict durably recorded while the spend
+silently, permanently never lands (the event's own existence is the replay dedup memory, so a
+retry would read "already handled" and skip the spend forever). It is ledgered under a key
 **distinct** from the reviewed lane's own worker name (`<lane>:engine-review`), deliberately:
 recording it under the lane's own name would make `State.getWorkerActualModels(issue)` — keyed
 on an exact `worker` match — pick up the reviewer's own model as one of "the producing lane's
@@ -1947,12 +1929,12 @@ actual models," poisoning engine-agent.ts's D5 same-model check on that lane's n
 fix-round re-review would then see the reviewer overlapping itself and fail closed forever). A
 review attempt that never reaches a decisive verdict (all retries exhausted, a setup failure, a
 D5 same-model refusal) still records nothing to the ledger — its cost is real but stays visible
-only in that attempt's own WAL artifact; this mirrors the #286 whole-logical-review cap, which
-reads the WAL, never the ledger, for the exact same reason. **#645 attributes what IS recorded —
+only in that attempt's own WAL artifact; this mirrors the whole-logical-review cap, which
+reads the WAL, never the ledger, for the exact same reason. **This attributes what IS recorded —
 it does not widen this**: the deliberate-absence posture for non-decisive attempts is unchanged,
 still no ledger row of any kind for one.
 
-**Durable spend attribution (#645).** `spend_ledger` carries three additional columns, written by
+**Durable spend attribution.** `spend_ledger` carries three additional columns, written by
 every real spend site: `actor_kind` (`worker` | `fix-leg` | `peripheral-role` | `engine-review` —
 conductor.ts's reclaim path sets the first two from whether the terminal lane was a `fixing`-origin
 leg; peripheral.ts's shared `runSessionWithRetry` sets `peripheral-role` for every po-align/
@@ -1975,7 +1957,7 @@ The shared read-model's spend section (`status --json`'s `spend` key) reports th
 `unclassifiedUsd` leftover bucket — now a COMPLEMENT query (every row not validly matching one of
 the three positive buckets, including a corrupt/unrecognized `actor_kind` value or a
 `peripheral-role` row missing its `role`), not an `actor_kind IS NULL`-only query, so a
-malformed row can never silently vanish from every total (#645 P1-3) — and its `incomplete` flag.
+malformed row can never silently vanish from every total — and its `incomplete` flag.
 `incomplete` is true whenever `unclassifiedUsd > 0` **or** `reviewer.mode` is `engine-agent`
 (the schema default): the deliberate-absence posture above means a non-decisive review attempt's
 cost can be real yet leave **no ledger row of any kind**, so `unclassifiedUsd` alone can never
@@ -1983,14 +1965,14 @@ prove the day is complete under that mode — `incomplete: false` is only reacha
 non-engine-agent reviewer mode. See `state/read-model.ts`'s `StatusSpendDTO` doc for the exact
 identity `todayUsd` holds by construction.
 
-**Supervisor prerequisite (#431):** operators running unattended under a supervisor
+**Supervisor prerequisite:** operators running unattended under a supervisor
 MUST configure the supervisor's own crash-loop circuit-breaker — e.g. systemd's
 `StartLimitBurst=5` / `StartLimitIntervalSec=600` (or the equivalent restart-limit in
 your process manager) — sapwood *assumes* it. A crash-looping engine is visible in the
 supervisor's restart counters; alert THERE. Defense-in-depth behind that assumption:
 the engine's own rapid-restart detector (`engine.rapidRestart`, default 5 starts in
 10 minutes) parks autonomous dispatch with an escalation when it observes its own
-crash-loop, and the `#382` single-instance data-dir lock keeps a supervisor's fast
+crash-loop, and the single-instance data-dir lock keeps a supervisor's fast
 restarts from ever double-driving one board. A crash loop's blast radius is bounded
 either way by `dailyBudgetUsd` and the merge gates.
 
@@ -2007,23 +1989,22 @@ of the taxonomy.
 The labelling is **shipped machinery, not just a convention**. Two PO roles open issues
 on your behalf today, and each applies the label itself at creation time as part of its
 governance pass: the aligning role (`engine/src/loop/align.ts`, goal-alignment
-proposals) and the decomposition role (`engine/src/loop/decompose.ts`, #310's `split`
+proposals) and the decomposition role (`engine/src/loop/decompose.ts`, `split`
 children). Both label idempotently, so a resumed run re-applies rather than skips it —
 provenance is marked on every agent-created issue, not best-effort.
 
 The human confirmation such an issue needs is the ordinary `Ready` move, and no separate
 gate mechanism exists or is needed. Per [`PLAN.md`](PLAN.md)'s "Ready-as-signature"
-section (locked 2026-07-17, issues #237/#238), moving *any* issue to `Ready` — agent- or
+section, moving *any* issue to `Ready` — agent- or
 human-authored — is itself the human signature endorsing that issue's why/what. An agent
 can propose work; a human still decides what actually enters the dispatch queue, and
 that card move *is* the decision.
 
-## The `plan:approved` label and gate⓪ (#88)
+## The `plan:approved` label and gate⓪
 
-Decision #8's `Ready` gate originally checked only that a verification plan *existed* —
-not whether it was any good — and `verify:n/a` was self-declared by whoever wrote the
-issue. A 2026-07-09 amendment to Decision #8 (locked in issue #77's comments) closes
-that gap: a plan must also pass agent quality review before dispatch.
+Decision #8's `Ready` gate requires more than a verification plan merely *existing* — a
+plan must also pass agent quality review before dispatch, and `verify:n/a` is not simply
+self-declared by whoever wrote the issue.
 
 `getReadyIssues` (`engine/src/forge/forge.ts`) now requires, for any issue not labelled
 `verify:n/a`, **both** a verification-plan section in the body **and** the
@@ -2035,7 +2016,7 @@ never the agent — who actually opens the doc-gate path, by removing `needs-hum
 themselves. `needs-human` and `blocked` block dispatch unconditionally, regardless of
 any other label present.
 
-**A plan below standard self-heals rather than stalls** (#77 Amendment 2): when the
+**A plan below standard self-heals rather than stalls**: when the
 reviewer finds the plan missing or inadequate beyond its minor-correction latitude, it
 does not park the issue for a human — its structured decision names precisely what's
 missing, the engine posts that as a comment (the brief), and the loop dispatches a
@@ -2051,7 +2032,7 @@ above is unchanged by any of this: implementation dispatch still requires
 `plan:approved` (or adjudicated `verify:n/a`) — only the repair path became more
 autonomous.
 
-The verification-plan-reviewer/verification-plan-drafter sessions are wired and, since #110, pure computation:
+The verification-plan-reviewer/verification-plan-drafter sessions are wired and pure computation:
 neither holds a `Bash` tool grant, so neither ever runs `gh` itself. Each session's
 final message ends in a structured, sentinel-delimited output block; the engine
 (`plan-review.ts`) parses it, validates it against a zod schema, re-checks the one
@@ -2062,20 +2043,20 @@ Malformed, schema-invalid, or content-invalid output is treated as a failed atte
 retried once, then escalated to `needs-human` with the full attempt trail, exactly like
 an outright session crash. The shipped default prompt lives at
 `engine/prompts/verification-plan-reviewer.md` (`roles.verificationPlanReviewer.promptFile` overrides it — same
-`#74` pattern as `worker.promptFile`).
+pattern as `worker.promptFile`).
 
-**`plan:approved` is re-endorsed, not permanent (#214).** The verification-plan-reviewer's candidate
+**`plan:approved` is re-endorsed, not permanent.** The verification-plan-reviewer's candidate
 sweep above is now scoped to the round pool rather than the whole Ready lane, and a
 prior round's `plan:approved` is re-checked — a lightweight, zero-forge-write-on-confirm
 session — every time that issue re-enters a pool, before its approval is trusted for
 dispatch again; a session that can't confirm or fails escalates `needs-human` the same
 way an initial review does. The label itself is never removed by that check either way.
 See [`docs/PLAN.md`](PLAN.md#v02-north-star-the-round-orchestrator) (the "gate⓪ is scoped
-to the round pool..." locked decision, issue #214) for the full detail.
+to the round pool..." locked decision) for the full detail.
 
-## The AC-authority dispatch snapshot (#283, design #279 §5)
+## The AC-authority dispatch snapshot
 
-Per-AC verdicts (the engine-side review agent design, #279) need an authoritative,
+Per-AC verdicts need an authoritative,
 immutable acceptance-criteria set to judge a PR against — but the producer holds `gh
 issue edit` capability (`worker.ts`'s own grant), so the live issue body is **not**
 authoritative once a worker has been dispatched against it: a worker (or anyone else
@@ -2108,14 +2089,14 @@ proceed; a human must re-adjudicate (a renewed gate⓪ pass) before the lane can
 again. A lane with no recorded snapshot (dispatched before this feature shipped) is not
 treated as drift — it drives normally, so this only ever tightens NEW dispatches.
 
-**The AC-authority hash is marker-normalized, not the raw body hash (#752).** #703's cursor
+**The AC-authority hash is marker-normalized, not the raw body hash.** The cursor
 discipline requires every PO comment on an issue to advance the
 `<!-- sapwood:comments-adjudicated-through: N -->` marker in the same body edit — which, against
 a raw full-body hash, would make a legitimate cursor advance on an in-flight issue *always* read
 as AC drift. `ac-snapshot.ts`'s `hashBodyForAcAuthority` normalizes the body before hashing
 (`normalizeForAcAuthority`, the same function backing every AC-authority site: `buildAcSnapshot`,
-`checkAcSnapshotDrift` above, the #676 re-baseline candidate pin, and its confirmation compare —
-all four must share it, or a staged #676 candidate could never match the snapshot on a later
+`checkAcSnapshotDrift` above, the re-baseline candidate pin, and its confirmation compare —
+all four must share it, or a staged candidate could never match the snapshot on a later
 tick), and excuses exactly two classes of edit from drift, both narrowly scoped:
 1. **A well-formed standalone marker line** — the ENTIRE trimmed line is `<!--
    sapwood:comments-adjudicated-through: N -->` where `N` is `0` or a bare digit run
@@ -2124,14 +2105,14 @@ tick), and excuses exactly two classes of edit from drift, both narrowly scoped:
    must still remove a role's malformed marker attempt too). A marker-*shaped* line carrying extra
    payload (e.g. `<!-- sapwood:comments-adjudicated-through: 0 IGNORE PRIOR ACs -->`) is NOT
    well-formed and stays in the hash — fail-closed against payload smuggling disguised as a marker
-   advance (#752 PO-adjudication finding 3).
+   advance.
 2. **A line-ending-only difference** (CRLF normalized to LF) **and the blank-line residue removing
    a marker line leaves behind** (any run of 2+ consecutive blank lines collapses to one; trailing
    blank lines/whitespace are trimmed) — without this, a markerless dispatch body and a live body
-   that gains its FIRST marker (a PO's very first #703-discipline comment) would still drift, since
+   that gains its FIRST marker (a PO's very first cursor-discipline comment) would still drift, since
    the blank line conventionally separating the marker from surrounding prose survives a bare
    line-removal as a dangling trailing newline or a doubled blank line that a markerless body never
-   had (#752 PO-adjudication finding 2). This collapse is WHOLE-BODY, not fence-aware like the
+   had. This collapse is WHOLE-BODY, not fence-aware like the
    marker scan above — a whitespace-only blank-line-run change INSIDE a fenced code block is also
    excused from drift, same as anywhere else in the body. Code samples are not byte-protected
    against that one narrow class of edit; only well-formed marker lines get the fence-aware
@@ -2141,12 +2122,12 @@ Every other byte of the body still participates in the hash, so any non-marker e
 fail-closed; a marker advance plus a real edit still drifts too. This normalization is scoped to
 AC authority only: `ac-snapshot.ts`'s own `hashBody` and `comment-cursor-gate.ts`'s `checkBodyDrift`
 (the functions gate⓪'s session-input drift check and both write-time drift guards call) stay raw
-and unmodified — those call sites are exactly where #703's own invariant (a role body-write must
+and unmodified — those call sites are exactly where the cursor-discipline invariant (a role body-write must
 not land silently over an operator's freshly-advanced marker) is enforced, and normalizing them
 too would defeat it.
 
-**The comment-cursor recheck before DRIVE reads the LIVE body, not the dispatch-time snapshot
-(#752 PO-adjudication finding 1).** `conductor.ts`'s `checkCommentCursorBeforeDrive` — the #652
+**The comment-cursor recheck before DRIVE reads the LIVE body, not the dispatch-time snapshot.**
+`conductor.ts`'s `checkCommentCursorBeforeDrive` — the
 review-time recheck that runs immediately before `gate.driveOne` — computes the adjudication
 cursor from the live issue body the sibling AC-drift check (`checkAcDriftBeforeDrive`, just above
 it) already fetched and confirmed AC-authority-matches the snapshot, never a second forge fetch.
@@ -2167,7 +2148,7 @@ above runs before either reviewer kind reaches its gate path.
 
 **Snapshot ownership is bound to the lane, not just the issue.** `ac_snapshots` is
 upsert-by-issue (one row per issue number) — but a `failed`-with-PR lane awaiting a
-human's GATED RECLAIM (#147) is *not* counted as in-flight (`activeWorkers()` excludes
+human's GATED RECLAIM is *not* counted as in-flight (`activeWorkers()` excludes
 `failed`), so a fresh dispatch of the *same* issue number can legitimately overwrite the
 issue-keyed snapshot while the older, un-reclaimed lane still exists. Each `WorkerRow`
 therefore stamps its own dispatch-time hash (`workers.ac_body_hash`) at creation, from
@@ -2184,7 +2165,7 @@ ids), but never assumed stable across a body edit; drift detection is what preve
 changed body from ever being silently re-extracted into a NEW id set that the engine
 would then treat as equivalent to the old one.
 
-## CI execution evidence for engine-agent review (design #279 §4)
+## CI execution evidence for engine-agent review
 
 A code-verifiable AC reaches `confirmed` only through two complementary checks. The review session
 statically maps the AC to a named, substantive, non-skipped test on the discovery path and checks
@@ -2202,28 +2183,28 @@ particular command.
 
 The paragraph above describes `loadConfig`/`parseConfig` — every read-only consumer (`status`,
 `events`, and this same drive path once a run is already in flight) — which is why it still only
-warns. `sapwood run` itself goes further (#784): it refuses to start at all under this exact
+warns. `sapwood run` itself goes further: it refuses to start at all under this exact
 combination, with a hard startup error naming the combination, the consequence, and both
 remedies, so the "queues before spending" drive-path behavior above is unreachable via `run` in
 practice — a run under this combination never gets far enough to dispatch a PR that could queue.
-`sapwood validate` (#801) mirrors that same refusal rather than only warning, so an operator never
+`sapwood validate` mirrors that same refusal rather than only warning, so an operator never
 sees `validate: OK` on a config `run` would hard-refuse.
 
-**Gate① is rollup-wide and strictly broader than `requiredChecks` (#783).** `requiredChecks`
+**Gate① is rollup-wide and strictly broader than `requiredChecks`.** `requiredChecks`
 narrows which checks count as trusted EVIDENCE for a code-verifiable AC; it never narrows which
 checks gate the merge itself. `PRStatus.ciGreen` requires the ENTIRE status-check rollup to pass,
 `requiredChecks` or not — so a non-required check can still BLOCK a merge (by being red, pending,
 or concluding without passing) but can never AUTHORIZE one on its own; only a fully green rollup
 does that.
 
-## The comment-adjudication cursor (#652)
+## The comment-adjudication cursor
 
-Batch-8 incident (2026-08-04, PR #651 round 1): a binding owner ruling recorded as an ISSUE
-COMMENT was invisible to the worker, which reads only the issue BODY (`{{issue.body}}`,
-`worker.ts`) and faithfully implemented the stale body — 5 P1s in one PR. That body-only boundary
+A binding owner ruling recorded as an ISSUE
+COMMENT was once invisible to the worker, which reads only the issue BODY (`{{issue.body}}`,
+`worker.ts`) and faithfully implemented the stale body — 5 P1s resulted in one PR. That body-only boundary
 is correct and stays: the body is maintainer-writable, while comments become world-writable once
 the repo is public (comment PROVENANCE filtering is a separately-deferred v0.3.0 entrance
-criterion, tracked on #329). What was missing is a check that the body is CURRENT relative to its
+criterion). What was missing is a check that the body is CURRENT relative to its
 own comment thread before the engine spends on gate⓪ review or dispatch — adjudications parked in
 comments were a standing trap, closed here.
 
@@ -2232,7 +2213,7 @@ loop: the issue body carries an adjudication-cursor marker
 `<!-- sapwood:comments-adjudicated-through: <comment-id> -->`, meaning "a maintainer has
 adjudicated every comment at or before this one" (adjudicated = folded into the body, or
 reviewed-and-nothing-to-fold). The marker identifies a concrete comment — **any** comment,
-engine-authored ones included (#703 v2, below) — by **stream position** in GitHub's oldest-first
+engine-authored ones included (see below) — by **stream position** in GitHub's oldest-first
 issue-comment stream, never by numeric id ordering: pending comments are the non-engine comments
 occurring after that position in the fetched stream, regardless of whether the target itself is
 an engine or non-engine comment. Cursor `0` denotes the position before the first comment (nothing
@@ -2240,18 +2221,16 @@ adjudicated yet). A malformed marker, a duplicate marker, or a cursor whose targ
 exists all fail closed to needs-attention; a deleted PENDING comment simply supplies no content,
 but a deleted CURSOR TARGET requires a maintainer to reset the cursor to an existing adjudicated
 comment. An issue with no marker and zero comments is the one pass-through case —
-behavior-identical to pre-#652 behavior (no new writes, labels, or outcome changes for that case;
+behavior-identical to the mechanism's baseline behavior (no new writes, labels, or outcome changes for that case;
 the checkpoints themselves DO add comment/actor reads on every other case, see below).
 
-**Position semantics, not a non-engine requirement (#703 v2, 2026-08-06 — supersedes the original
-"engine comment target fails closed" rule).** Live batch-11 evidence (2026-08-06, three
-occurrences in one afternoon: #145's round-340 plan_review housekeeping advice, an independent
-drafter redraft on #645, and a human operator live-reproducing the same mistake on #688 by
-following the pre-v2 recovery-comment wording literally) showed every marker-writing party
-converging on the SAME choice — "the newest comment id" — which the pre-v2 validator then
+**Position semantics, not a non-engine requirement.** Live evidence — three
+occurrences in one afternoon, including a human operator reproducing the same choice by
+following the recovery-comment wording literally — showed every marker-writing party
+converging on the SAME choice — "the newest comment id" — which an earlier, stricter validator then
 rejected outright whenever that newest comment happened to be engine-authored. The design
 diagnosis: the marker's own documented meaning IS a stream position, so rejecting an
-engine-comment target contradicted the mechanism's own model. The fix ships as ONE unit, in this
+engine-comment target would contradict the mechanism's own model. The fix ships as ONE unit, in this
 order (relaxing the validator alone, first, would open a silent-adjudication hole — see the next
 subsection):
 
@@ -2267,7 +2246,7 @@ subsection):
    comment pending. Every other fail-closed arm (malformed marker, duplicate marker, unknown
    target, missing comment id, missing marker with pending comments) is unchanged.
 
-**Role-marker immutability (#703 v2, structural, item 1).** The marker is PO/human-owned state —
+**Role-marker immutability.** The marker is PO/human-owned state —
 no role session has standing to move, create, or delete it, regardless of what the role's own
 output (or any prompt/plan_review advice feeding it) claims. Enforced at EVERY point a
 role-produced body is about to become the live one, not by trusting the role's text:
@@ -2280,14 +2259,14 @@ a role-proposed BRAND-NEW issue body, which can only ever have its own attempted
 (there being no current body to preserve a marker from) without disturbing the terminal proposal
 marker's own position-load-bearing `endsWith` trailer (`issue-creation.ts`).
 
-**Operator-owned section fence (#827).** The adjudication-cursor marker above protects one
+**Operator-owned section fence.** The adjudication-cursor marker above protects one
 metadata LINE; the operator-owned fence protects an arbitrary BLOCK of body prose — a design
-ruling, ownership note, or other PO testimony a role must never rewrite. Batch-14 (2026-08-11,
-issue #752): the PO wrote a design ruling into the issue body before Ready promotion, and gate⓪'s
+ruling, ownership note, or other PO testimony a role must never rewrite. In one incident,
+the PO wrote a design ruling into the issue body before Ready promotion, and gate⓪'s
 drafter, refining the body during plan review, REWROTE the ruling's own sentences in place (kept
 the substance, changed the wording) — laundering a defective ruling sentence forward under refined
 phrasing instead of leaving it verbatim for the audit trail. Same "operator-owned bytes a role
-rewrites must preserve verbatim" family as the marker above and #805's finding markers. A block
+rewrites must preserve verbatim" family as the marker above and other finding markers. A block
 delimited by `<!-- sapwood:operator-owned -->` … `<!-- /sapwood:operator-owned -->` (standalone
 lines, fence-aware exactly like the marker: an inline or fenced-code-quoted example never
 registers as a real boundary) must survive any role-produced body rewrite byte-for-byte, open tag
@@ -2320,7 +2299,7 @@ Multiset comparison has no notion of position: two byte-identical fences that ch
 relative to the rest of the body, or relative to each other, are not a violation — moving a fence
 is explicitly allowed (append/move freely, never edit the bytes between open and close).
 
-**gate② round 1 fixes (2026-08-12), three findings against the initial #827 landing:**
+**Fence-handling edge cases:**
 
 - **A malformed current fence now fails closed, never open.** An unclosed
   `<!-- sapwood:operator-owned -->` opener in the CURRENT body (a human left a fence open) used to
@@ -2366,23 +2345,23 @@ read as planless even when a perfectly ordinary legacy-heading Verification/Acce
 section sits right beside it — the fence's own close tag never collides in the first place (it
 starts `<!-- /sapwood:...`, not `<!-- sapwood:...`, so the anchor regex never matches it at all).
 
-**Normalization happens exactly ONCE, at the WRITE boundary — never pre-persisted into a journal
-(#703 v2 gate② P1-1, 2026-08-06).** PO triage's `updateIssueBodyIfUnchanged` (`align.ts`) is the
+**Normalization happens exactly ONCE, at the WRITE boundary — never pre-persisted into a journal.**
+PO triage's `updateIssueBodyIfUnchanged` (`align.ts`) is the
 ONE place a triage body-write is normalized, applied against a FRESH live-body read taken
 immediately before the actual `forge.updateIssueBody` call — for BOTH a fresh decision's first
 write AND a crash-RESUMED (journal-replayed) decision's write, since both funnel through this
 single call site. The `triage-decision-accepted` write-ahead journal event therefore carries the
 RAW role-produced text verbatim (never pre-normalized) — deliberately NOT versioned (pre-v1's
-no-migration doctrine): a `triage-decision-accepted` record persisted by a pre-#703 engine and
+no-migration doctrine): a `triage-decision-accepted` record persisted by an earlier engine version and
 resumed after a mid-round deploy upgrade (`triageProgress` only ever replays WITHIN the same
 `round_id`, so this is a same-round crash-resume, not a cross-round replay) is normalized against
 whatever marker is live RIGHT NOW at write time, exactly like a fresh decision — "whatever marker
 is live at write time wins" holds regardless of which engine version produced the journal record.
 Idempotent by construction: re-normalizing an ALREADY-normalized live body against the same role
 text reproduces that body byte-for-byte, so a genuine crash-resume where the write already landed
-still hits the pre-existing `current === newBody` short-circuit — #232's resume-safety is
+still hits the pre-existing `current === newBody` short-circuit — resume-safety is
 unaffected. If the live body has moved on since a (possibly pre-deploy) session read it, the
-pre-existing #232 concurrent-edit hash guard refuses the write outright, exactly like an ordinary
+pre-existing concurrent-edit hash guard refuses the write outright, exactly like an ordinary
 concurrent edit — never a blind overwrite, and never the journaled marker either.
 
 **The refusal arm.** When the CURRENT body's own marker state is already invalid — a human can
@@ -2394,16 +2373,15 @@ that would be the engine making a human-owned adjudication call on the human's b
 `align.ts`'s PO-triage site, which has no equivalent checkpoint of its own, checks
 `checkMarkerWritePrecondition` at the SAME write boundary as its normalization (inside
 `updateIssueBodyIfUnchanged`) and refuses the write (the candidate re-matches next round; the
-decision may already be write-ahead accepted per #232's own doctrine, but that accepted text never
+decision may already be write-ahead accepted, but that accepted text never
 reaches GitHub) on failure.
 
-**The write-boundary race (#703 v2 gate② P1-2, round 2).** `plan-review.ts`'s two write sites
+**The write-boundary race.** `plan-review.ts`'s two write sites
 re-read the live body a SECOND time, immediately before the actual `forge.updateIssueBody` call —
 closing the gap between the moment the first body snapshot is taken and the moment the EARLIER
-gate⓪ checkpoint's own async comment/actor fetch resolves. Round 1 of this fix re-ran the full
+gate⓪ checkpoint's own async comment/actor fetch resolves. An earlier version of this fix re-ran the full
 async `checkGate0CommentCursor` as that second check — which itself performs a comment/actor fetch
-whenever no drift is found, reopening the IDENTICAL race one level later (gate② round 2 caught
-this: the finding read as closed but had only moved forward). The FINAL check is now SYNCHRONOUS —
+whenever no drift is found, reopening the IDENTICAL race one level later. The FINAL check is now SYNCHRONOUS —
 a pure `checkBodyDrift` string compare, no comment/actor fetch at all — so the write site's call
 sequence is exactly `getIssueBody` → `checkBodyDrift` → `updateIssueBody`, with no I/O of any kind
 between the last read and the write. A human editing the marker (or anything else) up to and
@@ -2412,8 +2390,8 @@ land an edit into. On drift, the write never happens — the same needs-human/po
 escalation the async checkpoints use, invoked directly rather than through a second full
 `checkGate0CommentCursor` pass.
 
-**Marker recognition is standalone-line anchored (round 1 hardening) — and ATTEMPT recognition is
-broader than valid-VALUE parsing (#703 v2 gate② P2-1).** A marker counts only when it is the
+**Marker recognition is standalone-line anchored — and ATTEMPT recognition is
+broader than valid-VALUE parsing.** A marker counts only when it is the
 ENTIRE trimmed line, and never when that line falls inside a fenced (` ``` `/`~~~`) code block.
 Quoting the syntax for a maintainer's benefit is always safe and never mistaken for an
 authoritative marker: wrapping the marker in single backticks (inline code), leaving prose on the
@@ -2441,13 +2419,13 @@ silently-substituted placeholder id that could accidentally collide with (or be 
 real cursor target.
 
 **Checkpoints cover the race between candidate selection and the work actually starting, each
-checking BOTH comment-cursor freshness and (round 1) whether the live body still matches the body
+checking BOTH comment-cursor freshness and whether the live body still matches the body
 a session was actually given:**
 
 1. **Gate⓪** (`plan-review.ts`) checks freshness before spending on a verification-plan-reviewer
    (or confirm) session — that exact read (never a second, separately-fetched one) is what gets
    rendered into the session's prompt. It rechecks immediately before applying ANY
-   reviewer-derived body or label write, AND (round 1) immediately before the drafter's own body
+   reviewer-derived body or label write, AND immediately before the drafter's own body
    write — a pending comment OR a direct body edit landing WHILE a session ran discards that
    cycle's decision (or the drafter's draft) without applying it, approve/verify_na/draft_request/
    needs_human alike, never partially.
@@ -2464,17 +2442,17 @@ a session was actually given:**
    like an ordinary AC-snapshot body drift.
 
 **Degrade is the existing needs-human machinery, no new machinery.** A confirmed stale/invalid
-cursor — or (gate⓪ only, round 1) a confirmed body-drift discard, recorded with a distinct event
+cursor — or (gate⓪ only) a confirmed body-drift discard, recorded with a distinct event
 `cause` so the two are never conflated — applies the existing `needsHuman` label and posts ONE
 deduplicated engine comment listing the bounded pending comment ids and the recovery steps. **The
-recovery text is a copy-paste instruction (#703 v2, item 4 — fixing the exact wording trap a human
-operator live-reproduced on #688 by following the pre-v2 text literally):** it names the EXACT
+recovery text is a copy-paste instruction — fixing a wording trap that once led a human
+operator to reproduce the same mistake by following the text literally:** it names the EXACT
 standalone marker line to paste verbatim — `<!-- sapwood:comments-adjudicated-through: N -->` —
 where `N` is `pending.at(-1) ?? "0"` (the newest non-engine comment currently on the issue, or `0`
 when none exist). Comment ids are rendered as backticked RAW numbers — `` `N` `` — EVERYWHERE in
 this comment, not only the accepted-marker sentence: the pending-id listing itself renders the
-same way (gate② P2-2 finding: a pre-fix build rendered that list as `#10, #20`, which the
-narrower original test — checking only the accepted-marker line — missed). Never `#N` anywhere
+same way — an earlier build once rendered that list as `#10, #20` instead, a gap the
+narrower original test (checking only the accepted-marker line) missed. Never `#N` anywhere
 (which reads as a GitHub cross-reference, not a comment id). The duplicate-marker case adds an
 explicit instruction to remove every OTHER `sapwood:comments-adjudicated-through` line and keep
 exactly the one shown. `comment-id-missing` gets its own honest text with NO suggested marker
@@ -2487,7 +2465,7 @@ produces a second pointer comment, a genuinely new pending comment gets its own 
 (round 1) a cursor corrected from one still-invalid target to another (e.g. a marker re-pointed
 from a deleted comment to a DIFFERENT deleted comment) dedupes distinctly rather than being
 silently suppressed by the earlier target's key. The dedup read and the pointer-comment post are
-themselves CONTAINED (round 1, adopting #659's escalation-writer.ts discipline): a failure there
+themselves CONTAINED: a failure there
 is reported in the outcome (`posted: false`, `postError`), never thrown past the label write —
 every checkpoint's durable `comment-cursor-stale` event is UNCONDITIONAL, carrying the full
 label/post outcome in its payload, so a dedup-fetch or post failure can no longer strand an issue
@@ -2498,14 +2476,14 @@ checkpoint's own existing retry/environment-failure path (dispatch's rollback-on
 drive's queued-and-retried-next-tick stance, gate⓪'s ordinary thrown-error propagation) — network
 trouble must never turn a candidate into a human adjudication.
 
-**Surfacing when the runnable pool goes empty (#703 v2, item 5 — deliberately minimal: no new hold
-state, no new label, no new event kind).** When a round dispatches nothing AND this round also
+**Surfacing when the runnable pool goes empty — deliberately minimal: no new hold
+state, no new label, no new event kind.** When a round dispatches nothing AND this round also
 produced one or more `comment-cursor-stale` events, `round.ts` reads those already-appended events
 back over the round's own event window and logs which issue(s) are held back — `"awaiting human on
 #N[, #M]"` (`#N` here is a genuine GitHub issue-number cross-reference, unlike the comment-id
 wording constraint above) — so standby/idle-churn reporting distinguishes "genuinely nothing to
 do" from "work exists, a human needs to act." Purely a read of existing events into a log line; no
-write of any kind — including on the read's OWN failure path (gate② P2-3 finding: an earlier build
+write of any kind — including on the read's OWN failure path (an earlier build
 appended a `tick-error` event when this diagnostic read itself failed, contradicting this exact
 "no write" claim and perturbing idle-churn's own state fingerprint, which is computed over the
 same event window; fixed to log-and-continue only, an in-memory `tickErrors` counter unaffected).
@@ -2521,12 +2499,12 @@ comment creation, not comment content-versions. Editing an already-cursored comm
 reopen it — GitHub's `lastEditedAt` is not consulted, and a maintainer who needs to publish a
 binding amendment to an already-adjudicated comment must post a NEW comment, not edit the old
 one. This mechanism does not claim complete historical comment-version freshness; it is
-deliberately narrow (trusted-repo deployment only, design adjudicated 2026-08-05) and this residual
+deliberately narrow (trusted-repo deployment only) and this residual
 is accepted, not hidden — do not read "the cursor is current" as "every comment's current text was
 seen," only as "every comment CREATED at or before the cursor's target was adjudicated at some
 point in its history."
 
-### Residual notes for this doc package (#654)
+### Residual notes for this doc package
 
 - **The worker prompt surface is unchanged.** Workers are dispatched with the issue body
   only (`{{issue.body}}`, `worker.ts`); nothing in the cursor mechanism above, in
@@ -2538,10 +2516,10 @@ point in its history."
   the engine's own forge-proxy comment-reading tools available to gate⓪ roles
   (`PROXY_ROLE_TOOL_MATRIX`) — that is the scope of "no issue-comment tools" here. It is
   not a claim that a worker leg cannot read comments at all: an **L0** worker still holds
-  the `Bash(gh *)` grant (see [Worker credential tiers](#worker-credential-tiers-351-606)
+  the `Bash(gh *)` grant (see [Worker credential tiers](#worker-credential-tiers)
   above) and could run `gh issue view --comments` (or equivalent) on its own initiative,
-  same as any other `gh` read command that grant permits — nothing about #652 removes it.
-  **L1** (#606) is what actually closes this channel: it strips the forge credential and
+  same as any other `gh` read command that grant permits — nothing about this mechanism removes it.
+  **L1** is what actually closes this channel: it strips the forge credential and
   the `Bash(gh *)` grant together (`WORKER_ALLOWED_TOOLS_NO_GH`), so there is no credential
   left to read comments through even if a leg tried.
 - **The public/private threat-model split.** In a private repo, everyone who can comment is
@@ -2551,15 +2529,16 @@ point in its history."
   repo goes public, comments become world-writable while the body stays maintainer-writable,
   and the two are no longer comparable in trust. This package does not close that gap:
   comment PROVENANCE filtering (distinguishing a maintainer's comment from an arbitrary
-  public commenter's) is deferred to the v0.3.0 go-public entrance criterion recorded on
-  #329. Editing an already-cursored comment is the separate, already-documented "v1
+  public commenter's) is deferred to the v0.3.0 go-public entrance criterion. Editing an
+  already-cursored comment is the separate, already-documented "v1
   residual: edits are out of scope" case above — this note does not reopen or widen it.
-- **#653 and `docs/security.md` itself both ride #292.** #653's prompt edits
+- **`docs/security.md` itself, and the prompt files, both ride the instruction-path escalation.**
+  Prompt edits
   (`engine/prompts/**`, the gate⓪ contract-vs-discussion veto duty) and any PR touching
   this file are standing-instruction / reviewer-carrier changes under [Instruction-path
-  changes escalate to human review (#292)](#instruction-path-changes-escalate-to-human-review-292)
+  changes escalate to human review](#instruction-path-changes-escalate-to-human-review)
   — `engine/prompts/**` and `docs/security.md` are both entries in
-  `escalation.instructionPaths` (the latter since #539, [above](#the-mechanisms-own-carriers-join-the-escalation-surface-too-539)).
+  `escalation.instructionPaths` (the latter [above](#the-mechanisms-own-carriers-join-the-escalation-surface-too)).
   Both are expected to route `sapwood:human-merge-only`; that is the mechanism working as
   designed, not a defect in either PR. `docs/supervision.md` is not on that list, so its
   own edits are not affected by this note.

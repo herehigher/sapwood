@@ -1,5 +1,7 @@
 # Loop walkthrough (v0.2) — behavior reference, boundaries included
 
+> **Process record.** Internal design/research artifact from sapwood's own development history — not end-user documentation.
+
 What the engine actually does, step by step, including every boundary and
 failure path — written for two readers: the **operator** running sapwood, and
 the **#17 dashboard** (its architect needs this to know what "truth" the UI
