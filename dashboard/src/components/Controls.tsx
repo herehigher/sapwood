@@ -107,7 +107,12 @@ export interface ControlsProps {
   enabled: boolean;
   /** `engine.state === "running"` (§8) — EMERGENCY STOP is verb-legality gated: §3 Operations
    *  renders it only while the engine is actually running. Defaults false so every pre-#733 call
-   *  site (none of which know about the tier) keeps rendering the original four verbs unchanged. */
+   *  site (none of which know about the tier) keeps rendering the original four verbs unchanged.
+   *  #733 engine-agent finding [1]: `currentEngineState` never folds EMERGENCY_STOP into the
+   *  derived word, so the server CAN legitimately answer `state: "running"` together with
+   *  `estopActive: true` (the window between the sentinel landing and the engine's own next tick
+   *  observing it, or a dead engine's tick going stale). This component therefore never trusts
+   *  `running` alone for the estop button — see `estopActive` below, ANDed together internally. */
   running?: boolean;
   /** The raw EMERGENCY_STOP sentinel (§733's `engine.estopActive`) — while active, `start` must
    *  not render/report a "resumed" outcome, since the verb clears neither PAUSE nor this
@@ -126,7 +131,7 @@ export interface ControlsProps {
  * frontend-design.md §3 Operations: start/pause/resume/stop/estop, each behind a confirm naming
  * the consequence in §7 plain language. EMERGENCY STOP additionally requires a hold-to-arm before
  * that confirm ever opens (`useHoldToArm` above), carries the octagon icon, and only renders while
- * `running` is true.
+ * `running` is true AND `estopActive` is false (see `showEstop` below).
  */
 export function Controls({ enabled, running = false, estopActive = false, onControl, initialState }: ControlsProps) {
   const [state, dispatch] = useReducer(controlsReducer, initialState ?? { phase: "idle" });
@@ -154,9 +159,15 @@ export function Controls({ enabled, running = false, estopActive = false, onCont
 
   if (!enabled) return null;
 
+  // #733 engine-agent finding [1]: `running` alone is not a reliable "may still fire" signal — the
+  // server can report `state: "running"` while `estopActive` is already true (the derived state
+  // word doesn't fold EMERGENCY_STOP in). There is nothing left to stop once the halt has already
+  // landed, so the button must not offer to fire it again.
+  const showEstop = running && !estopActive;
+
   return (
     <fieldset className="controls" aria-label="operations">
-      {CONTROL_VERBS.filter((verb) => verb !== "estop" || running).map((verb) =>
+      {CONTROL_VERBS.filter((verb) => verb !== "estop" || showEstop).map((verb) =>
         verb === "estop" ? (
           <button
             key={verb}

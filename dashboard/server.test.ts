@@ -1013,6 +1013,12 @@ test("#733 POST /api/control estop writes the EMERGENCY_STOP sentinel and its re
     assert.equal(res.status, 200);
     assert.equal(existsSync(estopPath), true);
     const body = (await res.json()) as { state: string; message: string };
+    // #733 engine-agent finding [0]: the AC requires the response text to state the consequence
+    // as an IMMEDIATE HARD KILL with NO DRAIN — assert those claims directly rather than only the
+    // retained/stranded half, so the test actually reds if either claim is removed or contradicted.
+    assert.match(body.message, /immediate/i, "must state the kill is immediate");
+    assert.match(body.message, /hard kill/i, "must state the kill is a HARD kill, not the drain-first Stop tier");
+    assert.match(body.message, /no drain/i, "must state there is no drain window at all");
     assert.doesNotMatch(body.message, /\blost\b/i, "WIP is stranded pending review, never unconditionally 'lost'");
     assert.match(body.message, /stranded|retained/i);
     assert.match(body.message, /human review|needs-human/i);

@@ -87,6 +87,27 @@ test("EMERGENCY STOP renders only while the engine reports running — spelled-o
   assert.match(buttons[buttons.length - 1] as string, /control-estop/, "far-right: last in the control group");
 });
 
+// #733 engine-agent finding [1]: `currentEngineState` never folds EMERGENCY_STOP into the derived
+// word (engine/src/state/read-model.ts's `deriveEngineState`), so the REAL server can answer
+// `engine.state: "running"` at the same time `engine.estopActive: true` — the window between the
+// sentinel landing and the engine's own next tick observing it (or a dead engine's tick going
+// stale before it ever ticks again). This is the actual combination App.tsx's `running={state ===
+// "running"}` can pass straight through, not a hand-picked one the earlier tests avoided.
+test("EMERGENCY STOP stays hidden when estopActive is true even though running is also true — the exact combination the real server can serve", () => {
+  const html = renderToStaticMarkup(<Controls enabled running estopActive />);
+  // Not a bare /EMERGENCY STOP/ check — the Start persists-notice ALSO legitimately says
+  // "EMERGENCY STOP is active…" (that text must still render, per AC4). The button itself carries
+  // the "control-estop" class the notice doesn't, so that's the precise signal for "did the button
+  // render", distinct from the notice.
+  assert.doesNotMatch(html, /class="control-estop"/, "nothing left to stop once the halt has already landed");
+  assert.match(html, /EMERGENCY STOP is active/, "the Start persists-notice still renders, unaffected");
+
+  // Sanity: the SAME `running` value with `estopActive` false DOES render the button — proves
+  // this is a real regression guard on the AND, not a fixture where estop never renders regardless.
+  const normalHtml = renderToStaticMarkup(<Controls enabled running estopActive={false} />);
+  assert.match(normalHtml, /class="control-estop"/);
+});
+
 test("dashboard.controls: false renders no control buttons at all", () => {
   const html = renderToStaticMarkup(<Controls enabled={false} />);
   assert.equal(html, "");
