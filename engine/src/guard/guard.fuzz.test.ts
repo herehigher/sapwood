@@ -144,6 +144,26 @@ test("#840: static guard.py shared-block verdict table is present and non-trivia
   assert.ok(size > 100, `expected a substantial captured fixture, got ${size} entries`);
 });
 
+// #842 gate② required fix: the live oracle judged whatever the corpus produced, so a
+// fuzz-corpus.ts edit could never silently shrink coverage. The static table breaks that
+// unless something binds corpus<->table going forward: a future seed/PREFIXES/CORE/SUFFIXES
+// edit that shifts generated commands off the table's keys makes GUARD_PY_SHARED_BLOCK_VERDICTS[command]
+// miss silently (the loop below just `continue`s), decaying real coverage toward zero while every
+// test stays green. This tripwire is exact BY CONSTRUCTION — the table was captured from exactly
+// this union (fixtures/guard-shared-block-verdicts.ts's header) — so it passes today; it exists to
+// fail loudly the day the corpus and the fixture drift apart.
+test("#840 tripwire: every captured shared-block key is still produced by the current corpus", () => {
+  const liveCommands = new Set([...generateFuzzCorpus(), ...HAND_PICKED_SHARED_BLOCK_CASES]);
+  const staleKeys = Object.keys(GUARD_PY_SHARED_BLOCK_VERDICTS).filter((command) => !liveCommands.has(command));
+  assert.deepEqual(
+    staleKeys,
+    [],
+    `${staleKeys.length} captured fixture key(s) are no longer produced by fixtures/fuzz-corpus.ts — ` +
+      `corpus drifted from the captured fixture; regenerate via engine/scripts/regen-guard-shared-block-fixture.ts:\n` +
+      staleKeys.slice(0, 10).join("\n"),
+  );
+});
+
 test("differential: sapwood is at least as strict as guard.py on opaque + Category C (static fixture)", () => {
   // Regenerate the exact same deterministic corpus the fixture was captured from (see
   // fixtures/fuzz-corpus.ts + scripts/regen-guard-shared-block-fixture.ts). No python3/python
