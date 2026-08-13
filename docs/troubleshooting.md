@@ -151,6 +151,42 @@ retro starts over from the same history). The retention exists purely so the los
 diagnosable rather than silent. Salvage the draft if it's worth keeping, otherwise delete
 the directory; nothing in the loop waits on either.
 
+### Automatic settlement: when sapwood reclaims a worktree on its own
+
+The degrade path above is what happens when sapwood **cannot** prove a worktree clean.
+Two other places prove one clean instead, and reclaim the directory on their own — no
+manual cleanup needed:
+
+- **Merged-lane close-out.** The moment a lane's PR reads MERGED, sapwood checks that
+  lane's worktree for any uncommitted change — modified or staged, and not just what its
+  file timestamps suggest — as part of the same close-out that moves the board item to
+  `done`. (The baseline for "changed since when" is the worktree's own last commit, not
+  the lane's dispatch time — a successful lane necessarily commits files after being
+  dispatched, so anchoring on dispatch time would flag every successful lane as dirty.) A
+  worktree that comes back clean, or one that no longer exists, is deleted and its
+  git-worktree registration pruned. One that doesn't is left in place, recorded
+  event-only: the PR is already merged, so nothing is blocked on it, and this never
+  applies `labels.needsHuman` or posts an escalation comment the way the degrade path
+  above does — check `sapwood events` for the lane, not the issue thread.
+- **Startup janitor.** On every engine start, sapwood sweeps `.claude/worktrees/` for
+  registrations an owner no longer alive left behind: a locked registration whose recorded
+  pid is dead, or an unlocked one old enough (past a fixed 24h floor) that nothing is
+  plausibly still using it. A directory-less registration in this state is reaped
+  unconditionally — there's nothing left to check. A present directory has to clear the
+  same clean-worktree check as the merged-lane close-out above, plus one structural
+  guard: its admin HEAD must resolve to an actual branch — a detached worktree is never
+  touched, since deleting its registration would make its commits unreachable. The sweep
+  runs one bounded batch per start — never an unbounded loop over a large backlog — and
+  reports a single rollup event per run, never a comment or label per directory. That
+  makes it opportunistic, not a coverage guarantee: a large backlog can take several
+  restarts to clear. To clear one in full without waiting on restarts, run the one-shot
+  sweep by hand from the `engine/` directory: `npx tsx scripts/worktree-janitor.ts`.
+
+Both paths only ever reach a worktree they can prove is clean; anything that fails their
+check is left exactly where it was, the same as the degrade path above. So the doctrine
+holds unqualified regardless of which path is looking: **sapwood never deletes a
+worktree it cannot prove is clean.**
+
 ## Kill switch recovery
 
 If `data/KILL_SWITCH` is set (by a loaded plugin slash command or by hand), all new dispatch and
