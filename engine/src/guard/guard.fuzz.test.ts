@@ -1,6 +1,6 @@
 // Differential / fuzz test of guard.ts against the predecessor project's guard.py (issue #8). The tokenizer
-// divergence (TS shlex-equivalent vs Python shlex) is the real bypass surface, so we run
-// thousands of generated commands through BOTH and assert the safety invariant:
+// divergence (TS shlex-equivalent vs Python shlex) is the real bypass surface, so we replay
+// thousands of generated commands and assert the safety invariant:
 //
 //   on the SHARED decision surface — opaque constructs and Category C (gh overreach) —
 //   sapwood must be AT LEAST as strict as guard.py. i.e. if guard.py BLOCKs with an
@@ -10,177 +10,20 @@
 // `gh pr review --approve`, rm/git rm of boundary files) and omits guard.py's
 // application-specific categories A/B, so those are filtered out.
 //
-// guard.py is vendored as a frozen fixture (fixtures/guard_py_snapshot/), so the only remaining
-// skip condition is a missing python3/python interpreter.
+// #840: guard.py used to be vendored in-repo (fixtures/guard_py_snapshot/) and run LIVE, every
+// test run, as the oracle — a frozen reference implementation over a FIXED deterministic corpus
+// produces constant verdicts, so that bought nothing but a standing CI Python dependency. Its
+// verdicts were captured ONCE (scripts/regen-guard-shared-block-fixture.ts) into the static table
+// below (fixtures/guard-shared-block-verdicts.ts); this file now asserts guard.ts against that
+// table with NO interpreter involved. The corpus generator (fixtures/fuzz-corpus.ts) is unchanged
+// and still runs live — only the oracle side became static.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { generateFuzzCorpus, HAND_PICKED_SHARED_BLOCK_CASES } from "./fixtures/fuzz-corpus.js";
+import { GUARD_PY_SHARED_BLOCK_VERDICTS } from "./fixtures/guard-shared-block-verdicts.js";
 import { guardDecision } from "./guard.js";
 
 const CWD = "/repo";
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-// Vendored, frozen snapshot of the predecessor project's guard.py (provenance: fixtures/guard_py_snapshot/SOURCE.md).
-// It ships in-repo so the differential tests run in CI and in a worker's ephemeral worktree,
-// neither of which has a sibling predecessor checkout (#427). SAPWOOD_ZERODAY_SRC overrides it for
-// ad-hoc local comparison against a newer guard.py, e.g.
-// SAPWOOD_ZERODAY_SRC=/path/to/predecessor/backend/src npm --workspace engine test.
-const VENDORED_SRC = resolve(repoRoot, "engine", "src", "guard", "fixtures", "guard_py_snapshot");
-const ZERODAY_SRC = process.env.SAPWOOD_ZERODAY_SRC ? resolve(process.env.SAPWOOD_ZERODAY_SRC) : VENDORED_SRC;
-const GUARD_PY = join(ZERODAY_SRC, "zeroday", "loop", "guard.py");
-
-function pythonAvailable(): string | null {
-  for (const bin of ["python3", "python"]) {
-    try {
-      execFileSync(bin, ["--version"], { stdio: "ignore" });
-      return bin;
-    } catch {
-      /* try next */
-    }
-  }
-  return null;
-}
-
-const PY_DRIVER = `
-import sys, json
-from zeroday.loop.guard import guard_decision
-data = json.load(sys.stdin)
-out = [{"allow": (d := guard_decision("Bash", x["command"], x.get("cwd", "/repo"), {})).allow, "reason": d.reason} for x in data]
-sys.stdout.write(json.dumps(out))
-`;
-
-interface PyDecision {
-  allow: boolean;
-  reason: string;
-}
-
-function runGuardPy(bin: string, commands: string[]): PyDecision[] {
-  const input = JSON.stringify(commands.map((command) => ({ command, cwd: CWD })));
-  const out = execFileSync(bin, ["-c", PY_DRIVER], {
-    input,
-    env: { ...process.env, PYTHONPATH: ZERODAY_SRC },
-    maxBuffer: 64 * 1024 * 1024,
-    encoding: "utf8",
-  });
-  return JSON.parse(out) as PyDecision[];
-}
-
-// A guard.py BLOCK reason on the surface sapwood also implements.
-function isSharedBlock(d: PyDecision): boolean {
-  return !d.allow && (/opaque/i.test(d.reason) || d.reason.includes("类别C"));
-}
-
-// ── deterministic command generator (seeded; exercises the tokenizer + categories) ──
-function makeRng(seed: number): () => number {
-  let s = seed >>> 0;
-  return () => {
-    s = (s * 1664525 + 1013904223) >>> 0;
-    return s / 0x100000000;
-  };
-}
-
-const PREFIXES = [
-  "",
-  "",
-  "env FOO=1 ",
-  "env -u BAR ",
-  "uv run ",
-  "uv run --with rich ",
-  "uv run --all-extras ",
-  "command ",
-  "nohup ",
-  "/usr/bin/",
-  "stdbuf -oL ",
-  "poetry run ",
-  "npx ",
-  "( ",
-  "{ ",
-];
-const CORE = [
-  "gh pr merge 1",
-  "gh pr merge 1 --squash",
-  "gh pr ready 2",
-  "gh pr -R o/r merge 5",
-  "gh pr --repo o/r ready 5",
-  "gh pr -R o/r review 5 --approve",
-  "gh release create v1",
-  "gh -R o/r pr merge 3",
-  "gh api -X PUT repos/o/r/pulls/1/merge",
-  "gh api repos/o/r/releases -f t=v",
-  "gh api graphql -f query='mutation { mergePullRequest }'",
-  "gh api --hostname H graphql -f query='mutation{x}'",
-  "gh issue edit 1 --add-label hold",
-  "gh issue edit 1 --remove-label=ready --milestone M11",
-  "gh -R o/r issue edit 1 --milestone=M11",
-  "gh issue edit 1 -m M11",
-  "gh issue edit 1 -m=M11",
-  "gh issue edit 1 -mM11",
-  "gh issue edit 1 --remove-milestone",
-  "gh issue edit 1 --add-project=Board",
-  "gh issue edit 1 --remove-project Board",
-  "gh issue edit 1 --add-sub-issue 5",
-  "gh issue edit 1 --remove-sub-issue=5",
-  "gh issue edit 1 --remove-parent",
-  "gh issue edit 1 --parent=3",
-  "gh issue -R o/r edit 1 --add-label hold",
-  "gh issue --repo o/r edit 1 -m M11",
-  "gh label delete hold",
-  "gh project item-edit --id item",
-  "gh api -X POST repos/o/r/issues/1/labels -f labels=hold",
-  "gh api -X DELETE repos/o/r/labels/hold",
-  "gh api -X PATCH repos/o/r/issues/1 -f milestone=11",
-  "gh api -X POST repos/o/r/issues/1/sub_issues -F sub_issue_id=2",
-  "gh api -X DELETE repos/o/r/issues/1/sub_issue",
-  "gh api -X PATCH repos/o/r/issues/1/sub_issues/priority -F sub_issue_id=2",
-  "gh api -X PATCH repos/o/r/milestones/17 -f title=M12",
-  "gh api -X POST repos/o/r/milestones -f title=M12",
-  "gh api -X POST repos/o/r/issues/1/sub%5Fissues -F sub_issue_id=2",
-  "gh api -X PATCH repos/o/r/%6Dilestones/17 -f title=M12",
-  "gh api -X PATCH repos/o/r/issues/%31 -f milestone=11",
-  "gh api -X PATCH repos/o/r/issues/%zz",
-  "gh api -X POST repos/o/r/issues/%31/%63omments -f body=progress",
-  "gh api -X PUT repos/o/r/pulls/1/%6Derge",
-  "gh api -X POST repos/o/r/%72eleases -f tag_name=v1",
-  "gh api -X DELETE repos/o/r/git/%72efs/heads/feat-x",
-  "uv run --with rich gh label delete hold",
-  "gh pr view 1 --json state",
-  "gh api repos/o/r/pulls/1",
-  "gh pr list",
-  "gh issue edit 1 --title safe --body updated",
-  "gh issue edit 1 -t 'safe title'",
-  "gh issue edit 1 -b updated",
-  "gh issue edit 1 -F body.md",
-  "gh issue edit 1 --add-assignee octocat",
-  "gh issue edit 1 --remove-assignee octocat",
-  "gh issue edit 1 --add-blocked-by 7",
-  "gh issue comment 1 --body progress",
-  "gh pr comment 1 --body progress",
-  "gh api -X POST repos/o/r/issues/1/comments -f body=progress",
-  "gh api graphql -f query='query{viewer{login}}'",
-  "bash -c 'ls'",
-  "bash -lc 'echo hi'",
-  "sh -c 'ls'",
-  "python -c 'print(1)'",
-  "node -e 'x'",
-  "eval 'ls'",
-  "diff <(ls) <(ls -a)",
-  "ls -la",
-  "git status",
-  "echo hello",
-  "cat README.md",
-  "grep foo bar.txt",
-  "pytest -q",
-];
-const SUFFIXES = ["", "", "", " > out.txt", " >> log", " 2>&1", " | cat", " && ls", " ; echo done"];
-
-function genCommand(rng: () => number): string {
-  const pick = <T>(a: T[]): T => a[Math.floor(rng() * a.length)]!;
-  let cmd = pick(PREFIXES) + pick(CORE) + pick(SUFFIXES);
-  if (rng() < 0.25) cmd = cmd + " " + pick(["&&", ";", "|"]) + " " + pick(CORE);
-  return cmd;
-}
 
 test("#352 corpus: governance mutations block even when wrapper-embedded; comments pass", () => {
   const blocked = [
@@ -292,45 +135,47 @@ test("#353 corpus: issue lifecycle verbs (close/reopen/transfer/delete) block ev
   }
 });
 
-// #427: the two differential tests below used to skip whenever a sibling predecessor checkout was
-// absent — i.e. in CI and in every dogfood worker's worktree, so the safety-parity guarantee
-// docs/PLAN.md documents for M1 never actually ran there. Guard the fixture itself so a moved
-// or dropped snapshot fails loudly instead of silently reverting them to a permanent skip.
-test("#427: the guard.py reference implementation ships in-repo (no sibling checkout needed)", () => {
-  // The vendored fixture must be complete regardless; only the DEFAULT-resolution claim is
-  // conditional, since an ad-hoc SAPWOOD_ZERODAY_SRC run deliberately points elsewhere.
-  if (!process.env.SAPWOOD_ZERODAY_SRC) {
-    assert.equal(ZERODAY_SRC, VENDORED_SRC, "GUARD_PY resolves to the vendored fixture by default");
-  }
-  assert.ok(existsSync(GUARD_PY), `guard.py reference implementation missing: ${GUARD_PY}`);
-  assert.ok(existsSync(join(VENDORED_SRC, "SOURCE.md")), "fixture records its source commit");
-  // The package shape PY_DRIVER's `from zeroday.loop.guard import guard_decision` needs.
-  for (const p of [
-    ["zeroday", "__init__.py"],
-    ["zeroday", "loop", "__init__.py"],
-  ]) {
-    assert.ok(existsSync(join(VENDORED_SRC, ...p)), `importable package missing: ${p.join("/")}`);
-  }
+// #840 (obsoletes #427's in-repo-fixture test, which asserted the now-deleted vendored guard.py
+// snapshot shipped): assert the STATIC fixture this suite depends on is actually present and
+// non-trivial, so an accidentally emptied/deleted table fails loudly here instead of the
+// differential test below silently passing on zero comparisons.
+test("#840: static guard.py shared-block verdict table is present and non-trivial", () => {
+  const size = Object.keys(GUARD_PY_SHARED_BLOCK_VERDICTS).length;
+  assert.ok(size > 100, `expected a substantial captured fixture, got ${size} entries`);
 });
 
-test("differential: sapwood is at least as strict as guard.py on opaque + Category C", (t) => {
-  const bin = pythonAvailable();
-  if (!bin) {
-    t.skip("differential test needs a python3/python interpreter");
-    return;
-  }
+// #842 gate② required fix: the live oracle judged whatever the corpus produced, so a
+// fuzz-corpus.ts edit could never silently shrink coverage. The static table breaks that
+// unless something binds corpus<->table going forward: a future seed/PREFIXES/CORE/SUFFIXES
+// edit that shifts generated commands off the table's keys makes GUARD_PY_SHARED_BLOCK_VERDICTS[command]
+// miss silently (the loop below just `continue`s), decaying real coverage toward zero while every
+// test stays green. This tripwire is exact BY CONSTRUCTION — the table was captured from exactly
+// this union (fixtures/guard-shared-block-verdicts.ts's header) — so it passes today; it exists to
+// fail loudly the day the corpus and the fixture drift apart.
+test("#840 tripwire: every captured shared-block key is still produced by the current corpus", () => {
+  const liveCommands = new Set([...generateFuzzCorpus(), ...HAND_PICKED_SHARED_BLOCK_CASES]);
+  const staleKeys = Object.keys(GUARD_PY_SHARED_BLOCK_VERDICTS).filter((command) => !liveCommands.has(command));
+  assert.deepEqual(
+    staleKeys,
+    [],
+    `${staleKeys.length} captured fixture key(s) are no longer produced by fixtures/fuzz-corpus.ts — ` +
+      `corpus drifted from the captured fixture; regenerate via engine/scripts/regen-guard-shared-block-fixture.ts:\n` +
+      staleKeys.slice(0, 10).join("\n"),
+  );
+});
 
-  const rng = makeRng(0xc0ffee);
-  const commands = Array.from({ length: 1500 }, () => genCommand(rng));
-  const pyDecisions = runGuardPy(bin, commands);
-  assert.equal(pyDecisions.length, commands.length, "guard.py returned a decision per command");
+test("differential: sapwood is at least as strict as guard.py on opaque + Category C (static fixture)", () => {
+  // Regenerate the exact same deterministic corpus the fixture was captured from (see
+  // fixtures/fuzz-corpus.ts + scripts/regen-guard-shared-block-fixture.ts). No python3/python
+  // involved: guard.py's verdicts are the static GUARD_PY_SHARED_BLOCK_VERDICTS table.
+  const commands = generateFuzzCorpus();
 
   const divergences: string[] = [];
-  for (let i = 0; i < commands.length; i++) {
-    const py = pyDecisions[i]!;
-    if (!isSharedBlock(py)) continue; // only the shared surface guard.py blocks
-    const ts = guardDecision("Bash", { command: commands[i]! }, CWD);
-    if (ts.allow) divergences.push(`guard.py BLOCKED but guard.ts ALLOWED: ${JSON.stringify(commands[i])} (py: ${py.reason})`);
+  for (const command of commands) {
+    const reason = GUARD_PY_SHARED_BLOCK_VERDICTS[command];
+    if (reason === undefined) continue; // guard.py did not shared-block this command
+    const ts = guardDecision("Bash", { command }, CWD);
+    if (ts.allow) divergences.push(`guard.py BLOCKED but guard.ts ALLOWED: ${JSON.stringify(command)} (py: ${reason})`);
   }
   assert.deepEqual(
     divergences,
@@ -339,42 +184,11 @@ test("differential: sapwood is at least as strict as guard.py on opaque + Catego
   );
 });
 
-test("differential: predecessor-project shared-surface BLOCK cases all block in guard.ts", (t) => {
-  const bin = pythonAvailable();
-  if (!bin) {
-    t.skip("needs a python3/python interpreter");
-    return;
-  }
-  // The exact opaque + Category C commands from the predecessor project's authoritative bypass matrix.
-  const cases = [
-    'bash -c "python transfer.py"',
-    "gh pr merge 143 --squash",
-    "gh pr ready 143",
-    "gh release create v1 -t x",
-    "gh api -X PUT repos/o/r/pulls/143/merge",
-    "gh -R o/r pr merge 143 --squash",
-    "gh --repo o/r pr ready 5",
-    "gh api repos/o/r/releases --raw-field tag_name=v1",
-    "gh api --method=PUT repos/o/r/pulls/143/merge",
-    "gh api -XPUT repos/o/r/pulls/143/merge",
-    "bash -lc 'x'",
-    "bash -o pipefail -c 'ls'",
-    "diff <(ls) <(ls -a)",
-    "python -c 'print(1)'",
-    "eval 'ls -la'",
-    "node -e 'x'",
-    "/bin/bash -c 'ls'",
-    "command bash -c 'ls'",
-    "gh api graphql -f query='mutation { mergePullRequest }'",
-    "/usr/bin/gh pr merge 143",
-    "command -p bash -c 'ls'",
-  ];
-  const py = runGuardPy(bin, cases);
-  for (let i = 0; i < cases.length; i++) {
-    // These are hand-picked opaque / Category C cases — assert guard.py actually
-    // shared-blocks each one (so a drift in its reason format / our filter fails loudly
-    // instead of silently skipping the comparison), THEN assert guard.ts blocks too.
-    assert.ok(isSharedBlock(py[i]!), `guard.py should shared-block (opaque/类别C): ${cases[i]} (got: ${JSON.stringify(py[i])})`);
-    assert.equal(guardDecision("Bash", { command: cases[i]! }, CWD).allow, false, `guard.ts must block: ${cases[i]}`);
+test("differential: predecessor-project hand-picked shared-surface BLOCK cases all block in guard.ts", () => {
+  // The exact opaque + Category C commands from the predecessor project's authoritative bypass
+  // matrix (folded into the static fixture alongside the generated corpus — see fuzz-corpus.ts).
+  for (const command of HAND_PICKED_SHARED_BLOCK_CASES) {
+    assert.ok(command in GUARD_PY_SHARED_BLOCK_VERDICTS, `expected a captured shared-block verdict for hand-picked case: ${command}`);
+    assert.equal(guardDecision("Bash", { command }, CWD).allow, false, `guard.ts must block: ${command}`);
   }
 });
