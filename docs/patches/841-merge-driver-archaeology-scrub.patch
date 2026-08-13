@@ -77,9 +77,9 @@ diff --git a/engine/src/roles/merge-driver.ts b/engine/src/roles/merge-driver.ts
 -// not application-specific behavior); this default exists only so mergeDecision reproduces the predecessor project's parity-suite rows
 -// unchanged when called with no 5th argument.
 +// Default risk/human-triage label substrings. Real runtime callers pass cfg.escalation.humanLabels
-+// instead (CLAUDE.md: port the generic logic, not application-specific behavior); this default
-+// exists only so mergeDecision reproduces the parity-suite rows unchanged when called with no 5th
-+// argument.
++// instead — these are deployment-specific labels, not part of the generic merge-decision logic;
++// this default exists only so mergeDecision reproduces the parity-suite rows unchanged when
++// called with no 5th argument.
  const BASH_DEFAULT_HUMAN_LABELS = ["risk", "fund", "needs-human", "blocked"] as const;
 
  /**

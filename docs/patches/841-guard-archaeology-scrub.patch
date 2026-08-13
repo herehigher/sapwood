@@ -39,7 +39,7 @@ diff --git a/engine/src/guard/guard.ts b/engine/src/guard/guard.ts
 +// exec-prefix stripping, opaque-construct fail-closed detection, and the gh-overreach category
 +// (the worker, a PR *producer*, must never merge/approve/release) — plus a Write-path
 +// protection for the guard's own boundary files. Application-specific categories are
-+// intentionally not included (CLAUDE.md: "port the generic logic, not application-specific behavior").
++// intentionally not included — this module stays generic and application-agnostic.
  //
  // Decision order for a Bash command:
  //   1. split into fragments by shell chain operators; $()/`` substitutions recurse.
