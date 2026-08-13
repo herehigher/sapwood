@@ -1426,19 +1426,6 @@ test("#808 AC1: every droplet chip label and every hero-node-caption element sta
   };
 
   const events: DomainEvent[] = [ev("pool-selected", { round_id: 1, issues: [90, 91] })];
-  events.push(ev("dispatched", { worker: "w1", issue: 1 })); // plain lane droplet
-  events.push(ev("dispatched", { worker: "w2", issue: 2 }));
-  events.push(ev("reclaim-done", { worker: "w2", issue: 2, next: "DRIVING", pr: 200 }));
-  events.push(
-    ev("drive-fixup", {
-      worker: "w2",
-      issue: 2,
-      pr: 200,
-      fixRounds: 1,
-      reason: "gate:FIXABLE:REQUEST_CHANGES:unresolvedThreads=2:ciRed=false",
-    }),
-  );
-  events.push(ev("fix-leg-started", { worker: "w2", issue: 2, pr: 200, fixRounds: 1 })); // fixing lane
   for (let i = 0; i < 6; i++) {
     // fills CHECKPOINT_DRAW_CAP — every rank the grid draws
     events.push(ev("dispatched", { worker: `c${i}`, issue: 10 + i }));
@@ -1452,6 +1439,27 @@ test("#808 AC1: every droplet chip label and every hero-node-caption element sta
   events.push(ev("merged", { worker: "w10", issue: 60, pr: 600, headOid: "abc" })); // trunk droplet
   events.push(ev("dispatched", { worker: "w11", issue: 70 }));
   events.push(ev("handoff", { worker: "w11", issue: 70 })); // handed-off backlog droplet (3-row chip)
+  // #808 gate② finding [0] (run a343c343): the plain/fixing lane droplets are dispatched LAST,
+  // deliberately — `withVisibleLanes` caps `state.lanes` at `lanesMax` and (same-tier) keeps the
+  // MOST recently touched (`state.ts`'s `visibleLanes` tie-break); with 8 active-tier lane
+  // workers open (`c0`..`c5` + these two) against `lanesMax: 6` below, whichever 2 were touched
+  // LEAST recently lose their slot — and #716 gate② round 2 P1-1's rule then DROPS any droplet
+  // still `at: "lane"` whose lane lost that slot, never drawing it at all. Dispatching `w1`/`w2`
+  // last makes THEM the most-recently-touched pair instead, so both survive and actually render
+  // (the earlier ordering silently evicted them, the exact gap the finding caught below).
+  events.push(ev("dispatched", { worker: "w1", issue: 1 })); // plain lane droplet
+  events.push(ev("dispatched", { worker: "w2", issue: 2 }));
+  events.push(ev("reclaim-done", { worker: "w2", issue: 2, next: "DRIVING", pr: 200 }));
+  events.push(
+    ev("drive-fixup", {
+      worker: "w2",
+      issue: 2,
+      pr: 200,
+      fixRounds: 1,
+      reason: "gate:FIXABLE:REQUEST_CHANGES:unresolvedThreads=2:ciRed=false",
+    }),
+  );
+  events.push(ev("fix-leg-started", { worker: "w2", issue: 2, pr: 200, fixRounds: 1 })); // fixing lane
 
   // `markup()` renders the fixed 1200×380 viewBox `stage.tsx` always draws — the same shape a
   // ≥1600px real viewport shows, per `hero.css`'s `width:100%;height:auto` (`#728`'s own "scales
@@ -1481,19 +1489,28 @@ test("#808 AC1: every droplet chip label and every hero-node-caption element sta
   // fewer pairs than it claims to (planning×3 + lanes×6 + Review×1 + reflection×2 = 12).
   assert.equal(captionBoxes.length, 12, "fixture must mount every hero-node-caption zone (planning×3, lanes×6, Review×1, reflection×2)");
 
-  // Droplet label text mirrors stage.tsx's own formula exactly (never a hand-copied guess —
-  // the #808 VALUE-family doctrine this repo's review history flags): `dropletPoint` gives the
-  // real drawn position, `d.at === "trunk" ? "✓ " : ""` + `⊙`/`⤳` mirrors the JSX in stage.tsx.
-  const dropletBoxes: { label: string; box: Box }[] = state.droplets.map((d) => {
-    const { x, y } = dropletPoint(state, d);
-    const text = `${d.at === "trunk" ? "✓ " : ""}${d.pr === null ? `⊙ ${d.issue}` : `⤳ ${d.pr}`}`;
-    return { label: `droplet #${d.issue} ("${text}", at=${d.at})`, box: captionSafeTextBox(text, x, y - 14, 10) };
-  });
-  assert.equal(
-    dropletBoxes.length,
-    11,
-    "fixture must draw every droplet state under test: backlog×2 + handed-off + lane + fixing lane + checkpoint×6 + needs-human + trunk",
-  );
+  // #808 gate② finding [0] (run a343c343): parse every RENDERED `hero-droplet` group's own
+  // transform + label text straight from `html`, never reconstruct from `state.droplets` —
+  // reconstructing from state (via `dropletPoint`/a hand-copied label formula) proves nothing
+  // about what actually drew, and silently asserted against 2 droplets `withVisibleLanes` had
+  // already dropped from the markup entirely (see the event-ordering comment above).
+  const dropletRe =
+    /<g class="hero-droplet" data-issue="(\d+)" data-at="([a-z-]+)"[^>]*transform="translate\((-?[\d.]+) (-?[\d.]+)\)">([\s\S]*?)<\/g>/g;
+  const dropletBoxes: { label: string; box: Box }[] = [];
+  for (const [, issue, at, xRaw, yRaw, inner] of html.matchAll(dropletRe)) {
+    const labelMatch = (inner ?? "").match(/<text class="hero-num hero-small" x="0" y="-14" text-anchor="middle">([^<]*)<\/text>/);
+    assert.ok(labelMatch, `droplet #${issue} (at=${at}) must render its own chip label`);
+    const text = labelMatch?.[1] as string;
+    dropletBoxes.push({
+      label: `droplet #${issue} ("${text}", at=${at}) @ (${xRaw},${yRaw})`,
+      box: captionSafeTextBox(text, Number(xRaw), Number(yRaw) - 14, 10),
+    });
+  }
+  // Sanity: the fixture must actually RENDER every droplet state under test — checkpoint×6 +
+  // needs-human + trunk + handed-off backlog + plain lane + fixing lane — or this test silently
+  // checks fewer pairs than it claims to (the exact failure mode the finding caught: 11 states
+  // folded, only 9 actually drawn, under the ORIGINAL event order above).
+  assert.equal(dropletBoxes.length, 11, "fixture must RENDER every droplet state under test, not just fold it into state.droplets");
 
   // Cross-product only, same as the round 5 test above — captions/droplets overlapping their
   // OWN zone furniture is out of #808's scope (#745/#728/#744 already cover those pairs); what
