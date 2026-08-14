@@ -11,7 +11,7 @@
     "build": "node --import tsx src/demo/export-cli.ts && vite build && node build-server.mjs",
     "test": "node --import tsx --test --test-timeout=60000 \"*.test.ts\" \"src/**/*.test.ts\" \"src/**/*.test.tsx\"",
     "contrast": "node --import tsx src/contrast.ts",
-    "preview": "vite preview --port 4518 --strictPort",
+    "preview": "vite preview --port 4518 --strictPort --host 127.0.0.1",
     "shots": "npm run build && playwright test --config=shots/playwright.config.ts"
   },
   "dependencies": {

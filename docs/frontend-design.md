@@ -44,6 +44,16 @@ fixed (staleness beats PAUSE — §8), `/api/rounds` re-anchors on the `rounds`
 table (§8), and #206 is upgraded to a **hard prerequisite** for the header
 (the run-spend anchor exists only in engine memory today — §11).
 
+Amended 2026-08-14 (dependency-policy review — owner adjudication, #876): §2's "Weight
+budget" becomes the **dependency budget** — a fail-closed allowlist test whose *shape*
+changed from a standing ban to an owner-adjudicated adoption process; the first
+adjudicated toolkit (clsx, lucide-react, the two single-package Radix primitives,
+self-hosted JetBrains Mono) is approved in full and recorded in §2's adjudication table.
+§5's mono-font ruling is superseded by the same round (self-hosted, no longer
+system-stack). This document only establishes the toolkit and the rules; applying it —
+module restyling, the icon migration, the `<dialog>` migration, the motion recipes'
+application — is #729's work.
+
 ---
 
 ## 1. Goals & audiences
@@ -77,17 +87,97 @@ in/out call:
 | 6 | Avoid jargon | **IN as a copy layer**: one map covering **every** event kind — the §7 table is the authoritative list (a hard-coded count here would drift). UI language is English (repo/launch artifact); the map is a single module, trivially localizable later — no i18n framework. | |
 | 7 | Spec-first, consistent styling | **IN — this document.** Design tokens (§5) are defined before any component; one CSS file of custom properties is the only styling mechanism. | |
 
-**Weight budget** (a plugin-local tool must stay light — this table is the
-acceptance bar, checked at review):
+**Dependency budget** (a supply-chain gate, not a weight cap — this section is the
+acceptance bar, checked at review). Runtime dependencies land by owner adjudication only;
+`dashboard/src/scaffold.test.ts`'s allowlist enforces whatever the adjudication log below
+currently says, so a worker cannot widen it without the PR that is supposed to justify it.
 
-| Budget item | Limit |
+Rationale, in priority order:
+1. **Supply-chain surface (highest priority).** The allowlist test exists for the same
+   reason `guard.ts` exists: an autonomous worker edits `package.json` unsupervised, and
+   every dependency it can reach for is an unreviewed second author. Fewer, well-known,
+   low-transitive-footprint packages shrink that surface — the same fail-closed
+   philosophy `guard.ts` applies to tool calls, applied here to what code runs at all.
+2. **Maintenance tax.** A dependency someone else stops maintaining becomes this repo's
+   problem; adoption favors actively-maintained, provenance-checkable packages over
+   whatever is momentarily convenient.
+3. **Bundle size (lowest priority).** Near-irrelevant for a loopback-served, single-operator
+   panel — a few KB costs nothing a `sapwood dashboard` user will ever notice. Named last on
+   purpose: it is the criterion this budget optimizes for *least*, not the reason it exists.
+
+**Adoption criteria** for a future petition — all of these hold, or the petition names which
+don't and why the exception still clears the owner:
+- Hand-roll cost is measured in **weeks, not hours** — under that bar, hand-rolling stays
+  the default.
+- Zero or near-zero transitive runtime dependencies.
+- Active maintenance with checkable provenance (real maintainers, real release history).
+- Permissive license (MIT/ISC/Apache-2.0 family).
+- Tree-shakeable ESM — the allowlist doesn't buy back a bundle explosion.
+- No runtime network fetches — offline-safe, the same rule fonts/scripts already follow
+  (CDN imports forbidden).
+- **Copy-in (below) considered and rejected first** — a dependency is the fallback for
+  something dependency-shaped, not the default for a fragment.
+
+**Process.** Adding a runtime dependency is one PR that does all three, together:
+1. `dashboard/package.json` + the lockfile carry the exact addition (pinned exact for a
+   package without semver discipline this repo trusts, `^` range otherwise).
+2. `dashboard/src/scaffold.test.ts`'s allowlist gains the new entry — the test is red until
+   it does (a mutation check — temporarily revert the `package.json` line and confirm the
+   test goes red — is the way to prove the allowlist is actually load-bearing, not decorative).
+3. This section's adjudication log gains one row: the package, the date, and the one-line
+   adoption rationale.
+
+Owner adjudication decides the PR; a petition missing any of the three lands nowhere.
+
+**Copy-in (vendoring) channel.** Small, fragment-scale code lifted from elsewhere (one
+helper, one algorithm) is a *different* channel from a dependency: it consumes no allowlist
+slot, ships as a source file in this repo, and carries a comment naming its source and
+license at the top. Vendoring is not a way around the adoption criteria for something
+dependency-shaped — it exists for fragments a real dependency would be overkill for.
+
+**Radix usage scope** (owner adjudication 2026-08-14): `@radix-ui/react-tooltip` and
+`@radix-ui/react-popover` are scoped to **hover/focus hint surfaces and their positioning —
+flip/collision placement — only**. Every other interactive surface (drawers, confirm flows,
+buttons, the config panel) stays native markup; reaching for either package outside that
+scope is a scope violation, not a convenience call a component author gets to make alone.
+
+**Adopt-later triggers** (not adopted; recorded so a future petition points at a concrete
+bar instead of re-litigating the rationale from zero):
+- **uPlot** — only once time-series spend charts exceed ~500 points (v0.3+ territory);
+  hand-rolled SVG stays the answer below that.
+- **@tanstack/react-virtual** — only if the 200-row feed render cap ruling is overturned;
+  virtualization solves a problem the cap currently prevents from existing.
+- **motion** (the Framer Motion successor) — only on a layout-level shared-element
+  animation need that neither CSS nor anime.js (scoped to the hero, §2 row 1) can express.
+
+| Budget item | Status |
 |---|---|
-| Runtime dependencies | ≤ 5: `react`, `react-dom`, `@tanstack/react-query`, `animejs` |
 | Chart library | none — cost bars/sparklines are hand-rolled SVG |
-| CSS framework / CSS-in-JS | none — one `tokens.css` + one `app.css` |
+| CSS framework / CSS-in-JS | none — `tokens.css` + `app.css`/`panels.css`/`hero.css`, plain CSS only |
 | Server | `node:http` + `node:sqlite` (read-only), 127.0.0.1-bound; no Express. One guarded `POST /api/control` route (§3 Operations) — sentinel writes only |
 | Transport | HTTP polling (3 s via TanStack Query); no WebSocket |
-| Fonts | one bundled display face (subset woff2); system stacks for body & data |
+| Fonts | two self-hosted faces, each latin subset / woff2 bundled / CDN forbidden (display: Fraunces, data: JetBrains Mono Variable, §5); system stack for body |
+
+**Adjudication log** (owner adjudication 2026-08-14 unless noted — every runtime addition
+*and* every no-new-dependency ruling gets one row; this is the durable record the process
+above points at):
+
+| Date | Item | Rationale |
+|---|---|---|
+| 2026-08-14 | `clsx` (runtime) | State-variant class composition; 0 transitive deps, ~0.35 kB. |
+| 2026-08-14 | `lucide-react` (runtime, pinned exact) | Utility icons only — identity glyphs (sap droplet, rings, issue ⊙, PR merge-arrow) stay hand-drawn permanently (§3 C, `icons.tsx`); the unified icon spec lives in `icons.tsx`'s header. A new icon import gets its own table mention at adoption. |
+| 2026-08-14 | `@radix-ui/react-tooltip` + `@radix-ui/react-popover` (runtime, single packages — not the umbrella) | Keyboard-accessible, stylable tooltips are a §5 quality-floor requirement the current `title=` approach violates; flip/collision positioning is genuinely hard to hand-roll and CSS anchor positioning isn't cross-browser green yet. Usage scoped per the clause above. |
+| 2026-08-14 | `@fontsource-variable/jetbrains-mono` (runtime) | Self-hosted mono face — re-adjudicates §5's system-stack ruling (its zero-dependency premise is overturned this round); Fraunces self-hosting is the existing precedent this follows. |
+| 2026-08-14 | anime.js stays the single animation engine, scoped to the hero — **no new dependency** | Micro-interactions move to CSS-native recipes instead: a `--tap` motion token plus `@starting-style` + `transition-behavior: allow-discrete` recipes for drawer slide-in / list-entry appearance / press feedback (`panels.css`) — no bare millisecond value in a component. |
+| 2026-08-14 | Drawers/confirm dialogs → native `<dialog>.showModal()` — **no new dependency** | Focus trap, Esc, backdrop, and `inert` come free from the platform; the current hand-rolled drawers lack a focus trap. The hold-to-arm reducer and its semantics are untouched by this ruling. |
+| 2026-08-14 | No chart library — **re-affirmed on merits** | The hatch-fill est/settled encoding is a frozen-mockup identity element any chart library fights. Cost bars converge on one shared `<CostBar>` component + one SVG `<pattern>` hatch def (`--hatch-*` tokens); a `.num` utility class (`font-variant-numeric: tabular-nums`) covers all monetary/count text. |
+| 2026-08-14 | No CSS tooling additions (open-props / CVA / capsize / extra PostCSS) — **rejected** | `tokens.css` is extended instead (`--tap`, `--focus-ring`, `--z-drawer`/`--z-dialog`, `--hatch-*`) rather than reaching for a tool to manage tokens `tokens.css` already manages directly. |
+| 2026-08-14 | `@playwright/test` — devDependency, outside the runtime allowlist | `npm run shots`: renders the `?demo` fixture at 1440/1024/720 × both themes into a static side-by-side contact sheet (frozen mockup vs. live capture) — no pixel-diff assertions, evidence for humans and gate② (`docs/dev-guide/07-dashboard.md`). |
+| 2026-08-14 | `@testing-library/react` — devDependency, outside the runtime allowlist | Real interaction testing alongside the existing `registerRealDom()` opt-in pattern (`docs/dev-guide/07-dashboard.md`). |
+
+This issue (#876) lands the toolkit and the rules above; applying any of it — module
+restyling, the icon migration, the `<dialog>` migration, attaching the motion recipes — is
+out of scope here and belongs to #729.
 
 ## 3. Information architecture
 
@@ -426,7 +516,19 @@ stroked in `--bark` at 40% alpha; the growing (current) ring in `--sap`.
 |---|---|---|
 | Display | **Fraunces** (subset woff2, bundled — offline-safe) | Wordmark, section labels, the big ring count. Used sparingly; its warmth carries the organic identity. |
 | Body | `system-ui` stack | All UI prose. Native feel, zero bytes — the honest choice for a local tool. |
-| Data | `ui-monospace` stack | Issue/PR numbers, costs, timestamps, config keys. A tool dashboard is mostly data; the mono face does the daily work. |
+| Data | **JetBrains Mono Variable** (subset woff2, self-hosted — see the 2026-08-14 amendment below), `ui-monospace` stack as fallback | Issue/PR numbers, costs, timestamps, config keys. A tool dashboard is mostly data; the mono face does the daily work. |
+
+Amended 2026-08-14 (§2 dependency-budget review, owner adjudication, #876): the Data
+role's face changes from the bare `ui-monospace` system stack to **self-hosted JetBrains
+Mono** via `@fontsource-variable/jetbrains-mono` — latin subset only, woff2 bundled
+(`dashboard/src/fonts/jetbrains-mono-variable.css`, imported by `main.tsx`), CDN imports
+forbidden (same rule bundled fonts already follow). This supersedes this section's prior
+system-stack-only ruling: that ruling's zero-dependency premise is what §2's round overturns
+— a mono face is now inside the adjudicated toolkit, the same way Fraunces already is.
+Fraunces's own self-hosting (subset woff2, bundled) is the precedent this follows, not a
+new pattern. The system `ui-monospace` stack stays as the fallback for the font-load window
+and any environment the woff2 fails to reach — `--font-data` (`tokens.css`) leads with
+`"JetBrains Mono Variable"` and keeps the full prior stack behind it.
 
 Adjudicated 2026-08-10 (#728, token adjudication): the h1/h2/h3 module headers (`app.css`)
 and the hero's PLAN/IMPLEMENT/OUTCOME captions and ring count (`hero.css`) render in

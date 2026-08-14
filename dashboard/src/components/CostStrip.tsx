@@ -9,7 +9,7 @@ export interface CostBarGroup {
 }
 
 /** Hand-rolled SVG bar groups (frontend-design.md §3 E) — zero chart-library dependency, on
- *  purpose (§2 weight budget, `scaffold.test.ts`'s banned-package check). Each bar is one `<rect>`
+ *  purpose (§2 dependency budget, `scaffold.test.ts`'s banned-package check). Each bar is one `<rect>`
  *  over a faint track `<rect>`; that is the entire "chart". */
 function Bar({ bar, max }: { bar: CostBar; max: number }) {
   const pct = max > 0 ? Math.min(100, (bar.usd / max) * 100) : 0;

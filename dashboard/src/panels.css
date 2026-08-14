@@ -213,3 +213,61 @@
   gap: var(--space-2);
   padding-block: 2px;
 }
+
+/*
+ * Motion recipes (frontend-design.md §2 C1, owner adjudication 2026-08-14) — CSS-native
+ * micro-interactions, tokens only, never a bare millisecond in a component. Unapplied here
+ * on purpose: this issue lands the toolkit, #729 attaches these classes to the migrated
+ * `<dialog>`/list/press markup.
+ */
+
+/* Drawer slide-in: pairs with `<dialog>.showModal()` (§2 C2) — `@starting-style` supplies the
+   pre-open frame so the `[open]` attribute's `display: none → block` flip still transitions
+   instead of cutting; `allow-discrete` is what lets `display`/`overlay` participate at all. */
+.recipe-drawer {
+  transform: translateX(24px);
+  opacity: 0;
+}
+
+.recipe-drawer[open] {
+  transform: translateX(0);
+  opacity: 1;
+  transition:
+    transform var(--travel) var(--ease),
+    opacity var(--travel) var(--ease),
+    display var(--travel) allow-discrete,
+    overlay var(--travel) allow-discrete;
+}
+
+@starting-style {
+  .recipe-drawer[open] {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+}
+
+/* List-entry appearance: a freshly-appended activity/lane row fades and lifts in over
+   `--beat` instead of popping in place — same `@starting-style` mechanism, no JS
+   enter/exit bookkeeping and no per-row mount-time flag to thread through. */
+.recipe-list-entry {
+  transition:
+    opacity var(--beat) var(--ease),
+    transform var(--beat) var(--ease);
+}
+
+@starting-style {
+  .recipe-list-entry {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+/* Press feedback: a control's own down/up state. Scoped to `--tap`, deliberately shorter
+   than `--beat` — a press is felt, not narrated. */
+.recipe-press {
+  transition: transform var(--tap) var(--ease);
+}
+
+.recipe-press:active {
+  transform: scale(0.97);
+}

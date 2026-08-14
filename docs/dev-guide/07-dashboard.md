@@ -16,9 +16,24 @@ not mirror it.
 `package.json` (`@sapwood/dashboard`), `index.html`, `vite.config.ts`, and two
 tsconfigs — `tsconfig.json` (bundler resolution, DOM) for `src/` and
 `tsconfig.server.json` (NodeNext, no DOM) for the server; `npm run typecheck`
-runs both. Runtime dependencies are held to React, React DOM, TanStack Query and
-anime.js by a test, per the design's weight budget — no chart library, no CSS
-framework.
+runs both. Runtime dependencies are held to an owner-adjudicated allowlist by a
+test, per the design's §2 dependency budget: React, React DOM, TanStack Query,
+anime.js, clsx, lucide-react, the two single-package Radix primitives
+(tooltip/popover, scoped to hover/focus hint surfaces), and self-hosted
+JetBrains Mono — no chart library, no CSS framework.
+
+**Visual evidence: `npm --workspace dashboard run shots`.** Builds the
+dashboard, serves `dist/` over `vite preview` (Playwright's own `webServer`
+starts and stops it — nothing to run by hand first), and captures the `?demo`
+fixture at 1440/1024/720 × light/dark (6 combinations), full page plus
+per-module crops. Output is a static HTML contact sheet — `docs/design/mockup/`
+frozen baselines on the left, the matching live capture on the right; a module
+with no frozen mockup gets a full-page row instead of a crop pairing. No
+pixel-diff assertions: the sheet is evidence for a human reviewer or gate②, not
+a CI gate — it does not run under `npm test` or in CI. Output lands in
+`dashboard/shots-output/` (gitignored); run `npx playwright install chromium`
+once before the first local run. This is the tool #729's dispatch material
+points reviewers at for before/after visual comparison.
 
 **The data server** (`dashboard/server.ts`, #142/#360) serves the whole data
 contract: four read routes (`GET /api/loop/state`, `/api/events`, `/api/spend`,

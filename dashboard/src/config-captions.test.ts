@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 // Test-only import: this file runs under `node --test` directly, never through the vite bundle
 // that ships to the browser, so pulling in the engine's own allowlist here does not touch the
-// dashboard's runtime weight budget (scaffold.test.ts's separate check covers that). This is the
-// drift guard between the server's CONFIG_ALLOWLIST and this file's own caption list.
+// dashboard's runtime dependency budget (scaffold.test.ts's separate check covers that). This is
+// the drift guard between the server's CONFIG_ALLOWLIST and this file's own caption list.
 import { CONFIG_ALLOWLIST } from "../../engine/src/state/read-model.ts";
 import { CONFIG_GROUPS, CONFIG_KEYS, readConfigPath } from "./config-captions.ts";
 

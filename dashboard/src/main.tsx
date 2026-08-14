@@ -3,6 +3,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.tsx";
 import "./app.css";
+import "./fonts/jetbrains-mono-variable.css";
 
 // Polling owns freshness (§2), so the window-focus refetch would only add duplicate
 // requests on top of the 3 s tick.

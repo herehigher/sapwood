@@ -1,7 +1,17 @@
 /**
  * Inline SVG glyphs (frontend-design.md §3 C / §5): "never color as the sole carrier" applies to
  * every one of these — each is a distinct SHAPE, readable in grayscale, not just a colored dot.
- * No icon font, no icon library: three tiny paths cost less than either.
+ *
+ * These three are IDENTITY glyphs (sap droplet, growth rings, issue ⊙, PR merge-arrow are the
+ * full set across this file and hero/stage.tsx) — hand-drawn permanently, never sourced from
+ * `lucide-react` (§2 dependency budget, owner adjudication 2026-08-14). `lucide-react` supplies
+ * utility icons only (chrome affordances: close, expand, external-link, and the like) — any
+ * component reaching for one imports directly from the package; a new import gets a §2
+ * adjudication-table mention at adoption. Unified icon spec for those utility imports: 24×24
+ * viewBox grid, 1.5 stroke width, round caps and joins, `currentColor` stroke (never a hardcoded
+ * hex — themes swap under it for free), rendered at 16px by default. Identity glyphs keep their
+ * own dimensions/strokes as specced per-glyph below; the unified spec binds `lucide-react` icons
+ * only, not these.
  */
 
 /** Issue = circle-dot (⊙). */
