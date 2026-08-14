@@ -213,13 +213,26 @@
 
 /* engine-agent audit run 9aaabee8-5885-40d3-a15e-6fecb47b17f3 finding [0]: `header-dark.png`
  * draws the navigator as ONE joined three-slot rectangular stepper (◂ | round label | ▸), not
- * three independently bordered, rounded, gapped buttons. `.round-nav` now owns the single
+ * three independently bordered, rounded, gapped buttons. `.round-nav-stepper` owns the single
  * border/radius/background; the three buttons inside are borderless/flat, with a hairline
  * DIVIDER between adjacent slots standing in for the individual borders removed below.
  * `overflow: hidden` keeps a button's own hover/focus background from spilling past the group's
- * rounded corners. */
+ * rounded corners.
+ *
+ * engine-agent audit run fe112e01-e488-4d80-864a-9a490750cfb1 finding [0]
+ * (dropdown-clipped-by-navigator): that `overflow: hidden` used to live on `.round-nav` itself,
+ * the SAME element `.round-nav-list-wrap` (the opened dropdown, absolutely positioned) was a
+ * child of — clipping the dropdown outside the stepper's own small border box the instant it
+ * opened below it. `.round-nav` is now just a plain positioning anchor (`position: relative`,
+ * no clipping of its own); `.round-nav-stepper` is a NEW inner wrapper scoped to only the three
+ * buttons, so the dropdown — now a SIBLING of the stepper, not a descendant of the clipped
+ * element — is never subject to this overflow rule at all. */
 .round-nav {
   position: relative;
+  display: inline-flex;
+}
+
+.round-nav-stepper {
   display: inline-flex;
   align-items: stretch;
   background: var(--panel);

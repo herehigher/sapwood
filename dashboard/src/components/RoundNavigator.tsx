@@ -241,35 +241,46 @@ export function RoundNavigator({
 
   return (
     <div className="round-nav">
-      <button
-        type="button"
-        className="round-nav-arrow"
-        aria-label="previous round"
-        title={leftTarget !== null && leftTarget !== selectedRoundId ? `replay round ${leftTarget}` : undefined}
-        disabled={!canStepLeft}
-        onClick={() => onSelectRound(leftTarget)}
-      >
-        ◂
-      </button>
-      <button
-        type="button"
-        className={label.closed ? "round-nav-pill round-nav-pill-closed" : "round-nav-pill"}
-        aria-expanded={open}
-        aria-haspopup="true"
-        onClick={() => setOpen((o) => !o)}
-      >
-        {label.text}
-      </button>
-      <button
-        type="button"
-        className="round-nav-arrow"
-        aria-label="next round"
-        title={canStepRight ? "back to live" : undefined}
-        disabled={!canStepRight}
-        onClick={() => onSelectRound(rightTarget)}
-      >
-        ▸
-      </button>
+      {/* engine-agent audit run fe112e01-e488-4d80-864a-9a490750cfb1 finding [0]
+       *  (dropdown-clipped-by-navigator): the joined-stepper look needs `overflow: hidden` to
+       *  keep a slot's own hover background inside the group's rounded corners, but that same
+       *  `overflow: hidden` clips ANY absolutely positioned descendant — including the dropdown
+       *  below, which used to be a sibling of these buttons under the SAME clipped element.
+       *  Scoping `overflow: hidden` to this inner wrapper (which contains only the three
+       *  buttons, nothing that ever needs to escape it) lets `.round-nav-list-wrap` sit as this
+       *  wrapper's own SIBLING instead — a sibling is never subject to an ancestor's overflow
+       *  clip, so the dropdown escapes cleanly while the stepper still gets its rounded corners. */}
+      <div className="round-nav-stepper">
+        <button
+          type="button"
+          className="round-nav-arrow"
+          aria-label="previous round"
+          title={leftTarget !== null && leftTarget !== selectedRoundId ? `replay round ${leftTarget}` : undefined}
+          disabled={!canStepLeft}
+          onClick={() => onSelectRound(leftTarget)}
+        >
+          ◂
+        </button>
+        <button
+          type="button"
+          className={label.closed ? "round-nav-pill round-nav-pill-closed" : "round-nav-pill"}
+          aria-expanded={open}
+          aria-haspopup="true"
+          onClick={() => setOpen((o) => !o)}
+        >
+          {label.text}
+        </button>
+        <button
+          type="button"
+          className="round-nav-arrow"
+          aria-label="next round"
+          title={canStepRight ? "back to live" : undefined}
+          disabled={!canStepRight}
+          onClick={() => onSelectRound(rightTarget)}
+        >
+          ▸
+        </button>
+      </div>
       {open && (
         <div className="round-nav-list-wrap">
           {rounds.length === 0 ? (

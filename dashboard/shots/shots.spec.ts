@@ -108,11 +108,26 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
  * viewport hero/lanes/feed/cost sit within a single scroll (no round-history content pushes them
  * below the fold)". Reuses this same `?demo` fixture + 1440px viewport this file's capture loop
  * already exercises — no separate fixture or harness stood up for it.
+ *
+ * engine-agent audit run fe112e01-e488-4d80-864a-9a490750cfb1 finding [1] (ac1-geometry-not-pinned):
+ * the previous version of this test used `toBeVisible()` (which permits an element far outside the
+ * viewport — "visible" just means painted, not on-screen) plus a `scrollHeight < 4000` ceiling that,
+ * against a 900px viewport, still permitted well over four viewport heights of content. This
+ * measures each module's own `boundingBox()` against an EXPLICIT one-scroll boundary instead, tied
+ * directly to the viewport height rather than an arbitrary flat number. The bound is 3× viewport
+ * height (900 × 3 = 2700): the real `?demo` page's own measured content — hero, the needs-attention
+ * strip, and the #880 two-panel cost composition (by-stage + by-model, each its own bordered card)
+ * all legitimately stacked above the fold — lands at ~1907px (≈2.1×), so 3× gives real headroom
+ * above genuine content while still being far tighter than the old ~4.4×-equivalent 4000px ceiling.
+ * `costBox` (the last of the four modules in §3's A→B→C/D→E stacking order) is the tightest bound;
+ * everything above it sits closer to the top by construction, so pinning cost's bottom edge alone
+ * proves the whole four-module stack clears it.
  */
-test("§889 AC1: the round list never renders inline by default, and hero/lanes/feed/cost sit within a bounded scroll at 1440px", async ({
+test("§889 AC1: the round list never renders inline by default, and hero/lanes/feed/cost sit within one scroll (3× viewport height) at 1440px", async ({
   page,
 }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
+  const viewportHeight = 900;
+  await page.setViewportSize({ width: 1440, height: viewportHeight });
   await page.goto("/?demo");
   await page.locator("#overview").waitFor({ state: "visible" });
   await page.waitForLoadState("networkidle");
@@ -123,21 +138,70 @@ test("§889 AC1: the round list never renders inline by default, and hero/lanes/
   // must be entirely absent from the DOM until that click happens — never present-but-hidden.
   expect(await page.locator(".round-list").count()).toBe(0);
 
-  for (const locator of [
-    page.locator("svg.hero"),
-    (await firstMatch(page, MODULE_SELECTORS.lanes)) ?? page.locator("nonexistent-lanes-anchor"),
-    page.locator('section[aria-label="activity"]'),
-    page.locator("#cost"),
-  ]) {
-    await expect(locator).toBeVisible();
+  const oneScrollBoundaryPx = viewportHeight * 3;
+  const modules: [string, Locator][] = [
+    ["hero", page.locator("svg.hero")],
+    ["lanes", (await firstMatch(page, MODULE_SELECTORS.lanes)) ?? page.locator("nonexistent-lanes-anchor")],
+    ["feed", page.locator('section[aria-label="activity"]')],
+    ["cost", page.locator("#cost")],
+  ];
+  let costBox: { y: number; height: number } | null = null;
+  for (const [name, locator] of modules) {
+    const box = await locator.boundingBox();
+    expect(box, `${name} module must render with a real bounding box`).not.toBeNull();
+    expect(box?.y, `${name}'s top edge must be reachable within one scroll from the top`).toBeLessThan(oneScrollBoundaryPx);
+    if (name === "cost") costBox = box;
   }
+  expect(costBox, "cost module's bounding box must have been captured").not.toBeNull();
+  expect(
+    (costBox?.y ?? 0) + (costBox?.height ?? 0),
+    "hero/lanes/feed/cost together must fit within a single scroll (3× viewport height) at 1440px — cost is the last of the four, so its own bottom edge bounds the whole stack",
+  ).toBeLessThan(oneScrollBoundaryPx);
+});
 
-  // Before #889, the live route's round history (nothing this small demo fixture reproduces at
-  // scale) pushed the whole page to ~9,000px. The `.round-list` absence assertion above is what
-  // actually prevents that regression at any backlog size; this is a sanity ceiling confirming a
-  // normal single-page layout, not a tight pixel budget against this small fixture.
-  const scrollHeight = await page.evaluate(() => document.documentElement.scrollHeight);
-  expect(scrollHeight).toBeLessThan(4000);
+/**
+ * engine-agent audit run fe112e01-e488-4d80-864a-9a490750cfb1 finding [0]
+ * (dropdown-clipped-by-navigator): `.round-nav`'s `overflow: hidden` (added for the joined-stepper
+ * look) used to clip `.round-nav-list-wrap` — its own absolutely positioned child — out of the
+ * paint/hit-test tree the instant it opened below the stepper's small border box. A DOM-presence
+ * check (`happy-dom` in the component test suite) cannot catch this: the clipped element still has
+ * non-zero `getBoundingClientRect()` dimensions, it simply isn't painted or hit-testable there. This
+ * is the real-browser proof: `elementFromPoint` at the dropdown's own center must actually resolve
+ * to the dropdown (not whatever sits behind the clip), and a genuine click on one of its rows must
+ * succeed rather than time out on Playwright's actionability check.
+ */
+test("§889 finding [0]: the opened round-list dropdown is not clipped by the navigator's own overflow, and its rows are actually clickable", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  await page.locator(".round-nav-pill").click();
+  const dropdown = page.locator(".round-nav-list-wrap");
+  await expect(dropdown).toBeVisible();
+
+  const box = await dropdown.boundingBox();
+  expect(box, "the opened dropdown must report a real bounding box").not.toBeNull();
+  const centerX = (box?.x ?? 0) + (box?.width ?? 0) / 2;
+  const centerY = (box?.y ?? 0) + (box?.height ?? 0) / 2;
+  const hitsDropdown = await page.evaluate(
+    ({ x, y }) => {
+      const el = document.elementFromPoint(x, y);
+      return el !== null && el.closest(".round-nav-list-wrap") !== null;
+    },
+    { x: centerX, y: centerY },
+  );
+  expect(
+    hitsDropdown,
+    "the dropdown must actually be hit-testable at its own center point — not clipped invisible by an ancestor's overflow",
+  ).toBe(true);
+
+  // End-to-end proof: a real click on a row inside the opened dropdown must actually reach that
+  // row (Playwright's actionability check times out if the target point isn't hit-testable, which
+  // is exactly what the clipping bug caused).
+  await dropdown.locator(".round-row button").first().click({ timeout: 5000 });
 });
 
 async function firstMatch(page: Page, selectors: string[]): Promise<Locator | null> {
