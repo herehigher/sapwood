@@ -16,7 +16,7 @@ import { NeedsAttention } from "./components/NeedsAttention.tsx";
 import { PhaseInspectorDrawer } from "./components/PhaseInspectorDrawer.tsx";
 import { Transport } from "./components/Transport.tsx";
 import { readConfigPath } from "./config-captions.ts";
-import { avgRoundCostUsd, buildClosedRoundCostPanel, buildTodayCostPanel, modelCostBars, rowsForDay } from "./cost-panel.ts";
+import { avgRoundCostUsd, buildClosedRoundCostPanel, buildTodayCostPanel, modelCostBars, roundsForDay } from "./cost-panel.ts";
 import { useDemoReplay } from "./demo/useDemoReplay.ts";
 import { type DomainEvent, toDomainEvent } from "./domain-event.ts";
 import type { EntityTitles } from "./entities.ts";
@@ -217,6 +217,63 @@ export function useLastClosedRoundCost(
   if (!lastClosed) return null;
   const active = state?.roundId === lastClosed.roundId;
   return { round: lastClosed, spend: active ? state.spend : [], phaseWindows: active ? state.phaseWindows : [] };
+}
+
+/**
+ * #880 gate② finding today-stage-history-truncation: the "COST · TODAY" by-stage group used to
+ * read `useEventHistory`'s bounded `events` tail and `useSpendHistory`'s bounded `rows` tail —
+ * two INDEPENDENTLY sized eviction caps, so a spend row could outlive its own `round-phase` window
+ * once the smaller events cap evicted it first (misclassifying it as `Unattributed`), or vanish
+ * from the total entirely once the spend cap evicted it too — while the server-backed by-model
+ * total (`loop.data.spend.byModel`) stayed complete the whole time, a visible mismatch. This unions
+ * every round that started TODAY's own FULL, uncapped log instead — the SAME durable per-round
+ * fetch (`loadClosedRoundCostLog`/`loadRoundLog`) the ROUND N panel already uses for one round, run
+ * over every round `roundsForDay` names. Bounded by "how many rounds ran today" (a small, real
+ * number), never a rolling eviction window — no row can age out from underneath it. `allRounds`
+ * (not just `todayRounds`) is what each fetch's own ceiling computation needs — a today-round's
+ * "next round" boundary can itself start tomorrow, and `loadClosedRoundCostLog` already handles
+ * that correctly given the full list.
+ */
+export function useTodayCostLog(
+  todayRounds: readonly Round[],
+  allRounds: readonly Round[],
+  lanesMax: number | null,
+): { spend: SpendRow[]; phaseWindows: PhaseWindow[] } {
+  const roundIdsKey = todayRounds.map((r) => r.roundId).join(",");
+  const allRoundsRef = useRef(allRounds);
+  allRoundsRef.current = allRounds;
+  const todayRoundsRef = useRef(todayRounds);
+  todayRoundsRef.current = todayRounds;
+  const [state, setState] = useState<{ key: string; spend: SpendRow[]; phaseWindows: PhaseWindow[] }>({
+    key: "",
+    spend: [],
+    phaseWindows: [],
+  });
+
+  // `todayRounds`/`allRounds` are read via the refs above (same rationale useReplay.ts's own
+  // effect documents) — only the ROUND ID SET (roundIdsKey) should retrigger this fetch, not
+  // every unrelated `/api/rounds` poll, so they're deliberately absent from the dependency array.
+  useEffect(() => {
+    const rounds = todayRoundsRef.current;
+    if (rounds.length === 0) {
+      setState({ key: roundIdsKey, spend: [], phaseWindows: [] });
+      return;
+    }
+    let cancelled = false;
+    Promise.all(rounds.map((round) => loadClosedRoundCostLog(round, allRoundsRef.current, lanesMax))).then((results) => {
+      if (cancelled) return;
+      setState({
+        key: roundIdsKey,
+        spend: results.flatMap((r) => r?.spend ?? []),
+        phaseWindows: results.flatMap((r) => r?.phaseWindows ?? []),
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [roundIdsKey, lanesMax]);
+
+  return state.key === roundIdsKey ? { spend: state.spend, phaseWindows: state.phaseWindows } : { spend: [], phaseWindows: [] };
 }
 
 type ActiveFold = {
@@ -463,7 +520,7 @@ type AppProps = { now?: Date | undefined; initialConfigOpen?: boolean | undefine
 /**
  * The header (A) + hero (B, #144) + lane board (C) + activity feed (D) + cost strip/config
  * drawer (E) from frontend-design.md §3, all against the same §8 data hooks. `now` is
- * test-only (defaults to the real clock) — the "COST · TODAY" panel's day boundary (`rowsForDay`)
+ * test-only (defaults to the real clock) — the "COST · TODAY" panel's day boundary (`roundsForDay`)
  * needs a fixed instant to assert against. `initialConfigOpen` is test-only too, same posture as `now`.
  * All rendering lives in `appContent` above; this function only resolves the live queries/state
  * hooks require and hands the result straight through.
@@ -483,7 +540,8 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
   // (play/pause/speed/scrub, §6). `mode` is carried by round selection, not a separate toggle —
   // §3 A's "the round navigator IS the mode".
   const rounds = useRounds();
-  const replay = useReplay(rounds.data?.rounds ?? [], lanesMax);
+  const allRounds = rounds.data?.rounds ?? [];
+  const replay = useReplay(allRounds, lanesMax);
   const { mode } = replay;
 
   // §9/§11: one reducer, live and replay both feed it — every replayable panel below reads
@@ -520,24 +578,26 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
   const repoUrl = typeof owner === "string" && typeof repo === "string" ? `https://github.com/${owner}/${repo}` : undefined;
   const fixCap = resolveFixCap(loop.data?.config);
 
-  // #880: "COST · TODAY" — by-stage bars reuse the SAME `phaseSpendBars`/`bucketSpendByPhase`
-  // pipeline the old single strip used for its replay round, applied to the day's own history
-  // instead of one round's window. `events.events` is a bounded recent window
-  // (`useEventHistory`'s own doc), not the true unbounded day — an accepted display-strip
-  // approximation, the same posture this app already takes for its other bounded tails. Model
-  // bars reuse the server-aggregated `spend.byModel` (already today-scoped) rather than
-  // re-deriving the same total a second way from raw rows.
-  const todaySpend = rowsForDay(spend.rows, clock);
+  // #880 gate② finding today-stage-history-truncation: "COST · TODAY" by-stage bars union every
+  // round that started today's own FULL, uncapped log (`useTodayCostLog`) — never
+  // `useEventHistory`/`useSpendHistory`'s bounded display tails, whose independent eviction caps
+  // could silently misclassify or drop a still-real row. Model bars reuse the server-aggregated
+  // `spend.byModel` (already today-scoped, already unbounded) rather than re-deriving the same
+  // total a second way from raw rows. `avgRoundCostUsd` is scoped to the SAME today-started round
+  // set (gate② finding cost-doc-source-mismatch: the doc names "today's closed rounds", not every
+  // round ever).
+  const todayRounds = roundsForDay(allRounds, clock);
+  const todayLog = useTodayCostLog(todayRounds, allRounds, lanesMax);
   const todayModelBars = (loop.data?.spend.byModel ?? []).map((m) => ({ label: m.model, usd: m.usd }));
   const roundBudgetUsdConfig = ((): number | null => {
     const raw = loop.data?.config ? readConfigPath(loop.data.config, "cost.roundBudgetUsd") : undefined;
     return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
   })();
   const costToday = buildTodayCostPanel(
-    todaySpend,
-    buildPhaseWindows(events.events),
+    todayLog.spend,
+    todayLog.phaseWindows,
     todayModelBars,
-    avgRoundCostUsd(rounds.data?.rounds ?? []),
+    avgRoundCostUsd(todayRounds),
     roundBudgetUsdConfig,
   );
 
@@ -545,8 +605,8 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
   // OWN full, never-cursor-truncated log (`replay.roundSpend`/`replay.phaseWindows` — see
   // `useReplay.ts`'s doc for why); at LIVE (nothing selected — the navigator's LIVE slot has no
   // round id), the last-closed round's own fetch (`useLastClosedRoundCost`) fills the same slot.
-  const lastClosedRoundCost = useLastClosedRoundCost(rounds.data?.rounds ?? [], lanesMax);
-  const selectedRound = mode === "replay" ? (rounds.data?.rounds.find((r) => r.roundId === replay.selectedRoundId) ?? null) : null;
+  const lastClosedRoundCost = useLastClosedRoundCost(allRounds, lanesMax);
+  const selectedRound = mode === "replay" ? (allRounds.find((r) => r.roundId === replay.selectedRoundId) ?? null) : null;
   const costRound =
     mode === "replay" && selectedRound
       ? buildClosedRoundCostPanel(selectedRound, replay.roundSpend, replay.phaseWindows)
@@ -568,13 +628,13 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
         )
       : undefined;
   // #861: bound per §6's mode-purity rule — see `resolveInspectorArtifact`'s own doc.
-  const inspectorArtifact = resolveInspectorArtifact(mode, rounds.data?.rounds ?? [], loop.data?.round?.id ?? null, replay.selectedRoundId);
+  const inspectorArtifact = resolveInspectorArtifact(mode, allRounds, loop.data?.round?.id ?? null, replay.selectedRoundId);
   // #868 gate② finding [1]: the round-scoped event source for the drawer's Arch review/Verify
   // counts — live mode fetches it fresh (only while the drawer is actually open, `inspectorNode
   // !== null`, so a closed drawer never polls a round log nobody is looking at); replay reads
   // `replay.roundEvents`, the selected round's own already-loaded, uncapped full log (`useReplay`'s
   // own doc) rather than a second parallel fetch.
-  const inspectorRound = resolveInspectorRound(rounds.data?.rounds ?? [], loop.data?.round?.id ?? null);
+  const inspectorRound = resolveInspectorRound(allRounds, loop.data?.round?.id ?? null);
   const inspectorLiveEvents = useInspectorRoundEvents(mode === "live" && inspectorNode !== null ? inspectorRound : null);
   const inspectorEvents = mode === "live" ? inspectorLiveEvents : replay.roundEvents;
 
@@ -595,7 +655,7 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
     inspectorArtifact,
     inspectorEvents,
     mode,
-    rounds: rounds.data?.rounds ?? [],
+    rounds: allRounds,
     replay,
     activeHero,
     activeSteps,
@@ -662,8 +722,13 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
   const fixCap = resolveFixCap(bundle?.loopState.config);
 
   // #880: "COST · TODAY" — demo mode has no separate live/replay data source for "today"; the
-  // whole in-memory fixture (`bundle.events`/`bundle.spend`, never cursor-truncated) stands in for
-  // it, the same way `bundle` already stands in for every other live source this route replaces.
+  // whole in-memory fixture (`bundle.events`/`bundle.spend`/`rounds`, never cursor-truncated, so
+  // no eviction-cap truncation risk the way live mode's bounded tails have) stands in for it
+  // WHOLESALE, the same way `bundle` already stands in for every other live source this route
+  // replaces — so every round in the bundle counts toward `avgRoundCostUsd`, never day-filtered
+  // (`LiveApp`'s own day filter has nothing to anchor to here: the fixture's `startedAt` is a
+  // fixed historical recording date, not "today" in any wall-clock sense — filtering by `clock`
+  // would silently empty the header the moment the shipped recording ages past its own day).
   const bundleEvents = (bundle?.events ?? []).map(toDomainEvent);
   const demoRoundBudgetUsd = ((): number | null => {
     const raw = bundle?.loopState.config ? readConfigPath(bundle.loopState.config, "cost.roundBudgetUsd") : undefined;

@@ -111,6 +111,15 @@ export function rowsForDay(rows: readonly SpendRow[], now: Date): SpendRow[] {
   return rows.filter((r) => r.ts.startsWith(dayPrefix));
 }
 
+/** gate② finding cost-doc-source-mismatch: the SAME day boundary as `rowsForDay`, applied to a
+ *  round's own `startedAt` — the "TODAY" scope for `avgRoundCostUsd` and (App.tsx's
+ *  `useTodayCostLog`) the by-stage union, so both agree with the doc's "today's closed rounds"
+ *  claim instead of silently averaging/unioning a round's entire history. */
+export function roundsForDay(rounds: readonly Round[], now: Date): Round[] {
+  const dayPrefix = now.toISOString().slice(0, 10);
+  return rounds.filter((r) => r.startedAt.startsWith(dayPrefix));
+}
+
 export interface CostPanelData {
   heading: string;
   /** Renders the "CLOSED" badge — a round-scoped panel only (`cost-dark.png`'s "ROUND N" group). */

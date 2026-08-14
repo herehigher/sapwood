@@ -98,13 +98,16 @@
   cursor: pointer;
 }
 
-/* #880: "COST · TODAY" / "COST · ROUND N" — two stacked `.cost-panel`s inside one `.cost-strip`
- * (`cost-dark.png`), each with its own head (heading + optional CLOSED badge/avg-round stat), a
- * by-stage/by-model group pair, and an optional footer line. */
-.cost-panel + .cost-panel {
-  margin-top: var(--space-4);
-  padding-top: var(--space-4);
-  border-top: var(--hairline);
+/* #880: "COST · TODAY" / "COST · ROUND N" — two independently framed `.cost-panel` cards (each
+ * carries `.panel`'s own border/background — gate② finding cost-panels-not-separate: `cost-dark.png`
+ * shows two distinct cards separated by page background, never one shared card with an internal
+ * divider) stacked inside the unframed `.cost-strip` anchor, each with its own head (heading +
+ * optional CLOSED badge/avg-round stat), a by-stage/by-model group pair, and an optional footer
+ * line. */
+.cost-strip {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }
 
 .cost-panel-head {
@@ -112,6 +115,17 @@
   align-items: baseline;
   gap: var(--space-2);
   margin-bottom: var(--space-2);
+}
+
+/* `cost-dark.png`'s heading/group-label treatment — bold, letter-spaced caps, matching the
+ * `.cost-panel-badge`/hero-panel section-header convention (#879's own row-2 finding) rather than
+ * plain sentence case. Text CONTENT stays plain-language (`heading`/`title` props, §7's
+ * terminology rule) — only the rendered CASE changes here, so copy/accessibility text is
+ * unaffected. */
+.cost-panel-head h3,
+.cost-panel-group h4 {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .cost-panel-badge {

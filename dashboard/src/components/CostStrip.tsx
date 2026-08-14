@@ -58,7 +58,11 @@ function CostPanel({ heading, closed, avgRoundUsd, stageBars, targetUsd, modelBa
   const targetPct = targetUsd != null ? tickPositionPct(targetUsd, stageMax) : null;
   const modelMax = Math.max(0, ...modelBars.map((b) => b.usd));
   return (
-    <div className="cost-panel">
+    // `cost-dark.png` frames TODAY and ROUND N as two INDEPENDENT bordered cards, not one shared
+    // card with an internal divider — `panel` here (gate② finding cost-panels-not-separate) is
+    // what actually draws that border/background per card; the outer `<section>` below stays
+    // unframed on purpose, since a THIRD border around both cards is not in the baseline.
+    <div className="cost-panel panel">
       <div className="cost-panel-head">
         <h3>{heading}</h3>
         {closed && <span className="cost-panel-badge">closed</span>}
@@ -75,14 +79,17 @@ function CostPanel({ heading, closed, avgRoundUsd, stageBars, targetUsd, modelBa
 
 /**
  * §3 E's rebuilt cost composition (#880, superseding the single-strip by-model/by-lane first
- * pass) — two stacked panels: "today" (always present) and "round" (a closed round's own detail,
- * `null` when none is available yet — e.g. no round has closed today). `id="cost"` is the §3
- * rail's "cost" anchor target (#727) — this is the ONE cost-strip instance the app renders, so a
- * hardcoded id beats a prop no caller would ever vary.
+ * pass) — two stacked, INDEPENDENTLY FRAMED panels (gate② finding cost-panels-not-separate: the
+ * baseline shows two distinct cards separated by page background, never one card with an internal
+ * divider): "today" (always present) and "round" (a closed round's own detail, `null` when none is
+ * available yet — e.g. no round has closed today). This outer `<section>` carries no `panel`
+ * framing of its own — it exists only for the `#cost` anchor (§3 rail target, #727) and the
+ * `.stack` grid-column placement (app.css) — this is the ONE cost-strip instance the app renders,
+ * so a hardcoded id beats a prop no caller would ever vary.
  */
 export function CostStrip({ today, round }: { today: CostPanelData; round: CostPanelData | null }) {
   return (
-    <section id="cost" className="panel cost-strip" aria-label="cost">
+    <section id="cost" className="cost-strip" aria-label="cost">
       <CostPanel {...today} />
       {round && <CostPanel {...round} />}
     </section>

@@ -284,24 +284,38 @@ item becomes a routed page, that is a scope amendment to this section.
   newest first, relative timestamps; kind-colored dot per entry. Payload
   details (worker, head, mode) collapse behind each entry — never in the
   sentence.
-- **E — Cost strip + Config drawer.** Two stacked panels (#880, `cost-dark.png`; supersedes the
-  single-strip by-model/by-lane first pass and §11's now-superseded "round tier" strip text below).
-  **"COST · TODAY"**, always present: a **by stage** group (§7 labels — goal & align / arch review
-  / verify / lanes / summary / retro, never the internal phase keys; zero-filled, fixed order, six
-  rows always) with a shared **target-tick marker** — one value (the currently configured
-  `cost.roundBudgetUsd`, spread evenly across the six stages — no per-phase budget exists to draw
-  on) drawn at the same coordinate on every bar in the group, since they share one `max` — plus a
-  **by model** group, and an **avg-round-cost** header stat (mean settled spend across today's
-  closed rounds). **"COST · ROUND N"**: the same by-stage/by-model shape for a specific CLOSED
-  round — live mode's last-closed round when nothing is selected in the navigator, or the
+- **E — Cost strip + Config drawer.** Two independently framed panels, stacked (#880,
+  `cost-dark.png`; supersedes the single-strip by-model/by-lane first pass and §11's
+  now-superseded "round tier" strip text below) — each its own bordered card, never one shared
+  card with an internal divider. **"COST · TODAY"**, always present: a **by stage** group (§7
+  labels — goal & align / arch review / verify / lanes / summary / retro, never the internal phase
+  keys; zero-filled, fixed order, six rows always). LIVE mode sources it by UNIONING every round
+  that started TODAY (the wall-clock UTC calendar day) own full, uncapped log (the same durable
+  per-round fetch §3 E's round panel below already uses for a single round) — never the bounded
+  live display tails (`events`/`spend` history caps), which could otherwise silently misclassify or
+  drop a still-real row once it ages past either cap's own eviction point. `?demo` has no live
+  "today" of its own — the WHOLE static fixture (`events`/`spend`/`rounds`, never capped at all)
+  stands in for it wholesale, so every round the bundle carries counts, regardless of the fixture's
+  own fixed recording date (day-filtering a static demo by wall-clock date would silently empty it
+  the moment the shipped recording ages past its own day). Both modes render through a shared
+  **target-tick marker** — one value (the currently configured `cost.roundBudgetUsd`, spread evenly
+  across the six stages — no per-phase budget exists to draw on) drawn at the same coordinate on
+  every bar in the group, since they share one `max` — plus a **by model** group (the
+  server-aggregated today total in live mode, already unbounded; the bundle's own total in demo),
+  and an **avg-round-cost** header stat (mean settled spend across that SAME today-scoped round set
+  the by-stage group unions — live: today-started rounds; demo: the whole bundle). **"COST · ROUND
+  N"**: the same by-stage/by-model shape for a specific
+  CLOSED round — live mode's last-closed round when nothing is selected in the navigator, or the
   navigator's own selection in replay — carrying a **CLOSED** badge, its own target tick (that
-  round's OWN persisted `roundBudgetUsd`, never today's live config), and a **footer** line (total
-  spend / PRs merged / $-per-PR / review cost, all read straight from the round's persisted
-  artifact — omitted entirely, never fabricated, when the artifact is missing or malformed). This
-  round panel reads the round's FULL log, never truncated by the replay scrub cursor — it is a
-  closed round's frozen summary, not a moment-by-moment view like the hero/feed panels beside it.
-  Phase, not lane, for the by-stage group: lanes are short-lived reused slots (w1/w2/w3), so a
-  by-lane aggregate carries little meaning — per-lane cost already lives on the lane cards (§3 C).
+  round's OWN persisted `roundBudgetUsd`, never today's live config), and a **footer** line: total
+  spend / PRs merged / $-per-PR read straight from the round's persisted artifact, and review cost
+  summed from that round's OWN `spend_ledger` rows (`actorKind: "engine-review"` — the artifact
+  carries no review-cost field of its own) — the whole footer omitted, never fabricated, when the
+  artifact is missing or malformed. This round panel reads the round's FULL log, never truncated by
+  the replay scrub cursor — it is a closed round's frozen summary, not a moment-by-moment view like
+  the hero/feed panels beside it. Phase, not lane, for the by-stage group: lanes are short-lived
+  reused slots (w1/w2/w3), so a by-lane aggregate carries little meaning — per-lane cost already
+  lives on the lane cards (§3 C).
   `Config ▸` opens a read-only drawer: an **allowlisted subset** of the resolved config (the
   server serves named keys, never the whole object — the no-secrets guarantee
   stays structural even if future config grows sensitive keys; the allowlist

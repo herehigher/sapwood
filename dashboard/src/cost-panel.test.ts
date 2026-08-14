@@ -8,6 +8,7 @@ import {
   modelCostBars,
   reviewSpendUsd,
   roundCostFooter,
+  roundsForDay,
   rowsForDay,
   stageCostBars,
   tickPositionPct,
@@ -168,6 +169,18 @@ test("rowsForDay keeps only rows whose ts falls on the same UTC calendar day as 
   const rows = [spendRow(1, "2026-08-14T00:00:00Z", 1), spendRow(2, "2026-08-13T23:59:59Z", 2), spendRow(3, "2026-08-14T23:59:59Z", 3)];
   assert.deepEqual(
     rowsForDay(rows, new Date("2026-08-14T12:00:00Z")).map((r) => r.id),
+    [1, 3],
+  );
+});
+
+test("roundsForDay keeps only rounds whose startedAt falls on the same UTC calendar day as now", () => {
+  const rounds = [
+    round({ roundId: 1, startedAt: "2026-08-14T00:00:00Z" }),
+    round({ roundId: 2, startedAt: "2026-08-13T23:59:59Z" }),
+    round({ roundId: 3, startedAt: "2026-08-14T23:59:59Z" }),
+  ];
+  assert.deepEqual(
+    roundsForDay(rounds, new Date("2026-08-14T12:00:00Z")).map((r) => r.roundId),
     [1, 3],
   );
 });

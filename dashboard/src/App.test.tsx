@@ -413,46 +413,126 @@ test("#723: header renders the standby word with its plain-language caption and 
   assert.doesNotMatch(html, /stalled/);
 });
 
-test("#715 gate② round 3 [2] (re-scoped for #880's by-stage/by-model composition): a completed lane's settled spend still contributes to the TODAY panel", async () => {
-  // The lane is NOT in `lanes.items` (it already left the active set — merged/reclaimed), but its
-  // spend_ledger row still exists, forever, since the ledger is append-only — `rowsForDay` reads
-  // that ledger directly, never `lanes.items`, so this finding's scenario (the active-worker read
-  // model alone would show nothing for this lane) still holds under the rebuilt composition. No
-  // `round-phase` event exists in this fixture, so the row buckets as "Unattributed" — still
-  // visible, never silently dropped (the by-model group stays empty here since TODAY's model bars
-  // read the server-aggregated `spend.byModel`, not these raw rows — a separate, honest source).
-  const html = await renderSettledApp(
+test("#715/#880 gate② finding today-stage-history-truncation: TODAY's by-stage bars union EVERY round that started today via the real per-round fetch, not just one hand-injected panel", async () => {
+  // Two rounds both started today, each with their own event/spend id ranges — proving the union
+  // spans MULTIPLE rounds' fetches, not just a single round's. Round A's lane already left the
+  // active set (`lanes.items: []`) and carries no `round-phase` event, so its spend row buckets as
+  // "Unattributed" — still visible, never silently dropped, the same #715 scenario as before
+  // (the active-worker read model alone would show nothing for this lane). Round B's spend carries
+  // a real `round-phase` window, proving cross-round stage attribution also works.
+  const ROUND_A_ID = 88006;
+  const ROUND_B_ID = 88007;
+  const rounds = [
     {
-      "/api/loop/state": { status: 200, body: { ...LOOP_STATE_OK, lanes: { max: 1, items: [] } } },
-      "/api/events": { status: 200, body: { events: [], lastId: 0 } },
-      "/api/spend": {
-        status: 200,
-        body: {
-          spend: [
-            {
-              id: 1,
-              ts: "2026-08-06T01:00:00Z",
-              worker: "w1",
-              issue: 5,
-              usd: 3.4,
-              model: "opus",
-              inputTokens: 0,
-              outputTokens: 0,
-              cacheReadTokens: 0,
-              cacheCreationTokens: 0,
-              actorKind: "worker",
-              role: null,
-              estimated: false,
-            },
-          ],
-          lastId: 1,
-        },
-      },
+      roundId: ROUND_A_ID,
+      status: "done",
+      startedAt: "2026-08-06T00:30:00Z",
+      endedAt: "2026-08-06T01:30:00Z",
+      startEventId: 0,
+      startSpendId: 0,
+      eventCount: 0,
+      schemaVersion: 1,
+      artifact: null,
     },
-    new Date("2026-08-06T12:00:00Z"),
-  );
-  assert.match(html, /Unattributed/);
-  assert.match(html, /\$3\.40/);
+    {
+      roundId: ROUND_B_ID,
+      status: "done",
+      startedAt: "2026-08-06T02:00:00Z",
+      endedAt: "2026-08-06T03:00:00Z",
+      startEventId: 10,
+      startSpendId: 10,
+      eventCount: 1,
+      schemaVersion: 1,
+      artifact: null,
+    },
+  ];
+  const spend = [
+    {
+      id: 1,
+      ts: "2026-08-06T01:00:00Z",
+      worker: "w1",
+      issue: 5,
+      usd: 3.4,
+      model: "opus",
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      actorKind: "worker",
+      role: null,
+      estimated: false,
+    },
+    {
+      id: 11,
+      ts: "2026-08-06T02:30:00Z",
+      worker: "w2",
+      issue: 6,
+      usd: 1.1,
+      model: "sonnet",
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      actorKind: "worker",
+      role: null,
+      estimated: false,
+    },
+  ];
+  const events = [{ id: 11, ts: "2026-08-06T02:00:00Z", kind: "round-phase", payload: { round_id: ROUND_B_ID, phase: "aligning" } }];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const parsed = new URL(url, "http://localhost");
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (parsed.pathname === "/api/loop/state") return json({ ...LOOP_STATE_OK, lanes: { max: 1, items: [] } });
+    if (parsed.pathname === "/api/rounds") return json({ rounds });
+    if (parsed.pathname === "/api/events") {
+      const after = Number(parsed.searchParams.get("after") ?? 0);
+      const page = events.filter((e) => e.id > after);
+      return json({ events: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
+    }
+    if (parsed.pathname === "/api/spend") {
+      const after = Number(parsed.searchParams.get("after") ?? 0);
+      const limit = Number(parsed.searchParams.get("limit") ?? 200);
+      const page = spend.filter((r) => r.id > after).slice(0, limit);
+      return json({ spend: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
+    }
+    throw new Error(`unstubbed fetch: ${url}`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await Promise.allSettled([
+    client.prefetchQuery(loopStateQuery()),
+    client.prefetchQuery(eventsQuery(0)),
+    client.prefetchQuery(spendQuery(0)),
+    client.prefetchQuery(roundsQuery()),
+  ]);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={client}>
+        <App now={new Date("2026-08-06T12:00:00Z")} />
+      </QueryClientProvider>,
+    );
+  });
+  try {
+    // `useTodayCostLog`'s fetch is itself async — flush its effect+promise chain.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const html = container.innerHTML;
+    // Round A (no round-phase event) -> Unattributed; round B (a real "aligning" round-phase
+    // window) -> Goal & align. Both present together proves the fetch spans BOTH rounds, not just
+    // whichever one happened to be selected as "last closed".
+    assert.match(html, /Unattributed/);
+    assert.match(html, /\$3\.40/);
+    assert.match(html, /\$1\.10/);
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
 });
 
 // #727 gate② finding config-trigger-test-is-static: IconRail.test.tsx's own render-only test
