@@ -688,17 +688,17 @@ test("the backlog's selected chips read their fill from --sap, never a hardcoded
 
 test("a lane droplet in motion reads its fill from --sap; escalated/failed from --rust; merged from --moss", () => {
   const inMotion = run([ev("dispatched", { worker: "w1", issue: 1 })]);
-  assert.match(markup(inMotion.state), /data-issue="1"[\s\S]*?<circle r="9" style="fill:var\(--sap\)"/);
+  assert.match(markup(inMotion.state), /data-issue="1"[\s\S]*?<path class="hero-droplet-shape" d="[^"]*" style="fill:var\(--sap\)"/);
 
   const escalated = run([
     ev("dispatched", { worker: "w1", issue: 1 }),
     ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING" }),
     ev("drive-needs-human", { worker: "w1", issue: 1 }),
   ]);
-  assert.match(markup(escalated.state), /data-issue="1"[\s\S]*?<circle r="9" style="fill:var\(--rust\)"/);
+  assert.match(markup(escalated.state), /data-issue="1"[\s\S]*?<path class="hero-droplet-shape" d="[^"]*" style="fill:var\(--rust\)"/);
 
   const merged = run([ev("dispatched", { worker: "w1", issue: 1 }), ev("merged", { worker: "w1", issue: 1, pr: 11 })]);
-  assert.match(markup(merged.state), /data-issue="1"[\s\S]*?<circle r="9" style="fill:var\(--moss\)"/);
+  assert.match(markup(merged.state), /data-issue="1"[\s\S]*?<path class="hero-droplet-shape" d="[^"]*" style="fill:var\(--moss\)"/);
 });
 
 test("the escalation branch and NEEDS HUMAN node read their stroke from --rust, never a hardcoded hex", () => {
@@ -728,6 +728,71 @@ test("the ring count and the PLAN/IMPLEMENT/OUTCOME phase captions render with -
   assert.match(html, /class="hero-phase" style="font-family:var\(--font-display\)"[^>]*>\s*IMPLEMENT/);
   assert.match(html, /class="hero-phase" style="font-family:var\(--font-display\)"[^>]*>\s*OUTCOME/);
   assert.match(html, /class="hero-ring-count" style="font-family:var\(--font-display\)"/);
+});
+
+// ── #879: hero panel typography + chip/card/icon detailing (fidelity-ledger rows 1, 2, 7) ──
+
+test("#879: PLAN/IMPLEMENT/OUTCOME headers are bold with even letter-spacing — font-family stays Fraunces, per #728's own adjudication against this exact mockup", () => {
+  const match = heroCss.match(/\.hero-phase\s*\{([^}]*)\}/);
+  assert.ok(match, ".hero-phase rule must exist");
+  const body = match?.[1] as string;
+  assert.match(body, /font-weight:\s*600/);
+  assert.match(body, /letter-spacing:\s*0\.\d+em/);
+  assert.match(
+    body,
+    /font-family:\s*var\(--font-display\)/,
+    "font-family must stay Fraunces — reversing #728's adjudication is out of this issue's scope",
+  );
+});
+
+test("#879: the backlog's READY cards render as taller filled cards with bold, contrasting card text", () => {
+  const { state } = run([ev("pool-selected", { issues: [94] })]);
+  const html = markup(state);
+  assert.match(html, /class="hero-pool-chip"[\s\S]*?<rect style="fill:var\(--sap\)"[^>]*height="24"[^>]*rx="8"/);
+  assert.match(html, /class="hero-num hero-pool-num"[^>]*>⊙ 94</);
+  const poolNumRule = heroCss.match(/\.hero-pool-num\s*\{([^}]*)\}/);
+  assert.ok(poolNumRule, ".hero-pool-num rule must exist");
+  assert.match(poolNumRule?.[1] as string, /font-weight:\s*600/);
+  assert.match(poolNumRule?.[1] as string, /fill:\s*var\(--heartwood\)/);
+});
+
+test("#879: each PLAN circle (goal-align/arch-review/verify) draws its own distinct icon", () => {
+  const html = markup(initialHeroState(3));
+  for (const icon of ["target", "tree", "check"]) {
+    assert.equal(
+      (html.match(new RegExp(`data-icon="${icon}"`, "g")) ?? []).length,
+      1,
+      `exactly one ${icon} icon (goal-align/arch-review/verify each draw their own)`,
+    );
+  }
+  assert.equal((html.match(/class="hero-planning-icon"/g) ?? []).length, 3, "one icon per PLAN node, never zero or duplicated");
+});
+
+test("#879: issue tokens render as a droplet (teardrop path), never a bare circle", () => {
+  const { state } = run([ev("dispatched", { worker: "w1", issue: 1 })]);
+  const html = markup(state);
+  assert.match(html, /class="hero-droplet-shape" d="M0,-9/);
+  assert.doesNotMatch(html, /class="hero-droplet"[\s\S]{0,40}<circle r="9"/, "no droplet may still draw the old bare circle");
+});
+
+test("#879: the outcome ring count sits centered inside the ring cross-section, not floating below it", () => {
+  const html = markup(initialHeroState(3));
+  const match = html.match(/class="hero-ring-count"[^>]*x="(-?[\d.]+)" y="(-?[\d.]+)"/);
+  assert.ok(match, "hero-ring-count must render with x/y");
+  assert.equal(Number(match?.[1]), TRUNK.x);
+  const y = Number(match?.[2]);
+  assert.ok(
+    y > TRUNK.y - TRUNK.max * TRUNK.step && y < TRUNK.y + TRUNK.max * TRUNK.step,
+    `ring count y=${y} must sit inside the ring's own radius, not below it`,
+  );
+});
+
+test("#879: the current (outermost) ring strokes bolder than the rest — a bold ring, not a hairline", () => {
+  const currentRule = heroCss.match(/\.hero-ring\[data-current="true"\]\s*\{([^}]*)\}/);
+  assert.ok(currentRule, '.hero-ring[data-current="true"] rule must exist');
+  assert.match(currentRule?.[1] as string, /stroke-width:\s*3/);
+  const baseRule = heroCss.match(/\.hero-ring\s*\{([^}]*)\}/);
+  assert.match(baseRule?.[1] as string, /stroke-width:\s*1\.5/, "older rings stay hairline-thin — only the current ring bolds");
 });
 
 test("#728 gate② finding [0] (run 31f166a9): `.hero-small` (10px) is declared BEFORE every 9px caption rule, so the lane caption and outcome tally — both `hero-small` PLUS a 9px class — render at their intended 9px, not the 10px a later `.hero-small` would silently win with", () => {
@@ -1162,6 +1227,35 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
   assertNoOverlap(boxes);
 
   assert.match(html, /data-node="needs-human" data-count="6"/);
+});
+
+// #879 live-probe finding: the first cut of the ring-count reposition (`stage.tsx`'s own doc)
+// dead-centered the number on TRUNK.y — directly on top of the ONE droplet `merged` (state.ts)
+// always leaves parked at the trunk center ("only the newest merge keeps its tag on the
+// trunk"), PR-chip label and all. Caught by `npm run shots`, not by any prior test — this pins
+// it so a future reposition can't reintroduce the same collision silently.
+test("#879: the ring count never collides with the newest-merge droplet parked at the trunk center", () => {
+  const { state } = run([ev("merged", { worker: "w1", issue: 1, pr: 11 })]);
+  const html = markup(state);
+
+  const countMatch = html.match(/class="hero-ring-count"[^>]*x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</);
+  assert.ok(countMatch, "hero-ring-count must render");
+  const [, cxRaw, cyRaw, countText] = countMatch as unknown as [string, string, string, string];
+  const countBox = textBox(countText, Number(cxRaw), Number(cyRaw), 33);
+
+  const trunkLabelMatch = html.match(/<text class="hero-num hero-small" x="0" y="-14" text-anchor="middle">([^<]*)<\/text>/);
+  assert.ok(trunkLabelMatch, "the newest-merge droplet must still carry its own PR chip label");
+  const labelBox = textBox(trunkLabelMatch?.[1] as string, TRUNK.x, TRUNK.y - 14, 10);
+  const shapeBox = circleBox(TRUNK.x, TRUNK.y, 9);
+
+  assert.ok(
+    !boxesOverlap(countBox, labelBox),
+    `ring count ${JSON.stringify(countBox)} overlaps the trunk droplet's label ${JSON.stringify(labelBox)}`,
+  );
+  assert.ok(
+    !boxesOverlap(countBox, shapeBox),
+    `ring count ${JSON.stringify(countBox)} overlaps the trunk droplet's shape ${JSON.stringify(shapeBox)}`,
+  );
 });
 
 // ── #745: a droplet the fold can no longer vouch for must not be COUNTED as confident pending ──

@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { EngineState } from "../api/types.ts";
 import { type EngineFacts, Header, resolveSpendMeter, showsPauseChip } from "./Header.tsx";
+
+const panelsCss = readFileSync(new URL("../panels.css", import.meta.url), "utf8");
 
 // ── pure helpers (§3 A / §8) ────────────────────────────────────────────────────────────────
 
@@ -187,6 +190,16 @@ test("a null budgetUsd on `round` (artifact-less round) renders the used amount 
   );
   assert.match(html, /\$3\.14/);
   assert.doesNotMatch(html, /\$3\.14 \//);
+});
+
+// #879: frozen baseline — the spend meter's mono value renders bold with even letter-spacing,
+// matching the hero section headers' own weight bump (hero.css's `.hero-phase`).
+test("#879: the spend meter value's CSS carries bold weight and letter-spacing", () => {
+  const match = panelsCss.match(/\.spend-meter-value\s*\{([^}]*)\}/);
+  assert.ok(match, ".spend-meter-value rule must exist");
+  const body = match?.[1] as string;
+  assert.match(body, /font-weight:\s*600/);
+  assert.match(body, /letter-spacing:/);
 });
 
 test("does not render, import, or re-implement the legend", () => {

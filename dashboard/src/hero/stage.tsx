@@ -58,7 +58,9 @@ export const STAGE = { w: 1200, h: 380 } as const;
 // thing that hangs off a droplet — still fits inside the viewBox.
 // #716 gate② round 2 PO probe P3: chip step bumped 22 → 26 — labels like "⊙ 725" stacked at
 // the old 22px step were measured colliding with the next chip's label at small render sizes.
-export const BACKLOG = { x: 46, y: 62, w: 96, chip: 26 } as const;
+// #879: bumped 26 → 32 — the frozen baseline draws the ready backlog as filled CARDS, not a
+// thin list; a taller step is what gives the card rect (below) room to read as a card.
+export const BACKLOG = { x: 46, y: 62, w: 96, chip: 32 } as const;
 /** `note` clears the tallest lane stack (`lanes.max` 6) rather than sitting under 3 lanes. */
 const PLANNING = { x: 224, note: 300, noteX: 152 } as const;
 /** §7: plain word first, internal term never. `role` is the config-captions.ts `roles.<role>`
@@ -294,6 +296,16 @@ function dropletFill(d: Droplet): string {
   return "var(--sap)";
 }
 
+/**
+ * #879: the frozen baseline draws every issue token as a teardrop, not a bare circle. Kept
+ * within the SAME ~9px reach the old `<circle r={9}>` had (tip at y=-9, belly arc capped at
+ * y=+9, x within ±7) — `hero.test.ts`'s collision math (`circleBox(x, y, 9)`) treats a
+ * droplet's footprint as that 9px-radius circle, and every hairline-margin overlap check in
+ * this file (checkpoint grid, needs-human cluster, backlog column) was tuned against it; a
+ * shape that grew past that footprint would silently invalidate those margins.
+ */
+const DROPLET_SHAPE = "M0,-9 C4,-4.5 7,-1 7,2 A7,7 0 1 1 -7,2 C-7,-1 -4,-4.5 0,-9 Z";
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export type HeroStageProps = {
@@ -350,6 +362,43 @@ export function modelEffortCaption(config: Record<string, unknown> | null | unde
   if (typeof model !== "string") return null;
   const effort = readConfigPath(config, `${rolePath}.effort`);
   return typeof effort === "string" ? `${model} · ${effort}` : model;
+}
+
+/**
+ * #879: the frozen baseline draws a small glyph inside each PLAN circle — target (goal-align),
+ * a tiny hierarchy (arch-review), a checkmark (verify). Hand-drawn vector primitives, not a new
+ * icon-font/library dependency, matching how the stage already draws every other glyph (✓/✕
+ * text, hairline shapes) — three static, tightly-scoped shapes don't earn a package.
+ * `[data-active="true"] .hero-planning-icon` (hero.css) recolors the same way the node's own
+ * circle does; the icon carries no state of its own.
+ */
+function planningIcon(node: (typeof PLANNING_NODES)[number]["node"], cx: number, cy: number) {
+  switch (node) {
+    case "goal-align":
+      return (
+        <g className="hero-planning-icon" data-icon="target">
+          <circle cx={cx} cy={cy} r={6.5} />
+          <circle className="hero-planning-icon-dot" cx={cx} cy={cy} r={1.6} />
+        </g>
+      );
+    case "arch-review":
+      return (
+        <g className="hero-planning-icon" data-icon="tree">
+          <line x1={cx} y1={cy - 4} x2={cx} y2={cy + 1} />
+          <line x1={cx} y1={cy + 1} x2={cx - 6} y2={cy + 5} />
+          <line x1={cx} y1={cy + 1} x2={cx + 6} y2={cy + 5} />
+          <rect x={cx - 2} y={cy - 8} width={4} height={4} />
+          <rect x={cx - 8} y={cy + 5} width={4} height={4} />
+          <rect x={cx + 4} y={cy + 5} width={4} height={4} />
+        </g>
+      );
+    case "verify":
+      return (
+        <g className="hero-planning-icon" data-icon="check">
+          <path d={`M ${cx - 5} ${cy} L ${cx - 1.5} ${cy + 4} L ${cx + 5} ${cy - 5}`} />
+        </g>
+      );
+  }
 }
 
 /** §6: "how long since anything happened" — the OUTCOME zone's staleness caption. Whole
@@ -467,12 +516,20 @@ export function HeroStage({
             <rect
               style={{ fill: "var(--sap)" }}
               x={BACKLOG.x + 8}
-              y={BACKLOG.y + 10 + i * BACKLOG.chip}
+              y={BACKLOG.y + 6 + i * BACKLOG.chip}
               width={BACKLOG.w - 16}
-              height={16}
+              height={24}
               rx={8}
             />
-            <text className="hero-num" x={BACKLOG.x + BACKLOG.w / 2} y={BACKLOG.y + 22 + i * BACKLOG.chip} textAnchor="middle">
+            {/* #879: --heartwood is the frozen baseline's dark-on-amber card text — it inverts
+             * with --sap the same way it inverts with the page ground, so one token reads dark
+             * on the bright dark-theme amber AND light on the darker light-theme amber. */}
+            <text
+              className="hero-num hero-pool-num"
+              x={BACKLOG.x + BACKLOG.w / 2}
+              y={BACKLOG.y + 22 + i * BACKLOG.chip}
+              textAnchor="middle"
+            >
               ⊙ {issue}
             </text>
           </g>
@@ -495,6 +552,7 @@ export function HeroStage({
             >
               <title>{n.hint}</title>
               <circle className="hero-planning-node" cx={PLANNING.x} cy={n.y} r={17} />
+              {planningIcon(n.node, PLANNING.x, n.y)}
               <text className="hero-node-label" x={PLANNING.x + 28} y={n.y + 4}>
                 {n.label}
               </text>
@@ -675,7 +733,16 @@ export function HeroStage({
             />
           );
         })}
-        <text className="hero-ring-count" style={{ fontFamily: "var(--font-display)" }} x={TRUNK.x} y={TRUNK.y + 106} textAnchor="middle">
+        {/* #879: pulled up from its old resting spot (was +106, clear of the ring entirely) to
+         * read as INSIDE the ring cross-section (frozen baseline: a bold display number filling
+         * the ring). Not dead-centered on TRUNK.y, though: "merged" (state.ts) always leaves
+         * exactly ONE droplet parked AT the trunk center ("only the newest merge keeps its tag
+         * on the trunk — older ones *are* the rings now") with its own PR-chip label floating
+         * above it — a live probe caught the first, dead-centered version of this fix sitting
+         * the number directly on top of that chip. +40 clears the chip's shape (bottom edge
+         * ~+9) and its label (top edge ~-22) with margin — see the paired hero.test.ts
+         * collision assertion for the exact box math. */}
+        <text className="hero-ring-count" style={{ fontFamily: "var(--font-display)" }} x={TRUNK.x} y={TRUNK.y + 40} textAnchor="middle">
           {state.rings}
         </text>
         <text className="hero-label" x={TRUNK.x} y={TRUNK.y + 124} textAnchor="middle">
@@ -738,7 +805,7 @@ export function HeroStage({
               data-lane={d.lane ?? ""}
               transform={`translate(${x} ${y})`}
             >
-              <circle r={9} style={{ fill: dropletFill(d) }} />
+              <path className="hero-droplet-shape" d={DROPLET_SHAPE} style={{ fill: dropletFill(d) }} />
               <text className="hero-num hero-small" x={0} y={-14} textAnchor="middle">
                 {d.at === "trunk" ? "✓ " : ""}
                 {d.pr === null ? `⊙ ${d.issue}` : `⤳ ${d.pr}`}
