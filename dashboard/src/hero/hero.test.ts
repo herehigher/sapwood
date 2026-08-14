@@ -2070,3 +2070,86 @@ test("#891 AC1: needs-human droplets bound to the open round + a draw cap; histo
   // concern only, never a smaller/wrong count (#891 AC2).
   assert.match(html, /8 needs human/);
 });
+
+/** Extracts a drawn droplet's `transform="translate(x y)"` by its `data-issue`, straight from
+ *  the rendered markup — the actual DOM position, not a re-derivation of it. */
+function dropletTransform(html: string, issue: number): { x: number; y: number } {
+  const match = html.match(new RegExp(`data-issue="${issue}"[^>]*transform="translate\\(([-\\d.]+) ([-\\d.]+)\\)"`));
+  assert.ok(match, `droplet #${issue} must be drawn`);
+  return { x: Number(match![1]), y: Number(match![2]) };
+}
+
+test("#891 gate① engine-agent finding [0] (ac1-hidden-ranks-not-compacted): a drawn needs-human droplet's rank COMPACTS around hidden historical predecessors, never inheriting a rank/position from an entity that never draws", () => {
+  const events: LoopEvent[] = [];
+  // Two historical (round 1) escalations — never resolved, never touched again — arriving
+  // BEFORE the current-round ones in arrival order, exactly the shape that used to push a
+  // drawn droplet's rank (and therefore its stage position) two slots further than it should be.
+  events.push(wire("2026-07-01T00:00:00.000Z", "pool-selected", { round_id: 1, issues: [1, 2] }));
+  for (const issue of [1, 2]) {
+    events.push(wire("2026-07-01T00:01:00.000Z", "dispatched", { worker: `h${issue}`, issue }));
+    events.push(wire("2026-07-01T00:02:00.000Z", "reclaim-done", { worker: `h${issue}`, issue, next: "DRIVING", pr: issue }));
+    events.push(wire("2026-07-01T00:03:00.000Z", "drive-needs-human", { worker: `h${issue}`, issue, pr: issue }));
+  }
+  // Two current-round (round 2) escalations — the ones that must actually draw.
+  events.push(wire("2026-08-10T00:00:00.000Z", "pool-selected", { round_id: 2, issues: [] }));
+  for (const issue of [101, 102]) {
+    events.push(wire("2026-08-10T00:01:00.000Z", "dispatched", { worker: `w${issue}`, issue }));
+    events.push(wire("2026-08-10T00:02:00.000Z", "reclaim-done", { worker: `w${issue}`, issue, next: "DRIVING", pr: issue }));
+    events.push(wire("2026-08-10T00:03:00.000Z", "drive-needs-human", { worker: `w${issue}`, issue, pr: issue }));
+  }
+
+  const { state } = run(events.map(toDomainEvent));
+  const open = foldAttention(events);
+  assert.equal(Object.keys(open).length, 4, "nothing has resolved — all 4 are still open");
+
+  const html = markup(state, { openAttention: Object.values(open) });
+
+  // The expected positions are `dropletPoint`'s OWN formula, evaluated against the compacted
+  // collection (the two historical droplets excluded) — exactly what stage.tsx's internal
+  // `geometryState` now feeds it. Read from the source, never a hand-copied coordinate.
+  const compacted: HeroState = { ...state, droplets: state.droplets.filter((d) => d.issue === 101 || d.issue === 102) };
+  const expected101 = dropletPoint(compacted, droplet(compacted, 101)!);
+  const expected102 = dropletPoint(compacted, droplet(compacted, 102)!);
+  assert.notDeepEqual(expected101, expected102, "sanity check on the fixture itself — the two compacted ranks must be distinct");
+
+  assert.deepEqual(
+    dropletTransform(html, 101),
+    expected101,
+    "issue 101 must draw at the COMPACTED rank 0 — NOT rank 2, as if the 2 hidden historical droplets still occupied ranks ahead of it",
+  );
+  assert.deepEqual(dropletTransform(html, 102), expected102, "issue 102 must draw at the COMPACTED rank 1, not rank 3");
+
+  const pos101 = dropletTransform(html, 101);
+  const pos102 = dropletTransform(html, 102);
+  assertNoOverlap([
+    { label: "needs-human #101", box: circleBox(pos101.x, pos101.y, 9) },
+    { label: "needs-human #102", box: circleBox(pos102.x, pos102.y, 9) },
+  ]);
+});
+
+test("#891 gate① engine-agent finding [0]: a drawn backlog droplet's slot COMPACTS around a hidden historical (never-redispatched) handoff predecessor", () => {
+  const events: LoopEvent[] = [
+    // Round 1: a handed-off droplet nobody ever redispatches — historical from round 2 on.
+    wire("2026-07-01T00:00:00.000Z", "pool-selected", { round_id: 1, issues: [50] }),
+    wire("2026-07-01T00:01:00.000Z", "dispatched", { worker: "h50", issue: 50 }),
+    wire("2026-07-01T00:02:00.000Z", "handoff", { worker: "h50", issue: 50 }),
+    // Round 2, the open round: a fresh dispatch that then hands off too — the one that must
+    // actually draw, and draw at the FIRST backlog slot, not the third (after the hidden one's
+    // own 3-row handoff-badge reservation).
+    wire("2026-08-10T00:00:00.000Z", "pool-selected", { round_id: 2, issues: [] }),
+    wire("2026-08-10T00:01:00.000Z", "dispatched", { worker: "w60", issue: 60 }),
+    wire("2026-08-10T00:02:00.000Z", "handoff", { worker: "w60", issue: 60 }),
+  ];
+
+  const { state } = run(events.map(toDomainEvent));
+  const compacted: HeroState = { ...state, droplets: state.droplets.filter((d) => d.issue === 60) };
+  const expected60 = dropletPoint(compacted, droplet(compacted, 60)!);
+
+  const html = markup(state);
+  assert.doesNotMatch(html, /⊙ 50/, "the round-1 (historical) handoff droplet must not draw");
+  assert.deepEqual(
+    dropletTransform(html, 60),
+    expected60,
+    "issue 60 must draw at the FIRST compacted backlog slot, not three rows down as if the hidden historical droplet's own handoff-badge reservation still counted",
+  );
+});

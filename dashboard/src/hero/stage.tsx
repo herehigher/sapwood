@@ -540,6 +540,18 @@ export function HeroStage({
   const escalated = drawnNeedsHumanCount;
   const openAttentionCount =
     openAttention === undefined ? state.droplets.filter((d) => d.at === "needs-human").length : openAttention.length;
+  // #891 gate① engine-agent finding [0] (ac1-hidden-ranks-not-compacted): `dropletPoint`'s
+  // needs-human/backlog cases each derive a droplet's RANK (and, for backlog, its slot) from
+  // `state.droplets` filtered by zone — hidden droplets (`hiddenIssues`, above) still sat in that
+  // array, so a historical/resolved/overflow droplet ahead of a DRAWN one in arrival order still
+  // consumed a rank/slot, pushing the drawn droplet further down than the cap accounts for
+  // (backlog's slot counter isn't even bounded, so this could push a droplet below the well's
+  // drawn rect entirely). `geometryState` is what every position computation below reads instead
+  // — the exact same "capped, renumbered view" discipline `withVisibleLanes` already established
+  // for lanes (#716 gate② P1-9's own doc): drawing and RANKING must never disagree about which
+  // droplets exist.
+  const geometryState: HeroState =
+    hiddenIssues.size > 0 ? { ...state, droplets: state.droplets.filter((d) => !hiddenIssues.has(d.issue)) } : state;
   const anyRunning = state.lanes.some((l) => l.phase === "writing" || l.phase === "fixing");
   const activePlanning = activePlanningNode(roundPhase);
   const activeReflection = activeReflectionNode(roundPhase);
@@ -909,7 +921,10 @@ export function HeroStage({
           // nothing either — folded into the combined "+N from earlier" chip below instead
           // (`boundAttentionDroplets`'s own doc).
           if (hiddenIssues.has(d.issue)) return null;
-          const { x, y } = dropletPoint(state, d);
+          // `geometryState`, not `state`: a needs-human/backlog rank must be computed among the
+          // droplets that ACTUALLY draw, never among the hidden ones sitting ahead of it too
+          // (`geometryState`'s own doc above).
+          const { x, y } = dropletPoint(geometryState, d);
           return (
             <g
               className="hero-droplet"
