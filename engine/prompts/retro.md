@@ -106,10 +106,9 @@ If your proposal touches the review doctrine file (`doctrine.file` in config, de
 
 - If the file already exists, its header comment carries binding curation rules — read it
   before drafting and comply on the FIRST draft, not after review. If no doctrine file exists
-  yet — an absent doctrine is a legal state (`loadDoctrine()` returns `NO_DOCTRINE`) — a
-  proposal that creates the file starts from the shipped template
-  (`engine/prompts/doctrine-template.md`), whose header carries the same curation rules, rather
-  than a blank file.
+  yet — an absent doctrine is a legal state — a proposal that creates one follows the shape and
+  header curation rules of the doctrine template sapwood ships (the same template `sapwood init`
+  scaffolds), rather than starting from a blank file.
 - Never write incident narrative or round/PR chronicle into a rule; history compresses to bare
   #NNN anchors, the story stays in the issue/PR the anchor points to.
 - Never state an unconditional present-tense claim about code behavior that the code

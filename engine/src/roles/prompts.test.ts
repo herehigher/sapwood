@@ -275,13 +275,15 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // curation header on first draft. States the header-first-read rule and three negative,
   // single-channel bans (incident narrative, unconditional behavior claims, unfiled-follow-up
   // claims) — the third deliberate edit since #235's tool-scope freeze.
-  // #873 (gate② finding on the section above): an ABSENT doctrine file is a legal state
-  // (doctrine.ts's loadDoctrine() returns NO_DOCTRINE), so a proposal that CREATES the file
-  // can't "read its header first" — gates the header-first-read rule on the file already
-  // existing, and adds the absent-file branch: a creating proposal starts from the shipped
-  // engine/prompts/doctrine-template.md, whose header carries the same curation rules, rather
-  // than a blank file.
-  "retro.md": "10f41e5ad890978a69e360dad2f7a2de1ee9fc3dcd054685dab83e3922e037c4",
+  // #873 (gate② finding on the section above): an ABSENT doctrine file is a legal state, so a
+  // proposal that CREATES the file can't "read its header first" — gates the header-first-read
+  // rule on the file already existing, and adds the absent-file branch: a creating proposal
+  // follows the shape and header curation rules of the doctrine template sapwood ships, rather
+  // than starting from a blank file. PO-review trim (same #873 clause): dropped the
+  // engine-internal `loadDoctrine()`/`NO_DOCTRINE` citation — a retro session can't see engine
+  // source — and the hard `engine/prompts/doctrine-template.md` path, which need not exist in a
+  // target repo's checkout; both replaced with path-free, symbol-free phrasing.
+  "retro.md": "86de53f44e79794be02b781cbb34ad3b0193940305618d047f2180795e6f3456",
   // #529: same categorical→conditional GitHub-access fix as architect.md.
   // #533 proposed removing po-pool's ISSUE_TOOLS grant and substituting each candidate's full
   // body in its place; the owner reversed the grant-removal half only. po-pool KEEPS its
