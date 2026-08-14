@@ -226,10 +226,10 @@ code,
   white-space: nowrap;
 }
 
-/* §5 quality floor: visible keyboard focus, --sap outline. */
+/* §5 quality floor: visible keyboard focus, the shared --focus-ring token. */
 :focus-visible {
-  outline: 2px solid var(--sap);
-  outline-offset: 2px;
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 /* §5 quality floor: modules stack at 720 px. */
@@ -271,7 +271,7 @@ code,
   position: fixed;
   top: 0;
   right: 0;
-  z-index: 20;
+  z-index: var(--z-drawer);
   width: min(88vw, 380px);
   height: 100vh;
   overflow-y: auto;

@@ -18,3 +18,7 @@ __pycache__/
 
 # Browser-automation session artifacts (claude-in-chrome / playwright-mcp)
 .playwright-mcp/
+
+# `npm run shots` (dashboard/shots) output — captures + generated contact sheet, regenerated
+# on every run, never a committed artifact.
+dashboard/shots-output/

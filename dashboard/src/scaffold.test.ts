@@ -4,8 +4,20 @@ import test from "node:test";
 
 const read = (rel: string) => JSON.parse(readFileSync(new URL(rel, import.meta.url), "utf8"));
 
-// frontend-design.md §2 "Weight budget" — the acceptance bar, checked at review.
-const ALLOWED_RUNTIME_DEPS = ["@tanstack/react-query", "animejs", "react", "react-dom"];
+// frontend-design.md §2 dependency budget — the acceptance bar, checked at review. A new
+// runtime dependency needs a same-PR update here AND a §2 adjudication-table row (owner
+// adjudication 2026-08-14).
+const ALLOWED_RUNTIME_DEPS = [
+  "@fontsource-variable/jetbrains-mono",
+  "@radix-ui/react-popover",
+  "@radix-ui/react-tooltip",
+  "@tanstack/react-query",
+  "animejs",
+  "clsx",
+  "lucide-react",
+  "react",
+  "react-dom",
+];
 
 test("root package.json lists dashboard as a workspace", () => {
   // §9: without this, root -ws build/test/typecheck silently skip the package and CI lies.
@@ -13,10 +25,9 @@ test("root package.json lists dashboard as a workspace", () => {
   assert.ok(root.workspaces.includes("dashboard"), `workspaces=${JSON.stringify(root.workspaces)}`);
 });
 
-test("runtime dependencies stay inside the §2 weight budget", () => {
+test("runtime dependencies stay inside the §2 dependency budget", () => {
   const pkg = read("../package.json");
   const deps = Object.keys(pkg.dependencies).sort();
-  assert.ok(deps.length <= 5, `${deps.length} runtime deps`);
   assert.deepEqual(deps, ALLOWED_RUNTIME_DEPS);
 });
 
