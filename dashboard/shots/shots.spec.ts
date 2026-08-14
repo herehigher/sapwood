@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
@@ -36,6 +36,12 @@ const MODULE_SELECTORS: Record<string, string[]> = {
 // per-module comparison rows pair against.
 const CANONICAL_WIDTH = 1440;
 
+// A stale capture left over from a PREVIOUS run would let `missingCaptures()` below pass on a
+// selector that matches nothing THIS run — the presence assertion is only honest evidence if
+// this run's files are the only files it can see. Wipe captures/mockups before every run;
+// `contact-sheet.html` gets overwritten unconditionally by `buildContactSheet()` regardless.
+rmSync(CAPTURES_DIR, { recursive: true, force: true });
+rmSync(MOCKUPS_OUT_DIR, { recursive: true, force: true });
 for (const dir of [OUTPUT_DIR, CAPTURES_DIR, MOCKUPS_OUT_DIR]) {
   mkdirSync(dir, { recursive: true });
 }
@@ -63,6 +69,15 @@ test("capture the ?demo fixture across viewports/themes and build the contact sh
     }
   }
 
+  // Every module's selector chain (the `lanes` fallback included — the chain only guarantees
+  // "one of these matched", not which one) must have matched SOMETHING at every
+  // viewport/theme combination. A selector miss here (a renamed aria-label, a removed id) is a
+  // real regression the run should fail on, not a gap the contact sheet quietly omits a row
+  // for. Presence-of-evidence assertion, not a pixel comparison — the no-pixel-diff stance
+  // stands.
+  const missing = missingCaptures();
+  expect(missing, `missing crop captures (a module selector matched nothing):\n${missing.join("\n")}`).toEqual([]);
+
   buildContactSheet();
   expect(existsSync(`${OUTPUT_DIR}/contact-sheet.html`)).toBe(true);
 });
@@ -73,6 +88,21 @@ async function firstMatch(page: Page, selectors: string[]): Promise<Locator | nu
     if ((await locator.count()) > 0) return locator;
   }
   return null;
+}
+
+/** Every module × viewport × theme crop the capture loop above is supposed to have written —
+ *  anything absent means a selector chain matched nothing for that combination. */
+function missingCaptures(): string[] {
+  const missing: string[] = [];
+  for (const width of VIEWPORTS) {
+    for (const theme of THEMES) {
+      for (const moduleKey of Object.keys(MODULE_SELECTORS)) {
+        const file = `${CAPTURES_DIR}/${width}-${theme.key}-${moduleKey}.png`;
+        if (!existsSync(file)) missing.push(file);
+      }
+    }
+  }
+  return missing;
 }
 
 type PairRow = { moduleKey: string; theme: string; mockup: string; capture: string };
@@ -88,12 +118,21 @@ function buildContactSheet(): void {
     const theme = match?.[2];
     if (!moduleKey || !theme || !(moduleKey in MODULE_SELECTORS)) continue;
     const capture = `captures/${CANONICAL_WIDTH}-${theme}-${moduleKey}.png`;
-    if (!existsSync(`${OUTPUT_DIR}/${capture}`)) continue;
+    // `missingCaptures()` (called before this function ever runs) already asserts every
+    // module/viewport/theme crop exists — a miss here is that invariant broken, not a
+    // legitimate "no mockup" gap, so this fails loud rather than silently dropping the row
+    // and getting mislabeled alongside the real no-mockup case below.
+    if (!existsSync(`${OUTPUT_DIR}/${capture}`)) {
+      throw new Error(`invariant violated: capture missing for an existing mockup pairing (${capture})`);
+    }
     pairRows.push({ moduleKey, theme, mockup: `mockups/${file}`, capture });
   }
 
+  // Modules with genuinely no frozen mockup PNG on disk for either theme — never a
+  // capture-presence gap (the throw above rules that out), the honest "no baseline to compare
+  // against yet" case.
   const pairedModules = new Set(pairRows.map((r) => r.moduleKey));
-  const uncoveredModules = Object.keys(MODULE_SELECTORS).filter((m) => !pairedModules.has(m));
+  const modulesWithNoMockup = Object.keys(MODULE_SELECTORS).filter((m) => !pairedModules.has(m));
 
   const rowsHtml = pairRows
     .map(
@@ -116,10 +155,10 @@ function buildContactSheet(): void {
     ),
   ).join("");
 
-  const uncoveredNote = uncoveredModules.length
-    ? `<p class="note">No frozen mockup for: ${uncoveredModules.join(", ")} — see these in the full-page
-       captures below (and the activity feed / replay transport / icon rail, which have no per-module
-       mockup at all, are visible only there).</p>`
+  const noMockupNote = modulesWithNoMockup.length
+    ? `<p class="note">Module captured, no frozen mockup exists yet, for: ${modulesWithNoMockup.join(", ")} —
+       see these in the full-page captures below (and the activity feed / replay transport / icon rail,
+       which have no per-module mockup at all, are visible only there).</p>`
     : "";
 
   const html = `<!doctype html>
@@ -146,7 +185,7 @@ function buildContactSheet(): void {
 
 <h2>Per-module comparisons (${CANONICAL_WIDTH}px)</h2>
 <table>${rowsHtml || "<tr><td>No mockup/capture pairs found.</td></tr>"}</table>
-${uncoveredNote}
+${noMockupNote}
 
 <h2>Full-page captures — every viewport × theme combination</h2>
 <table>${fullPageRowsHtml}</table>
