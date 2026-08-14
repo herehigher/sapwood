@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { EngineState } from "../api/types.ts";
+import { registerRealDom } from "../test-dom.ts";
 import { type EngineFacts, Header, resolveSpendMeter, showsPauseChip } from "./Header.tsx";
+
+registerRealDom();
 
 const panelsCss = readFileSync(new URL("../panels.css", import.meta.url), "utf8");
 
@@ -192,14 +195,47 @@ test("a null budgetUsd on `round` (artifact-less round) renders the used amount 
   assert.doesNotMatch(html, /\$3\.14 \//);
 });
 
-// #879: frozen baseline — the spend meter's mono value renders bold with even letter-spacing,
-// matching the hero section headers' own weight bump (hero.css's `.hero-phase`).
-test("#879: the spend meter value's CSS carries bold weight and letter-spacing", () => {
+// #879 gate② finding [1]: same discipline as hero.test.ts's paired fix — a regex read of the
+// stylesheet TEXT proves the rule was authored, not that it cascades onto a rendered element, and
+// the original `letter-spacing:` check accepted ANY value. This mounts the real <Header> markup
+// into a REAL DOM (`registerRealDom()`, happy-dom) with `panelsCss` injected as an actual <style>
+// element, then reads `getComputedStyle` off the matched element for the exact shipped values.
+// Unlike `.hero-phase` (hero.test.ts), this rule declares no font-size of its own, so happy-dom's
+// em-resolution (which uses the inherited/default font-size) is trustworthy here — both properties
+// are asserted at their exact computed value, not just "applied".
+test("#879 gate② finding [1]: the spend meter value renders bold at the exact shipped weight/letter-spacing, proven against a real cascade — not a read of the stylesheet text", () => {
+  const style = document.createElement("style");
+  style.textContent = panelsCss;
+  document.head.appendChild(style);
+  const container = document.createElement("div");
+  container.innerHTML = renderToStaticMarkup(
+    <Header disconnected={false} isPending={false} engine={engine("running")} spend={SPEND_OK} parked={false} />,
+  );
+  document.body.appendChild(container);
+  try {
+    const valueEl = container.querySelector(".spend-meter-value");
+    assert.ok(valueEl, "a real .spend-meter-value element must render and match the injected stylesheet's selector");
+    const computed = getComputedStyle(valueEl as Element);
+    assert.equal(
+      computed.fontWeight,
+      "600",
+      "the cascade must actually apply the bold weight to the rendered element, not just declare it in source",
+    );
+    assert.equal(
+      computed.letterSpacing,
+      "0.32px",
+      "0.02em against the inherited 16px default — the exact shipped value, not just 'some' letter-spacing",
+    );
+  } finally {
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+
   const match = panelsCss.match(/\.spend-meter-value\s*\{([^}]*)\}/);
   assert.ok(match, ".spend-meter-value rule must exist");
   const body = match?.[1] as string;
   assert.match(body, /font-weight:\s*600/);
-  assert.match(body, /letter-spacing:/);
+  assert.match(body, /letter-spacing:\s*0\.02em\b/, "pin the exact shipped value — not a wildcard letter-spacing check");
 });
 
 test("does not render, import, or re-implement the legend", () => {

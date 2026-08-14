@@ -4,6 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { DomainEvent } from "../domain-event.ts";
+import { registerRealDom } from "../test-dom.ts";
 import { LEGEND_ITEMS, Legend } from "./Legend.tsx";
 import { BACKLOG, checkpointOverflowPoint, dropletPoint, GATES, HeroStage, STAGE, TRUNK } from "./stage.tsx";
 import {
@@ -37,6 +38,8 @@ const ev = (kind: string, payload: Record<string, unknown> = {}): DomainEvent =>
   kind,
   payload,
 });
+
+registerRealDom();
 
 /** Fold a script from a fresh stage; the tests assert on both halves of the result. */
 const run = (events: DomainEvent[], lanesMax: number | null = 3) => foldEvents(initialHeroState(lanesMax), events);
@@ -732,12 +735,47 @@ test("the ring count and the PLAN/IMPLEMENT/OUTCOME phase captions render with -
 
 // ── #879: hero panel typography + chip/card/icon detailing (fidelity-ledger rows 1, 2, 7) ──
 
-test("#879: PLAN/IMPLEMENT/OUTCOME headers are bold with even letter-spacing — font-family stays Fraunces, per #728's own adjudication against this exact mockup", () => {
+// #879 gate② finding [1]: a regex read of the stylesheet TEXT proves the rule was authored, not
+// that it actually cascades onto a rendered element — and the original wildcard (`0\.\d+em`)
+// would pass for any letter-spacing at all, not the shipped 0.18em specifically. This test
+// mounts the real markup into a REAL DOM (`registerRealDom()`, happy-dom) with `heroCss` injected
+// as an actual `<style>` element, then reads `getComputedStyle` off the matched element — proof
+// the selector matches and the cascade applies, not just that the source text contains the rule.
+test("#879 gate② finding [1]: PLAN/IMPLEMENT/OUTCOME headers render bold at the exact shipped weight/letter-spacing, proven against a real cascade — not a read of the stylesheet text", () => {
+  const style = document.createElement("style");
+  style.textContent = heroCss;
+  document.head.appendChild(style);
+  const container = document.createElement("div");
+  container.innerHTML = markup(initialHeroState(3));
+  document.body.appendChild(container);
+  try {
+    const phaseEl = container.querySelector(".hero-phase");
+    assert.ok(phaseEl, "a real .hero-phase element must render and match the injected stylesheet's selector");
+    const computed = getComputedStyle(phaseEl as Element);
+    assert.equal(
+      computed.fontWeight,
+      "600",
+      "the cascade must actually apply the bold weight to the rendered element, not just declare it in source",
+    );
+    assert.equal(computed.fontSize, "13px");
+    // happy-dom resolves an `em` letter-spacing against the DEFAULT 16px font-size, not this
+    // element's own cascaded 13px, when both are set in the same rule — reproduced directly: a
+    // `{ font-size: 13px; letter-spacing: 0.18em }` rule computes 2.88px (16*0.18) here, never a
+    // real browser's 2.34px (13*0.18). Asserting an exact computed px would pin happy-dom's own
+    // resolution bug as "correct", not the real cascade — so the exact VALUE is pinned against
+    // the CSS source below instead (tightened from a `0\.\d+em` wildcard to the literal shipped
+    // value); this computed check proves only that letter-spacing genuinely applied (non-default).
+    assert.notEqual(computed.letterSpacing, "normal", "letter-spacing must actually apply to the rendered element");
+  } finally {
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+
   const match = heroCss.match(/\.hero-phase\s*\{([^}]*)\}/);
   assert.ok(match, ".hero-phase rule must exist");
   const body = match?.[1] as string;
   assert.match(body, /font-weight:\s*600/);
-  assert.match(body, /letter-spacing:\s*0\.\d+em/);
+  assert.match(body, /letter-spacing:\s*0\.18em\b/, "pin the exact shipped value — not a wildcard 0.xem");
   assert.match(
     body,
     /font-family:\s*var\(--font-display\)/,
