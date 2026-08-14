@@ -15,12 +15,14 @@
 
 import type { KeyboardEvent, Ref } from "react";
 import { readConfigPath } from "../config-captions.ts";
+import type { DomainEvent } from "../domain-event.ts";
 import type { StageNode } from "../inspector.ts";
 import {
   activePlanningNode,
   activeReflectionNode,
   type Droplet,
   type DropletAt,
+  ESCALATION_KINDS,
   type HeroState,
   isPendingConfident,
   withVisibleLanes,
@@ -107,14 +109,18 @@ export const ESCALATION = { x: 810, y: 320 } as const;
  * - 34px row step: below a droplet's label-top-to-circle-bottom span, consecutive rows'
  *   droplets would overlap each other the same way.
  *
- * ponytail: verified collision-free up to 6 simultaneously escalated droplets (3 rows) —
- * the 4th row would reach the CI/REVIEW gates above. No live probe has reported anywhere near
- * that many at once; revisit (spill sideways past the gates, or cap+overflow-badge) if one
- * does.
+ * Verified collision-free up to 6 simultaneously DRAWN escalated droplets (3 rows) — the 4th
+ * row would reach the CI/REVIEW gates above. #891 (a live DB's real scale DID eventually report
+ * more than that) is the revisit this file's own ponytail note flagged: `NEEDS_HUMAN_DRAW_CAP`
+ * below caps what actually draws at this verified-safe ceiling, folding the rest into
+ * `boundAttentionDroplets`'s collapsed counter chip instead of growing the grid further.
  */
 const NEEDS_HUMAN_COLS = 2;
 const NEEDS_HUMAN_COL_STEP = 38;
 const NEEDS_HUMAN_ROW_STEP = 34;
+/** #891 AC1: never draw more than this many needs-human droplets at once — see the doc above
+ *  this cluster's own geometry constants for why 6 (2 cols × 3 rows) is the verified ceiling. */
+const NEEDS_HUMAN_DRAW_CAP = NEEDS_HUMAN_COLS * 3;
 /**
  * #745 gate② round 2 finding [1]: EVERY simultaneously-`at: "checkpoint"` droplet used to draw
  * at one fixed point — unlike `backlog` (slot counter) and `needs-human` (this same col/row
@@ -299,6 +305,61 @@ export function dropletPoint(state: HeroState, d: Droplet, at: DropletAt = d.at)
 }
 
 /**
+ * #891 AC1: which `backlog`/`needs-human` droplets to actually DRAW, and how many collapse into
+ * the single "+N from earlier rounds" counter chip instead — the fix for a live DB's real scale
+ * piling weeks-old escalated/parked droplets onto the stage forever (this cluster's own former
+ * ponytail note on NEEDS_HUMAN_COLS/STEP predicted exactly this once a live probe hit it).
+ *
+ * `openAttention`, when the caller has it (App.tsx always does in production — `undefined` here
+ * means only "this render doesn't know," never "nothing is open"), is `entities.ts`'s
+ * `foldOpenAttention` result — the SAME durable fold the needs-attention strip renders from
+ * (#891 AC2's "single source"). A `needs-human` droplet whose own escalation event is no longer
+ * in that set was resolved by something other than a fresh dispatch/merge (§3: an
+ * `escalation-resolved` naming a different resolution path) — this file's own droplet `at` never
+ * learns that on its own, so without this check a resolved-weeks-ago droplet would keep drawing
+ * forever. `undefined` (caller doesn't have the fold) degrades to the OLD unfiltered behavior —
+ * never hiding a droplet this function can't actually confirm is resolved.
+ *
+ * Independent of the fold: a droplet nothing has touched since an OLDER round (`Droplet.roundId`
+ * — re-stamped to the current round on every move) is historical regardless of whether its
+ * attention is still technically open — an issue escalated three weeks ago and still unresolved
+ * is exactly the strip's job to keep surfacing, not the stage's.
+ */
+function boundAttentionDroplets(
+  state: HeroState,
+  openAttention: readonly DomainEvent[] | undefined,
+): { hiddenIssues: Set<number>; drawnNeedsHumanCount: number; collapsedCount: number } {
+  const openEscalatedIssues =
+    openAttention === undefined
+      ? null
+      : new Set(
+          openAttention
+            .filter((e) => ESCALATION_KINDS.has(e.kind))
+            .map((e) => e.payload?.issue)
+            .filter((issue): issue is number => typeof issue === "number"),
+        );
+  const isConfirmedOpen = (d: Droplet) => openEscalatedIssues === null || openEscalatedIssues.has(d.issue);
+  const isCurrentRound = (d: Droplet) => d.roundId === state.roundId || d.roundId === null;
+
+  const needsHuman = state.droplets.filter((d) => d.at === "needs-human");
+  const resolved = needsHuman.filter((d) => !isConfirmedOpen(d));
+  const confirmedOpen = needsHuman.filter(isConfirmedOpen);
+  const currentRoundOpen = confirmedOpen.filter(isCurrentRound);
+  const historicalOpen = confirmedOpen.filter((d) => !isCurrentRound(d));
+  const overflow = currentRoundOpen.slice(NEEDS_HUMAN_DRAW_CAP);
+
+  const historicalBacklog = state.droplets.filter((d) => d.at === "backlog" && !isCurrentRound(d));
+
+  const hiddenIssues = new Set([...resolved, ...historicalOpen, ...overflow, ...historicalBacklog].map((d) => d.issue));
+
+  return {
+    hiddenIssues,
+    drawnNeedsHumanCount: currentRoundOpen.length - overflow.length,
+    collapsedCount: historicalOpen.length + overflow.length + historicalBacklog.length,
+  };
+}
+
+/**
  * The fixed slot the checkpoint zone's "+N more" overflow badge draws at — the FIRST cell of
  * the grid's LAST row (`CHECKPOINT_OVERFLOW_REAL_CAP`), which the real-chip draw loop leaves
  * empty specifically so the badge never shares a row with a real chip's label (see that
@@ -374,6 +435,16 @@ export type HeroStageProps = {
   /** §6 phase inspector (#861): fired with the clicked node's identity. Absent renders every
    *  stage node with no click/keyboard affordance at all (the feature is additive-only). */
   onInspect?: ((node: StageNode) => void) | undefined;
+  /**
+   * #891 AC1/AC2: `entities.ts`'s `foldOpenAttention` result — the SAME fold the needs-attention
+   * strip renders from (`App.tsx`'s `activeOpenAttention`). Drives BOTH the bounded needs-human
+   * droplet drawing (`boundAttentionDroplets`) and the outcome-tally/aria-label "needs human"
+   * count, so the stage and the strip can never read two different numbers for the same fact.
+   * `undefined` (a caller that hasn't wired this yet) degrades to the pre-#891 behavior on both:
+   * every `at: "needs-human"` droplet still draws, and the tally/aria count falls back to that
+   * same raw droplet count — an honest "don't know" never means "hide everything."
+   */
+  openAttention?: readonly DomainEvent[] | undefined;
   ref?: Ref<SVGSVGElement>;
 };
 
@@ -448,6 +519,7 @@ export function HeroStage({
   liveLanes = [],
   mergedPrs = [],
   onInspect,
+  openAttention,
   ref,
 }: HeroStageProps) {
   // #716 gate② P1-9: every downstream position/render computation reads the CAPPED,
@@ -457,7 +529,17 @@ export function HeroStage({
   const clock = now ?? new Date();
   const waiting = state.droplets.some((d) => d.at === "checkpoint");
   const gateState = waiting ? "waiting" : "idle";
-  const escalated = state.droplets.filter((d) => d.at === "needs-human").length;
+  // #891 AC1/AC2: `escalatedDrawn` bounds what actually DRAWS in the needs-human cluster
+  // (never more than `NEEDS_HUMAN_DRAW_CAP`, never a droplet resolved or left over from an
+  // earlier round); `openAttentionCount` is the tally/aria-label's own number — the SHARED
+  // fold's total, matching the strip exactly, deliberately NOT the same figure as what's drawn
+  // (a bounded stage view and an honest count are different jobs — see `boundAttentionDroplets`'s
+  // own doc). `openAttention === undefined` (caller hasn't wired the fold) falls back to the
+  // pre-#891 raw droplet count for BOTH, never a fabricated zero.
+  const { hiddenIssues, drawnNeedsHumanCount, collapsedCount } = boundAttentionDroplets(state, openAttention);
+  const escalated = drawnNeedsHumanCount;
+  const openAttentionCount =
+    openAttention === undefined ? state.droplets.filter((d) => d.at === "needs-human").length : openAttention.length;
   const anyRunning = state.lanes.some((l) => l.phase === "writing" || l.phase === "fixing");
   const activePlanning = activePlanningNode(roundPhase);
   const activeReflection = activeReflectionNode(roundPhase);
@@ -489,8 +571,8 @@ export function HeroStage({
   const windowedWord = state.foldTruncated ? "in window" : "unverified";
   const outcomeTally =
     windowedCount > 0
-      ? `${state.roundMerged} merged · ${pendingCount} pending (${windowedCount} ${windowedWord}) · ${escalated} needs human`
-      : `${state.roundMerged} merged · ${pendingCount} pending · ${escalated} needs human`;
+      ? `${state.roundMerged} merged · ${pendingCount} pending (${windowedCount} ${windowedWord}) · ${openAttentionCount} needs human`
+      : `${state.roundMerged} merged · ${pendingCount} pending · ${openAttentionCount} needs human`;
   // #716 gate② round 2 P2-5: the fix-return arrow's own label (§6: "labeled with the send-back
   // reason") — the first currently-fixing lane, in channel order.
   const fixingReason = state.lanes.find((l) => l.phase === "fixing")?.reason ?? null;
@@ -516,7 +598,13 @@ export function HeroStage({
       data-motion={reducedMotion ? "reduced" : "full"}
       data-running={anyRunning ? "true" : "false"}
       role="img"
-      aria-label={`Loop stage: ${state.rings} merged pull request${state.rings === 1 ? "" : "s"} so far, ${escalated} item${escalated === 1 ? "" : "s"} waiting on a person. The activity feed carries the same information as text.`}
+      // #891 AC4: two scope-named clauses, never mixed into one — "all-time" (the trunk ring
+      // count, `state.rings`) is a wholly different fact from "this round" (`state.roundMerged`)
+      // and the currently-open attention count (its own honest "currently" scope: an item can
+      // stay open across many rounds, so it is never claimed as "this round" either — see
+      // `openAttentionCount`'s own doc). The old single-clause wording mixed exactly these two
+      // (frontend-design.md §6 keeps them deliberately distinct).
+      aria-label={`Loop stage: ${state.rings} merged pull request${state.rings === 1 ? "" : "s"} all-time. This round: ${state.roundMerged} merged. ${openAttentionCount} item${openAttentionCount === 1 ? "" : "s"} currently waiting on a person. The activity feed carries the same information as text.`}
     >
       {/* ── Phase captions — §5: the big display face, sparingly ── */}
       <text className="hero-phase" style={{ fontFamily: "var(--font-display)" }} x={176} y={26} textAnchor="middle">
@@ -817,6 +905,10 @@ export function HeroStage({
           // capacity draws NOTHING for this droplet individually — it's folded into the single
           // "+N more" badge below instead, never an above-viewBox chip.
           if (hiddenCheckpointIssues.has(d.issue)) return null;
+          // #891 AC1: a resolved, historical-round, or needs-human-cap-overflow droplet draws
+          // nothing either — folded into the combined "+N from earlier" chip below instead
+          // (`boundAttentionDroplets`'s own doc).
+          if (hiddenIssues.has(d.issue)) return null;
           const { x, y } = dropletPoint(state, d);
           return (
             <g
@@ -858,6 +950,22 @@ export function HeroStage({
               </g>
             );
           })()}
+        {/* #891 AC1: droplets `boundAttentionDroplets` excluded for being resolved, from an
+         * earlier round, or beyond the needs-human draw cap collapse here — ONE combined chip
+         * rather than a per-zone one, since to the viewer they're all the same fact ("more is
+         * waiting than the stage shows right now — see the strip/feed"). Sits below the backlog
+         * well, an area nothing else on the stage ever draws into. */}
+        {collapsedCount > 0 && (
+          <text
+            className="hero-num hero-small hero-badge hero-attention-collapsed"
+            data-count={collapsedCount}
+            x={BACKLOG.x + BACKLOG.w / 2}
+            y={BACKLOG.y + 210 + 24}
+            textAnchor="middle"
+          >
+            +{collapsedCount} from earlier — see the strip
+          </text>
+        )}
       </g>
     </svg>
   );

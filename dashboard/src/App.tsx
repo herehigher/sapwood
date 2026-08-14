@@ -478,7 +478,14 @@ export function appContent(vm: AppViewModel) {
           now={clock}
         />
 
-        <NeedsAttention items={activeOpenAttention} titles={activeTitles} repoUrl={repoUrl} now={clock} onInspect={onInspect} />
+        <NeedsAttention
+          items={activeOpenAttention}
+          titles={activeTitles}
+          repoUrl={repoUrl}
+          now={clock}
+          onInspect={onInspect}
+          roundEscalated={activeHero.roundEscalated}
+        />
 
         {loop.data && (
           <Hero
@@ -492,6 +499,7 @@ export function appContent(vm: AppViewModel) {
             roundPhase={mode === "live" ? (loop.data.round?.phase ?? null) : null}
             config={loop.data.config}
             onInspect={onInspect}
+            openAttention={activeOpenAttention}
           />
         )}
 

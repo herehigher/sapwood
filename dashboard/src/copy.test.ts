@@ -14,6 +14,7 @@ import {
   type EventKind,
   engineStateCaption,
   hasAttention,
+  isDissentSignal,
   type SentencePart,
 } from "./copy.ts";
 
@@ -681,6 +682,15 @@ test("every attention-marked kind has exactly one category chip, and no non-atte
 
 test("attentionCategory returns undefined for an unrecognized kind, never a fabricated label", () => {
   assert.equal(attentionCategory("some-future-kind-nobody-registered-yet"), undefined);
+});
+
+// ── #891: the strip summary line's "dissent" signal ───────────────────────────────────────────
+
+test("isDissentSignal names only fix-leg-verdict-rerun — the closest real signal, not a fabricated one", () => {
+  assert.equal(isDissentSignal("fix-leg-verdict-rerun"), true);
+  assert.equal(isDissentSignal("drive-needs-human"), false);
+  assert.equal(isDissentSignal("fix-rounds-capped"), false);
+  assert.equal(isDissentSignal("some-future-kind-nobody-registered-yet"), false);
 });
 
 // ── #723: the header's engine-state caption (§7 convention, applied to the §3 A engine word) ──

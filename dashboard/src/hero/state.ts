@@ -52,6 +52,15 @@ export type Droplet = {
    * drawn at, not wherever rank 0 happens to be now.
    */
   checkpointRank: number | null;
+  /**
+   * The `roundId` this droplet was last touched under (whatever `draft.roundId` held at its
+   * most recent `moveDroplet`) — `null` until the fold has ever seen a round boundary. #891
+   * AC1: the stage's own bounding (`stage.tsx`'s `boundNeedsHuman`/`boundBacklog`) reads this
+   * to tell "still part of the OPEN round's story" apart from "left over from an earlier
+   * round" — a droplet touched again (re-dispatched, escalated afresh, …) always re-stamps to
+   * the CURRENT round, so only genuinely untouched-since-an-older-round droplets collapse.
+   */
+  roundId: number | null;
 };
 
 export type LanePhase = "idle" | "writing" | "driving" | "fixing" | "failed";
@@ -105,6 +114,16 @@ export type HeroState = {
   /** `merged` events folded since `roundId` last changed — the tally's "N merged", distinct
    *  from `rings` (the all-time trunk count). */
   roundMerged: number;
+  /**
+   * #891: `ESCALATION_KINDS` events folded since `roundId` last changed — a raw, NEVER
+   * decremented count (unlike `entities.ts`'s `foldOpenAttention`, which clears an entry once
+   * it resolves). This is the "did anything escalate this round" fact the strip's
+   * reconciliation sentence needs: a round can escalate 3 issues and have every one resolved
+   * by the time anyone looks — `foldOpenAttention` alone would show an empty, unexplained
+   * strip, indistinguishable from "nothing ever happened" — this number is what tells those
+   * two honestly-different states apart.
+   */
+  roundEscalated: number;
   /**
    * Whether the events this fold has actually been given are known to be an incomplete slice
    * of the full history — set by the caller (`queries.ts`'s `withFoldTruncated`, live catch-up:
@@ -172,6 +191,7 @@ export function initialHeroState(lanesMax: number | null): HeroState {
     lastEventTs: null,
     roundId: null,
     roundMerged: 0,
+    roundEscalated: 0,
     foldTruncated: false,
   };
 }
@@ -338,8 +358,10 @@ const str = (v: unknown): string | null => (typeof v === "string" && v.length > 
 /** Failure kinds that stop a droplet where it stands (§6 last-but-one row). */
 const FAILURE_KINDS = new Set(["reclaim-failed", "reclaim-dead", "rollback-escalated"]);
 
-/** The three kinds that cross onto the rust escalation branch (§6). */
-const ESCALATION_KINDS = new Set(["fix-rounds-capped", "fix-leg-verdict-rerun", "drive-needs-human"]);
+/** The three kinds that cross onto the rust escalation branch (§6). Exported so `stage.tsx`
+ *  (#891) can match a currently-open `foldOpenAttention` entry back to "is this specifically an
+ *  escalation, not some other attention category" without re-deriving the list. */
+export const ESCALATION_KINDS = new Set(["fix-rounds-capped", "fix-leg-verdict-rerun", "drive-needs-human"]);
 
 /**
  * …but two of the failure kinds are also the engine's *recovery* paths.
@@ -362,6 +384,7 @@ type Draft = {
   lastEventTs: string | null;
   roundId: number | null;
   roundMerged: number;
+  roundEscalated: number;
 };
 
 /** Either round-boundary event's `round_id` field (engine payload, snake_case verbatim —
@@ -446,8 +469,12 @@ function moveDroplet(draft: Draft, issue: number, id: number, patch: Partial<Dro
     sendBack: null,
     touchedAt: id,
     checkpointRank: null,
+    roundId: draft.roundId,
   };
-  const next = { ...current, failed: false, ...patch, touchedAt: id };
+  // Every move re-stamps `roundId` to the round CURRENTLY open — "the round of this droplet's
+  // most recent activity" (`Droplet.roundId`'s own doc). Only a droplet nothing has touched
+  // since an earlier round keeps that earlier stamp, which is exactly what marks it historical.
+  const next = { ...current, failed: false, ...patch, touchedAt: id, roundId: draft.roundId };
   draft.droplets.set(issue, next);
 
   // The lane's ✕ is the same mark on the other end of the wire: a channel still pinned to an
@@ -480,6 +507,7 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
   if (roundId !== null && roundId !== draft.roundId) {
     draft.roundId = roundId;
     draft.roundMerged = 0;
+    draft.roundEscalated = 0;
   }
 
   // Any event naming both an issue and a PR teaches that droplet its number, whether or not
@@ -626,6 +654,7 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
         if (issue === null) return null;
         releaseLane(laneOf(draft, worker));
         const d = moveDroplet(draft, issue, id, { at: "needs-human", ...(pr !== null ? { pr } : {}) });
+        draft.roundEscalated += 1;
         return { kind: "escalate", id, issue, pr: d.pr };
       }
 
@@ -701,6 +730,7 @@ function snapshotDraft(draft: Draft, laneCountUnknown: boolean, foldTruncated: b
     lastEventTs: draft.lastEventTs,
     roundId: draft.roundId,
     roundMerged: draft.roundMerged,
+    roundEscalated: draft.roundEscalated,
     foldTruncated,
   };
 }
@@ -740,6 +770,7 @@ export function foldEvents(state: HeroState, events: DomainEvent[]): { state: He
     lastEventTs: state.lastEventTs,
     roundId: state.roundId,
     roundMerged: state.roundMerged,
+    roundEscalated: state.roundEscalated,
   };
 
   const transitions: Transition[] = [];

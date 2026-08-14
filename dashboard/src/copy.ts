@@ -656,6 +656,17 @@ export function attentionCategory(kind: string): string | undefined {
   return isKnownKind(kind) ? ATTENTION_CATEGORY[kind] : undefined;
 }
 
+/** #891: the strip's summary line ("N waiting · oldest Xd · M dissent") needs a "dissent" count
+ *  — the mockup's own illustrative DISSENT chip has no backing event kind in this engine at all
+ *  (this file's `ATTENTION_CATEGORY` doc already says so). `fix-leg-verdict-rerun` is the
+ *  narrowest REAL match: its own sentence ("review findings aren't fixable by the producer") is
+ *  precisely a verdict the producer can't act on and a human must adjudicate — the nearest thing
+ *  to "dissent" this vocabulary actually has, not a guess at a nonexistent field. A future kind
+ *  literally named for reviewer disagreement should replace this, not add to it. */
+export function isDissentSignal(kind: string): boolean {
+  return kind === "fix-leg-verdict-rerun";
+}
+
 /** "The same module captions lane states" (§7) — a lane's `state` word, in plain language.
  *  Only `running`/`driving`/`fixing` are ever actually served (state.ts's `activeWorkers()`
  *  reads `WHERE state IN ('running','driving','fixing')`); `handoff` is captioned anyway since

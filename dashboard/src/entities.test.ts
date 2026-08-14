@@ -6,7 +6,7 @@ import test from "node:test";
 import { CLEAR_KINDS } from "../../engine/src/loop/escalation-reconcile.ts";
 import type { EventKind } from "./copy.ts";
 import type { DomainEvent, KnownDomainEvent, UnknownDomainEvent } from "./domain-event.ts";
-import { foldEntityTitles, foldOpenAttention, ISSUE_CLEAR_KINDS } from "./entities.ts";
+import { attentionSummary, foldEntityTitles, foldOpenAttention, ISSUE_CLEAR_KINDS } from "./entities.ts";
 
 // `kind: EventKind`, not a bare `string` — #715 gate② round 4 [0] / round 5 [0]: `entities.ts`
 // consumes `DomainEvent`, so its fixtures are `KnownDomainEvent`s directly (the shape
@@ -312,4 +312,25 @@ test("foldOpenAttention: an unknown-kind event never opens an attention entry (h
   };
   assert.doesNotThrow(() => foldOpenAttention([unknown]));
   assert.deepEqual(foldOpenAttention([unknown]), {});
+});
+
+// ── #891: attentionSummary — the strip's header line ("N waiting · oldest Xd · M dissent") ────
+
+test("attentionSummary: waiting is the item count, oldestDays floors the OLDEST item's age, dissent counts only fix-leg-verdict-rerun", () => {
+  const now = new Date("2026-08-10T12:00:00.000Z");
+  const items = [
+    event(1, "drive-needs-human", { issue: 10, pr: 1 }), // ts below
+    event(2, "fix-leg-verdict-rerun", { issue: 20, pr: 2 }),
+    event(3, "rollback-escalated", { issue: 30 }),
+  ].map((e, i) => ({ ...e, ts: ["2026-08-05T12:00:00.000Z", "2026-08-08T12:00:00.000Z", "2026-08-10T11:00:00.000Z"][i] as string }));
+  assert.deepEqual(attentionSummary(items, now), { waiting: 3, oldestDays: 5, dissent: 1 });
+});
+
+test("attentionSummary: an empty list is 0 waiting, 0 oldestDays (never NaN/negative), 0 dissent", () => {
+  assert.deepEqual(attentionSummary([], new Date("2026-08-10T12:00:00.000Z")), { waiting: 0, oldestDays: 0, dissent: 0 });
+});
+
+test("attentionSummary: an item open for under a day reads oldest 0d, not rounded up", () => {
+  const items = [event(1, "drive-needs-human", { issue: 10, pr: 1 })].map((e) => ({ ...e, ts: "2026-08-10T11:00:00.000Z" }));
+  assert.equal(attentionSummary(items, new Date("2026-08-10T12:00:00.000Z")).oldestDays, 0);
 });
