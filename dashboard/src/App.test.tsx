@@ -535,16 +535,21 @@ test("#715/#880 gate② finding today-stage-history-truncation: TODAY's by-stage
   }
 });
 
-// #888 gate② run 949439c8 finding [0] (today-phase-window-cross-round): unlike the test above
-// (round A deliberately has NO round-phase trail, so it can only ever bucket as Unattributed),
-// this gives BOTH rounds a real trail, including each one's own terminal `closed` phase — the
-// exact shape a real round log has. Round A's own per-round fetch necessarily leaves its trailing
-// `closed` window OPEN-ENDED (nothing in round A's own truncated event log bounds it — see
-// `PhaseWindow`'s own doc); once `useTodayCostLog` concatenates round A's windows ahead of round
-// B's, `bucketSpendByPhase`'s first-match `.find` can let round A's stale open window swallow
-// round B's later, REAL spend before round B's own window is ever checked. Round B's spend lands
-// inside its own real "aligning" window, so a correct implementation must show it there — a
-// naive implementation instead drops it (the "closed" phase bucket has no display slot at all).
+// #888 gate② run 949439c8 finding [0] (today-phase-window-cross-round), plus the follow-up final
+// gate② finding (same-timestamp round boundary): unlike the test above (round A deliberately has
+// NO round-phase trail, so it can only ever bucket as Unattributed), this gives BOTH rounds a real
+// trail, including each one's own terminal `closed` phase — the exact shape a real round log has.
+// Round A's own per-round fetch necessarily leaves its trailing `closed` window OPEN-ENDED
+// (nothing in round A's own truncated event log bounds it — see `PhaseWindow`'s own doc); once
+// `useTodayCostLog` concatenates round A's windows ahead of round B's, `bucketSpendByPhase`'s
+// first-match `.find` can let round A's stale open window swallow round B's later, REAL spend
+// before round B's own window is ever checked. Round B's spend lands inside its own real
+// "aligning" window, so a correct implementation must show it there — a naive implementation
+// instead drops it (the "closed" phase bucket has no display slot at all). Also carries a row
+// belonging to round A BY ID whose ts EQUALS round B's own `startedAt` exactly (the tie the
+// ID-cursor guarantee exists to disambiguate) — a timestamp-window-capping fix for the first half
+// of this finding reintroduces the SAME leak at that exact instant, so a correct fix must keep
+// round association by ID all the way through bucketing, never by a timestamp boundary alone.
 test("#888 gate② run 949439c8 finding [0]: TODAY's by-stage bars correctly attribute a LATER round's spend to its OWN phase window, never swallowed by an EARLIER round's open-ended trailing window", async () => {
   const ROUND_A_ID = 88020;
   const ROUND_B_ID = 88021;
@@ -617,6 +622,29 @@ test("#888 gate② run 949439c8 finding [0]: TODAY's by-stage bars correctly att
       role: null,
       estimated: false,
     },
+    // #888 gate② final finding (same-timestamp round boundary): round A's OWN spend (id 2, well
+    // under round B's startSpendId cursor — the ID partition `loadClosedRoundCostLog` already
+    // gives it), but its ts EQUALS round B's own `startedAt` EXACTLY — the tie the ID-cursor
+    // guarantee (frontend-design.md §8) exists specifically to disambiguate. A timestamp-only
+    // implementation that caps round A's own trailing window at that same instant excludes this
+    // row from round A (half-open windows are `ts < endTs`) and then lets it fall through into
+    // round B's own "aligning" window instead — inflating round B's real phase total with a row
+    // that, by ID, undeniably belongs to round A.
+    {
+      id: 2,
+      ts: "2026-08-06T02:00:00Z",
+      worker: "w1",
+      issue: 5,
+      usd: 5.5,
+      model: "opus",
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      actorKind: "worker",
+      role: null,
+      estimated: false,
+    },
   ];
   mock.method(globalThis, "fetch", async (url: string) => {
     const parsed = new URL(url, "http://localhost");
@@ -671,6 +699,11 @@ test("#888 gate② run 949439c8 finding [0]: TODAY's by-stage bars correctly att
     assert.ok(
       todayPanel.querySelector('[aria-label="Goal & align: $1.10"]'),
       "round B's own spend must bucket under ITS OWN real phase, not vanish into round A's stale open 'closed' window",
+    );
+    assert.equal(
+      todayPanel.querySelector('[aria-label^="Goal & align:"]')?.getAttribute("aria-label"),
+      "Goal & align: $1.10",
+      "round A's OWN same-timestamp-boundary row (ts === round B's startedAt) must NOT leak into round B's real phase, inflating it past round B's own $1.10",
     );
   } finally {
     await act(async () => {

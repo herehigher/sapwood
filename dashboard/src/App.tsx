@@ -16,7 +16,14 @@ import { NeedsAttention } from "./components/NeedsAttention.tsx";
 import { PhaseInspectorDrawer } from "./components/PhaseInspectorDrawer.tsx";
 import { Transport } from "./components/Transport.tsx";
 import { readConfigPath } from "./config-captions.ts";
-import { avgRoundCostUsd, buildClosedRoundCostPanel, buildTodayCostPanel, modelCostBars, roundsForDay } from "./cost-panel.ts";
+import {
+  avgRoundCostUsd,
+  buildClosedRoundCostPanel,
+  buildTodayCostPanel,
+  buildTodayCostPanelFromBuckets,
+  modelCostBars,
+  roundsForDay,
+} from "./cost-panel.ts";
 import { useDemoReplay } from "./demo/useDemoReplay.ts";
 import { type DomainEvent, toDomainEvent } from "./domain-event.ts";
 import type { EntityTitles } from "./entities.ts";
@@ -27,7 +34,7 @@ import type { StageNode } from "./inspector.ts";
 import type { ReplayPosition } from "./replay/player.ts";
 import { initialReplayState } from "./replay/reducer.ts";
 import { loadRoundEvents, roundEventCeiling } from "./replay/round-log.ts";
-import { buildPhaseWindows, closeTrailingWindow, type PhaseWindow } from "./replay/spend-replay.ts";
+import { buildPhaseWindows, mergeRoundPhaseBuckets, type PhaseSpendBucket, type PhaseWindow } from "./replay/spend-replay.ts";
 import { loadRoundLog, type ReplayView, useReplay } from "./replay/useReplay.ts";
 
 /**
@@ -173,11 +180,14 @@ export function findLastClosedRound(rounds: readonly Round[]): Round | null {
  * a parallel fetch implementation. `null` on a rejected load (never throws) — same "never rejects
  * itself" contract `loadRoundLog` documents for its own callers.
  *
- * #888 gate② run 949439c8 finding [0]: `phaseWindows` runs through `closeTrailingWindow`, capped
- * at the NEXT round's own `startedAt` (the same successor `spendCeilingId` above already bounds
- * by id) — `round`'s own trailing window would otherwise stay open-ended forever (nothing in ITS
- * OWN truncated event log closes it), harmless read alone but not once a caller unions this
- * round's windows with a LATER round's own (`useTodayCostLog` below does exactly that).
+ * #888 gate② final finding (same-timestamp round boundary): `phaseWindows` is returned RAW — an
+ * earlier round of this fix capped the trailing window at the next round's own `startedAt`, which
+ * excludes a round-A row whose `ts` EQUALS that boundary from round A's own window (half-open
+ * `ts < endTs`) and reintroduces the identical cross-round leak at that exact tie once a caller
+ * unions several rounds together. `spend` is already correctly ID-partitioned (`spendCeilingId`
+ * above, never a timestamp) — the caller (`useTodayCostLog`'s `mergeRoundPhaseBuckets`) preserves
+ * that same ID partition all the way through bucketing instead, so a round's own trailing window
+ * can safely stay open-ended; nothing outside this round's own spend is ever compared against it.
  */
 export function loadClosedRoundCostLog(
   round: Round,
@@ -188,9 +198,7 @@ export function loadClosedRoundCostLog(
   const nextRound = rounds.filter((r) => r.roundId > round.roundId).sort((a, b) => a.roundId - b.roundId)[0];
   const spendCeilingId = nextRound ? nextRound.startSpendId : null;
   return loadRoundLog(round, ceilingId, spendCeilingId, lanesMax).then((result) =>
-    result.ok
-      ? { spend: result.log.spend, phaseWindows: closeTrailingWindow(result.log.phaseWindows, nextRound?.startedAt ?? null) }
-      : null,
+    result.ok ? { spend: result.log.spend, phaseWindows: result.log.phaseWindows } : null,
   );
 }
 
@@ -251,23 +259,27 @@ export function useLastClosedRoundCost(
  * on, for the same "still-open round" reason) covers a fresh phase transition, and `todaySpendUsd`
  * (the server-aggregated total `/api/loop/state`'s poll already carries) covers a fresh spend row
  * landing without necessarily moving any round's own event count in the same tick.
+ *
+ * #888 gate② final finding (same-timestamp round boundary): each round's `{spend, phaseWindows}`
+ * result is bucketed through `mergeRoundPhaseBuckets` — per round, BEFORE merging — rather than
+ * flattened into two combined `spend`/`phaseWindows` arrays for a single `bucketSpendByPhase`
+ * call. The flattened shape discarded the ID partition `loadClosedRoundCostLog` already gives each
+ * round, letting a round-A row's timestamp match a DIFFERENT round's window (up to and including a
+ * same-millisecond boundary tie) purely because both ended up in the same combined array — see
+ * `mergeRoundPhaseBuckets`'s own doc.
  */
 export function useTodayCostLog(
   todayRounds: readonly Round[],
   allRounds: readonly Round[],
   lanesMax: number | null,
   todaySpendUsd: number | null,
-): { spend: SpendRow[]; phaseWindows: PhaseWindow[] } {
+): { buckets: PhaseSpendBucket[] } {
   const freshnessKey = `${todayRounds.map((r) => `${r.roundId}:${r.eventCount}`).join(",")}|${todaySpendUsd ?? ""}`;
   const allRoundsRef = useRef(allRounds);
   allRoundsRef.current = allRounds;
   const todayRoundsRef = useRef(todayRounds);
   todayRoundsRef.current = todayRounds;
-  const [state, setState] = useState<{ key: string; spend: SpendRow[]; phaseWindows: PhaseWindow[] }>({
-    key: "",
-    spend: [],
-    phaseWindows: [],
-  });
+  const [state, setState] = useState<{ key: string; buckets: PhaseSpendBucket[] }>({ key: "", buckets: [] });
 
   // `todayRounds`/`allRounds` are read via the refs above (same rationale useReplay.ts's own
   // effect documents) — only `freshnessKey` (round set + each round's own eventCount + today's
@@ -276,24 +288,21 @@ export function useTodayCostLog(
   useEffect(() => {
     const rounds = todayRoundsRef.current;
     if (rounds.length === 0) {
-      setState({ key: freshnessKey, spend: [], phaseWindows: [] });
+      setState({ key: freshnessKey, buckets: [] });
       return;
     }
     let cancelled = false;
     Promise.all(rounds.map((round) => loadClosedRoundCostLog(round, allRoundsRef.current, lanesMax))).then((results) => {
       if (cancelled) return;
-      setState({
-        key: freshnessKey,
-        spend: results.flatMap((r) => r?.spend ?? []),
-        phaseWindows: results.flatMap((r) => r?.phaseWindows ?? []),
-      });
+      const roundLogs = results.filter((r): r is { spend: SpendRow[]; phaseWindows: PhaseWindow[] } => r !== null);
+      setState({ key: freshnessKey, buckets: mergeRoundPhaseBuckets(roundLogs) });
     });
     return () => {
       cancelled = true;
     };
   }, [freshnessKey, lanesMax]);
 
-  return state.key === freshnessKey ? { spend: state.spend, phaseWindows: state.phaseWindows } : { spend: [], phaseWindows: [] };
+  return { buckets: state.key === freshnessKey ? state.buckets : [] };
 }
 
 type ActiveFold = {
@@ -616,13 +625,7 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
     const raw = loop.data?.config ? readConfigPath(loop.data.config, "cost.roundBudgetUsd") : undefined;
     return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
   })();
-  const costToday = buildTodayCostPanel(
-    todayLog.spend,
-    todayLog.phaseWindows,
-    todayModelBars,
-    avgRoundCostUsd(todayRounds),
-    roundBudgetUsdConfig,
-  );
+  const costToday = buildTodayCostPanelFromBuckets(todayLog.buckets, todayModelBars, avgRoundCostUsd(todayRounds), roundBudgetUsdConfig);
 
   // #880: "COST · ROUND N" — a round explicitly selected in the navigator (replay mode) reads its
   // OWN full, never-cursor-truncated log (`replay.roundSpend`/`replay.phaseWindows` — see

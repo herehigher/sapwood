@@ -135,14 +135,16 @@ export interface CostPanelData {
   footer?: RoundCostFooter | null;
 }
 
-/** The "COST · TODAY" panel — by-stage bars over whatever spend/phase-window slice the caller
- *  considers "today" (live: the day's own event/spend history; demo: the whole fixture bundle),
- *  plus the avg-round-cost header. `modelBars` is taken as an input rather than derived from
- *  `spend` here — live mode already has a server-aggregated `spend.byModel` for today that's
- *  cheaper to reuse than re-deriving the same total from raw rows a second way. */
-export function buildTodayCostPanel(
-  spend: readonly SpendRow[],
-  phaseWindows: readonly PhaseWindow[],
+/** The "COST · TODAY" panel, built straight from already-bucketed stage buckets — the shape
+ *  `App.tsx`'s LIVE mode needs (`mergeRoundPhaseBuckets`, #888 gate② final finding: each round's
+ *  own spend is bucketed against ITS OWN windows BEFORE merging, so an ID-partitioned round's row
+ *  can never cross into another round's phase, not even at a same-timestamp round boundary — a
+ *  single flat `bucketSpendByPhase` call over concatenated rounds could not guarantee that).
+ *  `modelBars` is taken as an input rather than derived here — live mode already has a
+ *  server-aggregated `spend.byModel` for today that's cheaper to reuse than re-deriving the same
+ *  total from raw rows a second way. */
+export function buildTodayCostPanelFromBuckets(
+  buckets: readonly PhaseSpendBucket[],
   modelBars: readonly CostBar[],
   avgRoundUsd: number | null,
   roundBudgetUsd: number | null,
@@ -150,11 +152,27 @@ export function buildTodayCostPanel(
   return {
     heading: "cost · today",
     avgRoundUsd,
-    stageBars: stageCostBars(bucketSpendByPhase(spend, phaseWindows)),
+    stageBars: stageCostBars(buckets),
     targetUsd: stageTargetUsd(roundBudgetUsd),
     modelBars: [...modelBars],
     footer: null,
   };
+}
+
+/** The "COST · TODAY" panel over a single flat spend/phase-window slice — demo mode's own shape
+ *  (the whole fixture bundle's continuous event stream, `buildPhaseWindows` over ALL of it in one
+ *  call, never per-round-truncated logs), where there is no round partition to lose in the first
+ *  place. LIVE mode instead goes through `buildTodayCostPanelFromBuckets` above — see that
+ *  function's own doc for why a flat bucketing call is unsafe once spend/windows come from
+ *  multiple independently-fetched rounds. */
+export function buildTodayCostPanel(
+  spend: readonly SpendRow[],
+  phaseWindows: readonly PhaseWindow[],
+  modelBars: readonly CostBar[],
+  avgRoundUsd: number | null,
+  roundBudgetUsd: number | null,
+): CostPanelData {
+  return buildTodayCostPanelFromBuckets(bucketSpendByPhase(spend, phaseWindows), modelBars, avgRoundUsd, roundBudgetUsd);
 }
 
 /** The "COST · ROUND N" panel — a CLOSED round's frozen by-stage + by-model breakdown plus footer
