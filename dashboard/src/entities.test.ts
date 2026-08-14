@@ -246,6 +246,99 @@ test("foldOpenAttention: `park-resumed` clears the open park-escalated entry", (
   assert.deepEqual(open, {});
 });
 
+// ── PR #900 gate② finding [0] (stale-breaker-attention): a real episode for one of the
+// probe-less breakers appends BOTH its own `*-detected` event and a `park-escalated{source}`
+// companion (rapid-restart.ts's `escalateLocally`, same tick) — these must collapse to ONE open
+// attention row, not two, and the matching `park-resumed{source}` receipt must close it. ────────
+
+test("foldOpenAttention: a rapid-restart episode's `*-detected` + `park-escalated` companion collapse to ONE open row, not two", () => {
+  const open = foldOpenAttention([
+    event(1, "rapid-restart-detected", { births: 3, windowSec: 60, maxBirths: 3 }),
+    event(2, "park-escalated", { source: "rapid-restart", channel: "local", triggerIssue: null }),
+  ]);
+  assert.equal(Object.keys(open).length, 1, "one park episode must never open two strip rows");
+  assert.equal(Object.values(open)[0]?.kind, "rapid-restart-detected");
+});
+
+test("foldOpenAttention: `park-resumed{source: rapid-restart}` closes the rapid-restart-detected row", () => {
+  const open = foldOpenAttention([
+    event(1, "rapid-restart-detected", { births: 3, windowSec: 60, maxBirths: 3 }),
+    event(2, "park-escalated", { source: "rapid-restart", channel: "local", triggerIssue: null }),
+    event(3, "park-resumed", { source: "rapid-restart", via: "restart-window-clear" }),
+  ]);
+  assert.deepEqual(open, {}, "the resolution receipt must close the row the detection event opened");
+});
+
+test("foldOpenAttention: a consecutive-stalls episode collapses to one row and clears on its own park-resumed source", () => {
+  const opened = foldOpenAttention([
+    event(1, "consecutive-stalls-detected", { streak: 3, maxConsecutiveStalls: 3, enteredAt: "2026-08-01T00:00:00Z" }),
+    event(2, "park-escalated", { source: "consecutive-stalls", channel: "local", triggerIssue: null }),
+  ]);
+  assert.equal(Object.keys(opened).length, 1);
+  const closed = foldOpenAttention([event(3, "park-resumed", { source: "consecutive-stalls", via: "operator-clear" })], opened);
+  assert.deepEqual(closed, {});
+});
+
+test("foldOpenAttention: an idle-churn episode collapses to one row and clears on its own park-resumed source", () => {
+  const opened = foldOpenAttention([
+    event(1, "idle-churn-detected", { rounds: 3 }),
+    event(2, "park-escalated", { source: "idle-churn", channel: "local", triggerIssue: null }),
+  ]);
+  assert.equal(Object.keys(opened).length, 1);
+  const closed = foldOpenAttention([event(3, "park-resumed", { source: "idle-churn" })], opened);
+  assert.deepEqual(closed, {});
+});
+
+test("foldOpenAttention: an empty-spin episode's `empty-spin-park` + its `park-escalated{source: llm}` companion collapse to ONE row, cleared by park-resumed{source: llm}", () => {
+  const opened = foldOpenAttention([
+    event(1, "empty-spin-park", { consecutiveDegradedRounds: 3, threshold: 3, roundId: 7 }),
+    event(2, "park-escalated", { source: "llm", channel: "local", triggerIssue: null }),
+  ]);
+  assert.equal(Object.keys(opened).length, 1, "empty-spin-park and its shared-llm-source park-escalated must not double up");
+  assert.equal(Object.values(opened)[0]?.kind, "empty-spin-park");
+  const closed = foldOpenAttention([event(3, "park-resumed", { source: "llm", via: "role-session" })], opened);
+  assert.deepEqual(closed, {});
+});
+
+test("foldOpenAttention: an ORDINARY llm env-failure park-escalated (no empty-spin open) still opens its own row and clears normally — the dedup is narrow, not a blanket llm suppression", () => {
+  const open = foldOpenAttention([
+    event(1, "park-escalated", { source: "llm", channel: "local", triggerIssue: null }),
+    event(2, "park-resumed", { source: "llm" }),
+  ]);
+  assert.deepEqual(open, {});
+  // And without the resume, it stays open on its own — proving it really did open (not silently
+  // suppressed because "llm" also happens to be empty-spin's shared source).
+  const stillOpen = foldOpenAttention([event(1, "park-escalated", { source: "llm", channel: "local", triggerIssue: null })]);
+  assert.equal(Object.keys(stillOpen).length, 1);
+});
+
+test("foldOpenAttention: rapid-restart's park-escalated companion never clears an UNRELATED still-open consecutive-stalls episode", () => {
+  const open = foldOpenAttention([
+    event(1, "consecutive-stalls-detected", { streak: 3, maxConsecutiveStalls: 3, enteredAt: "2026-08-01T00:00:00Z" }),
+    event(2, "park-escalated", { source: "consecutive-stalls", channel: "local", triggerIssue: null }),
+    event(3, "rapid-restart-detected", { births: 3, windowSec: 60, maxBirths: 3 }),
+    event(4, "park-escalated", { source: "rapid-restart", channel: "local", triggerIssue: null }),
+    event(5, "park-resumed", { source: "rapid-restart", via: "restart-window-clear" }),
+  ]);
+  assert.equal(Object.keys(open).length, 1, "the still-open consecutive-stalls episode must survive an unrelated source's resume");
+  assert.equal(Object.values(open)[0]?.kind, "consecutive-stalls-detected");
+});
+
+// ── PR #900 gate② finding [0]: emergency-stop has no probe/resume lifecycle of its own (#293 —
+// an immediate hard stop, never a park episode) — the next successful `run-started` is the
+// natural "someone dealt with it and the engine is back" signal, so that's what clears it. ──────
+
+test("foldOpenAttention: emergency-stop opens a global attention row", () => {
+  const open = foldOpenAttention([event(1, "emergency-stop", {})]);
+  assert.equal(Object.keys(open).length, 1);
+  assert.equal(Object.values(open)[0]?.kind, "emergency-stop");
+});
+
+test("foldOpenAttention: a later `run-started` clears an open emergency-stop row", () => {
+  const open = foldOpenAttention([event(1, "emergency-stop", {}), event(2, "run-started", {})]);
+  assert.deepEqual(open, {});
+});
+
 test("foldOpenAttention: `worktree-released` clears the worktree-retained entry sharing its worktreePath, keyed by path not issue", () => {
   const open = foldOpenAttention([
     event(1, "worktree-retained", { worker: "w1", issue: 5, worktreePath: "/data/worktrees/w1-issue5" }),

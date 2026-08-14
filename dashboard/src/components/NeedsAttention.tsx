@@ -1,4 +1,4 @@
-import { attentionCategory, COPY, type SentencePart } from "../copy.ts";
+import { attentionCategory, copyFor, type SentencePart } from "../copy.ts";
 import type { DomainEvent } from "../domain-event.ts";
 import { attentionSummary, type EntityTitles } from "../entities.ts";
 import { formatRelativeWithAbsoluteTitle } from "../format-time.ts";
@@ -41,7 +41,7 @@ function AttentionRow({
   onInspect?: ((node: StageNode) => void) | undefined;
 }) {
   const payload = event.payload ?? {};
-  const parts: SentencePart[] = event.known ? COPY[event.kind].sentence(payload) : [`Unrecognized event: ${event.kind}`];
+  const parts: SentencePart[] = event.known ? copyFor(event.kind)!.sentence(payload) : [`Unrecognized event: ${event.kind}`];
   const { text, title } = formatRelativeWithAbsoluteTitle(event.ts, "local", now);
   const node = event.known ? ATTENTION_KIND_TO_NODE[event.kind] : undefined;
   // #881: the mockup's category-chip taxonomy — absent for an unrecognized kind (no fallback

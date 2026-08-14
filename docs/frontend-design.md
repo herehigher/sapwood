@@ -277,7 +277,7 @@ item becomes a routed page, that is a scope amendment to this section.
   transition and `merged` carry the PR title — #207); the dashboard never
   queries GitHub for titles, so tooltips work offline and in replay. A
   number whose entity has no title-bearing event — pre-dispatch mentions in
-  the feed (`no-plan-after-draft`, `plan-review-escalated`, …) and all
+  the feed (`plan-review-escalated`, `verify-na-proposed`, …) and all
   pre-#207 history — simply shows no tooltip; that bounded blind spot is
   accepted, never patched with a live lookup.
 - **D — Activity feed.** The `events` stream through the copy map (§7),
@@ -683,7 +683,7 @@ explicit per-phase mapping (no field here may exceed the `events` /
 | Node | Drawer contents (source) |
 |---|---|
 | Goal & align | `align-summary` slice: created issues (with titles) + triaged issues (`align` in the artifact / the event, verbatim) |
-| Arch review / Verify | that phase's `degradedPhases` entries, `plan-review-escalated` / `no-plan-after-draft` counts from events |
+| Arch review / Verify | that phase's `degradedPhases` entries, `plan-review-escalated` / `verify-na-proposed` counts from events |
 | Lanes / CI / Review / merge | the round's `dispatches`, `merges`, `retries`, `escalations`, `handoffs` counters (artifact fields) |
 | Summary | the artifact's own top-line numbers (spend vs round budget, throughput counters) |
 | Retro | the `retro` outcome object (opened PR / degraded / neither) |
@@ -794,7 +794,7 @@ checklist item**):
 | `fix-leg-verdict-rerun` | PR #{pr}'s review findings aren't fixable by the producer · asks: adjudicate |
 | `ceiling-escalated` | Safety ceiling reached ({reasons.join}, when carried) — winding down all work · asks: resume when it clears, or raise the ceiling |
 | `ceiling-breach-entered` | Branches on `payload.reason` (#431 round 3: one event per REASON, each ceiling has its own lifecycle): wall-clock → "This run hit its {maxWallClockSec}s attention alarm — no new work until a restart"; daily-budget → "Today's ${dailyBudgetUsd} budget is spent — no new work until tomorrow". One per reason per episode, never per tick |
-| `rapid-restart-detected` | Engine started {births} times in {windowSec}s — crash loop suspected, dispatch parked for a human (#431) |
+| `rapid-restart-detected` | Engine started {births} times in {windowSec}s — crash loop suspected, dispatch parked for a human · asks: clear the park once resolved (#431; #893: promoted to an attention-strip item, see the `idle-churn-detected` row below for why) |
 | `ceiling-breach-cleared` | Branches on `payload.reason` (#431 round 3): wall-clock → "The wall-clock alarm cleared"; daily-budget → "The daily budget rolled over" — that reason's closing receipt; work resumes only when no ceiling remains open. One per reason per episode, transition-only |
 | `rollback-recovered` | Returned issue #{issue} to the backlog safely |
 | `rollback-retry-failed` | Still trying to return issue #{issue} to the backlog |
@@ -828,7 +828,6 @@ checklist item**):
 | `round-stop` | This round reached its limit ({detail}) — no new work this round |
 | `align-summary` | Planning pass: {n} issue(s) created, {m} plan(s) drafted |
 | `triage-degraded` | A planning session had trouble — some issues keep their old plans |
-| `no-plan-after-draft` | Issue #{issue} still has no usable plan after a drafting attempt |
 | `plan-review-escalated` | Issue #{issue}'s plan needs a human — {payload.reason, falling back to "automated review couldn't approve it"} · asks: revise the plan or adjudicate |
 | `verify-na-proposed` | Issue #{issue} proposed as not separately verifiable — reason not recorded · asks: approve or reject the proposal (#881 payload gap: no reason field exists upstream today) |
 | `gated-reentry` | Issue #{issue}'s PR was unblocked by a human — back through review |
@@ -842,40 +841,83 @@ checklist item**):
 | `run-started` | Engine started a new run |
 | `instance-lock-taken-over` | Took over the engine lock left by a crashed run (pid {previousPid}) |
 | `round-phase` | Round {round_id} moved into {phase}. The terminal `closed` entry additionally carries the idle-churn breaker's own per-round sample (#470): `idle` (this round dispatched nothing and left no lane in flight) and, for an idle round only, `fp` — a digest of every durable fact the round appended. Both are diagnostics for that breaker's ledger-derived streak, not feed copy; the sentence is unchanged |
-| `idle-churn-detected` | The loop ran {rounds} rounds in a row that changed nothing at all — parked for a human (#470). Names the standby probe signal(s) that kept opening those rounds. Not an attention *strip* item: like `rapid-restart-detected` and `consecutive-stalls-detected`, its waiting-on-a-human state is carried by its park episode (`PARKED (idle-churn)`), and it carries no issue |
+| `idle-churn-detected` | The loop ran {rounds} rounds in a row that changed nothing at all — parked for a human · asks: clear the park once resolved (#470). **#893 (owner adjudication 2026-08-14) supersedes the prior "not an attention-strip item" ruling here**: `idle-churn-detected`, `rapid-restart-detected`, `consecutive-stalls-detected`, and `empty-spin-park` are now attention-strip items (`BREAKER` chip) — none carries an issue/PR, so the strip row has no entity link, but the whole point of the strip is "something is waiting on a person," and a probe-less park episode with no automatic clear unambiguously is. |
 | `ci-inert-escalated` | PR #{pr} needs a human — CI concluded without ever going green ({check names, when the payload's `checks` items are strings, else a bare count}) · asks: fix the check, then clear the label to retry (#783). An attention item — it carries a `needsHuman` label the moment it fires |
 | `ci-pending-observed` | PR #{pr} is waiting on CI. Opens the CI-pending pin `ci-pending-escalated`'s escalation timer reads; routine, not an attention item |
 | `ci-pending-escalated` | PR #{pr} needs a human — CI stayed pending too long to progress on its own (gate② was already decisive), naming `blockedChecks`/`checks` when carried · asks: re-run or fix the stuck check, then clear the label. An attention item — it carries a `needsHuman` label the moment it fires |
 | `ci-pending-cleared` | PR #{pr}'s CI resolved. Closes the pin `ci-pending-observed` opened, canceling the escalation timer; routine, not an attention item |
+| `emergency-stop` | EMERGENCY STOP triggered — every running lane was killed immediately, no drain window · asks: inspect in-flight work for lost progress before resuming (#893: was deliberately absent as "a control signal, not a feed event kind" — but the engine registers it `actionability: intervene` and does append it durably, #293, so it needed a real row like every other registered kind) |
+| `consecutive-stalls-detected` | The engine stalled {streak}/{maxConsecutiveStalls} times in a row — dispatch parked for a human · asks: clear the park once resolved (#893; #407) |
+| `empty-spin-park` | The peripheral roles kept failing to produce work — paused dispatch · asks: clear the park once resolved (#893; #374) |
+| `base-ci-red-escalated` | The default branch's CI is red ({failing.join}, when carried) — no PR can merge until it's fixed · asks: fix the default branch's CI (#893; #502) |
+| `estop-lane-swept` | Lane {worker}'s driving work was killed by EMERGENCY STOP ("— the process couldn't be confirmed dead", when `confirmedDead` is `false`) · asks: check for an orphan process and confirm the PR's state (#893) |
+| `estop-lane-sweep-incapable` | Lane {worker}'s EMERGENCY STOP sweep couldn't verify or signal its process — left unsettled · asks: check the lane by hand (#893) |
+| `resume-capped` | Lane {worker} exhausted its resume attempts ({attempts}, when carried) after a handoff · asks: resume or reassign the lane by hand (#893; #172) |
+| `resume-undecidable` | Lane {worker}'s resume outcome couldn't be determined from the ledger · asks: check the lane by hand and decide whether to resume (#893; #172) |
+| `orphan-pr-escalated` | PR #{pr} is open but lane {worker} is dead ({via}, when carried) · asks: check the PR and decide whether to retry the issue (#893) |
+| `gated-flag-unprovable` | Lane {worker}'s reentry flag couldn't be found on either carrier · asks: check issue #{issue}'s labels by hand (#893; #391) |
+| `drive-human-merge-only` | PR #{pr} is ready but requires a human to merge it — a one-way, never re-decided policy · asks: review and merge by hand (#893; #292/#397) |
+| `fix-leg-dispatch-unconfigured` | PR #{pr} needs a fix leg but the fix loop isn't configured for this run · asks: enable the fix loop or fix the PR by hand (#893) |
+| `fix-leg-undecidable` | PR #{pr}'s fix leg outcome couldn't be determined from the ledger · asks: check the lane and decide the PR's next step (#893) |
+| `fix-thread-write-escalated` | PR #{pr} has a review-thread reply/resolve that couldn't be posted after retrying · asks: check the review thread by hand (#893; #398) |
+| `ac-snapshot-drift` | PR #{pr}'s issue body changed after its acceptance criteria were captured · asks: confirm the PR still matches the issue, or re-snapshot (#893; #279) |
+| `review-silence-escalated` | PR #{pr}'s review request went unanswered ({silenceSec} rounded to minutes, when carried) · asks: check the reviewer and prompt or reassign the review (#893; #170) |
+| `review-disputed` | PR #{pr} — successive reviews disagreed past the dispute limit · asks: adjudicate which review is right (#893; #451) |
+| `review-non-convergent` | PR #{pr} — fix-and-review rounds failed to converge · asks: adjudicate — re-ready or close manually (#893; #450) |
+| `comment-cursor-stale` | Issue #{issue}'s comment thread moved since the engine last read it, so it refused to spend/dispatch/drive · asks: review the comment thread — this clears once the engine re-reads it (#893; #652) |
+| `round-pool-removal-capped` | Issue #{issue}'s round-pool label couldn't be removed after retrying · asks: remove the label by hand (#893) |
+| `concern-post-escalated` | Issue #{issue}'s PO concern couldn't be posted after retrying · asks: check the issue and post the concern by hand (#893; #237) |
+| `operator-fence-violated` | Issue #{issue}'s body edit was refused — it touched an operator-owned section · asks: review the proposed edit and the operator fence by hand (#893; #827) |
+| `architect-repeat-drop-escalated` | Issue #{issue} was dropped repeatedly for the same reason with no edit in between · asks: revise the issue or adjudicate the repeated drop (#893; #666) |
+
+**#893 — the telemetry tier.** The table above is the NARRATIVE half of the dashboard's
+`EventKind` union (`copy.ts`'s `COPY` map) — `EventKind` itself is a compile-time type import
+from the engine's own event-kind registry (`engine/src/state/event-kinds/index.ts`, #425), not a
+hand-maintained union. The remaining ~100 registered kinds (heartbeats: `worker-heartbeat`,
+`role-session-heartbeat`, `park-wait-heartbeat`, `standby-heartbeat`; and bookkeeping: reconcile
+rollups, label-write receipts, degrade-and-retry telemetry, …) have no narrative worth telling on
+their own — `copy.ts`'s `TELEMETRY_KINDS` set classifies each of them instead, rendering an
+honest generic line (`Telemetry: <kind>`, never the raw wire kind unexplained) that the live
+feed collapses from its default view (opt-in "show" toggle) rather than ever falling through to
+the "Unrecognized event" fallback. Every kind the engine registers lands in EITHER this table
+(via `COPY`) OR `TELEMETRY_KINDS` — never neither, never both — enforced by copy.test.ts's
+cross-package exhaustiveness test (see the verification-contract paragraph below).
 
 The same module captions lane states (`running` → "writing", `driving` → "PR
-under review", `handoff` → "handed off") and config keys (§3 E). Adding an
-event kind without a copy entry is a type error. Kinds whose event leaves
+under review", `handoff` → "handed off") and config keys (§3 E). Kinds whose event leaves
 work waiting on a person additionally carry `attention` on the same entry —
 `true`, or a payload predicate where only some payloads qualify (§3) — so
 the strip and the sentences share one map and cannot drift apart.
 
-**Verification contract for the "type error" claim** (added 2026-08-07,
-retro round #344 — this exact gap was gate②-flagged twice on the same PR,
-once fixed with a look-alike guard that didn't close it): the claim above
-is only true if the wire/event type is *derived from* `copy.ts`, not
-duplicated next to it. A hand-maintained `EventKind` union declared
-independently in the dashboard (or in test fixtures) and merely checked
-against an unrelated string is not this contract — it compiles happily
-when an engine event kind is added without a matching `COPY` entry, which
-is precisely the failure this paragraph promises can't happen. Concretely:
-`LoopEvent["kind"]` (and any events-fixture type used in tests) must be
-`keyof typeof COPY` or a type imported from it, not a second union kept in
-sync by hand. The required proof, alongside the type itself, is a compile
-fixture that adds an unmapped kind to a real events value and asserts the
-build fails — a runtime fallback branch (e.g. `copyFor` returning a
-default string for unknown kinds) is a legitimate defensive measure but is
-not evidence for this claim and must not be cited as satisfying it. The
-same standard applies to the sentence *text* itself: a test that only
-counts one `COPY` entry per table row does not verify against this row's
-literal documented sentence — add a table-driven oracle that asserts each
-kind's rendered output against the string in this table (including its
-branches), so a sentence and its doc row can't drift apart either.
+**Verification contract — the cross-package anchor** (#893, 2026-08-14, superseding the
+2026-08-07 retro round #344 wording below): the earlier form of this contract — "adding an event
+kind without a copy entry is a type error" — was anchored ONLY inside the dashboard package: it
+proved a dashboard-local `EventKind` union stayed in sync with `COPY`, but had no link at all to
+the engine's own registry (`engine/src/state/event-kinds/index.ts`, #425), and a premise-check
+found it had silently failed ~126 times (126 of 194 then-registered engine kinds had no `COPY`
+entry — the gap this PR closes). The contract now has a real cross-package anchor:
+
+1. **The type anchor.** `dashboard/src/copy.ts`'s `EventKind` is `import type { EventKind } from
+   "../../engine/src/state/event-kinds/index.ts"` — erased at build (`import type`), so the
+   browser bundle carries zero engine runtime code, but the union itself is the engine's, not a
+   second one kept in sync by hand or convention.
+2. **The classification anchor.** Because `COPY` no longer needs to be exhaustive over every
+   engine kind (the telemetry tier above covers the rest), "an engine kind with no copy entry" is
+   no longer a *pure* type error — it is a **build/test failure**: copy.test.ts's cross-package
+   exhaustiveness test imports the engine's `EVENT_KIND_NAMES` (test-only, same precedent as
+   `ESCALATION_SOURCE_KINDS`) and asserts every one is classified as EITHER a `COPY` key OR a
+   `TELEMETRY_KINDS` member, never neither, never both. Mutation-kill proof: remove any one
+   mapping from either set in `copy.ts` and that kind's test loop iteration reddens.
+3. **The sentence-text anchor**, unchanged from the 2026-08-07 wording: a test that only counts
+   one `COPY` entry per table row does not verify against this row's literal documented sentence
+   — a table-driven oracle asserts each kind's rendered output against the string in this table
+   (including its branches), so a sentence and its doc row can't drift apart either.
+
+`LoopEvent["kind"]` (and any events-fixture type used in tests) must still be `keyof typeof COPY`,
+`EventKind`, or a type imported from one of them, not a second union kept in sync by hand — a
+runtime fallback branch (e.g. `copyFor` returning `undefined` for a genuinely unknown kind) is a
+legitimate defensive measure but is not evidence for this claim and must not be cited as
+satisfying it.
 
 **Stage labels lead with plain language** (decided at the design-director
 review: PO / gate⓪ / harvest are jargon to anyone who hasn't read PLAN.md,

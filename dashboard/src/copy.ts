@@ -1,14 +1,22 @@
 /**
  * The plain-language copy layer (frontend-design.md §7). One module, keyed by event kind:
  * every `events` row the server serves turns into a feed sentence through here, never through
- * ad-hoc string-building in a component. `COPY` is a `Record<EventKind, CopyEntry>` — TypeScript
- * itself refuses to compile this file if a kind is added to `EventKind` without a matching entry,
- * which is the "adding an event kind without a copy entry is a type error" contract (§7).
+ * ad-hoc string-building in a component.
  *
- * `emergency-stop` is deliberately absent: frontend-design.md defines it only as an engine
- * control-signal sentinel (§3 Operations, #293), never as a feed event kind — there is no §7
- * table row for it to occupy.
+ * #893: `EventKind` is a TYPE-ONLY import from the engine's own event-kind registry
+ * (`engine/src/state/event-kinds/index.ts`, #425) — erased at build, so the browser bundle
+ * carries zero engine runtime code, but every registered engine kind is now a real member of
+ * this file's own `EventKind` union. `COPY` carries the NARRATIVE kinds (full plain-language
+ * sentences, §7's table); `TELEMETRY_KINDS` carries the rest (heartbeat/bookkeeping traffic) —
+ * every kind in the union must land in exactly one of the two, which is what makes "an engine
+ * kind with no copy entry" a build/test failure instead of a silent gap (the cross-package
+ * exhaustiveness test in copy.test.ts; see also engine/src/state/event-kinds/index.ts's own
+ * doc on the other side of this same import).
  */
+
+import type { EventKind as EngineEventKind } from "../../engine/src/state/event-kinds/index.ts";
+
+export type EventKind = EngineEventKind;
 
 export type Payload = Record<string, unknown>;
 
@@ -55,6 +63,11 @@ export interface CopyEntry {
    *  for every payload, or a predicate for kinds where only some payloads qualify. Absent
    *  entirely for a kind that never leaves work waiting on a person. */
   attention?: true | ((payload: Payload) => boolean);
+  /** #893: present (`"telemetry"`) only on the generic entries `telemetryEntry` constructs for
+   *  `TELEMETRY_KINDS` members — absent on every hand-authored narrative entry. The feed's
+   *  default view reads this to collapse/exclude telemetry rows (opt-in to show); never set by
+   *  hand on a `COPY` entry. */
+  tier?: "telemetry";
 }
 
 /** #404's shared attention condition for both reclaim kinds, restated on the dashboard side of
@@ -101,88 +114,6 @@ function ceilingReasonWord(reason: unknown): "wall-clock" | "daily-budget" | nul
   return reason === "wall-clock" || reason === "daily-budget" ? reason : null;
 }
 
-export type EventKind =
-  | "dispatched"
-  | "dispatch-failed"
-  | "reclaim-done"
-  | "reclaim-failed"
-  | "reclaim-dead"
-  | "handoff"
-  | "merged"
-  | "drive-needs-human"
-  | "drive-no-pr"
-  | "drive-queued"
-  | "drive-stopped"
-  | "pool-selected"
-  | "drive-fixup"
-  | "fix-leg-started"
-  | "fix-leg-resumed"
-  | "fix-rounds-capped"
-  | "fix-leg-verdict-rerun"
-  | "ceiling-escalated"
-  | "ceiling-breach-entered"
-  | "rapid-restart-detected"
-  | "ceiling-breach-cleared"
-  | "rollback-recovered"
-  | "rollback-retry-failed"
-  | "rollback-escalated"
-  | "engine-review-verdict"
-  | "engine-review-budget-advisory"
-  | "engine-review-cost-unknown"
-  | "engine-review-containment-gap"
-  | "engine-review-orphaned-group"
-  | "engine-review-session-inspection"
-  | "reviewer-fallback-switch"
-  | "reviewer-fallback-revert"
-  | "pr-held"
-  | "pr-released"
-  | "lane-state-labeled"
-  | "lane-state-cleared"
-  | "resume-held"
-  | "worktree-retained"
-  | "worktree-released"
-  | "env-failure"
-  | "env-failure-preserved"
-  | "park-escalated"
-  | "park-probe"
-  | "park-resumed"
-  | "park-canary"
-  | "park-canary-failed"
-  | "park-canary-inconclusive"
-  | "tick-error"
-  | "standby-wait"
-  | "standby-exit"
-  | "round-stop"
-  | "align-summary"
-  | "triage-degraded"
-  | "no-plan-after-draft"
-  | "plan-review-escalated"
-  | "verify-na-proposed"
-  | "gated-reentry"
-  | "lane-revived"
-  | "gated-reentry-capped"
-  | "gated-reentry-capped-label-failed"
-  | "escalation-resolved"
-  | "needs-human-swept"
-  | "retro-pr-opened"
-  | "retro-pr-degraded"
-  | "run-started"
-  | "instance-lock-taken-over"
-  | "round-phase"
-  | "idle-churn-detected"
-  // gate② opus round 1 P3 (#797): frontend-design.md's §7 rule — a new event kind must land in
-  // the copy map in the SAME PR that registers it (engine/src/state/event-kinds/drive.ts). Not
-  // yet emitted anywhere (the live-posting wiring is #783's human-owned remainder,
-  // merge-driver.ts/conductor.ts being guard-protected), but the kind itself is registered now,
-  // so it must be representable here today.
-  | "ci-inert-escalated"
-  // #729 fidelity ledger: the #426 gap this file used to note above — `ci-pending-observed`/
-  // `-escalated`/`-cleared` (engine/src/state/event-kinds/drive.ts) had no copy entry, so any of
-  // the three reaching the feed rendered the raw "Unrecognized event: ci-pending-*" fallback.
-  | "ci-pending-observed"
-  | "ci-pending-escalated"
-  | "ci-pending-cleared";
-
 const RESOLUTION_SENTENCE: Record<string, (p: Payload) => SentencePart[]> = {
   merged: (p) => ["Issue ", issueTok(p.issue), " no longer needs you — PR ", prTok(p.pr, p.issue), " was merged"],
   "issue-closed": (p) => ["Issue ", issueTok(p.issue), " no longer needs you — it was closed"],
@@ -191,7 +122,11 @@ const RESOLUTION_SENTENCE: Record<string, (p: Payload) => SentencePart[]> = {
   "board-fixed": (p) => ["Issue ", issueTok(p.issue), " no longer needs you — the board was set to Done"],
 };
 
-export const COPY: Record<EventKind, CopyEntry> = {
+/** The NARRATIVE half of the closed union — full plain-language sentences, §7's table. Every
+ *  member below has a matching row in frontend-design.md §7; a kind absent from both this map
+ *  and `TELEMETRY_KINDS` fails copy.test.ts's cross-package exhaustiveness test, never silently
+ *  falls through to the raw wire fallback. */
+export const COPY: Partial<Record<EventKind, CopyEntry>> = {
   dispatched: {
     sentence: (p) => ["Started work on issue ", issueTok(p.issue)],
   },
@@ -307,7 +242,12 @@ export const COPY: Record<EventKind, CopyEntry> = {
     },
   },
   "rapid-restart-detected": {
-    sentence: (p) => [`Engine started ${p.births} times in ${p.windowSec}s — crash loop suspected, dispatch parked for a human`],
+    // #893: engine actionability `intervene` (run.ts) — the crash-loop breaker's probe-less park
+    // episode only clears via a later clean start or a human running `sapwood park clear`.
+    sentence: (p) => [
+      `Engine started ${p.births} times in ${p.windowSec}s — crash loop suspected, dispatch parked for a human · asks: clear the park once resolved`,
+    ],
+    attention: true,
   },
   "ceiling-breach-cleared": {
     sentence: (p) => {
@@ -458,9 +398,6 @@ export const COPY: Record<EventKind, CopyEntry> = {
   "triage-degraded": {
     sentence: () => ["A planning session had trouble — some issues keep their old plans"],
   },
-  "no-plan-after-draft": {
-    sentence: (p) => ["Issue ", issueTok(p.issue), " still has no usable plan after a drafting attempt"],
-  },
   "plan-review-escalated": {
     // #881: payload carries a real `reason` (prose, `plan-review.ts`'s own degrade/escalate call
     // sites — e.g. "reviewer determined this issue is not dispatchable by any redraft") that the
@@ -539,14 +476,17 @@ export const COPY: Record<EventKind, CopyEntry> = {
     sentence: (p) => [`Round ${p.round_id} moved into ${p.phase}`],
   },
   "idle-churn-detected": {
-    sentence: (p) => [`The loop ran ${p.rounds} rounds in a row that changed nothing at all — parked for a human`],
+    // #893: engine actionability `intervene` (run.ts) — same probe-less-park-episode family as
+    // `rapid-restart-detected`/`consecutive-stalls-detected`/`empty-spin-park`, clears only via a
+    // human running `sapwood park clear`.
+    sentence: (p) => [
+      `The loop ran ${p.rounds} rounds in a row that changed nothing at all — parked for a human · asks: clear the park once resolved`,
+    ],
+    attention: true,
   },
-  // gate② opus round 1 P3 (#797): not yet emitted anywhere (see the `EventKind` union's own
-  // comment on this kind) — this entry exists so `COPY`'s closed-union contract compiles once the
-  // kind is registered, and so the feed already knows how to render it the moment the human-owned
-  // wiring lands. Payload shape mirrors `buildCiInertEscalationPayload`'s `{checks: [{name,
-  // conclusion}]}` (engine/src/review/drive.ts) plus the usual `pr`/`issue` pair every drive-arm
-  // escalation carries.
+  // gate② opus round 1 P3 (#797): not yet emitted anywhere — the live-posting wiring is #783's
+  // human-owned remainder, merge-driver.ts/conductor.ts being guard-protected — but the kind is
+  // registered now, so it must be representable here today.
   "ci-inert-escalated": {
     // #881: `checks` is `string[]` on the real payload (`"name (CONCLUSION)"`, conductor.ts's own
     // comment on this field) — named when the items are actually strings, falling back to the
@@ -587,24 +527,347 @@ export const COPY: Record<EventKind, CopyEntry> = {
   "ci-pending-cleared": {
     sentence: (p) => ["PR ", prTok(p.pr, p.issue), "'s CI resolved"],
   },
+
+  // ── #893: attention-class kinds the engine registers `actionability: "intervene"` (or an
+  // unconditional `escalation-source:*`) that had no copy entry at all before this PR — the
+  // "126/194 kinds unmapped" gap's attention-bearing half. Each carries an explicit reason clause
+  // (from the emit site's real payload where confirmed by reading the engine source; the #881
+  // REASON_NOT_RECORDED convention otherwise — never a fabricated field) and an explicit `asks:`.
+
+  "emergency-stop": {
+    // #893: previously deliberately absent (see git history) as "a control-signal sentinel, never
+    // a feed event kind" — but run.ts registers it with `actionability: "intervene"` and it IS a
+    // durable, appendable event (#293), so an unmapped occurrence would have hit the raw fallback.
+    sentence: () => [
+      "EMERGENCY STOP triggered — every running lane was killed immediately, no drain window · asks: inspect in-flight work for lost progress before resuming",
+    ],
+    attention: true,
+  },
+  "consecutive-stalls-detected": {
+    // Payload confirmed at stall-breaker.ts's emit site: {streak, maxConsecutiveStalls, enteredAt}.
+    sentence: (p) => [
+      `The engine stalled ${p.streak}${typeof p.maxConsecutiveStalls === "number" ? `/${p.maxConsecutiveStalls}` : ""} times in a row — dispatch parked for a human · asks: clear the park once resolved`,
+    ],
+    attention: true,
+  },
+  "empty-spin-park": {
+    sentence: () => ["The peripheral roles kept failing to produce work — paused dispatch · asks: clear the park once resolved"],
+    attention: true,
+  },
+  "base-ci-red-escalated": {
+    // Payload confirmed at base-ci.ts's emit site: {sha, failing: string[], branch, at}.
+    sentence: (p) => {
+      const failing = Array.isArray(p.failing) ? p.failing.filter((f): f is string => typeof f === "string") : [];
+      const detail = failing.length > 0 ? ` (${failing.join(", ")})` : "";
+      return [`The default branch's CI is red${detail} — no PR can merge until it's fixed · asks: fix the default branch's CI`];
+    },
+    attention: true,
+  },
+  "estop-lane-swept": {
+    // Payload confirmed at state.ts's emit site: {worker, issue, confirmedDead, ...}.
+    sentence: (p) => [
+      `Lane ${p.worker}'s driving work was killed by EMERGENCY STOP${p.confirmedDead === false ? " — the process couldn't be confirmed dead" : ""} · asks: check for an orphan process and confirm the PR's state`,
+    ],
+    attention: true,
+  },
+  "estop-lane-sweep-incapable": {
+    // Payload confirmed at round.ts's emit site: {worker, issue}.
+    sentence: (p) => [
+      `Lane ${p.worker}'s EMERGENCY STOP sweep couldn't verify or signal its process — left unsettled · asks: check the lane by hand`,
+    ],
+    attention: true,
+  },
+  "resume-capped": {
+    // Payload confirmed at conductor.ts's emit site: {worker, issue, attempts, pr?}.
+    sentence: (p) => [
+      `Lane ${p.worker} exhausted its resume attempts${typeof p.attempts === "number" ? ` (${p.attempts})` : ""} after a handoff · asks: resume or reassign the lane by hand`,
+    ],
+    attention: true,
+  },
+  "resume-undecidable": {
+    sentence: (p) => [
+      `Lane ${p.worker}'s resume outcome couldn't be determined from the ledger · asks: check the lane by hand and decide whether to resume`,
+    ],
+    attention: true,
+  },
+  "orphan-pr-escalated": {
+    // Payload confirmed at reconcile.ts's emit site (escalateToNeedsHuman): {pr, worker, via, issue}.
+    sentence: (p) => [
+      "PR ",
+      prTok(p.pr, p.issue),
+      ` is open but lane ${p.worker} is dead${typeof p.via === "string" && p.via ? ` (${p.via})` : ""} · asks: check the PR and decide whether to retry the issue`,
+    ],
+    attention: true,
+  },
+  "gated-flag-unprovable": {
+    sentence: (p) => [
+      "Lane ",
+      `${p.worker}`,
+      "'s reentry flag couldn't be found on either carrier · asks: check issue ",
+      issueTok(p.issue),
+      "'s labels by hand",
+    ],
+    attention: true,
+  },
+  "drive-human-merge-only": {
+    sentence: (p) => [
+      "PR ",
+      prTok(p.pr, p.issue),
+      " is ready but requires a human to merge it — a one-way, never re-decided policy · asks: review and merge by hand",
+    ],
+    attention: true,
+  },
+  "fix-leg-dispatch-unconfigured": {
+    sentence: (p) => [
+      "PR ",
+      prTok(p.pr, p.issue),
+      " needs a fix leg but the fix loop isn't configured for this run · asks: enable the fix loop or fix the PR by hand",
+    ],
+    attention: true,
+  },
+  "fix-leg-undecidable": {
+    sentence: (p) => [
+      "PR ",
+      prTok(p.pr, p.issue),
+      "'s fix leg outcome couldn't be determined from the ledger · asks: check the lane and decide the PR's next step",
+    ],
+    attention: true,
+  },
+  "fix-thread-write-escalated": {
+    sentence: (p) => [
+      "PR ",
+      prTok(p.pr, p.issue),
+      " has a review-thread reply/resolve that couldn't be posted after retrying · asks: check the review thread by hand",
+    ],
+    attention: true,
+  },
+  "ac-snapshot-drift": {
+    sentence: (p) => [
+      "PR ",
+      prTok(p.pr, p.issue),
+      "'s issue body changed after its acceptance criteria were captured · asks: confirm the PR still matches the issue, or re-snapshot",
+    ],
+    attention: true,
+  },
+  "review-silence-escalated": {
+    // Payload confirmed at conductor.ts's emit site: {worker, issue, pr, head, silenceSec}.
+    sentence: (p) => [
+      "PR ",
+      prTok(p.pr, p.issue),
+      `'s review request went unanswered${typeof p.silenceSec === "number" ? ` for ${Math.round(p.silenceSec / 60)}m` : ""} · asks: check the reviewer and prompt or reassign the review`,
+    ],
+    attention: true,
+  },
+  "review-disputed": {
+    // Payload confirmed at conductor.ts's emit site: {worker, issue, pr, carrier, headOid, fixRounds, threads|findings, source}.
+    sentence: (p) => [
+      "PR ",
+      prTok(p.pr, p.issue),
+      " — successive reviews disagreed past the dispute limit · asks: adjudicate which review is right",
+    ],
+    attention: true,
+  },
+  "review-non-convergent": {
+    sentence: (p) => [
+      "PR ",
+      prTok(p.pr, p.issue),
+      " — fix-and-review rounds failed to converge · asks: adjudicate — re-ready or close manually",
+    ],
+    attention: true,
+  },
+  "comment-cursor-stale": {
+    sentence: (p) => [
+      "Issue ",
+      issueTok(p.issue),
+      "'s comment thread moved since the engine last read it, so it refused to spend/dispatch/drive · asks: review the comment thread — this clears once the engine re-reads it",
+    ],
+    attention: true,
+  },
+  "round-pool-removal-capped": {
+    sentence: (p) => [
+      "Issue ",
+      issueTok(p.issue),
+      "'s round-pool label couldn't be removed after retrying · asks: remove the label by hand",
+    ],
+    attention: true,
+  },
+  "concern-post-escalated": {
+    sentence: (p) => [
+      "Issue ",
+      issueTok(p.issue),
+      "'s PO concern couldn't be posted after retrying · asks: check the issue and post the concern by hand",
+    ],
+    attention: true,
+  },
+  "operator-fence-violated": {
+    sentence: (p) => [
+      "Issue ",
+      issueTok(p.issue),
+      "'s body edit was refused — it touched an operator-owned section · asks: review the proposed edit and the operator fence by hand",
+    ],
+    attention: true,
+  },
+  "architect-repeat-drop-escalated": {
+    sentence: (p) => [
+      "Issue ",
+      issueTok(p.issue),
+      " was dropped repeatedly for the same reason with no edit in between · asks: revise the issue or adjudicate the repeated drop",
+    ],
+    attention: true,
+  },
 };
 
-/** The exhaustive kind list, derived from `COPY` itself rather than re-spelled — the same
- *  one-source-of-truth shape `event-kinds/index.ts` uses on the engine side. */
+/** The narrative kind list, derived from `COPY` itself rather than re-spelled — the same
+ *  one-source-of-truth shape `event-kinds/index.ts` uses on the engine side. Scoped to narrative
+ *  (§7-table) kinds only — `TELEMETRY_KINDS` below is the other half of the full union. */
 export const EVENT_KINDS: EventKind[] = Object.keys(COPY) as EventKind[];
 
-/** #715 gate② round 5 [0]: the ONE source of truth for "is this wire kind one the client actually
- *  knows how to render" — a real type guard (`kind is EventKind`), not just a runtime boolean,
- *  so a caller can narrow a `string`-typed wire value to the closed `EventKind` union at the spot
- *  it needs to. `domain-event.ts`'s `toDomainEvent` is the ONE place in the app that calls this —
- *  every other kind check downstream trusts the classification it already made, rather than
- *  re-deriving it. */
+/** #893: heartbeat/bookkeeping engine kinds — real, registered, regularly-emitted traffic that
+ *  has no narrative worth telling on its own. Each still renders an honest, generic line via
+ *  `telemetryEntry` (never the raw "Unrecognized event" fallback) and is collapsed/excluded from
+ *  the live feed's default view (opt-in to show — ActivityFeed.tsx's `showTelemetry` toggle).
+ *  Completeness (every engine kind is EITHER here or in `COPY`, never both, never neither) is
+ *  pinned by copy.test.ts's cross-package exhaustiveness test — a registered engine kind added
+ *  to neither list fails that test (red-first, mutation-killable: remove any one member here and
+ *  that same test reddens for the now-unclassified kind). */
+const TELEMETRY_KIND_NAMES: readonly EventKind[] = [
+  // run.ts
+  "run-ended",
+  "deploy-key-tier-detected",
+  "claude-cli-version-checked",
+  "engine-stalled",
+  "engine-restart-after-stall",
+  "park-wait-heartbeat",
+  "standby-heartbeat",
+  "reconcile-completed",
+  "role-debris-swept",
+  "worktree-janitor-rollup",
+  "base-ci-red-observed",
+  "base-ci-red-cleared",
+  "directive-applied",
+  "forge-page-ceiling",
+  "web-access-denied-by-operator-settings",
+  "user-settings-drift-detected",
+  "fix-loop-unattached",
+  "labels-reconciled",
+  "board-normalized",
+  "board-gap-detected",
+  "proxy-mint-failed",
+  "egress-suspect",
+  // lane.ts
+  "reclaim-dead-comment-failed",
+  "estop-lane-sweep-started",
+  "resumed",
+  "resume-failed",
+  "resume-capped-label-failed",
+  "resume-undecidable-label-failed",
+  "lane-adopted",
+  "lane-pr-unknown",
+  "lane-revival-terminal",
+  "human-merge-only-closed",
+  "merged-lane-worktree-settled",
+  "merged-lane-worktree-retained",
+  "merged-lane-worktree-settle-failed",
+  "orphan-detected",
+  "orphan-healed",
+  "orphan-heal-failed",
+  "orphan-sweep-checked",
+  "gated-flag-healed",
+  "gated-lane-retired",
+  "worker-heartbeat",
+  "role-session-heartbeat",
+  "role-env-failure",
+  "role-session-exit-lost",
+  "role-session-spawn-timeout",
+  "role-worktree-retained",
+  "lane-spawned",
+  // drive.ts
+  "drive-thread-writes-pending",
+  "gated-reentry-merged",
+  "gated-reentry-issue-closed",
+  "gated-reentry-candidate-staged",
+  "fix-leg-adopted",
+  "fix-leg-adopted-drained",
+  "fix-leg-dispatch-blocked",
+  "fix-leg-dispatch-failed",
+  "fix-leg-resume-failed",
+  "fix-leg-resume-no-pr",
+  "fix-leg-resume-unconfigured",
+  "fix-leg-undecidable-label-failed",
+  "fix-rounds-cap-label-failed",
+  "fix-rounds-cap-comment-failed",
+  "fix-response-invalid",
+  "fix-response-queued",
+  "fix-thread-reply-posted",
+  "fix-thread-resolved",
+  "fix-thread-write-escalation-label-failed",
+  "fix-thread-write-retry-failed",
+  "blocked-by-cleared",
+  "drain-driving-escalation-label-failed",
+  "drain-driving-escalation-comment-failed",
+  // review.ts
+  "review-disputed-label-failed",
+  "review-disputed-comment-failed",
+  "review-non-convergent-label-failed",
+  "review-non-convergent-comment-failed",
+  // governance.ts
+  "align-skipped",
+  "backlog-read-failed",
+  "goal-file-unreadable",
+  "pool-labels-failed",
+  "pool-reconcile-incomplete",
+  "pool-selection-decision-lost",
+  "pool-degraded",
+  "triage-body-committed",
+  "triage-comment-posted",
+  "triage-decision-accepted",
+  "triage-decision-lost",
+  "triage-effects-committed",
+  "triage-stale-hash-skipped",
+  "proposal-created",
+  "proposal-comment-posted",
+  "proposal-set-persisted",
+  "proposal-skipped",
+  "proposal-journal-corrupt",
+  "concern-posted",
+  "concern-adjudicated",
+  "concern-post-failed",
+  "plan-approved",
+  "architect-review-degraded",
+  "architect-degraded",
+  "architect-verdict-applied",
+  "architect-verdict-lost",
+  "po-degraded",
+  "harvest-degraded",
+  "retro-degraded",
+];
+
+export const TELEMETRY_KINDS: ReadonlySet<EventKind> = new Set(TELEMETRY_KIND_NAMES);
+
+/** The generic, honest entry every `TELEMETRY_KINDS` member renders — the kind name itself, never
+ *  a fabricated narrative. `copyFor` constructs one on demand rather than pre-populating `COPY`
+ *  with 100+ near-identical entries, keeping §7's table (and its row-count test) scoped to the
+ *  hand-authored narrative kinds only. */
+function telemetryEntry(kind: EventKind): CopyEntry {
+  return { sentence: () => [`Telemetry: ${kind}`], tier: "telemetry" };
+}
+
+/** #715 gate② round 5 [0], extended #893: the ONE source of truth for "is this wire kind one the
+ *  client actually knows how to render" — a real type guard (`kind is EventKind`), not just a
+ *  runtime boolean, so a caller can narrow a `string`-typed wire value to the closed `EventKind`
+ *  union at the spot it needs to. `domain-event.ts`'s `toDomainEvent` is the ONE place in the app
+ *  that calls this — every other kind check downstream trusts the classification it already made,
+ *  rather than re-deriving it. A telemetry-tier kind is "known" too (#893: it must never render
+ *  the raw "Unrecognized event" fallback) — `copyFor`/`hasAttention`/`attentionCategory` all read
+ *  through this same gate. */
 export function isKnownKind(kind: string): kind is EventKind {
-  return Object.hasOwn(COPY, kind);
+  return Object.hasOwn(COPY, kind) || TELEMETRY_KINDS.has(kind as EventKind);
 }
 
 export function copyFor(kind: string): CopyEntry | undefined {
-  return isKnownKind(kind) ? COPY[kind] : undefined;
+  if (Object.hasOwn(COPY, kind)) return COPY[kind as EventKind];
+  if (TELEMETRY_KINDS.has(kind as EventKind)) return telemetryEntry(kind as EventKind);
+  return undefined;
 }
 
 export function hasAttention(kind: string, payload: Payload | null): boolean {
@@ -615,10 +878,8 @@ export function hasAttention(kind: string, payload: Payload | null): boolean {
 }
 
 /** #881: the category-chip taxonomy `NeedsAttention.tsx` renders per row, mirroring
- *  `needs-attention-dark.png`'s FIX CAP/REVIEW SILENCE/CEILING/DISSENT chip pattern — adapted to
- *  the kinds this engine actually emits rather than the mockup's illustrative labels verbatim
- *  (this engine has no literal "review silence" or "dissent" event kind). Every kind that ever
- *  carries `attention` (§3) has exactly one category below; completeness is pinned by
+ *  `needs-attention-dark.png`'s FIX CAP/REVIEW SILENCE/CEILING/DISSENT chip pattern. Every kind
+ *  that ever carries `attention` (§3) has exactly one category below; completeness is pinned by
  *  `copy.test.ts`'s taxonomy-completeness test rather than left to drift silently. Grouped by
  *  what kind of intervention the row is actually asking for, not by which engine module emitted
  *  it:
@@ -629,9 +890,24 @@ export function hasAttention(kind: string, payload: Payload | null): boolean {
  *  - ROLLBACK — an automatic backlog return failed
  *  - INSPECT — a worktree was kept on disk for a person to look at
  *  - ENV — the execution environment itself is unhealthy
- *  - REVIEW — a plan/verification review couldn't reach an automatic verdict
- *  - LABEL — a bookkeeping write failed (self-retries; lowest urgency of the ten)
- *  - CI — a PR's checks never resolved cleanly */
+ *  - REVIEW — a plan/verification/acceptance-criteria review couldn't reach an automatic verdict
+ *  - LABEL — a bookkeeping write failed (self-retries; lowest urgency of the group)
+ *  - CI — a PR's checks (or the default branch's) never resolved cleanly
+ *  - E-STOP — an EMERGENCY STOP left a lane/process in a state only a person can settle
+ *  - BREAKER — a run-level breaker tripped into a probe-less park episode (#893: same family as
+ *    ENV, but no PR/issue/lane is implicated — the whole run paused)
+ *  - RESUME — a handed-off lane's resume attempt was exhausted or undecidable (#893)
+ *  - FLAG — a gated-reentry escalation flag itself is missing or unprovable (#893)
+ *  - THREAD — a review-thread reply/resolve write exhausted its retries (#893)
+ *  - STALE — a cached snapshot/cursor (acceptance criteria, comment cursor) no longer matches
+ *    live state, and the engine refused to act on stale information (#893)
+ *  - CONCERN — the PO's structured-dissent concern couldn't be posted (#893)
+ *  - FENCE — an operator-owned issue-body region was (or would have been) violated (#893)
+ *  - DROP — the same issue was dropped repeatedly for the same unaddressed reason (#893)
+ *  - REVIEW SILENCE — a gate② review request went unanswered past the silence bound (#893, per
+ *    the mockup's own chip name)
+ *  - DISSENT — successive reviews disagreed, or fix/review rounds failed to converge (#893, per
+ *    the mockup's own chip name) */
 export const ATTENTION_CATEGORY: Partial<Record<EventKind, string>> = {
   "drive-needs-human": "DECISION",
   "drive-no-pr": "DECISION",
@@ -650,10 +926,36 @@ export const ATTENTION_CATEGORY: Partial<Record<EventKind, string>> = {
   "gated-reentry-capped-label-failed": "LABEL",
   "ci-inert-escalated": "CI",
   "ci-pending-escalated": "CI",
+  // #893 additions.
+  "emergency-stop": "E-STOP",
+  "estop-lane-swept": "E-STOP",
+  "estop-lane-sweep-incapable": "E-STOP",
+  "rapid-restart-detected": "BREAKER",
+  "consecutive-stalls-detected": "BREAKER",
+  "idle-churn-detected": "BREAKER",
+  "empty-spin-park": "BREAKER",
+  "base-ci-red-escalated": "CI",
+  "resume-capped": "RESUME",
+  "resume-undecidable": "RESUME",
+  "orphan-pr-escalated": "DECISION",
+  "gated-flag-unprovable": "FLAG",
+  "drive-human-merge-only": "DECISION",
+  "fix-leg-dispatch-unconfigured": "FIX CAP",
+  "fix-leg-undecidable": "FIX CAP",
+  "fix-thread-write-escalated": "THREAD",
+  "ac-snapshot-drift": "STALE",
+  "comment-cursor-stale": "STALE",
+  "review-silence-escalated": "REVIEW SILENCE",
+  "review-disputed": "DISSENT",
+  "review-non-convergent": "DISSENT",
+  "round-pool-removal-capped": "LABEL",
+  "concern-post-escalated": "CONCERN",
+  "operator-fence-violated": "FENCE",
+  "architect-repeat-drop-escalated": "DROP",
 };
 
 export function attentionCategory(kind: string): string | undefined {
-  return isKnownKind(kind) ? ATTENTION_CATEGORY[kind] : undefined;
+  return isKnownKind(kind) ? ATTENTION_CATEGORY[kind as EventKind] : undefined;
 }
 
 /** #891: the strip's summary line ("N waiting · oldest Xd · M dissent") needs a "dissent" count

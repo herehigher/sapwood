@@ -91,6 +91,40 @@ function openAttentionKey(kind: string, payload: Record<string, unknown>): strin
   return typeof payload.issue === "number" ? `${kind}:${payload.issue}` : kind;
 }
 
+/** PR #900 gate② finding [0]: a probe-less breaker (rapid-restart.ts's `escalateLocally` and its
+ *  stall-breaker.ts/idle-churn.ts siblings) appends BOTH its own one-shot `*-detected` event AND a
+ *  `park-escalated{source}` companion for the SAME episode, same tick — engine-side, that pair is
+ *  "detection" + "the ESCALATION marker went up", not two independent problems. Without this map,
+ *  both opened their own strip row, and `park-resumed{source}` only ever closed the generic
+ *  `park-escalated` key, leaving the `*-detected` row stuck open forever (the finding's exact
+ *  repro). Each breaker's own `ParkSource` constant is the join key (`rapid-restart.ts`'s
+ *  `RAPID_RESTART_PARK_SOURCE` etc.) — `empty-spin-park` deliberately has no entry here: it has no
+ *  `ParkSource` of its own (its meaning: 'enters the SAME "llm" park episode' ordinary env-failure
+ *  uses), so it can't be joined by source the same way; see `openParkEscalated`'s own handling. */
+const PARK_SOURCE_ATTENTION_KEY: Record<string, string> = {
+  "rapid-restart": "rapid-restart-detected",
+  "consecutive-stalls": "consecutive-stalls-detected",
+  "idle-churn": "idle-churn-detected",
+};
+
+/** `park-escalated`'s own open-side half of the dedup above. Two cases collapse to "don't open a
+ *  second row":
+ *  1. `payload.source` names one of the three breakers above — their `*-detected` event (same
+ *     tick, lower event id, so already folded by the time this runs) already represents the
+ *     episode.
+ *  2. `payload.source === "llm"` AND `empty-spin-park` is already open — empty-spin shares the
+ *     single "llm" `ParkSource` row with ordinary LLM env-failure parks (no dedicated source of
+ *     its own), so THIS specific episode's `park-escalated` is empty-spin's own probe-exhausted
+ *     escalation, not a second, independent LLM problem. An ORDINARY llm/forge env-failure park
+ *     (no empty-spin-park open) still opens its own row exactly as before — the suppression is
+ *     narrow to the co-occurring case, never a blanket "llm source never opens a row" rule. */
+function openParkEscalated(open: OpenAttention, event: DomainEvent, payload: Record<string, unknown>): void {
+  const source = typeof payload.source === "string" ? payload.source : "";
+  if (source in PARK_SOURCE_ATTENTION_KEY) return;
+  if (source === "llm" && open["empty-spin-park"] !== undefined) return;
+  open[openAttentionKey("park-escalated", payload)] = event;
+}
+
 /**
  * Durable, unbounded-by-display-window fold of currently-OPEN attention-class events (§715 gate②
  * [0]: `accumulateEventsPage`'s display cap must not be the same window an open-attention pin
@@ -105,10 +139,14 @@ function openAttentionKey(kind: string, payload: Record<string, unknown>): strin
  *
  * §3's full clearing-semantics prose, mirrored (#715 gate② round 3 [1] — round 2 covered only
  * `escalation-resolved`): a later `escalation-resolved` naming the same `(source, issue)` pair
- * closes it; `park-resumed` closes the (single, global) `park-escalated` entry; `worktree-released`
- * closes the `worktree-retained` entry sharing its `worktreePath`; and any of `dispatched`,
- * `merged`, `gated-reentry`, `lane-revived` closes EVERY open entry sharing that event's `issue`,
- * except one an operation's own effects produced (`clearedBySameOperation`). Never mutates `seed`.
+ * closes it; `park-resumed` closes the (single, global) `park-escalated` entry — PLUS, PR #900
+ * gate② finding [0], whichever breaker-specific row (`PARK_SOURCE_ATTENTION_KEY`) or
+ * `empty-spin-park` opened for that same episode; `run-started` closes a still-open
+ * `emergency-stop` (#293 has no probe/resume lifecycle of its own — a fresh boot is the signal
+ * someone dealt with it); `worktree-released` closes the `worktree-retained` entry sharing its
+ * `worktreePath`; and any of `dispatched`, `merged`, `gated-reentry`, `lane-revived` closes EVERY
+ * open entry sharing that event's `issue`, except one an operation's own effects produced
+ * (`clearedBySameOperation`). Never mutates `seed`.
  */
 export function foldOpenAttention(events: readonly DomainEvent[], seed: OpenAttention = {}): OpenAttention {
   const ordered = [...events].sort((a, b) => a.id - b.id);
@@ -125,6 +163,21 @@ export function foldOpenAttention(events: readonly DomainEvent[], seed: OpenAtte
     }
     if (kind === "park-resumed") {
       delete open["park-escalated"];
+      // PR #900 gate② finding [0]: the SAME resolution receipt that closes the generic
+      // `park-escalated` row must also close whichever breaker-specific row (or empty-spin-park,
+      // sharing the "llm" source) opened for this same episode — see `PARK_SOURCE_ATTENTION_KEY`
+      // and `openParkEscalated`'s own doc for why both can be open for one episode pre-clear.
+      const source = typeof payload.source === "string" ? payload.source : "";
+      const breakerKey = PARK_SOURCE_ATTENTION_KEY[source];
+      if (breakerKey !== undefined) delete open[breakerKey];
+      if (source === "llm") delete open["empty-spin-park"];
+      continue;
+    }
+    if (kind === "run-started") {
+      // PR #900 gate② finding [0]: `emergency-stop` (#293) is an immediate hard stop with no
+      // probe/resume lifecycle of its own — the engine successfully starting again is the natural
+      // "someone dealt with it" signal, the same role `park-resumed` plays for a park episode.
+      delete open["emergency-stop"];
       continue;
     }
     if (kind === "worktree-released") {
@@ -144,6 +197,10 @@ export function foldOpenAttention(events: readonly DomainEvent[], seed: OpenAtte
       }
     }
     if (!hasAttention(kind, payload)) continue;
+    if (kind === "park-escalated") {
+      openParkEscalated(open, event, payload);
+      continue;
+    }
     open[openAttentionKey(kind, payload)] = event;
   }
   return open;
