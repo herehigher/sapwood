@@ -20,6 +20,13 @@ const THEMES = [
   { key: "dark", attr: "heartwood" },
 ] as const;
 
+// #729 fidelity ledger finding [0]: "idle" is `?demo`'s default position — the round's
+// fully-folded END state (`useDemoReplay.ts`'s `endPosition` doc), nothing left in flight.
+// "active" is that same round scrubbed back to its midpoint event — a real, work-in-flight fold,
+// not a fabricated state. `idle` is the CANONICAL pairing state against the frozen mockups below
+// (unchanged meaning from before this state split); `active` is additional live-only evidence.
+const STATES = ["idle", "active"] as const;
+
 // §3 module name → candidate DOM anchors, tried in order. `lanes`'s primary target is the real
 // lane board; its fallback is `LiveOnly`'s "live only" placeholder — `?demo`'s `mode` is always
 // "replay" (App.tsx's `DemoApp` doc), so the real `LaneBoard` never mounts under `?demo` and the
@@ -48,7 +55,7 @@ for (const dir of [OUTPUT_DIR, CAPTURES_DIR, MOCKUPS_OUT_DIR]) {
 
 test.describe.configure({ mode: "serial" });
 
-test("capture the ?demo fixture across viewports/themes and build the contact sheet", async ({ page }) => {
+test("capture the ?demo fixture across viewports/themes/states and build the contact sheet", async ({ page }) => {
   for (const width of VIEWPORTS) {
     for (const theme of THEMES) {
       await page.setViewportSize({ width, height: 900 });
@@ -59,20 +66,32 @@ test("capture the ?demo fixture across viewports/themes and build the contact sh
       await page.locator("#overview").waitFor({ state: "visible" });
       await page.waitForLoadState("networkidle");
 
-      const prefix = `${width}-${theme.key}`;
-      await page.screenshot({ path: `${CAPTURES_DIR}/${prefix}-full.png`, fullPage: true });
-
+      const idlePrefix = `${width}-${theme.key}-idle`;
+      await page.screenshot({ path: `${CAPTURES_DIR}/${idlePrefix}-full.png`, fullPage: true });
       for (const [moduleKey, selectors] of Object.entries(MODULE_SELECTORS)) {
         const locator = await firstMatch(page, selectors);
-        if (locator) await locator.screenshot({ path: `${CAPTURES_DIR}/${prefix}-${moduleKey}.png` });
+        if (locator) await locator.screenshot({ path: `${CAPTURES_DIR}/${idlePrefix}-${moduleKey}.png` });
+      }
+
+      // Second state: scrub the transport back to the round's midpoint — a real, work-in-flight
+      // fold (`scrubTo`'s own doc: a checkpointed re-fold to an earlier event, not a fabricated
+      // state), giving genuine "active" evidence alongside the idle default above.
+      const scrubbed = await scrubToMidpoint(page);
+      if (scrubbed) {
+        const activePrefix = `${width}-${theme.key}-active`;
+        await page.screenshot({ path: `${CAPTURES_DIR}/${activePrefix}-full.png`, fullPage: true });
+        for (const [moduleKey, selectors] of Object.entries(MODULE_SELECTORS)) {
+          const locator = await firstMatch(page, selectors);
+          if (locator) await locator.screenshot({ path: `${CAPTURES_DIR}/${activePrefix}-${moduleKey}.png` });
+        }
       }
     }
   }
 
   // Every module's selector chain (the `lanes` fallback included — the chain only guarantees
   // "one of these matched", not which one) must have matched SOMETHING at every
-  // viewport/theme combination. A selector miss here (a renamed aria-label, a removed id) is a
-  // real regression the run should fail on, not a gap the contact sheet quietly omits a row
+  // viewport/theme/state combination. A selector miss here (a renamed aria-label, a removed id) is
+  // a real regression the run should fail on, not a gap the contact sheet quietly omits a row
   // for. Presence-of-evidence assertion, not a pixel comparison — the no-pixel-diff stance
   // stands.
   const missing = missingCaptures();
@@ -90,22 +109,52 @@ async function firstMatch(page: Page, selectors: string[]): Promise<Locator | nu
   return null;
 }
 
-/** Every module × viewport × theme crop the capture loop above is supposed to have written —
- *  anything absent means a selector chain matched nothing for that combination. */
+/** Drives the real `<input aria-label="scrub">` (`Transport.tsx`) to its midpoint event via
+ *  React's own `onChange` — a native property-setter write + a dispatched `input` event, the
+ *  standard way to drive a React-controlled input from outside React (`fill()` does not reliably
+ *  reach range inputs' React handlers). Returns false when no scrub control is present (nothing to
+ *  scrub — never treated as a failure, since not every module renders the transport). */
+async function scrubToMidpoint(page: Page): Promise<boolean> {
+  const scrub = page.locator('input[aria-label="scrub"]');
+  if ((await scrub.count()) === 0) return false;
+  await scrub.evaluate((el: HTMLInputElement) => {
+    const midpoint = Math.round((Number(el.min) + Number(el.max)) / 2);
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter?.call(el, String(midpoint));
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await page.waitForTimeout(100);
+  return true;
+}
+
+// `NeedsAttention.tsx` renders nothing at all when its item list is empty (frontend-design.md:
+// "empty = not rendered, empty is trustworthy") — at the round's SCRUBBED MIDPOINT nothing has
+// necessarily escalated to a human yet, so an absent capture there is a genuine, honest "nothing
+// waiting at this point in the round" fact, not a selector miss. Exempted from the presence
+// requirement for `active` only; still required for `idle` (the round's settled end, where the
+// fixture's own final needs-human item is expected to exist).
+const OPTIONAL_AT: Partial<Record<(typeof STATES)[number], string[]>> = { active: ["needs-attention"] };
+
+/** Every module × viewport × theme × state crop the capture loop above is supposed to have
+ *  written — anything absent (and not exempted above) means a selector chain matched nothing for
+ *  that combination. */
 function missingCaptures(): string[] {
   const missing: string[] = [];
   for (const width of VIEWPORTS) {
     for (const theme of THEMES) {
-      for (const moduleKey of Object.keys(MODULE_SELECTORS)) {
-        const file = `${CAPTURES_DIR}/${width}-${theme.key}-${moduleKey}.png`;
-        if (!existsSync(file)) missing.push(file);
+      for (const state of STATES) {
+        for (const moduleKey of Object.keys(MODULE_SELECTORS)) {
+          if (OPTIONAL_AT[state]?.includes(moduleKey)) continue;
+          const file = `${CAPTURES_DIR}/${width}-${theme.key}-${state}-${moduleKey}.png`;
+          if (!existsSync(file)) missing.push(file);
+        }
       }
     }
   }
   return missing;
 }
 
-type PairRow = { moduleKey: string; theme: string; mockup: string; capture: string };
+type PairRow = { moduleKey: string; theme: string; state: (typeof STATES)[number]; mockup: string; capture: string };
 
 function buildContactSheet(): void {
   const mockupFiles = existsSync(MOCKUPS_SRC_DIR) ? readdirSync(MOCKUPS_SRC_DIR).filter((f) => f.endsWith(".png")) : [];
@@ -117,15 +166,24 @@ function buildContactSheet(): void {
     const moduleKey = match?.[1];
     const theme = match?.[2];
     if (!moduleKey || !theme || !(moduleKey in MODULE_SELECTORS)) continue;
-    const capture = `captures/${CANONICAL_WIDTH}-${theme}-${moduleKey}.png`;
-    // `missingCaptures()` (called before this function ever runs) already asserts every
-    // module/viewport/theme crop exists — a miss here is that invariant broken, not a
-    // legitimate "no mockup" gap, so this fails loud rather than silently dropping the row
-    // and getting mislabeled alongside the real no-mockup case below.
-    if (!existsSync(`${OUTPUT_DIR}/${capture}`)) {
-      throw new Error(`invariant violated: capture missing for an existing mockup pairing (${capture})`);
+    // Every mockup is paired against BOTH live states — the frozen mockups predate this state
+    // split and each shows whichever moment its own design pass chose, so a reviewer needs both
+    // live states side by side to judge fidelity rather than one arbitrarily privileged over the
+    // other.
+    for (const state of STATES) {
+      const capture = `captures/${CANONICAL_WIDTH}-${theme}-${state}-${moduleKey}.png`;
+      if (!existsSync(`${OUTPUT_DIR}/${capture}`)) {
+        // `missingCaptures()` (called before this function ever runs) already asserts every
+        // required module/viewport/theme/state crop exists — an absence here is either that
+        // invariant broken (fail loud) or an `OPTIONAL_AT` exemption genuinely having nothing to
+        // show at this state (skip the row honestly, same as the no-mockup case below).
+        if (!OPTIONAL_AT[state]?.includes(moduleKey)) {
+          throw new Error(`invariant violated: capture missing for an existing mockup pairing (${capture})`);
+        }
+        continue;
+      }
+      pairRows.push({ moduleKey, theme, state, mockup: `mockups/${file}`, capture });
     }
-    pairRows.push({ moduleKey, theme, mockup: `mockups/${file}`, capture });
   }
 
   // Modules with genuinely no frozen mockup PNG on disk for either theme — never a
@@ -138,20 +196,22 @@ function buildContactSheet(): void {
     .map(
       (r) => `
       <tr>
-        <td class="label">${r.moduleKey} · ${r.theme}<br><span class="tag">mockup vs. live</span></td>
+        <td class="label">${r.moduleKey} · ${r.theme} · ${r.state}<br><span class="tag">mockup vs. live</span></td>
         <td><img src="${r.mockup}" alt="${r.moduleKey} ${r.theme} mockup"></td>
-        <td><img src="${r.capture}" alt="${r.moduleKey} ${r.theme} live capture"></td>
+        <td><img src="${r.capture}" alt="${r.moduleKey} ${r.theme} ${r.state} live capture"></td>
       </tr>`,
     )
     .join("");
 
   const fullPageRowsHtml = VIEWPORTS.flatMap((width) =>
-    THEMES.map(
-      (t) => `
+    THEMES.flatMap((t) =>
+      STATES.map(
+        (state) => `
       <tr>
-        <td class="label">${width}px · ${t.key}<br><span class="tag">full page</span></td>
-        <td colspan="2"><img src="captures/${width}-${t.key}-full.png" alt="${width} ${t.key} full page"></td>
+        <td class="label">${width}px · ${t.key} · ${state}<br><span class="tag">full page</span></td>
+        <td colspan="2"><img src="captures/${width}-${t.key}-${state}-full.png" alt="${width} ${t.key} ${state} full page"></td>
       </tr>`,
+      ),
     ),
   ).join("");
 
