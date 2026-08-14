@@ -968,17 +968,27 @@ export function HeroStage({
         {/* #891 AC1: droplets `boundAttentionDroplets` excluded for being resolved, from an
          * earlier round, or beyond the needs-human draw cap collapse here — ONE combined chip
          * rather than a per-zone one, since to the viewer they're all the same fact ("more is
-         * waiting than the stage shows right now — see the strip/feed"). Sits below the backlog
-         * well, an area nothing else on the stage ever draws into. */}
+         * waiting than the stage shows right now — see the strip/feed").
+         *
+         * #891 gate① engine-agent finding [0] (ac1-collapsed-chip-overlap): the original spot
+         * below the backlog well (94, 296) sat 4px off the staleness caption's own baseline
+         * (`PLANNING.noteX`/`PLANNING.note` = 152, 300) with a long enough label to run straight
+         * into it. Moved below the ESCALATION node instead — the one stretch of the stage
+         * nothing else draws into at ANY zone's worst case: below the needs-human cluster's
+         * lowest row (`ESCALATION.y - 30`, itself well above this y), below the node's own
+         * label/circle, and above the dashed return path's horizontal leg (`STAGE.h - 20`).
+         * Shortened text, verified collision-free against every neighboring caption/tally by
+         * `hero.test.ts`'s own worst-case stress test, the same discipline this file's other
+         * geometry constants already cite. */}
         {collapsedCount > 0 && (
           <text
             className="hero-num hero-small hero-badge hero-attention-collapsed"
             data-count={collapsedCount}
-            x={BACKLOG.x + BACKLOG.w / 2}
-            y={BACKLOG.y + 210 + 24}
+            x={ESCALATION.x}
+            y={ESCALATION.y + 34}
             textAnchor="middle"
           >
-            +{collapsedCount} from earlier — see the strip
+            +{collapsedCount} earlier — see strip
           </text>
         )}
       </g>

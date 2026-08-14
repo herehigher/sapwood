@@ -8,8 +8,9 @@ import type { DomainEvent } from "../domain-event.ts";
 import { toDomainEvent } from "../domain-event.ts";
 import { foldOpenAttention } from "../entities.ts";
 import { registerRealDom } from "../test-dom.ts";
+import { Hero } from "./Hero.tsx";
 import { LEGEND_ITEMS, Legend } from "./Legend.tsx";
-import { BACKLOG, checkpointOverflowPoint, dropletPoint, GATES, HeroStage, STAGE, TRUNK } from "./stage.tsx";
+import { BACKLOG, checkpointOverflowPoint, dropletPoint, ESCALATION, GATES, HeroStage, STAGE, TRUNK } from "./stage.tsx";
 import {
   activePlanningNode,
   activeReflectionNode,
@@ -2064,7 +2065,7 @@ test("#891 AC1: needs-human droplets bound to the open round + a draw cap; histo
   const badgeMatch = html.match(/class="hero-num hero-small hero-badge hero-attention-collapsed" data-count="(\d+)"/);
   assert.ok(badgeMatch, "the collapsed counter chip must render");
   assert.equal(badgeMatch?.[1], "3");
-  assert.match(html, /\+3 from earlier — see the strip/);
+  assert.match(html, /\+3 earlier — see strip/);
 
   // The tally/aria text itself still reports the HONEST total (8) — bounding is a STAGE drawing
   // concern only, never a smaller/wrong count (#891 AC2).
@@ -2152,4 +2153,113 @@ test("#891 gate① engine-agent finding [0]: a drawn backlog droplet's slot COMP
     expected60,
     "issue 60 must draw at the FIRST compacted backlog slot, not three rows down as if the hidden historical droplet's own handoff-badge reservation still counted",
   );
+});
+
+test("#891 gate① engine-agent finding [0] (ac1-collapsed-chip-overlap): the collapsed counter chip never collides with the staleness caption, the outcome tally, the escalation node's own label, or the needs-human cluster — stressed at the issue's own reported scale", () => {
+  const events: LoopEvent[] = [];
+  // 42 historical (round 1) escalations — the issue's own reported scale ("+42 more") — plus a
+  // large merged count, matching this file's own "#728 gate② [0]" stress-test doctrine: a
+  // deliberately inflated fixture, not today's small one.
+  events.push(wire("2026-07-01T00:00:00.000Z", "pool-selected", { round_id: 1, issues: [] }));
+  for (let i = 1; i <= 42; i++) {
+    events.push(wire("2026-07-01T00:01:00.000Z", "dispatched", { worker: `h${i}`, issue: i }));
+    events.push(wire("2026-07-01T00:02:00.000Z", "reclaim-done", { worker: `h${i}`, issue: i, next: "DRIVING", pr: i }));
+    events.push(wire("2026-07-01T00:03:00.000Z", "drive-needs-human", { worker: `h${i}`, issue: i, pr: i }));
+  }
+  events.push(wire("2026-08-10T00:00:00.000Z", "pool-selected", { round_id: 2, issues: [] }));
+  for (let i = 1; i <= 24; i++) events.push(wire("2026-08-10T00:01:00.000Z", "merged", { worker: `m${i}`, issue: 1000 + i, pr: 1000 + i }));
+  // 6 CURRENT-round escalations — fills the draw cap, the needs-human cluster's own worst case.
+  for (let i = 101; i <= 106; i++) {
+    events.push(wire("2026-08-10T00:02:00.000Z", "dispatched", { worker: `w${i}`, issue: i }));
+    events.push(wire("2026-08-10T00:03:00.000Z", "reclaim-done", { worker: `w${i}`, issue: i, next: "DRIVING", pr: i }));
+    events.push(wire("2026-08-10T00:04:00.000Z", "drive-needs-human", { worker: `w${i}`, issue: i, pr: i }));
+  }
+
+  const { state } = run(events.map(toDomainEvent), 43);
+  const open = foldAttention(events);
+  assert.equal(Object.keys(open).length, 48, "42 historical + 6 current-round escalations, nothing resolved");
+
+  const html = markup(state, {
+    lanesMax: 43,
+    openAttention: Object.values(open),
+    // A large elapsed time — the staleness caption's own worst-case rendered width, the exact
+    // neighbor this finding named.
+    now: new Date(new Date(state.lastEventTs!).getTime() + 999_999_000),
+  });
+
+  const chipMatch = html.match(
+    /class="hero-num hero-small hero-badge hero-attention-collapsed" data-count="(\d+)" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</,
+  );
+  assert.ok(chipMatch, "the collapsed chip must render");
+  const [, countRaw, chipXRaw, chipYRaw, chipText] = chipMatch as unknown as [string, string, string, string, string];
+  assert.equal(countRaw, "42");
+  assert.match(chipText, /\+42 earlier — see strip/);
+
+  const staleMatch = html.match(/class="hero-label hero-staleness" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</);
+  assert.ok(staleMatch, "the staleness caption must render");
+  const [, staleXRaw, staleYRaw, staleText] = staleMatch as unknown as [string, string, string, string];
+
+  const tallyMatch = html.match(/class="hero-num hero-small hero-outcome-tally" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</);
+  assert.ok(tallyMatch, "the outcome tally must render");
+  const [, tallyXRaw, tallyYRaw, tallyText] = tallyMatch as unknown as [string, string, string, string];
+
+  const boxes: { label: string; box: Box }[] = [
+    { label: "collapsed chip", box: textBox(chipText, Number(chipXRaw), Number(chipYRaw), DROPLET_LABEL_FONT_PX) },
+    // 9px, matching `.hero-staleness, .hero-outcome-tally`'s shared CSS rule — the same literal
+    // this file's own pre-existing outcome-tally collision tests already use.
+    { label: "staleness caption", box: textBox(staleText, Number(staleXRaw), Number(staleYRaw), 9) },
+    { label: "outcome tally", box: textBox(tallyText, Number(tallyXRaw), Number(tallyYRaw), 9) },
+    // The escalation node's own "Needs human" label — the chip's closest neighbor above it —
+    // `text-anchor="start"` (no override in stage.tsx), so `x` is the LEFT edge, not the center.
+    {
+      label: "needs-human node label",
+      box: captionSafeTextBox("Needs human", ESCALATION.x + 24, ESCALATION.y + 4, GATE_NODE_LABEL_FONT_PX, "start"),
+    },
+  ];
+  const drawn = state.droplets.filter((d) => d.at === "needs-human" && d.issue >= 101);
+  assert.equal(drawn.length, 6, "all 6 current-round escalations must be within the draw cap");
+  for (const d of drawn) {
+    const { x, y } = dropletPoint(state, d);
+    const label = d.pr === null ? `⊙ ${d.issue}` : `⤳ ${d.pr}`;
+    boxes.push({ label: `needs-human #${d.issue} circle`, box: circleBox(x, y, 9) });
+    boxes.push({ label: `needs-human #${d.issue} label`, box: textBox(label, x, y - 14, 10) });
+  }
+  assertNoOverlap(boxes);
+});
+
+test("#891 gate① engine-agent finding [1] (ac2-hero-wrapper-unpinned): the REAL <Hero> wrapper — not `HeroStage` rendered directly — forwards `openAttention` through to the rendered tally/aria", () => {
+  const events = [
+    wire("2026-08-10T11:00:00.000Z", "dispatched", { worker: "w1", issue: 86 }),
+    wire("2026-08-10T11:01:00.000Z", "reclaim-done", { worker: "w1", issue: 86, next: "DRIVING", pr: 97 }),
+    wire("2026-08-10T11:02:00.000Z", "drive-needs-human", { worker: "w1", issue: 86, pr: 97 }),
+    // Resolved WITHOUT redispatch — the hero's own droplet fold never learns this (same
+    // mutation-kill shape as the AC2 test above), so the droplet stays "at: needs-human"
+    // forever. Only forwarding `openAttention` all the way through `<Hero>` into `HeroStage`
+    // makes the rendered count honestly 0.
+    wire("2026-08-10T11:05:00.000Z", "escalation-resolved", { source: "drive-needs-human", issue: 86, via: "board-fixed" }),
+  ];
+  const { state } = run(events.map(toDomainEvent));
+  const open = foldAttention(events);
+  assert.deepEqual(Object.keys(open), [], "the shared fold is empty");
+
+  // `createElement(Hero, ...)`, never `HeroStage` — this is the whole point of the finding:
+  // hero.test.ts's other #891 tests all render `HeroStage` directly, which never exercises
+  // `Hero.tsx`'s OWN `openAttention={openAttention}` forward. Removing that one line from
+  // Hero.tsx would leave every one of those tests green.
+  const html = renderToStaticMarkup(
+    createElement(Hero, {
+      heroState: state,
+      steps: [],
+      lanesMax: 3,
+      engine: "running",
+      fixCap: 2,
+      openAttention: Object.values(open),
+    }),
+  );
+  assert.match(
+    html,
+    /0 needs human/,
+    "Hero must forward openAttention through to HeroStage — reverting Hero.tsx's own forward would leave this at 1 (the stale droplet count) instead",
+  );
+  assert.match(html, /0 items currently waiting on a person/);
 });
