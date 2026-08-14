@@ -19,10 +19,12 @@ import { demoFixtureQuery, eventsQuery, loopStateQuery, MAX_EVENT_HISTORY, round
 import type { Round, SpendRow } from "./api/types.ts";
 import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
+import { NeedsAttention } from "./components/NeedsAttention.tsx";
 import { buildClosedRoundCostPanel } from "./cost-panel.ts";
 import type { DemoBundle } from "./demo/types.ts";
 import type { DomainEvent } from "./domain-event.ts";
 import type { EntityTitles } from "./entities.ts";
+import { Hero } from "./hero/Hero.tsx";
 import { foldEvents, type HeroState, initialHeroState } from "./hero/state.ts";
 import { initialReplayState } from "./replay/reducer.ts";
 import { registerRealDom } from "./test-dom.ts";
@@ -84,6 +86,9 @@ function minimalAppViewModel(
     // #868 gate② finding [1]
     inspectorEvents?: unknown[];
     roundEvents?: unknown[];
+    // #891 gate① engine-agent finding [2]: distinguishable from the default `[]` so a test can
+    // prove `appContent` threads this SAME array to both `<Hero>` and `<NeedsAttention>`.
+    activeOpenAttention?: DomainEvent[];
   } = {},
 ) {
   return {
@@ -131,7 +136,7 @@ function minimalAppViewModel(
     activeSteps: [],
     activeEvents: overrides.activeEvents ?? [],
     activeTitles: overrides.activeTitles ?? {},
-    activeOpenAttention: [],
+    activeOpenAttention: overrides.activeOpenAttention ?? [],
     // Mirrors real `App()`: `spendFacts` is always `loop.data?.spend`, straight through.
     spendFacts: (overrides.loop as { data?: { spend?: unknown } } | undefined)?.data?.spend,
     roundSpend: overrides.roundSpend,
@@ -1103,6 +1108,41 @@ test("resolveSpendMeter's run/daily reading is what LIVE mode alone uses: appCon
 function domainEvent(id: number, kind: string): DomainEvent {
   return { known: false, id, ts: "2026-08-10T10:00:00Z", kind, payload: {} };
 }
+
+// ── #891 gate① engine-agent finding [2] (ac2-shared-fold-wiring-unpinned): appContent's own
+// wiring, not two independently-satisfied unit tests ───────────────────────────────────────────
+
+test("#891 AC2: appContent threads the SAME activeOpenAttention array into BOTH <Hero> and <NeedsAttention>, and activeHero.roundEscalated into NeedsAttention's reconciliation prop", () => {
+  const distinguishableOpenAttention = [domainEvent(42, "drive-needs-human")];
+  const distinguishableHero = { ...initialHeroState(1), roundEscalated: 7 };
+  const vm = minimalAppViewModel({
+    loop: { data: LOOP_STATE_OK, isPending: false },
+    activeOpenAttention: distinguishableOpenAttention,
+    activeHero: distinguishableHero,
+  });
+  const tree = appContent(vm);
+
+  const hero = findByType(tree, Hero);
+  assert.ok(hero, "<Hero> not found in appContent's real tree");
+  assert.equal(
+    hero!.props.openAttention,
+    distinguishableOpenAttention,
+    "Hero must receive the SAME activeOpenAttention array reference appContent threads elsewhere — proving one shared source, not a separately-satisfied prop",
+  );
+
+  const needsAttention = findByType(tree, NeedsAttention);
+  assert.ok(needsAttention, "<NeedsAttention> not found in appContent's real tree");
+  assert.equal(
+    needsAttention!.props.items,
+    distinguishableOpenAttention,
+    "NeedsAttention must receive the SAME activeOpenAttention array reference as Hero — the #891 AC2 shared-fold contract, provable only by rendering appContent itself",
+  );
+  assert.equal(
+    needsAttention!.props.roundEscalated,
+    7,
+    "NeedsAttention must receive activeHero.roundEscalated (the reconciliation-sentence input) through appContent's own wiring",
+  );
+});
 
 test("resolveActiveFold: live mode returns the live fold's own fields, untouched", () => {
   const live = {

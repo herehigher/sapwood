@@ -3,10 +3,14 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import type { LoopEvent } from "../api/types.ts";
 import type { DomainEvent } from "../domain-event.ts";
+import { toDomainEvent } from "../domain-event.ts";
+import { foldOpenAttention } from "../entities.ts";
 import { registerRealDom } from "../test-dom.ts";
+import { Hero } from "./Hero.tsx";
 import { LEGEND_ITEMS, Legend } from "./Legend.tsx";
-import { BACKLOG, checkpointOverflowPoint, dropletPoint, GATES, HeroStage, STAGE, TRUNK } from "./stage.tsx";
+import { BACKLOG, checkpointOverflowPoint, dropletPoint, ESCALATION, GATES, HeroStage, STAGE, TRUNK } from "./stage.tsx";
 import {
   activePlanningNode,
   activeReflectionNode,
@@ -83,6 +87,7 @@ test("§6 `dispatched`: droplet leaves the backlog for a lane channel, lane ligh
     sendBack: null,
     touchedAt: dispatchEv.id,
     checkpointRank: null,
+    roundId: null,
   });
   assert.equal(state.lanes[0]?.phase, "writing");
   assert.equal(state.lanes[0]?.issue, 86);
@@ -337,6 +342,18 @@ test("§6 `handoff`: droplet folds back into the backlog with a progress badge",
   assert.equal(droplet(state, 86)?.handedOff, true);
   assert.equal(state.lanes[0]?.phase, "idle");
   assert.match(markup(state), /saved for a successor/);
+});
+
+test("#891 'What': a fresh `dispatched` (not just `fix-leg-resumed`) ages out a stale handoff badge on re-dispatch", () => {
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 86 }),
+    ev("handoff", { worker: "w1", issue: 86 }),
+    // A later round picks the same issue back up from scratch — not a fix-loop resume.
+    ev("dispatched", { worker: "w2", issue: 86 }),
+  ]);
+  assert.equal(droplet(state, 86)?.handedOff, false);
+  assert.equal(droplet(state, 86)?.at, "lane");
+  assert.doesNotMatch(markup(state), /saved for a successor/);
 });
 
 test("a rescued `reclaim-failed` is a recovery, not a failure — it drives on", () => {
@@ -1954,4 +1971,503 @@ test("#744: on a fixing track, the lane status phrase and the droplet's PR chip 
     { label: "lane status phrase", box: textBox(statusText, statusCenterX, Number(statusYRaw), 10) },
     { label: "PR chip", box: textBox("⤳ 739", p.x, p.y - 14, 10) },
   ]);
+});
+
+// ── #891: hero tally/aria share the strip's own `foldOpenAttention`, droplet bounding, aria
+// scope split ── every test below runs through the REAL production entry point per the issue's
+// own verification plan: a wire `LoopEvent` → `toDomainEvent` → `foldOpenAttention`, never a
+// hand-built `openAttention` array — the same discipline `NeedsAttention.test.tsx` already
+// established for the strip side of this same fold.
+
+let wireSeq = 0;
+function wire(ts: string, kind: string, payload: Record<string, unknown> | null): LoopEvent {
+  return { id: ++wireSeq, ts, kind, payload };
+}
+const foldAttention = (events: LoopEvent[]) => foldOpenAttention(events.map(toDomainEvent));
+
+test("#891 AC2 (fold-sharing, mutation-kill): an escalation resolved WITHOUT redispatch vanishes from the hero tally/aria — proving they read the shared fold, not the hero's own stale droplet count", () => {
+  const events = [
+    wire("2026-08-10T11:00:00.000Z", "dispatched", { worker: "w1", issue: 86 }),
+    wire("2026-08-10T11:01:00.000Z", "reclaim-done", { worker: "w1", issue: 86, next: "DRIVING", pr: 97 }),
+    wire("2026-08-10T11:02:00.000Z", "drive-needs-human", { worker: "w1", issue: 86, pr: 97 }),
+    // Resolved by something OTHER than a fresh dispatch/merge (§3) — the hero's OWN droplet fold
+    // (state.ts) has no case for this kind at all, so `state.droplets` still shows the droplet
+    // parked at "needs-human" forever. Only `foldOpenAttention` (entities.ts) actually clears it.
+    wire("2026-08-10T11:05:00.000Z", "escalation-resolved", { source: "drive-needs-human", issue: 86, via: "board-fixed" }),
+  ];
+  const { state } = run(events.map(toDomainEvent));
+  assert.equal(state.droplets.find((d) => d.issue === 86)?.at, "needs-human", "the hero's own fold never learns this resolved");
+  assert.equal(state.roundEscalated, 1);
+
+  const open = foldAttention(events);
+  assert.deepEqual(Object.keys(open), [], "the shared fold IS empty — this is the divergence the mutation would miss");
+
+  const html = markup(state, { openAttention: Object.values(open) });
+  assert.match(html, /0 needs human/, "outcome tally must read the shared (empty) fold, not the stale droplet count (would read 1)");
+  assert.match(html, /0 items currently waiting on a person/, "aria-label must read the same shared fold");
+});
+
+test("#891 AC4: the hero aria-label names the all-time scope and the this-round scope in separate clauses", () => {
+  const events = [
+    wire("2026-08-10T11:00:00.000Z", "dispatched", { worker: "w1", issue: 1 }),
+    wire("2026-08-10T11:01:00.000Z", "reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 1 }),
+    wire("2026-08-10T11:02:00.000Z", "merged", { worker: "w1", issue: 1, pr: 1 }),
+    wire("2026-08-10T11:03:00.000Z", "dispatched", { worker: "w1", issue: 2 }),
+    wire("2026-08-10T11:04:00.000Z", "reclaim-done", { worker: "w1", issue: 2, next: "DRIVING", pr: 2 }),
+    wire("2026-08-10T11:05:00.000Z", "drive-needs-human", { worker: "w1", issue: 2, pr: 2 }),
+  ];
+  const { state } = run(events.map(toDomainEvent));
+  const open = foldAttention(events);
+  const html = markup(state, { openAttention: Object.values(open) });
+
+  // Two DISTINCT clauses, never one mixed together — the #891 gap was exactly this conflation.
+  assert.match(html, /1 merged pull request all-time\./);
+  assert.match(html, /This round: 1 merged\./);
+  assert.match(html, /1 item currently waiting on a person\./);
+});
+
+test("#891 AC1: needs-human droplets bound to the open round + a draw cap; historical/overflow droplets collapse into ONE counter chip, never piling up unbounded", () => {
+  const events: LoopEvent[] = [];
+  // Round 1: one escalation that's never resolved AND never touched again (a real "weeks-old
+  // escalated droplet, still parked" per the issue's own failure description) plus a
+  // handed-off droplet nobody ever redispatched (the issue's OTHER named failure: a stale
+  // "saved for a successor" badge sitting in the backlog zone).
+  events.push(wire("2026-07-01T00:00:00.000Z", "pool-selected", { round_id: 1, issues: [1, 50] }));
+  events.push(wire("2026-07-01T00:01:00.000Z", "dispatched", { worker: "w1", issue: 1 }));
+  events.push(wire("2026-07-01T00:02:00.000Z", "reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 1 }));
+  events.push(wire("2026-07-01T00:03:00.000Z", "drive-needs-human", { worker: "w1", issue: 1, pr: 1 }));
+  events.push(wire("2026-07-01T00:04:00.000Z", "dispatched", { worker: "w2", issue: 50 }));
+  events.push(wire("2026-07-01T00:05:00.000Z", "handoff", { worker: "w2", issue: 50 }));
+
+  // Round 2, the OPEN round: 7 fresh escalations — one more than NEEDS_HUMAN_DRAW_CAP (6).
+  events.push(wire("2026-08-10T00:00:00.000Z", "pool-selected", { round_id: 2, issues: [] }));
+  for (let i = 101; i <= 107; i++) {
+    events.push(wire("2026-08-10T00:01:00.000Z", "dispatched", { worker: `w${i}`, issue: i }));
+    events.push(wire("2026-08-10T00:02:00.000Z", "reclaim-done", { worker: `w${i}`, issue: i, next: "DRIVING", pr: i }));
+    events.push(wire("2026-08-10T00:03:00.000Z", "drive-needs-human", { worker: `w${i}`, issue: i, pr: i }));
+  }
+
+  const { state } = run(events.map(toDomainEvent), 43);
+  const open = foldAttention(events);
+  // Nothing has resolved — the shared fold still names all 8 escalations open (issue 1 + 101..107).
+  assert.equal(Object.keys(open).length, 8);
+
+  const html = markup(state, { lanesMax: 43, openAttention: Object.values(open) });
+
+  // Only 6 (the verified-safe draw cap) of the 7 CURRENT-round escalations draw — the round-1
+  // one (issue 1) never draws at all, it's historical from the first render.
+  assert.match(html, /data-node="needs-human" data-count="6"/);
+  assert.doesNotMatch(html, /⤳ 1</, "the round-1 (historical) escalated droplet must not draw");
+  assert.doesNotMatch(html, /saved for a successor/, "the round-1 (historical) handoff badge must not draw");
+
+  // Collapsed = 1 historical needs-human (issue 1) + 1 current-round overflow (issue 107, the
+  // 7th by arrival order) + 1 historical backlog (issue 50) = 3.
+  const badgeMatch = html.match(/class="hero-num hero-small hero-badge hero-attention-collapsed" data-count="(\d+)"/);
+  assert.ok(badgeMatch, "the collapsed counter chip must render");
+  assert.equal(badgeMatch?.[1], "3");
+  assert.match(html, /\+3 earlier — see strip/);
+
+  // The tally/aria text itself still reports the HONEST total (8) — bounding is a STAGE drawing
+  // concern only, never a smaller/wrong count (#891 AC2).
+  assert.match(html, /8 needs human/);
+});
+
+/** Extracts a drawn droplet's `transform="translate(x y)"` by its `data-issue`, straight from
+ *  the rendered markup — the actual DOM position, not a re-derivation of it. */
+function dropletTransform(html: string, issue: number): { x: number; y: number } {
+  const match = html.match(new RegExp(`data-issue="${issue}"[^>]*transform="translate\\(([-\\d.]+) ([-\\d.]+)\\)"`));
+  assert.ok(match, `droplet #${issue} must be drawn`);
+  return { x: Number(match![1]), y: Number(match![2]) };
+}
+
+test("#891 gate① engine-agent finding [0] (ac1-hidden-ranks-not-compacted): a drawn needs-human droplet's rank COMPACTS around hidden historical predecessors, never inheriting a rank/position from an entity that never draws", () => {
+  const events: LoopEvent[] = [];
+  // Two historical (round 1) escalations — never resolved, never touched again — arriving
+  // BEFORE the current-round ones in arrival order, exactly the shape that used to push a
+  // drawn droplet's rank (and therefore its stage position) two slots further than it should be.
+  events.push(wire("2026-07-01T00:00:00.000Z", "pool-selected", { round_id: 1, issues: [1, 2] }));
+  for (const issue of [1, 2]) {
+    events.push(wire("2026-07-01T00:01:00.000Z", "dispatched", { worker: `h${issue}`, issue }));
+    events.push(wire("2026-07-01T00:02:00.000Z", "reclaim-done", { worker: `h${issue}`, issue, next: "DRIVING", pr: issue }));
+    events.push(wire("2026-07-01T00:03:00.000Z", "drive-needs-human", { worker: `h${issue}`, issue, pr: issue }));
+  }
+  // Two current-round (round 2) escalations — the ones that must actually draw.
+  events.push(wire("2026-08-10T00:00:00.000Z", "pool-selected", { round_id: 2, issues: [] }));
+  for (const issue of [101, 102]) {
+    events.push(wire("2026-08-10T00:01:00.000Z", "dispatched", { worker: `w${issue}`, issue }));
+    events.push(wire("2026-08-10T00:02:00.000Z", "reclaim-done", { worker: `w${issue}`, issue, next: "DRIVING", pr: issue }));
+    events.push(wire("2026-08-10T00:03:00.000Z", "drive-needs-human", { worker: `w${issue}`, issue, pr: issue }));
+  }
+
+  const { state } = run(events.map(toDomainEvent));
+  const open = foldAttention(events);
+  assert.equal(Object.keys(open).length, 4, "nothing has resolved — all 4 are still open");
+
+  const html = markup(state, { openAttention: Object.values(open) });
+
+  // The expected positions are `dropletPoint`'s OWN formula, evaluated against the compacted
+  // collection (the two historical droplets excluded) — exactly what stage.tsx's internal
+  // `geometryState` now feeds it. Read from the source, never a hand-copied coordinate.
+  const compacted: HeroState = { ...state, droplets: state.droplets.filter((d) => d.issue === 101 || d.issue === 102) };
+  const expected101 = dropletPoint(compacted, droplet(compacted, 101)!);
+  const expected102 = dropletPoint(compacted, droplet(compacted, 102)!);
+  assert.notDeepEqual(expected101, expected102, "sanity check on the fixture itself — the two compacted ranks must be distinct");
+
+  assert.deepEqual(
+    dropletTransform(html, 101),
+    expected101,
+    "issue 101 must draw at the COMPACTED rank 0 — NOT rank 2, as if the 2 hidden historical droplets still occupied ranks ahead of it",
+  );
+  assert.deepEqual(dropletTransform(html, 102), expected102, "issue 102 must draw at the COMPACTED rank 1, not rank 3");
+
+  const pos101 = dropletTransform(html, 101);
+  const pos102 = dropletTransform(html, 102);
+  assertNoOverlap([
+    { label: "needs-human #101", box: circleBox(pos101.x, pos101.y, 9) },
+    { label: "needs-human #102", box: circleBox(pos102.x, pos102.y, 9) },
+  ]);
+});
+
+test("#891 gate① engine-agent finding [0]: a drawn backlog droplet's slot COMPACTS around a hidden historical (never-redispatched) handoff predecessor", () => {
+  const events: LoopEvent[] = [
+    // Round 1: a handed-off droplet nobody ever redispatches — historical from round 2 on.
+    wire("2026-07-01T00:00:00.000Z", "pool-selected", { round_id: 1, issues: [50] }),
+    wire("2026-07-01T00:01:00.000Z", "dispatched", { worker: "h50", issue: 50 }),
+    wire("2026-07-01T00:02:00.000Z", "handoff", { worker: "h50", issue: 50 }),
+    // Round 2, the open round: a fresh dispatch that then hands off too — the one that must
+    // actually draw, and draw at the FIRST backlog slot, not the third (after the hidden one's
+    // own 3-row handoff-badge reservation).
+    wire("2026-08-10T00:00:00.000Z", "pool-selected", { round_id: 2, issues: [] }),
+    wire("2026-08-10T00:01:00.000Z", "dispatched", { worker: "w60", issue: 60 }),
+    wire("2026-08-10T00:02:00.000Z", "handoff", { worker: "w60", issue: 60 }),
+  ];
+
+  const { state } = run(events.map(toDomainEvent));
+  const compacted: HeroState = { ...state, droplets: state.droplets.filter((d) => d.issue === 60) };
+  const expected60 = dropletPoint(compacted, droplet(compacted, 60)!);
+
+  const html = markup(state);
+  assert.doesNotMatch(html, /⊙ 50/, "the round-1 (historical) handoff droplet must not draw");
+  assert.deepEqual(
+    dropletTransform(html, 60),
+    expected60,
+    "issue 60 must draw at the FIRST compacted backlog slot, not three rows down as if the hidden historical droplet's own handoff-badge reservation still counted",
+  );
+});
+
+test("#891 gate① engine-agent finding [0] (ac1-collapsed-chip-overlap): the collapsed counter chip never collides with the staleness caption, the outcome tally, the escalation node's own label, or the needs-human cluster — stressed at the issue's own reported scale", () => {
+  const events: LoopEvent[] = [];
+  // 42 historical (round 1) escalations — the issue's own reported scale ("+42 more") — plus a
+  // large merged count, matching this file's own "#728 gate② [0]" stress-test doctrine: a
+  // deliberately inflated fixture, not today's small one.
+  events.push(wire("2026-07-01T00:00:00.000Z", "pool-selected", { round_id: 1, issues: [] }));
+  for (let i = 1; i <= 42; i++) {
+    events.push(wire("2026-07-01T00:01:00.000Z", "dispatched", { worker: `h${i}`, issue: i }));
+    events.push(wire("2026-07-01T00:02:00.000Z", "reclaim-done", { worker: `h${i}`, issue: i, next: "DRIVING", pr: i }));
+    events.push(wire("2026-07-01T00:03:00.000Z", "drive-needs-human", { worker: `h${i}`, issue: i, pr: i }));
+  }
+  events.push(wire("2026-08-10T00:00:00.000Z", "pool-selected", { round_id: 2, issues: [] }));
+  for (let i = 1; i <= 24; i++) events.push(wire("2026-08-10T00:01:00.000Z", "merged", { worker: `m${i}`, issue: 1000 + i, pr: 1000 + i }));
+  // 6 CURRENT-round escalations — fills the draw cap, the needs-human cluster's own worst case.
+  for (let i = 101; i <= 106; i++) {
+    events.push(wire("2026-08-10T00:02:00.000Z", "dispatched", { worker: `w${i}`, issue: i }));
+    events.push(wire("2026-08-10T00:03:00.000Z", "reclaim-done", { worker: `w${i}`, issue: i, next: "DRIVING", pr: i }));
+    events.push(wire("2026-08-10T00:04:00.000Z", "drive-needs-human", { worker: `w${i}`, issue: i, pr: i }));
+  }
+
+  const { state } = run(events.map(toDomainEvent), 43);
+  const open = foldAttention(events);
+  assert.equal(Object.keys(open).length, 48, "42 historical + 6 current-round escalations, nothing resolved");
+
+  const html = markup(state, {
+    lanesMax: 43,
+    openAttention: Object.values(open),
+    // A large elapsed time — the staleness caption's own worst-case rendered width, the exact
+    // neighbor this finding named.
+    now: new Date(new Date(state.lastEventTs!).getTime() + 999_999_000),
+  });
+
+  const chipMatch = html.match(
+    /class="hero-num hero-small hero-badge hero-attention-collapsed" data-count="(\d+)" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</,
+  );
+  assert.ok(chipMatch, "the collapsed chip must render");
+  const [, countRaw, chipXRaw, chipYRaw, chipText] = chipMatch as unknown as [string, string, string, string, string];
+  assert.equal(countRaw, "42");
+  assert.match(chipText, /\+42 earlier — see strip/);
+
+  const staleMatch = html.match(/class="hero-label hero-staleness" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</);
+  assert.ok(staleMatch, "the staleness caption must render");
+  const [, staleXRaw, staleYRaw, staleText] = staleMatch as unknown as [string, string, string, string];
+
+  const tallyMatch = html.match(/class="hero-num hero-small hero-outcome-tally" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</);
+  assert.ok(tallyMatch, "the outcome tally must render");
+  const [, tallyXRaw, tallyYRaw, tallyText] = tallyMatch as unknown as [string, string, string, string];
+
+  const boxes: { label: string; box: Box }[] = [
+    { label: "collapsed chip", box: textBox(chipText, Number(chipXRaw), Number(chipYRaw), DROPLET_LABEL_FONT_PX) },
+    // 9px, matching `.hero-staleness, .hero-outcome-tally`'s shared CSS rule — the same literal
+    // this file's own pre-existing outcome-tally collision tests already use.
+    { label: "staleness caption", box: textBox(staleText, Number(staleXRaw), Number(staleYRaw), 9) },
+    { label: "outcome tally", box: textBox(tallyText, Number(tallyXRaw), Number(tallyYRaw), 9) },
+    // The escalation node's own "Needs human" label — the chip's closest neighbor above it —
+    // `text-anchor="start"` (no override in stage.tsx), so `x` is the LEFT edge, not the center.
+    {
+      label: "needs-human node label",
+      box: captionSafeTextBox("Needs human", ESCALATION.x + 24, ESCALATION.y + 4, GATE_NODE_LABEL_FONT_PX, "start"),
+    },
+  ];
+  const drawn = state.droplets.filter((d) => d.at === "needs-human" && d.issue >= 101);
+  assert.equal(drawn.length, 6, "all 6 current-round escalations must be within the draw cap");
+  // #891: `dropletPoint(state, d)` against the raw, UNCOMPACTED `state` (42 historical droplets
+  // still ahead of these 6 in array order) computes ranks 42–47, nowhere near where production
+  // actually draws — a collision oracle built on that position could never catch a real overlap.
+  // `dropletTransform`, reading the `transform="translate(…)"` straight off the RENDERED markup,
+  // is what `dropletPoint`'s own compacted-rank tests above already use for exactly this reason:
+  // assert against what production drew, not a recomputation that can silently diverge from it.
+  for (const d of drawn) {
+    const { x, y } = dropletTransform(html, d.issue);
+    const label = d.pr === null ? `⊙ ${d.issue}` : `⤳ ${d.pr}`;
+    boxes.push({ label: `needs-human #${d.issue} circle`, box: circleBox(x, y, 9) });
+    boxes.push({ label: `needs-human #${d.issue} label`, box: textBox(label, x, y - 14, 10) });
+  }
+  assertNoOverlap(boxes);
+});
+
+test("#891 gate① engine-agent finding [1] (ac2-hero-wrapper-unpinned): the REAL <Hero> wrapper — not `HeroStage` rendered directly — forwards `openAttention` through to the rendered tally/aria", () => {
+  const events = [
+    wire("2026-08-10T11:00:00.000Z", "dispatched", { worker: "w1", issue: 86 }),
+    wire("2026-08-10T11:01:00.000Z", "reclaim-done", { worker: "w1", issue: 86, next: "DRIVING", pr: 97 }),
+    wire("2026-08-10T11:02:00.000Z", "drive-needs-human", { worker: "w1", issue: 86, pr: 97 }),
+    // Resolved WITHOUT redispatch — the hero's own droplet fold never learns this (same
+    // mutation-kill shape as the AC2 test above), so the droplet stays "at: needs-human"
+    // forever. Only forwarding `openAttention` all the way through `<Hero>` into `HeroStage`
+    // makes the rendered count honestly 0.
+    wire("2026-08-10T11:05:00.000Z", "escalation-resolved", { source: "drive-needs-human", issue: 86, via: "board-fixed" }),
+  ];
+  const { state } = run(events.map(toDomainEvent));
+  const open = foldAttention(events);
+  assert.deepEqual(Object.keys(open), [], "the shared fold is empty");
+
+  // `createElement(Hero, ...)`, never `HeroStage` — this is the whole point of the finding:
+  // hero.test.ts's other #891 tests all render `HeroStage` directly, which never exercises
+  // `Hero.tsx`'s OWN `openAttention={openAttention}` forward. Removing that one line from
+  // Hero.tsx would leave every one of those tests green.
+  const html = renderToStaticMarkup(
+    createElement(Hero, {
+      heroState: state,
+      steps: [],
+      lanesMax: 3,
+      engine: "running",
+      fixCap: 2,
+      openAttention: Object.values(open),
+    }),
+  );
+  assert.match(
+    html,
+    /0 needs human/,
+    "Hero must forward openAttention through to HeroStage — reverting Hero.tsx's own forward would leave this at 1 (the stale droplet count) instead",
+  );
+  assert.match(html, /0 items currently waiting on a person/);
+});
+
+test("#891 gate① engine-agent finding [0] (ac1-null-round-never-collapses): a droplet folded BEFORE the fold ever saw a round boundary (roundId still null) collapses to historical once a LATER round opens — null is not permanently 'current'", () => {
+  const events: LoopEvent[] = [
+    // No `pool-selected`/`round-phase` yet — this issue's droplet is stamped `roundId: null`,
+    // the "no round boundary observed yet" state (`Droplet.roundId`'s own doc), not "this round".
+    wire("2026-07-01T00:00:00.000Z", "dispatched", { worker: "h1", issue: 1 }),
+    wire("2026-07-01T00:01:00.000Z", "reclaim-done", { worker: "h1", issue: 1, next: "DRIVING", pr: 1 }),
+    wire("2026-07-01T00:02:00.000Z", "drive-needs-human", { worker: "h1", issue: 1, pr: 1 }),
+    // A round boundary opens WEEKS later — the fold now knows a real round exists, and issue 1's
+    // still-null stamp predates it just as surely as an explicit older `roundId` would.
+    wire("2026-08-10T00:00:00.000Z", "pool-selected", { round_id: 2, issues: [] }),
+  ];
+
+  const { state } = run(events.map(toDomainEvent));
+  assert.equal(
+    droplet(state, 1)?.roundId,
+    null,
+    "sanity check on the fixture: issue 1's droplet was never touched after the round boundary",
+  );
+  assert.equal(state.roundId, 2);
+
+  const open = foldAttention(events);
+  assert.equal(Object.keys(open).length, 1, "issue 1's escalation is still open — nothing has resolved it");
+
+  const html = markup(state, { openAttention: Object.values(open) });
+  assert.doesNotMatch(
+    html,
+    /⤳ 1</,
+    "a null-stamped droplet from before the first round boundary must NOT draw once a later round is known",
+  );
+  assert.match(
+    html,
+    /class="hero-num hero-small hero-badge hero-attention-collapsed" data-count="1"/,
+    "it must collapse into the historical counter chip instead",
+  );
+});
+
+test("#891 PO adjudication: historical classification is ONE round-identity predicate — backlog, lane, checkpoint, needs-human, AND trunk all collapse the same way, no per-zone carve-out left to forget a zone", () => {
+  const events: LoopEvent[] = [];
+  events.push(wire("2026-07-01T00:00:00.000Z", "pool-selected", { round_id: 1, issues: [] }));
+  // One historical (round 1) droplet parked in EVERY zone the stage can draw one at — none of
+  // these is ever touched again after this round closes.
+  events.push(wire("2026-07-01T00:01:00.000Z", "dispatched", { worker: "h-nh", issue: 1 }));
+  events.push(wire("2026-07-01T00:02:00.000Z", "reclaim-done", { worker: "h-nh", issue: 1, next: "DRIVING", pr: 1 }));
+  events.push(wire("2026-07-01T00:03:00.000Z", "drive-needs-human", { worker: "h-nh", issue: 1, pr: 1 }));
+  events.push(wire("2026-07-01T00:04:00.000Z", "dispatched", { worker: "h-bl", issue: 2 }));
+  events.push(wire("2026-07-01T00:05:00.000Z", "handoff", { worker: "h-bl", issue: 2 }));
+  events.push(wire("2026-07-01T00:06:00.000Z", "dispatched", { worker: "h-ln", issue: 3 }));
+  events.push(wire("2026-07-01T00:07:00.000Z", "dispatched", { worker: "h-cp", issue: 4 }));
+  events.push(wire("2026-07-01T00:08:00.000Z", "reclaim-done", { worker: "h-cp", issue: 4, next: "DRIVING", pr: 4 }));
+  // The reviewer's own example: `dispatched → reclaim-done → rollback-escalated` leaves a
+  // failed droplet parked at `checkpoint` that nothing revisits.
+  events.push(wire("2026-07-01T00:09:00.000Z", "rollback-escalated", { worker: "h-cp", issue: 4 }));
+  events.push(wire("2026-07-01T00:10:00.000Z", "dispatched", { worker: "h-tr", issue: 5 }));
+  events.push(wire("2026-07-01T00:11:00.000Z", "reclaim-done", { worker: "h-tr", issue: 5, next: "DRIVING", pr: 5 }));
+  events.push(wire("2026-07-01T00:12:00.000Z", "merged", { worker: "h-tr", issue: 5, pr: 5 }));
+
+  // The round boundary that leaves all five behind.
+  events.push(wire("2026-08-10T00:00:00.000Z", "pool-selected", { round_id: 2, issues: [] }));
+
+  // One current-round (round 2) droplet in the same four still-live zones (a fresh merge would
+  // itself delete any lingering trunk droplet, historical or not, independent of this predicate
+  // — so trunk's OWN collapse is exercised only by issue 5 above, not duplicated here) — every
+  // one of these must keep drawing.
+  events.push(wire("2026-08-10T00:01:00.000Z", "dispatched", { worker: "c-nh", issue: 101 }));
+  events.push(wire("2026-08-10T00:02:00.000Z", "reclaim-done", { worker: "c-nh", issue: 101, next: "DRIVING", pr: 101 }));
+  events.push(wire("2026-08-10T00:03:00.000Z", "drive-needs-human", { worker: "c-nh", issue: 101, pr: 101 }));
+  events.push(wire("2026-08-10T00:04:00.000Z", "dispatched", { worker: "c-bl", issue: 102 }));
+  events.push(wire("2026-08-10T00:05:00.000Z", "handoff", { worker: "c-bl", issue: 102 }));
+  events.push(wire("2026-08-10T00:06:00.000Z", "dispatched", { worker: "c-ln", issue: 103 }));
+  events.push(wire("2026-08-10T00:07:00.000Z", "dispatched", { worker: "c-cp", issue: 104 }));
+  events.push(wire("2026-08-10T00:08:00.000Z", "reclaim-done", { worker: "c-cp", issue: 104, next: "DRIVING", pr: 104 }));
+
+  const { state } = run(events.map(toDomainEvent), 20);
+  const open = foldAttention(events);
+  // Issue 1, issue 4 (`rollback-escalated` is itself an attention-opening kind — `copy.ts`'s
+  // `hasAttention` — independent of this test's round-identity predicate), and issue 101: none
+  // of the three has been resolved.
+  assert.equal(Object.keys(open).length, 3, "issues 1, 4, and 101 all still have open attention");
+
+  // Sanity check on the fixture itself — otherwise the assertions below would prove nothing.
+  for (const issue of [1, 2, 3, 4, 5]) assert.equal(droplet(state, issue)?.roundId, 1, `issue ${issue} fixture must be stamped round 1`);
+  for (const issue of [101, 102, 103, 104])
+    assert.equal(droplet(state, issue)?.roundId, 2, `issue ${issue} fixture must be stamped round 2`);
+  assert.equal(state.roundId, 2);
+  assert.equal(droplet(state, 4)?.at, "checkpoint");
+  assert.equal(droplet(state, 4)?.failed, true, "the rollback-escalated checkpoint droplet must actually be marked failed");
+  assert.equal(droplet(state, 5)?.at, "trunk");
+
+  const html = markup(state, { lanesMax: 20, openAttention: Object.values(open) });
+
+  // None of the five round-1 droplets draw, in ANY zone — proving the SAME predicate, not a
+  // per-zone list, is what excludes them.
+  assert.doesNotMatch(html, /⤳ 1</, "historical needs-human droplet (issue 1) must not draw");
+  assert.doesNotMatch(html, /⊙ 2</, "historical backlog droplet (issue 2) must not draw");
+  assert.doesNotMatch(html, /⊙ 3</, "historical lane droplet (issue 3) must not draw");
+  assert.doesNotMatch(
+    html,
+    /⤳ 4</,
+    "historical checkpoint droplet (issue 4, the reviewer's own dispatched→reclaim-done→rollback-escalated example) must not draw",
+  );
+  assert.doesNotMatch(html, /⤳ 5</, "historical trunk droplet (issue 5) must not draw");
+
+  // Every current-round droplet, in the same four zones, keeps drawing.
+  assert.match(html, /⤳ 101</, "current-round needs-human droplet must draw");
+  assert.match(html, /⊙ 102</, "current-round backlog droplet must draw");
+  assert.match(html, /⊙ 103</, "current-round lane droplet must draw");
+  assert.match(html, /⤳ 104</, "current-round checkpoint droplet must draw");
+
+  // Collapsed accounting: all 5 historical droplets, from all 5 zones, land in ONE chip — never
+  // scattered per-zone, never silently dropped without being counted anywhere.
+  assert.match(html, /class="hero-num hero-small hero-badge hero-attention-collapsed" data-count="5"/);
+  assert.match(html, /\+5 earlier — see strip/);
+  assert.match(html, /data-node="needs-human" data-count="1"/, "only the one CURRENT-round escalation draws in the needs-human cluster");
+});
+
+test("#891: purely historical checkpoint droplets past the checkpoint zone's own draw cap trigger NO zone overflow badge — the single collapsed chip is the only place they're counted", () => {
+  const events: DomainEvent[] = [];
+  events.push(ev("pool-selected", { round_id: 1 }));
+  // 50 historical (round 1) checkpoint droplets — well past CHECKPOINT_DRAW_CAP on their own —
+  // never touched again after this round closes.
+  for (let i = 1; i <= 50; i++) {
+    events.push(ev("dispatched", { worker: `h${i}`, issue: i }));
+    events.push(ev("reclaim-done", { worker: `h${i}`, issue: i, next: "DRIVING", pr: i }));
+  }
+  // The round boundary that leaves all 50 behind — nothing else happens in round 2.
+  events.push(ev("pool-selected", { round_id: 2 }));
+
+  const { state } = run(events, 60);
+  const checkpointed = state.droplets.filter((d) => d.at === "checkpoint");
+  assert.equal(checkpointed.length, 50, "sanity check on the fixture: 50 historical checkpoint droplets, none touched since");
+  assert.ok(
+    checkpointed.every((d) => d.roundId === 1),
+    "sanity check: every one of them is stamped to the closed round",
+  );
+
+  const html = markup(state, { lanesMax: 60 });
+
+  // The zone's own overflow badge must not render at all — these 50 droplets are entirely
+  // historical, so there is no CURRENT-round overflow for it to report.
+  assert.doesNotMatch(
+    html,
+    /class="hero-checkpoint-overflow"/,
+    "50 historical checkpoint droplets must never trigger the zone's OWN overflow badge — they belong to the single collapsed chip, not a second, contradictory count",
+  );
+  // None of the 50 draw individually either.
+  const drawnChips = [...html.matchAll(/class="hero-droplet" data-issue="(\d+)" data-at="checkpoint"/g)];
+  assert.equal(drawnChips.length, 0, "no historical checkpoint droplet may draw individually");
+
+  // The single collapsed chip is the ONLY place all 50 are counted.
+  assert.match(html, /class="hero-num hero-small hero-badge hero-attention-collapsed" data-count="50"/);
+  assert.match(html, /\+50 earlier — see strip/);
+});
+
+test("#891: a genuine CURRENT-round checkpoint overflow still renders its own zone badge, with a count unaffected by unrelated historical droplets sitting in the same zone", () => {
+  const events: DomainEvent[] = [];
+  events.push(ev("pool-selected", { round_id: 1 }));
+  // 50 historical (round 1) checkpoint droplets, same shape as the no-badge case above — present
+  // in the SAME zone, to prove they don't leak into the count below.
+  for (let i = 1; i <= 50; i++) {
+    events.push(ev("dispatched", { worker: `h${i}`, issue: i }));
+    events.push(ev("reclaim-done", { worker: `h${i}`, issue: i, next: "DRIVING", pr: i }));
+  }
+  events.push(ev("pool-selected", { round_id: 2 }));
+  // 8 CURRENT-round (round 2) checkpoint droplets — a genuine overflow on their own (past the
+  // CHECKPOINT_DRAW_CAP of 6), independent of the 50 historical ones above.
+  for (let i = 101; i <= 108; i++) {
+    events.push(ev("dispatched", { worker: `c${i}`, issue: i }));
+    events.push(ev("reclaim-done", { worker: `c${i}`, issue: i, next: "DRIVING", pr: i }));
+  }
+
+  const { state } = run(events, 60);
+  const checkpointed = state.droplets.filter((d) => d.at === "checkpoint");
+  assert.equal(checkpointed.length, 58, "sanity check on the fixture: 50 historical + 8 current-round checkpoint droplets");
+  assert.equal(checkpointed.filter((d) => d.roundId === 1).length, 50, "sanity check: 50 stamped to the closed round");
+  assert.equal(checkpointed.filter((d) => d.roundId === 2).length, 8, "sanity check: 8 stamped to the open round");
+
+  const html = markup(state, { lanesMax: 60 });
+
+  // None of the 50 historical droplets draw individually.
+  const drawnChips = [...html.matchAll(/class="hero-droplet" data-issue="(\d+)" data-at="checkpoint"/g)].map((m) => Number(m[1]));
+  assert.ok(
+    drawnChips.every((issue) => issue >= 101),
+    `no historical (issue <= 50) checkpoint droplet may draw individually, got ${JSON.stringify(drawnChips)}`,
+  );
+
+  // The zone's own badge reports ONLY the 8 current-round droplets' own remainder (8 total - 4
+  // drawn = 4) — never inflated by the 50 historical droplets the collapsed chip already
+  // accounts for.
+  const badgeMatch = html.match(/class="hero-checkpoint-overflow" data-count="(\d+)"/);
+  assert.ok(badgeMatch, "a genuine CURRENT-round overflow must still render its own badge");
+  assert.equal(
+    Number(badgeMatch?.[1]),
+    4,
+    "the badge must count only the 8 current-round droplets' own remainder, never the 50 historical ones too",
+  );
+  assert.match(html, /\+4 more/);
+
+  // The single collapsed chip is the ONLY place the 50 historical droplets are counted.
+  assert.match(html, /class="hero-num hero-small hero-badge hero-attention-collapsed" data-count="50"/);
+  assert.match(html, /\+50 earlier — see strip/);
 });

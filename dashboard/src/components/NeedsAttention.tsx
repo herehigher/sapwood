@@ -1,6 +1,6 @@
 import { attentionCategory, copyFor, type SentencePart } from "../copy.ts";
 import type { DomainEvent } from "../domain-event.ts";
-import type { EntityTitles } from "../entities.ts";
+import { attentionSummary, type EntityTitles } from "../entities.ts";
 import { formatRelativeWithAbsoluteTitle } from "../format-time.ts";
 import { ATTENTION_KIND_TO_NODE, type StageNode } from "../inspector.ts";
 import { SentencePartView } from "./ActivityFeed.tsx";
@@ -17,6 +17,14 @@ export interface NeedsAttentionProps {
   /** §6 phase inspector (#861) — AC7: only the three `ATTENTION_KIND_TO_NODE` kinds render an
    *  "inspect" control at all; absent entirely leaves every row exactly as it renders today. */
   onInspect?: ((node: StageNode) => void) | undefined;
+  /**
+   * #891 AC2: `hero/state.ts`'s `HeroState.roundEscalated` — this round's raw, never-decremented
+   * escalation-event count. Used ONLY to tell "nothing has escalated" apart from "everything
+   * that escalated is already resolved" when `items` is empty: the first is the calm default
+   * (renders nothing), the second renders the reconciliation sentence instead of going silently
+   * empty right after real activity. `0`/absent behaves exactly like before #891.
+   */
+  roundEscalated?: number;
 }
 
 function AttentionRow({
@@ -71,13 +79,37 @@ function AttentionRow({
  * entities.ts's clearing rules) — this component owns no membership or clearing logic of its
  * own (#361 AC).
  */
-export function NeedsAttention({ items, titles, repoUrl, now, onInspect }: NeedsAttentionProps) {
-  if (items.length === 0) return null;
-  const sorted = [...items].sort((a, b) => b.id - a.id);
+export function NeedsAttention({ items, titles, repoUrl, now, onInspect, roundEscalated = 0 }: NeedsAttentionProps) {
   const clock = now ?? new Date();
+
+  if (items.length === 0) {
+    // #891 AC2: the fold is empty, but this round DID escalate something — an unexplained empty
+    // strip right after real activity reads as a bug, not as "all clear". Named honestly as a
+    // reconciliation between the two numbers, not a row of its own (there is nothing left open
+    // to list).
+    if (roundEscalated === 0) return null;
+    return (
+      <section className="panel needs-attention" aria-label="needs attention">
+        <h2>needs attention</h2>
+        <p className="muted attention-reconciled">
+          {roundEscalated} escalation{roundEscalated === 1 ? "" : "s"} this round, all since resolved
+        </p>
+      </section>
+    );
+  }
+
+  const sorted = [...items].sort((a, b) => b.id - a.id);
+  // #891 AC3: the mockup's header summary line, computed from these SAME `items` — never a
+  // second count derived some other way.
+  const summary = attentionSummary(items, clock);
   return (
     <section className="panel needs-attention" aria-label="needs attention">
-      <h2>needs attention</h2>
+      <div className="attention-header">
+        <h2>needs attention</h2>
+        <span className="muted data attention-summary">
+          {summary.waiting} waiting · oldest {summary.oldestDays}d · {summary.dissent} dissent
+        </span>
+      </div>
       <ul aria-live="polite" className="attention-list">
         {sorted.map((event) => (
           <AttentionRow key={event.id} event={event} titles={titles} repoUrl={repoUrl} now={clock} onInspect={onInspect} />

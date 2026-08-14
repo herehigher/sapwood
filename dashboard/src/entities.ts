@@ -1,4 +1,4 @@
-import { hasAttention } from "./copy.ts";
+import { hasAttention, isDissentSignal } from "./copy.ts";
 import type { DomainEvent } from "./domain-event.ts";
 
 /** An entity's remembered title, keyed by ISSUE number (frontend-design.md §3 C). Every event
@@ -204,4 +204,20 @@ export function foldOpenAttention(events: readonly DomainEvent[], seed: OpenAtte
     open[openAttentionKey(kind, payload)] = event;
   }
   return open;
+}
+
+/** #891: the needs-attention strip's own header summary line — "N waiting · oldest Xd · M
+ *  dissent" (frontend-design.md mockup) — computed from the SAME `foldOpenAttention` result the
+ *  strip already renders rows from, never a second derivation. ISO timestamps compare correctly
+ *  as plain strings (same convention `foldOpenAttention`'s own ordering relies on), so the
+ *  oldest item is just the lexical minimum `ts`. `oldestDays` floors — an item open for under a
+ *  day reads "oldest 0d", honest rather than rounding up to a day that hasn't passed. */
+export function attentionSummary(items: readonly DomainEvent[], now: Date): { waiting: number; oldestDays: number; dissent: number } {
+  const oldestTs = items.reduce<string | null>((min, e) => (min === null || e.ts < min ? e.ts : min), null);
+  const oldestDays = oldestTs === null ? 0 : Math.floor((now.getTime() - new Date(oldestTs).getTime()) / 86_400_000);
+  return {
+    waiting: items.length,
+    oldestDays,
+    dissent: items.filter((e) => isDissentSignal(e.kind)).length,
+  };
 }
