@@ -256,6 +256,46 @@ test("#716 gate② P1-3: resolveFixCap reads the nested lanes.prFixCap path, not
   assert.equal(resolveFixCap({ lanes: { prFixCap: "6" } }), 2, "a non-number value is never coerced");
 });
 
+// ── PR #900 gate② finding [1] (attention-strip-wiring-proof): #893's newly-mapped attention
+// kinds proven through the REAL production path — a raw wire event from `/api/events`, through
+// `useEventHistory`'s real `foldOpenAttention` fold, into `App`'s own `activeOpenAttention` prop
+// wiring, rendering the real `NeedsAttention` entry point — not a hand-classified event injected
+// directly into the component in isolation. ──────────────────────────────────────────────────
+
+test("#900 finding [1]: review-silence-escalated reaches the needs-attention strip through the REAL wire→fold→App wiring, rendering its REVIEW SILENCE chip", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/events": {
+      status: 200,
+      body: {
+        events: [{ id: 1, ts: "2026-08-14T00:00:00Z", kind: "review-silence-escalated", payload: { pr: 42, issue: 7, silenceSec: 600 } }],
+        lastId: 1,
+      },
+    },
+  });
+  assert.match(html, /aria-label="needs attention"/, "the strip section must actually render, not be skipped as empty");
+  assert.match(html, /class="attention-chip">REVIEW SILENCE</);
+  assert.match(html, /went unanswered/);
+});
+
+test("#900 finding [1]: review-disputed and review-non-convergent BOTH reach the strip through the real wiring, rendering the DISSENT chip", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/events": {
+      status: 200,
+      body: {
+        events: [
+          { id: 1, ts: "2026-08-14T00:00:00Z", kind: "review-disputed", payload: { pr: 42, issue: 7, worker: "w1" } },
+          { id: 2, ts: "2026-08-14T00:01:00Z", kind: "review-non-convergent", payload: { pr: 43, issue: 8, worker: "w1" } },
+        ],
+        lastId: 2,
+      },
+    },
+  });
+  const dissentChips = html.match(/class="attention-chip">DISSENT</g)?.length ?? 0;
+  assert.equal(dissentChips, 2, "both review-disputed and review-non-convergent must independently reach the strip");
+});
+
 test("#715 gate② [7]: header shows the documented disconnected caption when /api/loop/state fails", async () => {
   const html = await renderSettledApp({
     "/api/loop/state": { status: 503, body: { error: "nope" } },

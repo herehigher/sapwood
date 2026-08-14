@@ -150,6 +150,14 @@ export function ActivityFeed({ events, pinnedAttention, titles, repoUrl, disconn
   // blown to keep every pin visible, and the disclosure below says so rather than staying silent.
   const visibleRest = rest.slice(0, Math.max(0, FEED_RENDER_CAP - pinned.length));
   const rendered = [...pinned, ...visibleRest];
+  // PR #900 gate② finding [0] (telemetry-visible-count): `telemetryCount` is the FULL non-pinned
+  // count, computed before FEED_RENDER_CAP truncates `rest` into `visibleRest` — with the toggle
+  // on, the disclosure must say how many telemetry rows actually rendered (`rendered`), never the
+  // pre-cap total, or "showing 201" can describe a view that only rendered 200 (or, with 200+
+  // pinned rows alone exceeding the cap, zero). With the toggle off this distinction is moot —
+  // `telemetryCount` IS the render-independent "how many are hidden" fact, since none render
+  // either way — so only the shown-state message reads off `renderedTelemetryCount`.
+  const renderedTelemetryCount = showTelemetry ? rendered.filter((e) => e.known && isTelemetryKind(e.kind)).length : 0;
   const pinnedExceedsCap = pinned.length > FEED_RENDER_CAP;
   const restTruncated = rendered.length < total;
   // A pinned row need not be among the newest — mixing it into a capped render breaks the "latest
@@ -170,7 +178,9 @@ export function ActivityFeed({ events, pinnedAttention, titles, repoUrl, disconn
       {telemetryCount > 0 && (
         <p className="muted feed-telemetry-note">
           {showTelemetry
-            ? `showing ${telemetryCount} telemetry event(s) (heartbeats, bookkeeping)`
+            ? renderedTelemetryCount === telemetryCount
+              ? `showing ${telemetryCount} telemetry event(s) (heartbeats, bookkeeping)`
+              : `showing ${renderedTelemetryCount} of ${telemetryCount} telemetry event(s) (heartbeats, bookkeeping) — the rest are excluded by the ${FEED_RENDER_CAP}-row display cap`
             : `${telemetryCount} telemetry event(s) hidden (heartbeats, bookkeeping)`}{" "}
           <button type="button" className="feed-telemetry-toggle" onClick={() => setShowTelemetry((v) => !v)}>
             {showTelemetry ? "hide" : "show"}

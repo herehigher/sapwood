@@ -7,7 +7,7 @@ import test from "node:test";
 import { ESCALATION_SOURCE_KINDS } from "../../engine/src/loop/escalation-reconcile.ts";
 // Test-only import (same pattern as ESCALATION_SOURCE_KINDS above): the engine's own registry —
 // not a re-transcribed count — is the oracle for the #893 cross-package exhaustiveness test.
-import { EVENT_KIND_NAMES as ENGINE_EVENT_KIND_NAMES } from "../../engine/src/state/event-kinds/index.ts";
+import { EVENT_KIND_NAMES as ENGINE_EVENT_KIND_NAMES, kindGlossary } from "../../engine/src/state/event-kinds/index.ts";
 import {
   ATTENTION_CATEGORY,
   attentionCategory,
@@ -861,6 +861,26 @@ test("AC1: ATTENTION_KINDS_SAMPLE is an independent, exhaustive transcription of
   const covered = new Set(ATTENTION_KINDS_SAMPLE.map(([kind]) => kind));
   const attentionKinds = new Set(EVENT_KINDS.filter((k) => copyFor(k)!.attention !== undefined));
   assert.deepEqual(covered, attentionKinds);
+});
+
+// ── PR #900 gate② finding [1] (attention-strip-wiring-proof, second half): the tests above
+// derive their "exhaustive attention set" from `ATTENTION_KINDS_SAMPLE`/`COPY` — a purely
+// dashboard-internal cross-check that would stay green even if the mapping itself simply forgot a
+// kind the ENGINE marks urgent. This drift-guards against the engine's own authoritative registry
+// field (`actionability`, event-kinds/types.ts) instead — the same "authoritative signal over
+// dashboard prose" doctrine the `ESCALATION_SOURCE_KINDS` drift guard above already applies, one
+// level up: `actionability: "intervene"` is the broader, editorial-judgment-free "a human owes
+// the next decision" signal (types.ts's own doc), a strict superset of `escalation-source:*`. ──
+
+test('#900 finding [1]: every engine-registered `actionability: "intervene"` kind carries `attention` in COPY — a registry-anchored floor, not just an internal COPY cross-check', () => {
+  for (const kind of ENGINE_EVENT_KIND_NAMES) {
+    if (kindGlossary(kind).actionability !== "intervene") continue;
+    assert.notEqual(
+      copyFor(kind)?.attention,
+      undefined,
+      `${kind} is actionability:"intervene" in the engine's own registry but carries no attention marker in COPY`,
+    );
+  }
 });
 
 // ── #881: category-chip taxonomy completeness ───────────────────────────────────────────────

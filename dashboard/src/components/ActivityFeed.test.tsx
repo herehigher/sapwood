@@ -397,3 +397,70 @@ test("#893: the telemetry toggle reveals hidden rows with an honest generic sent
     container.remove();
   }
 });
+
+// ── PR #900 gate② finding [0] (telemetry-visible-count): the disclosure's "showing N" must
+// describe what actually RENDERED, never the pre-cap total — FEED_RENDER_CAP truncates `rest`
+// (narrative + telemetry mixed) after `telemetryCount` is already computed. ─────────────────────
+
+test("#900 finding [0]: the shown-state disclosure reports the RENDERED count, not the pre-cap total, once FEED_RENDER_CAP truncates telemetry rows", async () => {
+  // 201 telemetry-only events, zero pinned, zero narrative: only FEED_RENDER_CAP (200) of them
+  // can actually render once shown, so the disclosure must say "200 of 201", never "201".
+  const events = Array.from({ length: FEED_RENDER_CAP + 1 }, (_, i) => ev(i + 1, "worker-heartbeat", { worker: "w1" }));
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<ActivityFeed events={events} pinnedAttention={[]} titles={{}} now={NOW} />);
+    });
+    assert.match(container.innerHTML, new RegExp(`${FEED_RENDER_CAP + 1} telemetry event\\(s\\) hidden`));
+    const toggle = container.querySelector(".feed-telemetry-toggle");
+    assert.ok(toggle);
+    await act(async () => {
+      toggle.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const rowCount = container.innerHTML.match(/Telemetry: worker-heartbeat/g)?.length ?? 0;
+    assert.equal(rowCount, FEED_RENDER_CAP, "only the cap's worth of telemetry rows actually render");
+    assert.match(container.innerHTML, new RegExp(`showing ${FEED_RENDER_CAP} of ${FEED_RENDER_CAP + 1} telemetry event\\(s\\)`));
+    assert.doesNotMatch(container.innerHTML, new RegExp(`showing ${FEED_RENDER_CAP + 1} telemetry event\\(s\\)(?! of)`));
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+});
+
+test("#900 finding [0]: with pinned rows alone exceeding the cap, the shown-state disclosure says ZERO telemetry rows rendered, never a false 'showing N'", async () => {
+  // Pinned attention is exempt from the cap and always renders FIRST — enough of it alone (well
+  // past FEED_RENDER_CAP) leaves zero render slots for `rest`, so no telemetry row can render at
+  // all even though the toggle is on.
+  const pinnedAttention = Array.from({ length: FEED_RENDER_CAP + 10 }, (_, i) =>
+    ev(i + 1, "drive-needs-human", { issue: i + 1, pr: i + 1 }),
+  );
+  const events = [...pinnedAttention, ev(9001, "worker-heartbeat", { worker: "w1" }), ev(9002, "role-session-heartbeat", { worker: "w1" })];
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<ActivityFeed events={events} pinnedAttention={pinnedAttention} titles={{}} now={NOW} />);
+    });
+    const toggle = container.querySelector(".feed-telemetry-toggle");
+    assert.ok(toggle);
+    await act(async () => {
+      toggle.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    assert.doesNotMatch(
+      container.innerHTML,
+      /Telemetry: worker-heartbeat/,
+      "pinned rows alone already exceed the cap — no room for telemetry rows",
+    );
+    assert.match(container.innerHTML, /showing 0 of 2 telemetry event\(s\)/);
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+});
