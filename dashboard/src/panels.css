@@ -377,12 +377,17 @@
   flex-wrap: wrap;
 }
 
+/* Without its own rule these inherit the ambient body font (system-ui) instead of the mono
+ * stack the rest of the transport's data readouts use — matches the sibling `.transport-position`
+ * span (app.css's `code, .data` rule) and the design mockup, which renders the whole transport
+ * row mono. */
 .transport-controls button {
   background: var(--panel);
   border: var(--hairline);
   border-radius: var(--radius-card);
   padding: 2px var(--space-2);
   color: inherit;
+  font-family: var(--font-data);
   cursor: pointer;
 }
 

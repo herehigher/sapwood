@@ -252,9 +252,48 @@ test("§889 AC2: navigator/transport controls resolve real token-based styling i
   ] as const;
   const pillClosedColorByTheme: Record<string, string> = {};
   const sapTokenByTheme: Record<string, string> = {};
+  const buttonBackgroundByTheme: Record<string, string> = {};
 
   for (const theme of themes) {
     await page.evaluate((attr) => document.documentElement.setAttribute("data-theme", attr), theme.attr);
+
+    // The back-to-live/play/speed BUTTONS' own real computed style, not just the scrub input's
+    // native-chrome opt-out above — an operator probe against production (issue #889 comment)
+    // confirmed those buttons computed `font-family: Arial`, no mono rule reaching them, while the
+    // sibling `.transport-position` readout correctly resolved "JetBrains Mono Variable". Compares
+    // against `.transport-position`'s own real computed font-family (a fact, not a hand-copied
+    // token literal) rather than hardcoding the expected mono stack.
+    const positionFontFamily = await page.locator(".transport-position").evaluate((el) => getComputedStyle(el).fontFamily);
+    expect(positionFontFamily, `${theme.key}: the .transport-position readout must resolve a real font-family`).not.toBe("");
+
+    const backToLive = page.locator(".transport-controls button", { hasText: "back to live" });
+    const playButton = page.locator('.transport-controls button[aria-label="play"], .transport-controls button[aria-label="pause"]');
+    const speedButtons = page.locator(".transport-speeds button");
+    expect(await speedButtons.count(), `${theme.key}: ×1/×4/×16 speed buttons must all be present`).toBe(3);
+
+    const monoTargets: [string, Locator][] = [
+      ["back to live", backToLive],
+      ["play/pause", playButton],
+      ["×1 speed", speedButtons.nth(0)],
+      ["×4 speed", speedButtons.nth(1)],
+      ["×16 speed", speedButtons.nth(2)],
+    ];
+    for (const [label, locator] of monoTargets) {
+      const fontFamily = await locator.first().evaluate((el) => getComputedStyle(el).fontFamily);
+      expect(
+        fontFamily,
+        `${theme.key}: the ${label} button must resolve the SAME mono font-family as .transport-position, not native/body chrome`,
+      ).toBe(positionFontFamily);
+    }
+
+    // Background too, per the same STYLE rule — the "no native default chrome" half of AC2, not
+    // just the font.
+    const buttonBackground = await backToLive.first().evaluate((el) => getComputedStyle(el).backgroundColor);
+    expect(
+      buttonBackground,
+      `${theme.key}: back-to-live button must resolve a real token background, not native transparent chrome`,
+    ).not.toBe("rgba(0, 0, 0, 0)");
+    buttonBackgroundByTheme[theme.key] = buttonBackground;
 
     const stepperRadius = await page.locator(".round-nav-stepper").evaluate((el) => getComputedStyle(el).borderRadius);
     expect(stepperRadius, `${theme.key}: the stepper group itself must be rounded`).not.toBe("0px");
@@ -285,6 +324,10 @@ test("§889 AC2: navigator/transport controls resolve real token-based styling i
     "the closed-pill tint must actually differ between light and dark themes — proof light-dark() genuinely cascades, not a theme-invariant hardcoded value",
   ).not.toBe(pillClosedColorByTheme.dark);
   expect(sapTokenByTheme.light, "--sap itself must differ between light and dark themes at :root").not.toBe(sapTokenByTheme.dark);
+  expect(
+    buttonBackgroundByTheme.light,
+    "the transport button background must actually differ between light and dark themes — proof light-dark() genuinely cascades onto it, not a theme-invariant hardcoded value",
+  ).not.toBe(buttonBackgroundByTheme.dark);
 
   const panelsCss = readFileSync(fileURLToPath(new URL("../src/panels.css", import.meta.url)), "utf8");
   const thumbRule = panelsCss.match(/\.transport-scrub::-webkit-slider-thumb\s*\{([^}]*)\}/);
