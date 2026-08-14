@@ -98,7 +98,54 @@
   cursor: pointer;
 }
 
-.cost-strip-groups {
+/* #880: "COST · TODAY" / "COST · ROUND N" — two independently framed `.cost-panel` cards (each
+ * carries `.panel`'s own border/background — gate② finding cost-panels-not-separate: `cost-dark.png`
+ * shows two distinct cards separated by page background, never one shared card with an internal
+ * divider) stacked inside the unframed `.cost-strip` anchor, each with its own head (heading +
+ * optional CLOSED badge/avg-round stat), a by-stage/by-model group pair, and an optional footer
+ * line. */
+.cost-strip {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.cost-panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+/* `cost-dark.png`'s heading/group-label treatment — bold, letter-spaced caps, matching the
+ * `.cost-panel-badge`/hero-panel section-header convention (#879's own row-2 finding) rather than
+ * plain sentence case. Text CONTENT stays plain-language (`heading`/`title` props, §7's
+ * terminology rule) — only the rendered CASE changes here, so copy/accessibility text is
+ * unaffected. */
+.cost-panel-head h3,
+.cost-panel-group h4 {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cost-panel-badge {
+  border: var(--hairline);
+  border-radius: var(--radius-card);
+  padding: 0 var(--space-1);
+  text-transform: uppercase;
+  font-family: var(--font-data);
+  font-size: var(--text-0);
+}
+
+.cost-panel-avg {
+  margin-left: auto;
+}
+
+.cost-panel-footer {
+  margin-top: var(--space-2);
+}
+
+.cost-panel-groups {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: var(--space-4);
@@ -123,6 +170,14 @@
 .cost-bar {
   width: 100%;
   height: 10px;
+}
+
+/* The by-stage group's shared target/ceiling tick (`cost-panel.ts`'s `tickPositionPct`) — a thin
+ * line across the bar's full height, drawn in the primary text color so it reads against both the
+ * faint track and the amber fill. */
+.cost-bar-target {
+  stroke: var(--sapwood);
+  stroke-width: 1;
 }
 
 /* ---- header: engine state word + spend meter (§3 A, #361) ---------------- */

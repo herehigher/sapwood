@@ -90,6 +90,43 @@ export function bucketSpendByPhase(rows: readonly SpendRow[], windows: readonly 
   return buckets;
 }
 
+/**
+ * Buckets EACH round's own spend against ITS OWN phase windows independently, then merges the
+ * per-phase totals across rounds — the structurally honest fix for #888 gate② run 949439c8
+ * finding [0]/its same-timestamp-boundary follow-up. A round's own {spend, phaseWindows} pair
+ * (`App.tsx`'s `loadClosedRoundCostLog`) already carries the correct ID-based partition — spend is
+ * bounded by the NEXT round's own `startSpendId`, never by timestamp — but concatenating several
+ * rounds' `spend`/`phaseWindows` arrays together BEFORE a single `bucketSpendByPhase` call (the
+ * prior shape) discards that partition: `bucketSpendByPhase`'s window match is timestamp-only, so
+ * an EARLIER round's still-open trailing window can swallow a LATER round's real spend, and ANY
+ * fix that instead caps that trailing window at a timestamp reintroduces the identical leak at the
+ * exact tie (a round-A row whose `ts` equals round B's own `startedAt`) — a timestamp boundary can
+ * never fully stand in for the ID partition. Bucketing round-by-round and merging AFTER never lets
+ * one round's windows see another round's spend at all, so no timestamp tie is possible.
+ */
+export function mergeRoundPhaseBuckets(
+  rounds: readonly { spend: readonly SpendRow[]; phaseWindows: readonly PhaseWindow[] }[],
+): PhaseSpendBucket[] {
+  const byPhase = new Map<string, SpendRow[]>();
+  const order: string[] = [];
+  for (const { spend, phaseWindows } of rounds) {
+    for (const bucket of bucketSpendByPhase(spend, phaseWindows)) {
+      const existing = byPhase.get(bucket.phase);
+      if (existing) existing.push(...bucket.rows);
+      else {
+        byPhase.set(bucket.phase, [...bucket.rows]);
+        order.push(bucket.phase);
+      }
+    }
+  }
+  const buckets: PhaseSpendBucket[] = order
+    .filter((phase) => phase !== UNATTRIBUTED_PHASE)
+    .map((phase) => ({ phase, rows: byPhase.get(phase)! }));
+  const unattributed = byPhase.get(UNATTRIBUTED_PHASE);
+  if (unattributed) buckets.push({ phase: UNATTRIBUTED_PHASE, rows: unattributed });
+  return buckets;
+}
+
 /** `{ label, usd }` bars, summed per bucket — the shape `CostStrip`'s `CostBarGroup.bars` wants,
  *  without this module importing the component layer (`api`/`replay` stay upstream of
  *  `components` — see §9's tree). */

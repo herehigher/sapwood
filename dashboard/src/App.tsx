@@ -1,12 +1,12 @@
 import type { Dispatch, SetStateAction } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchEvents } from "./api/client.ts";
-import { spendByWorkerForDay, useDemoFixture, useEventHistory, useLoopState, useRounds, useSpendHistory } from "./api/queries.ts";
-import type { EventsPage, Round } from "./api/types.ts";
+import { useDemoFixture, useEventHistory, useLoopState, useRounds, useSpendHistory } from "./api/queries.ts";
+import type { EventsPage, Round, SpendRow } from "./api/types.ts";
 import { ActivityFeed } from "./components/ActivityFeed.tsx";
 import { ConfigDrawer } from "./components/ConfigDrawer.tsx";
 import { Controls } from "./components/Controls.tsx";
-import type { CostBarGroup } from "./components/CostStrip.tsx";
+import type { CostPanelData } from "./components/CostStrip.tsx";
 import { CostStrip } from "./components/CostStrip.tsx";
 import { Header, type RoundSpend, type SpendFacts } from "./components/Header.tsx";
 import { IconRail } from "./components/IconRail.tsx";
@@ -16,8 +16,16 @@ import { NeedsAttention } from "./components/NeedsAttention.tsx";
 import { PhaseInspectorDrawer } from "./components/PhaseInspectorDrawer.tsx";
 import { Transport } from "./components/Transport.tsx";
 import { readConfigPath } from "./config-captions.ts";
+import {
+  avgRoundCostUsd,
+  buildClosedRoundCostPanel,
+  buildTodayCostPanel,
+  buildTodayCostPanelFromBuckets,
+  modelCostBars,
+  roundsForDay,
+} from "./cost-panel.ts";
 import { useDemoReplay } from "./demo/useDemoReplay.ts";
-import type { DomainEvent } from "./domain-event.ts";
+import { type DomainEvent, toDomainEvent } from "./domain-event.ts";
 import type { EntityTitles } from "./entities.ts";
 import { Hero } from "./hero/Hero.tsx";
 import { Legend } from "./hero/Legend.tsx";
@@ -25,9 +33,9 @@ import { type FoldStep, type HeroState, initialHeroState } from "./hero/state.ts
 import type { StageNode } from "./inspector.ts";
 import type { ReplayPosition } from "./replay/player.ts";
 import { initialReplayState } from "./replay/reducer.ts";
-import { loadRoundEvents } from "./replay/round-log.ts";
-import { bucketSpendByPhase, phaseSpendBars } from "./replay/spend-replay.ts";
-import { type ReplayView, useReplay } from "./replay/useReplay.ts";
+import { loadRoundEvents, roundEventCeiling } from "./replay/round-log.ts";
+import { buildPhaseWindows, mergeRoundPhaseBuckets, type PhaseSpendBucket, type PhaseWindow } from "./replay/spend-replay.ts";
+import { loadRoundLog, type ReplayView, useReplay } from "./replay/useReplay.ts";
 
 /**
  * #716 gate② P1-3: pulls `lanes.prFixCap` through the same nested-path reader `board.owner`/
@@ -154,6 +162,149 @@ export function useInspectorRoundEvents(round: Round | null): DomainEvent[] {
   return round && state.roundId === round.roundId ? state.events : [];
 }
 
+/**
+ * #880: the "COST · ROUND N" panel's LIVE-mode target — the highest-`roundId` CLOSED round, since
+ * live mode's round navigator has nothing explicitly selected (the LIVE slot carries no round id
+ * at all). `null` (panel simply omitted, never a fabricated one) until a round has actually
+ * closed. Exported and pure so the selection rule is directly testable without mounting a hook.
+ */
+export function findLastClosedRound(rounds: readonly Round[]): Round | null {
+  return [...rounds].filter((r) => r.status === "done").sort((a, b) => b.roundId - a.roundId)[0] ?? null;
+}
+
+/**
+ * #880: the async body behind `useLastClosedRoundCost` below, factored out the same way
+ * `loadInspectorRoundEvents` already is — a plain function a test can call directly, never inline
+ * `.then` logic inside an effect. Reuses `loadRoundLog` (`replay/useReplay.ts`) — the SAME
+ * `/api/events`+`/api/spend` paging an explicitly-selected replay round already goes through, not
+ * a parallel fetch implementation. `null` on a rejected load (never throws) — same "never rejects
+ * itself" contract `loadRoundLog` documents for its own callers.
+ *
+ * #888 gate② final finding (same-timestamp round boundary): `phaseWindows` is returned RAW — an
+ * earlier round of this fix capped the trailing window at the next round's own `startedAt`, which
+ * excludes a round-A row whose `ts` EQUALS that boundary from round A's own window (half-open
+ * `ts < endTs`) and reintroduces the identical cross-round leak at that exact tie once a caller
+ * unions several rounds together. `spend` is already correctly ID-partitioned (`spendCeilingId`
+ * above, never a timestamp) — the caller (`useTodayCostLog`'s `mergeRoundPhaseBuckets`) preserves
+ * that same ID partition all the way through bucketing instead, so a round's own trailing window
+ * can safely stay open-ended; nothing outside this round's own spend is ever compared against it.
+ */
+export function loadClosedRoundCostLog(
+  round: Round,
+  rounds: readonly Round[],
+  lanesMax: number | null,
+): Promise<{ spend: SpendRow[]; phaseWindows: PhaseWindow[] } | null> {
+  const ceilingId = roundEventCeiling(round, rounds);
+  const nextRound = rounds.filter((r) => r.roundId > round.roundId).sort((a, b) => a.roundId - b.roundId)[0];
+  const spendCeilingId = nextRound ? nextRound.startSpendId : null;
+  return loadRoundLog(round, ceilingId, spendCeilingId, lanesMax).then((result) =>
+    result.ok ? { spend: result.log.spend, phaseWindows: result.log.phaseWindows } : null,
+  );
+}
+
+/** #880: LIVE mode's own source for the "COST · ROUND N" panel — see `findLastClosedRound`'s doc
+ *  for why live mode needs its own round selection at all (replay's `selectedRoundId` covers the
+ *  case where the navigator has moved off HEAD). Re-fetches only when the last-closed round's OWN
+ *  identity changes (a fresh round closing) — `rounds` keeps polling every 3 s regardless, so a
+ *  ref (same pattern `useReplay.ts`'s own `roundsRef` already uses) keeps that poll from re-firing
+ *  this fetch on every unrelated tick. */
+export function useLastClosedRoundCost(
+  rounds: readonly Round[],
+  lanesMax: number | null,
+): { round: Round; spend: SpendRow[]; phaseWindows: PhaseWindow[] } | null {
+  const lastClosed = findLastClosedRound(rounds);
+  const roundsRef = useRef(rounds);
+  roundsRef.current = rounds;
+  const [state, setState] = useState<{ roundId: number; spend: SpendRow[]; phaseWindows: PhaseWindow[] } | null>(null);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `rounds` intentionally excluded — read via roundsRef, same rationale useReplay.ts's own effect documents.
+  useEffect(() => {
+    if (!lastClosed) return;
+    let cancelled = false;
+    loadClosedRoundCostLog(lastClosed, roundsRef.current, lanesMax).then((result) => {
+      if (cancelled || !result) return;
+      setState({ roundId: lastClosed.roundId, spend: result.spend, phaseWindows: result.phaseWindows });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [lastClosed?.roundId, lanesMax]);
+
+  if (!lastClosed) return null;
+  const active = state?.roundId === lastClosed.roundId;
+  return { round: lastClosed, spend: active ? state.spend : [], phaseWindows: active ? state.phaseWindows : [] };
+}
+
+/**
+ * #880 gate② finding today-stage-history-truncation: the "COST · TODAY" by-stage group used to
+ * read `useEventHistory`'s bounded `events` tail and `useSpendHistory`'s bounded `rows` tail —
+ * two INDEPENDENTLY sized eviction caps, so a spend row could outlive its own `round-phase` window
+ * once the smaller events cap evicted it first (misclassifying it as `Unattributed`), or vanish
+ * from the total entirely once the spend cap evicted it too — while the server-backed by-model
+ * total (`loop.data.spend.byModel`) stayed complete the whole time, a visible mismatch. This unions
+ * every round that started TODAY's own FULL, uncapped log instead — the SAME durable per-round
+ * fetch (`loadClosedRoundCostLog`/`loadRoundLog`) the ROUND N panel already uses for one round, run
+ * over every round `roundsForDay` names. Bounded by "how many rounds ran today" (a small, real
+ * number), never a rolling eviction window — no row can age out from underneath it. `allRounds`
+ * (not just `todayRounds`) is what each fetch's own ceiling computation needs — a today-round's
+ * "next round" boundary can itself start tomorrow, and `loadClosedRoundCostLog` already handles
+ * that correctly given the full list.
+ *
+ * #888 gate② run 949439c8 finding [1]: the round ID SET alone only changes when a round OPENS or
+ * CLOSES — a round already in the set gaining a fresh phase transition or spend row left the set
+ * untouched, so this effect never re-ran while that round was still in progress, and TODAY's
+ * by-stage panel froze at its first snapshot for the rest of the round. `freshnessKey` below folds
+ * in TWO more already-flowing signals rather than opening a new polling channel of its own: each
+ * round's own `eventCount` (the identical live cursor `useInspectorRoundEvents` above already keys
+ * on, for the same "still-open round" reason) covers a fresh phase transition, and `todaySpendUsd`
+ * (the server-aggregated total `/api/loop/state`'s poll already carries) covers a fresh spend row
+ * landing without necessarily moving any round's own event count in the same tick.
+ *
+ * #888 gate② final finding (same-timestamp round boundary): each round's `{spend, phaseWindows}`
+ * result is bucketed through `mergeRoundPhaseBuckets` — per round, BEFORE merging — rather than
+ * flattened into two combined `spend`/`phaseWindows` arrays for a single `bucketSpendByPhase`
+ * call. The flattened shape discarded the ID partition `loadClosedRoundCostLog` already gives each
+ * round, letting a round-A row's timestamp match a DIFFERENT round's window (up to and including a
+ * same-millisecond boundary tie) purely because both ended up in the same combined array — see
+ * `mergeRoundPhaseBuckets`'s own doc.
+ */
+export function useTodayCostLog(
+  todayRounds: readonly Round[],
+  allRounds: readonly Round[],
+  lanesMax: number | null,
+  todaySpendUsd: number | null,
+): { buckets: PhaseSpendBucket[] } {
+  const freshnessKey = `${todayRounds.map((r) => `${r.roundId}:${r.eventCount}`).join(",")}|${todaySpendUsd ?? ""}`;
+  const allRoundsRef = useRef(allRounds);
+  allRoundsRef.current = allRounds;
+  const todayRoundsRef = useRef(todayRounds);
+  todayRoundsRef.current = todayRounds;
+  const [state, setState] = useState<{ key: string; buckets: PhaseSpendBucket[] }>({ key: "", buckets: [] });
+
+  // `todayRounds`/`allRounds` are read via the refs above (same rationale useReplay.ts's own
+  // effect documents) — only `freshnessKey` (round set + each round's own eventCount + today's
+  // spend total) should retrigger this fetch, not every unrelated `/api/rounds`/`/api/loop/state`
+  // poll tick that changes neither.
+  useEffect(() => {
+    const rounds = todayRoundsRef.current;
+    if (rounds.length === 0) {
+      setState({ key: freshnessKey, buckets: [] });
+      return;
+    }
+    let cancelled = false;
+    Promise.all(rounds.map((round) => loadClosedRoundCostLog(round, allRoundsRef.current, lanesMax))).then((results) => {
+      if (cancelled) return;
+      const roundLogs = results.filter((r): r is { spend: SpendRow[]; phaseWindows: PhaseWindow[] } => r !== null);
+      setState({ key: freshnessKey, buckets: mergeRoundPhaseBuckets(roundLogs) });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [freshnessKey, lanesMax]);
+
+  return { buckets: state.key === freshnessKey ? state.buckets : [] };
+}
+
 type ActiveFold = {
   hero: HeroState;
   steps: FoldStep[];
@@ -202,9 +353,11 @@ type AppViewModel = {
   parked: boolean;
   repoUrl: string | undefined;
   fixCap: number;
-  byModel: CostBarGroup;
-  byLane: CostBarGroup;
-  byPhase: CostBarGroup;
+  // #880: the rebuilt two-panel cost composition (`cost-dark.png`) — `costRound` is `null` until a
+  // round has actually closed (live: nothing closed yet today; replay/demo: unreachable, since a
+  // navigable round is by definition closed).
+  costToday: CostPanelData;
+  costRound: CostPanelData | null;
   configOpen: boolean;
   setConfigOpen: Dispatch<SetStateAction<boolean>>;
   // #861: which stage node's drawer is open (null = closed) + the round data it reads.
@@ -256,9 +409,8 @@ export function appContent(vm: AppViewModel) {
     parked,
     repoUrl,
     fixCap,
-    byModel,
-    byLane,
-    byPhase,
+    costToday,
+    costRound,
     configOpen,
     setConfigOpen,
     inspectorNode,
@@ -365,10 +517,7 @@ export function appContent(vm: AppViewModel) {
           disconnected={disconnected}
         />
 
-        <CostStrip
-          groups={mode === "replay" ? [byPhase] : [byModel, byLane]}
-          heading={mode === "replay" ? "cost · this round" : "cost · today"}
-        />
+        <CostStrip today={costToday} round={costRound} />
 
         {configOpen && (
           <LiveOnly mode={mode}>
@@ -400,8 +549,8 @@ type AppProps = { now?: Date | undefined; initialConfigOpen?: boolean | undefine
 /**
  * The header (A) + hero (B, #144) + lane board (C) + activity feed (D) + cost strip/config
  * drawer (E) from frontend-design.md §3, all against the same §8 data hooks. `now` is
- * test-only (defaults to the real clock) — the cost strip's "by lane" day boundary needs a
- * fixed instant to assert against. `initialConfigOpen` is test-only too, same posture as `now`.
+ * test-only (defaults to the real clock) — the "COST · TODAY" panel's day boundary (`roundsForDay`)
+ * needs a fixed instant to assert against. `initialConfigOpen` is test-only too, same posture as `now`.
  * All rendering lives in `appContent` above; this function only resolves the live queries/state
  * hooks require and hands the result straight through.
  */
@@ -420,7 +569,8 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
   // (play/pause/speed/scrub, §6). `mode` is carried by round selection, not a separate toggle —
   // §3 A's "the round navigator IS the mode".
   const rounds = useRounds();
-  const replay = useReplay(rounds.data?.rounds ?? [], lanesMax);
+  const allRounds = rounds.data?.rounds ?? [];
+  const replay = useReplay(allRounds, lanesMax);
   const { mode } = replay;
 
   // §9/§11: one reducer, live and replay both feed it — every replayable panel below reads
@@ -457,34 +607,45 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
   const repoUrl = typeof owner === "string" && typeof repo === "string" ? `https://github.com/${owner}/${repo}` : undefined;
   const fixCap = resolveFixCap(loop.data?.config);
 
-  // §3 E specifies a "by phase" bucket; `/api/loop/state` serves no phase-bucketed spend today
-  // (only `spend.byModel`), so LIVE ships "by lane" instead — ponytail: upgrade to "by phase" live
-  // too once the engine serves a phase-bucketed spend aggregate. Sourced from the append-only
-  // `/api/spend` ledger, NOT `loop.data.lanes.items` (#715 gate② round 3 [2]: the active-worker
-  // read model drops a lane's settled spend the instant it stops being active, and renders an
-  // in-flight lane with no settled/estimated cost as a fabricated `$0` — the ledger only ever
-  // records SETTLED cost, so a still-running lane with nothing billed yet simply has no bar).
-  const byLane: CostBarGroup = {
-    title: "by lane",
-    bars: spendByWorkerForDay(spend.rows, clock),
-  };
-  const byModel: CostBarGroup = {
-    title: "by model",
-    bars: (loop.data?.spend.byModel ?? []).map((m) => ({ label: m.model, usd: m.usd })),
-  };
-  // #741 §8/§11: replay's cost strip is "THIS ROUND BY PHASE" — `spendThroughCursor` is already
-  // timestamp-cursor-truncated by `useReplay`; `phaseWindows` comes from the SAME round's own
-  // `round-phase` trail, so "unattributed" only ever appears for genuinely pre-#206 history.
-  const byPhase: CostBarGroup = {
-    title: "by phase",
-    bars: phaseSpendBars(bucketSpendByPhase(replay.spendThroughCursor, replay.phaseWindows)),
-  };
+  // #880 gate② finding today-stage-history-truncation: "COST · TODAY" by-stage bars union every
+  // round that started today's own FULL, uncapped log (`useTodayCostLog`) — never
+  // `useEventHistory`/`useSpendHistory`'s bounded display tails, whose independent eviction caps
+  // could silently misclassify or drop a still-real row. Model bars reuse the server-aggregated
+  // `spend.byModel` (already today-scoped, already unbounded) rather than re-deriving the same
+  // total a second way from raw rows. `avgRoundCostUsd` is scoped to the SAME today-started round
+  // set (gate② finding cost-doc-source-mismatch: the doc names "today's closed rounds", not every
+  // round ever).
+  const todayRounds = roundsForDay(allRounds, clock);
+  // #888 gate② run 949439c8 finding [1]: `todayUsd` is the already-flowing freshness signal that
+  // lets `useTodayCostLog` notice a spend row landing on a round already in its set (see that
+  // hook's own doc).
+  const todayLog = useTodayCostLog(todayRounds, allRounds, lanesMax, loop.data?.spend.todayUsd ?? null);
+  const todayModelBars = (loop.data?.spend.byModel ?? []).map((m) => ({ label: m.model, usd: m.usd }));
+  const roundBudgetUsdConfig = ((): number | null => {
+    const raw = loop.data?.config ? readConfigPath(loop.data.config, "cost.roundBudgetUsd") : undefined;
+    return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+  })();
+  const costToday = buildTodayCostPanelFromBuckets(todayLog.buckets, todayModelBars, avgRoundCostUsd(todayRounds), roundBudgetUsdConfig);
+
+  // #880: "COST · ROUND N" — a round explicitly selected in the navigator (replay mode) reads its
+  // OWN full, never-cursor-truncated log (`replay.roundSpend`/`replay.phaseWindows` — see
+  // `useReplay.ts`'s doc for why); at LIVE (nothing selected — the navigator's LIVE slot has no
+  // round id), the last-closed round's own fetch (`useLastClosedRoundCost`) fills the same slot.
+  const lastClosedRoundCost = useLastClosedRoundCost(allRounds, lanesMax);
+  const selectedRound = mode === "replay" ? (allRounds.find((r) => r.roundId === replay.selectedRoundId) ?? null) : null;
+  const costRound =
+    mode === "replay" && selectedRound
+      ? buildClosedRoundCostPanel(selectedRound, replay.roundSpend, replay.phaseWindows)
+      : mode === "live" && lastClosedRoundCost
+        ? buildClosedRoundCostPanel(lastClosedRoundCost.round, lastClosedRoundCost.spend, lastClosedRoundCost.phaseWindows)
+        : null;
+
   // #766 gate② finding [1]: the header meter's replay reading — the SAME `spendThroughCursor` rows
-  // the phase strip above already reads (0 during the round's-log-still-loading window), against
-  // the SELECTED round's own persisted `roundBudgetUsd` (never today's live config). `spendFacts`
-  // (live) is passed through unconditionally too — Header.tsx's `round` prop always wins over it
-  // when both are present, so live mode is unaffected.
-  const selectedRoundArtifact = rounds.data?.rounds.find((r) => r.roundId === replay.selectedRoundId)?.artifact ?? null;
+  // (cursor-truncated, unlike `costRound` above) against the SELECTED round's own persisted
+  // `roundBudgetUsd` (never today's live config). `spendFacts` (live) is passed through
+  // unconditionally too — Header.tsx's `round` prop always wins over it when both are present, so
+  // live mode is unaffected.
+  const selectedRoundArtifact = selectedRound?.artifact ?? null;
   const roundSpend =
     mode === "replay"
       ? resolveRoundSpend(
@@ -493,13 +654,13 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
         )
       : undefined;
   // #861: bound per §6's mode-purity rule — see `resolveInspectorArtifact`'s own doc.
-  const inspectorArtifact = resolveInspectorArtifact(mode, rounds.data?.rounds ?? [], loop.data?.round?.id ?? null, replay.selectedRoundId);
+  const inspectorArtifact = resolveInspectorArtifact(mode, allRounds, loop.data?.round?.id ?? null, replay.selectedRoundId);
   // #868 gate② finding [1]: the round-scoped event source for the drawer's Arch review/Verify
   // counts — live mode fetches it fresh (only while the drawer is actually open, `inspectorNode
   // !== null`, so a closed drawer never polls a round log nobody is looking at); replay reads
   // `replay.roundEvents`, the selected round's own already-loaded, uncapped full log (`useReplay`'s
   // own doc) rather than a second parallel fetch.
-  const inspectorRound = resolveInspectorRound(rounds.data?.rounds ?? [], loop.data?.round?.id ?? null);
+  const inspectorRound = resolveInspectorRound(allRounds, loop.data?.round?.id ?? null);
   const inspectorLiveEvents = useInspectorRoundEvents(mode === "live" && inspectorNode !== null ? inspectorRound : null);
   const inspectorEvents = mode === "live" ? inspectorLiveEvents : replay.roundEvents;
 
@@ -511,9 +672,8 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
     parked,
     repoUrl,
     fixCap,
-    byModel,
-    byLane,
-    byPhase,
+    costToday,
+    costRound,
     configOpen,
     setConfigOpen,
     inspectorNode,
@@ -521,7 +681,7 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
     inspectorArtifact,
     inspectorEvents,
     mode,
-    rounds: rounds.data?.rounds ?? [],
+    rounds: allRounds,
     replay,
     activeHero,
     activeSteps,
@@ -587,14 +747,31 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
   const repoUrl = typeof owner === "string" && typeof repo === "string" ? `https://github.com/${owner}/${repo}` : undefined;
   const fixCap = resolveFixCap(bundle?.loopState.config);
 
-  // §3 E's "by phase" bucket is the only cost strip group demo mode ever shows (`mode` is always
-  // "replay" once loaded) — `byModel`/`byLane` are unreachable placeholders, same reasoning
-  // `appContent`'s own `mode === "replay" ? [byPhase] : [byModel, byLane]` branch already encodes.
-  const byPhase: CostBarGroup = {
-    title: "by phase",
-    bars: phaseSpendBars(bucketSpendByPhase(replay.spendThroughCursor, replay.phaseWindows)),
-  };
-  const selectedRoundArtifact = rounds.find((r) => r.roundId === replay.selectedRoundId)?.artifact ?? null;
+  // #880: "COST · TODAY" — demo mode has no separate live/replay data source for "today"; the
+  // whole in-memory fixture (`bundle.events`/`bundle.spend`/`rounds`, never cursor-truncated, so
+  // no eviction-cap truncation risk the way live mode's bounded tails have) stands in for it
+  // WHOLESALE, the same way `bundle` already stands in for every other live source this route
+  // replaces — so every round in the bundle counts toward `avgRoundCostUsd`, never day-filtered
+  // (`LiveApp`'s own day filter has nothing to anchor to here: the fixture's `startedAt` is a
+  // fixed historical recording date, not "today" in any wall-clock sense — filtering by `clock`
+  // would silently empty the header the moment the shipped recording ages past its own day).
+  const bundleEvents = (bundle?.events ?? []).map(toDomainEvent);
+  const demoRoundBudgetUsd = ((): number | null => {
+    const raw = bundle?.loopState.config ? readConfigPath(bundle.loopState.config, "cost.roundBudgetUsd") : undefined;
+    return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+  })();
+  const costToday = buildTodayCostPanel(
+    bundle?.spend ?? [],
+    buildPhaseWindows(bundleEvents),
+    modelCostBars(bundle?.spend ?? []),
+    avgRoundCostUsd(rounds),
+    demoRoundBudgetUsd,
+  );
+  // #880: "COST · ROUND N" — the selected round's own full log, same never-cursor-truncated
+  // reading `LiveApp`'s replay branch uses (`replay.roundSpend`/`phaseWindows`).
+  const selectedRound = rounds.find((r) => r.roundId === replay.selectedRoundId) ?? null;
+  const costRound = selectedRound ? buildClosedRoundCostPanel(selectedRound, replay.roundSpend, replay.phaseWindows) : null;
+  const selectedRoundArtifact = selectedRound?.artifact ?? null;
   const roundSpend =
     mode === "replay"
       ? resolveRoundSpend(
@@ -613,9 +790,8 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
     parked,
     repoUrl,
     fixCap,
-    byModel: { title: "by model", bars: [] },
-    byLane: { title: "by lane", bars: [] },
-    byPhase,
+    costToday,
+    costRound,
     configOpen,
     setConfigOpen,
     inspectorNode,

@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { SpendRow } from "../api/types.ts";
 import type { DomainEvent } from "../domain-event.ts";
-import { bucketSpendByPhase, buildPhaseWindows, phaseSpendBars, spendThroughTs, UNATTRIBUTED_PHASE } from "./spend-replay.ts";
+import {
+  bucketSpendByPhase,
+  buildPhaseWindows,
+  mergeRoundPhaseBuckets,
+  phaseSpendBars,
+  spendThroughTs,
+  UNATTRIBUTED_PHASE,
+} from "./spend-replay.ts";
 
 function spendRow(id: number, ts: string, usd: number): SpendRow {
   return {
@@ -139,6 +146,77 @@ test("a mixed pre-#206 and post-#206 log never misfiles the pre-history rows int
     buckets.find((b) => b.phase === "executing")?.rows.map((r) => r.id),
     [3],
   );
+});
+
+// ── mergeRoundPhaseBuckets: per-round bucketing preserves ID association across a union ──────────
+
+test("mergeRoundPhaseBuckets sums per-phase totals across rounds, each bucketed against its OWN windows", () => {
+  const roundA = {
+    spend: [spendRow(1, "2026-08-10T00:15:00Z", 3.4)],
+    phaseWindows: buildPhaseWindows([
+      roundPhaseEvent(1, "2026-08-10T00:00:00Z", "aligning"),
+      roundPhaseEvent(2, "2026-08-10T00:10:00Z", "executing"),
+    ]),
+  };
+  const roundB = {
+    spend: [spendRow(2, "2026-08-10T02:05:00Z", 1.1)],
+    phaseWindows: buildPhaseWindows([roundPhaseEvent(10, "2026-08-10T02:00:00Z", "aligning")]),
+  };
+  const buckets = mergeRoundPhaseBuckets([roundA, roundB]);
+  assert.deepEqual(
+    buckets.map((b) => ({ phase: b.phase, usd: b.rows.reduce((sum, r) => sum + r.usd, 0) })),
+    [
+      { phase: "executing", usd: 3.4 },
+      { phase: "aligning", usd: 1.1 },
+    ],
+  );
+});
+
+// #888 gate② final finding (same-timestamp round boundary): a round-A row whose `ts` EQUALS
+// round B's own window start — the tie the ID-cursor guarantee exists to disambiguate. Because
+// each round is bucketed against ONLY its own windows before merging, round B's own windows never
+// even see round A's row, so there is no timestamp comparison across rounds left to tie on.
+test("mergeRoundPhaseBuckets never leaks a round-A row into round B's phase, even when its ts EXACTLY equals round B's own window start", () => {
+  const roundA = {
+    spend: [spendRow(1, "2026-08-10T02:00:00Z", 5.5)], // ties round B's own window start, by ts
+    phaseWindows: buildPhaseWindows([
+      roundPhaseEvent(1, "2026-08-10T00:00:00Z", "aligning"),
+      roundPhaseEvent(2, "2026-08-10T00:20:00Z", "closed"),
+    ]),
+  };
+  const roundB = {
+    spend: [spendRow(2, "2026-08-10T02:05:00Z", 1.1)],
+    phaseWindows: buildPhaseWindows([roundPhaseEvent(10, "2026-08-10T02:00:00Z", "aligning")]),
+  };
+  const buckets = mergeRoundPhaseBuckets([roundA, roundB]);
+  // Round A's tied row correctly lands in round A's OWN "closed" window (open-ended — nothing in
+  // round A's own trail bounds it, and nothing needs to: round B's spend is never compared
+  // against it). Round B's "aligning" total stays exactly its own $1.10, never inflated.
+  assert.deepEqual(
+    buckets.find((b) => b.phase === "closed")?.rows.map((r) => r.id),
+    [1],
+  );
+  assert.equal(
+    buckets.find((b) => b.phase === "aligning")?.rows.reduce((sum, r) => sum + r.usd, 0),
+    1.1,
+  );
+});
+
+test("mergeRoundPhaseBuckets merges Unattributed across rounds and keeps it trailing last", () => {
+  const roundA = { spend: [spendRow(1, "2026-08-09T00:00:00Z", 2)], phaseWindows: [] }; // pre-#206-style, no windows at all
+  const roundB = {
+    spend: [spendRow(2, "2026-08-10T00:15:00Z", 4)],
+    phaseWindows: buildPhaseWindows([roundPhaseEvent(1, "2026-08-10T00:00:00Z", "executing")]),
+  };
+  const buckets = mergeRoundPhaseBuckets([roundA, roundB]);
+  assert.deepEqual(
+    buckets.map((b) => b.phase),
+    ["executing", UNATTRIBUTED_PHASE],
+  );
+});
+
+test("mergeRoundPhaseBuckets is empty for no rounds", () => {
+  assert.deepEqual(mergeRoundPhaseBuckets([]), []);
 });
 
 // ── bars: the CostStrip-shaped summary, summed per bucket ───────────────────────────────────────

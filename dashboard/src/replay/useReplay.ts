@@ -110,6 +110,14 @@ export interface ReplayView {
    *  live display window's cap is never undercounted in replay either. Empty outside replay, and
    *  during the selected round's own loading window (`activeLog` is `null` until it resolves). */
   roundEvents: DomainEvent[];
+  /** #880: the selected round's OWN full spend log — same "never capped" posture as `roundEvents`,
+   *  but UNLIKE `spendThroughCursor` also never truncated by the scrub cursor. The "COST · ROUND
+   *  N" panel is a closed round's frozen summary (`cost-dark.png`), not a live-scrubbing view —
+   *  its by-stage/by-model bars must read the round's FINAL total regardless of where the
+   *  transport's cursor currently sits, or scrubbing backward would visibly shrink a panel
+   *  labeled "CLOSED" while its footer stats (sourced from the round's persisted artifact) stayed
+   *  fixed. Empty outside replay, same as `roundEvents`. */
+  roundSpend: SpendRow[];
 }
 
 /**
@@ -237,5 +245,6 @@ export function useReplay(rounds: Round[], lanesMax: number | null): ReplayView 
     spendThroughCursor,
     phaseWindows: activeLog?.phaseWindows ?? [],
     roundEvents: activeLog?.events ?? [],
+    roundSpend: activeLog?.spend ?? [],
   };
 }
