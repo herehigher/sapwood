@@ -169,6 +169,27 @@
   margin-left: auto;
 }
 
+/* #881: the mockup's category chip (FIX CAP/REVIEW SILENCE/CEILING/DISSENT) — one shared style
+ * for every category; the taxonomy is in the label text, not a per-category color scheme. */
+.attention-chip {
+  padding: 2px var(--space-2);
+  border: 1px solid var(--rust);
+  border-radius: var(--radius-card);
+  color: var(--rust);
+  font-family: var(--font-data);
+  font-size: var(--text-0);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* #881: the mockup's bordered age readout, distinguishing it from the plain muted timestamps
+ * used elsewhere in the feed. */
+.attention-age {
+  border: var(--hairline);
+  border-radius: var(--radius-card);
+  padding: 2px var(--space-2);
+}
+
 /* AC7 (#861): a sibling control next to the sentence's own GitHub anchor, never nested inside
  * it — its own hit target and accessible name. */
 .attention-inspect {

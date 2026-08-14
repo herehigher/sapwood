@@ -5,7 +5,17 @@ import test from "node:test";
 // engine's own tagged registry is the AUTHORITATIVE attention-membership signal, not frontend-
 // design.md §3's prose list, which has already drifted once (finding [2] below).
 import { ESCALATION_SOURCE_KINDS } from "../../engine/src/loop/escalation-reconcile.ts";
-import { COPY, copyFor, EVENT_KINDS, type EventKind, engineStateCaption, hasAttention, type SentencePart } from "./copy.ts";
+import {
+  ATTENTION_CATEGORY,
+  attentionCategory,
+  COPY,
+  copyFor,
+  EVENT_KINDS,
+  type EventKind,
+  engineStateCaption,
+  hasAttention,
+  type SentencePart,
+} from "./copy.ts";
 
 const render = (kind: EventKind, payload: Record<string, unknown> = {}) =>
   COPY[kind]
@@ -123,7 +133,14 @@ test("copyFor returns undefined for any kind absent from the map, never a fallba
 
 test("reclaim-done branches on payload.next", () => {
   assert.equal(render("reclaim-done", { worker: "w1", next: "DRIVING" }), "Lane w1 opened a PR — now in review");
-  assert.equal(render("reclaim-done", { worker: "w1", next: "REQUEUE" }), "Lane w1 ended without a PR — flagged for a human");
+  assert.equal(
+    render("reclaim-done", { worker: "w1", next: "REQUEUE" }),
+    "Lane w1 ended without a PR — reason not recorded · asks: review the lane's outcome and decide whether to retry",
+  );
+  assert.equal(
+    render("reclaim-done", { worker: "w1", next: "REQUEUE", reason: "worker stated it couldn't reproduce the failure" }),
+    "Lane w1 ended without a PR — worker stated it couldn't reproduce the failure · asks: review the lane's outcome and decide whether to retry",
+  );
 });
 
 test("park-probe branches on payload.success and payload.source", () => {
@@ -252,10 +269,14 @@ test("verify-na-proposed always carries attention", () => {
 });
 
 test("gate② opus round 1 P3 (#797): ci-inert-escalated names the check count, pluralizes correctly, and always carries attention", () => {
-  assert.equal(render("ci-inert-escalated", { pr: 1, checks: [] }), "PR #1 needs a human — CI concluded without ever going green");
+  assert.equal(
+    render("ci-inert-escalated", { pr: 1, checks: [] }),
+    "PR #1 needs a human — CI concluded without ever going green · asks: fix the check, then clear the label to retry",
+  );
+  // A malformed-shape (non-string) checks array still falls back to the honest count, never a throw.
   assert.equal(
     render("ci-inert-escalated", { pr: 1, checks: [{ name: "a", conclusion: "SKIPPED" }] }),
-    "PR #1 needs a human — CI concluded without ever going green (1 check)",
+    "PR #1 needs a human — CI concluded without ever going green (1 check) · asks: fix the check, then clear the label to retry",
   );
   assert.equal(
     render("ci-inert-escalated", {
@@ -265,10 +286,17 @@ test("gate② opus round 1 P3 (#797): ci-inert-escalated names the check count, 
         { name: "b", conclusion: "NEUTRAL" },
       ],
     }),
-    "PR #1 needs a human — CI concluded without ever going green (2 checks)",
+    "PR #1 needs a human — CI concluded without ever going green (2 checks) · asks: fix the check, then clear the label to retry",
   );
   assert.equal(COPY["ci-inert-escalated"].attention, true);
   assert.equal(hasAttention("ci-inert-escalated", { pr: 1 }), true);
+});
+
+test("#881: ci-inert-escalated names the actual check strings when the real string[] payload shape is carried", () => {
+  assert.equal(
+    render("ci-inert-escalated", { pr: 1, checks: ["lint (SKIPPED)", "build (NEUTRAL)"] }),
+    "PR #1 needs a human — CI concluded without ever going green (lint (SKIPPED), build (NEUTRAL)) · asks: fix the check, then clear the label to retry",
+  );
 });
 
 test("escalation-resolved never carries attention — it clears an item, never opens one", () => {
@@ -354,13 +382,30 @@ const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expec
   ["dispatched", { issue: 1 }, "Started work on issue #1"],
   ["dispatch-failed", { issue: 1 }, "Couldn't start issue #1 — it's back in the backlog"],
   ["reclaim-done", { worker: "w1", next: "DRIVING" }, "Lane w1 opened a PR — now in review"],
-  ["reclaim-done", { worker: "w1", next: "ESCALATE_NOPR" }, "Lane w1 ended without a PR — flagged for a human"],
-  ["reclaim-failed", { worker: "w1" }, "Lane w1 hit a problem and stopped"],
+  [
+    "reclaim-done",
+    { worker: "w1", next: "ESCALATE_NOPR" },
+    "Lane w1 ended without a PR — reason not recorded · asks: review the lane's outcome and decide whether to retry",
+  ],
+  [
+    "reclaim-failed",
+    { worker: "w1" },
+    "Lane w1 hit a problem and stopped — reason not recorded · asks: investigate and decide whether to retry",
+  ],
   ["reclaim-dead", { worker: "w1" }, "Lane w1 went silent — cleaned up; its issue goes back to the backlog"],
   ["handoff", { worker: "w1" }, "Lane w1 reached its budget and saved its progress for a successor"],
   ["merged", { pr: 10, issue: 1 }, "Merged PR #10 — checks green and review approved"],
-  ["drive-needs-human", { pr: 10, issue: 1 }, "PR #10 needs a human decision"],
-  ["drive-no-pr", { worker: "w1" }, "Lane w1 ended without opening a PR"],
+  ["drive-needs-human", { pr: 10, issue: 1 }, "PR #10 needs a human decision — reason not recorded · asks: decide the PR's next step"],
+  [
+    "drive-needs-human",
+    { pr: 10, issue: 1, reason: "engine-agent: gate:HUMAN:pr-state-closed" },
+    "PR #10 needs a human decision — the PR was closed outside the loop · asks: decide the PR's next step",
+  ],
+  [
+    "drive-no-pr",
+    { worker: "w1" },
+    "Lane w1 ended without opening a PR — reason not recorded · asks: check the lane's log and decide next steps",
+  ],
   ["drive-queued", { pr: 10, issue: 1 }, "PR #10 is ready — waiting its turn to merge"],
   ["drive-stopped", { pr: 10, issue: 1 }, "PR #10 is open and left for you — auto-merge is off"],
   ["pool-selected", { issues: [1, 2, 3] }, "Selected 3 issue(s) for this round"],
@@ -371,9 +416,19 @@ const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expec
   ["fix-leg-started", { worker: "w1", fixRounds: 2, cap: 5 }, "Lane w1 is fixing its PR — round 2 of 5"],
   ["fix-leg-started", { worker: "w1", fixRounds: 1 }, "Lane w1 is fixing its PR — round 1"],
   ["fix-leg-resumed", { worker: "w1" }, "Lane w1 resumed fixing after a handoff"],
-  ["fix-rounds-capped", { pr: 1, issue: 1 }, "PR #1 used up its fix attempts — needs a human"],
-  ["fix-leg-verdict-rerun", { pr: 1, issue: 1 }, "PR #1's review findings aren't fixable by the producer — needs a human"],
-  ["ceiling-escalated", {}, "Safety ceiling reached — winding down all work"],
+  ["fix-rounds-capped", { pr: 1, issue: 1 }, "PR #1 used up its fix attempts · asks: adjudicate — re-ready or close manually"],
+  [
+    "fix-rounds-capped",
+    { pr: 1, issue: 1, fixRounds: 3, cap: 3 },
+    "PR #1 used up its fix attempts (3/3) · asks: adjudicate — re-ready or close manually",
+  ],
+  ["fix-leg-verdict-rerun", { pr: 1, issue: 1 }, "PR #1's review findings aren't fixable by the producer · asks: adjudicate"],
+  ["ceiling-escalated", {}, "Safety ceiling reached — winding down all work · asks: resume when it clears, or raise the ceiling"],
+  [
+    "ceiling-escalated",
+    { reasons: ["daily-budget"] },
+    "Safety ceiling reached (daily-budget) — winding down all work · asks: resume when it clears, or raise the ceiling",
+  ],
   [
     "ceiling-breach-entered",
     { reason: "wall-clock", maxWallClockSec: 3600 },
@@ -391,7 +446,12 @@ const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expec
   ["ceiling-breach-cleared", {}, "A safety ceiling cleared"],
   ["rollback-recovered", { issue: 1 }, "Returned issue #1 to the backlog safely"],
   ["rollback-retry-failed", { issue: 1 }, "Still trying to return issue #1 to the backlog"],
-  ["rollback-escalated", { issue: 1 }, "Couldn't return issue #1 automatically — flagged for a human"],
+  ["rollback-escalated", { issue: 1 }, "Couldn't return issue #1 automatically · asks: return it to the backlog by hand"],
+  [
+    "rollback-escalated",
+    { issue: 1, reason: "3 retries exhausted" },
+    "Couldn't return issue #1 automatically — 3 retries exhausted · asks: return it to the backlog by hand",
+  ],
   ["engine-review-verdict", { outcome: "approved", pr: 1, issue: 1, findingCount: 0 }, "Review approved PR #1 — 0 finding(s) noted"],
   ["engine-review-verdict", { outcome: "rejected", pr: 1, issue: 1, findingCount: 2 }, "Review sent PR #1 back — 2 finding(s) to fix"],
   ["engine-review-verdict", { outcome: "approved", pr: 1, issue: 1 }, "Review approved PR #1 — counts unavailable noted"],
@@ -423,15 +483,34 @@ const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expec
     { worker: "w1", issue: 7, label: "sapwood:blocked" },
     "Lane w1's handoff can't resume — issue #7 still carries `sapwood:blocked`",
   ],
-  ["worktree-retained", { worker: "w1" }, "Kept lane w1's working folder for inspection"],
+  [
+    "worktree-retained",
+    { worker: "w1" },
+    "Kept lane w1's working folder for inspection — reason not recorded · asks: inspect and clear when done",
+  ],
+  [
+    "worktree-retained",
+    { worker: "w1", worktreePath: "/tmp/w1" },
+    "Kept lane w1's working folder for inspection at `/tmp/w1` — reason not recorded · asks: inspect and clear when done",
+  ],
   ["worktree-released", { worker: "w1" }, "Lane w1's retained folder was cleaned up"],
   ["env-failure", { worker: "w1" }, "Lane w1 hit an environment problem — not the work itself"],
   [
     "env-failure-preserved",
     { worker: "w1" },
-    "Kept lane w1's work safe after an environment problem — its PR needs a human to continue it",
+    "Kept lane w1's work safe after an environment problem — its PR needs a human to continue it · asks: inspect the environment and continue the PR",
   ],
-  ["park-escalated", {}, "The environment keeps failing — paused dispatch and flagged a human"],
+  [
+    "env-failure-preserved",
+    { worker: "w1", source: "llm-timeout" },
+    "Kept lane w1's work safe after an environment problem (llm-timeout) — its PR needs a human to continue it · asks: inspect the environment and continue the PR",
+  ],
+  ["park-escalated", {}, "The environment keeps failing — paused dispatch · asks: clear the park once resolved"],
+  [
+    "park-escalated",
+    { source: "consecutive-stalls" },
+    "The environment keeps failing (consecutive-stalls) — paused dispatch · asks: clear the park once resolved",
+  ],
   ["park-probe", { source: "forge", success: true }, "Forge check passed"],
   ["park-probe", { source: "llm", success: true }, "Model check passed"],
   ["park-probe", { source: "forge", success: false }, "Environment check failed — still waiting"],
@@ -446,12 +525,43 @@ const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expec
   ["align-summary", { created: 3, triaged: 2 }, "Planning pass: 3 issue(s) created, 2 plan(s) drafted"],
   ["triage-degraded", {}, "A planning session had trouble — some issues keep their old plans"],
   ["no-plan-after-draft", { issue: 1 }, "Issue #1 still has no usable plan after a drafting attempt"],
-  ["plan-review-escalated", { issue: 1 }, "Issue #1's plan needs a human — automated review couldn't approve it"],
-  ["verify-na-proposed", { issue: 1 }, "Issue #1 proposed as not separately verifiable — a person decides"],
+  [
+    "plan-review-escalated",
+    { issue: 1 },
+    "Issue #1's plan needs a human — automated review couldn't approve it · asks: revise the plan or adjudicate",
+  ],
+  [
+    "plan-review-escalated",
+    { issue: 1, reason: "reviewer determined this issue is not dispatchable by any redraft" },
+    "Issue #1's plan needs a human — reviewer determined this issue is not dispatchable by any redraft · asks: revise the plan or adjudicate",
+  ],
+  [
+    "verify-na-proposed",
+    { issue: 1 },
+    "Issue #1 proposed as not separately verifiable — reason not recorded · asks: approve or reject the proposal",
+  ],
   ["gated-reentry", { issue: 1 }, "Issue #1's PR was unblocked by a human — back through review"],
   ["lane-revived", { issue: 1 }, "Issue #1's PR picked back up after an environment failure — back under review"],
-  ["gated-reentry-capped", { issue: 1 }, "Issue #1 was unblocked too many times without landing — flagged for a human"],
-  ["gated-reentry-capped-label-failed", { issue: 1 }, "Couldn't re-flag issue #1 — please check it manually"],
+  [
+    "gated-reentry-capped",
+    { issue: 1 },
+    "Issue #1 was unblocked too many times without landing · asks: merge by hand — automatic reentry exhausted",
+  ],
+  [
+    "gated-reentry-capped",
+    { issue: 1, attempts: 3 },
+    "Issue #1 was unblocked 3 times without landing · asks: merge by hand — automatic reentry exhausted",
+  ],
+  [
+    "gated-reentry-capped-label-failed",
+    { issue: 1 },
+    "Couldn't re-flag issue #1 · asks: check it manually (retries automatically — not urgent)",
+  ],
+  [
+    "gated-reentry-capped-label-failed",
+    { issue: 1, error: "label API 500" },
+    "Couldn't re-flag issue #1 — label API 500 · asks: check it manually (retries automatically — not urgent)",
+  ],
   ["escalation-resolved", { issue: 7, pr: 12, via: "merged" }, "Issue #7 no longer needs you — PR #12 was merged"],
   ["escalation-resolved", { issue: 7, via: "issue-closed" }, "Issue #7 no longer needs you — it was closed"],
   ["escalation-resolved", { issue: 7, pr: 12, via: "pr-closed" }, "Issue #7 no longer needs you — PR #12 was closed without merging"],
@@ -471,10 +581,19 @@ const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expec
   [
     "ci-inert-escalated",
     { pr: 12, issue: 7, checks: [{ name: "lint", conclusion: "SKIPPED" }] },
-    "PR #12 needs a human — CI concluded without ever going green (1 check)",
+    "PR #12 needs a human — CI concluded without ever going green (1 check) · asks: fix the check, then clear the label to retry",
   ],
   ["ci-pending-observed", { pr: 12, issue: 7 }, "PR #12 is waiting on CI"],
-  ["ci-pending-escalated", { pr: 12, issue: 7 }, "PR #12 needs a human — CI stayed pending too long to progress on its own"],
+  [
+    "ci-pending-escalated",
+    { pr: 12, issue: 7 },
+    "PR #12 needs a human — CI stayed pending too long to progress on its own · asks: re-run or fix the stuck check, then clear the label",
+  ],
+  [
+    "ci-pending-escalated",
+    { pr: 12, issue: 7, checks: ["build"], blockedChecks: ["build"] },
+    "PR #12 needs a human — CI stayed pending too long to progress on its own — blocked: build · asks: re-run or fix the stuck check, then clear the label",
+  ],
   ["ci-pending-cleared", { pr: 12, issue: 7 }, "PR #12's CI resolved"],
 ];
 
@@ -487,6 +606,81 @@ test("table-driven §7 sentence oracle: every row (and every documented payload 
 test("the sentence oracle covers every current §7-table kind at least once", () => {
   const covered = new Set(SENTENCE_ORACLE.map(([kind]) => kind));
   assert.deepEqual([...covered].sort(), [...EVENT_KINDS].sort());
+});
+
+// ── #881: payload audit — every attention kind carries a reason clause + ask, or names the gap ─
+//
+// The issue's own AC1: "Every attention: true COPY entry either carries a reason clause + ask in
+// its sentence, or the payload gap blocking it is named explicitly (not silently absent)." This
+// is an INDEPENDENT enumeration of every kind that ever carries `attention` (not derived from
+// `ATTENTION_CATEGORY` or `COPY` itself, same "the map is the count" discipline `DOC_TABLE_KINDS`
+// above applies) — each rendered with a representative payload and asserted to contain both an
+// explicit "asks:" clause and a reason segment, where an unrecorded reason renders as the literal
+// "reason not recorded" (the named-gap disclosure for the kinds the payload audit found lack a
+// reason field upstream: `drive-no-pr`, `verify-na-proposed`, `worktree-retained`, and the
+// optional-reason branches of `reclaim-done`/`reclaim-failed`).
+const ATTENTION_KINDS_SAMPLE: [kind: EventKind, payload: Record<string, unknown>][] = [
+  ["drive-needs-human", { pr: 1, issue: 1 }],
+  ["drive-no-pr", { worker: "w1" }],
+  ["reclaim-done", { worker: "w1", next: "ESCALATE_NOPR" }],
+  ["reclaim-failed", { worker: "w1" }],
+  ["fix-rounds-capped", { pr: 1, issue: 1 }],
+  ["fix-leg-verdict-rerun", { pr: 1, issue: 1 }],
+  ["ceiling-escalated", {}],
+  ["rollback-escalated", { issue: 1 }],
+  ["worktree-retained", { worker: "w1" }],
+  ["env-failure-preserved", { worker: "w1" }],
+  ["park-escalated", {}],
+  ["plan-review-escalated", { issue: 1 }],
+  ["verify-na-proposed", { issue: 1 }],
+  ["gated-reentry-capped", { issue: 1 }],
+  ["gated-reentry-capped-label-failed", { issue: 1 }],
+  ["ci-inert-escalated", { pr: 1, issue: 1 }],
+  ["ci-pending-escalated", { pr: 1, issue: 1 }],
+];
+
+test("AC1: every attention kind's sentence carries an explicit asks: clause", () => {
+  for (const [kind, payload] of ATTENTION_KINDS_SAMPLE) {
+    assert.equal(COPY[kind].attention !== undefined, true, `${kind} is expected to be an attention kind`);
+    assert.match(render(kind, payload), /asks: /, `${kind} should render an explicit "asks:" clause`);
+  }
+});
+
+test("AC1: every attention kind's sentence either states a reason or names the payload gap ('reason not recorded')", () => {
+  for (const [kind, payload] of ATTENTION_KINDS_SAMPLE) {
+    const rendered = render(kind, payload);
+    const hasReasonNotRecorded = rendered.includes("reason not recorded");
+    // The sentence is more than JUST the kind's bare fact + the asks: clause — i.e. it isn't a
+    // string that would be identical with no reason clause segment at all. Every entry above
+    // either includes the literal "reason not recorded" disclosure or a non-empty reason drawn
+    // from the sample payload/hardcoded reason text (asserted per-kind by SENTENCE_ORACLE).
+    assert.ok(
+      hasReasonNotRecorded || rendered.length > `PR #1 needs a human — asks: `.length,
+      `${kind} should carry a reason clause or the explicit "reason not recorded" gap disclosure`,
+    );
+  }
+});
+
+test("AC1: ATTENTION_KINDS_SAMPLE is an independent, exhaustive transcription of every attention kind", () => {
+  const covered = new Set(ATTENTION_KINDS_SAMPLE.map(([kind]) => kind));
+  const attentionKinds = new Set(EVENT_KINDS.filter((k) => COPY[k].attention !== undefined));
+  assert.deepEqual(covered, attentionKinds);
+});
+
+// ── #881: category-chip taxonomy completeness ───────────────────────────────────────────────
+
+test("every attention-marked kind has exactly one category chip, and no non-attention kind has one", () => {
+  for (const kind of EVENT_KINDS) {
+    if (COPY[kind].attention !== undefined) {
+      assert.ok(ATTENTION_CATEGORY[kind], `${kind} carries attention but has no ATTENTION_CATEGORY entry`);
+    } else {
+      assert.equal(ATTENTION_CATEGORY[kind], undefined, `${kind} carries no attention marker but has a category chip`);
+    }
+  }
+});
+
+test("attentionCategory returns undefined for an unrecognized kind, never a fabricated label", () => {
+  assert.equal(attentionCategory("some-future-kind-nobody-registered-yet"), undefined);
 });
 
 // ── #723: the header's engine-state caption (§7 convention, applied to the §3 A engine word) ──

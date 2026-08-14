@@ -1,4 +1,4 @@
-import { COPY, type SentencePart } from "../copy.ts";
+import { attentionCategory, COPY, type SentencePart } from "../copy.ts";
 import type { DomainEvent } from "../domain-event.ts";
 import type { EntityTitles } from "../entities.ts";
 import { formatRelativeWithAbsoluteTitle } from "../format-time.ts";
@@ -36,8 +36,12 @@ function AttentionRow({
   const parts: SentencePart[] = event.known ? COPY[event.kind].sentence(payload) : [`Unrecognized event: ${event.kind}`];
   const { text, title } = formatRelativeWithAbsoluteTitle(event.ts, "local", now);
   const node = event.known ? ATTENTION_KIND_TO_NODE[event.kind] : undefined;
+  // #881: the mockup's category-chip taxonomy — absent for an unrecognized kind (no fallback
+  // fabricated) rather than rendering an empty/misleading chip.
+  const category = event.known ? attentionCategory(event.kind) : undefined;
   return (
     <li className="attention-row">
+      {category && <span className="attention-chip">{category}</span>}
       <span className="attention-sentence">
         {parts.map((part, i) => (
           // biome-ignore lint/suspicious/noArrayIndexKey: sentence parts are a fixed-order render list, not reorderable data
@@ -53,7 +57,7 @@ function AttentionRow({
           inspect
         </button>
       )}
-      <span className="muted data attention-ts" title={title}>
+      <span className="muted data attention-ts attention-age" title={title}>
         {text}
       </span>
     </li>

@@ -76,6 +76,25 @@ function fixReasonWord(reason: unknown): string {
   return r || "a review finding";
 }
 
+/** #881 payload audit: `drive-needs-human`'s `reason` field (`conductor.ts`'s `escalateNeedsHuman`
+ *  call sites) is a terse machine gate code (`gate:HUMAN:pr-state-closed`, `fix-loop-unwired:*`),
+ *  not prose — narrow named patterns per the same doctrine `fixReasonWord` above already applies,
+ *  falling back to the raw code (honest-unknown) rather than inventing a meaning for an
+ *  unrecognized one. Empty/missing reason renders as an explicit "not recorded", never a blank —
+ *  this IS the #881 payload-gap disclosure for the cases where no code was ever attached. */
+function driveNeedsHumanReasonWord(reason: unknown): string {
+  const r = typeof reason === "string" ? reason : "";
+  if (r.includes("pr-state-closed")) return "the PR was closed outside the loop";
+  if (r.includes("fix-loop-unwired")) return "the fix loop isn't wired for this path yet";
+  return r || "reason not recorded";
+}
+
+/** #881: a fixed-string fallback for the handful of attention kinds whose engine payload carries
+ *  no reason field at all today (`drive-no-pr`, `verify-na-proposed`, `worktree-retained` —
+ *  see the payload audit in the #881 PR body) — an explicit, honest "not recorded" rather than a
+ *  silently bare sentence, so the AC1 table-driven test can assert the gap is NAMED, not absent. */
+const REASON_NOT_RECORDED = "reason not recorded";
+
 /** `ceiling-breach-entered`/`ceiling-breach-cleared` branch on `payload.reason` (#431 round 3:
  *  one event per reason, each ceiling its own lifecycle) — see conductor.ts's `CeilingReason`. */
 function ceilingReasonWord(reason: unknown): "wall-clock" | "daily-budget" | null {
@@ -180,14 +199,23 @@ export const COPY: Record<EventKind, CopyEntry> = {
     sentence: (p) => ["Couldn't start issue ", issueTok(p.issue), " — it's back in the backlog"],
   },
   "reclaim-done": {
+    // #881: the non-DRIVING branch is an attention row — payload carries an OPTIONAL `reason`
+    // (the worker's own stated exit reason, `doneReason` in conductor.ts) when the worker gave
+    // one; absent otherwise, rendered as an explicit not-recorded rather than silently dropped.
     sentence: (p) =>
       p.next === "DRIVING"
         ? [`Lane ${p.worker} opened a PR — now in review`]
-        : [`Lane ${p.worker} ended without a PR — flagged for a human`],
+        : [
+            `Lane ${p.worker} ended without a PR — ${typeof p.reason === "string" && p.reason ? p.reason : REASON_NOT_RECORDED} · asks: review the lane's outcome and decide whether to retry`,
+          ],
     attention: reclaimNeedsAttention,
   },
   "reclaim-failed": {
-    sentence: (p) => [`Lane ${p.worker} hit a problem and stopped`],
+    // #881: `reason` (`failedReason`) is only attached at one of the two conductor.ts emit sites
+    // — optional, same not-recorded fallback as `reclaim-done` above.
+    sentence: (p) => [
+      `Lane ${p.worker} hit a problem and stopped — ${typeof p.reason === "string" && p.reason ? p.reason : REASON_NOT_RECORDED} · asks: investigate and decide whether to retry`,
+    ],
     attention: reclaimNeedsAttention,
   },
   "reclaim-dead": {
@@ -200,11 +228,21 @@ export const COPY: Record<EventKind, CopyEntry> = {
     sentence: (p) => ["Merged PR ", prTok(p.pr, p.issue), " — checks green and review approved"],
   },
   "drive-needs-human": {
-    sentence: (p) => ["PR ", prTok(p.pr, p.issue), " needs a human decision"],
+    sentence: (p) => [
+      "PR ",
+      prTok(p.pr, p.issue),
+      ` needs a human decision — ${driveNeedsHumanReasonWord(p.reason)} · asks: decide the PR's next step`,
+    ],
     attention: true,
   },
   "drive-no-pr": {
-    sentence: (p) => [`Lane ${p.worker} ended without opening a PR`],
+    // #881 payload audit: `conductor.ts`'s emit site for this kind (the driving-lane-with-no-PR
+    // invariant break) carries only `worker`/`issue` — no reason field exists upstream to read,
+    // a genuine payload gap (not a copy-layer oversight); named explicitly rather than a silently
+    // bare sentence. The ask does not depend on knowing why, so it is not blocked by the gap.
+    sentence: (p) => [
+      `Lane ${p.worker} ended without opening a PR — ${REASON_NOT_RECORDED} · asks: check the lane's log and decide next steps`,
+    ],
     // #715 gate② [2]: the engine's own registry tags this `escalation-source:always`
     // (engine/src/state/event-kinds/drive.ts) — a driving lane with no PR is always a person's
     // decision, unconditionally, same tier as `drive-needs-human`.
@@ -229,18 +267,31 @@ export const COPY: Record<EventKind, CopyEntry> = {
     sentence: (p) => [`Lane ${p.worker} resumed fixing after a handoff`],
   },
   "fix-rounds-capped": {
-    sentence: (p) => ["PR ", prTok(p.pr, p.issue), " used up its fix attempts — needs a human"],
+    // #881: payload carries `fixRounds`/`cap` (both numbers) — surfaced as the reason clause
+    // when present, omitted (not fabricated) when absent.
+    sentence: (p) => [
+      "PR ",
+      prTok(p.pr, p.issue),
+      ` used up its fix attempts${typeof p.fixRounds === "number" ? ` (${p.fixRounds}${typeof p.cap === "number" ? `/${p.cap}` : ""})` : ""} · asks: adjudicate — re-ready or close manually`,
+    ],
     // #715 gate② [2]: `escalation-source:always` in the engine's own registry (drive.ts) —
     // "needs a human" in the sentence itself, and the reconciler treats it as unconditional.
     attention: true,
   },
   "fix-leg-verdict-rerun": {
-    sentence: (p) => ["PR ", prTok(p.pr, p.issue), "'s review findings aren't fixable by the producer — needs a human"],
+    sentence: (p) => ["PR ", prTok(p.pr, p.issue), "'s review findings aren't fixable by the producer · asks: adjudicate"],
     // #715 gate② [2]: same `escalation-source:always` tier as `fix-rounds-capped` above.
     attention: true,
   },
   "ceiling-escalated": {
-    sentence: () => ["Safety ceiling reached — winding down all work"],
+    // #881: payload carries `reasons: string[]` (the tripped-ceiling codes) that the sentence
+    // previously ignored entirely — surfaced now, defensively filtered the same way
+    // `engine-review-containment-gap`'s `gaps` array already is below.
+    sentence: (p) => {
+      const reasons = Array.isArray(p.reasons) ? p.reasons.filter((r): r is string => typeof r === "string") : [];
+      const detail = reasons.length > 0 ? ` (${reasons.join(", ")})` : "";
+      return [`Safety ceiling reached${detail} — winding down all work · asks: resume when it clears, or raise the ceiling`];
+    },
     attention: true,
   },
   "ceiling-breach-entered": {
@@ -273,7 +324,13 @@ export const COPY: Record<EventKind, CopyEntry> = {
     sentence: (p) => ["Still trying to return issue ", issueTok(p.issue), " to the backlog"],
   },
   "rollback-escalated": {
-    sentence: (p) => ["Couldn't return issue ", issueTok(p.issue), " automatically — flagged for a human"],
+    // #881: payload carries `reason` (the rollback trigger) and `error` (the last retry failure)
+    // — `reason` is the more legible of the two for a feed sentence, surfaced when present.
+    sentence: (p) => [
+      "Couldn't return issue ",
+      issueTok(p.issue),
+      ` automatically${typeof p.reason === "string" && p.reason ? ` — ${p.reason}` : ""} · asks: return it to the backlog by hand`,
+    ],
     attention: true,
   },
   "engine-review-verdict": {
@@ -333,7 +390,12 @@ export const COPY: Record<EventKind, CopyEntry> = {
     sentence: (p) => [`Lane ${p.worker}'s handoff can't resume — issue `, issueTok(p.issue), ` still carries \`${p.label}\``],
   },
   "worktree-retained": {
-    sentence: (p) => [`Kept lane ${p.worker}'s working folder for inspection`],
+    // #881 payload audit: `conductor.ts`'s `reportRetainedWorktree` emits only `worker`/`issue`/
+    // `worktreePath` — no field states WHY the worktree was retained, a genuine payload gap named
+    // here rather than silently absent. `worktreePath` (when present) doubles as the ask target.
+    sentence: (p) => [
+      `Kept lane ${p.worker}'s working folder for inspection${typeof p.worktreePath === "string" && p.worktreePath ? ` at \`${p.worktreePath}\`` : ""} — ${REASON_NOT_RECORDED} · asks: inspect and clear when done`,
+    ],
     attention: true,
   },
   "worktree-released": {
@@ -343,11 +405,21 @@ export const COPY: Record<EventKind, CopyEntry> = {
     sentence: (p) => [`Lane ${p.worker} hit an environment problem — not the work itself`],
   },
   "env-failure-preserved": {
-    sentence: (p) => [`Kept lane ${p.worker}'s work safe after an environment problem — its PR needs a human to continue it`],
+    // #881: payload carries `source` (the classified env-failure signature, `envSource` in
+    // conductor.ts) — surfaced as the reason, previously ignored.
+    sentence: (p) => [
+      `Kept lane ${p.worker}'s work safe after an environment problem${typeof p.source === "string" && p.source ? ` (${p.source})` : ""} — its PR needs a human to continue it · asks: inspect the environment and continue the PR`,
+    ],
     attention: true,
   },
   "park-escalated": {
-    sentence: () => ["The environment keeps failing — paused dispatch and flagged a human"],
+    // #881: payload carries `source` (the park-cause id: consecutive-stalls/rapid-restart/
+    // idle-churn/etc, per each of park.ts's/stall-breaker.ts's/rapid-restart.ts's/idle-churn.ts's
+    // emit sites) — surfaced as the reason, previously ignored (the sentence took no payload at
+    // all).
+    sentence: (p) => [
+      `The environment keeps failing${typeof p.source === "string" && p.source ? ` (${p.source})` : ""} — paused dispatch · asks: clear the park once resolved`,
+    ],
     attention: true,
   },
   "park-probe": {
@@ -390,11 +462,26 @@ export const COPY: Record<EventKind, CopyEntry> = {
     sentence: (p) => ["Issue ", issueTok(p.issue), " still has no usable plan after a drafting attempt"],
   },
   "plan-review-escalated": {
-    sentence: (p) => ["Issue ", issueTok(p.issue), "'s plan needs a human — automated review couldn't approve it"],
+    // #881: payload carries a real `reason` (prose, `plan-review.ts`'s own degrade/escalate call
+    // sites — e.g. "reviewer determined this issue is not dispatchable by any redraft") that the
+    // sentence previously ignored in favor of a fixed generic string. Falls back to the old
+    // generic text only when `reason` is genuinely absent.
+    sentence: (p) => [
+      "Issue ",
+      issueTok(p.issue),
+      `'s plan needs a human — ${typeof p.reason === "string" && p.reason ? p.reason : "automated review couldn't approve it"} · asks: revise the plan or adjudicate`,
+    ],
     attention: true,
   },
   "verify-na-proposed": {
-    sentence: (p) => ["Issue ", issueTok(p.issue), " proposed as not separately verifiable — a person decides"],
+    // #881 payload audit: `plan-review.ts`'s emit site carries only `round_id`/`issue` — the
+    // proposal's rationale lives in the forge comment body, never in the event payload, a genuine
+    // gap named explicitly rather than fabricated.
+    sentence: (p) => [
+      "Issue ",
+      issueTok(p.issue),
+      ` proposed as not separately verifiable — ${REASON_NOT_RECORDED} · asks: approve or reject the proposal`,
+    ],
     attention: true,
   },
   "gated-reentry": {
@@ -404,11 +491,23 @@ export const COPY: Record<EventKind, CopyEntry> = {
     sentence: (p) => ["Issue ", issueTok(p.issue), "'s PR picked back up after an environment failure — back under review"],
   },
   "gated-reentry-capped": {
-    sentence: (p) => ["Issue ", issueTok(p.issue), " was unblocked too many times without landing — flagged for a human"],
+    // #881: payload carries `attempts` — surfaced as the reason, previously ignored.
+    sentence: (p) => [
+      "Issue ",
+      issueTok(p.issue),
+      `${typeof p.attempts === "number" ? ` was unblocked ${p.attempts} times` : " was unblocked too many times"} without landing · asks: merge by hand — automatic reentry exhausted`,
+    ],
     attention: true,
   },
   "gated-reentry-capped-label-failed": {
-    sentence: (p) => ["Couldn't re-flag issue ", issueTok(p.issue), " — please check it manually"],
+    // #881: payload carries `error` (the label-write failure) — surfaced as the reason. This kind
+    // is `escalation-source:never` (self-retries next tick, per the engine's own registry) — the
+    // ask names that explicitly rather than reading like an urgent unresolved intervention.
+    sentence: (p) => [
+      "Couldn't re-flag issue ",
+      issueTok(p.issue),
+      `${typeof p.error === "string" && p.error ? ` — ${p.error}` : ""} · asks: check it manually (retries automatically — not urgent)`,
+    ],
     attention: true,
   },
   "escalation-resolved": {
@@ -449,12 +548,18 @@ export const COPY: Record<EventKind, CopyEntry> = {
   // conclusion}]}` (engine/src/review/drive.ts) plus the usual `pr`/`issue` pair every drive-arm
   // escalation carries.
   "ci-inert-escalated": {
+    // #881: `checks` is `string[]` on the real payload (`"name (CONCLUSION)"`, conductor.ts's own
+    // comment on this field) — named when the items are actually strings, falling back to the
+    // bare count for any other shape (never fabricated).
     sentence: (p) => {
-      const n = Array.isArray(p.checks) ? p.checks.length : 0;
+      const raw = Array.isArray(p.checks) ? p.checks : [];
+      const names = raw.filter((c): c is string => typeof c === "string");
+      const n = raw.length;
+      const detail = names.length > 0 ? ` (${names.join(", ")})` : n > 0 ? ` (${n} check${n === 1 ? "" : "s"})` : "";
       return [
         "PR ",
         prTok(p.pr, p.issue),
-        ` needs a human — CI concluded without ever going green${n > 0 ? ` (${n} check${n === 1 ? "" : "s"})` : ""}`,
+        ` needs a human — CI concluded without ever going green${detail} · asks: fix the check, then clear the label to retry`,
       ];
     },
     attention: true,
@@ -464,7 +569,19 @@ export const COPY: Record<EventKind, CopyEntry> = {
     sentence: (p) => ["PR ", prTok(p.pr, p.issue), " is waiting on CI"],
   },
   "ci-pending-escalated": {
-    sentence: (p) => ["PR ", prTok(p.pr, p.issue), " needs a human — CI stayed pending too long to progress on its own"],
+    // #881: payload carries `checks`/`blockedChecks` (both `string[]`) that the sentence
+    // previously ignored — `blockedChecks` (a check that concluded WITHOUT passing) is the more
+    // actionable of the two when present, since it names what's actually wedging gate①.
+    sentence: (p) => {
+      const blocked = Array.isArray(p.blockedChecks) ? p.blockedChecks.filter((c): c is string => typeof c === "string") : [];
+      const checks = Array.isArray(p.checks) ? p.checks.filter((c): c is string => typeof c === "string") : [];
+      const detail = blocked.length > 0 ? ` — blocked: ${blocked.join(", ")}` : checks.length > 0 ? ` (${checks.join(", ")})` : "";
+      return [
+        "PR ",
+        prTok(p.pr, p.issue),
+        ` needs a human — CI stayed pending too long to progress on its own${detail} · asks: re-run or fix the stuck check, then clear the label`,
+      ];
+    },
     attention: true,
   },
   "ci-pending-cleared": {
@@ -495,6 +612,48 @@ export function hasAttention(kind: string, payload: Payload | null): boolean {
   if (!entry?.attention) return false;
   if (entry.attention === true) return true;
   return entry.attention(payload ?? {});
+}
+
+/** #881: the category-chip taxonomy `NeedsAttention.tsx` renders per row, mirroring
+ *  `needs-attention-dark.png`'s FIX CAP/REVIEW SILENCE/CEILING/DISSENT chip pattern — adapted to
+ *  the kinds this engine actually emits rather than the mockup's illustrative labels verbatim
+ *  (this engine has no literal "review silence" or "dissent" event kind). Every kind that ever
+ *  carries `attention` (§3) has exactly one category below; completeness is pinned by
+ *  `copy.test.ts`'s taxonomy-completeness test rather than left to drift silently. Grouped by
+ *  what kind of intervention the row is actually asking for, not by which engine module emitted
+ *  it:
+ *  - DECISION — an ambiguous outcome only a human can resolve (no automatic next step exists)
+ *  - LANE END — a lane stopped without a clean, driving hand-off
+ *  - FIX CAP — the automatic fix loop exhausted its budget or its own review-decidability
+ *  - CEILING — a safety/cost ceiling tripped
+ *  - ROLLBACK — an automatic backlog return failed
+ *  - INSPECT — a worktree was kept on disk for a person to look at
+ *  - ENV — the execution environment itself is unhealthy
+ *  - REVIEW — a plan/verification review couldn't reach an automatic verdict
+ *  - LABEL — a bookkeeping write failed (self-retries; lowest urgency of the ten)
+ *  - CI — a PR's checks never resolved cleanly */
+export const ATTENTION_CATEGORY: Partial<Record<EventKind, string>> = {
+  "drive-needs-human": "DECISION",
+  "drive-no-pr": "DECISION",
+  "reclaim-done": "LANE END",
+  "reclaim-failed": "LANE END",
+  "fix-rounds-capped": "FIX CAP",
+  "fix-leg-verdict-rerun": "FIX CAP",
+  "gated-reentry-capped": "FIX CAP",
+  "ceiling-escalated": "CEILING",
+  "rollback-escalated": "ROLLBACK",
+  "worktree-retained": "INSPECT",
+  "env-failure-preserved": "ENV",
+  "park-escalated": "ENV",
+  "plan-review-escalated": "REVIEW",
+  "verify-na-proposed": "REVIEW",
+  "gated-reentry-capped-label-failed": "LABEL",
+  "ci-inert-escalated": "CI",
+  "ci-pending-escalated": "CI",
+};
+
+export function attentionCategory(kind: string): string | undefined {
+  return isKnownKind(kind) ? ATTENTION_CATEGORY[kind] : undefined;
 }
 
 /** "The same module captions lane states" (§7) — a lane's `state` word, in plain language.

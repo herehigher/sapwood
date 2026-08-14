@@ -309,11 +309,18 @@ rendered **only** when something needs a person — zero height otherwise, so
 the calm default stays calm. It is the promoted form of the old
 "`needs-human` pins to the top of the feed" rule, upgraded from a feed
 convention to a first-class surface. One row per open item, each showing:
+a **category chip** (#881 — `ATTENTION_CATEGORY` in `copy.ts`: one of
+DECISION / LANE END / FIX CAP / CEILING / ROLLBACK / INSPECT / ENV / REVIEW /
+LABEL / CI, one entry per attention kind, no fallback for an unmapped one),
 the affected entity (issue/PR number with its type glyph and hover title),
-the plain-language reason (the same §7 copy map sentence that produced the
-feed line — no second vocabulary), *when*, and — **only when the payload
-carries it, verbatim fields, never synthesized** — what the engine did
-about it. Each row links to the GitHub issue/PR and opens the relevant
+the plain-language reason clause **and explicit "asks:" action** (the same
+§7 copy map sentence that produced the feed line — no second vocabulary; an
+attention sentence names why the row exists and what a person is meant to
+do about it, or states "reason not recorded" when the engine payload
+genuinely carries no reason field yet rather than fabricating one — #881's
+payload audit), *when* (in a bordered age box), and — **only when the
+payload carries it, verbatim fields, never synthesized** — what the engine
+did about it. Each row links to the GitHub issue/PR and opens the relevant
 inspector drawer on click.
 
 Membership is carried by the copy map, not a second list — and it is
@@ -323,6 +330,7 @@ defined **semantically, not by sentence wording**: a kind whose event
 only some payloads qualify (the entry owns its own condition — no side
 list to drift, and gate②'s existing extend-the-map checklist item curates
 the flag with the sentence). Flagged today: `drive-needs-human`,
+`drive-no-pr`, `fix-rounds-capped`, `fix-leg-verdict-rerun`,
 `rollback-escalated`, `plan-review-escalated`, `verify-na-proposed` (#296 —
 the gate⓪ "not separately verifiable" proposal: labels and comment land
 automatically, but only a person accepts or rejects it; issue-scoped, so the
@@ -330,7 +338,8 @@ existing issue-scoped clears below resolve the row), `gated-reentry-capped`,
 `gated-reentry-capped-label-failed`, `worktree-retained`,
 `park-escalated`, `env-failure-preserved` (that path deliberately leaves
 the lane failed — the preserved PR needs a manual drive),
-`ceiling-escalated`; plus two predicate kinds: `reclaim-failed` when
+`ceiling-escalated`, `ci-inert-escalated`, `ci-pending-escalated`; plus two
+predicate kinds: `reclaim-failed` when
 `payload.next` is not an automatic continuation, and `reclaim-done` on its
 no-PR branch — that condition is **code, not prose** (#404): the engine's
 `attentionProof(kind, payload)`
@@ -735,28 +744,28 @@ checklist item**):
 |---|---|
 | `dispatched` | Started work on issue #{issue} |
 | `dispatch-failed` | Couldn't start issue #{issue} — it's back in the backlog |
-| `reclaim-done` | Branches on `payload.next`: PR produced → "Lane {worker} opened a PR — now in review"; ended without a PR → "Lane {worker} ended without a PR — flagged for a human" |
-| `reclaim-failed` | Lane {worker} hit a problem and stopped |
+| `reclaim-done` | Branches on `payload.next`: PR produced → "Lane {worker} opened a PR — now in review"; ended without a PR → "Lane {worker} ended without a PR — {reason, or "reason not recorded" — #881 payload gap, see below} · asks: review the lane's outcome and decide whether to retry" |
+| `reclaim-failed` | Lane {worker} hit a problem and stopped — {reason, or "reason not recorded"} · asks: investigate and decide whether to retry |
 | `reclaim-dead` | Lane {worker} went silent — cleaned up; its issue goes back to the backlog |
 | `handoff` | Lane {worker} reached its budget and saved its progress for a successor |
 | `merged` | Merged PR #{pr} — checks green and review approved |
-| `drive-needs-human` | PR #{pr} needs a human decision |
-| `drive-no-pr` | Lane {worker} ended without opening a PR |
+| `drive-needs-human` | PR #{pr} needs a human decision — {reason word, narrow-pattern-matched off `payload.reason`'s machine gate code, falling back to the raw code or "reason not recorded"} · asks: decide the PR's next step |
+| `drive-no-pr` | Lane {worker} ended without opening a PR — reason not recorded · asks: check the lane's log and decide next steps (#881 payload gap: no reason field exists upstream today) |
 | `drive-queued` | PR #{pr} is ready — waiting its turn to merge |
 | `drive-stopped` | PR #{pr} is open and left for you — auto-merge is off |
 | `pool-selected` | Selected {n} issue(s) for this round |
 | `drive-fixup` | PR #{pr} sent back to fix — {reason} (reason word from the payload: review findings / checks failed / merge conflict) |
 | `fix-leg-started` | Lane {worker} is fixing its PR — round {n} of {cap} |
 | `fix-leg-resumed` | Lane {worker} resumed fixing after a handoff |
-| `fix-rounds-capped` | PR #{pr} used up its fix attempts — needs a human |
-| `fix-leg-verdict-rerun` | PR #{pr}'s review findings aren't fixable by the producer — needs a human |
-| `ceiling-escalated` | Safety ceiling reached — winding down all work |
+| `fix-rounds-capped` | PR #{pr} used up its fix attempts ({fixRounds}/{cap}, when the payload carries them) · asks: adjudicate — re-ready or close manually |
+| `fix-leg-verdict-rerun` | PR #{pr}'s review findings aren't fixable by the producer · asks: adjudicate |
+| `ceiling-escalated` | Safety ceiling reached ({reasons.join}, when carried) — winding down all work · asks: resume when it clears, or raise the ceiling |
 | `ceiling-breach-entered` | Branches on `payload.reason` (#431 round 3: one event per REASON, each ceiling has its own lifecycle): wall-clock → "This run hit its {maxWallClockSec}s attention alarm — no new work until a restart"; daily-budget → "Today's ${dailyBudgetUsd} budget is spent — no new work until tomorrow". One per reason per episode, never per tick |
 | `rapid-restart-detected` | Engine started {births} times in {windowSec}s — crash loop suspected, dispatch parked for a human (#431) |
 | `ceiling-breach-cleared` | Branches on `payload.reason` (#431 round 3): wall-clock → "The wall-clock alarm cleared"; daily-budget → "The daily budget rolled over" — that reason's closing receipt; work resumes only when no ceiling remains open. One per reason per episode, transition-only |
 | `rollback-recovered` | Returned issue #{issue} to the backlog safely |
 | `rollback-retry-failed` | Still trying to return issue #{issue} to the backlog |
-| `rollback-escalated` | Couldn't return issue #{issue} automatically — flagged for a human |
+| `rollback-escalated` | Couldn't return issue #{issue} automatically ({reason}, when carried) · asks: return it to the backlog by hand |
 | `engine-review-verdict` | Branches on `payload.outcome` (#489): approved → "Review approved PR #{pr} — {findingCount} finding(s) noted"; rejected → "Review sent PR #{pr} back — {findingCount} finding(s) to fix". The engine's own reviewer reaching a decision, emitted once per review run (`runId`); the sentence stops there — what happens next is narrated by `merged` / `drive-fixup` themselves. A SUMMARY: counts only, since the findings themselves live in the PR's audit comment. `findingCount`/`perAC` are `null` when the run's artifact wasn't observed — say "counts unavailable", never "0" |
 | `engine-review-budget-advisory` | This review’s ${capUsd} budget is a guide, not a limit — the tool running it can’t enforce one (#443). Emitted once per review attempt, before it starts, only for the local Codex reviewer (`reviewer.agent.runner: codex-exec`); the Claude reviewer enforces its budget for real and stays silent here |
 | `engine-review-cost-unknown` | This review finished without reporting what it cost — its spend is unknown, not zero (#443). Never shown as “$0” anywhere; the attempt is treated as unmeasured, which is also why it is never retried on a leftover budget |
@@ -770,11 +779,11 @@ checklist item**):
 | `lane-state-labeled` | Lane {worker} is now shown as working on PR #{pr} (#399). Bookkeeping, not an attention item: it records that the engine put its lane-state label on the PR so the PR list says someone is on it. One per lane per PR, never per tick |
 | `lane-state-cleared` | PR #{pr} no longer shows lane {worker} as working on it (#399) — the lane ended (merged, escalated or dead), or the label write failed and will be retried. Same bookkeeping tier as its twin above |
 | `resume-held` | Lane {worker}'s handoff can't resume — issue #{issue} still carries `{label}`. Deliberately **not** an attention item (§3): it is the *consequence* of a hold, not a new thing waiting on a person — whoever owns that label already has the strip row (an engine escalation) or applied it themselves (a human). Its job is to make an idle lane legible; one per suppression episode, never per tick (#441) |
-| `worktree-retained` | Kept lane {worker}'s working folder for inspection |
+| `worktree-retained` | Kept lane {worker}'s working folder for inspection (at `{worktreePath}`, when carried) — reason not recorded · asks: inspect and clear when done (#881 payload gap: no reason field exists upstream today) |
 | `worktree-released` | Lane {worker}'s retained folder was cleaned up |
 | `env-failure` | Lane {worker} hit an environment problem — not the work itself (subsequent events narrate the disposition; this sentence claims none of it — `hasPr` alone cannot pick the outcome) |
-| `env-failure-preserved` | Kept lane {worker}'s work safe after an environment problem — its PR needs a human to continue it |
-| `park-escalated` | The environment keeps failing — paused dispatch and flagged a human |
+| `env-failure-preserved` | Kept lane {worker}'s work safe after an environment problem ({source}, when carried) — its PR needs a human to continue it · asks: inspect the environment and continue the PR |
+| `park-escalated` | The environment keeps failing ({source}, when carried) — paused dispatch · asks: clear the park once resolved |
 | `park-probe` | Branches on `payload.success` and `payload.source`, stating **only the check's own result** — never a global outcome (a mixed forge+LLM park can pass one check and stay parked): forge + passed → "Forge check passed"; llm + passed → "Model check passed"; failed → "Environment check failed — still waiting". What happens next is narrated by `park-resumed` / `park-canary` themselves |
 | `park-resumed` | Environment recovered — resuming work |
 | `park-canary` | Sent one test lane to check the environment |
@@ -787,12 +796,12 @@ checklist item**):
 | `align-summary` | Planning pass: {n} issue(s) created, {m} plan(s) drafted |
 | `triage-degraded` | A planning session had trouble — some issues keep their old plans |
 | `no-plan-after-draft` | Issue #{issue} still has no usable plan after a drafting attempt |
-| `plan-review-escalated` | Issue #{issue}'s plan needs a human — automated review couldn't approve it |
-| `verify-na-proposed` | Issue #{issue} proposed as not separately verifiable — a person decides |
+| `plan-review-escalated` | Issue #{issue}'s plan needs a human — {payload.reason, falling back to "automated review couldn't approve it"} · asks: revise the plan or adjudicate |
+| `verify-na-proposed` | Issue #{issue} proposed as not separately verifiable — reason not recorded · asks: approve or reject the proposal (#881 payload gap: no reason field exists upstream today) |
 | `gated-reentry` | Issue #{issue}'s PR was unblocked by a human — back through review |
 | `lane-revived` | Issue #{issue}'s PR picked back up after an environment failure — back under review |
-| `gated-reentry-capped` | Issue #{issue} was unblocked too many times without landing — flagged for a human |
-| `gated-reentry-capped-label-failed` | Couldn't re-flag issue #{issue} — please check it manually |
+| `gated-reentry-capped` | Issue #{issue} was unblocked {attempts, or "too many"} times without landing · asks: merge by hand — automatic reentry exhausted |
+| `gated-reentry-capped-label-failed` | Couldn't re-flag issue #{issue} ({error}, when carried) · asks: check it manually (retries automatically — not urgent) |
 | `escalation-resolved` | Branches on `payload.via`: merged → "Issue #{issue} no longer needs you — PR #{pr} was merged"; issue-closed → "Issue #{issue} no longer needs you — it was closed"; pr-closed → "Issue #{issue} no longer needs you — PR #{pr} was closed without merging"; label-removed → "Issue #{issue} no longer needs you — the flag was cleared"; board-fixed → "Issue #{issue} no longer needs you — the board was set to Done". Never an attention item — this is the event that *clears* one (§3) |
 | `needs-human-swept` | Issue #{issue} no longer carries `{label}` — the engine removed the flag it had applied itself, now that its escalation is resolved. Never an attention item; it is the receipt that a cleared item's *carrier* was cleared too. Only ever follows a `merged` or `issue-closed` resolution; a PR closed without merging still owes a human decision and keeps its flag (#441) |
 | `retro-pr-opened` | The loop proposed an improvement to itself — PR #{pr} awaits review |
@@ -801,9 +810,9 @@ checklist item**):
 | `instance-lock-taken-over` | Took over the engine lock left by a crashed run (pid {previousPid}) |
 | `round-phase` | Round {round_id} moved into {phase}. The terminal `closed` entry additionally carries the idle-churn breaker's own per-round sample (#470): `idle` (this round dispatched nothing and left no lane in flight) and, for an idle round only, `fp` — a digest of every durable fact the round appended. Both are diagnostics for that breaker's ledger-derived streak, not feed copy; the sentence is unchanged |
 | `idle-churn-detected` | The loop ran {rounds} rounds in a row that changed nothing at all — parked for a human (#470). Names the standby probe signal(s) that kept opening those rounds. Not an attention *strip* item: like `rapid-restart-detected` and `consecutive-stalls-detected`, its waiting-on-a-human state is carried by its park episode (`PARKED (idle-churn)`), and it carries no issue |
-| `ci-inert-escalated` | PR #{pr} needs a human — CI concluded without ever going green (#783). Registered now, not yet emitted anywhere: the live-posting wiring is #783's human-owned remainder (`merge-driver.ts`/`conductor.ts` are guard-protected paths), landed here per this section's own "new kind, same PR" rule so `copy.ts` already knows how to render it once that wiring lands. An attention item — it carries a `needsHuman` label the moment it does fire |
+| `ci-inert-escalated` | PR #{pr} needs a human — CI concluded without ever going green ({check names, when the payload's `checks` items are strings, else a bare count}) · asks: fix the check, then clear the label to retry (#783). An attention item — it carries a `needsHuman` label the moment it fires |
 | `ci-pending-observed` | PR #{pr} is waiting on CI. Opens the CI-pending pin `ci-pending-escalated`'s escalation timer reads; routine, not an attention item |
-| `ci-pending-escalated` | PR #{pr} needs a human — CI stayed pending too long to progress on its own (gate② was already decisive). An attention item — it carries a `needsHuman` label the moment it fires |
+| `ci-pending-escalated` | PR #{pr} needs a human — CI stayed pending too long to progress on its own (gate② was already decisive), naming `blockedChecks`/`checks` when carried · asks: re-run or fix the stuck check, then clear the label. An attention item — it carries a `needsHuman` label the moment it fires |
 | `ci-pending-cleared` | PR #{pr}'s CI resolved. Closes the pin `ci-pending-observed` opened, canceling the escalation timer; routine, not an attention item |
 
 The same module captions lane states (`running` → "writing", `driving` → "PR

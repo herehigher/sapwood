@@ -166,7 +166,7 @@ test("#715 gate② [5]: resolving ONE of two simultaneously-open sources on the 
   const needsHumanIdx = html.indexOf("needs a human decision");
   // renderToStaticMarkup HTML-escapes the apostrophe ("Couldn't" -> "Couldn&#x27;t"), so match on
   // an apostrophe-free substring of the sentence instead.
-  const rollbackIdx = html.indexOf("automatically — flagged for a human");
+  const rollbackIdx = html.indexOf("automatically · asks: return it to the backlog by hand");
   const dispatchedIdx = html.indexOf("Started work on issue");
   assert.ok(needsHumanIdx > dispatchedIdx, "the RESOLVED source should no longer be pinned above the routine entry");
   assert.ok(rollbackIdx !== -1 && rollbackIdx < dispatchedIdx, "the UNRESOLVED source on the same issue must stay pinned");
