@@ -42,13 +42,24 @@
  * Font-family stays Fraunces (frontend-design.md §5's #728 adjudication already settled that
  * against these same baseline PNGs — a mockup-vs-shipped font-family deviation is not this
  * issue's to re-litigate); only weight/size/letter-spacing move to close the "thin/small" gap
- * `docs/design/729-fidelity-ledger.md` row 2 recorded. Split out of `.hero-label` above (which
- * keeps the smaller BACKLOG/ring caption weight) rather than bumped in place. */
+ * `docs/design/729-fidelity-ledger.md` row 2 recorded.
+ *
+ * #886 gate② run 2e566ac9 finding [4]: `letter-spacing` is a literal px value (2.34px), not
+ * `0.18em`, even though 2.34px IS exactly 0.18em at this rule's own 13px font-size — verified
+ * NOT to be a style preference: happy-dom (this repo's real-DOM test harness, `test-dom.ts`)
+ * resolves an `em` letter-spacing against the DEFAULT 16px font-size rather than the element's
+ * own cascaded 13px whenever the SAME selector's own rule declares font-size at all (reproduced
+ * directly; splitting font-size and letter-spacing into two separate rule blocks for the same
+ * selector does NOT avoid it — only an element that inherits its font-size with no own-rule
+ * declaration at all resolves correctly, which isn't an option here since this rule deliberately
+ * sets its own 13px). A literal px value has no unit to mis-resolve in the first place — in any
+ * real browser it renders identically to `0.18em` here, and `hero.test.ts` can assert the exact
+ * value directly instead of fighting the test harness. */
 .hero-phase {
   font-family: var(--font-display);
   font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.18em;
+  letter-spacing: 2.34px;
   fill: var(--bark-text);
 }
 

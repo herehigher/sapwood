@@ -9,6 +9,15 @@ import { type EngineFacts, Header, resolveSpendMeter, showsPauseChip } from "./H
 registerRealDom();
 
 const panelsCss = readFileSync(new URL("../panels.css", import.meta.url), "utf8");
+const tokensCss = readFileSync(new URL("../tokens.css", import.meta.url), "utf8");
+const appCss = readFileSync(new URL("../app.css", import.meta.url), "utf8");
+// #886 gate② run 2e566ac9 finding [3]: `.spend-meter-value` declares no font-size of its own —
+// it inherits `body`'s (app.css, driven by tokens.css's `--text-0`). The first cut of this test
+// injected only `panelsCss`, leaving happy-dom's own 16px default in play instead of production's
+// real 13px, so its "exact" computed letter-spacing (0.32px = 0.02em × 16px) didn't match what
+// actually ships (0.02em × 13px = 0.26px). Extracted (not hand-copied) straight from the real
+// `body { ... }` rule in app.css so this can't silently desync from the real cascade.
+const bodyFontSizeRule = appCss.match(/body\s*\{[^}]*\}/)?.[0];
 
 // ── pure helpers (§3 A / §8) ────────────────────────────────────────────────────────────────
 
@@ -195,17 +204,18 @@ test("a null budgetUsd on `round` (artifact-less round) renders the used amount 
   assert.doesNotMatch(html, /\$3\.14 \//);
 });
 
-// #879 gate② finding [1]: same discipline as hero.test.ts's paired fix — a regex read of the
-// stylesheet TEXT proves the rule was authored, not that it cascades onto a rendered element, and
-// the original `letter-spacing:` check accepted ANY value. This mounts the real <Header> markup
-// into a REAL DOM (`registerRealDom()`, happy-dom) with `panelsCss` injected as an actual <style>
-// element, then reads `getComputedStyle` off the matched element for the exact shipped values.
-// Unlike `.hero-phase` (hero.test.ts), this rule declares no font-size of its own, so happy-dom's
-// em-resolution (which uses the inherited/default font-size) is trustworthy here — both properties
-// are asserted at their exact computed value, not just "applied".
-test("#879 gate② finding [1]: the spend meter value renders bold at the exact shipped weight/letter-spacing, proven against a real cascade — not a read of the stylesheet text", () => {
+// #886 gate② run 2e566ac9 finding [3]: mounts the REAL production cascade (`tokensCss` for
+// `--text-0`, the extracted real `body { font-size: var(--text-0) }` rule, then `panelsCss`) —
+// not just `panelsCss` alone, which left happy-dom at its own 16px default instead of the
+// element's real inherited 13px. `.spend-meter-value` declares no font-size of its own, so
+// happy-dom's em-resolution against an INHERITED font-size (as opposed to one declared in the
+// SAME rule as letter-spacing — see `.hero-phase`'s paired fix, hero.test.ts) is trustworthy
+// here, verified by direct reproduction: both properties are asserted at their exact computed
+// value against 13px, not just "applied".
+test("#879 gate② run 2e566ac9 finding [3]: the spend meter value renders bold at the exact shipped weight/letter-spacing, proven against the REAL production cascade (tokens.css + app.css's body rule + panels.css)", () => {
+  assert.ok(bodyFontSizeRule, "app.css must still declare a body { ... } rule for tokensCss/panelsCss to cascade through");
   const style = document.createElement("style");
-  style.textContent = panelsCss;
+  style.textContent = `${tokensCss}\n${bodyFontSizeRule}\n${panelsCss}`;
   document.head.appendChild(style);
   const container = document.createElement("div");
   container.innerHTML = renderToStaticMarkup(
@@ -216,6 +226,7 @@ test("#879 gate② finding [1]: the spend meter value renders bold at the exact 
     const valueEl = container.querySelector(".spend-meter-value");
     assert.ok(valueEl, "a real .spend-meter-value element must render and match the injected stylesheet's selector");
     const computed = getComputedStyle(valueEl as Element);
+    assert.equal(computed.fontSize, "13px", "sanity check: the real body-cascaded font-size the letter-spacing assertion below depends on");
     assert.equal(
       computed.fontWeight,
       "600",
@@ -223,8 +234,8 @@ test("#879 gate② finding [1]: the spend meter value renders bold at the exact 
     );
     assert.equal(
       computed.letterSpacing,
-      "0.32px",
-      "0.02em against the inherited 16px default — the exact shipped value, not just 'some' letter-spacing",
+      "0.26px",
+      "0.02em against the REAL inherited 13px body font-size — the exact shipped value, not a stand-in environment's 0.32px",
     );
   } finally {
     document.body.removeChild(container);

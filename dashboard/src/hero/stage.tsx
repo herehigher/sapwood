@@ -182,6 +182,21 @@ const CHECKPOINT_DRAW_CAP = CHECKPOINT_COLS * CHECKPOINT_ROWS_MAX;
  */
 const CHECKPOINT_OVERFLOW_REAL_CAP = CHECKPOINT_COLS * (CHECKPOINT_ROWS_MAX - 1);
 export const TRUNK = { x: 1006, y: 156, step: 7, max: 12 } as const;
+/**
+ * #886 gate② run 2e566ac9 finding [1]: where the newest-merge droplet parks, offset from
+ * `dropletPoint`'s "trunk" case — frees the true trunk CENTER for the outcome number (below).
+ * Chosen purely for vertical clearance from the number's own worst-case rendered box (a
+ * multi-digit ring count centered at `TRUNK.y + 11`, `hero.css`'s 33px `.hero-ring-count`):
+ * the droplet's own label sits 14px above its shape (`hero-droplet`'s own `y=-14` convention),
+ * so a -40 vertical offset alone already puts the label's bottom edge (`hero.test.ts`'s stress
+ * test: ~104) well clear of the number's top edge (~140) regardless of either string's digit
+ * count or the +40 horizontal component — the horizontal offset only keeps the marker visually
+ * near "where the merge arm feeds in" (`GATES.review` → `TRUNK`), not load-bearing for the
+ * clearance itself. Verified collision-free at a deliberately stressed digit count (3-digit ring
+ * total, 6-digit PR number) by `hero.test.ts`'s own test, the same discipline #728's
+ * NEEDS_HUMAN_COL_STEP/ROW_STEP doc already uses for its own cluster.
+ */
+const TRUNK_DROPLET_OFFSET = { dx: 40, dy: -40 } as const;
 const REFLECTION = { x: 1118, bottom: 244 } as const;
 const REFLECTION_NODES = [
   { node: "summary" as const, y: 110, label: "Summary", role: "roles.harvest" },
@@ -269,8 +284,17 @@ export function dropletPoint(state: HeroState, d: Droplet, at: DropletAt = d.at)
       const row = Math.floor(rank / NEEDS_HUMAN_COLS);
       return { x: ESCALATION.x + col * NEEDS_HUMAN_COL_STEP, y: ESCALATION.y - 30 - row * NEEDS_HUMAN_ROW_STEP };
     }
+    // #886 gate② run 2e566ac9 finding [1]: the frozen baseline's outcome ring has NOTHING
+    // else drawn near it — just a big centered number. `merged` (state.ts) always parks the
+    // newest-merge droplet's PR tag at the trunk, so the two can't both sit dead-center; earlier
+    // attempts moved the NUMBER off-center to dodge the droplet (read as "floating below the
+    // ring" for the realistic low-ring-count case a live probe actually captures). This moves
+    // the DROPLET instead — up-right of center, near where the merge arm feeds in — freeing
+    // the true center for the number to match the baseline exactly, at any ring count. The
+    // offset is verified collision-free against a worst-case ring/PR digit count by
+    // `hero.test.ts`'s own stress test (mirrors the #728 needs-human-cluster stress pattern).
     case "trunk":
-      return { x: TRUNK.x, y: TRUNK.y };
+      return { x: TRUNK.x + TRUNK_DROPLET_OFFSET.dx, y: TRUNK.y + TRUNK_DROPLET_OFFSET.dy };
   }
 }
 
@@ -733,16 +757,15 @@ export function HeroStage({
             />
           );
         })}
-        {/* #879: pulled up from its old resting spot (was +106, clear of the ring entirely) to
-         * read as INSIDE the ring cross-section (frozen baseline: a bold display number filling
-         * the ring). Not dead-centered on TRUNK.y, though: "merged" (state.ts) always leaves
-         * exactly ONE droplet parked AT the trunk center ("only the newest merge keeps its tag
-         * on the trunk — older ones *are* the rings now") with its own PR-chip label floating
-         * above it — a live probe caught the first, dead-centered version of this fix sitting
-         * the number directly on top of that chip. +40 clears the chip's shape (bottom edge
-         * ~+9) and its label (top edge ~-22) with margin — see the paired hero.test.ts
-         * collision assertion for the exact box math. */}
-        <text className="hero-ring-count" style={{ fontFamily: "var(--font-display)" }} x={TRUNK.x} y={TRUNK.y + 40} textAnchor="middle">
+        {/* #879/#886: dead center — the frozen baseline's bold display number fills the ring
+         * cross-section with nothing else drawn near it. Earlier rounds moved this text itself
+         * off-center to dodge the newest-merge droplet that always parks at the trunk (see
+         * `merged` in state.ts); that read as "floating below the ring" for the realistic
+         * low-ring-count case a live probe actually captures. `TRUNK_DROPLET_OFFSET` (above)
+         * moves the DROPLET out of the way instead, so this can stay truly centered at any ring
+         * count. +11 is a baseline-centering nudge for the display font's cap-height, not a
+         * collision-avoidance number. */}
+        <text className="hero-ring-count" style={{ fontFamily: "var(--font-display)" }} x={TRUNK.x} y={TRUNK.y + 11} textAnchor="middle">
           {state.rings}
         </text>
         <text className="hero-label" x={TRUNK.x} y={TRUNK.y + 124} textAnchor="middle">
