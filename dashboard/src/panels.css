@@ -211,24 +211,50 @@
 
 /* ---- round navigator (§3 A, #889) ----------------------------------------- */
 
+/* engine-agent audit run 9aaabee8-5885-40d3-a15e-6fecb47b17f3 finding [0]: `header-dark.png`
+ * draws the navigator as ONE joined three-slot rectangular stepper (◂ | round label | ▸), not
+ * three independently bordered, rounded, gapped buttons. `.round-nav` now owns the single
+ * border/radius/background; the three buttons inside are borderless/flat, with a hairline
+ * DIVIDER between adjacent slots standing in for the individual borders removed below.
+ * `overflow: hidden` keeps a button's own hover/focus background from spilling past the group's
+ * rounded corners. */
 .round-nav {
   position: relative;
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.round-nav-arrow {
   display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
+  align-items: stretch;
   background: var(--panel);
   border: var(--hairline);
   border-radius: var(--radius-card);
+  overflow: hidden;
+}
+
+.round-nav-arrow,
+.round-nav-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
   color: inherit;
   cursor: pointer;
+}
+
+/* Among the three `<button>` slots, the left arrow is `:first-of-type` and the right arrow is
+ * `:last-of-type` (by TAG, not class, so this survives `.round-nav-list-wrap`'s conditional
+ * `<div>` sibling) — giving the divider to the left arrow and the middle pill leaves the right
+ * arrow undivided at the group's own trailing edge, which is exactly the 3-slot shape. */
+.round-nav-arrow:first-of-type,
+.round-nav-pill {
+  border-right: var(--hairline);
+}
+
+.round-nav-arrow {
+  width: 24px;
+  padding: 0;
+}
+
+.round-nav-arrow:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--bark) 12%, transparent);
 }
 
 .round-nav-arrow:disabled {
@@ -237,22 +263,19 @@
 }
 
 .round-nav-pill {
-  background: var(--panel);
-  border: var(--hairline);
-  border-radius: var(--radius-card);
   padding: 2px var(--space-2);
   font-family: var(--font-data);
   font-size: var(--text-0);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: inherit;
-  cursor: pointer;
 }
 
 /* §3 A: "a persistent tinted 'ROUND N · CLOSED' badge" — the pill itself carries the badge
- * (`header-dark.png`'s band 2 pill), rather than a second element duplicating the same fact. */
+ * (`header-dark.png`'s band 2 pill), rather than a second element duplicating the same fact. A
+ * background wash (not just text color) keeps the tint visible now that the pill has no border
+ * of its own to recolor — the joined group's border is shared, not per-slot. */
 .round-nav-pill-closed {
-  border-color: var(--sap);
+  background: color-mix(in srgb, var(--sap) 16%, transparent);
   color: var(--sap);
 }
 
@@ -362,13 +385,56 @@
   padding: 0;
 }
 
-/* No native blue chrome (#889's own why) — `accent-color` retints the thumb/track through the
- * same amber "in motion" token every other live-state indicator already uses, no custom slider
- * markup needed. */
+/* engine-agent audit run 9aaabee8-5885-40d3-a15e-6fecb47b17f3 finding [0]: `accent-color` alone
+ * (the previous version of this rule) only retints the BROWSER'S OWN track/thumb — the element is
+ * still rendered by the user-agent's native `<input type=range>` implementation underneath, with
+ * a platform-dependent shape/size. `appearance: none` opts fully out of that native rendering;
+ * the `::-webkit-slider-*`/`::-moz-range-*` pseudo-elements below are what actually draw a
+ * token-styled track/thumb in its place, in both themes (every color here resolves through
+ * tokens.css's own `light-dark()` declarations, so no per-theme override is needed here). */
 .transport-scrub {
   flex: 1;
   min-width: 120px;
-  accent-color: var(--sap);
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.transport-scrub::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--bark) 35%, transparent);
+}
+
+.transport-scrub::-moz-range-track {
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--bark) 35%, transparent);
+}
+
+.transport-scrub::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px; /* centers the 14px thumb on the 4px track (webkit doesn't do this itself) */
+  border-radius: var(--radius-pill);
+  border: none;
+  background: var(--sap);
+}
+
+.transport-scrub::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-pill);
+  border: none;
+  background: var(--sap);
+}
+
+.transport-scrub:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .transport-position {

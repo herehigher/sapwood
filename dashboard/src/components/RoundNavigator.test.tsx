@@ -179,7 +179,12 @@ test(".round-list never renders inline by default — only after the navigator p
   assert.match(html, /round-nav-pill/);
 });
 
-test("the round-row separator between relative time and tally is a real element, not glued text", () => {
+// engine-agent audit run 9aaabee8-5885-40d3-a15e-6fecb47b17f3 finding [1]: the old version of this
+// test only matched the CLASS NAME `round-row-sep` — it stayed green even if the `·` glyph inside
+// that span were deleted, since the class attribute text alone satisfies a bare substring match.
+// This asserts the actual rendered separator TEXT sits between the relative-time and tally spans,
+// so deleting the glyph (or emptying the span) fails it.
+test("the round-row separator between relative time and tally renders the actual '·' glyph, not just the class name", () => {
   const html = renderToStaticMarkup(
     <RoundNavigator
       rounds={[round({ roundId: 1, artifact: artifact({ prsMerged: 1, spendUsd: 12.3 }) })]}
@@ -190,7 +195,10 @@ test("the round-row separator between relative time and tally is a real element,
       initiallyOpen
     />,
   );
-  assert.match(html, /round-row-sep/);
+  assert.match(html, /class="muted round-row-sep" aria-hidden="true">·<\/span>/, "the separator span must actually contain the '·' glyph");
+  // The full sequence — relative time, then the real separator, then the tally — never glued
+  // together as "…ago1 merged" (the original bug this fix addresses).
+  assert.match(html, /round-row-when"[^>]*>[^<]*<\/span><span class="muted round-row-sep"[^>]*>·<\/span><span/);
 });
 
 test("a round with a tally shows its merged count and spend", () => {
@@ -258,11 +266,36 @@ test("no rounds at all: opening the navigator shows 'no rounds yet', no list mar
   assert.doesNotMatch(html, /round-list/);
 });
 
+// engine-agent audit run 9aaabee8-5885-40d3-a15e-6fecb47b17f3 finding [1]: the old version of this
+// test never rendered `RoundNavigator` at all and never asserted the rendered row count or the
+// disclosure TEXT — it only proved `buildRoundListEntries(rounds).length > ROUND_LIST_RENDER_CAP`,
+// which stays true even if the component silently dropped capping/disclosure entirely. This opens
+// the real navigator and pins the exact disclosure copy plus the actual rendered `.round-row` count.
 test(`entries beyond the ${ROUND_LIST_RENDER_CAP}-entry cap carry an honest disclosure line, same discipline as the feed`, () => {
-  const rounds = Array.from({ length: ROUND_LIST_RENDER_CAP + 10 }, (_, i) =>
-    round({ roundId: i + 1, artifact: artifact({ prsMerged: 1 }) }),
+  const total = ROUND_LIST_RENDER_CAP + 10;
+  const rounds = Array.from({ length: total }, (_, i) => round({ roundId: i + 1, artifact: artifact({ prsMerged: 1 }) }));
+  const html = renderToStaticMarkup(
+    <RoundNavigator rounds={rounds} selectedRoundId={null} onSelectRound={() => {}} liveRoundId={null} now={NOW} initiallyOpen />,
   );
-  const entries = buildRoundListEntries(rounds);
-  assert.equal(entries.length, rounds.length, "no standby rounds here, so every round is its own entry");
-  assert.ok(entries.length > ROUND_LIST_RENDER_CAP);
+  assert.match(
+    html,
+    new RegExp(`showing latest ${ROUND_LIST_RENDER_CAP} of ${total} — ${total} rounds total`),
+    "the disclosure line must name the exact rendered/total counts, not just exist",
+  );
+  const renderedRows = html.match(/class="round-row(?:\s+round-row-selected)?"/g) ?? [];
+  assert.equal(
+    renderedRows.length,
+    ROUND_LIST_RENDER_CAP,
+    "exactly the capped number of rows must actually be in the DOM, not just claimed",
+  );
+});
+
+test(`at or under the ${ROUND_LIST_RENDER_CAP}-entry cap, no disclosure line renders at all — the cap note is honest about when it applies`, () => {
+  const rounds = Array.from({ length: ROUND_LIST_RENDER_CAP }, (_, i) => round({ roundId: i + 1, artifact: artifact({ prsMerged: 1 }) }));
+  const html = renderToStaticMarkup(
+    <RoundNavigator rounds={rounds} selectedRoundId={null} onSelectRound={() => {}} liveRoundId={null} now={NOW} initiallyOpen />,
+  );
+  assert.doesNotMatch(html, /round-list-cap-note/);
+  const renderedRows = html.match(/class="round-row(?:\s+round-row-selected)?"/g) ?? [];
+  assert.equal(renderedRows.length, ROUND_LIST_RENDER_CAP);
 });
