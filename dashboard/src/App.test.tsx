@@ -1610,14 +1610,16 @@ function inspectorEvent(id: number, kind: string, payload: Record<string, unknow
   return { known: true, id, ts: `2026-08-10T09:0${id}:00Z`, kind, payload } as DomainEvent;
 }
 
-// 3 plan-review-escalated + 2 no-plan-after-draft — distinguishable counts for the Arch
-// review / Verify drawer's event-derived numbers (AC2).
+// 3 plan-review-escalated + 2 verify-na-proposed — distinguishable counts for the Arch
+// review / Verify drawer's event-derived numbers (AC2). #893: was "no-plan-after-draft", a
+// dashboard-only kind the engine never actually registers (dead drift closed by this PR) —
+// swapped for another real, distinct engine-registered kind so the fixture stays honest.
 const INSPECTOR_EVENTS: DomainEvent[] = [
   inspectorEvent(1, "plan-review-escalated", { issue: 901 }),
   inspectorEvent(2, "plan-review-escalated", { issue: 902 }),
   inspectorEvent(3, "plan-review-escalated", { issue: 903 }),
-  inspectorEvent(4, "no-plan-after-draft", { issue: 904 }),
-  inspectorEvent(5, "no-plan-after-draft", { issue: 905 }),
+  inspectorEvent(4, "verify-na-proposed", { issue: 904 }),
+  inspectorEvent(5, "verify-na-proposed", { issue: 905 }),
 ];
 
 function inspectorViewModel(overrides: {
@@ -1747,7 +1749,7 @@ test("#868 gate② finding [1]: the real live wiring excludes a PRIOR round's ma
   const ledger = [
     roundLogRow(1, "plan-review-escalated"), // prior round's own event
     roundLogRow(2, "plan-review-escalated"), // prior round's own event
-    roundLogRow(3, "no-plan-after-draft"), // prior round's own last event (the boundary row)
+    roundLogRow(3, "verify-na-proposed"), // prior round's own last event (the boundary row)
     roundLogRow(4, "plan-review-escalated"), // the OPEN round's own event
   ];
   const rounds = [
@@ -1965,7 +1967,7 @@ for (const node of ["arch-review", "verify"] as const) {
     assert.match(drawer, /sess-verify-861/);
     assert.doesNotMatch(drawer, /sess-harvest-861/, "harvest's own degraded session belongs to Summary, not here");
     assertRow(drawer, "plan-review escalations", 3);
-    assertRow(drawer, "no plan after draft", 2);
+    assertRow(drawer, "verify n/a proposed", 2);
     const expectedCaption = node === "arch-review" ? "arch-model-861 · medium" : "verify-model-861 · low";
     assert.match(drawer, new RegExp(escapeRegExp(expectedCaption)));
     assert.doesNotMatch(drawer, /Distinguishable created title 861/, "Goal & align's own fields must not leak here");

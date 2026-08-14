@@ -16,9 +16,12 @@
 //     while an `eventsSince`/dedup/replay consumer depends on it. A tagged kind says out loud
 //     which read paths hold it up.
 //
-// OUT OF REACH, on purpose: `@sapwood/dashboard` is a separate workspace that does not import
-// `engine/src`, so its §7 copy map stays outside the compiler. The gate② checklist rule ("new
-// event kinds land in the §7 copy map in the same PR") remains the mechanism there.
+// #893: `@sapwood/dashboard`'s `copy.ts` type-imports `EventKind` from this module (`import type`
+// — erased at build, so the browser bundle never carries engine runtime code). That closes the
+// gap the line above used to describe: an engine-side kind addition now fails the dashboard's own
+// build/test until it is classified, either a `COPY` entry or a `TELEMETRY_KINDS` member (see
+// `copy.ts`'s module doc and `copy.test.ts`'s cross-package exhaustiveness test) — the mechanism
+// frontend-design.md §7 names instead of the old prose-only "gate② checklist" rule.
 import { DRIVE_EVENT_KINDS } from "./drive.js";
 import { ESCALATION_EVENT_KINDS } from "./escalation.js";
 import { GOVERNANCE_EVENT_KINDS } from "./governance.js";

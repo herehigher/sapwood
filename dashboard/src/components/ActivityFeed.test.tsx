@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { EventKind } from "../copy.ts";
 import type { DomainEvent, KnownDomainEvent, UnknownDomainEvent } from "../domain-event.ts";
 import { foldOpenAttention } from "../entities.ts";
+import { registerRealDom } from "../test-dom.ts";
 import { ActivityFeed, FEED_RENDER_CAP } from "./ActivityFeed.tsx";
+
+// #893: opt-in real DOM (one call, this file only — test-dom.ts's own doc) so the telemetry
+// toggle's click-through can be proven for real, not just its collapsed initial render via
+// `renderToStaticMarkup` (which never dispatches events).
+registerRealDom();
 
 const panelsCss = readFileSync(new URL("../panels.css", import.meta.url), "utf8");
 
@@ -337,4 +345,55 @@ test("#722 gate② [0]: the disclosure names the pinned exception rather than im
   const events = [escalation, ...routine];
   const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={[escalation]} titles={{}} now={NOW} />);
   assert.match(html, /1 pinned always included/);
+});
+
+// ── #893: telemetry tier — collapsed by default, honest disclosure, opt-in reveal ─────────────
+
+test("#893: a real, previously-unmapped heartbeat kind renders zero 'Unrecognized event' rows — AC2", () => {
+  const events = [ev(1, "worker-heartbeat", { worker: "w1" }), ev(2, "dispatched", { issue: 1 })];
+  const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={[]} titles={{}} now={NOW} />);
+  assert.doesNotMatch(html, /Unrecognized event/);
+});
+
+test("#893: telemetry rows are collapsed from the default view, with an honest disclosure count", () => {
+  const events = [
+    ev(1, "worker-heartbeat", { worker: "w1" }),
+    ev(2, "role-session-heartbeat", { worker: "w1" }),
+    ev(3, "dispatched", { issue: 1 }),
+  ];
+  const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={[]} titles={{}} now={NOW} />);
+  assert.doesNotMatch(html, /Telemetry: worker-heartbeat/, "telemetry rows must not render inline by default");
+  assert.match(html, /2 telemetry event\(s\) hidden/, "the count of hidden telemetry rows must be disclosed honestly");
+  assert.match(html, /Started work on issue/, "narrative rows still render normally alongside the disclosure");
+});
+
+test("#893: no telemetry disclosure renders when there is nothing to hide", () => {
+  const events = [ev(1, "dispatched", { issue: 1 })];
+  const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={[]} titles={{}} now={NOW} />);
+  assert.doesNotMatch(html, /telemetry event/);
+});
+
+test("#893: the telemetry toggle reveals hidden rows with an honest generic sentence, through a real click", async () => {
+  const events = [ev(1, "worker-heartbeat", { worker: "w1" }), ev(2, "dispatched", { issue: 1 })];
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<ActivityFeed events={events} pinnedAttention={[]} titles={{}} now={NOW} />);
+    });
+    assert.doesNotMatch(container.innerHTML, /Telemetry: worker-heartbeat/, "collapsed by default");
+    const toggle = container.querySelector(".feed-telemetry-toggle");
+    assert.ok(toggle, "the show/hide toggle must render whenever telemetry rows are hidden");
+    await act(async () => {
+      toggle.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    assert.match(container.innerHTML, /Telemetry: worker-heartbeat/, "the honest generic line renders once shown");
+    assert.match(container.innerHTML, /showing 1 telemetry event\(s\)/);
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
 });

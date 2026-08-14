@@ -44,6 +44,35 @@ test("renders a different chip label for a different category (CI)", () => {
   assert.match(html, /class="attention-chip">CI</);
 });
 
+// ── #893: REVIEW SILENCE / DISSENT — through the REAL parse boundary (`toDomainEvent`), not a
+// hand-forced `known: true` fixture, so this proves the wire kind is actually classified as
+// known (`isKnownKind`) end to end, not just that the strip CAN render the chip in isolation.
+
+test("#893: review-silence-escalated reaches the strip and renders the REVIEW SILENCE chip", () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "review-silence-escalated", { pr: 42, issue: 7, silenceSec: 600 }));
+  assert.equal(event.known, true, "review-silence-escalated must classify as a known kind");
+  const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
+  assert.match(html, /class="attention-chip">REVIEW SILENCE</);
+  assert.match(html, /went unanswered/);
+  assert.match(html, /asks: check the reviewer/);
+});
+
+test("#893: review-disputed reaches the strip and renders the DISSENT chip", () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "review-disputed", { pr: 42, issue: 7, worker: "w1" }));
+  assert.equal(event.known, true, "review-disputed must classify as a known kind");
+  const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
+  assert.match(html, /class="attention-chip">DISSENT</);
+  assert.match(html, /successive reviews disagreed/);
+});
+
+test("#893: review-non-convergent ALSO renders the DISSENT chip — same category, different trigger", () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "review-non-convergent", { pr: 42, issue: 7, worker: "w1" }));
+  assert.equal(event.known, true, "review-non-convergent must classify as a known kind");
+  const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
+  assert.match(html, /class="attention-chip">DISSENT</);
+  assert.match(html, /failed to converge/);
+});
+
 test("renders no chip for an unrecognized event kind, never a fabricated label", () => {
   const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "some-future-kind-nobody-registered-yet", { pr: 42 }));
   const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
