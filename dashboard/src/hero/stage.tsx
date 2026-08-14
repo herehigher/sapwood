@@ -607,14 +607,19 @@ export function HeroStage({
   // #716 gate② round 2 P2-5: the fix-return arrow's own label (§6: "labeled with the send-back
   // reason") — the first currently-fixing lane, in channel order.
   const fixingReason = state.lanes.find((l) => l.phase === "fixing")?.reason ?? null;
-  // #745 gate② round 4 finding [0]: cap the checkpoint zone's DRAWN chips — never let a rank
-  // grow the grid above the viewBox. At or under `CHECKPOINT_DRAW_CAP`, every droplet draws
-  // normally (unchanged). Past it, only `CHECKPOINT_OVERFLOW_REAL_CAP` real chips draw — one row
-  // short of the grid's capacity — so the badge can take the whole last row for itself, never
-  // colliding by label width with a real chip's own (see that constant's own doc). `state.
-  // droplets`' order among checkpoint droplets IS rank order (the same array `dropletPoint`'s
-  // own rank derivation filters), so slicing here stays consistent with what gets drawn.
-  const checkpointDroplets = state.droplets.filter((d) => d.at === "checkpoint");
+  // Cap the checkpoint zone's DRAWN chips — never let a rank grow the grid above the viewBox.
+  // At or under `CHECKPOINT_DRAW_CAP`, every droplet draws normally (unchanged). Past it, only
+  // `CHECKPOINT_OVERFLOW_REAL_CAP` real chips draw — one row short of the grid's capacity — so
+  // the badge can take the whole last row for itself, never colliding by label width with a real
+  // chip's own (see that constant's own doc). `geometryState.droplets`, NOT raw `state.droplets`
+  // — this zone's own "+N more" badge must count only droplets that could actually still be
+  // DRAWN here (the same historical-round exclusion `geometryState` already applies for every
+  // other zone's position math): a historical checkpoint droplet already folded into
+  // `boundAttentionDroplets`'s single collapsed chip via `hiddenIssues` above, so counting it
+  // AGAIN in this zone's own overflow badge double-accounts the same droplet in two numbers on
+  // the same stage — the badge would report drawable current-round overflow that isn't real
+  // while the collapsed chip already claimed those very droplets as historical.
+  const checkpointDroplets = geometryState.droplets.filter((d) => d.at === "checkpoint");
   const checkpointOverflowCount = Math.max(0, checkpointDroplets.length - CHECKPOINT_DRAW_CAP);
   const hiddenCheckpointIssues = new Set(
     checkpointOverflowCount > 0 ? checkpointDroplets.slice(CHECKPOINT_OVERFLOW_REAL_CAP).map((d) => d.issue) : [],

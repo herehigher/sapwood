@@ -2384,3 +2384,90 @@ test("#891 PO adjudication: historical classification is ONE round-identity pred
   assert.match(html, /\+5 earlier — see strip/);
   assert.match(html, /data-node="needs-human" data-count="1"/, "only the one CURRENT-round escalation draws in the needs-human cluster");
 });
+
+test("#891: purely historical checkpoint droplets past the checkpoint zone's own draw cap trigger NO zone overflow badge — the single collapsed chip is the only place they're counted", () => {
+  const events: DomainEvent[] = [];
+  events.push(ev("pool-selected", { round_id: 1 }));
+  // 50 historical (round 1) checkpoint droplets — well past CHECKPOINT_DRAW_CAP on their own —
+  // never touched again after this round closes.
+  for (let i = 1; i <= 50; i++) {
+    events.push(ev("dispatched", { worker: `h${i}`, issue: i }));
+    events.push(ev("reclaim-done", { worker: `h${i}`, issue: i, next: "DRIVING", pr: i }));
+  }
+  // The round boundary that leaves all 50 behind — nothing else happens in round 2.
+  events.push(ev("pool-selected", { round_id: 2 }));
+
+  const { state } = run(events, 60);
+  const checkpointed = state.droplets.filter((d) => d.at === "checkpoint");
+  assert.equal(checkpointed.length, 50, "sanity check on the fixture: 50 historical checkpoint droplets, none touched since");
+  assert.ok(
+    checkpointed.every((d) => d.roundId === 1),
+    "sanity check: every one of them is stamped to the closed round",
+  );
+
+  const html = markup(state, { lanesMax: 60 });
+
+  // The zone's own overflow badge must not render at all — these 50 droplets are entirely
+  // historical, so there is no CURRENT-round overflow for it to report.
+  assert.doesNotMatch(
+    html,
+    /class="hero-checkpoint-overflow"/,
+    "50 historical checkpoint droplets must never trigger the zone's OWN overflow badge — they belong to the single collapsed chip, not a second, contradictory count",
+  );
+  // None of the 50 draw individually either.
+  const drawnChips = [...html.matchAll(/class="hero-droplet" data-issue="(\d+)" data-at="checkpoint"/g)];
+  assert.equal(drawnChips.length, 0, "no historical checkpoint droplet may draw individually");
+
+  // The single collapsed chip is the ONLY place all 50 are counted.
+  assert.match(html, /class="hero-num hero-small hero-badge hero-attention-collapsed" data-count="50"/);
+  assert.match(html, /\+50 earlier — see strip/);
+});
+
+test("#891: a genuine CURRENT-round checkpoint overflow still renders its own zone badge, with a count unaffected by unrelated historical droplets sitting in the same zone", () => {
+  const events: DomainEvent[] = [];
+  events.push(ev("pool-selected", { round_id: 1 }));
+  // 50 historical (round 1) checkpoint droplets, same shape as the no-badge case above — present
+  // in the SAME zone, to prove they don't leak into the count below.
+  for (let i = 1; i <= 50; i++) {
+    events.push(ev("dispatched", { worker: `h${i}`, issue: i }));
+    events.push(ev("reclaim-done", { worker: `h${i}`, issue: i, next: "DRIVING", pr: i }));
+  }
+  events.push(ev("pool-selected", { round_id: 2 }));
+  // 8 CURRENT-round (round 2) checkpoint droplets — a genuine overflow on their own (past the
+  // CHECKPOINT_DRAW_CAP of 6), independent of the 50 historical ones above.
+  for (let i = 101; i <= 108; i++) {
+    events.push(ev("dispatched", { worker: `c${i}`, issue: i }));
+    events.push(ev("reclaim-done", { worker: `c${i}`, issue: i, next: "DRIVING", pr: i }));
+  }
+
+  const { state } = run(events, 60);
+  const checkpointed = state.droplets.filter((d) => d.at === "checkpoint");
+  assert.equal(checkpointed.length, 58, "sanity check on the fixture: 50 historical + 8 current-round checkpoint droplets");
+  assert.equal(checkpointed.filter((d) => d.roundId === 1).length, 50, "sanity check: 50 stamped to the closed round");
+  assert.equal(checkpointed.filter((d) => d.roundId === 2).length, 8, "sanity check: 8 stamped to the open round");
+
+  const html = markup(state, { lanesMax: 60 });
+
+  // None of the 50 historical droplets draw individually.
+  const drawnChips = [...html.matchAll(/class="hero-droplet" data-issue="(\d+)" data-at="checkpoint"/g)].map((m) => Number(m[1]));
+  assert.ok(
+    drawnChips.every((issue) => issue >= 101),
+    `no historical (issue <= 50) checkpoint droplet may draw individually, got ${JSON.stringify(drawnChips)}`,
+  );
+
+  // The zone's own badge reports ONLY the 8 current-round droplets' own remainder (8 total - 4
+  // drawn = 4) — never inflated by the 50 historical droplets the collapsed chip already
+  // accounts for.
+  const badgeMatch = html.match(/class="hero-checkpoint-overflow" data-count="(\d+)"/);
+  assert.ok(badgeMatch, "a genuine CURRENT-round overflow must still render its own badge");
+  assert.equal(
+    Number(badgeMatch?.[1]),
+    4,
+    "the badge must count only the 8 current-round droplets' own remainder, never the 50 historical ones too",
+  );
+  assert.match(html, /\+4 more/);
+
+  // The single collapsed chip is the ONLY place the 50 historical droplets are counted.
+  assert.match(html, /class="hero-num hero-small hero-badge hero-attention-collapsed" data-count="50"/);
+  assert.match(html, /\+50 earlier — see strip/);
+});
