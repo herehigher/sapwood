@@ -40,7 +40,7 @@
   /* ---- Type -------------------------------------------------------------- */
   --font-display: "Fraunces", Georgia, "Times New Roman", serif;
   --font-body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  /* §5 amendment 2026-08-14: self-hosted "JetBrains Mono Variable" (fonts/jetbrains-mono-variable.css,
+  /* §5 amendment 2026-08-14: self-hosted "JetBrains Mono Variable" (@fontsource-variable/jetbrains-mono,
      imported by main.tsx) leads the stack; the system stack stays as fallback for the font-load window
      and any environment the woff2 fails to reach. */
   --font-data: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -66,22 +66,22 @@
   /* ---- Motion ------------------------------------------------------------ */
   --beat: 240ms; /* state flips */
   --travel: 900ms; /* token movement in the hero */
-  --tap: 120ms; /* press/release feedback (§2 C1) — shorter than --beat: felt, not narrated */
+  --tap: 120ms; /* press/release feedback (§2 adjudication log, 2026-08-14) — shorter than --beat: felt, not narrated */
   --ease: cubic-bezier(0.3, 0.7, 0.3, 1);
   --ambient: 3s; /* ambient pulses are never faster than this */
 
-  /* ---- Focus (§2 C2) ------------------------------------------------------ */
+  /* ---- Focus (§2 adjudication log, 2026-08-14) ----------------------------- */
   --focus-ring: 2px solid var(--sap);
   --focus-ring-offset: 2px;
 
-  /* ---- Z-layers (§2 C2) ---------------------------------------------------
+  /* ---- Z-layers (§2 adjudication log, 2026-08-14) --------------------------
      Named by ROLE, like the colour tokens above: a component asks for "drawer" or
      "dialog", never a bare number, so two floating layers can never collide by
      someone picking arbitrary z-indices in different files. */
   --z-drawer: 20;
   --z-dialog: 30;
 
-  /* ---- Hatch pattern (§2 C3, est/settled cost-bar encoding) ---------------
+  /* ---- Hatch pattern (§2 adjudication log, 2026-08-14; est/settled cost-bar encoding) ----
      One shared SVG <pattern> def draws the "estimated, not yet settled" texture from
      these — never a second hand-rolled hatch definition per bar. */
   --hatch-stroke: var(--bark);

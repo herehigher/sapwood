@@ -215,15 +215,17 @@
 }
 
 /*
- * Motion recipes (frontend-design.md §2 C1, owner adjudication 2026-08-14) — CSS-native
- * micro-interactions, tokens only, never a bare millisecond in a component. Unapplied here
- * on purpose: this issue lands the toolkit, #729 attaches these classes to the migrated
- * `<dialog>`/list/press markup.
+ * Motion recipes (frontend-design.md §2 adjudication log, owner adjudication 2026-08-14) —
+ * CSS-native micro-interactions, tokens only, never a bare millisecond in a component.
+ * Unapplied here on purpose: this issue lands the toolkit, #729 attaches these classes to
+ * the migrated `<dialog>`/list/press markup.
  */
 
-/* Drawer slide-in: pairs with `<dialog>.showModal()` (§2 C2) — `@starting-style` supplies the
-   pre-open frame so the `[open]` attribute's `display: none → block` flip still transitions
-   instead of cutting; `allow-discrete` is what lets `display`/`overlay` participate at all. */
+/* Drawer slide-in: pairs with `<dialog>.showModal()` (§2 adjudication log) — `--beat`, the
+   state-flip token, not `--travel` (that one is reserved for token movement in the hero).
+   `@starting-style` supplies the pre-open frame so the `[open]` attribute's
+   `display: none → block` flip still transitions instead of cutting; `allow-discrete` is
+   what lets `display`/`overlay` participate at all. */
 .recipe-drawer {
   transform: translateX(24px);
   opacity: 0;
@@ -233,10 +235,10 @@
   transform: translateX(0);
   opacity: 1;
   transition:
-    transform var(--travel) var(--ease),
-    opacity var(--travel) var(--ease),
-    display var(--travel) allow-discrete,
-    overlay var(--travel) allow-discrete;
+    transform var(--beat) var(--ease),
+    opacity var(--beat) var(--ease),
+    display var(--beat) allow-discrete,
+    overlay var(--beat) allow-discrete;
 }
 
 @starting-style {
@@ -262,12 +264,16 @@
   }
 }
 
-/* Press feedback: a control's own down/up state. Scoped to `--tap`, deliberately shorter
-   than `--beat` — a press is felt, not narrated. */
+/* Press feedback: a control's own down/up state, scoped to `--tap` — deliberately shorter
+   than `--beat`, a press is felt, not narrated. Border/background only, per the owner's
+   press-feedback ruling: no scale, no translation — print doesn't bounce. */
 .recipe-press {
-  transition: transform var(--tap) var(--ease);
+  transition:
+    border-color var(--tap) var(--ease),
+    background-color var(--tap) var(--ease);
 }
 
 .recipe-press:active {
-  transform: scale(0.97);
+  border-color: var(--bark);
+  background-color: color-mix(in srgb, var(--bark) 12%, transparent);
 }

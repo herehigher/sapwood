@@ -156,7 +156,7 @@ bar instead of re-litigating the rationale from zero):
 | CSS framework / CSS-in-JS | none — `tokens.css` + `app.css`/`panels.css`/`hero.css`, plain CSS only |
 | Server | `node:http` + `node:sqlite` (read-only), 127.0.0.1-bound; no Express. One guarded `POST /api/control` route (§3 Operations) — sentinel writes only |
 | Transport | HTTP polling (3 s via TanStack Query); no WebSocket |
-| Fonts | two self-hosted faces, each latin subset / woff2 bundled / CDN forbidden (display: Fraunces, data: JetBrains Mono Variable, §5); system stack for body |
+| Fonts | two self-hosted faces, woff2, CDN forbidden (display: Fraunces, hand-subset latin woff2; data: JetBrains Mono Variable, the `@fontsource-variable/jetbrains-mono` package's own CSS, §5); system stack for body |
 
 **Adjudication log** (owner adjudication 2026-08-14 unless noted — every runtime addition
 *and* every no-new-dependency ruling gets one row; this is the durable record the process
@@ -167,7 +167,7 @@ above points at):
 | 2026-08-14 | `clsx` (runtime) | State-variant class composition; 0 transitive deps, ~0.35 kB. |
 | 2026-08-14 | `lucide-react` (runtime, pinned exact) | Utility icons only — identity glyphs (sap droplet, rings, issue ⊙, PR merge-arrow) stay hand-drawn permanently (§3 C, `icons.tsx`); the unified icon spec lives in `icons.tsx`'s header. A new icon import gets its own table mention at adoption. |
 | 2026-08-14 | `@radix-ui/react-tooltip` + `@radix-ui/react-popover` (runtime, single packages — not the umbrella) | Keyboard-accessible, stylable tooltips are a §5 quality-floor requirement the current `title=` approach violates; flip/collision positioning is genuinely hard to hand-roll and CSS anchor positioning isn't cross-browser green yet. Usage scoped per the clause above. |
-| 2026-08-14 | `@fontsource-variable/jetbrains-mono` (runtime) | Self-hosted mono face — re-adjudicates §5's system-stack ruling (its zero-dependency premise is overturned this round); Fraunces self-hosting is the existing precedent this follows. |
+| 2026-08-14 | `@fontsource-variable/jetbrains-mono` (runtime) | Self-hosted mono face, imported whole via the package's own `index.css` (`main.tsx`) — re-adjudicates §5's system-stack ruling (its zero-dependency premise is overturned this round); Fraunces's self-hosted/CDN-forbidden posture is the precedent this follows, not Fraunces's own hand-subsetting mechanism (§5 amendment explains why). |
 | 2026-08-14 | anime.js stays the single animation engine, scoped to the hero — **no new dependency** | Micro-interactions move to CSS-native recipes instead: a `--tap` motion token plus `@starting-style` + `transition-behavior: allow-discrete` recipes for drawer slide-in / list-entry appearance / press feedback (`panels.css`) — no bare millisecond value in a component. |
 | 2026-08-14 | Drawers/confirm dialogs → native `<dialog>.showModal()` — **no new dependency** | Focus trap, Esc, backdrop, and `inert` come free from the platform; the current hand-rolled drawers lack a focus trap. The hold-to-arm reducer and its semantics are untouched by this ruling. |
 | 2026-08-14 | No chart library — **re-affirmed on merits** | The hatch-fill est/settled encoding is a frozen-mockup identity element any chart library fights. Cost bars converge on one shared `<CostBar>` component + one SVG `<pattern>` hatch def (`--hatch-*` tokens); a `.num` utility class (`font-variant-numeric: tabular-nums`) covers all monetary/count text. |
@@ -516,19 +516,25 @@ stroked in `--bark` at 40% alpha; the growing (current) ring in `--sap`.
 |---|---|---|
 | Display | **Fraunces** (subset woff2, bundled — offline-safe) | Wordmark, section labels, the big ring count. Used sparingly; its warmth carries the organic identity. |
 | Body | `system-ui` stack | All UI prose. Native feel, zero bytes — the honest choice for a local tool. |
-| Data | **JetBrains Mono Variable** (subset woff2, self-hosted — see the 2026-08-14 amendment below), `ui-monospace` stack as fallback | Issue/PR numbers, costs, timestamps, config keys. A tool dashboard is mostly data; the mono face does the daily work. |
+| Data | **JetBrains Mono Variable** (self-hosted npm dependency — see the 2026-08-14 amendment below), `ui-monospace` stack as fallback | Issue/PR numbers, costs, timestamps, config keys. A tool dashboard is mostly data; the mono face does the daily work. |
 
 Amended 2026-08-14 (§2 dependency-budget review, owner adjudication, #876): the Data
 role's face changes from the bare `ui-monospace` system stack to **self-hosted JetBrains
-Mono** via `@fontsource-variable/jetbrains-mono` — latin subset only, woff2 bundled
-(`dashboard/src/fonts/jetbrains-mono-variable.css`, imported by `main.tsx`), CDN imports
-forbidden (same rule bundled fonts already follow). This supersedes this section's prior
-system-stack-only ruling: that ruling's zero-dependency premise is what §2's round overturns
-— a mono face is now inside the adjudicated toolkit, the same way Fraunces already is.
-Fraunces's own self-hosting (subset woff2, bundled) is the precedent this follows, not a
-new pattern. The system `ui-monospace` stack stays as the fallback for the font-load window
-and any environment the woff2 fails to reach — `--font-data` (`tokens.css`) leads with
-`"JetBrains Mono Variable"` and keeps the full prior stack behind it.
+Mono** via the `@fontsource-variable/jetbrains-mono` runtime dependency — `main.tsx` imports
+the package's own `index.css` unmodified (its every subset/weight for the `wght` axis, woff2,
+CDN imports forbidden — same rule bundled fonts already follow). §2's own priority order
+governs the choice not to hand-subset this asset the way Fraunces's own woff2 is: the owner
+adjudicated the *package*, and re-deriving a latin-only cut from it would trade a real
+dependency relationship (the lockfile pins what ships) for a vendored copy wearing the
+allowlist's slot — exactly the copy-in-channel confusion §2's own copy-in rule warns against,
+and in service of bundle size, the criterion §2 ranks lowest. This supersedes this section's
+prior system-stack-only ruling: that ruling's zero-dependency premise is what §2's round
+overturns — a mono face is now inside the adjudicated toolkit, the same way Fraunces already
+is self-hosted (subset woff2, bundled, CDN forbidden) — the self-hosted/CDN-forbidden posture
+is the precedent this follows, not the specific hand-subsetting mechanism. The system
+`ui-monospace` stack stays as the fallback for the font-load window and any environment the
+woff2 fails to reach — `--font-data` (`tokens.css`) leads with `"JetBrains Mono Variable"` and
+keeps the full prior stack behind it.
 
 Adjudicated 2026-08-10 (#728, token adjudication): the h1/h2/h3 module headers (`app.css`)
 and the hero's PLAN/IMPLEMENT/OUTCOME captions and ring count (`hero.css`) render in
