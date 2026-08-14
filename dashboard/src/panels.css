@@ -209,6 +209,172 @@
   color: var(--rust);
 }
 
+/* ---- round navigator (§3 A, #889) ----------------------------------------- */
+
+.round-nav {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.round-nav-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  background: var(--panel);
+  border: var(--hairline);
+  border-radius: var(--radius-card);
+  color: inherit;
+  cursor: pointer;
+}
+
+.round-nav-arrow:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.round-nav-pill {
+  background: var(--panel);
+  border: var(--hairline);
+  border-radius: var(--radius-card);
+  padding: 2px var(--space-2);
+  font-family: var(--font-data);
+  font-size: var(--text-0);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: inherit;
+  cursor: pointer;
+}
+
+/* §3 A: "a persistent tinted 'ROUND N · CLOSED' badge" — the pill itself carries the badge
+ * (`header-dark.png`'s band 2 pill), rather than a second element duplicating the same fact. */
+.round-nav-pill-closed {
+  border-color: var(--sap);
+  color: var(--sap);
+}
+
+.round-nav-list-wrap {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: 0;
+  z-index: var(--z-drawer);
+  min-width: 320px;
+  max-width: 90vw;
+  max-height: 360px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: var(--hairline);
+  border-radius: var(--radius-card);
+  padding: var(--space-2);
+  box-shadow: 0 4px 16px color-mix(in srgb, black 30%, transparent);
+}
+
+.round-list,
+.round-list-nested {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.round-list-nested {
+  padding-top: var(--space-1);
+  padding-left: var(--space-3);
+}
+
+.round-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+}
+
+.round-row button {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+}
+
+.round-row button:disabled {
+  color: var(--bark-text);
+  cursor: default;
+}
+
+.round-row-selected {
+  font-weight: 600;
+}
+
+.round-row-when {
+  margin-left: auto;
+}
+
+.round-row-collapsed summary {
+  cursor: pointer;
+  color: var(--bark-text);
+  list-style: none;
+}
+
+.round-row-collapsed summary::-webkit-details-marker {
+  display: none;
+}
+
+.round-list-cap-note {
+  margin: 0 0 var(--space-1);
+}
+
+/* ---- replay transport (§3 A band 2, #889) ---------------------------------- */
+
+.transport-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border: none;
+  padding: 0;
+  flex-wrap: wrap;
+}
+
+.transport-controls button {
+  background: var(--panel);
+  border: var(--hairline);
+  border-radius: var(--radius-card);
+  padding: 2px var(--space-2);
+  color: inherit;
+  cursor: pointer;
+}
+
+.transport-controls button[aria-pressed="true"] {
+  border-color: var(--sap);
+  color: var(--sap);
+}
+
+.transport-speeds {
+  display: flex;
+  gap: var(--space-1);
+  border: none;
+  padding: 0;
+}
+
+/* No native blue chrome (#889's own why) — `accent-color` retints the thumb/track through the
+ * same amber "in motion" token every other live-state indicator already uses, no custom slider
+ * markup needed. */
+.transport-scrub {
+  flex: 1;
+  min-width: 120px;
+  accent-color: var(--sap);
+}
+
+.transport-position {
+  white-space: nowrap;
+}
+
 /* ---- needs-attention strip (§3, #361) ------------------------------------- */
 
 .attention-list {

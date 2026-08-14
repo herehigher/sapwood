@@ -249,6 +249,40 @@ test("#879 gate② run 2e566ac9 finding [3]: the spend meter value renders bold 
   assert.match(body, /letter-spacing:\s*0\.02em\b/, "pin the exact shipped value — not a wildcard letter-spacing check");
 });
 
+// ── #889: Header wires the round navigator's own props straight through, unedited ─────────────
+
+test("Header wires selectedRoundId/liveRoundId through to the round navigator pill", () => {
+  const live = renderToStaticMarkup(
+    <Header
+      disconnected={false}
+      isPending={false}
+      engine={engine("running")}
+      spend={SPEND_OK}
+      parked={false}
+      rounds={[]}
+      selectedRoundId={null}
+      liveRoundId={12}
+    />,
+  );
+  assert.match(live, /round-nav-pill/);
+  assert.match(live, />round 12 · live</);
+
+  const closed = renderToStaticMarkup(
+    <Header
+      disconnected={false}
+      isPending={false}
+      engine={engine("running")}
+      spend={SPEND_OK}
+      parked={false}
+      rounds={[]}
+      selectedRoundId={9}
+      liveRoundId={null}
+    />,
+  );
+  assert.match(closed, /round-nav-pill-closed/);
+  assert.match(closed, />round 9 · closed</);
+});
+
 test("does not render, import, or re-implement the legend", () => {
   const html = renderToStaticMarkup(
     <Header disconnected={false} isPending={false} engine={engine("running")} spend={SPEND_OK} parked={false} />,

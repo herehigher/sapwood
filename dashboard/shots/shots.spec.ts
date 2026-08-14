@@ -101,6 +101,45 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
   expect(existsSync(`${OUTPUT_DIR}/contact-sheet.html`)).toBe(true);
 });
 
+/**
+ * #889 (§3 A implementation) Tier A, decomposed out of the live-route walk into a fixture-scale
+ * structural fact per the issue's own verification plan: "an assertion that `.round-list` renders
+ * only once the navigator is opened (never inline in the default render) and that at a 1440px
+ * viewport hero/lanes/feed/cost sit within a single scroll (no round-history content pushes them
+ * below the fold)". Reuses this same `?demo` fixture + 1440px viewport this file's capture loop
+ * already exercises — no separate fixture or harness stood up for it.
+ */
+test("§889 AC1: the round list never renders inline by default, and hero/lanes/feed/cost sit within a bounded scroll at 1440px", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  // The structural fix itself: the round list used to be `Transport.tsx`'s always-rendered
+  // `<ul className="round-list">` — the ~9,000px/387-row live-route bulge the issue names. It now
+  // lives entirely behind the header navigator's click-to-open state (`RoundNavigator.tsx`), so it
+  // must be entirely absent from the DOM until that click happens — never present-but-hidden.
+  expect(await page.locator(".round-list").count()).toBe(0);
+
+  for (const locator of [
+    page.locator("svg.hero"),
+    (await firstMatch(page, MODULE_SELECTORS.lanes)) ?? page.locator("nonexistent-lanes-anchor"),
+    page.locator('section[aria-label="activity"]'),
+    page.locator("#cost"),
+  ]) {
+    await expect(locator).toBeVisible();
+  }
+
+  // Before #889, the live route's round history (nothing this small demo fixture reproduces at
+  // scale) pushed the whole page to ~9,000px. The `.round-list` absence assertion above is what
+  // actually prevents that regression at any backlog size; this is a sanity ceiling confirming a
+  // normal single-page layout, not a tight pixel budget against this small fixture.
+  const scrollHeight = await page.evaluate(() => document.documentElement.scrollHeight);
+  expect(scrollHeight).toBeLessThan(4000);
+});
+
 async function firstMatch(page: Page, selectors: string[]): Promise<Locator | null> {
   for (const selector of selectors) {
     const locator = page.locator(selector).first();

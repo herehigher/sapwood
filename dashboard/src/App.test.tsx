@@ -927,14 +927,17 @@ test("#727 gate②: every rail hash anchor resolves to exactly one matching targ
 });
 
 // #766 gate② finding [0] (rounds-api-ui-unexercised): the endpoint (server.test.ts) and the
-// navigator's rendering (Transport.test.tsx, hand-fed a Round[]) were only ever tested as
+// navigator's rendering (RoundNavigator.test.tsx, hand-fed a Round[]) were only ever tested as
 // disconnected halves — nothing proved `fetchRounds`/`roundsQuery`'s response actually reaches
-// App's real `<Transport>`. This drives the REAL `App` component through the REAL query layer
-// (`renderSettledApp`'s `client.prefetchQuery(roundsQuery())`), stubbing `/api/rounds` with
-// distinguishable multi-round data — including an artifact-less row — and asserts the rendered
-// page shows both, tally and tally-less alike.
-test("#766 gate② finding [0]: /api/rounds data flows through fetchRounds/roundsQuery into App's real <Transport>, including an artifact-less row rendering tally-less", async () => {
-  const html = await renderSettledApp({
+// App's real `<Header>`/`<RoundNavigator>`. This drives the REAL `App` component through the REAL
+// query layer, stubbing `/api/rounds` with distinguishable multi-round data — including an
+// artifact-less row — and asserts the rendered list shows both, tally and tally-less alike.
+//
+// #889: the round list now renders only once the navigator pill is clicked open (never inline by
+// default), so this needs a real DOM click (`mountSettledApp`, same posture as the phase-inspector
+// click tests below) rather than a bare `renderToStaticMarkup` string match.
+test("#766 gate② finding [0]: /api/rounds data flows through fetchRounds/roundsQuery into App's real round navigator, including an artifact-less row rendering tally-less", async () => {
+  const { container, unmount } = await mountSettledApp({
     "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
     "/api/events": { status: 200, body: { events: [], lastId: 0 } },
     "/api/rounds": {
@@ -969,10 +972,23 @@ test("#766 gate② finding [0]: /api/rounds data flows through fetchRounds/round
       },
     },
   });
-  assert.match(html, /round 5/, "round 5's navigator row must render from the real /api/rounds response");
-  assert.match(html, /round 6/, "round 6's navigator row must render too");
-  assert.match(html, /3 merged/, "round 5's real artifact tally must render");
-  assert.match(html, /no summary yet/, "round 6's artifact-less row must render tally-less, not skipped or fabricated");
+  try {
+    assert.equal(container.querySelector(".round-list"), null, "the round list must not render inline by default");
+    const pill = container.querySelector(".round-nav-pill");
+    assert.ok(pill, "the header's round navigator pill must render");
+    await act(async () => {
+      pill.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const list = container.querySelector(".round-list");
+    assert.ok(list, "clicking the navigator pill must open the round list");
+    const html = list.innerHTML;
+    assert.match(html, /round 5/, "round 5's navigator row must render from the real /api/rounds response");
+    assert.match(html, /round 6/, "round 6's navigator row must render too");
+    assert.match(html, /3 merged/, "round 5's real artifact tally must render");
+    assert.match(html, /no summary yet/, "round 6's artifact-less row must render tally-less, not skipped or fabricated");
+  } finally {
+    await unmount();
+  }
 });
 
 // ── #766 gate② finding [1] (header-replay-total-is-round-scoped): resolveRoundSpend ────────────
