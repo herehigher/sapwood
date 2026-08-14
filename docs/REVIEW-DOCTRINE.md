@@ -91,7 +91,8 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     test stays green. Rule: read the value from its source, or pin the two together with an
     assertion that fails the moment they disagree. This does NOT require asserting against real
     rendered DOM in general — the default dashboard harness is DOM-free
-    (docs/dev-guide/07-dashboard.md). Worked example: `textBox()`/`CHAR_ADVANCE` in
+    (docs/dev-guide/07-dashboard.md) — EXCEPT a computed-style claim itself; see STYLE below.
+    Worked example: `textBox()`/`CHAR_ADVANCE` in
     `dashboard/src/hero/hero.test.ts` turns font-size and character count into a rendered extent
     without a browser, tied to the same inputs the real draw path uses, plus a cascade/source-order
     assertion pinning declaration order instead of hand-copying which rule wins. Two shapes seen
@@ -128,6 +129,14 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     named boundary/adversarial case, not just the nominal one. `docs/dev-guide/07-dashboard.md`'s
     `registerRealDom()` solved this for CLICK wiring (retro #355); QUERY/data-flow wiring has no
     equivalent shared helper yet — cite one here once a PR extracts it.
+  - **STYLE (computed-style ACs are VALUE's real-DOM exception).** "Authored" isn't "rendered" —
+    a CSS/typography AC needs `registerRealDom()` plus a real `getComputedStyle` read, never a
+    stand-in. Same PR, one round apart (#879, PR #886 gate② rounds 1, 3): a regex match on
+    declaration TEXT proves a rule exists, never that it cascades onto the element or wins over a
+    later rule; and mounting only the ONE stylesheet under test still gets an `em` value wrong,
+    since it resolves off the *inherited* font-size a partial cascade misses. Mount every
+    stylesheet the element inherits, in production order, and assert the exact value — never
+    `notEqual`/existence, which any non-default value satisfies.
 
 ### Documentation claims
 
@@ -171,21 +180,17 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   criterion's only remaining gap is a missing tier-C RECORD — every other clause and sub-fact
   already confirmed — no fix round can close it; only the operator posting the record can. It is
   correct for that criterion to stay `cannot-confirm` and the PR to stay unmerged — do not weaken
-  the gate. But say so explicitly in the finding's body (name the AC, name the gap as
-  operator-owned, not producer-owned) rather than writing it identically to a producer-fixable
-  gap: an unlabeled operator-owned gap reads exactly like a producer failure to the convergence
-  classifier (`review/convergence.ts`) and to any human reading the thread.
+  the gate. But name the gap as operator-owned in the finding's body, not producer-owned —
+  unlabeled, it reads exactly like a producer failure to the convergence classifier
+  (`review/convergence.ts`) and to any human reading the thread.
 - **A fully operator-owned rejection still pays for a fix leg it cannot use** — residual gap in
   the rule above. Labeling a tier-C gap `operator-owned` changes what the finding SAYS, not what
-  `driveDecision` (`conductor.ts`) DOES: the gate stays `FIXABLE`, so — where ordinary
-  scheduling/admission conditions permit a leg at all — a paid one still dispatches with nothing
-  producer-actionable to fix, disputes, and escalates `needs-human` — spend that buys
-  no information either way the operator later rules. Today's only lever is that labeling itself,
-  in the finding's BODY prose; a STRUCTURED per-finding owner tag letting `driveDecision` route an
-  all-operator-owned verdict straight to `ESCALATE` (mixed verdicts still get `FIXUP` for their
-  producer-fixable share) is #865's code fix, not something the current finding schema
-  (id/body/severity/kind/path) can carry. Grounding: `docs/security.md`'s AC-evidence-tier
-  doctrine (Decision #8, `docs/PLAN.md`) and its Cost ceiling constraint. (#857, #862, #863)
+  `driveDecision` (`conductor.ts`) DOES: the gate stays `FIXABLE`, so a paid leg can still
+  dispatch with nothing producer-actionable, dispute, and escalate — spend that buys no
+  information either way the operator later rules. The only lever today is that BODY-prose label;
+  a structured per-finding owner tag routing an all-operator-owned verdict straight to `ESCALATE`
+  (mixed verdicts keep `FIXUP`) is #865's code fix, not something the current finding schema can
+  carry. Grounding: `docs/security.md`'s AC-evidence-tier doctrine, Decision #8. (#857, #862, #863)
 
 How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbatim principles):
 
