@@ -324,6 +324,15 @@ export function dropletPoint(state: HeroState, d: Droplet, at: DropletAt = d.at)
  * — re-stamped to the current round on every move) is historical regardless of whether its
  * attention is still technically open — an issue escalated three weeks ago and still unresolved
  * is exactly the strip's job to keep surfacing, not the stage's.
+ *
+ * #891: historical classification is ONE predicate on round identity — `isHistorical` below —
+ * applied to every droplet the SAME way regardless of which zone it currently sits in. An
+ * earlier version special-cased needs-human and backlog only, which left a droplet stranded in
+ * any OTHER zone (lane, checkpoint, trunk) rendering forever once its round closed — e.g. a
+ * `dispatched → reclaim-done → rollback-escalated` droplet parks at `checkpoint` failed, and with
+ * no zone-specific carve-out for checkpoint at all, nothing ever folded it into the collapsed
+ * accounting. No zone gets its own carve-out anymore, so no zone can be individually forgotten
+ * again.
  */
 function boundAttentionDroplets(
   state: HeroState,
@@ -343,28 +352,29 @@ function boundAttentionDroplets(
   // is `null` ONLY while the fold has never yet seen a round boundary (`Droplet.roundId`'s own
   // doc) — once `state.roundId` becomes a real number, a still-`null`-stamped droplet PREDATES
   // that first boundary and is exactly as historical as one stamped to an explicit older round.
-  // A prior version of this check treated `null` as unconditionally current, which meant a
-  // droplet folded before the fold's first round boundary never collapsed, no matter how many
-  // real rounds passed after it — the exact unbounded-accumulation failure AC1 exists to kill.
-  // Plain `===` already covers the genuinely-current case too: while `state.roundId` is ALSO
-  // still `null` (no boundary seen at all yet), `null === null` is `true`.
-  const isCurrentRound = (d: Droplet) => d.roundId === state.roundId;
+  // Plain `!==` already covers the genuinely-current case too: while `state.roundId` is ALSO
+  // still `null` (no boundary seen at all yet), `null !== null` is `false`.
+  const isHistorical = (d: Droplet) => d.roundId !== state.roundId;
 
   const needsHuman = state.droplets.filter((d) => d.at === "needs-human");
   const resolved = needsHuman.filter((d) => !isConfirmedOpen(d));
   const confirmedOpen = needsHuman.filter(isConfirmedOpen);
-  const currentRoundOpen = confirmedOpen.filter(isCurrentRound);
-  const historicalOpen = confirmedOpen.filter((d) => !isCurrentRound(d));
+  const currentRoundOpen = confirmedOpen.filter((d) => !isHistorical(d));
+  const historicalOpen = confirmedOpen.filter(isHistorical);
   const overflow = currentRoundOpen.slice(NEEDS_HUMAN_DRAW_CAP);
 
-  const historicalBacklog = state.droplets.filter((d) => d.at === "backlog" && !isCurrentRound(d));
+  // Every OTHER zone (backlog, lane, checkpoint, trunk) has nothing but this same predicate
+  // governing it — no per-zone list to grow or forget. needs-human is excluded here because its
+  // own resolved/overflow accounting above already covers it, on a fact (the shared attention
+  // fold) this predicate alone can't see.
+  const historicalElsewhere = state.droplets.filter((d) => d.at !== "needs-human" && isHistorical(d));
 
-  const hiddenIssues = new Set([...resolved, ...historicalOpen, ...overflow, ...historicalBacklog].map((d) => d.issue));
+  const hiddenIssues = new Set([...resolved, ...historicalOpen, ...overflow, ...historicalElsewhere].map((d) => d.issue));
 
   return {
     hiddenIssues,
     drawnNeedsHumanCount: currentRoundOpen.length - overflow.length,
-    collapsedCount: historicalOpen.length + overflow.length + historicalBacklog.length,
+    collapsedCount: historicalOpen.length + overflow.length + historicalElsewhere.length,
   };
 }
 

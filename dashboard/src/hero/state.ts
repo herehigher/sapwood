@@ -55,10 +55,11 @@ export type Droplet = {
   /**
    * The `roundId` this droplet was last touched under (whatever `draft.roundId` held at its
    * most recent `moveDroplet`) — `null` until the fold has ever seen a round boundary. #891
-   * AC1: the stage's own bounding (`stage.tsx`'s `boundNeedsHuman`/`boundBacklog`) reads this
-   * to tell "still part of the OPEN round's story" apart from "left over from an earlier
-   * round" — a droplet touched again (re-dispatched, escalated afresh, …) always re-stamps to
-   * the CURRENT round, so only genuinely untouched-since-an-older-round droplets collapse.
+   * AC1: the stage's own bounding (`stage.tsx`'s `boundAttentionDroplets`) reads this, for a
+   * droplet in ANY zone, to tell "still part of the OPEN round's story" apart from "left over
+   * from an earlier round" — a droplet touched again (re-dispatched, escalated afresh, …)
+   * always re-stamps to the CURRENT round, so only genuinely untouched-since-an-older-round
+   * droplets collapse.
    */
   roundId: number | null;
 };

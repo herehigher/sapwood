@@ -2218,8 +2218,14 @@ test("#891 gate① engine-agent finding [0] (ac1-collapsed-chip-overlap): the co
   ];
   const drawn = state.droplets.filter((d) => d.at === "needs-human" && d.issue >= 101);
   assert.equal(drawn.length, 6, "all 6 current-round escalations must be within the draw cap");
+  // #891: `dropletPoint(state, d)` against the raw, UNCOMPACTED `state` (42 historical droplets
+  // still ahead of these 6 in array order) computes ranks 42–47, nowhere near where production
+  // actually draws — a collision oracle built on that position could never catch a real overlap.
+  // `dropletTransform`, reading the `transform="translate(…)"` straight off the RENDERED markup,
+  // is what `dropletPoint`'s own compacted-rank tests above already use for exactly this reason:
+  // assert against what production drew, not a recomputation that can silently diverge from it.
   for (const d of drawn) {
-    const { x, y } = dropletPoint(state, d);
+    const { x, y } = dropletTransform(html, d.issue);
     const label = d.pr === null ? `⊙ ${d.issue}` : `⤳ ${d.pr}`;
     boxes.push({ label: `needs-human #${d.issue} circle`, box: circleBox(x, y, 9) });
     boxes.push({ label: `needs-human #${d.issue} label`, box: textBox(label, x, y - 14, 10) });
@@ -2298,4 +2304,83 @@ test("#891 gate① engine-agent finding [0] (ac1-null-round-never-collapses): a 
     /class="hero-num hero-small hero-badge hero-attention-collapsed" data-count="1"/,
     "it must collapse into the historical counter chip instead",
   );
+});
+
+test("#891 PO adjudication: historical classification is ONE round-identity predicate — backlog, lane, checkpoint, needs-human, AND trunk all collapse the same way, no per-zone carve-out left to forget a zone", () => {
+  const events: LoopEvent[] = [];
+  events.push(wire("2026-07-01T00:00:00.000Z", "pool-selected", { round_id: 1, issues: [] }));
+  // One historical (round 1) droplet parked in EVERY zone the stage can draw one at — none of
+  // these is ever touched again after this round closes.
+  events.push(wire("2026-07-01T00:01:00.000Z", "dispatched", { worker: "h-nh", issue: 1 }));
+  events.push(wire("2026-07-01T00:02:00.000Z", "reclaim-done", { worker: "h-nh", issue: 1, next: "DRIVING", pr: 1 }));
+  events.push(wire("2026-07-01T00:03:00.000Z", "drive-needs-human", { worker: "h-nh", issue: 1, pr: 1 }));
+  events.push(wire("2026-07-01T00:04:00.000Z", "dispatched", { worker: "h-bl", issue: 2 }));
+  events.push(wire("2026-07-01T00:05:00.000Z", "handoff", { worker: "h-bl", issue: 2 }));
+  events.push(wire("2026-07-01T00:06:00.000Z", "dispatched", { worker: "h-ln", issue: 3 }));
+  events.push(wire("2026-07-01T00:07:00.000Z", "dispatched", { worker: "h-cp", issue: 4 }));
+  events.push(wire("2026-07-01T00:08:00.000Z", "reclaim-done", { worker: "h-cp", issue: 4, next: "DRIVING", pr: 4 }));
+  // The reviewer's own example: `dispatched → reclaim-done → rollback-escalated` leaves a
+  // failed droplet parked at `checkpoint` that nothing revisits.
+  events.push(wire("2026-07-01T00:09:00.000Z", "rollback-escalated", { worker: "h-cp", issue: 4 }));
+  events.push(wire("2026-07-01T00:10:00.000Z", "dispatched", { worker: "h-tr", issue: 5 }));
+  events.push(wire("2026-07-01T00:11:00.000Z", "reclaim-done", { worker: "h-tr", issue: 5, next: "DRIVING", pr: 5 }));
+  events.push(wire("2026-07-01T00:12:00.000Z", "merged", { worker: "h-tr", issue: 5, pr: 5 }));
+
+  // The round boundary that leaves all five behind.
+  events.push(wire("2026-08-10T00:00:00.000Z", "pool-selected", { round_id: 2, issues: [] }));
+
+  // One current-round (round 2) droplet in the same four still-live zones (a fresh merge would
+  // itself delete any lingering trunk droplet, historical or not, independent of this predicate
+  // — so trunk's OWN collapse is exercised only by issue 5 above, not duplicated here) — every
+  // one of these must keep drawing.
+  events.push(wire("2026-08-10T00:01:00.000Z", "dispatched", { worker: "c-nh", issue: 101 }));
+  events.push(wire("2026-08-10T00:02:00.000Z", "reclaim-done", { worker: "c-nh", issue: 101, next: "DRIVING", pr: 101 }));
+  events.push(wire("2026-08-10T00:03:00.000Z", "drive-needs-human", { worker: "c-nh", issue: 101, pr: 101 }));
+  events.push(wire("2026-08-10T00:04:00.000Z", "dispatched", { worker: "c-bl", issue: 102 }));
+  events.push(wire("2026-08-10T00:05:00.000Z", "handoff", { worker: "c-bl", issue: 102 }));
+  events.push(wire("2026-08-10T00:06:00.000Z", "dispatched", { worker: "c-ln", issue: 103 }));
+  events.push(wire("2026-08-10T00:07:00.000Z", "dispatched", { worker: "c-cp", issue: 104 }));
+  events.push(wire("2026-08-10T00:08:00.000Z", "reclaim-done", { worker: "c-cp", issue: 104, next: "DRIVING", pr: 104 }));
+
+  const { state } = run(events.map(toDomainEvent), 20);
+  const open = foldAttention(events);
+  // Issue 1, issue 4 (`rollback-escalated` is itself an attention-opening kind — `copy.ts`'s
+  // `hasAttention` — independent of this test's round-identity predicate), and issue 101: none
+  // of the three has been resolved.
+  assert.equal(Object.keys(open).length, 3, "issues 1, 4, and 101 all still have open attention");
+
+  // Sanity check on the fixture itself — otherwise the assertions below would prove nothing.
+  for (const issue of [1, 2, 3, 4, 5]) assert.equal(droplet(state, issue)?.roundId, 1, `issue ${issue} fixture must be stamped round 1`);
+  for (const issue of [101, 102, 103, 104])
+    assert.equal(droplet(state, issue)?.roundId, 2, `issue ${issue} fixture must be stamped round 2`);
+  assert.equal(state.roundId, 2);
+  assert.equal(droplet(state, 4)?.at, "checkpoint");
+  assert.equal(droplet(state, 4)?.failed, true, "the rollback-escalated checkpoint droplet must actually be marked failed");
+  assert.equal(droplet(state, 5)?.at, "trunk");
+
+  const html = markup(state, { lanesMax: 20, openAttention: Object.values(open) });
+
+  // None of the five round-1 droplets draw, in ANY zone — proving the SAME predicate, not a
+  // per-zone list, is what excludes them.
+  assert.doesNotMatch(html, /⤳ 1</, "historical needs-human droplet (issue 1) must not draw");
+  assert.doesNotMatch(html, /⊙ 2</, "historical backlog droplet (issue 2) must not draw");
+  assert.doesNotMatch(html, /⊙ 3</, "historical lane droplet (issue 3) must not draw");
+  assert.doesNotMatch(
+    html,
+    /⤳ 4</,
+    "historical checkpoint droplet (issue 4, the reviewer's own dispatched→reclaim-done→rollback-escalated example) must not draw",
+  );
+  assert.doesNotMatch(html, /⤳ 5</, "historical trunk droplet (issue 5) must not draw");
+
+  // Every current-round droplet, in the same four zones, keeps drawing.
+  assert.match(html, /⤳ 101</, "current-round needs-human droplet must draw");
+  assert.match(html, /⊙ 102</, "current-round backlog droplet must draw");
+  assert.match(html, /⊙ 103</, "current-round lane droplet must draw");
+  assert.match(html, /⤳ 104</, "current-round checkpoint droplet must draw");
+
+  // Collapsed accounting: all 5 historical droplets, from all 5 zones, land in ONE chip — never
+  // scattered per-zone, never silently dropped without being counted anywhere.
+  assert.match(html, /class="hero-num hero-small hero-badge hero-attention-collapsed" data-count="5"/);
+  assert.match(html, /\+5 earlier — see strip/);
+  assert.match(html, /data-node="needs-human" data-count="1"/, "only the one CURRENT-round escalation draws in the needs-human cluster");
 });
