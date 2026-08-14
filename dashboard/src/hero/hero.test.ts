@@ -52,6 +52,16 @@ const droplet = (state: HeroState, issue: number) => state.droplets.find((d) => 
 const markup = (state: HeroState, extra: Partial<Parameters<typeof HeroStage>[0]> = {}) =>
   renderToStaticMarkup(createElement(HeroStage, { state, lanesMax: 3, fixCap: 2, ...extra }));
 const heroCss = readFileSync(new URL("./hero.css", import.meta.url), "utf8");
+// #886 final gate②: the computed-style test below used to inject ONLY `heroCss` — production
+// actually cascades tokens.css → panels.css → hero.css, then app.css's own `body { ... }` rule
+// (app.css's imports run first, its own rules after), so a same-specificity override landing
+// in any of those other files, outside hero.css, could win in production while this test never
+// saw it at all. Mirrors `Header.test.tsx`'s `.spend-meter-value` fix (#886 run 2e566ac9
+// finding [3]) — full production cascade, in production order, not a partial mount.
+const tokensCss = readFileSync(new URL("../tokens.css", import.meta.url), "utf8");
+const panelsCss = readFileSync(new URL("../panels.css", import.meta.url), "utf8");
+const appCss = readFileSync(new URL("../app.css", import.meta.url), "utf8");
+const bodyFontSizeRule = appCss.match(/body\s*\{[^}]*\}/)?.[0];
 
 // ── §6 transition table — one row at a time ────────────────────────────────────
 // AC 1: "every event kind listed in the §6 transition table has a corresponding
@@ -737,9 +747,9 @@ test("the ring count and the PLAN/IMPLEMENT/OUTCOME phase captions render with -
 
 // #879 gate② finding [1]: a regex read of the stylesheet TEXT proves the rule was authored, not
 // that it actually cascades onto a rendered element. This test mounts the real markup into a
-// REAL DOM (`registerRealDom()`, happy-dom) with `heroCss` injected as an actual `<style>`
-// element, then reads `getComputedStyle` off the matched element — proof the selector matches
-// and the cascade applies, not just that the source text contains the rule.
+// REAL DOM (`registerRealDom()`, happy-dom) with the FULL production stylesheet cascade injected
+// as actual `<style>` elements, then reads `getComputedStyle` off the matched element — proof the
+// selector matches and the cascade applies, not just that the source text contains the rule.
 //
 // #886 gate② run 2e566ac9 finding [4]: the prior version accepted ANY non-default letter-spacing
 // (`assert.notEqual(computed.letterSpacing, "normal")`), which would pass even for a later
@@ -752,9 +762,24 @@ test("the ring count and the PLAN/IMPLEMENT/OUTCOME phase captions render with -
 // `letter-spacing` into separate rule blocks for the same selector does NOT avoid it — only
 // verified in isolation, an EARLIER version of this fix mistook cross-test style-tag
 // contamination for a genuine split-rule fix). A literal px value has no unit to mis-resolve.
-test("#879 gate② run 2e566ac9 finding [4]: PLAN/IMPLEMENT/OUTCOME headers render bold at the EXACT shipped letter-spacing, proven against a real cascade", () => {
+//
+// #886 final gate②: injecting `heroCss` ALONE proved the selector/cascade within hero.css, but
+// left a same-specificity override landing in tokens.css/panels.css/app.css invisible to this
+// test regardless of source order, since those files were never mounted at all. Confirmed by
+// direct reproduction: a synthetic `.hero-phase { letter-spacing: 9px }` appended past `heroCss`
+// alone DOES win (cascade mechanics behave as expected once mounted) — the gap was never that
+// the cascade is unpredictable, only that this test never gave production's other sheets a
+// chance to be seen. Fixed by mounting the real production order — tokens.css → panels.css →
+// hero.css → app.css's own `body { ... }` rule (imports run first in app.css, its own rules
+// after) — same pattern as `Header.test.tsx`'s `.spend-meter-value` fix. Re-verified against
+// that full cascade: `.hero-phase` declares font-size/font-weight/letter-spacing all as literal
+// values in its own rule (no inheritance, no `em` to mis-resolve), and no other shipped file
+// declares a `.hero-phase` rule, so 2.34px is still the true winning value — this test now
+// proves that rather than assuming it.
+test("#879 gate② run 2e566ac9 finding [4]: PLAN/IMPLEMENT/OUTCOME headers render bold at the EXACT shipped letter-spacing, proven against the REAL production cascade (tokens.css + panels.css + hero.css + app.css's body rule)", () => {
+  assert.ok(bodyFontSizeRule, "app.css must still declare a body { ... } rule for tokensCss/panelsCss/heroCss to cascade through");
   const style = document.createElement("style");
-  style.textContent = heroCss;
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
   document.head.appendChild(style);
   const container = document.createElement("div");
   container.innerHTML = markup(initialHeroState(3));
@@ -769,7 +794,11 @@ test("#879 gate② run 2e566ac9 finding [4]: PLAN/IMPLEMENT/OUTCOME headers rend
       "the cascade must actually apply the bold weight to the rendered element, not just declare it in source",
     );
     assert.equal(computed.fontSize, "13px");
-    assert.equal(computed.letterSpacing, "2.34px", "the exact winning cascaded value, not merely 'some' spacing");
+    assert.equal(
+      computed.letterSpacing,
+      "2.34px",
+      "the exact winning cascaded value against the full production cascade, not merely 'some' spacing",
+    );
   } finally {
     document.body.removeChild(container);
     document.head.removeChild(style);
