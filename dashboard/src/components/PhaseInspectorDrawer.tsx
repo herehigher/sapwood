@@ -111,7 +111,10 @@ function ArchVerifyBody({ artifact, events }: { artifact: unknown; events: reado
       </div>
       <dl className="config-drawer-group">
         <Counter label="plan-review escalations" value={countEventKind(events, "plan-review-escalated")} />
-        <Counter label="no plan after draft" value={countEventKind(events, "no-plan-after-draft")} />
+        {/* #893: was "no-plan-after-draft" — a dashboard-only kind the engine never actually
+         *  registers (dead cross-package drift closed by this PR); swapped for a real,
+         *  distinct plan-review-family kind so this counter is never permanently zero. */}
+        <Counter label="verify n/a proposed" value={countEventKind(events, "verify-na-proposed")} />
       </dl>
     </>
   );

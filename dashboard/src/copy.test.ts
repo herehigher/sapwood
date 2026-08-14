@@ -5,6 +5,9 @@ import test from "node:test";
 // engine's own tagged registry is the AUTHORITATIVE attention-membership signal, not frontend-
 // design.md §3's prose list, which has already drifted once (finding [2] below).
 import { ESCALATION_SOURCE_KINDS } from "../../engine/src/loop/escalation-reconcile.ts";
+// Test-only import (same pattern as ESCALATION_SOURCE_KINDS above): the engine's own registry —
+// not a re-transcribed count — is the oracle for the #893 cross-package exhaustiveness test.
+import { EVENT_KIND_NAMES as ENGINE_EVENT_KIND_NAMES, kindGlossary } from "../../engine/src/state/event-kinds/index.ts";
 import {
   ATTENTION_CATEGORY,
   attentionCategory,
@@ -14,12 +17,16 @@ import {
   type EventKind,
   engineStateCaption,
   hasAttention,
+  isKnownKind,
   type SentencePart,
+  TELEMETRY_KINDS,
 } from "./copy.ts";
 
+// `copyFor`, not `COPY[kind]` directly — #893: `COPY` is now `Partial<Record<EventKind,
+// CopyEntry>>` (only the narrative half of the full engine-derived union), so a direct index would
+// be `CopyEntry | undefined` at the type level even for a kind this test knows is narrative.
 const render = (kind: EventKind, payload: Record<string, unknown> = {}) =>
-  COPY[kind]
-    .sentence(payload)
+  (copyFor(kind)?.sentence(payload) ?? [])
     .map((part) => (typeof part === "string" ? part : part.kind === "link" ? part.label : `#${part.number}`))
     .join("");
 
@@ -81,7 +88,6 @@ const DOC_TABLE_KINDS = [
   "round-stop",
   "align-summary",
   "triage-degraded",
-  "no-plan-after-draft",
   "plan-review-escalated",
   "verify-na-proposed",
   "gated-reentry",
@@ -100,6 +106,32 @@ const DOC_TABLE_KINDS = [
   "ci-pending-observed",
   "ci-pending-escalated",
   "ci-pending-cleared",
+  // #893: newly-mapped attention-class kinds — the engine registers each `actionability:
+  // "intervene"` (or an unconditional `escalation-source:*`), and each had no copy entry at all
+  // before this PR (the "126/194 kinds unmapped" gap's attention-bearing half).
+  "emergency-stop",
+  "consecutive-stalls-detected",
+  "empty-spin-park",
+  "base-ci-red-escalated",
+  "estop-lane-swept",
+  "estop-lane-sweep-incapable",
+  "resume-capped",
+  "resume-undecidable",
+  "orphan-pr-escalated",
+  "gated-flag-unprovable",
+  "drive-human-merge-only",
+  "fix-leg-dispatch-unconfigured",
+  "fix-leg-undecidable",
+  "fix-thread-write-escalated",
+  "ac-snapshot-drift",
+  "review-silence-escalated",
+  "review-disputed",
+  "review-non-convergent",
+  "comment-cursor-stale",
+  "round-pool-removal-capped",
+  "concern-post-escalated",
+  "operator-fence-violated",
+  "architect-repeat-drop-escalated",
 ].sort();
 
 test("copy.ts has exactly one entry per §7 table kind — no more, no fewer", () => {
@@ -121,8 +153,9 @@ test("the §7 table's kind count is derived from the map, never hard-coded", () 
   assert.equal(rows.length, EVENT_KINDS.length);
 });
 
-test("emergency-stop has no copy.ts entry (#293 — a control signal, not a feed event kind)", () => {
-  assert.equal(copyFor("emergency-stop"), undefined);
+test("#893: emergency-stop now carries a real copy entry — a registered engine kind (actionability: intervene, run.ts) that used to be deliberately absent and would otherwise hit the raw fallback", () => {
+  assert.notEqual(copyFor("emergency-stop"), undefined);
+  assert.equal(hasAttention("emergency-stop", {}), true);
 });
 
 test("copyFor returns undefined for any kind absent from the map, never a fallback entry", () => {
@@ -202,29 +235,29 @@ test("every PR-bearing sentence spells out the literal word PR before the entity
     ["retro-pr-opened", { pr: 1 }],
   ];
   for (const [kind, payload] of prBearing) {
-    const before = textBeforeFirstPrToken(COPY[kind].sentence(payload));
+    const before = textBeforeFirstPrToken(copyFor(kind)!.sentence(payload));
     assert.match(before ?? "", /PR $/, `${kind} should spell "PR " immediately before its entity token`);
   }
   assert.match(
-    textBeforeFirstPrToken(COPY["engine-review-verdict"].sentence({ outcome: "approved", pr: 1, issue: 1, findingCount: 0 })) ?? "",
+    textBeforeFirstPrToken(copyFor("engine-review-verdict")!.sentence({ outcome: "approved", pr: 1, issue: 1, findingCount: 0 })) ?? "",
     /Review approved PR $/,
   );
   assert.match(
-    textBeforeFirstPrToken(COPY["engine-review-verdict"].sentence({ outcome: "rejected", pr: 1, issue: 1, findingCount: 1 })) ?? "",
+    textBeforeFirstPrToken(copyFor("engine-review-verdict")!.sentence({ outcome: "rejected", pr: 1, issue: 1, findingCount: 1 })) ?? "",
     /Review sent PR $/,
   );
   assert.match(
-    textBeforeFirstPrToken(COPY["escalation-resolved"].sentence({ issue: 1, pr: 1, via: "merged" })) ?? "",
+    textBeforeFirstPrToken(copyFor("escalation-resolved")!.sentence({ issue: 1, pr: 1, via: "merged" })) ?? "",
     /no longer needs you — PR $/,
   );
   assert.match(
-    textBeforeFirstPrToken(COPY["escalation-resolved"].sentence({ issue: 1, pr: 1, via: "pr-closed" })) ?? "",
+    textBeforeFirstPrToken(copyFor("escalation-resolved")!.sentence({ issue: 1, pr: 1, via: "pr-closed" })) ?? "",
     /no longer needs you — PR $/,
   );
 });
 
 test("#715 gate② round 3 [0]: engine-review-containment-gap renders one line per payload.gaps entry and a security-guide link", () => {
-  const parts = COPY["engine-review-containment-gap"].sentence({
+  const parts = copyFor("engine-review-containment-gap")!.sentence({
     gaps: ["model-invoked-shell-execution", "host-wide-filesystem-reads"],
   });
   const lines = parts.filter((p): p is string => typeof p === "string" && p.startsWith("\n- "));
@@ -237,14 +270,14 @@ test("#715 gate② round 3 [0]: engine-review-containment-gap renders one line p
 });
 
 test("engine-review-containment-gap falls back to the raw code for an unrecognized gap, never a silent drop", () => {
-  const parts = COPY["engine-review-containment-gap"].sentence({ gaps: ["some-future-gap-code"] });
+  const parts = copyFor("engine-review-containment-gap")!.sentence({ gaps: ["some-future-gap-code"] });
   const lines = parts.filter((p): p is string => typeof p === "string" && p.startsWith("\n- "));
   assert.deepEqual(lines, ["\n- some-future-gap-code"]);
 });
 
 test("engine-review-containment-gap tolerates a missing/malformed payload.gaps without throwing", () => {
-  assert.doesNotThrow(() => COPY["engine-review-containment-gap"].sentence({}));
-  const parts = COPY["engine-review-containment-gap"].sentence({});
+  assert.doesNotThrow(() => copyFor("engine-review-containment-gap")!.sentence({}));
+  const parts = copyFor("engine-review-containment-gap")!.sentence({});
   assert.equal(parts.filter((p) => typeof p === "string" && p.startsWith("\n- ")).length, 0);
 });
 
@@ -257,14 +290,14 @@ test("drive-fixup names the reason word for each of the three prescriptions", ()
 // ── attention membership (§3) ────────────────────────────────────────────────────────────────
 
 test("pr-held and pr-released carry no attention marker", () => {
-  assert.equal(COPY["pr-held"].attention, undefined);
-  assert.equal(COPY["pr-released"].attention, undefined);
+  assert.equal(copyFor("pr-held")!.attention, undefined);
+  assert.equal(copyFor("pr-released")!.attention, undefined);
   assert.equal(hasAttention("pr-held", { pr: 1, issue: 1 }), false);
   assert.equal(hasAttention("pr-released", { pr: 1, issue: 1 }), false);
 });
 
 test("verify-na-proposed always carries attention", () => {
-  assert.equal(COPY["verify-na-proposed"].attention, true);
+  assert.equal(copyFor("verify-na-proposed")!.attention, true);
   assert.equal(hasAttention("verify-na-proposed", { issue: 1 }), true);
 });
 
@@ -288,7 +321,7 @@ test("gate② opus round 1 P3 (#797): ci-inert-escalated names the check count, 
     }),
     "PR #1 needs a human — CI concluded without ever going green (2 checks) · asks: fix the check, then clear the label to retry",
   );
-  assert.equal(COPY["ci-inert-escalated"].attention, true);
+  assert.equal(copyFor("ci-inert-escalated")!.attention, true);
   assert.equal(hasAttention("ci-inert-escalated", { pr: 1 }), true);
 });
 
@@ -300,7 +333,7 @@ test("#881: ci-inert-escalated names the actual check strings when the real stri
 });
 
 test("escalation-resolved never carries attention — it clears an item, never opens one", () => {
-  assert.equal(COPY["escalation-resolved"].attention, undefined);
+  assert.equal(copyFor("escalation-resolved")!.attention, undefined);
   for (const via of ["merged", "issue-closed", "pr-closed", "label-removed", "board-fixed"]) {
     assert.equal(hasAttention("escalation-resolved", { issue: 1, via }), false);
   }
@@ -337,7 +370,7 @@ test("every kind named in §3's flagged-attention list carries the marker", () =
     "fix-leg-verdict-rerun",
   ];
   for (const kind of alwaysAttention) {
-    assert.equal(COPY[kind].attention, true, `${kind} should carry attention: true`);
+    assert.equal(copyFor(kind)!.attention, true, `${kind} should carry attention: true`);
   }
 });
 
@@ -346,16 +379,15 @@ test("#715 gate② [2]: attention drift guard — every §7-table kind the engin
   // not unconditional presence, and copy.ts already covers them with `reclaimNeedsAttention`
   // (tested above); this guard only asserts the UNCONDITIONAL sources.
   const predicated = new Set(["reclaim-done", "reclaim-failed"]);
-  // Set<string>, not Set<engine's EventKind>: dashboard's own EventKind union is NOT provably a
-  // subset of the engine's (e.g. `no-plan-after-draft` has a §7 table row and a COPY entry but,
-  // as of this writing, no matching engine-registered kind at all — a separate, pre-existing
-  // doc/engine drift this test does not try to adjudicate). Comparing as plain strings is the
-  // correct membership check regardless of which side's nominal type is wider.
+  // #893: dashboard's `EventKind` is now type-derived from the engine's own registry, so this is
+  // a genuine subset check rather than a defensive plain-string comparison against a possibly
+  // wider/narrower nominal type (the pre-#893 `no-plan-after-draft` drift this comment used to
+  // note is gone — that dead, non-engine-registered COPY entry was removed in the same change).
   const unconditionalSources: Set<string> = new Set(ESCALATION_SOURCE_KINDS.filter((k) => !predicated.has(k)));
   for (const kind of EVENT_KINDS) {
     if (!unconditionalSources.has(kind)) continue;
     assert.equal(
-      COPY[kind].attention,
+      copyFor(kind)!.attention,
       true,
       `${kind} is escalation-source:* in the engine's registry but carries no attention marker in COPY`,
     );
@@ -363,7 +395,7 @@ test("#715 gate② [2]: attention drift guard — every §7-table kind the engin
 });
 
 test("resume-held carries no attention marker — it is a consequence, not a new item (§3)", () => {
-  assert.equal(COPY["resume-held"].attention, undefined);
+  assert.equal(copyFor("resume-held")!.attention, undefined);
 });
 
 // ── #715 gate② round 4 [1]: table-driven sentence oracle — exact §7 text, every row, every branch ─
@@ -439,7 +471,7 @@ const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expec
   [
     "rapid-restart-detected",
     { births: 3, windowSec: 60 },
-    "Engine started 3 times in 60s — crash loop suspected, dispatch parked for a human",
+    "Engine started 3 times in 60s — crash loop suspected, dispatch parked for a human · asks: clear the park once resolved",
   ],
   ["ceiling-breach-cleared", { reason: "wall-clock" }, "The wall-clock alarm cleared"],
   ["ceiling-breach-cleared", { reason: "daily-budget" }, "The daily budget rolled over"],
@@ -524,7 +556,6 @@ const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expec
   ["round-stop", { detail: "lane cap" }, "This round reached its limit (lane cap) — no new work this round"],
   ["align-summary", { created: 3, triaged: 2 }, "Planning pass: 3 issue(s) created, 2 plan(s) drafted"],
   ["triage-degraded", {}, "A planning session had trouble — some issues keep their old plans"],
-  ["no-plan-after-draft", { issue: 1 }, "Issue #1 still has no usable plan after a drafting attempt"],
   [
     "plan-review-escalated",
     { issue: 1 },
@@ -577,7 +608,11 @@ const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expec
   ["run-started", {}, "Engine started a new run"],
   ["instance-lock-taken-over", { previousPid: 1234 }, "Took over the engine lock left by a crashed run (pid 1234)"],
   ["round-phase", { round_id: 5, phase: "executing" }, "Round 5 moved into executing"],
-  ["idle-churn-detected", { rounds: 3 }, "The loop ran 3 rounds in a row that changed nothing at all — parked for a human"],
+  [
+    "idle-churn-detected",
+    { rounds: 3 },
+    "The loop ran 3 rounds in a row that changed nothing at all — parked for a human · asks: clear the park once resolved",
+  ],
   [
     "ci-inert-escalated",
     { pr: 12, issue: 7, checks: [{ name: "lint", conclusion: "SKIPPED" }] },
@@ -595,6 +630,139 @@ const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expec
     "PR #12 needs a human — CI stayed pending too long to progress on its own — blocked: build · asks: re-run or fix the stuck check, then clear the label",
   ],
   ["ci-pending-cleared", { pr: 12, issue: 7 }, "PR #12's CI resolved"],
+
+  // #893: the newly-mapped attention-class kinds.
+  [
+    "emergency-stop",
+    {},
+    "EMERGENCY STOP triggered — every running lane was killed immediately, no drain window · asks: inspect in-flight work for lost progress before resuming",
+  ],
+  [
+    "consecutive-stalls-detected",
+    { streak: 3, maxConsecutiveStalls: 3 },
+    "The engine stalled 3/3 times in a row — dispatch parked for a human · asks: clear the park once resolved",
+  ],
+  ["empty-spin-park", {}, "The peripheral roles kept failing to produce work — paused dispatch · asks: clear the park once resolved"],
+  [
+    "base-ci-red-escalated",
+    { sha: "abc123", branch: "main", failing: ["lint", "build"] },
+    "The default branch's CI is red (lint, build) — no PR can merge until it's fixed · asks: fix the default branch's CI",
+  ],
+  [
+    "base-ci-red-escalated",
+    { sha: "abc123", branch: "main" },
+    "The default branch's CI is red — no PR can merge until it's fixed · asks: fix the default branch's CI",
+  ],
+  [
+    "estop-lane-swept",
+    { worker: "w1", issue: 1, confirmedDead: true },
+    "Lane w1's driving work was killed by EMERGENCY STOP · asks: check for an orphan process and confirm the PR's state",
+  ],
+  [
+    "estop-lane-swept",
+    { worker: "w1", issue: 1, confirmedDead: false },
+    "Lane w1's driving work was killed by EMERGENCY STOP — the process couldn't be confirmed dead · asks: check for an orphan process and confirm the PR's state",
+  ],
+  [
+    "estop-lane-sweep-incapable",
+    { worker: "w1", issue: 1 },
+    "Lane w1's EMERGENCY STOP sweep couldn't verify or signal its process — left unsettled · asks: check the lane by hand",
+  ],
+  [
+    "resume-capped",
+    { worker: "w1", issue: 1, attempts: 3 },
+    "Lane w1 exhausted its resume attempts (3) after a handoff · asks: resume or reassign the lane by hand",
+  ],
+  [
+    "resume-capped",
+    { worker: "w1", issue: 1 },
+    "Lane w1 exhausted its resume attempts after a handoff · asks: resume or reassign the lane by hand",
+  ],
+  [
+    "resume-undecidable",
+    { worker: "w1", issue: 1 },
+    "Lane w1's resume outcome couldn't be determined from the ledger · asks: check the lane by hand and decide whether to resume",
+  ],
+  [
+    "orphan-pr-escalated",
+    { pr: 10, issue: 1, worker: "w1", via: "open-engine-pr" },
+    "PR #10 is open but lane w1 is dead (open-engine-pr) · asks: check the PR and decide whether to retry the issue",
+  ],
+  [
+    "gated-flag-unprovable",
+    { worker: "w1", issue: 1 },
+    "Lane w1's reentry flag couldn't be found on either carrier · asks: check issue #1's labels by hand",
+  ],
+  [
+    "drive-human-merge-only",
+    { pr: 10, issue: 1 },
+    "PR #10 is ready but requires a human to merge it — a one-way, never re-decided policy · asks: review and merge by hand",
+  ],
+  [
+    "fix-leg-dispatch-unconfigured",
+    { pr: 10, issue: 1 },
+    "PR #10 needs a fix leg but the fix loop isn't configured for this run · asks: enable the fix loop or fix the PR by hand",
+  ],
+  [
+    "fix-leg-undecidable",
+    { pr: 10, issue: 1 },
+    "PR #10's fix leg outcome couldn't be determined from the ledger · asks: check the lane and decide the PR's next step",
+  ],
+  [
+    "fix-thread-write-escalated",
+    { pr: 10, issue: 1 },
+    "PR #10 has a review-thread reply/resolve that couldn't be posted after retrying · asks: check the review thread by hand",
+  ],
+  [
+    "ac-snapshot-drift",
+    { pr: 10, issue: 1 },
+    "PR #10's issue body changed after its acceptance criteria were captured · asks: confirm the PR still matches the issue, or re-snapshot",
+  ],
+  [
+    "review-silence-escalated",
+    { pr: 10, issue: 1, silenceSec: 600 },
+    "PR #10's review request went unanswered for 10m · asks: check the reviewer and prompt or reassign the review",
+  ],
+  [
+    "review-silence-escalated",
+    { pr: 10, issue: 1 },
+    "PR #10's review request went unanswered · asks: check the reviewer and prompt or reassign the review",
+  ],
+  [
+    "review-disputed",
+    { pr: 10, issue: 1, worker: "w1" },
+    "PR #10 — successive reviews disagreed past the dispute limit · asks: adjudicate which review is right",
+  ],
+  [
+    "review-non-convergent",
+    { pr: 10, issue: 1, worker: "w1" },
+    "PR #10 — fix-and-review rounds failed to converge · asks: adjudicate — re-ready or close manually",
+  ],
+  [
+    "comment-cursor-stale",
+    { issue: 1 },
+    "Issue #1's comment thread moved since the engine last read it, so it refused to spend/dispatch/drive · asks: review the comment thread — this clears once the engine re-reads it",
+  ],
+  [
+    "round-pool-removal-capped",
+    { issue: 1 },
+    "Issue #1's round-pool label couldn't be removed after retrying · asks: remove the label by hand",
+  ],
+  [
+    "concern-post-escalated",
+    { issue: 1 },
+    "Issue #1's PO concern couldn't be posted after retrying · asks: check the issue and post the concern by hand",
+  ],
+  [
+    "operator-fence-violated",
+    { issue: 1 },
+    "Issue #1's body edit was refused — it touched an operator-owned section · asks: review the proposed edit and the operator fence by hand",
+  ],
+  [
+    "architect-repeat-drop-escalated",
+    { issue: 1 },
+    "Issue #1 was dropped repeatedly for the same reason with no edit in between · asks: revise the issue or adjudicate the repeated drop",
+  ],
 ];
 
 test("table-driven §7 sentence oracle: every row (and every documented payload branch) renders its exact documented text", () => {
@@ -637,11 +805,39 @@ const ATTENTION_KINDS_SAMPLE: [kind: EventKind, payload: Record<string, unknown>
   ["gated-reentry-capped-label-failed", { issue: 1 }],
   ["ci-inert-escalated", { pr: 1, issue: 1 }],
   ["ci-pending-escalated", { pr: 1, issue: 1 }],
+  // #893 additions.
+  ["emergency-stop", {}],
+  // Pre-existing COPY entries, promoted to attention:true by #893's owner adjudication (the
+  // §7 doc row's own note on why) rather than newly mapped.
+  ["rapid-restart-detected", { births: 3, windowSec: 60 }],
+  ["idle-churn-detected", { rounds: 3 }],
+  ["consecutive-stalls-detected", { streak: 3, maxConsecutiveStalls: 3 }],
+  ["empty-spin-park", {}],
+  ["base-ci-red-escalated", { sha: "abc", branch: "main", failing: ["lint"] }],
+  ["estop-lane-swept", { worker: "w1", issue: 1, confirmedDead: true }],
+  ["estop-lane-sweep-incapable", { worker: "w1", issue: 1 }],
+  ["resume-capped", { worker: "w1", issue: 1, attempts: 3 }],
+  ["resume-undecidable", { worker: "w1", issue: 1 }],
+  ["orphan-pr-escalated", { pr: 1, issue: 1, worker: "w1", via: "open-engine-pr" }],
+  ["gated-flag-unprovable", { worker: "w1", issue: 1 }],
+  ["drive-human-merge-only", { pr: 1, issue: 1 }],
+  ["fix-leg-dispatch-unconfigured", { pr: 1, issue: 1 }],
+  ["fix-leg-undecidable", { pr: 1, issue: 1 }],
+  ["fix-thread-write-escalated", { pr: 1, issue: 1 }],
+  ["ac-snapshot-drift", { pr: 1, issue: 1 }],
+  ["review-silence-escalated", { pr: 1, issue: 1, silenceSec: 600 }],
+  ["review-disputed", { pr: 1, issue: 1, worker: "w1" }],
+  ["review-non-convergent", { pr: 1, issue: 1, worker: "w1" }],
+  ["comment-cursor-stale", { issue: 1 }],
+  ["round-pool-removal-capped", { issue: 1 }],
+  ["concern-post-escalated", { issue: 1 }],
+  ["operator-fence-violated", { issue: 1 }],
+  ["architect-repeat-drop-escalated", { issue: 1 }],
 ];
 
 test("AC1: every attention kind's sentence carries an explicit asks: clause", () => {
   for (const [kind, payload] of ATTENTION_KINDS_SAMPLE) {
-    assert.equal(COPY[kind].attention !== undefined, true, `${kind} is expected to be an attention kind`);
+    assert.equal(copyFor(kind)!.attention !== undefined, true, `${kind} is expected to be an attention kind`);
     assert.match(render(kind, payload), /asks: /, `${kind} should render an explicit "asks:" clause`);
   }
 });
@@ -663,15 +859,35 @@ test("AC1: every attention kind's sentence either states a reason or names the p
 
 test("AC1: ATTENTION_KINDS_SAMPLE is an independent, exhaustive transcription of every attention kind", () => {
   const covered = new Set(ATTENTION_KINDS_SAMPLE.map(([kind]) => kind));
-  const attentionKinds = new Set(EVENT_KINDS.filter((k) => COPY[k].attention !== undefined));
+  const attentionKinds = new Set(EVENT_KINDS.filter((k) => copyFor(k)!.attention !== undefined));
   assert.deepEqual(covered, attentionKinds);
+});
+
+// ── PR #900 gate② finding [1] (attention-strip-wiring-proof, second half): the tests above
+// derive their "exhaustive attention set" from `ATTENTION_KINDS_SAMPLE`/`COPY` — a purely
+// dashboard-internal cross-check that would stay green even if the mapping itself simply forgot a
+// kind the ENGINE marks urgent. This drift-guards against the engine's own authoritative registry
+// field (`actionability`, event-kinds/types.ts) instead — the same "authoritative signal over
+// dashboard prose" doctrine the `ESCALATION_SOURCE_KINDS` drift guard above already applies, one
+// level up: `actionability: "intervene"` is the broader, editorial-judgment-free "a human owes
+// the next decision" signal (types.ts's own doc), a strict superset of `escalation-source:*`. ──
+
+test('#900 finding [1]: every engine-registered `actionability: "intervene"` kind carries `attention` in COPY — a registry-anchored floor, not just an internal COPY cross-check', () => {
+  for (const kind of ENGINE_EVENT_KIND_NAMES) {
+    if (kindGlossary(kind).actionability !== "intervene") continue;
+    assert.notEqual(
+      copyFor(kind)?.attention,
+      undefined,
+      `${kind} is actionability:"intervene" in the engine's own registry but carries no attention marker in COPY`,
+    );
+  }
 });
 
 // ── #881: category-chip taxonomy completeness ───────────────────────────────────────────────
 
 test("every attention-marked kind has exactly one category chip, and no non-attention kind has one", () => {
   for (const kind of EVENT_KINDS) {
-    if (COPY[kind].attention !== undefined) {
+    if (copyFor(kind)!.attention !== undefined) {
       assert.ok(ATTENTION_CATEGORY[kind], `${kind} carries attention but has no ATTENTION_CATEGORY entry`);
     } else {
       assert.equal(ATTENTION_CATEGORY[kind], undefined, `${kind} carries no attention marker but has a category chip`);
@@ -681,6 +897,57 @@ test("every attention-marked kind has exactly one category chip, and no non-atte
 
 test("attentionCategory returns undefined for an unrecognized kind, never a fabricated label", () => {
   assert.equal(attentionCategory("some-future-kind-nobody-registered-yet"), undefined);
+});
+
+test("#893: REVIEW SILENCE and DISSENT chips exist for their named kinds, per the mockup's own taxonomy", () => {
+  assert.equal(attentionCategory("review-silence-escalated"), "REVIEW SILENCE");
+  assert.equal(attentionCategory("review-disputed"), "DISSENT");
+  assert.equal(attentionCategory("review-non-convergent"), "DISSENT");
+});
+
+// ── #893: cross-package exhaustiveness — every REAL engine-registered kind is classified ───────
+//
+// AC1's own text: "a registered kind with neither copy entry nor telemetry classification is a
+// build/test failure (red-first proof required)." `ENGINE_EVENT_KIND_NAMES` is the engine's own
+// registry (test-only import, same precedent as `ESCALATION_SOURCE_KINDS` above) — the oracle,
+// not a re-transcription of `EventKind` itself, so a kind added to the engine and forgotten here
+// reddens this test rather than silently compiling. Mutation-kill: remove any one member from
+// `COPY`/`TELEMETRY_KINDS` in copy.ts and its now-unclassified kind fails the loop below.
+
+test("#893: every engine-registered kind is classified as EITHER a COPY entry OR a TELEMETRY_KINDS member — never neither, never both", () => {
+  for (const kind of ENGINE_EVENT_KIND_NAMES) {
+    const narrative = Object.hasOwn(COPY, kind);
+    const telemetry = TELEMETRY_KINDS.has(kind);
+    assert.ok(narrative || telemetry, `${kind} is registered by the engine but classified as neither narrative nor telemetry`);
+    assert.ok(!(narrative && telemetry), `${kind} is classified as BOTH narrative and telemetry — pick one`);
+  }
+});
+
+test("#893: COPY and TELEMETRY_KINDS contain no kind absent from the engine's own registry", () => {
+  const engineKinds = new Set<string>(ENGINE_EVENT_KIND_NAMES);
+  for (const kind of EVENT_KINDS) {
+    assert.ok(engineKinds.has(kind), `COPY has a narrative entry for "${kind}", which the engine does not register`);
+  }
+  for (const kind of TELEMETRY_KINDS) {
+    assert.ok(engineKinds.has(kind), `TELEMETRY_KINDS lists "${kind}", which the engine does not register`);
+  }
+});
+
+test("#893: heartbeat kinds classify as telemetry, render an honest generic line, and never the raw fallback", () => {
+  for (const kind of ["worker-heartbeat", "role-session-heartbeat", "park-wait-heartbeat", "standby-heartbeat"] as const) {
+    assert.ok(TELEMETRY_KINDS.has(kind), `${kind} should be telemetry-tier`);
+    assert.ok(isKnownKind(kind), `${kind} should be a known kind (never the raw "Unrecognized event" fallback)`);
+    const entry = copyFor(kind);
+    assert.equal(entry?.tier, "telemetry");
+    assert.equal(entry?.sentence({}).join(""), `Telemetry: ${kind}`);
+    assert.equal(hasAttention(kind, {}), false, `${kind} is telemetry, never attention`);
+  }
+});
+
+test("#893: a telemetry kind is never also a COPY (narrative) key", () => {
+  for (const kind of TELEMETRY_KINDS) {
+    assert.ok(!Object.hasOwn(COPY, kind), `${kind} is in TELEMETRY_KINDS but also has a COPY entry`);
+  }
 });
 
 // ── #723: the header's engine-state caption (§7 convention, applied to the §3 A engine word) ──

@@ -44,6 +44,36 @@ test("renders a different chip label for a different category (CI)", () => {
   assert.match(html, /class="attention-chip">CI</);
 });
 
+// ── #893 / PR #900 gate② finding [1]: REVIEW SILENCE / DISSENT — folded through the REAL
+// production history path (`toDomainEvent` parse boundary + `foldOpenAttention`, `foldAt`
+// below), not a hand-classified `KnownDomainEvent` injected directly into `items`. A direct
+// injection would stay green even if `hasAttention`/`openAttentionKey` failed to actually open a
+// row for one of these kinds — folding first proves the kind really reaches `openAttention`, the
+// same object `App.tsx` passes verbatim as `NeedsAttention`'s `items` prop (a real end-to-end
+// wiring test lives in App.test.tsx, which additionally proves the `/api/events` → `App` half).
+
+test("#893: review-silence-escalated reaches the strip and renders the REVIEW SILENCE chip", () => {
+  const open = foldAt([wire(1, "2026-08-10T11:59:00.000Z", "review-silence-escalated", { pr: 42, issue: 7, silenceSec: 600 })]);
+  const html = renderToStaticMarkup(<NeedsAttention items={Object.values(open)} titles={{}} now={NOW} />);
+  assert.match(html, /class="attention-chip">REVIEW SILENCE</);
+  assert.match(html, /went unanswered/);
+  assert.match(html, /asks: check the reviewer/);
+});
+
+test("#893: review-disputed reaches the strip and renders the DISSENT chip", () => {
+  const open = foldAt([wire(1, "2026-08-10T11:59:00.000Z", "review-disputed", { pr: 42, issue: 7, worker: "w1" })]);
+  const html = renderToStaticMarkup(<NeedsAttention items={Object.values(open)} titles={{}} now={NOW} />);
+  assert.match(html, /class="attention-chip">DISSENT</);
+  assert.match(html, /successive reviews disagreed/);
+});
+
+test("#893: review-non-convergent ALSO renders the DISSENT chip — same category, different trigger", () => {
+  const open = foldAt([wire(1, "2026-08-10T11:59:00.000Z", "review-non-convergent", { pr: 42, issue: 7, worker: "w1" })]);
+  const html = renderToStaticMarkup(<NeedsAttention items={Object.values(open)} titles={{}} now={NOW} />);
+  assert.match(html, /class="attention-chip">DISSENT</);
+  assert.match(html, /failed to converge/);
+});
+
 test("renders no chip for an unrecognized event kind, never a fabricated label", () => {
   const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "some-future-kind-nobody-registered-yet", { pr: 42 }));
   const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);

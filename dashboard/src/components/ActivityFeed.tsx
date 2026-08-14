@@ -1,9 +1,17 @@
-import { COPY, type EntityToken, hasAttention, type SentencePart } from "../copy.ts";
+import { useState } from "react";
+import { copyFor, type EntityToken, hasAttention, type SentencePart } from "../copy.ts";
 import type { DomainEvent } from "../domain-event.ts";
 import type { EntityTitles } from "../entities.ts";
 import { formatRelative } from "../format.ts";
 import { EntityRef } from "./EntityRef.tsx";
 import { StateGlyph } from "./icons.tsx";
+
+/** #893: a heartbeat/bookkeeping engine kind (`TELEMETRY_KINDS` in copy.ts) — collapsed from the
+ *  feed's default view. `event.known` must already be true (an unknown wire kind is neither
+ *  narrative nor telemetry; it renders the honest raw fallback, unaffected by this filter). */
+function isTelemetryKind(kind: string): boolean {
+  return copyFor(kind)?.tier === "telemetry";
+}
 
 /** #722: the feed panel gets its own scroll container (`.feed-scroll`, panels.css) rather than
  *  driving the whole page's height, but a scroll container alone still leaves thousands of `<li>`
@@ -68,7 +76,7 @@ function FeedEntry({ event, titles, repoUrl, now }: { event: DomainEvent; titles
   // UNKNOWN one — a real possibility per §8 (a newer engine may emit a kind this build hasn't
   // shipped a copy entry for yet) — renders the same honest fallback sentence it always has,
   // never crashing and never hiding the row.
-  const parts: SentencePart[] = event.known ? COPY[event.kind].sentence(payload) : [`Unrecognized event: ${event.kind}`];
+  const parts: SentencePart[] = event.known ? copyFor(event.kind)!.sentence(payload) : [`Unrecognized event: ${event.kind}`];
   const attention = event.known && hasAttention(event.kind, payload);
   const glyph = event.known ? gateGlyph(event.kind, payload) : null;
   const dotColor = attention ? "var(--rust)" : glyph === true ? "var(--moss)" : "var(--sap)";
@@ -95,6 +103,11 @@ function FeedEntry({ event, titles, repoUrl, now }: { event: DomainEvent; titles
 
 export function ActivityFeed({ events, pinnedAttention, titles, repoUrl, disconnected, now }: ActivityFeedProps) {
   const clock = now ?? new Date();
+  // #893: telemetry (heartbeat/bookkeeping) rows are collapsed from the default view — the feed
+  // shows narrative, telemetry is opt-in. A pinned attention row is never telemetry-tier (every
+  // COPY entry carrying `attention` is narrative), so this has no interaction with the pin
+  // contract below.
+  const [showTelemetry, setShowTelemetry] = useState(false);
   if (disconnected) {
     return (
       <section className="panel activity-feed" aria-label="activity">
@@ -125,7 +138,11 @@ export function ActivityFeed({ events, pinnedAttention, titles, repoUrl, disconn
   // in its pinned position, not twice.
   const pinnedIds = new Set(pinnedAttention.map((e) => e.id));
   const pinned = [...pinnedAttention].sort((a, b) => b.id - a.id);
-  const rest = events.filter((e) => !pinnedIds.has(e.id)).sort((a, b) => b.id - a.id);
+  const nonPinned = events.filter((e) => !pinnedIds.has(e.id));
+  // #893: honest disclosure count — computed from the FULL non-pinned set regardless of the
+  // toggle's current state, so the "N telemetry event(s)" wording never goes stale mid-toggle.
+  const telemetryCount = nonPinned.filter((e) => e.known && isTelemetryKind(e.kind)).length;
+  const rest = (showTelemetry ? nonPinned : nonPinned.filter((e) => !(e.known && isTelemetryKind(e.kind)))).sort((a, b) => b.id - a.id);
   const total = pinned.length + rest.length;
   // Pinned entries are exempt from the cap (their own durable contract, #715 gate② [0]) — an open
   // escalation must never be silently dropped by the display cap. That means `pinned.length` alone
@@ -133,6 +150,14 @@ export function ActivityFeed({ events, pinnedAttention, titles, repoUrl, disconn
   // blown to keep every pin visible, and the disclosure below says so rather than staying silent.
   const visibleRest = rest.slice(0, Math.max(0, FEED_RENDER_CAP - pinned.length));
   const rendered = [...pinned, ...visibleRest];
+  // PR #900 gate② finding [0] (telemetry-visible-count): `telemetryCount` is the FULL non-pinned
+  // count, computed before FEED_RENDER_CAP truncates `rest` into `visibleRest` — with the toggle
+  // on, the disclosure must say how many telemetry rows actually rendered (`rendered`), never the
+  // pre-cap total, or "showing 201" can describe a view that only rendered 200 (or, with 200+
+  // pinned rows alone exceeding the cap, zero). With the toggle off this distinction is moot —
+  // `telemetryCount` IS the render-independent "how many are hidden" fact, since none render
+  // either way — so only the shown-state message reads off `renderedTelemetryCount`.
+  const renderedTelemetryCount = showTelemetry ? rendered.filter((e) => e.known && isTelemetryKind(e.kind)).length : 0;
   const pinnedExceedsCap = pinned.length > FEED_RENDER_CAP;
   const restTruncated = rendered.length < total;
   // A pinned row need not be among the newest — mixing it into a capped render breaks the "latest
@@ -150,6 +175,18 @@ export function ActivityFeed({ events, pinnedAttention, titles, repoUrl, disconn
     <section className="panel activity-feed" aria-label="activity">
       <h2>activity</h2>
       {capNote && <p className="muted feed-cap-note">{capNote}</p>}
+      {telemetryCount > 0 && (
+        <p className="muted feed-telemetry-note">
+          {showTelemetry
+            ? renderedTelemetryCount === telemetryCount
+              ? `showing ${telemetryCount} telemetry event(s) (heartbeats, bookkeeping)`
+              : `showing ${renderedTelemetryCount} of ${telemetryCount} telemetry event(s) (heartbeats, bookkeeping) — the rest are excluded by the ${FEED_RENDER_CAP}-row display cap`
+            : `${telemetryCount} telemetry event(s) hidden (heartbeats, bookkeeping)`}{" "}
+          <button type="button" className="feed-telemetry-toggle" onClick={() => setShowTelemetry((v) => !v)}>
+            {showTelemetry ? "hide" : "show"}
+          </button>
+        </p>
+      )}
       <div className="feed-scroll">
         <ul aria-live="polite" className="feed-list">
           {rendered.map((event) => (
