@@ -45,7 +45,13 @@ export const DEMO_SOURCE: DemoBundle = {
     },
   ],
   events: [
-    { id: 1, ts: "2026-08-09T09:00:05Z", kind: "pool-selected", payload: { round_id: 5001, issues: [9101, 9102] } },
+    // #886 gate② run 2e566ac9 finding [0]: 9103 is deliberately never dispatched — with
+    // `lanes.max: 2` above, a round selecting 3 issues into its pool while only 2 lanes work
+    // concurrently is completely ordinary (the backlog buffer existing at all), not padding.
+    // Without it, `state.pool` is empty at every state `npm run shots` captures (both dispatched
+    // issues leave the pool by event 4), so `.hero-pool-chip` never renders in the contact sheet
+    // — the shots evidence AC 1 requires can't demonstrate the backlog cards otherwise.
+    { id: 1, ts: "2026-08-09T09:00:05Z", kind: "pool-selected", payload: { round_id: 5001, issues: [9101, 9102, 9103] } },
     { id: 2, ts: "2026-08-09T09:00:10Z", kind: "round-phase", payload: { round_id: 5001, phase: "executing" } },
     {
       id: 3,

@@ -4,6 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { DomainEvent } from "../domain-event.ts";
+import { registerRealDom } from "../test-dom.ts";
 import { LEGEND_ITEMS, Legend } from "./Legend.tsx";
 import { BACKLOG, checkpointOverflowPoint, dropletPoint, GATES, HeroStage, STAGE, TRUNK } from "./stage.tsx";
 import {
@@ -38,6 +39,8 @@ const ev = (kind: string, payload: Record<string, unknown> = {}): DomainEvent =>
   payload,
 });
 
+registerRealDom();
+
 /** Fold a script from a fresh stage; the tests assert on both halves of the result. */
 const run = (events: DomainEvent[], lanesMax: number | null = 3) => foldEvents(initialHeroState(lanesMax), events);
 
@@ -49,6 +52,16 @@ const droplet = (state: HeroState, issue: number) => state.droplets.find((d) => 
 const markup = (state: HeroState, extra: Partial<Parameters<typeof HeroStage>[0]> = {}) =>
   renderToStaticMarkup(createElement(HeroStage, { state, lanesMax: 3, fixCap: 2, ...extra }));
 const heroCss = readFileSync(new URL("./hero.css", import.meta.url), "utf8");
+// #886 final gate②: the computed-style test below used to inject ONLY `heroCss` — production
+// actually cascades tokens.css → panels.css → hero.css, then app.css's own `body { ... }` rule
+// (app.css's imports run first, its own rules after), so a same-specificity override landing
+// in any of those other files, outside hero.css, could win in production while this test never
+// saw it at all. Mirrors `Header.test.tsx`'s `.spend-meter-value` fix (#886 run 2e566ac9
+// finding [3]) — full production cascade, in production order, not a partial mount.
+const tokensCss = readFileSync(new URL("../tokens.css", import.meta.url), "utf8");
+const panelsCss = readFileSync(new URL("../panels.css", import.meta.url), "utf8");
+const appCss = readFileSync(new URL("../app.css", import.meta.url), "utf8");
+const bodyFontSizeRule = appCss.match(/body\s*\{[^}]*\}/)?.[0];
 
 // ── §6 transition table — one row at a time ────────────────────────────────────
 // AC 1: "every event kind listed in the §6 transition table has a corresponding
@@ -688,17 +701,17 @@ test("the backlog's selected chips read their fill from --sap, never a hardcoded
 
 test("a lane droplet in motion reads its fill from --sap; escalated/failed from --rust; merged from --moss", () => {
   const inMotion = run([ev("dispatched", { worker: "w1", issue: 1 })]);
-  assert.match(markup(inMotion.state), /data-issue="1"[\s\S]*?<circle r="9" style="fill:var\(--sap\)"/);
+  assert.match(markup(inMotion.state), /data-issue="1"[\s\S]*?<path class="hero-droplet-shape" d="[^"]*" style="fill:var\(--sap\)"/);
 
   const escalated = run([
     ev("dispatched", { worker: "w1", issue: 1 }),
     ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING" }),
     ev("drive-needs-human", { worker: "w1", issue: 1 }),
   ]);
-  assert.match(markup(escalated.state), /data-issue="1"[\s\S]*?<circle r="9" style="fill:var\(--rust\)"/);
+  assert.match(markup(escalated.state), /data-issue="1"[\s\S]*?<path class="hero-droplet-shape" d="[^"]*" style="fill:var\(--rust\)"/);
 
   const merged = run([ev("dispatched", { worker: "w1", issue: 1 }), ev("merged", { worker: "w1", issue: 1, pr: 11 })]);
-  assert.match(markup(merged.state), /data-issue="1"[\s\S]*?<circle r="9" style="fill:var\(--moss\)"/);
+  assert.match(markup(merged.state), /data-issue="1"[\s\S]*?<path class="hero-droplet-shape" d="[^"]*" style="fill:var\(--moss\)"/);
 });
 
 test("the escalation branch and NEEDS HUMAN node read their stroke from --rust, never a hardcoded hex", () => {
@@ -728,6 +741,139 @@ test("the ring count and the PLAN/IMPLEMENT/OUTCOME phase captions render with -
   assert.match(html, /class="hero-phase" style="font-family:var\(--font-display\)"[^>]*>\s*IMPLEMENT/);
   assert.match(html, /class="hero-phase" style="font-family:var\(--font-display\)"[^>]*>\s*OUTCOME/);
   assert.match(html, /class="hero-ring-count" style="font-family:var\(--font-display\)"/);
+});
+
+// ── #879: hero panel typography + chip/card/icon detailing (fidelity-ledger rows 1, 2, 7) ──
+
+// #879 gate② finding [1]: a regex read of the stylesheet TEXT proves the rule was authored, not
+// that it actually cascades onto a rendered element. This test mounts the real markup into a
+// REAL DOM (`registerRealDom()`, happy-dom) with the FULL production stylesheet cascade injected
+// as actual `<style>` elements, then reads `getComputedStyle` off the matched element — proof the
+// selector matches and the cascade applies, not just that the source text contains the rule.
+//
+// #886 gate② run 2e566ac9 finding [4]: the prior version accepted ANY non-default letter-spacing
+// (`assert.notEqual(computed.letterSpacing, "normal")`), which would pass even for a later
+// overriding rule with the WRONG spacing — the finding's own ask: "sensitive to the exact
+// winning cascaded value". `hero.css`'s `.hero-phase` now declares `letter-spacing` as a literal
+// `2.34px` rather than `0.18em` specifically so this can assert that exact value directly — see
+// that rule's own doc for why: happy-dom resolves an `em` letter-spacing against the DEFAULT
+// 16px font-size rather than this element's own cascaded 13px whenever the same selector's own
+// rule declares a font-size at all (reproduced directly; splitting `font-size` and
+// `letter-spacing` into separate rule blocks for the same selector does NOT avoid it — only
+// verified in isolation, an EARLIER version of this fix mistook cross-test style-tag
+// contamination for a genuine split-rule fix). A literal px value has no unit to mis-resolve.
+//
+// #886 final gate②: injecting `heroCss` ALONE proved the selector/cascade within hero.css, but
+// left a same-specificity override landing in tokens.css/panels.css/app.css invisible to this
+// test regardless of source order, since those files were never mounted at all. Confirmed by
+// direct reproduction: a synthetic `.hero-phase { letter-spacing: 9px }` appended past `heroCss`
+// alone DOES win (cascade mechanics behave as expected once mounted) — the gap was never that
+// the cascade is unpredictable, only that this test never gave production's other sheets a
+// chance to be seen. Fixed by mounting the real production order — tokens.css → panels.css →
+// hero.css → app.css's own `body { ... }` rule (imports run first in app.css, its own rules
+// after) — same pattern as `Header.test.tsx`'s `.spend-meter-value` fix. Re-verified against
+// that full cascade: `.hero-phase` declares font-size/font-weight/letter-spacing all as literal
+// values in its own rule (no inheritance, no `em` to mis-resolve), and no other shipped file
+// declares a `.hero-phase` rule, so 2.34px is still the true winning value — this test now
+// proves that rather than assuming it.
+test("#879 gate② run 2e566ac9 finding [4]: PLAN/IMPLEMENT/OUTCOME headers render bold at the EXACT shipped letter-spacing, proven against the REAL production cascade (tokens.css + panels.css + hero.css + app.css's body rule)", () => {
+  assert.ok(bodyFontSizeRule, "app.css must still declare a body { ... } rule for tokensCss/panelsCss/heroCss to cascade through");
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const container = document.createElement("div");
+  container.innerHTML = markup(initialHeroState(3));
+  document.body.appendChild(container);
+  try {
+    const phaseEl = container.querySelector(".hero-phase");
+    assert.ok(phaseEl, "a real .hero-phase element must render and match the injected stylesheet's selector");
+    const computed = getComputedStyle(phaseEl as Element);
+    assert.equal(
+      computed.fontWeight,
+      "600",
+      "the cascade must actually apply the bold weight to the rendered element, not just declare it in source",
+    );
+    assert.equal(computed.fontSize, "13px");
+    assert.equal(
+      computed.letterSpacing,
+      "2.34px",
+      "the exact winning cascaded value against the full production cascade, not merely 'some' spacing",
+    );
+  } finally {
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+
+  const match = heroCss.match(/\.hero-phase\s*\{([^}]*)\}/);
+  assert.ok(match, ".hero-phase rule must exist");
+  const body = match?.[1] as string;
+  assert.match(body, /font-weight:\s*600/);
+  assert.match(body, /letter-spacing:\s*2\.34px\b/, "pin the exact shipped value");
+  assert.match(
+    body,
+    /font-family:\s*var\(--font-display\)/,
+    "font-family must stay Fraunces — reversing #728's adjudication is out of this issue's scope",
+  );
+});
+
+test("#879: the backlog's READY cards render as taller filled cards with bold, contrasting card text", () => {
+  const { state } = run([ev("pool-selected", { issues: [94] })]);
+  const html = markup(state);
+  assert.match(html, /class="hero-pool-chip"[\s\S]*?<rect style="fill:var\(--sap\)"[^>]*height="24"[^>]*rx="8"/);
+  assert.match(html, /class="hero-num hero-pool-num"[^>]*>⊙ 94</);
+  const poolNumRule = heroCss.match(/\.hero-pool-num\s*\{([^}]*)\}/);
+  assert.ok(poolNumRule, ".hero-pool-num rule must exist");
+  assert.match(poolNumRule?.[1] as string, /font-weight:\s*600/);
+  assert.match(poolNumRule?.[1] as string, /fill:\s*var\(--heartwood\)/);
+});
+
+test("#879: each PLAN circle (goal-align/arch-review/verify) draws its own distinct icon", () => {
+  const html = markup(initialHeroState(3));
+  for (const icon of ["target", "tree", "check"]) {
+    assert.equal(
+      (html.match(new RegExp(`data-icon="${icon}"`, "g")) ?? []).length,
+      1,
+      `exactly one ${icon} icon (goal-align/arch-review/verify each draw their own)`,
+    );
+  }
+  assert.equal((html.match(/class="hero-planning-icon"/g) ?? []).length, 3, "one icon per PLAN node, never zero or duplicated");
+});
+
+test("#879: issue tokens render as a droplet (teardrop path), never a bare circle", () => {
+  const { state } = run([ev("dispatched", { worker: "w1", issue: 1 })]);
+  const html = markup(state);
+  assert.match(html, /class="hero-droplet-shape" d="M0,-9/);
+  assert.doesNotMatch(html, /class="hero-droplet"[\s\S]{0,40}<circle r="9"/, "no droplet may still draw the old bare circle");
+});
+
+// #886 gate② run b2a4f37d finding [0] + run 2e566ac9 finding [1]: two earlier rounds moved the
+// NUMBER off-center to dodge the newest-merge droplet `merged` (state.ts) always parks at the
+// trunk — first landing directly on top of it (dead center), then well below the real one-merge
+// demo's tiny radius-7 ring (a bound loose enough that the prior version of THIS test, checking
+// against `initialHeroState`'s theoretical max radius, never caught it). This round moves the
+// DROPLET instead (`TRUNK_DROPLET_OFFSET`, stage.tsx) so the number can stay genuinely centered
+// at any ring count, verified here against the real one-merge demo state specifically.
+test("#879/#886: against the REAL single-merge demo state, the outcome number sits genuinely centered on the ring — the trunk droplet moved out of the way, not the number", () => {
+  const { state } = run([ev("merged", { worker: "w1", issue: 1, pr: 11 })]);
+  assert.equal(state.rings, 1, "this fixture's point is the real one-ring state the live demo capture renders, not a synthetic maximum");
+
+  const html = markup(state);
+  const match = html.match(/class="hero-ring-count"[^>]*x="(-?[\d.]+)" y="(-?[\d.]+)"/);
+  assert.ok(match, "hero-ring-count must render with x/y");
+  assert.equal(Number(match?.[1]), TRUNK.x, "horizontally dead-center on the trunk");
+  assert.equal(
+    Number(match?.[2]),
+    TRUNK.y + 11,
+    "vertically dead-center on the trunk (+11 is only a baseline-centering nudge, not a collision offset)",
+  );
+});
+
+test("#879: the current (outermost) ring strokes bolder than the rest — a bold ring, not a hairline", () => {
+  const currentRule = heroCss.match(/\.hero-ring\[data-current="true"\]\s*\{([^}]*)\}/);
+  assert.ok(currentRule, '.hero-ring[data-current="true"] rule must exist');
+  assert.match(currentRule?.[1] as string, /stroke-width:\s*3/);
+  const baseRule = heroCss.match(/\.hero-ring\s*\{([^}]*)\}/);
+  assert.match(baseRule?.[1] as string, /stroke-width:\s*1\.5/, "older rings stay hairline-thin — only the current ring bolds");
 });
 
 test("#728 gate② finding [0] (run 31f166a9): `.hero-small` (10px) is declared BEFORE every 9px caption rule, so the lane caption and outcome tally — both `hero-small` PLUS a 9px class — render at their intended 9px, not the 10px a later `.hero-small` would silently win with", () => {
@@ -1162,6 +1308,51 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
   assertNoOverlap(boxes);
 
   assert.match(html, /data-node="needs-human" data-count="6"/);
+});
+
+// #886 gate② run 2e566ac9 finding [1]: the earlier fix kept the droplet dead-center and moved
+// the NUMBER away to dodge it (first landing on top of it, then reading as "well outside" a low
+// ring count). This round moves the DROPLET instead (`TRUNK_DROPLET_OFFSET`, stage.tsx) so the
+// number can stay genuinely centered. Stressed at a 3-digit ring total and a 6-digit PR number —
+// `TRUNK_DROPLET_OFFSET`'s own doc argues the vertical component alone already clears the label
+// regardless of either string's width; this proves that against the ACTUAL rendered boxes rather
+// than trusting the doc's arithmetic, the same discipline #728's NEEDS_HUMAN_COL_STEP/ROW_STEP
+// doc cites for its own cluster.
+test("#886 gate② run 2e566ac9 finding [1]: the centered ring count never collides with the newest-merge droplet, now offset away from the trunk center — stressed at multi-digit ring/PR counts", () => {
+  const events: DomainEvent[] = [];
+  for (let i = 1; i <= 999; i++) events.push(ev("merged", { worker: `m${i}`, issue: i, pr: 999999 }));
+  const { state } = run(events, 3);
+  assert.equal(state.rings, 999, "stress case: a 3-digit ring total, the widest realistic .hero-ring-count string");
+  const html = markup(state);
+
+  const countMatch = html.match(/class="hero-ring-count"[^>]*x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</);
+  assert.ok(countMatch, "hero-ring-count must render");
+  const [, cxRaw, cyRaw, countText] = countMatch as unknown as [string, string, string, string];
+  assert.equal(countText, "999");
+  const countBox = textBox(countText, Number(cxRaw), Number(cyRaw), 33);
+
+  const trunkDroplet = state.droplets.find((d) => d.at === "trunk");
+  assert.ok(trunkDroplet, "the newest merge must still park a droplet at the trunk");
+  const { x: dropX, y: dropY } = dropletPoint(state, trunkDroplet as Droplet);
+  assert.notEqual(dropX, TRUNK.x, "the droplet — not the number — carries the offset now");
+  assert.notEqual(dropY, TRUNK.y);
+
+  const dropletRe = new RegExp(`<g class="hero-droplet"[^>]*transform="translate\\(${dropX} ${dropY}\\)">([\\s\\S]*?)</g>`);
+  const dropletInner = html.match(dropletRe)?.[1];
+  assert.ok(dropletInner, "the trunk droplet must render at its own offset transform");
+  const labelMatch = dropletInner?.match(/<text class="hero-num hero-small" x="0" y="-14" text-anchor="middle">([^<]*)<\/text>/);
+  assert.ok(labelMatch, "the newest-merge droplet must still carry its own PR chip label");
+  const labelBox = textBox(labelMatch?.[1] as string, dropX, dropY - 14, 10);
+  const shapeBox = circleBox(dropX, dropY, 9);
+
+  assert.ok(
+    !boxesOverlap(countBox, labelBox),
+    `ring count ${JSON.stringify(countBox)} overlaps the trunk droplet's label ${JSON.stringify(labelBox)}`,
+  );
+  assert.ok(
+    !boxesOverlap(countBox, shapeBox),
+    `ring count ${JSON.stringify(countBox)} overlaps the trunk droplet's shape ${JSON.stringify(shapeBox)}`,
+  );
 });
 
 // ── #745: a droplet the fold can no longer vouch for must not be COUNTED as confident pending ──

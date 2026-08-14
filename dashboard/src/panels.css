@@ -143,6 +143,13 @@
   border-radius: var(--radius-pill);
 }
 
+/* #879: the frozen baseline's spend meter is bold mono, not the ambient body weight — matches
+ * the hero section headers' own weight bump (`.hero-phase`, hero.css), same doctrine. */
+.spend-meter-value {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
 .spend-meter-warm .spend-meter-value {
   color: var(--rust);
 }

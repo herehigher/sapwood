@@ -31,11 +31,35 @@
  * AC: a component test asserts the rendered font-family directly). --label reuses the same
  * face for the smaller BACKLOG / ring-count captions, declared here since those aren't
  * separately token-tested. */
-.hero-phase,
 .hero-label {
   font-family: var(--font-display);
   font-size: 11px;
   letter-spacing: 0.14em;
+  fill: var(--bark-text);
+}
+
+/* #879: PLAN/IMPLEMENT/OUTCOME — the frozen baseline's bold, evenly-spaced section headers.
+ * Font-family stays Fraunces (frontend-design.md §5's #728 adjudication already settled that
+ * against these same baseline PNGs — a mockup-vs-shipped font-family deviation is not this
+ * issue's to re-litigate); only weight/size/letter-spacing move to close the "thin/small" gap
+ * `docs/design/729-fidelity-ledger.md` row 2 recorded.
+ *
+ * #886 gate② run 2e566ac9 finding [4]: `letter-spacing` is a literal px value (2.34px), not
+ * `0.18em`, even though 2.34px IS exactly 0.18em at this rule's own 13px font-size — verified
+ * NOT to be a style preference: happy-dom (this repo's real-DOM test harness, `test-dom.ts`)
+ * resolves an `em` letter-spacing against the DEFAULT 16px font-size rather than the element's
+ * own cascaded 13px whenever the SAME selector's own rule declares font-size at all (reproduced
+ * directly; splitting font-size and letter-spacing into two separate rule blocks for the same
+ * selector does NOT avoid it — only an element that inherits its font-size with no own-rule
+ * declaration at all resolves correctly, which isn't an option here since this rule deliberately
+ * sets its own 13px). A literal px value has no unit to mis-resolve in the first place — in any
+ * real browser it renders identically to `0.18em` here, and `hero.test.ts` can assert the exact
+ * value directly instead of fighting the test harness. */
+.hero-phase {
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 2.34px;
   fill: var(--bark-text);
 }
 
@@ -49,6 +73,13 @@
   font-family: var(--font-data);
   font-size: 11px;
   fill: var(--bark-text);
+}
+
+/* #879: backlog READY cards are filled --sap — --heartwood is the contrasting card-text token
+ * (see stage.tsx's own doc on why the same token works dark-on-amber AND light-on-amber). */
+.hero-pool-num {
+  font-weight: 600;
+  fill: var(--heartwood);
 }
 
 /* #728 gate② finding [0] (run 31f166a9): must precede every 9px caption rule below — a lane
@@ -201,6 +232,10 @@
 
 .hero-ring[data-current="true"] {
   stroke-opacity: 1;
+  /* #879: the frozen baseline's outcome ring is a bold display number set against a ring that
+   * itself reads as substantial, not a hairline — bolding only the CURRENT (outermost) ring
+   * carries that weight without inventing history-less rings the real merge count doesn't have. */
+  stroke-width: 3;
 }
 
 /* §6 ambient: the outermost ring breathes at low amplitude while any lane is running. */
@@ -237,6 +272,29 @@
   stroke: var(--sap);
   stroke-opacity: 0.9;
   animation: hero-breathe 3s ease-in-out infinite;
+}
+
+/* #879: the target/tree/check glyph inside each PLAN circle — same inactive/active colour
+ * split as the circle it sits in, so the icon never carries state the circle doesn't already. */
+.hero-planning-icon {
+  fill: none;
+  stroke: var(--bark);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.hero-planning-icon-dot {
+  fill: var(--bark);
+  stroke: none;
+}
+
+[data-active="true"] .hero-planning-icon {
+  stroke: var(--sap);
+}
+
+[data-active="true"] .hero-planning-icon-dot {
+  fill: var(--sap);
 }
 
 /* ---- Ambient ------------------------------------------------------------- */

@@ -58,7 +58,9 @@ export const STAGE = { w: 1200, h: 380 } as const;
 // thing that hangs off a droplet — still fits inside the viewBox.
 // #716 gate② round 2 PO probe P3: chip step bumped 22 → 26 — labels like "⊙ 725" stacked at
 // the old 22px step were measured colliding with the next chip's label at small render sizes.
-export const BACKLOG = { x: 46, y: 62, w: 96, chip: 26 } as const;
+// #879: bumped 26 → 32 — the frozen baseline draws the ready backlog as filled CARDS, not a
+// thin list; a taller step is what gives the card rect (below) room to read as a card.
+export const BACKLOG = { x: 46, y: 62, w: 96, chip: 32 } as const;
 /** `note` clears the tallest lane stack (`lanes.max` 6) rather than sitting under 3 lanes. */
 const PLANNING = { x: 224, note: 300, noteX: 152 } as const;
 /** §7: plain word first, internal term never. `role` is the config-captions.ts `roles.<role>`
@@ -180,6 +182,21 @@ const CHECKPOINT_DRAW_CAP = CHECKPOINT_COLS * CHECKPOINT_ROWS_MAX;
  */
 const CHECKPOINT_OVERFLOW_REAL_CAP = CHECKPOINT_COLS * (CHECKPOINT_ROWS_MAX - 1);
 export const TRUNK = { x: 1006, y: 156, step: 7, max: 12 } as const;
+/**
+ * #886 gate② run 2e566ac9 finding [1]: where the newest-merge droplet parks, offset from
+ * `dropletPoint`'s "trunk" case — frees the true trunk CENTER for the outcome number (below).
+ * Chosen purely for vertical clearance from the number's own worst-case rendered box (a
+ * multi-digit ring count centered at `TRUNK.y + 11`, `hero.css`'s 33px `.hero-ring-count`):
+ * the droplet's own label sits 14px above its shape (`hero-droplet`'s own `y=-14` convention),
+ * so a -40 vertical offset alone already puts the label's bottom edge (`hero.test.ts`'s stress
+ * test: ~104) well clear of the number's top edge (~140) regardless of either string's digit
+ * count or the +40 horizontal component — the horizontal offset only keeps the marker visually
+ * near "where the merge arm feeds in" (`GATES.review` → `TRUNK`), not load-bearing for the
+ * clearance itself. Verified collision-free at a deliberately stressed digit count (3-digit ring
+ * total, 6-digit PR number) by `hero.test.ts`'s own test, the same discipline #728's
+ * NEEDS_HUMAN_COL_STEP/ROW_STEP doc already uses for its own cluster.
+ */
+const TRUNK_DROPLET_OFFSET = { dx: 40, dy: -40 } as const;
 const REFLECTION = { x: 1118, bottom: 244 } as const;
 const REFLECTION_NODES = [
   { node: "summary" as const, y: 110, label: "Summary", role: "roles.harvest" },
@@ -267,8 +284,17 @@ export function dropletPoint(state: HeroState, d: Droplet, at: DropletAt = d.at)
       const row = Math.floor(rank / NEEDS_HUMAN_COLS);
       return { x: ESCALATION.x + col * NEEDS_HUMAN_COL_STEP, y: ESCALATION.y - 30 - row * NEEDS_HUMAN_ROW_STEP };
     }
+    // #886 gate② run 2e566ac9 finding [1]: the frozen baseline's outcome ring has NOTHING
+    // else drawn near it — just a big centered number. `merged` (state.ts) always parks the
+    // newest-merge droplet's PR tag at the trunk, so the two can't both sit dead-center; earlier
+    // attempts moved the NUMBER off-center to dodge the droplet (read as "floating below the
+    // ring" for the realistic low-ring-count case a live probe actually captures). This moves
+    // the DROPLET instead — up-right of center, near where the merge arm feeds in — freeing
+    // the true center for the number to match the baseline exactly, at any ring count. The
+    // offset is verified collision-free against a worst-case ring/PR digit count by
+    // `hero.test.ts`'s own stress test (mirrors the #728 needs-human-cluster stress pattern).
     case "trunk":
-      return { x: TRUNK.x, y: TRUNK.y };
+      return { x: TRUNK.x + TRUNK_DROPLET_OFFSET.dx, y: TRUNK.y + TRUNK_DROPLET_OFFSET.dy };
   }
 }
 
@@ -293,6 +319,16 @@ function dropletFill(d: Droplet): string {
   if (d.failed || d.at === "needs-human") return "var(--rust)";
   return "var(--sap)";
 }
+
+/**
+ * #879: the frozen baseline draws every issue token as a teardrop, not a bare circle. Kept
+ * within the SAME ~9px reach the old `<circle r={9}>` had (tip at y=-9, belly arc capped at
+ * y=+9, x within ±7) — `hero.test.ts`'s collision math (`circleBox(x, y, 9)`) treats a
+ * droplet's footprint as that 9px-radius circle, and every hairline-margin overlap check in
+ * this file (checkpoint grid, needs-human cluster, backlog column) was tuned against it; a
+ * shape that grew past that footprint would silently invalidate those margins.
+ */
+const DROPLET_SHAPE = "M0,-9 C4,-4.5 7,-1 7,2 A7,7 0 1 1 -7,2 C-7,-1 -4,-4.5 0,-9 Z";
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
@@ -350,6 +386,43 @@ export function modelEffortCaption(config: Record<string, unknown> | null | unde
   if (typeof model !== "string") return null;
   const effort = readConfigPath(config, `${rolePath}.effort`);
   return typeof effort === "string" ? `${model} · ${effort}` : model;
+}
+
+/**
+ * #879: the frozen baseline draws a small glyph inside each PLAN circle — target (goal-align),
+ * a tiny hierarchy (arch-review), a checkmark (verify). Hand-drawn vector primitives, not a new
+ * icon-font/library dependency, matching how the stage already draws every other glyph (✓/✕
+ * text, hairline shapes) — three static, tightly-scoped shapes don't earn a package.
+ * `[data-active="true"] .hero-planning-icon` (hero.css) recolors the same way the node's own
+ * circle does; the icon carries no state of its own.
+ */
+function planningIcon(node: (typeof PLANNING_NODES)[number]["node"], cx: number, cy: number) {
+  switch (node) {
+    case "goal-align":
+      return (
+        <g className="hero-planning-icon" data-icon="target">
+          <circle cx={cx} cy={cy} r={6.5} />
+          <circle className="hero-planning-icon-dot" cx={cx} cy={cy} r={1.6} />
+        </g>
+      );
+    case "arch-review":
+      return (
+        <g className="hero-planning-icon" data-icon="tree">
+          <line x1={cx} y1={cy - 4} x2={cx} y2={cy + 1} />
+          <line x1={cx} y1={cy + 1} x2={cx - 6} y2={cy + 5} />
+          <line x1={cx} y1={cy + 1} x2={cx + 6} y2={cy + 5} />
+          <rect x={cx - 2} y={cy - 8} width={4} height={4} />
+          <rect x={cx - 8} y={cy + 5} width={4} height={4} />
+          <rect x={cx + 4} y={cy + 5} width={4} height={4} />
+        </g>
+      );
+    case "verify":
+      return (
+        <g className="hero-planning-icon" data-icon="check">
+          <path d={`M ${cx - 5} ${cy} L ${cx - 1.5} ${cy + 4} L ${cx + 5} ${cy - 5}`} />
+        </g>
+      );
+  }
 }
 
 /** §6: "how long since anything happened" — the OUTCOME zone's staleness caption. Whole
@@ -467,12 +540,20 @@ export function HeroStage({
             <rect
               style={{ fill: "var(--sap)" }}
               x={BACKLOG.x + 8}
-              y={BACKLOG.y + 10 + i * BACKLOG.chip}
+              y={BACKLOG.y + 6 + i * BACKLOG.chip}
               width={BACKLOG.w - 16}
-              height={16}
+              height={24}
               rx={8}
             />
-            <text className="hero-num" x={BACKLOG.x + BACKLOG.w / 2} y={BACKLOG.y + 22 + i * BACKLOG.chip} textAnchor="middle">
+            {/* #879: --heartwood is the frozen baseline's dark-on-amber card text — it inverts
+             * with --sap the same way it inverts with the page ground, so one token reads dark
+             * on the bright dark-theme amber AND light on the darker light-theme amber. */}
+            <text
+              className="hero-num hero-pool-num"
+              x={BACKLOG.x + BACKLOG.w / 2}
+              y={BACKLOG.y + 22 + i * BACKLOG.chip}
+              textAnchor="middle"
+            >
               ⊙ {issue}
             </text>
           </g>
@@ -495,6 +576,7 @@ export function HeroStage({
             >
               <title>{n.hint}</title>
               <circle className="hero-planning-node" cx={PLANNING.x} cy={n.y} r={17} />
+              {planningIcon(n.node, PLANNING.x, n.y)}
               <text className="hero-node-label" x={PLANNING.x + 28} y={n.y + 4}>
                 {n.label}
               </text>
@@ -675,7 +757,15 @@ export function HeroStage({
             />
           );
         })}
-        <text className="hero-ring-count" style={{ fontFamily: "var(--font-display)" }} x={TRUNK.x} y={TRUNK.y + 106} textAnchor="middle">
+        {/* #879/#886: dead center — the frozen baseline's bold display number fills the ring
+         * cross-section with nothing else drawn near it. Earlier rounds moved this text itself
+         * off-center to dodge the newest-merge droplet that always parks at the trunk (see
+         * `merged` in state.ts); that read as "floating below the ring" for the realistic
+         * low-ring-count case a live probe actually captures. `TRUNK_DROPLET_OFFSET` (above)
+         * moves the DROPLET out of the way instead, so this can stay truly centered at any ring
+         * count. +11 is a baseline-centering nudge for the display font's cap-height, not a
+         * collision-avoidance number. */}
+        <text className="hero-ring-count" style={{ fontFamily: "var(--font-display)" }} x={TRUNK.x} y={TRUNK.y + 11} textAnchor="middle">
           {state.rings}
         </text>
         <text className="hero-label" x={TRUNK.x} y={TRUNK.y + 124} textAnchor="middle">
@@ -738,7 +828,7 @@ export function HeroStage({
               data-lane={d.lane ?? ""}
               transform={`translate(${x} ${y})`}
             >
-              <circle r={9} style={{ fill: dropletFill(d) }} />
+              <path className="hero-droplet-shape" d={DROPLET_SHAPE} style={{ fill: dropletFill(d) }} />
               <text className="hero-num hero-small" x={0} y={-14} textAnchor="middle">
                 {d.at === "trunk" ? "✓ " : ""}
                 {d.pr === null ? `⊙ ${d.issue}` : `⤳ ${d.pr}`}

@@ -1,8 +1,23 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { EngineState } from "../api/types.ts";
+import { registerRealDom } from "../test-dom.ts";
 import { type EngineFacts, Header, resolveSpendMeter, showsPauseChip } from "./Header.tsx";
+
+registerRealDom();
+
+const panelsCss = readFileSync(new URL("../panels.css", import.meta.url), "utf8");
+const tokensCss = readFileSync(new URL("../tokens.css", import.meta.url), "utf8");
+const appCss = readFileSync(new URL("../app.css", import.meta.url), "utf8");
+// #886 gate② run 2e566ac9 finding [3]: `.spend-meter-value` declares no font-size of its own —
+// it inherits `body`'s (app.css, driven by tokens.css's `--text-0`). The first cut of this test
+// injected only `panelsCss`, leaving happy-dom's own 16px default in play instead of production's
+// real 13px, so its "exact" computed letter-spacing (0.32px = 0.02em × 16px) didn't match what
+// actually ships (0.02em × 13px = 0.26px). Extracted (not hand-copied) straight from the real
+// `body { ... }` rule in app.css so this can't silently desync from the real cascade.
+const bodyFontSizeRule = appCss.match(/body\s*\{[^}]*\}/)?.[0];
 
 // ── pure helpers (§3 A / §8) ────────────────────────────────────────────────────────────────
 
@@ -187,6 +202,51 @@ test("a null budgetUsd on `round` (artifact-less round) renders the used amount 
   );
   assert.match(html, /\$3\.14/);
   assert.doesNotMatch(html, /\$3\.14 \//);
+});
+
+// #886 gate② run 2e566ac9 finding [3]: mounts the REAL production cascade (`tokensCss` for
+// `--text-0`, the extracted real `body { font-size: var(--text-0) }` rule, then `panelsCss`) —
+// not just `panelsCss` alone, which left happy-dom at its own 16px default instead of the
+// element's real inherited 13px. `.spend-meter-value` declares no font-size of its own, so
+// happy-dom's em-resolution against an INHERITED font-size (as opposed to one declared in the
+// SAME rule as letter-spacing — see `.hero-phase`'s paired fix, hero.test.ts) is trustworthy
+// here, verified by direct reproduction: both properties are asserted at their exact computed
+// value against 13px, not just "applied".
+test("#879 gate② run 2e566ac9 finding [3]: the spend meter value renders bold at the exact shipped weight/letter-spacing, proven against the REAL production cascade (tokens.css + app.css's body rule + panels.css)", () => {
+  assert.ok(bodyFontSizeRule, "app.css must still declare a body { ... } rule for tokensCss/panelsCss to cascade through");
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${bodyFontSizeRule}\n${panelsCss}`;
+  document.head.appendChild(style);
+  const container = document.createElement("div");
+  container.innerHTML = renderToStaticMarkup(
+    <Header disconnected={false} isPending={false} engine={engine("running")} spend={SPEND_OK} parked={false} />,
+  );
+  document.body.appendChild(container);
+  try {
+    const valueEl = container.querySelector(".spend-meter-value");
+    assert.ok(valueEl, "a real .spend-meter-value element must render and match the injected stylesheet's selector");
+    const computed = getComputedStyle(valueEl as Element);
+    assert.equal(computed.fontSize, "13px", "sanity check: the real body-cascaded font-size the letter-spacing assertion below depends on");
+    assert.equal(
+      computed.fontWeight,
+      "600",
+      "the cascade must actually apply the bold weight to the rendered element, not just declare it in source",
+    );
+    assert.equal(
+      computed.letterSpacing,
+      "0.26px",
+      "0.02em against the REAL inherited 13px body font-size — the exact shipped value, not a stand-in environment's 0.32px",
+    );
+  } finally {
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+
+  const match = panelsCss.match(/\.spend-meter-value\s*\{([^}]*)\}/);
+  assert.ok(match, ".spend-meter-value rule must exist");
+  const body = match?.[1] as string;
+  assert.match(body, /font-weight:\s*600/);
+  assert.match(body, /letter-spacing:\s*0\.02em\b/, "pin the exact shipped value — not a wildcard letter-spacing check");
 });
 
 test("does not render, import, or re-implement the legend", () => {
