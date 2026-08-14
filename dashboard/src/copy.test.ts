@@ -87,6 +87,9 @@ const DOC_TABLE_KINDS = [
   "round-phase",
   "idle-churn-detected",
   "ci-inert-escalated",
+  "ci-pending-observed",
+  "ci-pending-escalated",
+  "ci-pending-cleared",
 ].sort();
 
 test("copy.ts has exactly one entry per §7 table kind — no more, no fewer", () => {
@@ -470,6 +473,9 @@ const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expec
     { pr: 12, issue: 7, checks: [{ name: "lint", conclusion: "SKIPPED" }] },
     "PR #12 needs a human — CI concluded without ever going green (1 check)",
   ],
+  ["ci-pending-observed", { pr: 12, issue: 7 }, "PR #12 is waiting on CI"],
+  ["ci-pending-escalated", { pr: 12, issue: 7 }, "PR #12 needs a human — CI stayed pending too long to progress on its own"],
+  ["ci-pending-cleared", { pr: 12, issue: 7 }, "PR #12's CI resolved"],
 ];
 
 test("table-driven §7 sentence oracle: every row (and every documented payload branch) renders its exact documented text", () => {
@@ -495,7 +501,11 @@ test("engineStateCaption: every other state ignores standbyNextCheckSec even if 
   assert.equal(engineStateCaption("paused", null), "paused by operator");
   assert.equal(engineStateCaption("winding-down", null), "finishing in-flight work, no new dispatch");
   assert.equal(engineStateCaption("stopping", null), "shutting down");
-  assert.equal(engineStateCaption("stopped", null), "stopped");
+  assert.equal(engineStateCaption("stopped", null), "not running");
+});
+
+test("engineStateCaption: stopped never repeats the engine-word span's own text (#729 — was the doubled 'stopped — stopped')", () => {
+  assert.notEqual(engineStateCaption("stopped", null), "stopped");
 });
 
 test("engineStateCaption: standby with no countdown known yet renders the base caption alone, never a stray dash", () => {

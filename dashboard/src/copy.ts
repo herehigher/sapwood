@@ -155,11 +155,14 @@ export type EventKind =
   // the copy map in the SAME PR that registers it (engine/src/state/event-kinds/drive.ts). Not
   // yet emitted anywhere (the live-posting wiring is #783's human-owned remainder,
   // merge-driver.ts/conductor.ts being guard-protected), but the kind itself is registered now,
-  // so it must be representable here today. `ci-pending-escalated` (#426) has the SAME gap —
-  // pre-existing, left untouched by this PR; not forced by any copy.ts union test (its engine
-  // registry `tags: []` keeps it out of `ESCALATION_SOURCE_KINDS`, so copy.test.ts's drift guard
-  // does not require it either), and out of this PR's own scope.
-  | "ci-inert-escalated";
+  // so it must be representable here today.
+  | "ci-inert-escalated"
+  // #729 fidelity ledger: the #426 gap this file used to note above — `ci-pending-observed`/
+  // `-escalated`/`-cleared` (engine/src/state/event-kinds/drive.ts) had no copy entry, so any of
+  // the three reaching the feed rendered the raw "Unrecognized event: ci-pending-*" fallback.
+  | "ci-pending-observed"
+  | "ci-pending-escalated"
+  | "ci-pending-cleared";
 
 const RESOLUTION_SENTENCE: Record<string, (p: Payload) => SentencePart[]> = {
   merged: (p) => ["Issue ", issueTok(p.issue), " no longer needs you — PR ", prTok(p.pr, p.issue), " was merged"],
@@ -456,6 +459,17 @@ export const COPY: Record<EventKind, CopyEntry> = {
     },
     attention: true,
   },
+  // #729 fidelity ledger — payload shape mirrors every other drive-arm CI kind (`pr`/`issue`).
+  "ci-pending-observed": {
+    sentence: (p) => ["PR ", prTok(p.pr, p.issue), " is waiting on CI"],
+  },
+  "ci-pending-escalated": {
+    sentence: (p) => ["PR ", prTok(p.pr, p.issue), " needs a human — CI stayed pending too long to progress on its own"],
+    attention: true,
+  },
+  "ci-pending-cleared": {
+    sentence: (p) => ["PR ", prTok(p.pr, p.issue), "'s CI resolved"],
+  },
 };
 
 /** The exhaustive kind list, derived from `COPY` itself rather than re-spelled — the same
@@ -529,7 +543,9 @@ export const ENGINE_STATE_CAPTION: Record<string, string> = {
   paused: "paused by operator",
   "winding-down": "finishing in-flight work, no new dispatch",
   stopping: "shutting down",
-  stopped: "stopped",
+  // #729 fidelity ledger: was the literal string "stopped", so the header rendered the doubled
+  // "stopped — stopped" (engine-word span + this caption span back to back).
+  stopped: "not running",
 };
 
 /** `standbyNextCheckSec` (the #723 API payload field) only ever applies to `standby` itself —
