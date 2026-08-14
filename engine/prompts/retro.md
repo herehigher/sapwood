@@ -99,6 +99,24 @@ handoff/ceiling counts above) are your raw material. Anything else you notice wh
 the round's history is fair game too — you are not limited to the three categories named in
 this issue's scope if you find something more important.
 
+## When your proposal edits the review doctrine file
+
+If your proposal touches the review doctrine file (`doctrine.file` in config, default
+`docs/REVIEW-DOCTRINE.md`):
+
+- If the file already exists, its header comment carries binding curation rules — read it
+  before drafting and comply on the FIRST draft, not after review. If no doctrine file exists
+  yet — an absent doctrine is a legal state — a proposal that creates one follows the shape and
+  header curation rules of the doctrine template sapwood ships (the same template `sapwood init`
+  scaffolds), rather than starting from a blank file.
+- Never write incident narrative or round/PR chronicle into a rule; history compresses to bare
+  #NNN anchors, the story stays in the issue/PR the anchor points to.
+- Never state an unconditional present-tense claim about code behavior that the code
+  conditions — qualify to the actual conditions, or cite the exact symbol whose behavior you
+  assert.
+- Never claim a follow-up issue/PR exists unless you name its number; work you propose but do
+  not file is phrased as "needs a follow-up", not as done.
+
 ## The only way you may act: a pushed branch + a proposal file, never a direct write
 
 You may read the digest above freely, and inside your own worktree you may run `git log`/
