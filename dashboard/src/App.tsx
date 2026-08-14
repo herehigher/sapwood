@@ -27,7 +27,7 @@ import type { StageNode } from "./inspector.ts";
 import type { ReplayPosition } from "./replay/player.ts";
 import { initialReplayState } from "./replay/reducer.ts";
 import { loadRoundEvents, roundEventCeiling } from "./replay/round-log.ts";
-import { buildPhaseWindows, type PhaseWindow } from "./replay/spend-replay.ts";
+import { buildPhaseWindows, closeTrailingWindow, type PhaseWindow } from "./replay/spend-replay.ts";
 import { loadRoundLog, type ReplayView, useReplay } from "./replay/useReplay.ts";
 
 /**
@@ -172,6 +172,12 @@ export function findLastClosedRound(rounds: readonly Round[]): Round | null {
  * `/api/events`+`/api/spend` paging an explicitly-selected replay round already goes through, not
  * a parallel fetch implementation. `null` on a rejected load (never throws) — same "never rejects
  * itself" contract `loadRoundLog` documents for its own callers.
+ *
+ * #888 gate② run 949439c8 finding [0]: `phaseWindows` runs through `closeTrailingWindow`, capped
+ * at the NEXT round's own `startedAt` (the same successor `spendCeilingId` above already bounds
+ * by id) — `round`'s own trailing window would otherwise stay open-ended forever (nothing in ITS
+ * OWN truncated event log closes it), harmless read alone but not once a caller unions this
+ * round's windows with a LATER round's own (`useTodayCostLog` below does exactly that).
  */
 export function loadClosedRoundCostLog(
   round: Round,
@@ -182,7 +188,9 @@ export function loadClosedRoundCostLog(
   const nextRound = rounds.filter((r) => r.roundId > round.roundId).sort((a, b) => a.roundId - b.roundId)[0];
   const spendCeilingId = nextRound ? nextRound.startSpendId : null;
   return loadRoundLog(round, ceilingId, spendCeilingId, lanesMax).then((result) =>
-    result.ok ? { spend: result.log.spend, phaseWindows: result.log.phaseWindows } : null,
+    result.ok
+      ? { spend: result.log.spend, phaseWindows: closeTrailingWindow(result.log.phaseWindows, nextRound?.startedAt ?? null) }
+      : null,
   );
 }
 
@@ -233,13 +241,24 @@ export function useLastClosedRoundCost(
  * (not just `todayRounds`) is what each fetch's own ceiling computation needs — a today-round's
  * "next round" boundary can itself start tomorrow, and `loadClosedRoundCostLog` already handles
  * that correctly given the full list.
+ *
+ * #888 gate② run 949439c8 finding [1]: the round ID SET alone only changes when a round OPENS or
+ * CLOSES — a round already in the set gaining a fresh phase transition or spend row left the set
+ * untouched, so this effect never re-ran while that round was still in progress, and TODAY's
+ * by-stage panel froze at its first snapshot for the rest of the round. `freshnessKey` below folds
+ * in TWO more already-flowing signals rather than opening a new polling channel of its own: each
+ * round's own `eventCount` (the identical live cursor `useInspectorRoundEvents` above already keys
+ * on, for the same "still-open round" reason) covers a fresh phase transition, and `todaySpendUsd`
+ * (the server-aggregated total `/api/loop/state`'s poll already carries) covers a fresh spend row
+ * landing without necessarily moving any round's own event count in the same tick.
  */
 export function useTodayCostLog(
   todayRounds: readonly Round[],
   allRounds: readonly Round[],
   lanesMax: number | null,
+  todaySpendUsd: number | null,
 ): { spend: SpendRow[]; phaseWindows: PhaseWindow[] } {
-  const roundIdsKey = todayRounds.map((r) => r.roundId).join(",");
+  const freshnessKey = `${todayRounds.map((r) => `${r.roundId}:${r.eventCount}`).join(",")}|${todaySpendUsd ?? ""}`;
   const allRoundsRef = useRef(allRounds);
   allRoundsRef.current = allRounds;
   const todayRoundsRef = useRef(todayRounds);
@@ -251,19 +270,20 @@ export function useTodayCostLog(
   });
 
   // `todayRounds`/`allRounds` are read via the refs above (same rationale useReplay.ts's own
-  // effect documents) — only the ROUND ID SET (roundIdsKey) should retrigger this fetch, not
-  // every unrelated `/api/rounds` poll, so they're deliberately absent from the dependency array.
+  // effect documents) — only `freshnessKey` (round set + each round's own eventCount + today's
+  // spend total) should retrigger this fetch, not every unrelated `/api/rounds`/`/api/loop/state`
+  // poll tick that changes neither.
   useEffect(() => {
     const rounds = todayRoundsRef.current;
     if (rounds.length === 0) {
-      setState({ key: roundIdsKey, spend: [], phaseWindows: [] });
+      setState({ key: freshnessKey, spend: [], phaseWindows: [] });
       return;
     }
     let cancelled = false;
     Promise.all(rounds.map((round) => loadClosedRoundCostLog(round, allRoundsRef.current, lanesMax))).then((results) => {
       if (cancelled) return;
       setState({
-        key: roundIdsKey,
+        key: freshnessKey,
         spend: results.flatMap((r) => r?.spend ?? []),
         phaseWindows: results.flatMap((r) => r?.phaseWindows ?? []),
       });
@@ -271,9 +291,9 @@ export function useTodayCostLog(
     return () => {
       cancelled = true;
     };
-  }, [roundIdsKey, lanesMax]);
+  }, [freshnessKey, lanesMax]);
 
-  return state.key === roundIdsKey ? { spend: state.spend, phaseWindows: state.phaseWindows } : { spend: [], phaseWindows: [] };
+  return state.key === freshnessKey ? { spend: state.spend, phaseWindows: state.phaseWindows } : { spend: [], phaseWindows: [] };
 }
 
 type ActiveFold = {
@@ -587,7 +607,10 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
   // set (gate② finding cost-doc-source-mismatch: the doc names "today's closed rounds", not every
   // round ever).
   const todayRounds = roundsForDay(allRounds, clock);
-  const todayLog = useTodayCostLog(todayRounds, allRounds, lanesMax);
+  // #888 gate② run 949439c8 finding [1]: `todayUsd` is the already-flowing freshness signal that
+  // lets `useTodayCostLog` notice a spend row landing on a round already in its set (see that
+  // hook's own doc).
+  const todayLog = useTodayCostLog(todayRounds, allRounds, lanesMax, loop.data?.spend.todayUsd ?? null);
   const todayModelBars = (loop.data?.spend.byModel ?? []).map((m) => ({ label: m.model, usd: m.usd }));
   const roundBudgetUsdConfig = ((): number | null => {
     const raw = loop.data?.config ? readConfigPath(loop.data.config, "cost.roundBudgetUsd") : undefined;

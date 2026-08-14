@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { SpendRow } from "../api/types.ts";
 import type { DomainEvent } from "../domain-event.ts";
-import { bucketSpendByPhase, buildPhaseWindows, phaseSpendBars, spendThroughTs, UNATTRIBUTED_PHASE } from "./spend-replay.ts";
+import {
+  bucketSpendByPhase,
+  buildPhaseWindows,
+  closeTrailingWindow,
+  phaseSpendBars,
+  spendThroughTs,
+  UNATTRIBUTED_PHASE,
+} from "./spend-replay.ts";
 
 function spendRow(id: number, ts: string, usd: number): SpendRow {
   return {
@@ -72,6 +79,36 @@ test("buildPhaseWindows ignores non-round-phase events and sorts by id regardles
 
 test("buildPhaseWindows returns no windows when the log carries no round-phase events at all (pre-#206 history)", () => {
   assert.deepEqual(buildPhaseWindows([]), []);
+});
+
+// ── closeTrailingWindow: bounding a round's own open-ended trailing window ──────────────────────
+
+test("closeTrailingWindow caps an open-ended trailing window's endTs at the given boundary", () => {
+  const windows = buildPhaseWindows([roundPhaseEvent(1, "2026-08-10T00:00:00Z", "closed")]);
+  assert.deepEqual(closeTrailingWindow(windows, "2026-08-10T02:00:00Z"), [
+    { phase: "closed", startTs: "2026-08-10T00:00:00Z", endTs: "2026-08-10T02:00:00Z" },
+  ]);
+});
+
+test("closeTrailingWindow leaves the windows untouched when boundaryTs is null (no known successor yet)", () => {
+  const windows = buildPhaseWindows([roundPhaseEvent(1, "2026-08-10T00:00:00Z", "closed")]);
+  assert.deepEqual(closeTrailingWindow(windows, null), windows);
+});
+
+test("closeTrailingWindow leaves an ALREADY-closed trailing window untouched, never overwriting a real endTs", () => {
+  const windows = buildPhaseWindows([
+    roundPhaseEvent(1, "2026-08-10T00:00:00Z", "aligning"),
+    roundPhaseEvent(2, "2026-08-10T00:10:00Z", "executing"),
+  ]);
+  // Only the FIRST window here is closed by a real successor event; the LAST is still open —
+  // `closeTrailingWindow` only ever touches that last one.
+  const capped = closeTrailingWindow(windows, "2026-08-10T01:00:00Z");
+  assert.deepEqual(capped[0], { phase: "aligning", startTs: "2026-08-10T00:00:00Z", endTs: "2026-08-10T00:10:00Z" });
+  assert.deepEqual(capped[1], { phase: "executing", startTs: "2026-08-10T00:10:00Z", endTs: "2026-08-10T01:00:00Z" });
+});
+
+test("closeTrailingWindow is a no-op on an empty window array", () => {
+  assert.deepEqual(closeTrailingWindow([], "2026-08-10T00:00:00Z"), []);
 });
 
 // ── phase bucketing: a row belongs to the window containing its ts; misses go to unattributed ───

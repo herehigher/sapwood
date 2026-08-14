@@ -61,6 +61,23 @@ export function buildPhaseWindows(events: readonly DomainEvent[]): PhaseWindow[]
   }));
 }
 
+/**
+ * Caps a window array's own trailing OPEN-ENDED window (the still-open last phase, `endTs: null`
+ * — see `PhaseWindow`'s own doc) at `boundaryTs`, when known. `windows` comes from ONE round's
+ * own event trail; a caller that concatenates several rounds' own window arrays together (as
+ * `App.tsx`'s `useTodayCostLog` unions today's rounds) otherwise leaves an EARLIER closed round's
+ * trailing window open forever, so `bucketSpendByPhase`'s first-match `.find` can swallow a LATER
+ * round's real spend into the earlier round's stale window (#888 gate② run 949439c8 finding [0]).
+ * `boundaryTs: null` (no known successor yet — the newest round of the set) leaves the window
+ * untouched, the same honest "still open" reading `buildPhaseWindows` already gives it.
+ */
+export function closeTrailingWindow(windows: readonly PhaseWindow[], boundaryTs: string | null): PhaseWindow[] {
+  if (windows.length === 0 || boundaryTs === null) return windows.slice();
+  const last = windows[windows.length - 1]!;
+  if (last.endTs !== null) return windows.slice();
+  return [...windows.slice(0, -1), { ...last, endTs: boundaryTs }];
+}
+
 export interface PhaseSpendBucket {
   phase: string;
   rows: SpendRow[];

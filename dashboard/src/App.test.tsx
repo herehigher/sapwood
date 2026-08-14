@@ -535,6 +535,277 @@ test("#715/#880 gate② finding today-stage-history-truncation: TODAY's by-stage
   }
 });
 
+// #888 gate② run 949439c8 finding [0] (today-phase-window-cross-round): unlike the test above
+// (round A deliberately has NO round-phase trail, so it can only ever bucket as Unattributed),
+// this gives BOTH rounds a real trail, including each one's own terminal `closed` phase — the
+// exact shape a real round log has. Round A's own per-round fetch necessarily leaves its trailing
+// `closed` window OPEN-ENDED (nothing in round A's own truncated event log bounds it — see
+// `PhaseWindow`'s own doc); once `useTodayCostLog` concatenates round A's windows ahead of round
+// B's, `bucketSpendByPhase`'s first-match `.find` can let round A's stale open window swallow
+// round B's later, REAL spend before round B's own window is ever checked. Round B's spend lands
+// inside its own real "aligning" window, so a correct implementation must show it there — a
+// naive implementation instead drops it (the "closed" phase bucket has no display slot at all).
+test("#888 gate② run 949439c8 finding [0]: TODAY's by-stage bars correctly attribute a LATER round's spend to its OWN phase window, never swallowed by an EARLIER round's open-ended trailing window", async () => {
+  const ROUND_A_ID = 88020;
+  const ROUND_B_ID = 88021;
+  const rounds = [
+    {
+      roundId: ROUND_A_ID,
+      status: "done",
+      startedAt: "2026-08-06T00:00:00Z",
+      endedAt: "2026-08-06T00:20:00Z",
+      startEventId: 0,
+      startSpendId: 0,
+      eventCount: 3,
+      schemaVersion: null,
+      artifact: null,
+    },
+    {
+      roundId: ROUND_B_ID,
+      status: "done",
+      startedAt: "2026-08-06T02:00:00Z",
+      endedAt: "2026-08-06T02:10:00Z",
+      startEventId: 9,
+      startSpendId: 9,
+      eventCount: 2,
+      schemaVersion: null,
+      artifact: null,
+    },
+  ];
+  // Round A's own full trail: aligning -> executing -> closed. Round B's own full trail:
+  // aligning -> closed. Both terminal `closed` events land WITHIN their own round's id window
+  // (below the next round's own startEventId), matching a real round log exactly.
+  const events = [
+    { id: 1, ts: "2026-08-06T00:00:00Z", kind: "round-phase", payload: { round_id: ROUND_A_ID, phase: "aligning" } },
+    { id: 2, ts: "2026-08-06T00:10:00Z", kind: "round-phase", payload: { round_id: ROUND_A_ID, phase: "executing" } },
+    { id: 3, ts: "2026-08-06T00:20:00Z", kind: "round-phase", payload: { round_id: ROUND_A_ID, phase: "closed" } },
+    { id: 10, ts: "2026-08-06T02:00:00Z", kind: "round-phase", payload: { round_id: ROUND_B_ID, phase: "aligning" } },
+    { id: 11, ts: "2026-08-06T02:10:00Z", kind: "round-phase", payload: { round_id: ROUND_B_ID, phase: "closed" } },
+  ];
+  const spend = [
+    // Round A's own spend, inside its own "executing" window — unaffected by the defect either way.
+    {
+      id: 1,
+      ts: "2026-08-06T00:15:00Z",
+      worker: "w1",
+      issue: 5,
+      usd: 3.4,
+      model: "opus",
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      actorKind: "worker",
+      role: null,
+      estimated: false,
+    },
+    // Round B's own spend, inside its own "aligning" window — but its ts falls AFTER round A's
+    // own trailing "closed" window's start, so an unbounded concatenation misattributes it to
+    // round A's "closed" phase and drops it entirely.
+    {
+      id: 11,
+      ts: "2026-08-06T02:05:00Z",
+      worker: "w2",
+      issue: 6,
+      usd: 1.1,
+      model: "sonnet",
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      actorKind: "worker",
+      role: null,
+      estimated: false,
+    },
+  ];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const parsed = new URL(url, "http://localhost");
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (parsed.pathname === "/api/loop/state") return json({ ...LOOP_STATE_OK, lanes: { max: 1, items: [] } });
+    if (parsed.pathname === "/api/rounds") return json({ rounds });
+    if (parsed.pathname === "/api/events") {
+      const after = Number(parsed.searchParams.get("after") ?? 0);
+      const page = events.filter((e) => e.id > after);
+      return json({ events: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
+    }
+    if (parsed.pathname === "/api/spend") {
+      const after = Number(parsed.searchParams.get("after") ?? 0);
+      const limit = Number(parsed.searchParams.get("limit") ?? 200);
+      const page = spend.filter((r) => r.id > after).slice(0, limit);
+      return json({ spend: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
+    }
+    throw new Error(`unstubbed fetch: ${url}`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await Promise.allSettled([
+    client.prefetchQuery(loopStateQuery()),
+    client.prefetchQuery(eventsQuery(0)),
+    client.prefetchQuery(spendQuery(0)),
+    client.prefetchQuery(roundsQuery()),
+  ]);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={client}>
+        <App now={new Date("2026-08-06T12:00:00Z")} />
+      </QueryClientProvider>,
+    );
+  });
+  try {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // Scope to the TODAY panel specifically (the first `.cost-panel`) — round B, being the
+    // last-CLOSED round of the day, would ALSO populate its own correct "COST · ROUND N" panel
+    // regardless of this defect (that panel buckets one round's own log in isolation), so
+    // asserting anywhere in the whole document would pass even with the bug still present.
+    const todayPanel = container.querySelectorAll(".cost-panel")[0] as Element;
+    assert.ok(todayPanel, "the TODAY panel must render");
+    assert.ok(
+      todayPanel.querySelector('[aria-label="Lanes: $3.40"]'),
+      "round A's own spend still buckets correctly under its own real phase",
+    );
+    assert.ok(
+      todayPanel.querySelector('[aria-label="Goal & align: $1.10"]'),
+      "round B's own spend must bucket under ITS OWN real phase, not vanish into round A's stale open 'closed' window",
+    );
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+});
+
+// #888 gate② run 949439c8 finding [1] (today-cost-log-stale-within-round): `useTodayCostLog`'s
+// effect used to key ONLY on the round ID set (+ lanesMax) — once an in-progress round FIRST
+// appears, every later `/api/rounds` poll keeps naming the SAME round id, so a fresh phase event
+// or spend row landing on that still-open round never re-triggered the fetch; TODAY's by-stage
+// panel froze at its very first snapshot for the rest of the round. This mounts the app, lets the
+// round's initial single spend row settle, then grows the SAME round's spend (no new round, no
+// new id) and forces the poll-equivalent refetch `client.refetchQueries()` already exercises for
+// every other live query in this suite — a correct implementation must pick up the new row.
+test("#888 gate② run 949439c8 finding [1]: TODAY's by-stage bars stay fresh when the SAME in-progress round gains spend after the first render", async () => {
+  const ROUND_ID = 88030;
+  const round = {
+    roundId: ROUND_ID,
+    status: "in_progress",
+    startedAt: "2026-08-06T00:00:00Z",
+    endedAt: null,
+    startEventId: 0,
+    startSpendId: 0,
+    eventCount: 1,
+    schemaVersion: null,
+    artifact: null,
+  };
+  const events = [{ id: 1, ts: "2026-08-06T00:05:00Z", kind: "round-phase", payload: { round_id: ROUND_ID, phase: "aligning" } }];
+  const spend: SpendRow[] = [
+    {
+      id: 1,
+      ts: "2026-08-06T00:06:00Z",
+      worker: "w1",
+      issue: 5,
+      usd: 2.0,
+      model: "opus",
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      actorKind: "worker",
+      role: null,
+      estimated: false,
+    },
+  ];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const parsed = new URL(url, "http://localhost");
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    // The by-model total already flows live off THIS same poll payload — the exact "already
+    // flowing" signal the fix is meant to key on, computed fresh every call from `spend`'s
+    // current contents (never a separately-tracked counter that could itself go stale).
+    const todayUsd = spend.reduce((sum, r) => sum + r.usd, 0);
+    if (parsed.pathname === "/api/loop/state") {
+      return json({ ...LOOP_STATE_OK, lanes: { max: 1, items: [] }, spend: { ...LOOP_STATE_OK.spend, todayUsd } });
+    }
+    if (parsed.pathname === "/api/rounds") return json({ rounds: [round] });
+    if (parsed.pathname === "/api/events") {
+      const after = Number(parsed.searchParams.get("after") ?? 0);
+      const page = events.filter((e) => e.id > after);
+      return json({ events: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
+    }
+    if (parsed.pathname === "/api/spend") {
+      const after = Number(parsed.searchParams.get("after") ?? 0);
+      const limit = Number(parsed.searchParams.get("limit") ?? 200);
+      const page = spend.filter((r) => r.id > after).slice(0, limit);
+      return json({ spend: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
+    }
+    throw new Error(`unstubbed fetch: ${url}`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await Promise.allSettled([
+    client.prefetchQuery(loopStateQuery()),
+    client.prefetchQuery(eventsQuery(0)),
+    client.prefetchQuery(spendQuery(0)),
+    client.prefetchQuery(roundsQuery()),
+  ]);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={client}>
+        <App now={new Date("2026-08-06T12:00:00Z")} />
+      </QueryClientProvider>,
+    );
+  });
+  try {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.ok(container.querySelector('[aria-label="Goal & align: $2.00"]'), "first render shows the round's initial single spend row");
+
+    // The SAME round id gains a second spend row — no new round opens, no `/api/rounds` set
+    // change — then a poll-equivalent refetch runs, same as every other live query on a tick.
+    spend.push({
+      id: 2,
+      ts: "2026-08-06T00:07:00Z",
+      worker: "w1",
+      issue: 5,
+      usd: 1.5,
+      model: "opus",
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      actorKind: "worker",
+      role: null,
+      estimated: false,
+    });
+    await act(async () => {
+      await client.refetchQueries();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    assert.ok(
+      container.querySelector('[aria-label="Goal & align: $3.50"]'),
+      "the SAME round id gaining spend must refresh TODAY's by-stage total, not freeze at the first snapshot",
+    );
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+});
+
 // #727 gate② finding config-trigger-test-is-static: IconRail.test.tsx's own render-only test
 // can only prove the gear's markup exists, never that clicking it drives App's real `configOpen`
 // state into the SAME `ConfigDrawer` #145 built (`renderToStaticMarkup` runs no effects and
