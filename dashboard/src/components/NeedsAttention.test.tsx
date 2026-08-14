@@ -30,6 +30,35 @@ test("aria-live is present so a new row announces itself", () => {
   assert.match(html, /aria-live="polite"/);
 });
 
+// ── #881: category chip + reason/ask row shape (needs-attention-dark.png fidelity) ───────────
+
+test("renders the row's category chip, matching the mockup's taxonomy", () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 42, issue: 7 }));
+  const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
+  assert.match(html, /class="attention-chip">DECISION</);
+});
+
+test("renders a different chip label for a different category (CI)", () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "ci-inert-escalated", { pr: 42, issue: 7, checks: [] }));
+  const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
+  assert.match(html, /class="attention-chip">CI</);
+});
+
+test("renders no chip for an unrecognized event kind, never a fabricated label", () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "some-future-kind-nobody-registered-yet", { pr: 42 }));
+  const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
+  assert.doesNotMatch(html, /attention-chip/);
+});
+
+test("row renders the mockup's shape — chip, reason + explicit ask, and a bordered age box", () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "fix-rounds-capped", { pr: 9, issue: 1, fixRounds: 3, cap: 3 }));
+  const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
+  assert.match(html, /attention-chip">FIX CAP/);
+  assert.match(html, /\(3\/3\)/);
+  assert.match(html, /asks: adjudicate/);
+  assert.match(html, /class="muted data attention-ts attention-age"/);
+});
+
 test("does not render, import, or re-implement the legend", () => {
   const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 42, issue: 7 }));
   const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
