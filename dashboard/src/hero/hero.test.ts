@@ -813,15 +813,38 @@ test("#879: issue tokens render as a droplet (teardrop path), never a bare circl
   assert.doesNotMatch(html, /class="hero-droplet"[\s\S]{0,40}<circle r="9"/, "no droplet may still draw the old bare circle");
 });
 
-test("#879: the outcome ring count sits centered inside the ring cross-section, not floating below it", () => {
-  const html = markup(initialHeroState(3));
+// #886 gate② run b2a4f37d finding [0]: the prior version of this test checked the count's y
+// against the THEORETICAL max radius (`TRUNK.max * TRUNK.step` = 84) using `initialHeroState`
+// (zero rings, no ring drawn at all) — a bound so generous it couldn't fail even when the real,
+// live `?demo` capture's actual state (ONE merge, ring radius 7) reads as the number floating
+// well below a ring 12× smaller than what the test allowed for. This exercises that real
+// single-ring state instead, and asserts the number sits at the TIGHTEST clearance the
+// always-present trunk droplet allows — not merely "somewhere within a generous ceiling".
+test("#879 gate② run b2a4f37d finding [0]: against the REAL single-merge demo state, the outcome number sits at the trunk droplet's minimum clearance — not floating an arbitrary distance below the (much smaller) real ring", () => {
+  const { state } = run([ev("merged", { worker: "w1", issue: 1, pr: 11 })]);
+  assert.equal(state.rings, 1, "this fixture's point is the real one-ring state the live demo capture renders, not a synthetic maximum");
+
+  const html = markup(state);
   const match = html.match(/class="hero-ring-count"[^>]*x="(-?[\d.]+)" y="(-?[\d.]+)"/);
   assert.ok(match, "hero-ring-count must render with x/y");
   assert.equal(Number(match?.[1]), TRUNK.x);
-  const y = Number(match?.[2]);
+  const countBaselineY = Number(match?.[2]);
+  // .hero-ring-count's own font-size (hero.css: var(--text-4) = 33px) and this file's own
+  // ASCENT model (below) — the number's rendered TOP edge, not its baseline.
+  const countTop = countBaselineY - TRUNK.y - 33 * ASCENT;
+
+  // `merged` (state.ts) always parks exactly one droplet at the trunk center regardless of ring
+  // count ("only the newest merge keeps its tag on the trunk"); its shape alone (DROPLET_SHAPE,
+  // stage.tsx) reaches y=+9 — a hard floor on how close the count can sit, independent of the
+  // ring's own (much smaller, at low counts) radius. 4px is the position's own documented safety
+  // margin (stage.tsx's `TRUNK.y + 40` comment). The upper bound proves the offset tracks that
+  // real constraint tightly rather than a guessed-too-large cushion — the actual "well outside
+  // the ring" failure mode a looser bound would silently permit.
+  const dropletClearance = 9 + 4;
+  assert.ok(countTop >= dropletClearance, `count top (${countTop}) must clear the trunk droplet's shape (bottom edge ${dropletClearance})`);
   assert.ok(
-    y > TRUNK.y - TRUNK.max * TRUNK.step && y < TRUNK.y + TRUNK.max * TRUNK.step,
-    `ring count y=${y} must sit inside the ring's own radius, not below it`,
+    countTop < dropletClearance + 4,
+    `count top (${countTop}) sits well past the droplet's minimum clearance (${dropletClearance}) — the offset should track the real constraint tightly, not float an arbitrary distance below the ring (whose own edge, at 1 merge, is only ${TRUNK.step}px from center)`,
   );
 });
 
