@@ -20,6 +20,16 @@
   recurring findings as they accumulate, and delete the placeholders once real entries exist.
   Deliberately PROSE, not a lint/DSL: these are judgment rules for an LLM reviewer, not
   machine-checkable patterns.
+
+  Curation rule: this file is a fixed-size cache, not a log — the budget (`doctrine.maxChars`)
+  is the design, and hitting it is a curation signal, never a reason to compress a new rule into
+  telegram style. Above ~85% of that budget, an addition must evict or merge at least as much as
+  it adds (one-in-one-out). A new rule joins an existing family/sub-case structure where one
+  fits, rather than opening a new top-level bullet. Incident narrative is banned — a distilled
+  worked example is not narrative: keep an example only for the discriminating criterion it
+  carries (what to look at, what decides); the blow-by-blow story belongs in the issue/PR its
+  bare anchor (#NNN) points to, once one exists. Mechanism claims cite symbols/files, never line
+  ranges — line ranges rot as the code moves.
 -->
 
 # Review doctrine

@@ -270,7 +270,12 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // #701: new "Working language" section states the configured `language.issuesAndPrs` default
   // for proposal prose this role composes — the second deliberate edit since #235's tool-scope
   // freeze (after #453's tendency-table section; see the retro.md snapshot test's own name below).
-  "retro.md": "f8fbb96b150f85d26d67ac8ab89d4fd74e7aa5cda86922ddb4ce527cf1bb787d",
+  // retro-prompt-curation-register: new "When your proposal edits the review doctrine file"
+  // section — batch-16 found 3 of 4 doctrine-edit proposals violated the doctrine file's own
+  // curation header on first draft. States the header-first-read rule and three negative,
+  // single-channel bans (incident narrative, unconditional behavior claims, unfiled-follow-up
+  // claims) — the third deliberate edit since #235's tool-scope freeze.
+  "retro.md": "9cf883b8eaf49af9aaf1e47e6aa669ce9b9bbfee11ef66d0a6a5edd1f4b2bf54",
   // #529: same categorical→conditional GitHub-access fix as architect.md.
   // #533 proposed removing po-pool's ISSUE_TOOLS grant and substituting each candidate's full
   // body in its place; the owner reversed the grant-removal half only. po-pool KEEPS its
@@ -334,7 +339,7 @@ test("prompt snapshot: harvest.md hash matches the pinned revision", () => {
   assert.equal(sha256(readPrompt(defaultHarvestPromptPath())), SNAPSHOT_HASHES["harvest.md"]);
 });
 
-test("prompt snapshot: retro.md hash matches the pinned revision (#235's tool-scope freeze still holds — the only edits since are #453's tendency-table section and #701's working-language line)", () => {
+test("prompt snapshot: retro.md hash matches the pinned revision (#235's tool-scope freeze still holds — edits since are #453's tendency-table section, #701's working-language line, and the doctrine-curation-register section)", () => {
   assert.equal(sha256(readPrompt(defaultRetroPromptPath())), SNAPSHOT_HASHES["retro.md"]);
   // #235 AC item 3 was about retro's TOOL SCOPE, and that half is still pinned byte-wise below:
   // the prompt gained no tool grant, no `gh` instruction, and no direct-write path.
