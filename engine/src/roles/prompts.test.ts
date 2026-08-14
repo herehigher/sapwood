@@ -275,7 +275,13 @@ const SNAPSHOT_HASHES: Record<string, string> = {
   // curation header on first draft. States the header-first-read rule and three negative,
   // single-channel bans (incident narrative, unconditional behavior claims, unfiled-follow-up
   // claims) — the third deliberate edit since #235's tool-scope freeze.
-  "retro.md": "9cf883b8eaf49af9aaf1e47e6aa669ce9b9bbfee11ef66d0a6a5edd1f4b2bf54",
+  // #873 (gate② finding on the section above): an ABSENT doctrine file is a legal state
+  // (doctrine.ts's loadDoctrine() returns NO_DOCTRINE), so a proposal that CREATES the file
+  // can't "read its header first" — gates the header-first-read rule on the file already
+  // existing, and adds the absent-file branch: a creating proposal starts from the shipped
+  // engine/prompts/doctrine-template.md, whose header carries the same curation rules, rather
+  // than a blank file.
+  "retro.md": "10f41e5ad890978a69e360dad2f7a2de1ee9fc3dcd054685dab83e3922e037c4",
   // #529: same categorical→conditional GitHub-access fix as architect.md.
   // #533 proposed removing po-pool's ISSUE_TOOLS grant and substituting each candidate's full
   // body in its place; the owner reversed the grant-removal half only. po-pool KEEPS its
@@ -339,7 +345,7 @@ test("prompt snapshot: harvest.md hash matches the pinned revision", () => {
   assert.equal(sha256(readPrompt(defaultHarvestPromptPath())), SNAPSHOT_HASHES["harvest.md"]);
 });
 
-test("prompt snapshot: retro.md hash matches the pinned revision (#235's tool-scope freeze still holds — edits since are #453's tendency-table section, #701's working-language line, and the doctrine-curation-register section)", () => {
+test("prompt snapshot: retro.md hash matches the pinned revision (#235's tool-scope freeze still holds — edits since are #453's tendency-table section, #701's working-language line, and the doctrine-curation-register section, gated on file existence by #873)", () => {
   assert.equal(sha256(readPrompt(defaultRetroPromptPath())), SNAPSHOT_HASHES["retro.md"]);
   // #235 AC item 3 was about retro's TOOL SCOPE, and that half is still pinned byte-wise below:
   // the prompt gained no tool grant, no `gh` instruction, and no direct-write path.
