@@ -98,7 +98,40 @@
   cursor: pointer;
 }
 
-.cost-strip-groups {
+/* #880: "COST · TODAY" / "COST · ROUND N" — two stacked `.cost-panel`s inside one `.cost-strip`
+ * (`cost-dark.png`), each with its own head (heading + optional CLOSED badge/avg-round stat), a
+ * by-stage/by-model group pair, and an optional footer line. */
+.cost-panel + .cost-panel {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: var(--hairline);
+}
+
+.cost-panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.cost-panel-badge {
+  border: var(--hairline);
+  border-radius: var(--radius-card);
+  padding: 0 var(--space-1);
+  text-transform: uppercase;
+  font-family: var(--font-data);
+  font-size: var(--text-0);
+}
+
+.cost-panel-avg {
+  margin-left: auto;
+}
+
+.cost-panel-footer {
+  margin-top: var(--space-2);
+}
+
+.cost-panel-groups {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: var(--space-4);
@@ -123,6 +156,14 @@
 .cost-bar {
   width: 100%;
   height: 10px;
+}
+
+/* The by-stage group's shared target/ceiling tick (`cost-panel.ts`'s `tickPositionPct`) — a thin
+ * line across the bar's full height, drawn in the primary text color so it reads against both the
+ * faint track and the amber fill. */
+.cost-bar-target {
+  stroke: var(--sapwood);
+  stroke-width: 1;
 }
 
 /* ---- header: engine state word + spend meter (§3 A, #361) ---------------- */

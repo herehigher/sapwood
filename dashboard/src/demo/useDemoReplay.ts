@@ -128,5 +128,9 @@ export function useDemoReplay(bundle: DemoBundle | undefined, lanesMax: number |
     // uncapped (`demo/build-round-log.ts`'s own doc) — the phase inspector's event-derived counts
     // read this directly, same as live `useReplay`'s `roundEvents`.
     roundEvents: log?.events ?? [],
+    // #880: same "never cursor-truncated" posture as live `useReplay`'s own `roundSpend` — see
+    // that field's doc for why the ROUND N cost panel needs the round's FULL spend, not
+    // `spendThroughCursor`.
+    roundSpend: log?.spend ?? [],
   };
 }

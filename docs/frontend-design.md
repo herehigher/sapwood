@@ -54,6 +54,14 @@ system-stack). This document only establishes the toolkit and the rules; applyin
 module restyling, the icon migration, the `<dialog>` migration, the motion recipes'
 application — is #729's work.
 
+Amended 2026-08-14 (#880, #729 fidelity ledger row 3): §3 E's cost strip is rebuilt as two
+stacked panels per `cost-dark.png` — "COST · TODAY" (by-stage bars with a shared
+target-tick marker + avg-round-cost header) and "COST · ROUND N" (the same by-stage
+shape for a closed round, plus by-model breakdown and footer stats), superseding the
+single-strip by-model/by-lane first pass. §11's "Cost strip: round tier" text is
+superseded — the round panel is now a closed round's frozen summary, never
+cursor-truncated by the scrub position.
+
 ---
 
 ## 1. Goals & audiences
@@ -204,7 +212,7 @@ item becomes a routed page, that is a scope amendment to this section.
 │ │ $1.20  │ │ PR #97 │ │        │  │  Started issue #90       │
 │ └────────┘ └────────┘ └────────┘  │  …                       │
 ├───────────────────────────────────┴──────────────────────────┤
-│ E cost strip — today by phase / by model (SVG bars) [Config ▸]│
+│ E cost · today / cost · round N (by stage, by model)  [Config ▸]│
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -276,14 +284,25 @@ item becomes a routed page, that is a scope amendment to this section.
   newest first, relative timestamps; kind-colored dot per entry. Payload
   details (worker, head, mode) collapse behind each entry — never in the
   sentence.
-- **E — Cost strip + Config drawer.** Two small SVG bar groups: today's spend
-  **by phase** (displayed with the §7 stage labels: goal & align / arch
-  review / verify / lanes / summary / retro — never the internal phase
-  keys) and **by model** (token split available on hover). Phase, not lane: lanes are
-  short-lived reused slots (w1/w2/w3), so a by-lane day aggregate carries
-  little meaning — per-lane cost already lives on the lane cards (§3 C), and
-  the phase bucketing matches the replay round tier (§11). `Config ▸` opens a
-  read-only drawer: an **allowlisted subset** of the resolved config (the
+- **E — Cost strip + Config drawer.** Two stacked panels (#880, `cost-dark.png`; supersedes the
+  single-strip by-model/by-lane first pass and §11's now-superseded "round tier" strip text below).
+  **"COST · TODAY"**, always present: a **by stage** group (§7 labels — goal & align / arch review
+  / verify / lanes / summary / retro, never the internal phase keys; zero-filled, fixed order, six
+  rows always) with a shared **target-tick marker** — one value (the currently configured
+  `cost.roundBudgetUsd`, spread evenly across the six stages — no per-phase budget exists to draw
+  on) drawn at the same coordinate on every bar in the group, since they share one `max` — plus a
+  **by model** group, and an **avg-round-cost** header stat (mean settled spend across today's
+  closed rounds). **"COST · ROUND N"**: the same by-stage/by-model shape for a specific CLOSED
+  round — live mode's last-closed round when nothing is selected in the navigator, or the
+  navigator's own selection in replay — carrying a **CLOSED** badge, its own target tick (that
+  round's OWN persisted `roundBudgetUsd`, never today's live config), and a **footer** line (total
+  spend / PRs merged / $-per-PR / review cost, all read straight from the round's persisted
+  artifact — omitted entirely, never fabricated, when the artifact is missing or malformed). This
+  round panel reads the round's FULL log, never truncated by the replay scrub cursor — it is a
+  closed round's frozen summary, not a moment-by-moment view like the hero/feed panels beside it.
+  Phase, not lane, for the by-stage group: lanes are short-lived reused slots (w1/w2/w3), so a
+  by-lane aggregate carries little meaning — per-lane cost already lives on the lane cards (§3 C).
+  `Config ▸` opens a read-only drawer: an **allowlisted subset** of the resolved config (the
   server serves named keys, never the whole object — the no-secrets guarantee
   stays structural even if future config grows sensitive keys; the allowlist
   **must include** the per-role `model`/`effort` keys the §3 C/§6 captions
@@ -1256,20 +1275,25 @@ mutable snapshot or outside the engine's own DB is live-only.
   same-millisecond boundary collisions. A run replays as the ordered chapter
   list of its rounds; inter-round events attach to the following chapter.
 
-### Cost in replay — two scales, both truncated at the cursor
+### Cost in replay — two scales, one cursor-truncated, one frozen
 
 - **Header meter: run tier.** Spend as of the cursor within the replayed
   run, over that run's budget — the same tier rule as live (§3 A), truncated
   at the cursor. Watching spend approach the budget while scrubbing is a
   core replay payoff.
-- **Cost strip: round tier.** The replayed round's own window
-  (`start_spend_id` → cursor), bucketed by phase/model. The live title
-  "TODAY BY …" becomes **"THIS ROUND BY …"** in replay — "today" has no
-  meaning against a historical round.
-- Both numbers grow monotonically under the scrubber; **no est segments
-  exist in replay** — history has only settled values.
-- Cursor mapping: the scrubber cursor is an `events.id`; spend truncates by
-  the current event's timestamp. Display-grade precision, no join table.
+- **Cost panel: round tier, NOT cursor-truncated** (#880, supersedes this
+  section's earlier "THIS ROUND BY …" single-strip text). §3 E's "COST ·
+  ROUND N" panel reads the selected round's FULL by-stage/by-model log and
+  its persisted artifact's footer stats regardless of where the scrub cursor
+  sits — it is a closed round's frozen summary, not a moment-by-moment replay
+  view. "COST · TODAY" (§3 E) is unaffected by replay at all: it always
+  reads live "today" data, whether or not a closed round is currently being
+  browsed.
+- The header meter still grows monotonically under the scrubber; **no est
+  segments exist in replay** — history has only settled values.
+- Cursor mapping (header meter only): the scrubber cursor is an `events.id`;
+  spend truncates by the current event's timestamp. Display-grade precision,
+  no join table.
 
 ### Mode purity
 

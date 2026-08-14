@@ -19,12 +19,12 @@ import { demoFixtureQuery, eventsQuery, loopStateQuery, MAX_EVENT_HISTORY, round
 import type { Round, SpendRow } from "./api/types.ts";
 import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
+import { buildClosedRoundCostPanel } from "./cost-panel.ts";
 import type { DemoBundle } from "./demo/types.ts";
 import type { DomainEvent } from "./domain-event.ts";
 import type { EntityTitles } from "./entities.ts";
 import { foldEvents, type HeroState, initialHeroState } from "./hero/state.ts";
 import { initialReplayState } from "./replay/reducer.ts";
-import { bucketSpendByPhase, phaseSpendBars } from "./replay/spend-replay.ts";
 import { registerRealDom } from "./test-dom.ts";
 
 registerRealDom();
@@ -94,9 +94,8 @@ function minimalAppViewModel(
     parked: false,
     repoUrl: overrides.repoUrl,
     fixCap: 2,
-    byModel: { title: "by model", bars: [] },
-    byLane: { title: "by lane", bars: [] },
-    byPhase: { title: "by phase", bars: [] },
+    costToday: { heading: "cost · today", avgRoundUsd: null, stageBars: [], targetUsd: null, modelBars: [], footer: null },
+    costRound: null,
     configOpen: overrides.configOpen ?? false,
     setConfigOpen: overrides.setConfigOpen ?? (() => {}),
     inspectorNode: overrides.inspectorNode ?? null,
@@ -414,10 +413,14 @@ test("#723: header renders the standby word with its plain-language caption and 
   assert.doesNotMatch(html, /stalled/);
 });
 
-test("#715 gate② round 3 [2]: a completed lane's settled spend still renders in the by-lane cost strip", async () => {
+test("#715 gate② round 3 [2] (re-scoped for #880's by-stage/by-model composition): a completed lane's settled spend still contributes to the TODAY panel", async () => {
   // The lane is NOT in `lanes.items` (it already left the active set — merged/reclaimed), but its
-  // spend_ledger row still exists, forever, since the ledger is append-only. This is exactly the
-  // finding's scenario: the active-worker read model alone would show nothing for this lane.
+  // spend_ledger row still exists, forever, since the ledger is append-only — `rowsForDay` reads
+  // that ledger directly, never `lanes.items`, so this finding's scenario (the active-worker read
+  // model alone would show nothing for this lane) still holds under the rebuilt composition. No
+  // `round-phase` event exists in this fixture, so the row buckets as "Unattributed" — still
+  // visible, never silently dropped (the by-model group stays empty here since TODAY's model bars
+  // read the server-aggregated `spend.byModel`, not these raw rows — a separate, honest source).
   const html = await renderSettledApp(
     {
       "/api/loop/state": { status: 200, body: { ...LOOP_STATE_OK, lanes: { max: 1, items: [] } } },
@@ -448,7 +451,7 @@ test("#715 gate② round 3 [2]: a completed lane's settled spend still renders i
     },
     new Date("2026-08-06T12:00:00Z"),
   );
-  assert.match(html, /w1/);
+  assert.match(html, /Unattributed/);
   assert.match(html, /\$3\.40/);
 });
 
@@ -854,19 +857,18 @@ test("#803: the SAME droplet renders under the #745 windowed qualifier when loop
   );
 });
 
-// ── #766 gate② finding [1] (replay-spend-panel-unexercised) ────────────────────────────────────
+// ── #766/#880 (replay-spend-panel-unexercised, carried into the rebuilt composition) ───────────
 //
-// `spend-replay.test.ts` proves `bucketSpendByPhase`/`phaseSpendBars` as pure array transforms, and
-// `CostStrip.test.tsx` proves the component renders whatever `CostBarGroup[]` it's handed — but
-// nothing before this test passed timestamp-truncated, phase-bucketed spend THROUGH those real
-// functions and then through App's own `groups={mode === "replay" ? [byPhase] : [byModel, byLane]}`
-// wiring, checking the rendered strip actually shows the trailing `unattributed` bucket instead of
-// the live `by model`/`by lane` groups. This computes `byPhase` the EXACT way `App()` does — via
-// the real `bucketSpendByPhase`/`phaseSpendBars` pipeline over a realistic mixed spend set (one
+// `cost-panel.test.ts` proves `buildClosedRoundCostPanel` as a pure transform, and
+// `CostStrip.test.tsx` proves the component renders whatever `CostPanelData` it's handed — but
+// nothing before this test passed a real round's spend/phase-window log THROUGH that real
+// function and then through App's own `<CostStrip today={costToday} round={costRound} />` wiring,
+// checking the rendered ROUND panel actually shows the trailing `Unattributed` bucket. This calls
+// `buildClosedRoundCostPanel` the EXACT way `App()` does — over a realistic mixed spend set (one
 // attributed row inside a real `round-phase` window, one pre-#206 row before any window) — then
-// renders it through `appContent`'s real `mode === "replay"` branch.
+// renders it through `appContent`'s real `costRound` slot.
 
-test("#766 gate② finding [1]: real timestamp-truncated, phase-bucketed spend renders through App's replay CostStrip branch, unattributed bucket included, live groups absent", () => {
+test("#766/#880: real timestamp-truncated, phase-bucketed spend renders through App's ROUND N panel, unattributed bucket included, executing labeled per the fixed §7 stage order", () => {
   const attributedRow: SpendRow = {
     id: 1,
     ts: "2026-08-10T10:15:00Z",
@@ -884,19 +886,128 @@ test("#766 gate② finding [1]: real timestamp-truncated, phase-bucketed spend r
   };
   const preHistoryRow: SpendRow = { ...attributedRow, id: 2, ts: "2026-08-01T00:00:00Z", usd: 3.25 }; // before any round-phase window
   const phaseWindows = [{ phase: "executing", startTs: "2026-08-10T10:00:00Z", endTs: null }];
-  // The SAME functions App() itself calls (replay/spend-replay.ts) — not a hand-authored group.
-  const byPhase = { title: "by phase", bars: phaseSpendBars(bucketSpendByPhase([attributedRow, preHistoryRow], phaseWindows)) };
+  const round: Round = {
+    roundId: 9,
+    status: "done",
+    startedAt: "2026-08-10T10:00:00Z",
+    endedAt: "2026-08-10T11:00:00Z",
+    startEventId: 0,
+    startSpendId: 0,
+    eventCount: 0,
+    schemaVersion: 1,
+    artifact: { spendUsd: 15.75, roundBudgetUsd: 30, prsMerged: 2 },
+  };
+  // The SAME function App() itself calls (cost-panel.ts) — not a hand-authored panel.
+  const costRound = buildClosedRoundCostPanel(round, [attributedRow, preHistoryRow], phaseWindows);
 
   const vm = minimalAppViewModel({ mode: "replay" });
-  const html = renderToStaticMarkup(appContent({ ...vm, byPhase } as unknown as Parameters<typeof appContent>[0]));
+  const html = renderToStaticMarkup(appContent({ ...vm, costRound }));
 
-  assert.match(html, /executing/, "the real attributed phase bucket must render");
-  assert.match(html, /\$12\.50/, "the attributed row's real cursor-truncated sum must render");
-  assert.match(html, /unattributed/, "the pre-#206 row must land in the labeled unattributed bucket");
+  assert.match(html, /Lanes/, "the real attributed phase bucket (executing) must render under its §7 label");
+  assert.match(html, /\$12\.50/, "the attributed row's real sum must render");
+  assert.match(html, /Unattributed/, "the pre-#206 row must land in the labeled unattributed bucket");
   assert.match(html, /\$3\.25/, "the unattributed bucket's real sum must render");
-  assert.doesNotMatch(html, /by model/, "replay must show phase groups, never the live by-model group");
-  assert.doesNotMatch(html, /by lane/, "replay must show phase groups, never the live by-lane group");
-  assert.match(html, /cost · this round/, "the replay heading must read 'this round', not 'today'");
+  assert.match(html, /cost · round 9/, "the round panel's heading names the round id");
+  assert.match(html, /closed/i, "the round panel carries the CLOSED badge");
+});
+
+// #880: `useLastClosedRoundCost`'s own async fetch (`loadClosedRoundCostLog`, via `loadRoundLog`)
+// only runs inside a `useEffect` — `renderToStaticMarkup` never fires those, so the test above
+// (which proves `buildClosedRoundCostPanel` renders correctly once given data) can't prove LIVE
+// mode's own real wiring ever REACHES that function. This mounts the real app (`mountSettledApp`'s
+// pattern) with one closed round + its own round-scoped events/spend, flushes the effect, and
+// checks the ROUND N panel populates from that fetch — not a hand-injected `costRound` prop.
+test("#880: LIVE mode's ROUND N panel is populated by the real useLastClosedRoundCost fetch for the last-closed round, not a hand-injected panel", async () => {
+  const CLOSED_ROUND_ID = 88005;
+  const rounds = [
+    {
+      roundId: CLOSED_ROUND_ID,
+      status: "done",
+      startedAt: "2026-08-10T09:00:00Z",
+      endedAt: "2026-08-10T09:30:00Z",
+      startEventId: 0,
+      startSpendId: 0,
+      eventCount: 1,
+      schemaVersion: 1,
+      artifact: { spendUsd: 9.5, roundBudgetUsd: 30, prsMerged: 1 },
+    },
+  ];
+  const events = [{ id: 1, ts: "2026-08-10T09:05:00Z", kind: "round-phase", payload: { round_id: CLOSED_ROUND_ID, phase: "executing" } }];
+  const spend = [
+    {
+      id: 1,
+      ts: "2026-08-10T09:06:00Z",
+      worker: "w1",
+      issue: 10,
+      usd: 9.5,
+      model: "opus",
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      actorKind: "worker",
+      role: null,
+      estimated: false,
+    },
+  ];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const parsed = new URL(url, "http://localhost");
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (parsed.pathname === "/api/loop/state") return json({ ...LOOP_STATE_OK, round: null });
+    if (parsed.pathname === "/api/rounds") return json({ rounds });
+    if (parsed.pathname === "/api/events") {
+      const after = Number(parsed.searchParams.get("after") ?? 0);
+      const limit = Number(parsed.searchParams.get("limit") ?? 200);
+      const page = events.filter((e) => e.id > after).slice(0, limit);
+      return json({ events: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
+    }
+    if (parsed.pathname === "/api/spend") {
+      const after = Number(parsed.searchParams.get("after") ?? 0);
+      const limit = Number(parsed.searchParams.get("limit") ?? 200);
+      const page = spend.filter((r) => r.id > after).slice(0, limit);
+      return json({ spend: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
+    }
+    throw new Error(`unstubbed fetch: ${url}`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await Promise.allSettled([
+    client.prefetchQuery(loopStateQuery()),
+    client.prefetchQuery(eventsQuery(0)),
+    client.prefetchQuery(spendQuery(0)),
+    client.prefetchQuery(roundsQuery()),
+  ]);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+  });
+  try {
+    // `useLastClosedRoundCost`'s fetch is itself async — flush its effect+promise chain.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const html = container.innerHTML;
+    assert.match(html, new RegExp(`cost · round ${CLOSED_ROUND_ID}`), "the last-closed round's own id names the panel");
+    assert.match(html, /closed/i);
+    assert.match(html, /Lanes/, "the round's real spend buckets into the executing/Lanes stage row");
+    assert.match(html, /\$9\.50/);
+    assert.match(
+      html,
+      /total \$9\.50 · 1 PR merged · \$9\.50\/PR · review \$0\.00/,
+      "footer stats read straight from the round's artifact",
+    );
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
 });
 
 // ── #742 (split 3/4 of #146): `?demo` static fixture bundle ────────────────────────────────────
@@ -1011,6 +1122,17 @@ test("#742: ?demo's fixture data actually drives the transport player — a fixt
     new RegExp(DEMO_ISSUE_TITLE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
     "the fixture's distinguishable issue title must be folded and rendered — proof the fixture's events actually reached the shared reducer, not just its rounds list",
   );
+});
+
+test("#880: ?demo's real DemoApp wiring populates BOTH the today panel (whole-bundle spend) and the round panel (the fixture's own artifact-backed footer)", async () => {
+  const html = await renderSettledDemoApp(demoBundleFixture());
+  assert.match(html, /cost · today/, "the today panel always renders, even in demo/replay mode");
+  assert.match(html, new RegExp(`cost · round ${DEMO_ROUND_ID}`), "the round panel names the fixture's own round id");
+  assert.match(html, /closed/i, "a demo round is by definition closed — the round panel carries the CLOSED badge");
+  // The fixture's one spend row carries no round-phase window, so it buckets as Unattributed —
+  // proof the real bucketing pipeline ran, not a hand-authored placeholder.
+  assert.match(html, /Unattributed/);
+  assert.match(html, /total \$1\.00 · 1 PR merged · \$1\.00\/PR · review \$0\.00/, "footer stats read from the fixture's own artifact");
 });
 
 // ── #861 phase inspector ─────────────────────────────────────────────────────────────────────
