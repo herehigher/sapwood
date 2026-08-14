@@ -1,45 +1,27 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Round } from "../api/types.ts";
+import { registerRealDom } from "../test-dom.ts";
 import { Transport } from "./Transport.tsx";
 
-const NOW = new Date("2026-08-10T12:00:00Z");
+registerRealDom();
 
-/** #766 gate② finding [3]: a hand-built object matching the FULL, authoritative v1
- *  `RoundArtifactSchema` shape (`engine/src/loop/round-artifact.ts`) — the dashboard workspace
- *  never imports `engine/src` at runtime (same established boundary `entities.ts`'s title-fold
- *  doc and `copy.ts`'s `EventKind` mirror already document), so this mirrors the contract by
- *  hand rather than importing the zod schema. Every required field is present with its correct
- *  NAME (`prsMerged`, not `merged` — the exact field the finding caught this renderer missing)
- *  so a fixture drift from the real contract would show up as an obviously-wrong test value, not
- *  a silently-passing invented field. */
-function contractValidArtifact(overrides: Partial<{ prsMerged: number; spendUsd: number }> = {}) {
-  return {
-    schemaVersion: 1,
-    roundId: 1,
-    startedAt: "2026-08-10T10:00:00Z",
-    endedAt: "2026-08-10T10:30:00Z",
-    dispatches: [],
-    merges: [],
-    prsOpened: overrides.prsMerged ?? 3,
-    prsMerged: overrides.prsMerged ?? 3,
-    issuesClosed: overrides.prsMerged ?? 3,
-    spendUsd: overrides.spendUsd ?? 4.5,
-    roundBudgetUsd: 100,
-    retries: { gatedReentries: 0, gatedReentryCapped: 0, rollbacksRecovered: 0, rollbacksEscalated: 0 },
-    reviewRounds: { reviewerFallbackSwitches: 0, reviewerFallbackReverts: 0 },
-    escalations: { needsHuman: [], ceiling: 0, driveNoPr: 0 },
-    egressSuspects: [],
-    handoffs: 0,
-    degradedPhases: [],
-    roundStops: [],
-    retro: { opened: null, degraded: null },
-    align: null,
-    concerns: [],
-    concernsReconciled: [],
-  };
-}
+const panelsCss = readFileSync(new URL("../panels.css", import.meta.url), "utf8");
+const tokensCss = readFileSync(new URL("../tokens.css", import.meta.url), "utf8");
+const heroCss = readFileSync(new URL("../hero/hero.css", import.meta.url), "utf8");
+const appCss = readFileSync(new URL("../app.css", import.meta.url), "utf8");
+// Same extraction Header.test.tsx uses: the real `body { ... }` rule, pulled from source
+// rather than hand-copied, so the ambient (pre-fix) font-family a button would inherit
+// without its own rule can't silently desync from what actually ships. The
+// `.transport-position` oracle this file compares against gets ITS mono font from app.css's
+// `code, .data { font-family: var(--font-data); }` rule (`Transport.tsx` gives it the `data`
+// class), not from panels.css — that rule is extracted too, for the same reason.
+const bodyFontFamilyRule = appCss.match(/body\s*\{[^}]*\}/)?.[0];
+const dataClassFontFamilyRule = appCss.match(/code,\s*\.data\s*\{[^}]*\}/)?.[0];
+
+const NOW = new Date("2026-08-10T12:00:00Z");
 
 function round(overrides: Partial<Round> = {}): Round {
   return {
@@ -51,84 +33,29 @@ function round(overrides: Partial<Round> = {}): Round {
     startSpendId: 50,
     eventCount: 42,
     schemaVersion: 1,
-    artifact: contractValidArtifact(),
+    artifact: { schemaVersion: 1, prsMerged: 3, spendUsd: 4.5 },
     ...overrides,
   };
 }
 
-// ── round navigator: chapter marks from /api/rounds ─────────────────────────────────────────────
+// ── #889: live mode renders nothing at all — the round list moved to the header navigator ──────
 
-test("empty state: no rounds yet", () => {
-  const html = renderToStaticMarkup(<Transport rounds={[]} selectedRoundId={null} onSelectRound={() => {}} now={NOW} />);
-  assert.match(html, /no rounds yet/);
+test("live mode (nothing selected) renders nothing — no panel, no round list, no controls", () => {
+  const html = renderToStaticMarkup(<Transport rounds={[round()]} selectedRoundId={null} onSelectRound={() => {}} now={NOW} />);
+  assert.equal(html, "");
 });
 
-// #766 gate② finding [2] (rounds-failure-renders-empty): a genuinely FAILED /api/rounds fetch
-// must never render as the honest "no rounds yet" empty history — same `disconnected` posture
-// LaneBoard/ActivityFeed already carry for their own failed data sources.
-test("disconnected=true renders the disconnected caption, never 'no rounds yet' — a fetch failure is not an honest empty history", () => {
+test("disconnected renders nothing — the header's own navigator already carries that state", () => {
   const html = renderToStaticMarkup(<Transport rounds={[]} selectedRoundId={null} onSelectRound={() => {}} disconnected now={NOW} />);
-  assert.match(html, /disconnected — restart sapwood to reconnect/);
-  assert.doesNotMatch(html, /no rounds yet/);
+  assert.equal(html, "");
 });
 
-test("lists every round from /api/rounds, one row each", () => {
-  const rounds = [round({ roundId: 1 }), round({ roundId: 2 }), round({ roundId: 3, status: "in_progress" })];
-  const html = renderToStaticMarkup(<Transport rounds={rounds} selectedRoundId={null} onSelectRound={() => {}} now={NOW} />);
-  for (const r of rounds) assert.match(html, new RegExp(`round ${r.roundId}`));
-});
-
-test("a round with a tally (artifact present) shows its merged count and spend, read from the REAL v1 artifact field names", () => {
-  const html = renderToStaticMarkup(
-    <Transport
-      rounds={[round({ artifact: contractValidArtifact({ prsMerged: 5, spendUsd: 12.3 }) })]}
-      selectedRoundId={null}
-      onSelectRound={() => {}}
-      now={NOW}
-    />,
-  );
-  assert.match(html, /5 merged/);
-  assert.match(html, /\$12\.30/);
-});
-
-test("#766 gate② finding [3]: an artifact shaped like the invented 'merged' field (never a real contract field) renders tally-less, not a fabricated count", () => {
-  const html = renderToStaticMarkup(
-    <Transport rounds={[round({ artifact: { merged: 5, spendUsd: 12.3 } })]} selectedRoundId={null} onSelectRound={() => {}} now={NOW} />,
-  );
-  assert.doesNotMatch(html, /5 merged/, "there is no 'merged' field on a real artifact — this must not render a count from it");
-});
-
-test("an artifact-less round renders tally-less — 'no summary yet', never a fabricated $0/0", () => {
-  const artifactLess = round({ schemaVersion: null, artifact: null });
-  const html = renderToStaticMarkup(<Transport rounds={[artifactLess]} selectedRoundId={null} onSelectRound={() => {}} now={NOW} />);
-  assert.match(html, /no summary yet/);
-  assert.doesNotMatch(html, /\$0\.00/);
-  assert.match(html, /round-row-tally-less/);
-});
-
-test("the still-open round is not selectable for replay — its row's button is disabled", () => {
-  const openRound = round({ roundId: 9, status: "in_progress" });
-  const html = renderToStaticMarkup(<Transport rounds={[openRound]} selectedRoundId={null} onSelectRound={() => {}} now={NOW} />);
-  assert.match(html, /<button[^>]*disabled[^>]*>round 9 · live/);
-});
-
-test("a closed round's row button is enabled and marked aria-pressed to reflect selection", () => {
-  const r = round({ roundId: 7 });
-  const selected = renderToStaticMarkup(<Transport rounds={[r]} selectedRoundId={7} onSelectRound={() => {}} now={NOW} />);
-  assert.match(selected, /aria-pressed="true"/);
-
-  const unselected = renderToStaticMarkup(<Transport rounds={[r]} selectedRoundId={null} onSelectRound={() => {}} now={NOW} />);
-  assert.match(unselected, /aria-pressed="false"/);
-  assert.doesNotMatch(unselected, /<button[^>]*disabled[^>]*>▶ round 7/);
+test("a selectedRoundId not (yet) present in `rounds` renders nothing rather than crashing", () => {
+  const html = renderToStaticMarkup(<Transport rounds={[]} selectedRoundId={5} onSelectRound={() => {}} now={NOW} />);
+  assert.equal(html, "");
 });
 
 // ── transport controls: only render once a round is actually selected ──────────────────────────
-
-test("no transport controls (play/speed/scrub) render while nothing is selected — live mode has no transport", () => {
-  const html = renderToStaticMarkup(<Transport rounds={[round()]} selectedRoundId={null} onSelectRound={() => {}} now={NOW} />);
-  assert.doesNotMatch(html, /transport-controls/);
-  assert.doesNotMatch(html, /aria-label="scrub"/);
-});
 
 test("selecting a round reveals play/pause, speed, and scrub controls", () => {
   const html = renderToStaticMarkup(
@@ -207,4 +134,82 @@ test("no loadError and not loading: the ordinary transport controls render, not 
   );
   assert.doesNotMatch(html, /could not load this round/);
   assert.match(html, /aria-label="scrub"/);
+});
+
+// ── the transport buttons themselves must resolve real token-based (mono) styling — an operator
+// probe against production (issue #889 comment) confirmed every `.transport-controls button`
+// computed `font-family: Arial` (no mono rule reaches them) while the sibling `.transport-position`
+// readout correctly resolved "JetBrains Mono Variable". docs/REVIEW-DOCTRINE.md's STYLE rule: a
+// computed-style AC needs `registerRealDom()` + a real `getComputedStyle` read against the FULL
+// production cascade, mounted in production order — never a regex match on declaration text, which
+// proves a rule exists but never that it wins the cascade onto the element.
+test("gate② finding: back-to-live/play/speed buttons resolve the SAME mono font-family as the sibling .transport-position readout, in both themes", () => {
+  assert.ok(bodyFontFamilyRule, "app.css must still declare a body { ... } rule for the ambient (pre-fix) inherited font to extract");
+  assert.ok(dataClassFontFamilyRule, "app.css must still declare the code, .data { ... } rule .transport-position's mono font depends on");
+  const style = document.createElement("style");
+  // Exactly the order the browser sees: app.css's own three `@import`s (tokens, panels, hero —
+  // in that source order) load BEFORE app.css's own rules (`body`, `code, .data`, ...) that
+  // follow them in the file — mounting body/.data ahead of panels would prove nothing about
+  // whether a later app-level rule could still out-cascade panels.css's fix.
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontFamilyRule}\n${dataClassFontFamilyRule}`;
+  document.head.appendChild(style);
+  const container = document.createElement("div");
+  container.innerHTML = renderToStaticMarkup(
+    <Transport
+      rounds={[round({ roundId: 1 })]}
+      selectedRoundId={1}
+      onSelectRound={() => {}}
+      loading={false}
+      loadError={null}
+      cursorId={100}
+      now={NOW}
+    />,
+  );
+  document.body.appendChild(container);
+  try {
+    // font-family isn't itself theme-dependent (`--font-data` carries one value, not a
+    // `light-dark()` pair) — asserted under both attributes anyway, proving the theme override
+    // mechanism doesn't somehow knock the rule out in either direction.
+    for (const themeAttr of ["heartwood", "sapwood"]) {
+      document.documentElement.setAttribute("data-theme", themeAttr);
+
+      const positionEl = container.querySelector(".transport-position");
+      assert.ok(positionEl, `${themeAttr}: .transport-position must render`);
+      const monoFontFamily = getComputedStyle(positionEl as Element).fontFamily;
+      const bodyFontFamily = getComputedStyle(document.body).fontFamily;
+      assert.notEqual(monoFontFamily, "", `${themeAttr}: sanity check — the sibling mono readout must resolve a real font-family`);
+      assert.notEqual(
+        monoFontFamily,
+        bodyFontFamily,
+        `${themeAttr}: sanity check — .transport-position must actually BE mono, distinct from the ambient body font, or this oracle proves nothing`,
+      );
+
+      const backToLive = Array.from(container.querySelectorAll(".transport-controls button")).find((b) => b.textContent === "back to live");
+      const playButton = container.querySelector(
+        '.transport-controls button[aria-label="play"], .transport-controls button[aria-label="pause"]',
+      );
+      const speedButtons = Array.from(container.querySelectorAll(".transport-speeds button"));
+      assert.equal(speedButtons.length, 3, `${themeAttr}: ×1/×4/×16 speed buttons must all be present`);
+
+      const targets: [string, Element | null | undefined][] = [
+        ["back to live", backToLive],
+        ["play", playButton],
+        ["×1 speed", speedButtons[0]],
+        ["×4 speed", speedButtons[1]],
+        ["×16 speed", speedButtons[2]],
+      ];
+      for (const [label, el] of targets) {
+        assert.ok(el, `${themeAttr}: the ${label} button must render`);
+        assert.equal(
+          getComputedStyle(el as Element).fontFamily,
+          monoFontFamily,
+          `${themeAttr}: the ${label} button must resolve the SAME mono token as .transport-position, not the ambient body font`,
+        );
+      }
+    }
+  } finally {
+    document.documentElement.removeAttribute("data-theme");
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
 });

@@ -1,16 +1,19 @@
 import type { Round } from "../api/types.ts";
-import { formatUsd } from "../format.ts";
-import { formatAbsoluteTime, formatRelativeTime } from "../format-time.ts";
 import type { PlaySpeed } from "../replay/player.ts";
 import { PLAY_SPEEDS } from "../replay/player.ts";
 
-/** #741 (split 2/4 of #146), frontend-design.md §3 A / §6: the round navigator's list plus, once
- *  a closed round is selected, the play/pause/speed/scrub transport that drives replay through
- *  it. Only `done` rounds are selectable — the open round is the LIVE slot (§10: "the open round
- *  is not scrubbable in v0.2"), never a replay target itself. */
+/**
+ * #741 (split 2/4 of #146), restructured by #889 (§3 A implementation): the play/pause/speed/scrub
+ * transport that drives replay once a closed round is selected. The round navigator/list itself
+ * moved wholesale to `RoundNavigator.tsx` (the header's `◂ [round N] ▸` pill owns opening it now) —
+ * this component renders NOTHING at all in live mode (`selectedRoundId === null`), so it no longer
+ * contributes an always-present, ~9,000px "every round ever" block above the fold (#889's own why).
+ * Only `done` rounds are selectable — the open round is the LIVE slot (§10: "the open round is not
+ * scrubbable in v0.2"), never a replay target itself.
+ */
 export interface TransportProps {
   rounds: Round[];
-  /** `null` = live mode, nothing selected for replay. */
+  /** `null` = live mode, nothing selected for replay — renders nothing. */
   selectedRoundId: number | null;
   onSelectRound: (roundId: number | null) => void;
   /** The selected round's own replay position — omitted entirely while `selectedRoundId` is
@@ -30,60 +33,11 @@ export interface TransportProps {
    *  a retry affordance, rather than leaving the panel permanently blank with no explanation. */
   loadError?: unknown;
   onRetry?: () => void;
-  /** #766 gate② finding [2]: the `/api/rounds` fetch itself failed — same documented
-   *  `disconnected` empty state `LaneBoard`/`ActivityFeed` already render, so a rounds-fetch
-   *  failure never gets mistaken for the honest "no rounds yet" empty history. */
+  /** #766 gate② finding [2]: the `/api/rounds` fetch itself failed. The header's own navigator
+   *  already carries this state (`RoundNavigator`/`Header` render the disconnected notice), so
+   *  this panel simply renders nothing rather than a second, redundant disconnected message. */
   disconnected?: boolean;
   now?: Date;
-}
-
-/** #766 gate② finding [3] (round-tally-uses-nonexistent-field): the authoritative v1
- *  `RoundArtifactSchema` (`engine/src/loop/round-artifact.ts`) names the merged-PR counter
- *  `prsMerged`, not `merged` — a real `/api/rounds` artifact has no `merged` field at all, so the
- *  old read always fell through to "no summary yet" for every genuine artifact. */
-function roundTally(round: Round): string {
-  if (round.artifact === null || typeof round.artifact !== "object") return "no summary yet";
-  const a = round.artifact as Record<string, unknown>;
-  const prsMerged = typeof a.prsMerged === "number" ? a.prsMerged : undefined;
-  const spendUsd = typeof a.spendUsd === "number" ? a.spendUsd : undefined;
-  if (prsMerged === undefined && spendUsd === undefined) return "no summary yet";
-  const parts: string[] = [];
-  if (prsMerged !== undefined) parts.push(`${prsMerged} merged`);
-  if (spendUsd !== undefined) parts.push(formatUsd(spendUsd));
-  return parts.join(" · ");
-}
-
-function RoundRow({
-  round,
-  selected,
-  onSelectRound,
-  now,
-}: {
-  round: Round;
-  selected: boolean;
-  onSelectRound: (roundId: number | null) => void;
-  now: Date;
-}) {
-  const replayable = round.status === "done";
-  const tallyLess = round.schemaVersion === null && round.artifact === null;
-  const title = formatAbsoluteTime(round.startedAt);
-  return (
-    <li className={selected ? "round-row round-row-selected" : "round-row"} data-round-id={round.roundId}>
-      <button
-        type="button"
-        disabled={!replayable}
-        aria-pressed={selected}
-        onClick={() => onSelectRound(replayable ? round.roundId : null)}
-        title={title}
-      >
-        {round.status === "in_progress" ? `round ${round.roundId} · live` : `▶ round ${round.roundId}`}
-      </button>
-      <span className="muted round-row-when" title={title}>
-        {formatRelativeTime(round.startedAt, now)}
-      </span>
-      <span className={tallyLess ? "muted round-row-tally round-row-tally-less" : "muted round-row-tally"}>{roundTally(round)}</span>
-    </li>
-  );
 }
 
 const SPEED_LABEL: Record<PlaySpeed, string> = { 1: "×1", 4: "×4", 16: "×16" };
@@ -103,42 +57,17 @@ export function Transport({
   loadError,
   onRetry,
   disconnected = false,
-  now,
 }: TransportProps) {
-  const clock = now ?? new Date();
+  // §889 AC1: hero/lanes/feed/cost must sit above the fold with nothing extra pushed below it in
+  // live mode — the header's own navigator/badge already carries the disconnected state, so this
+  // panel contributes zero height rather than a second, redundant notice.
+  if (disconnected || selectedRoundId === null) return null;
   const selected = rounds.find((r) => r.roundId === selectedRoundId) ?? null;
-
-  if (disconnected) {
-    return (
-      <section className="panel transport" aria-label="replay">
-        <h2>rounds</h2>
-        <p className="muted" style={{ color: "var(--rust)" }}>
-          disconnected — restart sapwood to reconnect
-        </p>
-      </section>
-    );
-  }
+  if (!selected) return null;
 
   return (
-    <section className="panel transport" aria-label="replay">
-      <h2>rounds</h2>
-      {rounds.length === 0 ? (
-        <p className="muted">no rounds yet</p>
-      ) : (
-        <ul className="round-list">
-          {rounds.map((round) => (
-            <RoundRow
-              key={round.roundId}
-              round={round}
-              selected={round.roundId === selectedRoundId}
-              onSelectRound={onSelectRound}
-              now={clock}
-            />
-          ))}
-        </ul>
-      )}
-
-      {selected && loading && (
+    <section className="panel transport" aria-label="replay transport">
+      {loading && (
         <fieldset className="transport-controls" aria-label="transport controls">
           <button type="button" onClick={() => onSelectRound(null)}>
             back to live
@@ -147,7 +76,7 @@ export function Transport({
         </fieldset>
       )}
 
-      {selected && !loading && loadError !== undefined && loadError !== null && (
+      {!loading && loadError !== undefined && loadError !== null && (
         <fieldset className="transport-controls" aria-label="transport controls">
           <button type="button" onClick={() => onSelectRound(null)}>
             back to live
@@ -159,7 +88,7 @@ export function Transport({
         </fieldset>
       )}
 
-      {selected && !loading && (loadError === undefined || loadError === null) && (
+      {!loading && (loadError === undefined || loadError === null) && (
         <fieldset className="transport-controls" aria-label="transport controls">
           <button type="button" onClick={() => onSelectRound(null)}>
             back to live

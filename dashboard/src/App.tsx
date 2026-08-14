@@ -374,6 +374,10 @@ type AppViewModel = {
   // navigator IS the mode", so every replayable panel below reads whichever fold is active.
   mode: "live" | "replay";
   rounds: Round[];
+  /** #889: the header navigator's LIVE-slot round id — the currently OPEN round in live mode,
+   *  `null` in demo (no live engine to have an open round at all) or before `/api/rounds` has
+   *  caught up to it. */
+  liveRoundId: number | null;
   replay: ReplayView;
   activeHero: HeroState;
   activeSteps: FoldStep[];
@@ -419,6 +423,7 @@ export function appContent(vm: AppViewModel) {
     inspectorEvents,
     mode,
     rounds,
+    liveRoundId,
     replay,
     activeHero,
     activeSteps,
@@ -449,6 +454,11 @@ export function appContent(vm: AppViewModel) {
             spend={spendFacts}
             round={roundSpend}
             parked={parked}
+            rounds={rounds}
+            selectedRoundId={replay.selectedRoundId}
+            onSelectRound={replay.selectRound}
+            liveRoundId={liveRoundId}
+            now={clock}
           />
           {/* §3 Operations: the engine control verbs hide entirely while viewing a closed round —
               they act on the PRESENT engine while every other pixel shows an as-of-cursor past. */}
@@ -682,6 +692,7 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
     inspectorEvents,
     mode,
     rounds: allRounds,
+    liveRoundId: loop.data?.round?.id ?? null,
     replay,
     activeHero,
     activeSteps,
@@ -803,6 +814,8 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
     inspectorEvents: replay.roundEvents,
     mode,
     rounds,
+    // #889: demo mode has no live open round at all — see `resolveInspectorArtifact`'s own doc.
+    liveRoundId: null,
     replay,
     activeHero,
     activeSteps,

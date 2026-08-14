@@ -1,6 +1,7 @@
-import type { EngineState } from "../api/types.ts";
+import type { EngineState, Round } from "../api/types.ts";
 import { engineStateCaption } from "../copy.ts";
 import { formatUsd } from "../format.ts";
+import { RoundNavigator } from "./RoundNavigator.tsx";
 
 /** §8 precedence: staleness, a ceiling breach, and the kill switch all outrank PAUSE in the
  *  DERIVED word — a dead engine with a PAUSE file renders `stalled`, never `paused`. The sentinel
@@ -86,6 +87,15 @@ export interface HeaderProps {
    *  is currently open (the needs-attention fold already tracks that; this component adds no
    *  second signal). */
   parked: boolean;
+  /** #889 (§3 A implementation): the round navigator's own data — optional so every pre-#889
+   *  caller/test that doesn't care about the navigator keeps working unchanged, defaulting to
+   *  the honest "no rounds yet" empty state rather than requiring a prop nobody's testing. */
+  rounds?: Round[];
+  selectedRoundId?: number | null;
+  onSelectRound?: (roundId: number | null) => void;
+  /** The currently OPEN round's id in live mode — see `RoundNavigator`'s own doc. */
+  liveRoundId?: number | null;
+  now?: Date;
 }
 
 /**
@@ -93,7 +103,19 @@ export interface HeaderProps {
  * render the "?" legend (#144's `Legend`) — this band composes with it at the call site instead
  * of duplicating it (#361 AC).
  */
-export function Header({ disconnected, isPending, engine, spend, round, parked }: HeaderProps) {
+export function Header({
+  disconnected,
+  isPending,
+  engine,
+  spend,
+  round,
+  parked,
+  rounds = [],
+  selectedRoundId = null,
+  onSelectRound = () => {},
+  liveRoundId = null,
+  now,
+}: HeaderProps) {
   if (disconnected) {
     return (
       <p className="muted" style={{ color: "var(--rust)" }}>
@@ -111,6 +133,14 @@ export function Header({ disconnected, isPending, engine, spend, round, parked }
       <span className="muted engine-caption"> — {engineStateCaption(engine.state, engine.standbyNextCheckSec)}</span>
       {engine.state === "standby" && parked && <span className="muted engine-park-caption">park</span>}
       {showsPauseChip(engine.state, engine.pauseActive) && <span className="muted data engine-pause-chip">PAUSE set</span>}
+      <RoundNavigator
+        rounds={rounds}
+        selectedRoundId={selectedRoundId}
+        onSelectRound={onSelectRound}
+        liveRoundId={liveRoundId}
+        engineState={engine.state}
+        now={now}
+      />
       <SpendMeter spend={spend} round={round} />
     </div>
   );
