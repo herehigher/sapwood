@@ -958,15 +958,18 @@ export function attentionCategory(kind: string): string | undefined {
   return isKnownKind(kind) ? ATTENTION_CATEGORY[kind as EventKind] : undefined;
 }
 
-/** #891: the strip's summary line ("N waiting · oldest Xd · M dissent") needs a "dissent" count
- *  — the mockup's own illustrative DISSENT chip has no backing event kind in this engine at all
- *  (this file's `ATTENTION_CATEGORY` doc already says so). `fix-leg-verdict-rerun` is the
- *  narrowest REAL match: its own sentence ("review findings aren't fixable by the producer") is
- *  precisely a verdict the producer can't act on and a human must adjudicate — the nearest thing
- *  to "dissent" this vocabulary actually has, not a guess at a nonexistent field. A future kind
- *  literally named for reviewer disagreement should replace this, not add to it. */
+/** #891 gate① engine-agent finding [2] (ac3-dissent-counts-wrong-events): the strip's summary
+ *  line ("N waiting · oldest Xd · M dissent") counts the SAME kinds this file's own
+ *  `ATTENTION_CATEGORY` already classifies "DISSENT" (`review-disputed`, `review-non-convergent`
+ *  — #893's real reviewer-disagreement/non-convergence kinds), never a second, independently
+ *  guessed proxy. A prior version of this function counted `fix-leg-verdict-rerun` instead — a
+ *  kind this SAME `ATTENTION_CATEGORY` map classifies "FIX CAP", not "DISSENT" — so a strip row
+ *  actually carrying a real DISSENT chip reported 0 dissent while an unrelated FIX CAP row
+ *  inflated the count. Deriving from `attentionCategory` is what keeps the two views permanently
+ *  in sync — a future DISSENT-classified kind is picked up automatically, never needing a
+ *  second, hand-maintained list here. */
 export function isDissentSignal(kind: string): boolean {
-  return kind === "fix-leg-verdict-rerun";
+  return attentionCategory(kind) === "DISSENT";
 }
 
 /** "The same module captions lane states" (§7) — a lane's `state` word, in plain language.

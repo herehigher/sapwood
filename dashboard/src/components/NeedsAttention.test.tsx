@@ -174,9 +174,9 @@ test("#891 AC3: the strip's header summary line matches the mockup's grammar —
   const wireEvents: LoopEvent[] = [
     // Oldest — 5 days back.
     wire(1, "2026-08-05T12:00:00.000Z", "drive-needs-human", { pr: 1, issue: 10 }),
-    // The one recorded dissent (`fix-leg-verdict-rerun` — the nearest real signal to the
-    // mockup's illustrative DISSENT chip, per `copy.ts`'s `isDissentSignal`).
-    wire(2, "2026-08-08T12:00:00.000Z", "fix-leg-verdict-rerun", { pr: 2, issue: 20 }),
+    // The one recorded dissent — `review-disputed`, one of the two real kinds `copy.ts`'s
+    // `ATTENTION_CATEGORY` classifies DISSENT (`isDissentSignal`'s own source of truth).
+    wire(2, "2026-08-08T12:00:00.000Z", "review-disputed", { pr: 2, issue: 20 }),
     // Newest — 1 hour back.
     wire(3, "2026-08-10T11:00:00.000Z", "rollback-escalated", { issue: 30 }),
   ];

@@ -339,7 +339,16 @@ function boundAttentionDroplets(
             .filter((issue): issue is number => typeof issue === "number"),
         );
   const isConfirmedOpen = (d: Droplet) => openEscalatedIssues === null || openEscalatedIssues.has(d.issue);
-  const isCurrentRound = (d: Droplet) => d.roundId === state.roundId || d.roundId === null;
+  // #891 gate① engine-agent finding [0] (ac1-null-round-never-collapses): a droplet's `roundId`
+  // is `null` ONLY while the fold has never yet seen a round boundary (`Droplet.roundId`'s own
+  // doc) — once `state.roundId` becomes a real number, a still-`null`-stamped droplet PREDATES
+  // that first boundary and is exactly as historical as one stamped to an explicit older round.
+  // A prior version of this check treated `null` as unconditionally current, which meant a
+  // droplet folded before the fold's first round boundary never collapsed, no matter how many
+  // real rounds passed after it — the exact unbounded-accumulation failure AC1 exists to kill.
+  // Plain `===` already covers the genuinely-current case too: while `state.roundId` is ALSO
+  // still `null` (no boundary seen at all yet), `null === null` is `true`.
+  const isCurrentRound = (d: Droplet) => d.roundId === state.roundId;
 
   const needsHuman = state.droplets.filter((d) => d.at === "needs-human");
   const resolved = needsHuman.filter((d) => !isConfirmedOpen(d));

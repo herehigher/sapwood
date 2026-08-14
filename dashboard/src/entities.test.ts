@@ -409,11 +409,13 @@ test("foldOpenAttention: an unknown-kind event never opens an attention entry (h
 
 // ── #891: attentionSummary — the strip's header line ("N waiting · oldest Xd · M dissent") ────
 
-test("attentionSummary: waiting is the item count, oldestDays floors the OLDEST item's age, dissent counts only fix-leg-verdict-rerun", () => {
+test("attentionSummary: waiting is the item count, oldestDays floors the OLDEST item's age, dissent counts the ATTENTION_CATEGORY-DISSENT kinds", () => {
   const now = new Date("2026-08-10T12:00:00.000Z");
   const items = [
     event(1, "drive-needs-human", { issue: 10, pr: 1 }), // ts below
-    event(2, "fix-leg-verdict-rerun", { issue: 20, pr: 2 }),
+    // #891 gate① engine-agent finding [2]: a REAL DISSENT-classified kind (review-disputed),
+    // never the invented fix-leg-verdict-rerun (FIX CAP) proxy the prior version used.
+    event(2, "review-disputed", { issue: 20, pr: 2 }),
     event(3, "rollback-escalated", { issue: 30 }),
   ].map((e, i) => ({ ...e, ts: ["2026-08-05T12:00:00.000Z", "2026-08-08T12:00:00.000Z", "2026-08-10T11:00:00.000Z"][i] as string }));
   assert.deepEqual(attentionSummary(items, now), { waiting: 3, oldestDays: 5, dissent: 1 });

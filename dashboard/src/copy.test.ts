@@ -902,8 +902,14 @@ test("attentionCategory returns undefined for an unrecognized kind, never a fabr
 
 // ── #891: the strip summary line's "dissent" signal ───────────────────────────────────────────
 
-test("isDissentSignal names only fix-leg-verdict-rerun — the closest real signal, not a fabricated one", () => {
-  assert.equal(isDissentSignal("fix-leg-verdict-rerun"), true);
+test("isDissentSignal names exactly the kinds ATTENTION_CATEGORY classifies DISSENT — never a second, independently guessed list", () => {
+  assert.equal(isDissentSignal("review-disputed"), true);
+  assert.equal(isDissentSignal("review-non-convergent"), true);
+  // #891 gate① engine-agent finding [2] (ac3-dissent-counts-wrong-events): this kind is
+  // classified FIX CAP by this SAME map, not DISSENT — a prior version of `isDissentSignal`
+  // wrongly counted it, so a strip row carrying a real DISSENT chip reported 0 dissent while an
+  // unrelated FIX CAP row inflated the count.
+  assert.equal(isDissentSignal("fix-leg-verdict-rerun"), false);
   assert.equal(isDissentSignal("drive-needs-human"), false);
   assert.equal(isDissentSignal("fix-rounds-capped"), false);
   assert.equal(isDissentSignal("some-future-kind-nobody-registered-yet"), false);

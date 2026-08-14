@@ -2263,3 +2263,39 @@ test("#891 gate① engine-agent finding [1] (ac2-hero-wrapper-unpinned): the REA
   );
   assert.match(html, /0 items currently waiting on a person/);
 });
+
+test("#891 gate① engine-agent finding [0] (ac1-null-round-never-collapses): a droplet folded BEFORE the fold ever saw a round boundary (roundId still null) collapses to historical once a LATER round opens — null is not permanently 'current'", () => {
+  const events: LoopEvent[] = [
+    // No `pool-selected`/`round-phase` yet — this issue's droplet is stamped `roundId: null`,
+    // the "no round boundary observed yet" state (`Droplet.roundId`'s own doc), not "this round".
+    wire("2026-07-01T00:00:00.000Z", "dispatched", { worker: "h1", issue: 1 }),
+    wire("2026-07-01T00:01:00.000Z", "reclaim-done", { worker: "h1", issue: 1, next: "DRIVING", pr: 1 }),
+    wire("2026-07-01T00:02:00.000Z", "drive-needs-human", { worker: "h1", issue: 1, pr: 1 }),
+    // A round boundary opens WEEKS later — the fold now knows a real round exists, and issue 1's
+    // still-null stamp predates it just as surely as an explicit older `roundId` would.
+    wire("2026-08-10T00:00:00.000Z", "pool-selected", { round_id: 2, issues: [] }),
+  ];
+
+  const { state } = run(events.map(toDomainEvent));
+  assert.equal(
+    droplet(state, 1)?.roundId,
+    null,
+    "sanity check on the fixture: issue 1's droplet was never touched after the round boundary",
+  );
+  assert.equal(state.roundId, 2);
+
+  const open = foldAttention(events);
+  assert.equal(Object.keys(open).length, 1, "issue 1's escalation is still open — nothing has resolved it");
+
+  const html = markup(state, { openAttention: Object.values(open) });
+  assert.doesNotMatch(
+    html,
+    /⤳ 1</,
+    "a null-stamped droplet from before the first round boundary must NOT draw once a later round is known",
+  );
+  assert.match(
+    html,
+    /class="hero-num hero-small hero-badge hero-attention-collapsed" data-count="1"/,
+    "it must collapse into the historical counter chip instead",
+  );
+});
