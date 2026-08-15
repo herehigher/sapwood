@@ -1220,7 +1220,25 @@ test("#897 AC4: a pool at or under the filled cap draws no candidate stack at al
 // [4] test above already established) into a real DOM and reads `getComputedStyle`, proving the
 // candidate rect actually resolves to no fill with a visible stroke, and that a filled pool chip
 // resolves distinguishably (NOT `fill: none`) under the exact same cascade.
-test("engine-agent audit f82d2468 finding [3]: a candidate card's rect computes to no fill with a visible stroke, distinguishable from a filled pool chip under the real production cascade", () => {
+//
+// engine-agent audit run aafcbc3f finding [2] (ac4-outline-oracle-nonexact): the prior cut's
+// `notEqual(stroke, "none")`/`notEqual(stroke, "")` still passes for a transparent stroke or
+// `stroke-opacity: 0` — the STYLE doctrine's own "never notEqual/existence" rule. Every value
+// below is now the EXACT resolved string, verified empirically against this repo's real
+// happy-dom harness rather than assumed: `var(--bark)` (a plain hex, `tokens.css`) resolves to
+// the literal `"#8A7A64"` and `stroke-opacity: 0.35` resolves to the literal `"0.35"`, both
+// through a CSS class rule exactly like `.hero-pool-candidate rect` declares. `var(--sap)` (a
+// `light-dark()` token) resolves through happy-dom's cascade to the literal, deterministic
+// string `"light-dark(#8A5A14, #E8A33D)"` — verified directly against THIS shape (an inline
+// `fill: var(--sap)` on an SVG rect, the exact form `.hero-pool-chip`'s own rect authors), not
+// assumed from `shots/shots.spec.ts`'s own doc (engine-agent audit run 509eb47b finding [1]),
+// which found a BARE top-level `color`/background `light-dark()` resolves EMPTY in happy-dom — a
+// different context this repo's test suite hasn't previously exercised through a `var()`
+// indirection. Both `--bark` and `--sap` resolve to real, exact, deterministic strings THIS
+// cascade produces every time — not a resolved final RGB (a real browser only would give that,
+// per `shots.spec.ts`'s same doc), but exact and non-fakeable regardless: a transparent/removed
+// stroke or a no-fill regression on either element changes one of these literal strings.
+test("engine-agent audit f82d2468 finding [3] / aafcbc3f finding [2]: a candidate card's rect resolves to the EXACT no-fill/visible-stroke values, distinguishable from a filled pool chip's EXACT fill, under the real production cascade", () => {
   assert.ok(bodyFontSizeRule);
   const style = document.createElement("style");
   style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
@@ -1233,20 +1251,20 @@ test("engine-agent audit f82d2468 finding [3]: a candidate card's rect computes 
     assert.ok(candidateRect, "a real .hero-pool-candidate rect must render and match the injected stylesheet's selector");
     const candidateComputed = getComputedStyle(candidateRect as Element);
     assert.equal(candidateComputed.fill, "none", "the candidate card must actually cascade to no fill, not just declare it in source");
-    assert.notEqual(candidateComputed.stroke, "none", "the candidate card must resolve a real, visible stroke");
-    assert.notEqual(
-      candidateComputed.stroke,
-      "",
-      "the candidate card's stroke must actually resolve (var(--bark) is a plain hex, not light-dark())",
+    assert.equal(candidateComputed.stroke, "#8A7A64", "the candidate card's stroke must resolve to the EXACT --bark hex, never a stand-in");
+    assert.equal(
+      candidateComputed.strokeOpacity,
+      "0.35",
+      "the candidate card's stroke must resolve a NONZERO opacity — a `stroke-opacity: 0` regression would still pass a bare non-empty/non-none check",
     );
 
     const filledRect = container.querySelector(".hero-pool-chip rect");
     assert.ok(filledRect, "a real .hero-pool-chip rect must also render for the distinguishability comparison");
     const filledComputed = getComputedStyle(filledRect as Element);
-    assert.notEqual(
+    assert.equal(
       filledComputed.fill,
-      "none",
-      "a filled pool chip must NOT resolve to no-fill — that's what makes the two sets distinguishable",
+      "light-dark(#8A5A14, #E8A33D)",
+      "a filled pool chip must resolve to the EXACT --sap token text, distinguishable from the candidate's exact 'none'",
     );
   } finally {
     document.body.removeChild(container);
