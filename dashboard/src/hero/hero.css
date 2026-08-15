@@ -138,6 +138,14 @@
   fill-opacity: 0.22;
 }
 
+/* #897 AC4: the rest of the ready pool beyond `BACKLOG_FILLED_CAP` — an outlined candidate
+ * card, distinguishable from the filled `.hero-pool-chip` cards above it. */
+.hero-pool-candidate rect {
+  fill: none;
+  stroke: var(--bark);
+  stroke-opacity: 0.35;
+}
+
 .hero-channel {
   stroke: var(--bark);
   stroke-opacity: 0.35;
@@ -168,7 +176,11 @@
   stroke-width: 2;
 }
 
-.hero-gate rect {
+/* #897: circular gate nodes, not rects — see `GATES.r`/`gateIcon` in stage.tsx. Scoped to
+ * `.hero-gate-node` (the outer node circle), not a bare `circle` selector, since `gateIcon`
+ * also draws smaller `<circle>` primitives (the gear hub, the eye pupil) inside the same group
+ * that must not pick up the node's own fill/breathe/merge styling. */
+.hero-gate-node {
   fill: var(--panel);
   stroke: var(--bark);
   stroke-opacity: 0.4;
@@ -178,11 +190,11 @@
  * §6: the checkpoints are ONE calm waiting area. They breathe together while a PR waits and
  * never render per-gate progress — v0.2 persists no gate substate to render.
  */
-.hero-gate[data-state="waiting"] rect {
+.hero-gate[data-state="waiting"] .hero-gate-node {
   animation: hero-breathe 3.2s ease-in-out infinite;
 }
 
-.hero-gate.is-merged rect {
+.hero-gate.is-merged .hero-gate-node {
   stroke: var(--moss);
   stroke-opacity: 1;
 }
@@ -275,8 +287,13 @@
 }
 
 /* #879: the target/tree/check glyph inside each PLAN circle — same inactive/active colour
- * split as the circle it sits in, so the icon never carries state the circle doesn't already. */
-.hero-planning-icon {
+ * split as the circle it sits in, so the icon never carries state the circle doesn't already.
+ * #897: `.hero-gate-icon` (the CI gear / Review eye) shares this same stroke styling — a
+ * separate class only so `hero.test.ts`'s planning-trio icon count stays scoped to the
+ * planning zone; gates carry no active/inactive state, so they never pick up the
+ * `[data-active="true"]` rule below either way. */
+.hero-planning-icon,
+.hero-gate-icon {
   fill: none;
   stroke: var(--bark);
   stroke-width: 1.4;

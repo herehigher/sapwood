@@ -248,14 +248,14 @@ test("#728: the fix-return arc mounts only for an active fix loop and unmounts o
   ]);
   const fixingHtml = markup(fixing.state);
   assert.match(fixingHtml, /<path id="hero-fixloop-path"/);
-  assert.match(fixingHtml, /<textPath[^>]*href="#hero-fixloop-path"[^>]*>merge conflict<\/textPath>/);
+  assert.match(fixingHtml, /<text class="hero-fixloop-label"[^>]*>merge conflict<\/text>/);
 
   // The fix loop ends — the lane merges straight out of `fixing` — and folding that event
   // must fold the arc itself away, not just its label.
   const folded = foldEvents(fixing.state, [ev("merged", { worker: "w1", issue: 86, pr: 97 })]);
   const foldedHtml = markup(folded.state);
   assert.doesNotMatch(foldedHtml, /<path id="hero-fixloop-path"/);
-  assert.doesNotMatch(foldedHtml, /<textPath/);
+  assert.doesNotMatch(foldedHtml, /hero-fixloop-label/);
 });
 
 test("§6 `fix-leg-resumed` re-lights the same fixing state after a handoff", () => {
@@ -275,7 +275,7 @@ test("§6 `fix-leg-resumed` re-lights the same fixing state after a handoff", ()
   assert.equal(droplet(state, 86)?.handedOff, false);
 });
 
-test("#716 gate② round 2 P2-5: the fix-return arrow carries the send-back reason as a textPath label, not only the lane caption", () => {
+test("#716 gate② round 2 P2-5: the fix-return arrow carries the send-back reason as its own label, not only the lane caption", () => {
   const { state } = run([
     ev("dispatched", { worker: "w1", issue: 86 }),
     ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING", pr: 97 }),
@@ -284,10 +284,33 @@ test("#716 gate② round 2 P2-5: the fix-return arrow carries the send-back reas
   ]);
   const html = markup(state);
   assert.match(html, /<path id="hero-fixloop-path"/);
-  assert.match(html, /<textPath[^>]*href="#hero-fixloop-path"[^>]*>merge conflict<\/textPath>/);
+  assert.match(html, /<text class="hero-fixloop-label"[^>]*>merge conflict<\/text>/);
 
   // No fixing lane at all — no label on the arrow.
-  assert.doesNotMatch(markup(initialHeroState(3)), /<textPath/);
+  assert.doesNotMatch(markup(initialHeroState(3)), /hero-fixloop-label/);
+});
+
+test("#897 AC1: the fix-loop label renders as plain upright text below the return leg, not a textPath riding the arrow", () => {
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 86 }),
+    ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING", pr: 97 }),
+    ev("drive-fixup", { worker: "w1", issue: 86, pr: 97, fixRounds: 1, reason: "gate:FIXABLE:merge-conflict" }),
+    ev("fix-leg-started", { worker: "w1", issue: 86, pr: 97, fixRounds: 1 }),
+  ]);
+  const html = markup(state);
+
+  // Plain text, not a textPath riding the arrow's own (right-to-left, at this stretch) curve —
+  // no `<textPath>` element at all, so there is no path direction for the label to inherit a
+  // rotation from.
+  assert.doesNotMatch(html, /<textPath/);
+
+  const labelMatch = html.match(/<text class="hero-fixloop-label" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>merge conflict<\/text>/);
+  assert.ok(labelMatch, "the label must render as a plain <text> element carrying its own x/y");
+  assert.doesNotMatch(labelMatch![0], /rotate\(/, "no rotation transform on the label");
+
+  // Below the return leg's own deepest dip (the arc's control-point y, `GATES.y + 78`) —
+  // distinct from the arrow's own path, which the label no longer rides.
+  assert.ok(Number(labelMatch![2]) > GATES.y + 78, "the label must sit below the return leg's deepest point");
 });
 
 test("sendBackReason maps the engine's gate reason to the three §6/§7 words", () => {
@@ -332,6 +355,30 @@ test("§6 `merged`: gates flash ✓, the droplet becomes a ring, the counter inc
   // merged droplet's own label already carries (`stage.tsx`'s `d.at === "trunk" ? "✓ " : ""`),
   // which the old loose `/✓/` match could never actually distinguish from.
   assert.equal(html.match(/class="hero-gate-check"/g)?.length, 2, "both CI and Review gates carry the ✓ glyph element");
+});
+
+test("#897 AC2: CI and Review render as circular gate nodes carrying a hand-drawn icon marker, not rects", () => {
+  const html = markup(initialHeroState(3));
+  const ciGate = html.match(/<g class="hero-gate" data-gate="ci"[^>]*>([\s\S]*?)<\/g>\s*<g class="hero-gate" data-gate="review"/);
+  assert.ok(ciGate, "the CI gate group must render");
+  assert.match(ciGate![1] as string, /<circle class="hero-gate-node"/, "CI must render as a <circle>, not the old <rect>");
+  assert.doesNotMatch(ciGate![1] as string, /<rect/, "no <rect> left inside the CI gate");
+  assert.match(ciGate![1] as string, /data-icon="gear"/, "CI carries its icon marker via the existing data-icon convention");
+
+  const reviewGate = html.match(/<g class="hero-gate" data-gate="review"[^>]*>([\s\S]*?)<\/g>\s*<line/);
+  assert.ok(reviewGate, "the Review gate group must render");
+  assert.match(reviewGate![1] as string, /<circle class="hero-gate-node"/, "Review must render as a <circle>, not the old <rect>");
+  assert.doesNotMatch(reviewGate![1] as string, /<rect/, "no <rect> left inside the Review gate");
+  assert.match(reviewGate![1] as string, /data-icon="eye"/, "Review carries its icon marker via the existing data-icon convention");
+});
+
+test("#897 AC2: Summary/Retro reflection nodes sit below the trunk/outcome disc, not beside it at TRUNK.y", () => {
+  const html = markup(initialHeroState(3));
+  const nodeYs = [...html.matchAll(/<circle class="hero-planning-node" cx="(-?[\d.]+)" cy="(-?[\d.]+)" r="13">/g)].map(([, , y]) =>
+    Number(y),
+  );
+  assert.equal(nodeYs.length, 2, "both Summary and Retro nodes must render");
+  for (const y of nodeYs) assert.ok(y > TRUNK.y, `reflection node y=${y} must sit below TRUNK.y=${TRUNK.y}`);
 });
 
 test("§6 `handoff`: droplet folds back into the backlog with a progress badge", () => {
@@ -743,7 +790,7 @@ test("the merged event's checkpoint flash and the new growth ring use --moss, ne
   // The flash is an imperative anime.js class toggle (`.is-merged`), so its token binding is
   // asserted against the stylesheet that drives it, tied to the class the rendered gate carries.
   assert.match(markup(initialHeroState(3)), /class="hero-gate"/);
-  assert.match(heroCss, /\.hero-gate\.is-merged rect\s*\{[^}]*stroke:\s*var\(--moss\)/);
+  assert.match(heroCss, /\.hero-gate\.is-merged \.hero-gate-node\s*\{[^}]*stroke:\s*var\(--moss\)/);
 
   // The newest ring is a static, server-rendered attribute — directly assertable. `data-ring`
   // (#716 gate② round 2 P1-3) sits between `data-current` and `style` in draw order, hence
@@ -1140,6 +1187,30 @@ test("the backlog renders this round's selection pool", () => {
 
   assert.equal(html.match(/class="hero-pool-chip"/g)?.length, 3);
   assert.match(html, /BACKLOG/);
+});
+
+test("#897 AC4: BACKLOG carries the ready count, and the pool beyond the filled cap draws as an outlined candidate stack", () => {
+  const { state } = run([ev("pool-selected", { round_id: 1, issues: [86, 88, 90, 92, 94] })]);
+  const html = markup(state);
+
+  // N is `state.pool.length` — the same array both the filled and candidate cards below draw
+  // from, never a second guess at "how many are ready".
+  assert.equal(state.pool.length, 5);
+  assert.match(html, /BACKLOG \(5 ready\)/);
+
+  // Two distinguishable element sets: the existing filled pool chips, capped, and a separate
+  // outlined candidate-stack set for the rest — not just one filled-chip list.
+  assert.equal(html.match(/class="hero-pool-chip"/g)?.length, 3, "only the front of the queue draws filled");
+  assert.equal(html.match(/class="hero-pool-candidate"/g)?.length, 2, "the rest draws as a distinguishable outlined set");
+  assert.match(html, /class="hero-pool-candidate" data-issue="92"/);
+  assert.match(html, /class="hero-pool-candidate" data-issue="94"/);
+});
+
+test("#897 AC4: a pool at or under the filled cap draws no candidate stack at all", () => {
+  const { state } = run([ev("pool-selected", { round_id: 1, issues: [86, 88, 90] })]);
+  const html = markup(state);
+  assert.match(html, /BACKLOG \(3 ready\)/);
+  assert.doesNotMatch(html, /hero-pool-candidate/);
 });
 
 // ── #728: backlog chip / needs-human / outcome-tally overlap ──────────────────

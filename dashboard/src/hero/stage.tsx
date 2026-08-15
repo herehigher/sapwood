@@ -63,6 +63,13 @@ export const STAGE = { w: 1200, h: 380 } as const;
 // #879: bumped 26 → 32 — the frozen baseline draws the ready backlog as filled CARDS, not a
 // thin list; a taller step is what gives the card rect (below) room to read as a card.
 export const BACKLOG = { x: 46, y: 62, w: 96, chip: 32 } as const;
+/**
+ * #897 AC4: only the FRONT of the ready pool draws as filled cards — the frozen baseline's
+ * "about to be worked" emphasis — the rest draws as outlined candidate cards below them (same
+ * "cap what's emphasized" grammar `NEEDS_HUMAN_DRAW_CAP`/`CHECKPOINT_DRAW_CAP` already use).
+ * 3 matches the baseline's own filled-card count.
+ */
+const BACKLOG_FILLED_CAP = 3;
 /** `note` clears the tallest lane stack (`lanes.max` 6) rather than sitting under 3 lanes. */
 const PLANNING = { x: 224, note: 300, noteX: 152 } as const;
 /** §7: plain word first, internal term never. `role` is the config-captions.ts `roles.<role>`
@@ -91,8 +98,24 @@ const PLANNING_NODES = [
   },
 ] as const;
 const LANES = { x: 330, w: 372, top: 92, gap: 44 } as const;
-export const GATES = { ci: 762, review: 858, y: 156 } as const;
+/**
+ * #897: `r` is new — the frozen baseline draws CI/Review as large circular gate nodes (with a
+ * hand-drawn gear/eye glyph inside, `gateIcon` below), not the small rects this stage used to
+ * draw. 26 keeps the circle's right edge (`GATES.review + r` = 884) inside the same clearance
+ * the old rect already held against the trunk rings' leftmost reach (`TRUNK.x - TRUNK.max *
+ * TRUNK.step` = 922) — margin only grows (was 22px at the old rect's 900 edge, now 38px).
+ */
+export const GATES = { ci: 762, review: 858, y: 156, r: 26 } as const;
 export const ESCALATION = { x: 810, y: 320 } as const;
+/**
+ * #897 AC1: the fix-loop return arrow's own send-back-reason label — plain upright text, not a
+ * `textPath` riding the arrow's own (right-to-left, at this stretch) curve, which rendered the
+ * word rotated ~180°. Sits below the arc's own deepest dip (the curve's control-point y,
+ * `GATES.y + 78`) with clearance from both the curve above and `LANES` row captions below it —
+ * distinct from the arrow's own path direction, per the mockup (`hero-panel-{dark,light}.png`:
+ * the label sits upright on its own baseline under the return leg, not painted along it).
+ */
+const FIXLOOP_LABEL = { x: 535, y: GATES.y + 100 } as const;
 /**
  * #728 gate② finding [0]: caps the cluster's rightward spread so it stays clear of the trunk
  * rings (leftmost extent `TRUNK.x - TRUNK.max * TRUNK.step` = 922) AND the OUTCOME tally
@@ -187,7 +210,15 @@ const CHECKPOINT_DRAW_CAP = CHECKPOINT_COLS * CHECKPOINT_ROWS_MAX;
  * anchor points don't (caught by this file's own bbox test, not a guess).
  */
 const CHECKPOINT_OVERFLOW_REAL_CAP = CHECKPOINT_COLS * (CHECKPOINT_ROWS_MAX - 1);
-export const TRUNK = { x: 1006, y: 156, step: 7, max: 12 } as const;
+/**
+ * #897 AC3: the frozen baseline's cross-section is dense and fine-grained (many close rings),
+ * not the ~12 coarse widely-spaced circles this stage used to draw — `step`/`max` move from
+ * 7/12 to 2/42, so the SAME overall reach (`max * step` = 84, unchanged) now packs 42 rings into
+ * it instead of 12. Every downstream geometry constant that cites the old `84` reach (the
+ * escalation cluster's own doc below, the trunk-droplet clearance doc) stays valid unmodified —
+ * only the drawn TEXTURE inside that same footprint gets finer.
+ */
+export const TRUNK = { x: 1006, y: 156, step: 2, max: 42 } as const;
 /**
  * #886 gate② run 2e566ac9 finding [1]: where the newest-merge droplet parks, offset from
  * `dropletPoint`'s "trunk" case — frees the true trunk CENTER for the outcome number (below).
@@ -203,10 +234,19 @@ export const TRUNK = { x: 1006, y: 156, step: 7, max: 12 } as const;
  * NEEDS_HUMAN_COL_STEP/ROW_STEP doc already uses for its own cluster.
  */
 const TRUNK_DROPLET_OFFSET = { dx: 40, dy: -40 } as const;
-const REFLECTION = { x: 1118, bottom: 244 } as const;
+/**
+ * #897 AC2: the frozen baseline connects Summary/Retro BELOW the outcome disc as a lower
+ * reflection tree — a stem off the ring's own bottom edge (`TRUNK.y + TRUNK.max * TRUNK.step`),
+ * a horizontal bar, and two drops into the nodes — not beside the trunk at its own y-band
+ * (the old `REFLECTION.x` column stacked at y 110/200, alongside `TRUNK.y` = 156). `barY`/`y`
+ * sit below both the "ring(s)" label (`TRUNK.y + 124` = 280) and the outcome tally
+ * (`TRUNK.y + 140` = 296) with clearance verified against `hero.test.ts`'s own caption/droplet
+ * stress test; `spread` keeps both nodes' labels inside `STAGE.w` with room to spare.
+ */
+const REFLECTION = { stemX: TRUNK.x, spread: 44, barY: 265, y: 316, r: 13, bottom: 358 } as const;
 const REFLECTION_NODES = [
-  { node: "summary" as const, y: 110, label: "Summary", role: "roles.harvest" },
-  { node: "retro" as const, y: 200, label: "Retro", role: "roles.retro" },
+  { node: "summary" as const, x: REFLECTION.stemX - REFLECTION.spread, label: "Summary", role: "roles.harvest" },
+  { node: "retro" as const, x: REFLECTION.stemX + REFLECTION.spread, label: "Retro", role: "roles.retro" },
 ] as const;
 
 const laneY = (index: number) => LANES.top + index * LANES.gap;
@@ -515,6 +555,43 @@ function planningIcon(node: (typeof PLANNING_NODES)[number]["node"], cx: number,
   }
 }
 
+/**
+ * #897 AC2: the frozen baseline draws a hand-drawn glyph inside each gate circle — a gear for
+ * CI, an eye for Review — same "hand-drawn vector primitive, no icon-font" posture as
+ * `planningIcon` above (two static, tightly-scoped shapes don't earn a package either). A
+ * distinct `hero-gate-icon` class, not a reuse of `hero-planning-icon` — the two zones stay
+ * separately countable (`hero.test.ts`'s own "one icon per PLAN node" oracle depends on
+ * `hero-planning-icon` never drawing outside the planning trio); `hero.css` shares the actual
+ * stroke styling between the two classes.
+ */
+function gateIcon(gate: "ci" | "review", cx: number, cy: number) {
+  switch (gate) {
+    case "ci":
+      return (
+        <g className="hero-gate-icon" data-icon="gear">
+          <circle cx={cx} cy={cy} r={7} />
+          <circle className="hero-planning-icon-dot" cx={cx} cy={cy} r={2.2} />
+          {[0, 45, 90, 135].map((deg) => (
+            <line
+              key={deg}
+              x1={cx + 10 * Math.cos((deg * Math.PI) / 180)}
+              y1={cy + 10 * Math.sin((deg * Math.PI) / 180)}
+              x2={cx - 10 * Math.cos((deg * Math.PI) / 180)}
+              y2={cy - 10 * Math.sin((deg * Math.PI) / 180)}
+            />
+          ))}
+        </g>
+      );
+    case "review":
+      return (
+        <g className="hero-gate-icon" data-icon="eye">
+          <path d={`M ${cx - 11} ${cy} Q ${cx} ${cy - 8} ${cx + 11} ${cy} Q ${cx} ${cy + 8} ${cx - 11} ${cy} Z`} />
+          <circle className="hero-planning-icon-dot" cx={cx} cy={cy} r={2.6} />
+        </g>
+      );
+  }
+}
+
 /** §6: "how long since anything happened" — the OUTCOME zone's staleness caption. Whole
  *  seconds, floored; a future/unparseable timestamp (clock skew) reads as "just now" rather
  *  than a negative or NaN caption. */
@@ -655,11 +732,14 @@ export function HeroStage({
 
       {/* ── Zone 1: backlog ── */}
       <g className="hero-backlog">
+        {/* #897 AC4: "BACKLOG (N ready)" — N is `state.pool.length`, the SAME array the filled/
+         * candidate cards below draw from (one number, one source, never a second guess at
+         * "how many are ready"). */}
         <text className="hero-label" x={BACKLOG.x} y={BACKLOG.y - 12}>
-          BACKLOG
+          BACKLOG ({state.pool.length} ready)
         </text>
         <rect className="hero-well" x={BACKLOG.x} y={BACKLOG.y} width={BACKLOG.w} height={210} rx={6} />
-        {state.pool.map((issue, i) => (
+        {state.pool.slice(0, BACKLOG_FILLED_CAP).map((issue, i) => (
           <g className="hero-pool-chip" key={issue} data-issue={issue}>
             <rect
               style={{ fill: "var(--sap)" }}
@@ -676,6 +756,21 @@ export function HeroStage({
               className="hero-num hero-pool-num"
               x={BACKLOG.x + BACKLOG.w / 2}
               y={BACKLOG.y + 22 + i * BACKLOG.chip}
+              textAnchor="middle"
+            >
+              ⊙ {issue}
+            </text>
+          </g>
+        ))}
+        {/* #897 AC4: the rest of the ready pool — an outlined candidate stack, distinguishable
+         * from the filled cards above rather than folded into the same filled-chip list. */}
+        {state.pool.slice(BACKLOG_FILLED_CAP).map((issue, i) => (
+          <g className="hero-pool-candidate" key={issue} data-issue={issue}>
+            <rect x={BACKLOG.x + 8} y={BACKLOG.y + 6 + (i + BACKLOG_FILLED_CAP) * BACKLOG.chip} width={BACKLOG.w - 16} height={24} rx={8} />
+            <text
+              className="hero-num"
+              x={BACKLOG.x + BACKLOG.w / 2}
+              y={BACKLOG.y + 22 + (i + BACKLOG_FILLED_CAP) * BACKLOG.chip}
               textAnchor="middle"
             >
               ⊙ {issue}
@@ -778,15 +873,15 @@ export function HeroStage({
               className="hero-fixloop"
               d={`M ${GATES.ci - 30} ${GATES.y + 26} C ${640} ${GATES.y + 78}, ${430} ${GATES.y + 78}, ${LANES.x + 40} ${laneY(0) + 12}`}
             />
-            {/* #716 gate② round 2 P2-5: the AC wants the send-back reason word ON the return
-             * arrow itself, via textPath — the per-lane caption flash (above) narrates WHICH
-             * lane, this narrates WHAT the loop is doing. One shared path draws one label; when
-             * several lanes are fixing at once, the first (channel order) wins rather than
-             * concatenating an ambiguous list. */}
-            <text className="hero-fixloop-label">
-              <textPath href="#hero-fixloop-path" startOffset="50%" textAnchor="middle">
-                {fixingReason}
-              </textPath>
+            {/* #897 AC1: the send-back reason renders as plain upright text below the return
+             * leg — the per-lane caption flash (above) narrates WHICH lane, this narrates WHAT
+             * the loop is doing. A `textPath` riding the arrow's own curve rendered the word
+             * rotated ~180° at this stretch (the curve runs right-to-left here); plain text has
+             * no path to inherit a direction from. One shared label; when several lanes are
+             * fixing at once, the first (channel order) wins rather than concatenating an
+             * ambiguous list. */}
+            <text className="hero-fixloop-label" x={FIXLOOP_LABEL.x} y={FIXLOOP_LABEL.y} textAnchor="middle">
+              {fixingReason}
             </text>
           </>
         )}
@@ -798,50 +893,55 @@ export function HeroStage({
        * Plain labels only — CI / Review, never gate①/gate②.
        */}
       <g className="hero-gates">
+        {/* #897 AC2: large circular gate nodes with a hand-drawn icon marker (`gateIcon`), not
+         * the small rects this stage used to draw — the primary "CI"/"Review" label moves below
+         * the circle (the circle itself carries the icon), matching the planning trio's own
+         * circle-then-label-below convention. */}
         <g className="hero-gate" data-gate="ci" data-state={gateState} {...inspectProps("ci", "inspect CI", onInspect)}>
-          <rect x={GATES.ci - 34} y={GATES.y - 20} width={68} height={40} rx={6} />
-          <text className="hero-node-label" x={GATES.ci} y={GATES.y + 5} textAnchor="middle">
+          <circle className="hero-gate-node" cx={GATES.ci} cy={GATES.y} r={GATES.r} />
+          {gateIcon("ci", GATES.ci, GATES.y)}
+          <text className="hero-node-label" x={GATES.ci} y={GATES.y + GATES.r + 16} textAnchor="middle">
             CI
           </text>
           {/* #716 gate② P2-5: the merged flash used to be a border-color change ONLY
-           * (`.hero-gate.is-merged rect`) — a real ✓ glyph is the non-color-carried channel
+           * (`.hero-gate.is-merged circle`) — a real ✓ glyph is the non-color-carried channel
            * this file's own §5 doctrine requires; shown via CSS opacity keyed off `.is-merged`
            * (Hero.tsx toggles that class), never a second render path. */}
-          <text className="hero-gate-check" x={GATES.ci + 24} y={GATES.y - 8} textAnchor="middle">
+          <text className="hero-gate-check" x={GATES.ci + GATES.r - 4} y={GATES.y - GATES.r + 6} textAnchor="middle">
             ✓
           </text>
         </g>
         <g className="hero-gate" data-gate="review" data-state={gateState} {...inspectProps("review", "inspect Review", onInspect)}>
-          <rect x={GATES.review - 42} y={GATES.y - 20} width={84} height={40} rx={6} />
-          <text className="hero-node-label" x={GATES.review} y={GATES.y + 5} textAnchor="middle">
+          <circle className="hero-gate-node" cx={GATES.review} cy={GATES.y} r={GATES.r} />
+          {gateIcon("review", GATES.review, GATES.y)}
+          <text className="hero-node-label" x={GATES.review} y={GATES.y + GATES.r + 16} textAnchor="middle">
             Review
           </text>
-          <text className="hero-gate-check" x={GATES.review + 32} y={GATES.y - 8} textAnchor="middle">
+          <text className="hero-gate-check" x={GATES.review + GATES.r - 4} y={GATES.y - GATES.r + 6} textAnchor="middle">
             ✓
           </text>
           {/* §6: REVIEW carries the review MODE word (e.g. "codex", "engine-agent"), not a
            * model·effort pair — it isn't itself model-backed, the mode just names which
            * reviewer runs.
            * #745 gate② round 5 PO pre-merge Tier-C probe (1700px, live DB): a drawn checkpoint
-           * chip's label bbox-intersected this caption — pushed further from the gate box
-           * (was `GATES.y + 18`) as the cheap half of the fix, paired with the checkpoint
-           * grid's own extra clearance below (`dropletPoint`'s checkpoint case).
-           * #808: pushed once more (was `GATES.y + 26`) alongside `CHECKPOINT_BASE_OFFSET`'s own
-           * bump — extra settled-position margin only. See that constant's doc for the real root
-           * cause (an `escalate` transition's flight, not any settled rank, is what a live probe
-           * actually catches crossing here) and `Hero.tsx`'s `fadeAcross` for the actual fix. */}
+           * chip's label bbox-intersected this caption — pushed further from the gate box as the
+           * cheap half of the fix, paired with the checkpoint grid's own extra clearance below
+           * (`dropletPoint`'s checkpoint case).
+           * #897: the caption now sits below the "Review" label itself (`GATES.y + GATES.r + 29`)
+           * since the primary label moved out from inside the gate shape to below it — strictly
+           * more clearance from the checkpoint grid above than any prior offset held. */}
           {typeof reviewMode === "string" && (
-            <text className="hero-node-caption" x={GATES.review} y={GATES.y + 34} textAnchor="middle">
+            <text className="hero-node-caption" x={GATES.review} y={GATES.y + GATES.r + 29} textAnchor="middle">
               {reviewMode}
             </text>
           )}
         </g>
-        <line className="hero-arm" x1={GATES.ci + 34} y1={GATES.y} x2={GATES.review - 42} y2={GATES.y} />
+        <line className="hero-arm" x1={GATES.ci + GATES.r} y1={GATES.y} x2={GATES.review - GATES.r} y2={GATES.y} />
         {/* The merge arm — §6: "answers only to review", the segment carrying a merged PR into
          * the trunk. Its own clickable node (AC3's "the merge arm carries no caption") — distinct
          * from CI/Review, which sit above it. */}
         <g {...inspectProps("merge", "inspect merge", onInspect)}>
-          <line className="hero-arm" x1={GATES.review + 42} y1={GATES.y} x2={TRUNK.x - 40} y2={TRUNK.y} />
+          <line className="hero-arm" x1={GATES.review + GATES.r} y1={GATES.y} x2={TRUNK.x - 40} y2={TRUNK.y} />
         </g>
       </g>
 
@@ -906,6 +1006,18 @@ export function HeroStage({
       </g>
 
       <g className="hero-reflection" data-node="reflection">
+        {/* #897 AC2: the lower reflection tree — a stem off the ring's own bottom edge, a
+         * horizontal bar, and a drop into each node — replaces the old beside-the-trunk column. */}
+        <path
+          className="hero-arm"
+          d={`M ${REFLECTION.stemX} ${TRUNK.y + TRUNK.max * TRUNK.step + 4} L ${REFLECTION.stemX} ${REFLECTION.barY} M ${
+            REFLECTION.stemX - REFLECTION.spread
+          } ${REFLECTION.barY} L ${REFLECTION.stemX + REFLECTION.spread} ${REFLECTION.barY} M ${REFLECTION.stemX - REFLECTION.spread} ${
+            REFLECTION.barY
+          } L ${REFLECTION.stemX - REFLECTION.spread} ${REFLECTION.y - REFLECTION.r} M ${REFLECTION.stemX + REFLECTION.spread} ${
+            REFLECTION.barY
+          } L ${REFLECTION.stemX + REFLECTION.spread} ${REFLECTION.y - REFLECTION.r}`}
+        />
         {REFLECTION_NODES.map((n) => {
           const caption = modelEffortCaption(config, n.role);
           return (
@@ -914,12 +1026,12 @@ export function HeroStage({
               data-active={activeReflection === n.node ? "true" : "false"}
               {...inspectProps(n.node, `inspect ${n.label}`, onInspect)}
             >
-              <circle className="hero-planning-node" cx={REFLECTION.x} cy={n.y} r={13} />
-              <text className="hero-node-label" x={REFLECTION.x} y={n.y + 30} textAnchor="middle">
+              <circle className="hero-planning-node" cx={n.x} cy={REFLECTION.y} r={REFLECTION.r} />
+              <text className="hero-node-label" x={n.x} y={REFLECTION.y + 27} textAnchor="middle">
                 {n.label}
               </text>
               {caption && (
-                <text className="hero-node-caption" x={REFLECTION.x} y={n.y + 43} textAnchor="middle">
+                <text className="hero-node-caption" x={n.x} y={REFLECTION.y + 40} textAnchor="middle">
                   {caption}
                 </text>
               )}
@@ -931,7 +1043,7 @@ export function HeroStage({
       {/* The dashed return path that closes the loop back into planning. */}
       <path
         className="hero-return"
-        d={`M ${REFLECTION.x} ${REFLECTION.bottom} L ${REFLECTION.x} ${STAGE.h - 20} L ${PLANNING.x} ${STAGE.h - 20} L ${PLANNING.x} ${PLANNING.note + 14}`}
+        d={`M ${REFLECTION.stemX} ${REFLECTION.bottom} L ${REFLECTION.stemX} ${STAGE.h - 20} L ${PLANNING.x} ${STAGE.h - 20} L ${PLANNING.x} ${PLANNING.note + 14}`}
       />
 
       {/* ── Droplets — real entities, moved only by real events ── */}
