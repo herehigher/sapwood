@@ -251,23 +251,28 @@ export const TRUNK = { x: 1006, y: 156, step: 2, max: 42 } as const;
 const TRUNK_DROPLET_OFFSET = { dx: 40, dy: -40 } as const;
 /**
  * #897 AC2: the frozen baseline connects Summary/Retro BELOW the outcome disc as a lower
- * reflection tree — a horizontal bar and two drops into the nodes — not beside the trunk at its
- * own y-band (the old `REFLECTION.x` column stacked at y 110/200, alongside `TRUNK.y` = 156).
+ * reflection tree — not beside the trunk at its own y-band (the old `REFLECTION.x` column
+ * stacked at y 110/200, alongside `TRUNK.y` = 156).
  *
  * engine-agent audit run f82d2468 finding [0] (reflection-branches-cross-tally): an earlier cut
  * placed the bar ABOVE the outcome tally (`TRUNK.y + 140` = 296) and dropped straight through
- * its row into the nodes below — the tally's rendered width is UNBOUNDED-ish (a long "N merged ·
- * N pending (N unverified) · N needs human" string, `hero.test.ts`'s own #745 gate② round 5
- * stress case reaches a rendered right edge past x=1080), so any vertical line anywhere near
- * `TRUNK.x` sits inside its typical footprint — there is no X position that dodges it reliably.
- * The fix is a Y-band split instead: `barY`/`y` sit entirely BELOW the tally's own worst-case
- * rendered box (bottom edge ≈ `TRUNK.y + 140 + 9 * 1.0` ≈ 305, `hero.test.ts`'s own
- * `CAPTION_SAFE_ASCENT`-modeled clearance) — no ring-to-bar stem crosses the tally's row at all,
- * since the stem would have shared exactly the same problem. `spread` keeps both nodes' labels
- * inside `STAGE.w` with room to spare. Verified collision-free against the tally's own stress
- * text by `hero.test.ts`'s dedicated bounding-box test (same finding).
+ * its row into the nodes below — the tally's rendered width is realistically wide (a long
+ * "N merged · N pending (N unverified) · N needs human" string; `hero.test.ts`'s own dedicated
+ * stress fixture measures a practical worst-case rendered box of roughly x∈[825,1127]), so any
+ * vertical line anywhere near `TRUNK.x` (1006, inside that range) sits inside its typical
+ * footprint. Fixed with a Y-band split — `barY`/`y` sit entirely below the tally's own
+ * worst-case rendered box (bottom edge ≈ 298, `CAPTION_SAFE_ASCENT`-modeled).
+ *
+ * engine-agent audit run 001f18a1 finding [0] (reflection-tree-disconnected): the Y-band fix
+ * above then dropped the ring-to-bar STEM entirely — AC2 wants the tree actually attached to the
+ * disc, not a floating bar. `detourX` (1140) is the second half of the same fix: past the
+ * tally's own worst-case right edge (1127, this doc's own measured figure) with margin, so a
+ * connector can run RIGHT from the ring's bottom edge to `detourX` (a horizontal segment at the
+ * ring's own tangent y, never inside the tally's y-band at all), then DOWN past the tally's row
+ * at that clear x, then LEFT into the bar — never crossing the tally's rendered box at any point,
+ * verified against the same stress text by `hero.test.ts`'s own connector-path test.
  */
-export const REFLECTION = { stemX: TRUNK.x, spread: 44, barY: 305, y: 324, r: 13, bottom: 358 } as const;
+export const REFLECTION = { stemX: TRUNK.x, spread: 44, barY: 305, y: 324, r: 13, bottom: 358, detourX: 1140 } as const;
 const REFLECTION_NODES = [
   { node: "summary" as const, x: REFLECTION.stemX - REFLECTION.spread, label: "Summary", role: "roles.harvest" },
   { node: "retro" as const, x: REFLECTION.stemX + REFLECTION.spread, label: "Retro", role: "roles.retro" },
@@ -1032,20 +1037,25 @@ export function HeroStage({
       </g>
 
       <g className="hero-reflection" data-node="reflection">
-        {/* #897 AC2 / engine-agent audit run f82d2468 finding [0]: the lower reflection tree — a
-         * horizontal bar and a drop into each node — sits entirely BELOW the outcome tally's own
-         * worst-case rendered row (`REFLECTION`'s own doc). No stem reaches up to the ring: a
-         * straight line anywhere near `TRUNK.x` would cross the tally's row exactly the same way
-         * the bar/drops used to. */}
+        {/* #897 AC2 / engine-agent audit run 001f18a1 finding [0]: the lower reflection tree
+         * actually CONNECTS to the outcome disc — a stem off the ring's own bottom edge, routed
+         * right to `REFLECTION.detourX` (past the outcome tally's own worst-case rendered right
+         * edge, `REFLECTION`'s own doc) before dropping down and back left into the bar, so no
+         * segment of this path ever crosses the tally's row at an X the tally could actually
+         * reach. */}
         <path
           className="hero-arm"
-          d={`M ${REFLECTION.stemX - REFLECTION.spread} ${REFLECTION.barY} L ${REFLECTION.stemX + REFLECTION.spread} ${
-            REFLECTION.barY
-          } M ${REFLECTION.stemX - REFLECTION.spread} ${REFLECTION.barY} L ${REFLECTION.stemX - REFLECTION.spread} ${
-            REFLECTION.y - REFLECTION.r
-          } M ${REFLECTION.stemX + REFLECTION.spread} ${REFLECTION.barY} L ${REFLECTION.stemX + REFLECTION.spread} ${
-            REFLECTION.y - REFLECTION.r
-          }`}
+          d={[
+            `M ${TRUNK.x} ${TRUNK.y + TRUNK.max * TRUNK.step + 4}`,
+            `L ${REFLECTION.detourX} ${TRUNK.y + TRUNK.max * TRUNK.step + 4}`,
+            `L ${REFLECTION.detourX} ${REFLECTION.barY}`,
+            `L ${REFLECTION.stemX + REFLECTION.spread} ${REFLECTION.barY}`,
+            `L ${REFLECTION.stemX - REFLECTION.spread} ${REFLECTION.barY}`,
+            `M ${REFLECTION.stemX - REFLECTION.spread} ${REFLECTION.barY}`,
+            `L ${REFLECTION.stemX - REFLECTION.spread} ${REFLECTION.y - REFLECTION.r}`,
+            `M ${REFLECTION.stemX + REFLECTION.spread} ${REFLECTION.barY}`,
+            `L ${REFLECTION.stemX + REFLECTION.spread} ${REFLECTION.y - REFLECTION.r}`,
+          ].join(" ")}
         />
         {REFLECTION_NODES.map((n) => {
           const caption = modelEffortCaption(config, n.role);

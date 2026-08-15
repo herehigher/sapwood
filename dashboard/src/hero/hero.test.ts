@@ -1484,10 +1484,23 @@ test("engine-agent audit f82d2468 finding [0]: the reflection tree's bar/drops n
   const [, tallyXRaw, tallyYRaw, tallyText] = tallyMatch as unknown as [string, string, string, string];
   assert.match(tallyText, /unverified/, "this fixture must actually exercise the LONGER qualified tally format");
   const tallyBox = textBox(tallyText, Number(tallyXRaw), Number(tallyYRaw), 9);
+  assert.ok(
+    tallyBox.right < REFLECTION.detourX,
+    `the tally's own measured right edge (${tallyBox.right}) must stay clear of REFLECTION.detourX (${REFLECTION.detourX}) — the whole premise the connector's detour route depends on`,
+  );
 
+  const ringBottomY = TRUNK.y + TRUNK.max * TRUNK.step + 4;
   // The connector's own occupied regions — a thin box per drawn segment, mirroring stage.tsx's
-  // own `d` formula exactly (a horizontal bar at `barY`, two vertical drops into the nodes).
+  // own `d` formula exactly: a stem off the ring, right to `detourX`, down, then into the bar
+  // and its two drops into the nodes (engine-agent audit run 001f18a1 finding [0]'s own fix).
   const strokeHalf = 2; // generous over the actual ~1px stroke width
+  const ringStemBox: Box = { left: TRUNK.x, right: REFLECTION.detourX, top: ringBottomY - strokeHalf, bottom: ringBottomY + strokeHalf };
+  const detourDropBox: Box = {
+    left: REFLECTION.detourX - strokeHalf,
+    right: REFLECTION.detourX + strokeHalf,
+    top: ringBottomY,
+    bottom: REFLECTION.barY,
+  };
   const barBox: Box = {
     left: REFLECTION.stemX - REFLECTION.spread,
     right: REFLECTION.stemX + REFLECTION.spread,
@@ -1509,10 +1522,12 @@ test("engine-agent audit f82d2468 finding [0]: the reflection tree's bar/drops n
   const summaryCircle = circleBox(REFLECTION.stemX - REFLECTION.spread, REFLECTION.y, REFLECTION.r);
   const retroCircle = circleBox(REFLECTION.stemX + REFLECTION.spread, REFLECTION.y, REFLECTION.r);
 
-  // Only the TALLY vs. each reflection-tree piece is checked — the bar and its own drops are
-  // DESIGNED to touch at their shared corner (one connected line), so cross-checking connector
-  // segments against each other would flag a false positive on the tree's own joints.
+  // Only the TALLY vs. each reflection-tree piece is checked — the pieces are DESIGNED to touch
+  // each other at their shared corners (one connected line), so cross-checking them against each
+  // other would flag a false positive on the tree's own joints.
   for (const { label, box } of [
+    { label: "reflection ring stem", box: ringStemBox },
+    { label: "reflection detour drop", box: detourDropBox },
     { label: "reflection bar", box: barBox },
     { label: "reflection left drop (Summary)", box: leftDropBox },
     { label: "reflection right drop (Retro)", box: rightDropBox },
@@ -1521,6 +1536,37 @@ test("engine-agent audit f82d2468 finding [0]: the reflection tree's bar/drops n
   ]) {
     assert.ok(!boxesOverlap(tallyBox, box), `outcome tally ${JSON.stringify(tallyBox)} overlaps ${label} ${JSON.stringify(box)}`);
   }
+});
+
+// engine-agent audit run 001f18a1 finding [0] (reflection-tree-disconnected): the earlier fix
+// left the reflection tree floating — a bar/drops with no segment reaching the outcome disc at
+// all. AC2 wants Summary/Retro actually CONNECTED below the disc, and the node-y test alone
+// can't detect a missing connector (it would still pass with the path element absent entirely).
+// This asserts the rendered `<path class="hero-arm">` that draws the reflection tree actually
+// contains a point at (or very near) the ring's own bottom edge — proof the tree is attached to
+// the disc, not just floating near it.
+test("engine-agent audit 001f18a1 finding [0]: the reflection tree's connector path actually reaches the outcome disc's own bottom edge, not just a floating bar", () => {
+  const html = markup(initialHeroState(3));
+  const reflectionGroupMatch = html.match(/<g class="hero-reflection" data-node="reflection">([\s\S]*?)<\/g>\s*<path class="hero-return"/);
+  assert.ok(reflectionGroupMatch, "the hero-reflection group must render");
+  const pathMatch = (reflectionGroupMatch![1] as string).match(/<path class="hero-arm" d="([^"]*)"/);
+  assert.ok(pathMatch, "the reflection tree's connector <path> must render");
+  const d = pathMatch![1] as string;
+
+  // Every numeric coordinate pair in the `d` string — the topmost (smallest y) point must sit at
+  // the ring's own bottom edge, not at `REFLECTION.barY` (which would mean the connector never
+  // actually reaches the disc, the exact defect this finding reports).
+  const points = [...d.matchAll(/([ML])\s*(-?[\d.]+)\s+(-?[\d.]+)/g)].map(([, , x, y]) => ({ x: Number(x), y: Number(y) }));
+  assert.ok(points.length >= 2, "the connector path must carry real coordinate points");
+  const ringBottomY = TRUNK.y + TRUNK.max * TRUNK.step + 4;
+  const topmostY = Math.min(...points.map((p) => p.y));
+  assert.equal(
+    topmostY,
+    ringBottomY,
+    "the connector's topmost point must sit at the ring's own bottom edge, proving it is actually attached",
+  );
+  const attachedAtRingX = points.some((p) => p.y === ringBottomY && p.x === TRUNK.x);
+  assert.ok(attachedAtRingX, `the connector must carry a point at (TRUNK.x, ringBottomY) = (${TRUNK.x}, ${ringBottomY})`);
 });
 
 // #886 gate② run 2e566ac9 finding [1]: the earlier fix kept the droplet dead-center and moved
