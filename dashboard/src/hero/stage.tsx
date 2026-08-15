@@ -101,11 +101,26 @@ const LANES = { x: 330, w: 372, top: 92, gap: 44 } as const;
 /**
  * #897: `r` is new — the frozen baseline draws CI/Review as large circular gate nodes (with a
  * hand-drawn gear/eye glyph inside, `gateIcon` below), not the small rects this stage used to
- * draw. 26 keeps the circle's right edge (`GATES.review + r` = 884) inside the same clearance
- * the old rect already held against the trunk rings' leftmost reach (`TRUNK.x - TRUNK.max *
- * TRUNK.step` = 922) — margin only grows (was 22px at the old rect's 900 edge, now 38px).
+ * draw. 20 keeps the circle's right edge (`GATES.review + r` = 878) well inside the same
+ * clearance the old rect already held against the trunk rings' leftmost reach (`TRUNK.x -
+ * TRUNK.max * TRUNK.step` = 922) — margin only grows (was 22px at the old rect's 900 edge, now
+ * 44px).
+ *
+ * engine-agent audit run e759fef7 finding [0] (gate-label-needs-human-collision): `r` shrank
+ * from an earlier 26 specifically to make room for the "CI"/"Review" word BELOW the circle
+ * without reaching the needs-human cluster's own fixed ceiling (rank 5's droplet label top,
+ * `ESCALATION.y - 30 - 2 * NEEDS_HUMAN_ROW_STEP - DROPLET_LABEL_FONT_PX` ≈ 198) — the cluster's
+ * own row cap (`NEEDS_HUMAN_DRAW_CAP`'s doc) was tuned against the OLD rect geometry, which drew
+ * no text below itself at all; this stage's own below-circle label is what newly competes for
+ * that space. The review-mode caption moved ABOVE the circle instead of stacking a second line
+ * below it — there was no room below for two lines regardless of `r` (worked the algebra: even
+ * at `r` = 15 the two-line channel between the circle and the cluster's ceiling has no valid Y
+ * range for both a 12px label and a 9px caption with real margins). Above the circle, the gap
+ * between the checkpoint grid's own closest row (`CHECKPOINT_BASE_OFFSET`, topmost content
+ * bottom ≈ 105) and the circle top (`GATES.y - r`) is 31px — comfortable room `hero.test.ts`'s
+ * own collision test verifies against the fixture that actually mounts both clusters at once.
  */
-export const GATES = { ci: 762, review: 858, y: 156, r: 26 } as const;
+export const GATES = { ci: 762, review: 858, y: 156, r: 20 } as const;
 export const ESCALATION = { x: 810, y: 320 } as const;
 /**
  * #897 AC1: the fix-loop return arrow's own send-back-reason label — plain upright text, not a
@@ -936,11 +951,13 @@ export function HeroStage({
            * chip's label bbox-intersected this caption — pushed further from the gate box as the
            * cheap half of the fix, paired with the checkpoint grid's own extra clearance below
            * (`dropletPoint`'s checkpoint case).
-           * #897: the caption now sits below the "Review" label itself (`GATES.y + GATES.r + 29`)
-           * since the primary label moved out from inside the gate shape to below it — strictly
-           * more clearance from the checkpoint grid above than any prior offset held. */}
+           * engine-agent audit run e759fef7 finding [0]: moved ABOVE the circle (`GATES.y -
+           * GATES.r - 12`) — the space below the circle is spoken for by the "Review" word label
+           * alone (`GATES`'s own doc: no room below for two stacked lines before the needs-human
+           * cluster's fixed ceiling). Above the circle sits comfortably clear of the checkpoint
+           * grid's own closest content — same doc's own margin accounting. */}
           {typeof reviewMode === "string" && (
-            <text className="hero-node-caption" x={GATES.review} y={GATES.y + GATES.r + 29} textAnchor="middle">
+            <text className="hero-node-caption" x={GATES.review} y={GATES.y - GATES.r - 12} textAnchor="middle">
               {reviewMode}
             </text>
           )}

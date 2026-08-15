@@ -1811,9 +1811,16 @@ test("#745 AC2: six simultaneous checkpoint droplets — CHECKPOINT_COLS/STEP's 
 // label bbox-intersected the Review gate's own "engine-agent" mode caption — the same defect
 // family as #728/#744 (real rendered extent, not anchor-point spacing). Checked at every rank up
 // to `CHECKPOINT_DRAW_CAP - 1` (the pre-overflow ceiling) against the FULL CI/Review gate
-// cluster: both rects, both node labels, and the Review caption (rendered with `reviewer.mode`
-// set, the exact live shape — the caption doesn't even mount without it).
-test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any rank up to the grid's capacity, intersects the CI/Review gate cluster (rect, label, or mode caption)", () => {
+// cluster: the gate circles, both node labels, and the Review caption (rendered with
+// `reviewer.mode` set, the exact live shape — the caption doesn't even mount without it).
+//
+// #897: rewritten for the circular gate shape (`GATES.r`, not a rect) — label/caption positions
+// are read DYNAMICALLY off the rendered markup (same discipline the caption match already used)
+// rather than hand-copied constants, so a future geometry tweak can't silently desync this
+// oracle from what's actually drawn (the VALUE doctrine's own "read the value from its source"
+// rule) — the STALE version of this test (hardcoded `GATES.y + 5`, a rect box) is exactly the
+// failure this rewrite closes: it kept passing against geometry that no longer existed.
+test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any rank up to the grid's capacity, intersects the CI/Review gate cluster (circle, label, or mode caption)", () => {
   const events: DomainEvent[] = [];
   for (let i = 1; i <= 6; i++) {
     events.push(ev("dispatched", { worker: `w${i}`, issue: i }));
@@ -1828,11 +1835,19 @@ test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any
   assert.ok(captionMatch, "the fixture must actually mount the Review gate's mode caption (the live shape under test)");
   const [, capXRaw, capYRaw] = captionMatch as unknown as [string, string, string];
 
+  const ciLabelMatch = html.match(/<text class="hero-node-label" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">CI<\/text>/);
+  assert.ok(ciLabelMatch, "the CI gate label must render");
+  const [, ciLabelXRaw, ciLabelYRaw] = ciLabelMatch as unknown as [string, string, string];
+
+  const reviewLabelMatch = html.match(/<text class="hero-node-label" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">Review<\/text>/);
+  assert.ok(reviewLabelMatch, "the Review gate label must render");
+  const [, reviewLabelXRaw, reviewLabelYRaw] = reviewLabelMatch as unknown as [string, string, string];
+
   const gateBoxes: { label: string; box: Box }[] = [
-    { label: "CI gate rect", box: { left: GATES.ci - 34, right: GATES.ci + 34, top: GATES.y - 20, bottom: GATES.y + 20 } },
-    { label: "CI gate label", box: textBox("CI", GATES.ci, GATES.y + 5, 12) },
-    { label: "Review gate rect", box: { left: GATES.review - 42, right: GATES.review + 42, top: GATES.y - 20, bottom: GATES.y + 20 } },
-    { label: "Review gate label", box: textBox("Review", GATES.review, GATES.y + 5, 12) },
+    { label: "CI gate circle", box: circleBox(GATES.ci, GATES.y, GATES.r) },
+    { label: "CI gate label", box: textBox("CI", Number(ciLabelXRaw), Number(ciLabelYRaw), 12) },
+    { label: "Review gate circle", box: circleBox(GATES.review, GATES.y, GATES.r) },
+    { label: "Review gate label", box: textBox("Review", Number(reviewLabelXRaw), Number(reviewLabelYRaw), 12) },
     { label: "Review gate mode caption (engine-agent)", box: textBox("engine-agent", Number(capXRaw), Number(capYRaw), 9) },
   ];
 
@@ -1843,9 +1858,9 @@ test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any
     checkpointBoxes.push({ label: `checkpoint #${d.issue} label`, box: textBox(`⤳ ${d.pr}`, x, y - 14, 10) });
   }
 
-  // Cross-product only — gate rect/label/caption overlapping EACH OTHER is by design (the
-  // caption and label are drawn inside/beside their own rect); what must never overlap is a
-  // checkpoint chip against any piece of the gate cluster.
+  // Cross-product only — gate circle/label/caption overlapping EACH OTHER is by design (the
+  // caption sits above the circle, the label below it — see `GATES`'s own doc); what must never
+  // overlap is a checkpoint chip against any piece of the gate cluster.
   for (const chip of checkpointBoxes) {
     for (const gate of gateBoxes) {
       assert.ok(
@@ -1860,15 +1875,18 @@ test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any
   // ink-level shave (`CAPTION_SAFE_ASCENT`'s own doc comment). `textBox()` cannot see that gap
   // by construction: it is font-metric/leading blindness in the oracle, not a defect in this
   // specific pair's geometry (this second pass re-checks the SAME ranks against the SAME
-  // cluster and stays green — the margin `CHECKPOINT_BASE_OFFSET`/`GATES.y+26` already carry is
-  // wide enough to absorb the refined ascent too). Re-run with `captionSafeTextBox` as the
-  // regression guard against a FUTURE geometry change that narrows this pair back down to
-  // something only the refined oracle would catch.
+  // cluster and stays green — the margin `GATES`'s own doc already carries is wide enough to
+  // absorb the refined ascent too). Re-run with `captionSafeTextBox` as the regression guard
+  // against a FUTURE geometry change that narrows this pair back down to something only the
+  // refined oracle would catch.
   const gateBoxesRefined: { label: string; box: Box }[] = [
-    { label: "CI gate rect", box: { left: GATES.ci - 34, right: GATES.ci + 34, top: GATES.y - 20, bottom: GATES.y + 20 } },
-    { label: "CI gate label", box: captionSafeTextBox("CI", GATES.ci, GATES.y + 5, GATE_NODE_LABEL_FONT_PX) },
-    { label: "Review gate rect", box: { left: GATES.review - 42, right: GATES.review + 42, top: GATES.y - 20, bottom: GATES.y + 20 } },
-    { label: "Review gate label", box: captionSafeTextBox("Review", GATES.review, GATES.y + 5, GATE_NODE_LABEL_FONT_PX) },
+    { label: "CI gate circle", box: circleBox(GATES.ci, GATES.y, GATES.r) },
+    { label: "CI gate label", box: captionSafeTextBox("CI", Number(ciLabelXRaw), Number(ciLabelYRaw), GATE_NODE_LABEL_FONT_PX) },
+    { label: "Review gate circle", box: circleBox(GATES.review, GATES.y, GATES.r) },
+    {
+      label: "Review gate label",
+      box: captionSafeTextBox("Review", Number(reviewLabelXRaw), Number(reviewLabelYRaw), GATE_NODE_LABEL_FONT_PX),
+    },
     {
       label: "Review gate mode caption (engine-agent)",
       box: captionSafeTextBox("engine-agent", Number(capXRaw), Number(capYRaw), CAPTION_FONT_PX, "middle"),
@@ -1884,6 +1902,66 @@ test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any
         !boxesOverlap(chip.box, gate.box),
         `${chip.label} ${JSON.stringify(chip.box)} overlaps ${gate.label} ${JSON.stringify(gate.box)} (refined ascent)`,
       );
+    }
+  }
+});
+
+// engine-agent audit run e759fef7 finding [0] (gate-label-needs-human-collision): the checkpoint
+// cluster above ONLY exercises checkpoint chips against the gate cluster — the finding's own
+// scenario is the NEEDS-HUMAN cluster (a DIFFERENT zone, below-and-right of the gates) at its own
+// documented draw cap (6, `NEEDS_HUMAN_DRAW_CAP`), with the Review mode caption mounted (the
+// live shape the finding's own rank-5 math was computed against). Dedicated fixture + oracle, not
+// folded into the checkpoint test above, since the two clusters occupy different geometry.
+test("engine-agent audit e759fef7 finding [0]: no needs-human droplet, at any rank up to the cluster's draw cap, intersects the CI/Review gate cluster (circle, label, or mode caption)", () => {
+  const events: DomainEvent[] = [];
+  for (let i = 1; i <= 6; i++) {
+    events.push(ev("dispatched", { worker: `w${i}`, issue: 200 + i }));
+    events.push(ev("reclaim-done", { worker: `w${i}`, issue: 200 + i, next: "DRIVING", pr: 9000 + i }));
+    events.push(ev("drive-needs-human", { worker: `w${i}`, issue: 200 + i, pr: 9000 + i }));
+  }
+  const { state } = run(events, 43);
+  const escalated = state.droplets.filter((d) => d.at === "needs-human");
+  assert.equal(escalated.length, 6, "exercise every rank up to NEEDS_HUMAN_DRAW_CAP (0..5), including the finding's own rank 5");
+
+  const html = markup(state, { lanesMax: 43, config: { reviewer: { mode: "engine-agent" } } });
+  const captionMatch = html.match(/class="hero-node-caption" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">engine-agent</);
+  assert.ok(captionMatch, "the fixture must actually mount the Review gate's mode caption (the live shape the finding computed against)");
+  const [, capXRaw, capYRaw] = captionMatch as unknown as [string, string, string];
+  const ciLabelMatch = html.match(/<text class="hero-node-label" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">CI<\/text>/);
+  assert.ok(ciLabelMatch);
+  const [, ciLabelXRaw, ciLabelYRaw] = ciLabelMatch as unknown as [string, string, string];
+  const reviewLabelMatch = html.match(/<text class="hero-node-label" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">Review<\/text>/);
+  assert.ok(reviewLabelMatch);
+  const [, reviewLabelXRaw, reviewLabelYRaw] = reviewLabelMatch as unknown as [string, string, string];
+
+  const gateBoxesRefined: { label: string; box: Box }[] = [
+    { label: "CI gate circle", box: circleBox(GATES.ci, GATES.y, GATES.r) },
+    { label: "CI gate label", box: captionSafeTextBox("CI", Number(ciLabelXRaw), Number(ciLabelYRaw), GATE_NODE_LABEL_FONT_PX) },
+    { label: "Review gate circle", box: circleBox(GATES.review, GATES.y, GATES.r) },
+    {
+      label: "Review gate label",
+      box: captionSafeTextBox("Review", Number(reviewLabelXRaw), Number(reviewLabelYRaw), GATE_NODE_LABEL_FONT_PX),
+    },
+    {
+      label: "Review gate mode caption (engine-agent)",
+      box: captionSafeTextBox("engine-agent", Number(capXRaw), Number(capYRaw), CAPTION_FONT_PX, "middle"),
+    },
+  ];
+
+  for (const d of escalated) {
+    const { x, y } = dropletPoint(state, d);
+    const label = d.pr === null ? `⊙ ${d.issue}` : `⤳ ${d.pr}`;
+    const needsHumanBoxes: { label: string; box: Box }[] = [
+      { label: `needs-human #${d.issue} circle`, box: circleBox(x, y, 9) },
+      { label: `needs-human #${d.issue} label`, box: captionSafeTextBox(label, x, y - 14, DROPLET_LABEL_FONT_PX) },
+    ];
+    for (const nh of needsHumanBoxes) {
+      for (const gate of gateBoxesRefined) {
+        assert.ok(
+          !boxesOverlap(nh.box, gate.box),
+          `${nh.label} ${JSON.stringify(nh.box)} overlaps ${gate.label} ${JSON.stringify(gate.box)}`,
+        );
+      }
     }
   }
 });
