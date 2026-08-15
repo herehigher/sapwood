@@ -10,7 +10,7 @@ import { foldOpenAttention } from "../entities.ts";
 import { registerRealDom } from "../test-dom.ts";
 import { Hero } from "./Hero.tsx";
 import { LEGEND_ITEMS, Legend } from "./Legend.tsx";
-import { BACKLOG, checkpointOverflowPoint, dropletPoint, ESCALATION, GATES, HeroStage, STAGE, TRUNK } from "./stage.tsx";
+import { BACKLOG, checkpointOverflowPoint, dropletPoint, ESCALATION, GATES, HeroStage, REFLECTION, STAGE, TRUNK } from "./stage.tsx";
 import {
   activePlanningNode,
   activeReflectionNode,
@@ -1213,6 +1213,47 @@ test("#897 AC4: a pool at or under the filled cap draws no candidate stack at al
   assert.doesNotMatch(html, /hero-pool-candidate/);
 });
 
+// engine-agent audit run f82d2468 finding [3] (candidate-outline-not-tested): the two tests above
+// assert class names/counts only — removing or overriding `.hero-pool-candidate rect { fill:
+// none; stroke: ... }` would leave both green. This mounts the REAL production cascade
+// (tokens.css → panels.css → hero.css → app.css's body rule, same order the #879 gate② finding
+// [4] test above already established) into a real DOM and reads `getComputedStyle`, proving the
+// candidate rect actually resolves to no fill with a visible stroke, and that a filled pool chip
+// resolves distinguishably (NOT `fill: none`) under the exact same cascade.
+test("engine-agent audit f82d2468 finding [3]: a candidate card's rect computes to no fill with a visible stroke, distinguishable from a filled pool chip under the real production cascade", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const container = document.createElement("div");
+  container.innerHTML = markup(run([ev("pool-selected", { round_id: 1, issues: [86, 88, 90, 92, 94] })]).state);
+  document.body.appendChild(container);
+  try {
+    const candidateRect = container.querySelector(".hero-pool-candidate rect");
+    assert.ok(candidateRect, "a real .hero-pool-candidate rect must render and match the injected stylesheet's selector");
+    const candidateComputed = getComputedStyle(candidateRect as Element);
+    assert.equal(candidateComputed.fill, "none", "the candidate card must actually cascade to no fill, not just declare it in source");
+    assert.notEqual(candidateComputed.stroke, "none", "the candidate card must resolve a real, visible stroke");
+    assert.notEqual(
+      candidateComputed.stroke,
+      "",
+      "the candidate card's stroke must actually resolve (var(--bark) is a plain hex, not light-dark())",
+    );
+
+    const filledRect = container.querySelector(".hero-pool-chip rect");
+    assert.ok(filledRect, "a real .hero-pool-chip rect must also render for the distinguishability comparison");
+    const filledComputed = getComputedStyle(filledRect as Element);
+    assert.notEqual(
+      filledComputed.fill,
+      "none",
+      "a filled pool chip must NOT resolve to no-fill — that's what makes the two sets distinguishable",
+    );
+  } finally {
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+});
+
 // ── #728: backlog chip / needs-human / outcome-tally overlap ──────────────────
 //
 // The hero is one `viewBox`-scaled SVG (`.hero { width: 100%; height: auto }`, asserted
@@ -1396,6 +1437,72 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
   assertNoOverlap(boxes);
 
   assert.match(html, /data-node="needs-human" data-count="6"/);
+});
+
+// engine-agent audit run f82d2468 finding [0] (reflection-branches-cross-tally): the reflection
+// tree's bar/drops used to sit ABOVE the outcome tally and run straight through its row — the
+// tally's rendered width is effectively unbounded (a long qualified "N merged · N pending (N
+// unverified) · N needs human" string), so no X position near TRUNK.x reliably dodges it. The fix
+// is a Y-band split (`REFLECTION`'s own doc in stage.tsx); this test proves it against the
+// LONGEST tally text this fixture can produce — merged/pending/needs-human all present AND the
+// windowed qualifier active (unvouched dispatched droplets), not just the unqualified case.
+test("engine-agent audit f82d2468 finding [0]: the reflection tree's bar/drops never overlap the outcome tally, even at the tally's longest (qualified) rendered text", () => {
+  const events: DomainEvent[] = [];
+  for (let i = 1; i <= 24; i++) events.push(ev("merged", { worker: `m${i}`, issue: i, pr: i }));
+  // No liveLanes coverage below (unlike the sibling needs-human collision test) — every one of
+  // these stays unvouched, forcing the LONGER qualified tally format ("(N unverified)") that
+  // stresses the tally's real rendered width the most.
+  for (let i = 1; i <= 13; i++) events.push(ev("dispatched", { worker: `p${i}`, issue: 100 + i }));
+  for (let i = 1; i <= 6; i++) {
+    events.push(ev("dispatched", { worker: `w${i}`, issue: 200 + i }));
+    events.push(ev("reclaim-done", { worker: `w${i}`, issue: 200 + i, next: "DRIVING", pr: 9000 + i }));
+    events.push(ev("drive-needs-human", { worker: `w${i}`, issue: 200 + i, pr: 9000 + i }));
+  }
+  const { state } = run(events, 43);
+  const html = markup(state, { lanesMax: 43 });
+
+  const tallyMatch = html.match(/class="hero-num hero-small hero-outcome-tally" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</);
+  assert.ok(tallyMatch, "outcome tally must render");
+  const [, tallyXRaw, tallyYRaw, tallyText] = tallyMatch as unknown as [string, string, string, string];
+  assert.match(tallyText, /unverified/, "this fixture must actually exercise the LONGER qualified tally format");
+  const tallyBox = textBox(tallyText, Number(tallyXRaw), Number(tallyYRaw), 9);
+
+  // The connector's own occupied regions — a thin box per drawn segment, mirroring stage.tsx's
+  // own `d` formula exactly (a horizontal bar at `barY`, two vertical drops into the nodes).
+  const strokeHalf = 2; // generous over the actual ~1px stroke width
+  const barBox: Box = {
+    left: REFLECTION.stemX - REFLECTION.spread,
+    right: REFLECTION.stemX + REFLECTION.spread,
+    top: REFLECTION.barY - strokeHalf,
+    bottom: REFLECTION.barY + strokeHalf,
+  };
+  const leftDropBox: Box = {
+    left: REFLECTION.stemX - REFLECTION.spread - strokeHalf,
+    right: REFLECTION.stemX - REFLECTION.spread + strokeHalf,
+    top: REFLECTION.barY,
+    bottom: REFLECTION.y - REFLECTION.r,
+  };
+  const rightDropBox: Box = {
+    left: REFLECTION.stemX + REFLECTION.spread - strokeHalf,
+    right: REFLECTION.stemX + REFLECTION.spread + strokeHalf,
+    top: REFLECTION.barY,
+    bottom: REFLECTION.y - REFLECTION.r,
+  };
+  const summaryCircle = circleBox(REFLECTION.stemX - REFLECTION.spread, REFLECTION.y, REFLECTION.r);
+  const retroCircle = circleBox(REFLECTION.stemX + REFLECTION.spread, REFLECTION.y, REFLECTION.r);
+
+  // Only the TALLY vs. each reflection-tree piece is checked — the bar and its own drops are
+  // DESIGNED to touch at their shared corner (one connected line), so cross-checking connector
+  // segments against each other would flag a false positive on the tree's own joints.
+  for (const { label, box } of [
+    { label: "reflection bar", box: barBox },
+    { label: "reflection left drop (Summary)", box: leftDropBox },
+    { label: "reflection right drop (Retro)", box: rightDropBox },
+    { label: "Summary node circle", box: summaryCircle },
+    { label: "Retro node circle", box: retroCircle },
+  ]) {
+    assert.ok(!boxesOverlap(tallyBox, box), `outcome tally ${JSON.stringify(tallyBox)} overlaps ${label} ${JSON.stringify(box)}`);
+  }
 });
 
 // #886 gate② run 2e566ac9 finding [1]: the earlier fix kept the droplet dead-center and moved
