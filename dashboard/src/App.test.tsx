@@ -440,6 +440,50 @@ test("both queries succeeding renders the normal header, not disconnected", asyn
   assert.match(html, />running</);
 });
 
+// #890 (§3 E): a running lane's engine-provided `estCostUsd`, through the REAL wire→`LiveApp`→
+// `sumEstCostUsd`→`<Header estUsd>`/`<CostStrip>` derivation — never a hand-assembled `estUsd`
+// prop. WIRING doctrine's data-flow sub-shape: mounted with a real prefetched/settled
+// `/api/loop/state` query, not `appContent` called directly with a constructed view model.
+test("#890: a live lane's estCostUsd flows through the real fetch pipeline into the header's est tail and the Lanes cost bar's hatch", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": {
+      status: 200,
+      body: {
+        ...LOOP_STATE_OK,
+        spend: { todayUsd: 10.4, dailyBudgetUsd: 100, runUsd: null, runBudgetUsd: null, byModel: [] },
+        lanes: {
+          max: 1,
+          items: [
+            {
+              lane: "w1",
+              issue: 90,
+              state: "running",
+              pr: null,
+              startedAt: "2026-08-14T00:00:00Z",
+              endedAt: null,
+              costUsd: null,
+              estCostUsd: 2.2,
+              contextTokens: null,
+              tokenComposition: null,
+            },
+          ],
+        },
+      },
+    },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  assert.match(html, /\$10\.40 \+ \$2\.20 est \/ \$100\.00/, "the header meter's est tail must read the lane's own live estimate");
+  assert.match(html, /url\(#cost-bar-est-hatch\)/, "at least the header bar's est segment must render hatched");
+});
+
+test("#890: no running lane (LOOP_STATE_OK's own empty lanes.items) renders no est tail at all — never a fabricated one", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  assert.doesNotMatch(html, / est/);
+});
+
 // #723: AC12 operator probe — the header must render `standby` (with its calm caption and the
 // next-check countdown), never `stalled`, during a healthy backoff dwell.
 test("#723: header renders the standby word with its plain-language caption and next-check countdown, not stalled", async () => {

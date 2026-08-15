@@ -47,6 +47,31 @@ test("settled cost renders the real spend_ledger sum", () => {
   assert.match(html, /\$1\.20/);
 });
 
+// ── #890 (§3 E): engine-provided est is never silently dropped ─────────────────────────────────
+
+test("a running lane's engine-provided estCostUsd renders as '$X.XX est', never the settles-later placeholder", () => {
+  const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ costUsd: null, estCostUsd: 6.21 })]} titles={{}} now={NOW} />);
+  assert.match(html, /\$6\.21 est/);
+  assert.doesNotMatch(html, /settles when the lane ends/);
+});
+
+test("a settled lane's real costUsd wins over any lingering estCostUsd — never both figures shown", () => {
+  const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ costUsd: 5.8, estCostUsd: 6.21 })]} titles={{}} now={NOW} />);
+  assert.match(html, /\$5\.80/);
+  assert.doesNotMatch(html, /6\.21/);
+});
+
+test("a lane with a live estimate renders the shared hatched CostBar", () => {
+  const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ costUsd: null, estCostUsd: 6.21 })]} titles={{}} now={NOW} />);
+  assert.match(html, /class="cost-bar lane-card-bar"/);
+  assert.match(html, /url\(#cost-bar-est-hatch\)/);
+});
+
+test("a lane with neither a settled nor an est figure renders no bar at all — never a zero-width chart", () => {
+  const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ costUsd: null, estCostUsd: null })]} titles={{}} now={NOW} />);
+  assert.doesNotMatch(html, /class="cost-bar/);
+});
+
 test("shows a PR link only when the lane is driving a PR", () => {
   const withoutPr = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ pr: null })]} titles={{}} now={NOW} />);
   assert.doesNotMatch(withoutPr, /lane-card-pr/);

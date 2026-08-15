@@ -109,3 +109,31 @@ test("the outer section keeps its #cost anchor id (§3 rail target, #727) — th
   const html = renderToStaticMarkup(<CostStrip today={todayPanel()} round={null} />);
   assert.match(html, /id="cost"/);
 });
+
+// ── #890 (§3 E): the shared CostBar primitive's hatched est share ──────────────────────────────
+
+test("a bar carrying estUsd renders the shared hatch pattern; a bar with none does not", () => {
+  const withEst = renderToStaticMarkup(
+    <CostStrip today={todayPanel({ stageBars: [{ label: "Lanes", usd: 8.9, estUsd: 2.2 }] })} round={null} />,
+  );
+  assert.match(withEst, /cost-bar-est-hatch/);
+  const withoutEst = renderToStaticMarkup(<CostStrip today={todayPanel()} round={null} />);
+  assert.doesNotMatch(withoutEst, /url\(#cost-bar-est-hatch\)/);
+});
+
+test("a CLOSED round panel's bars never carry a hatch — nothing is still running in a closed round", () => {
+  const html = renderToStaticMarkup(
+    <CostStrip
+      today={todayPanel()}
+      round={{
+        heading: "cost · round 9",
+        closed: true,
+        stageBars: STAGE_BARS,
+        targetUsd: 5,
+        modelBars: MODEL_BARS,
+        footer: { totalUsd: 6.2, prsMerged: 3, usdPerPr: 6.2 / 3, reviewUsd: 0 },
+      }}
+    />,
+  );
+  assert.doesNotMatch(html, /url\(#cost-bar-est-hatch\)/);
+});

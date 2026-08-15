@@ -2180,6 +2180,49 @@ test("#601: a forge.addIssueComment failure at ESCALATE_NOPR is best-effort — 
   st.close();
 });
 
+// ── #890 (§3 E): reclaim-done carries costUsd + the lane's last live estimate ───────────────────
+
+test("#890: reclaim-done carries the settled costUsd plus the lane's last live-telemetry estCostUsd, read before clearLiveTelemetry wipes it", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-calibrate", 90);
+  // A prior probe (conductor.tick()'s KEEP branch) already recorded a live estimate — the exact
+  // value `reclaim-done`'s payload must carry forward once this SAME lane settles.
+  st.setLiveTelemetry("lane-calibrate", {
+    estCostUsd: 6.21,
+    contextTokens: 1000,
+    tokenComposition: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+  });
+  sup.probes["lane-calibrate"] = { ...DEFAULT_PROBE, done: true, hasPr: true, costUsd: 5.8 };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-done"]);
+  assert.equal(events.length, 1);
+  const payload = events[0]!.payload as { costUsd?: number; estCostUsd?: number };
+  assert.equal(payload.costUsd, 5.8);
+  assert.equal(payload.estCostUsd, 6.21);
+  // The live-display trio is cleared on settlement (#155) — the event payload is the ONLY place
+  // this estimate survives past reclaim.
+  assert.equal(st.getWorker("lane-calibrate")?.est_cost_usd, null);
+  st.close();
+});
+
+test("#890: a lane that reclaims before its first live-telemetry probe carries costUsd alone, never a fabricated estCostUsd", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-no-estimate", 91);
+  sup.probes["lane-no-estimate"] = { ...DEFAULT_PROBE, done: true, hasPr: true, costUsd: 1.1 };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-done"]);
+  const payload = events[0]!.payload as Record<string, unknown>;
+  assert.equal(payload.costUsd, 1.1);
+  assert.ok(!Object.hasOwn(payload, "estCostUsd"), "no live-telemetry snapshot ever landed — the field must be absent, not 0/null");
+  st.close();
+});
+
 // ── #601 mirror: the FAILED (no PR, no env signature) ESCALATE path. Forge writes there already
 //   precede the terminal upsert (parity with the DEAD path, unrelated to #223 — see the ordinary
 //   `next === "ESCALATE"` branch's own comment) — the new comment slots in alongside the

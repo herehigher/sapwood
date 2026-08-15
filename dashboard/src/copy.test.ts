@@ -177,6 +177,27 @@ test("reclaim-done branches on payload.next", () => {
   );
 });
 
+// ── #890 (§3 E): the est→real calibration clause on lane settlement ────────────────────────────
+
+test("reclaim-done appends the est→real calibration clause when both figures are present, on either branch", () => {
+  assert.equal(
+    render("reclaim-done", { worker: "w1", next: "DRIVING", estCostUsd: 6.21, costUsd: 5.8 }),
+    "Lane w1 opened a PR — now in review · est $6.21 → real $5.80",
+  );
+  assert.equal(
+    render("reclaim-done", { worker: "w1", next: "REQUEUE", estCostUsd: 6.21, costUsd: 5.8 }),
+    "Lane w1 ended without a PR — reason not recorded · asks: review the lane's outcome and decide whether to retry · est $6.21 → real $5.80",
+  );
+});
+
+test("reclaim-done renders no calibration clause when estCostUsd is absent — a lane never probed while running", () => {
+  assert.equal(render("reclaim-done", { worker: "w1", next: "DRIVING", costUsd: 5.8 }), "Lane w1 opened a PR — now in review");
+});
+
+test("reclaim-done renders no calibration clause when costUsd is absent (a pre-#890 payload) — never half a figure", () => {
+  assert.equal(render("reclaim-done", { worker: "w1", next: "DRIVING", estCostUsd: 6.21 }), "Lane w1 opened a PR — now in review");
+});
+
 test("park-probe branches on payload.success and payload.source", () => {
   assert.equal(render("park-probe", { source: "forge", success: true }), "Forge check passed");
   assert.equal(render("park-probe", { source: "llm", success: true }), "Model check passed");

@@ -464,3 +464,24 @@ test("#900 finding [0]: with pinned rows alone exceeding the cap, the shown-stat
     container.remove();
   }
 });
+
+// ── #890 (§3 E): est→real calibration line on lane settlement — issue verification plan Tier A ─
+//
+// A `reclaim-done` domain event shaped like the engine's real payload (`conductor.ts`'s
+// `reclaimTerminalLane` — `costUsd` the settled real figure, `estCostUsd` the lane's own
+// last-known live estimate), fed through the feed's ordinary event pipeline (`ev()`, the SAME
+// fixture helper every other test in this file uses to build a `KnownDomainEvent` — never a
+// hand-built calibration prop), asserting the rendered sentence carries the exact "est $X → real
+// $Y" text.
+
+test("#890: a lane-settlement event carrying both estCostUsd and costUsd renders the est→real calibration line, through the real event pipeline", () => {
+  const events = [ev(1, "reclaim-done", { worker: "w1", issue: 90, next: "DRIVING", estCostUsd: 6.21, costUsd: 5.8 })];
+  const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={[]} titles={{}} now={NOW} />);
+  assert.match(html, /est \$6\.21 → real \$5\.80/);
+});
+
+test("#890: a lane-settlement event with no est/real figures on the payload renders no calibration line at all", () => {
+  const events = [ev(1, "reclaim-done", { worker: "w1", issue: 90, next: "DRIVING" })];
+  const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={[]} titles={{}} now={NOW} />);
+  assert.doesNotMatch(html, /est \$/);
+});

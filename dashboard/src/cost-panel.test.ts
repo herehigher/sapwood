@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Round, SpendRow } from "./api/types.ts";
+import type { Lane, Round, SpendRow } from "./api/types.ts";
 import {
   avgRoundCostUsd,
   buildClosedRoundCostPanel,
@@ -11,6 +11,7 @@ import {
   roundsForDay,
   rowsForDay,
   stageCostBars,
+  sumEstCostUsd,
   tickPositionPct,
 } from "./cost-panel.ts";
 import { bucketSpendByPhase, buildPhaseWindows } from "./replay/spend-replay.ts";
@@ -30,6 +31,22 @@ function spendRow(id: number, ts: string, usd: number, overrides: Partial<SpendR
     actorKind: "worker",
     role: null,
     estimated: false,
+    ...overrides,
+  };
+}
+
+function lane(overrides: Partial<Lane> = {}): Lane {
+  return {
+    lane: "w1",
+    issue: 1,
+    state: "running",
+    pr: null,
+    startedAt: "2026-08-14T00:00:00Z",
+    endedAt: null,
+    costUsd: null,
+    estCostUsd: null,
+    contextTokens: null,
+    tokenComposition: null,
     ...overrides,
   };
 }
@@ -77,6 +94,41 @@ test("stageCostBars appends an Unattributed row last, only when the bucket is no
   const noneUnattributed = stageCostBars([]);
   assert.equal(noneUnattributed.length, 6);
   assert.ok(!noneUnattributed.some((b) => b.label === "Unattributed"));
+});
+
+// ── #890 (§3 E): the est share folds onto the "Lanes" bar only ─────────────────────────────────
+
+test("stageCostBars folds a non-zero executingEstUsd onto the Lanes bar only, every other bar untouched", () => {
+  const buckets = bucketSpendByPhase([spendRow(1, "t0", 8.9)], buildPhaseWindows([]));
+  const bars = stageCostBars(buckets, 2.2);
+  assert.deepEqual(
+    bars.find((b) => b.label === "Lanes"),
+    { label: "Lanes", usd: 0, estUsd: 2.2 },
+  );
+  for (const b of bars) {
+    if (b.label !== "Lanes") assert.equal(b.estUsd, undefined, `${b.label} must carry no est share`);
+  }
+});
+
+test("stageCostBars omits estUsd entirely (never a fabricated zero) when executingEstUsd is 0 or unset", () => {
+  const bars = stageCostBars([]);
+  assert.equal(bars.find((b) => b.label === "Lanes")?.estUsd, undefined);
+});
+
+// ── sumEstCostUsd: the header meter's and today panel's shared est source ──────────────────────
+
+test("sumEstCostUsd sums every running lane's live estimate, treating a null estimate as 0", () => {
+  const lanes = [lane({ estCostUsd: 6.21 }), lane({ lane: "w2", estCostUsd: null }), lane({ lane: "w3", estCostUsd: 1.5 })];
+  assert.equal(sumEstCostUsd(lanes), 6.21 + 1.5);
+});
+
+test("sumEstCostUsd is 0 (never NaN) for no lanes", () => {
+  assert.equal(sumEstCostUsd([]), 0);
+});
+
+test("buildTodayCostPanel threads lanesEstUsd through to the Lanes stage bar", () => {
+  const panel = buildTodayCostPanel([], [], [], null, null, 3.3);
+  assert.equal(panel.stageBars.find((b) => b.label === "Lanes")?.estUsd, 3.3);
 });
 
 // ── modelCostBars: group by model, largest spend first ──────────────────────────────────────────

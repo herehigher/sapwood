@@ -23,6 +23,7 @@ import {
   buildTodayCostPanelFromBuckets,
   modelCostBars,
   roundsForDay,
+  sumEstCostUsd,
 } from "./cost-panel.ts";
 import { useDemoReplay } from "./demo/useDemoReplay.ts";
 import { type DomainEvent, toDomainEvent } from "./domain-event.ts";
@@ -391,6 +392,9 @@ type AppViewModel = {
    *  output, present only in replay mode. `undefined` in live mode, where `spendFacts` alone
    *  drives the meter. */
   roundSpend: RoundSpend | undefined;
+  /** #890 (§3 E): the header meter's est tail — `sumEstCostUsd` over the live lanes, live mode
+   *  only (`undefined` in replay/demo, where no lane is actually running). */
+  estUsd: number | undefined;
 };
 
 /**
@@ -432,6 +436,7 @@ export function appContent(vm: AppViewModel) {
     activeOpenAttention,
     spendFacts,
     roundSpend,
+    estUsd,
   } = vm;
   const onInspect = (node: StageNode) => setInspectorNode(node);
   return (
@@ -453,6 +458,7 @@ export function appContent(vm: AppViewModel) {
             }
             spend={spendFacts}
             round={roundSpend}
+            estUsd={estUsd}
             parked={parked}
             rounds={rounds}
             selectedRoundId={replay.selectedRoundId}
@@ -643,7 +649,17 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
     const raw = loop.data?.config ? readConfigPath(loop.data.config, "cost.roundBudgetUsd") : undefined;
     return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
   })();
-  const costToday = buildTodayCostPanelFromBuckets(todayLog.buckets, todayModelBars, avgRoundCostUsd(todayRounds), roundBudgetUsdConfig);
+  // #890 (§3 E): the header meter's and the "Lanes" stage bar's shared est source — live lanes
+  // only (`mode === "replay"` has no live lane data to sum, same gate `Hero`'s own `lanes` prop
+  // above already applies).
+  const lanesEstUsd = mode === "live" ? sumEstCostUsd(loop.data?.lanes.items ?? []) : 0;
+  const costToday = buildTodayCostPanelFromBuckets(
+    todayLog.buckets,
+    todayModelBars,
+    avgRoundCostUsd(todayRounds),
+    roundBudgetUsdConfig,
+    lanesEstUsd,
+  );
 
   // #880: "COST · ROUND N" — a round explicitly selected in the navigator (replay mode) reads its
   // OWN full, never-cursor-truncated log (`replay.roundSpend`/`replay.phaseWindows` — see
@@ -709,6 +725,7 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
     activeOpenAttention,
     spendFacts: loop.data?.spend,
     roundSpend,
+    estUsd: mode === "live" ? lanesEstUsd : undefined,
   });
 }
 
@@ -832,6 +849,9 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
     activeOpenAttention,
     spendFacts: bundle?.loopState.spend,
     roundSpend,
+    // #890: demo mode is always "replay" (this function's own doc) — no live lane exists to sum
+    // an est from, same honest-absent posture `liveRoundId`/`inspectorEvents` above already take.
+    estUsd: undefined,
   });
 }
 

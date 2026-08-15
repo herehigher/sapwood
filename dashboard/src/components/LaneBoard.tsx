@@ -2,8 +2,26 @@ import type { Lane } from "../api/types.ts";
 import { laneStateCaption } from "../copy.ts";
 import type { EntityTitles } from "../entities.ts";
 import { formatElapsed, formatUsd } from "../format.ts";
+import { CostBar } from "./CostBar.tsx";
 import { EntityRef } from "./EntityRef.tsx";
 import { StateGlyph } from "./icons.tsx";
+
+/** #890 (§3 E): the lane card's own settled/est text — a running lane's engine-provided
+ *  `estCostUsd` is never silently dropped (the pre-#890 behavior: any lane with `costUsd: null`
+ *  read as "—, settles when the lane ends" even when the engine already had a live estimate).
+ *  `costUsd` still wins once settled — an est figure is a placeholder for the not-yet-real
+ *  number, never shown alongside its own settled replacement. */
+export function laneCostText(lane: Lane): string {
+  if (lane.costUsd !== null) return formatUsd(lane.costUsd);
+  if (lane.estCostUsd !== null) return `${formatUsd(lane.estCostUsd)} est`;
+  return "—, settles when the lane ends";
+}
+
+/** The card's own bar total — settled once real, settled + est while still running (a stale est
+ *  never counts once `costUsd` has landed, same "settled wins" stance as `laneCostText`). */
+function laneCostBarMax(lane: Lane): number {
+  return (lane.costUsd ?? 0) + (lane.costUsd === null ? (lane.estCostUsd ?? 0) : 0);
+}
 
 /** The lane states `/api/loop/state` can actually serve (`state.activeWorkers()` reads
  *  `WHERE state IN ('running','driving','fixing')`; `handoff` is included since §7 captions it
@@ -45,8 +63,19 @@ function LaneCard({ lane, titles, repoUrl, now }: { lane: Lane; titles: EntityTi
       )}
       <div className="lane-card-foot muted data">
         <span>{formatElapsed(lane.startedAt, now)}</span>
-        <span>{lane.costUsd !== null ? formatUsd(lane.costUsd) : "—, settles when the lane ends"}</span>
+        <span>{laneCostText(lane)}</span>
       </div>
+      {laneCostBarMax(lane) > 0 && (
+        <CostBar
+          className="lane-card-bar"
+          settledUsd={lane.costUsd ?? 0}
+          // #890: same "settled wins" stance as `laneCostText` — a stale est lingering after
+          // settlement is never drawn alongside its own real replacement.
+          estUsd={lane.costUsd === null ? lane.estCostUsd : null}
+          max={laneCostBarMax(lane)}
+          label="lane cost"
+        />
+      )}
     </div>
   );
 }
