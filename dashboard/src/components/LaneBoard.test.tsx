@@ -72,6 +72,39 @@ test("a lane with neither a settled nor an est figure renders no bar at all — 
   assert.doesNotMatch(html, /class="cost-bar/);
 });
 
+// ── #890 gate② finding [1] (lane-bars-self-scale): the bar scales against the configured worker
+// soft budget, not the amount it draws — a self-scaled max made every positive figure render
+// 100% full, losing all budget context.
+
+test("workerBudgetUsdSoft is the bar's ceiling — a small settled amount against a real budget draws a partial-width fill, never full", () => {
+  const html = renderToStaticMarkup(
+    <LaneBoard lanesMax={1} lanes={[lane({ costUsd: 2 })]} titles={{}} workerBudgetUsdSoft={10} now={NOW} />,
+  );
+  // The background TRACK rect is always width="100" (a fixed full-width reference) — the settled
+  // FILL rect (`fill="var(--sap)"`) is the one whose width must scale against the ceiling.
+  assert.match(html, /width="20" height="10" fill="var\(--sap\)"/, "$2 of a $10 soft budget is a 20%-wide fill");
+  assert.doesNotMatch(html, /width="100" height="10" fill="var\(--sap\)"/, "the settled fill itself must never self-scale to full width");
+});
+
+test("workerBudgetUsdSoft unset (config unreadable) falls back to the self-scaled total, same as before #890 gate② round 2", () => {
+  const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ costUsd: 2 })]} titles={{}} now={NOW} />);
+  assert.match(html, /width="100"/, "with no real ceiling to measure against, the settled figure fills its own bar");
+});
+
+test("a lane that overran its soft budget still draws a full (clamped) bar, never off-track", () => {
+  const html = renderToStaticMarkup(
+    <LaneBoard lanesMax={1} lanes={[lane({ costUsd: 15 })]} titles={{}} workerBudgetUsdSoft={10} now={NOW} />,
+  );
+  assert.match(html, /width="100"/);
+});
+
+test("a configured budget never forces an empty lane (no settled, no est) to draw a bar", () => {
+  const html = renderToStaticMarkup(
+    <LaneBoard lanesMax={1} lanes={[lane({ costUsd: null, estCostUsd: null })]} titles={{}} workerBudgetUsdSoft={10} now={NOW} />,
+  );
+  assert.doesNotMatch(html, /class="cost-bar/);
+});
+
 test("shows a PR link only when the lane is driving a PR", () => {
   const withoutPr = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ pr: null })]} titles={{}} now={NOW} />);
   assert.doesNotMatch(withoutPr, /lane-card-pr/);

@@ -52,6 +52,15 @@ export function resolveFixCap(config: Record<string, unknown> | null | undefined
   return typeof raw === "number" && Number.isFinite(raw) ? raw : 2;
 }
 
+/** #890 gate② finding [1] (lane-bars-self-scale): `worker.budgetUsdSoft` (allowlisted config,
+ *  `config-captions.ts`) — the lane card bar's own ceiling, `LaneBoard.tsx`'s `laneCostBarMax`.
+ *  `null` (never a guessed number) when the config is unreadable, same honest-unknown posture
+ *  `resolveFixCap` above takes for `lanes.prFixCap`. */
+export function resolveWorkerBudgetUsdSoft(config: Record<string, unknown> | null | undefined): number | null {
+  const raw = config ? readConfigPath(config, "worker.budgetUsdSoft") : undefined;
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+}
+
 /**
  * PR #766 gate② audit finding [1] (header-replay-total-is-round-scoped) — round 2 of the header
  * meter fix. Round 1 (finding [0], addressed on the previous head) labeled the SELECTED round's
@@ -530,6 +539,7 @@ export function appContent(vm: AppViewModel) {
             titles={activeTitles}
             repoUrl={repoUrl}
             disconnected={disconnected}
+            workerBudgetUsdSoft={resolveWorkerBudgetUsdSoft(loop.data?.config)}
           />
         </LiveOnly>
 

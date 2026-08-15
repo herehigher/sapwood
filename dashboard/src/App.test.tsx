@@ -13,6 +13,7 @@ import {
   resolveInspectorArtifact,
   resolveInspectorRound,
   resolveRoundSpend,
+  resolveWorkerBudgetUsdSoft,
   toggleConfigOpen,
 } from "./App.tsx";
 import { demoFixtureQuery, eventsQuery, loopStateQuery, MAX_EVENT_HISTORY, roundsQuery, spendQuery } from "./api/queries.ts";
@@ -261,6 +262,15 @@ test("#716 gate② P1-3: resolveFixCap reads the nested lanes.prFixCap path, not
   assert.equal(resolveFixCap({ lanes: { prFixCap: "6" } }), 2, "a non-number value is never coerced");
 });
 
+test("#890 gate② finding [1]: resolveWorkerBudgetUsdSoft reads the nested worker.budgetUsdSoft path, honest-null when unreadable", () => {
+  assert.equal(resolveWorkerBudgetUsdSoft({ worker: { budgetUsdSoft: 12 } }), 12);
+  assert.equal(resolveWorkerBudgetUsdSoft({ "worker.budgetUsdSoft": 12 }), null, "a flat dotted key must not match");
+  assert.equal(resolveWorkerBudgetUsdSoft(null), null);
+  assert.equal(resolveWorkerBudgetUsdSoft(undefined), null);
+  assert.equal(resolveWorkerBudgetUsdSoft({ worker: {} }), null);
+  assert.equal(resolveWorkerBudgetUsdSoft({ worker: { budgetUsdSoft: "12" } }), null, "a non-number value is never coerced");
+});
+
 // ── PR #900 gate② finding [1] (attention-strip-wiring-proof): #893's newly-mapped attention
 // kinds proven through the REAL production path — a raw wire event from `/api/events`, through
 // `useEventHistory`'s real `foldOpenAttention` fold, into `App`'s own `activeOpenAttention` prop
@@ -473,7 +483,64 @@ test("#890: a live lane's estCostUsd flows through the real fetch pipeline into 
     "/api/events": { status: 200, body: { events: [], lastId: 0 } },
   });
   assert.match(html, /\$10\.40 \+ \$2\.20 est \/ \$100\.00/, "the header meter's est tail must read the lane's own live estimate");
-  assert.match(html, /url\(#cost-bar-est-hatch\)/, "at least the header bar's est segment must render hatched");
+  // #890 gate② finding [2] (cost-panel-hatch-test-vacuous): a hatch fill-url ANYWHERE on the page
+  // is non-discriminating — Header's own est tail already guarantees one regardless of whether
+  // the cost panel's own `estUsd` wiring works. Scoping the check to the markup FROM the cost
+  // strip's own `id="cost"` anchor onward isolates CostStrip's own subtree — dropping
+  // `sumEstCostUsd`'s wiring into `buildTodayCostPanelFromBuckets` would leave THIS assertion red
+  // even though the header's own hatch (rendered earlier in the DOM) stays green.
+  const costSectionHtml = html.slice(html.indexOf('id="cost"'));
+  assert.match(
+    costSectionHtml,
+    /url\(#cost-bar-est-hatch\)/,
+    "the cost panel's own Lanes stage bar must render hatched, independent of the header's own bar",
+  );
+});
+
+// #890 gate② finding [1] (lane-bars-self-scale): a self-scaled `max` (settledUsd + estUsd) draws
+// every positive lane spend as a 100%-wide bar regardless of size, losing all budget context.
+// Proven through the real fetch pipeline: a lane settled at $2 against a configured
+// `worker.budgetUsdSoft: 10` must draw a 20%-wide solid fill, never 100%.
+test("#890 gate② finding [1]: a lane's settled cost bar scales against worker.budgetUsdSoft, not itself — a small settled amount never draws a full-width bar", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": {
+      status: 200,
+      body: {
+        ...LOOP_STATE_OK,
+        config: { worker: { budgetUsdSoft: 10 } },
+        lanes: {
+          max: 1,
+          items: [
+            {
+              lane: "w1",
+              issue: 90,
+              state: "running",
+              pr: null,
+              startedAt: "2026-08-14T00:00:00Z",
+              endedAt: null,
+              costUsd: 2,
+              estCostUsd: null,
+              contextTokens: null,
+              tokenComposition: null,
+            },
+          ],
+        },
+      },
+    },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  const laneBarSvg = html.slice(
+    html.indexOf('class="cost-bar lane-card-bar"'),
+    html.indexOf("</svg>", html.indexOf('class="cost-bar lane-card-bar"')),
+  );
+  // The background TRACK rect is always width="100" (a fixed reference) — the settled FILL rect
+  // (`fill="var(--sap)"`) is the one that must scale against the configured ceiling.
+  assert.match(laneBarSvg, /width="20" height="10" fill="var\(--sap\)"/, "$2 against a $10 soft budget must draw a 20%-wide fill");
+  assert.doesNotMatch(
+    laneBarSvg,
+    /width="100" height="10" fill="var\(--sap\)"/,
+    "the settled fill must never self-scale to a full-width bar regardless of the real dollar amount",
+  );
 });
 
 test("#890: no running lane (LOOP_STATE_OK's own empty lanes.items) renders no est tail at all — never a fabricated one", async () => {

@@ -17,9 +17,22 @@ export function laneCostText(lane: Lane): string {
   return "—, settles when the lane ends";
 }
 
-/** The card's own bar total — settled once real, settled + est while still running (a stale est
- *  never counts once `costUsd` has landed, same "settled wins" stance as `laneCostText`). */
-function laneCostBarMax(lane: Lane): number {
+/** Whether the card has anything to draw a bar for at all — settled or (while still running) an
+ *  est figure. Independent of `laneCostBarMax`'s own ceiling below, since a configured worker
+ *  budget is always positive and must never force an empty lane to draw a zero-progress bar. */
+function laneHasCostToShow(lane: Lane): boolean {
+  return (lane.costUsd ?? 0) + (lane.costUsd === null ? (lane.estCostUsd ?? 0) : 0) > 0;
+}
+
+/** #890 gate② finding [1] (lane-bars-self-scale): the card's own bar ceiling is the common
+ *  worker soft-budget (`worker.budgetUsdSoft`, allowlisted config — the SAME reference a reader
+ *  compares every lane's spend against, `ConfigDrawer`'s own "Worker" group), never the amount
+ *  being drawn itself — a self-scaled max made every positive figure render 100% full regardless
+ *  of size, losing all budget context. `CostBar` already clamps a bar past 100% (a lane that
+ *  overran its soft budget still draws full, never off-track), so an unreadable config's fallback
+ *  (self-scaled total) only ever applies when the real ceiling is genuinely unknown. */
+function laneCostBarMax(lane: Lane, workerBudgetUsdSoft: number | null): number {
+  if (workerBudgetUsdSoft !== null) return workerBudgetUsdSoft;
   return (lane.costUsd ?? 0) + (lane.costUsd === null ? (lane.estCostUsd ?? 0) : 0);
 }
 
@@ -43,10 +56,25 @@ export interface LaneBoardProps {
   repoUrl?: string | undefined;
   /** The loop-state fetch itself failed — the documented `disconnected` empty state. */
   disconnected?: boolean;
+  /** #890 gate② finding [1]: `worker.budgetUsdSoft` (allowlisted config) — the lane bar's own
+   *  ceiling. `null` when the config is unreadable, same honest-unknown posture as `lanesMax`. */
+  workerBudgetUsdSoft?: number | null;
   now?: Date;
 }
 
-function LaneCard({ lane, titles, repoUrl, now }: { lane: Lane; titles: EntityTitles; repoUrl?: string | undefined; now: Date }) {
+function LaneCard({
+  lane,
+  titles,
+  repoUrl,
+  now,
+  workerBudgetUsdSoft,
+}: {
+  lane: Lane;
+  titles: EntityTitles;
+  repoUrl?: string | undefined;
+  now: Date;
+  workerBudgetUsdSoft: number | null;
+}) {
   return (
     <div className="lane-card panel">
       <div className="lane-card-head">
@@ -65,14 +93,14 @@ function LaneCard({ lane, titles, repoUrl, now }: { lane: Lane; titles: EntityTi
         <span>{formatElapsed(lane.startedAt, now)}</span>
         <span>{laneCostText(lane)}</span>
       </div>
-      {laneCostBarMax(lane) > 0 && (
+      {laneHasCostToShow(lane) && (
         <CostBar
           className="lane-card-bar"
           settledUsd={lane.costUsd ?? 0}
           // #890: same "settled wins" stance as `laneCostText` — a stale est lingering after
           // settlement is never drawn alongside its own real replacement.
           estUsd={lane.costUsd === null ? lane.estCostUsd : null}
-          max={laneCostBarMax(lane)}
+          max={laneCostBarMax(lane, workerBudgetUsdSoft)}
           label="lane cost"
         />
       )}
@@ -88,7 +116,7 @@ function EmptyLaneCard({ caption }: { caption?: string }) {
   );
 }
 
-export function LaneBoard({ lanesMax, lanes, titles, repoUrl, disconnected, now }: LaneBoardProps) {
+export function LaneBoard({ lanesMax, lanes, titles, repoUrl, disconnected, workerBudgetUsdSoft = null, now }: LaneBoardProps) {
   const clock = now ?? new Date();
   if (disconnected) {
     return (
@@ -118,7 +146,7 @@ export function LaneBoard({ lanesMax, lanes, titles, repoUrl, disconnected, now 
       <div className="lane-board-grid">
         {slots.map((lane, i) =>
           lane ? (
-            <LaneCard key={lane.lane} lane={lane} titles={titles} repoUrl={repoUrl} now={clock} />
+            <LaneCard key={lane.lane} lane={lane} titles={titles} repoUrl={repoUrl} now={clock} workerBudgetUsdSoft={workerBudgetUsdSoft} />
           ) : (
             // biome-ignore lint/suspicious/noArrayIndexKey: empty slots have no identity to key on
             <EmptyLaneCard key={`empty-${i}`} />
