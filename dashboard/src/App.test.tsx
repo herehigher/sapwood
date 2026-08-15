@@ -495,6 +495,19 @@ test("#890: a live lane's estCostUsd flows through the real fetch pipeline into 
     /url\(#cost-bar-est-hatch\)/,
     "the cost panel's own Lanes stage bar must render hatched, independent of the header's own bar",
   );
+  // #890 gate② round 2 finding [1] (ac2-live-lane-est-wiring-unasserted): the header/cost-panel
+  // assertions above prove `estCostUsd` reached THOSE two consumers, but AC2 is about the LANE
+  // CARD itself — this same fixture's lane must render its own "$2.20 est" text and its own
+  // hatched bar, isolated to the `aria-label="lanes"` subtree so this can't pass on the header's
+  // or cost panel's hatch alone.
+  const laneSectionHtml = html.slice(html.indexOf('aria-label="lanes"'), html.indexOf('id="cost"'));
+  assert.match(laneSectionHtml, /\$2\.20 est/, "the lane card's own settled/est text must read the lane's live estimate, not '—'");
+  assert.match(laneSectionHtml, /class="cost-bar lane-card-bar"/, "the lane card's own CostBar must render");
+  assert.match(
+    laneSectionHtml,
+    /url\(#cost-bar-est-hatch\)/,
+    "the lane card's own bar must render hatched, independent of the header's/cost panel's own bars",
+  );
 });
 
 // #890 gate② finding [1] (lane-bars-self-scale): a self-scaled `max` (settledUsd + estUsd) draws
