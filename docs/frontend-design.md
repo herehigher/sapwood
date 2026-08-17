@@ -391,11 +391,14 @@ still does). Clearing uses only events that actually resolve the item:
 issue-scoped items (including `ceiling-escalated`, which the engine emits
 **per hard-stopped worker**, and `env-failure-preserved`) clear when a
 later event moves that issue (`dispatched`, `merged`, `gated-reentry`,
-`lane-revived`) — with one exemption: a clear event never clears an
-escalation **that same operation produced**, because an operation's own
-effects are not evidence it was resolved (a merge whose Done-board write
-failed emits `rollback-escalated` *before* its own `merged` event; the
-board is still wrong) —
+`lane-revived`, and — #933 — the two engine terminal witnesses
+`human-merge-only-closed` and `gated-lane-retired`, which retire
+`drive-human-merge-only`/`gated-flag-unprovable` the same way a merge or a
+reentry retires anything else) — with one exemption: a clear event never
+clears an escalation **that same operation produced**, because an
+operation's own effects are not evidence it was resolved (a merge whose
+Done-board write failed emits `rollback-escalated` *before* its own
+`merged` event; the board is still wrong) —
 **or, since #295, when `escalation-resolved` reports the human resolved it
 outside the loop entirely.** That event is what makes the empty-strip
 contract survivable: the 2026-07-21 audit found most escalation classes had
@@ -427,6 +430,18 @@ it up) and appends the event; the filesystem it manages is the resolution
 signal, no acknowledge UI invented. The strip never invents state and
 never requires an acknowledge action. In replay it rebuilds from the same
 fold at the cursor, like every other event-backed surface (§11).
+
+The issue-scoped clear SET itself (#933) is **derived from the engine's own
+registry**, not hand-mirrored on the dashboard side: every kind the engine
+tags `escalation-clear` (`engine/src/state/event-kinds/*.ts`) is, by
+construction, in `dashboard/src/entities.ts`'s `ISSUE_CLEAR_KINDS` — the
+dashboard reads the tag (`kindsTagged("escalation-clear")`) rather than
+re-listing kind names by hand. Before #933 the list was a literal array a
+human had to remember to update every time the engine grew a new terminal
+witness, and `human-merge-only-closed`/`gated-lane-retired` fell through
+that gap for weeks (54 zombie rows on the dogfood DB, oldest from
+2026-07-29) — deriving the set means the next terminal kind the engine
+tags cannot fall through the same way.
 
 **Operations — start · pause · resume · stop · e-stop** (design-director
 round 2, user decision; e-stop added 2026-07-21): the release dashboard is

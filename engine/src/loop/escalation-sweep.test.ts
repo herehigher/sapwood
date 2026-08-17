@@ -219,6 +219,30 @@ test("sweepResolvedHolds (AC1): a hand-applied label survives even when a NOT-pr
   state.close();
 });
 
+// #933 AC3: ac-snapshot-drift/comment-cursor-stale apply needs-human through their own bespoke
+// label site (escalation-buckets.test.ts's SITE_INVENTORY), not the shared addLabel call the
+// other `always`/`payload` sources share — so they are `escalation-source:never`, same as
+// env-failure-preserved above, and the ownership-proof invariant means the sweep must never treat
+// a resolved one of these as license to remove the label, even though the label really did land
+// (`labeled: 1`/`labeled: true` in the payload — a payload field this module deliberately never
+// reads for a `never`-proof kind).
+test("sweepResolvedHolds (#933): ac-snapshot-drift and comment-cursor-stale resolving never sweeps their label — never-proof, not the shared addLabel site", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("ac-snapshot-drift", { worker: "w1", issue: 7, pr: 12, reason: "x", labeled: 1 });
+  state.appendEvent("escalation-resolved", { issue: 7, pr: 12, source: "ac-snapshot-drift", via: "merged" });
+  state.appendEvent("comment-cursor-stale", { issue: 8, checkpoint: "dispatch", labeled: true, posted: true });
+  state.appendEvent("escalation-resolved", { issue: 8, source: "comment-cursor-stale", via: "issue-closed" });
+  forge.issueLabels[7] = [NEEDS_HUMAN];
+  forge.issueLabels[8] = [NEEDS_HUMAN];
+
+  await sweepResolvedHolds(forge, state, mkCfg());
+
+  assert.deepEqual(forge.removed, []);
+  assert.deepEqual(sweptEvents(state), []);
+  state.close();
+});
+
 test("sweepResolvedHolds: an issue whose OTHER escalation is still open is left alone entirely", async () => {
   const forge = new FakeForge();
   const state = new State(":memory:");

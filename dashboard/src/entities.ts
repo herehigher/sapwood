@@ -1,3 +1,9 @@
+// #933: a VALUE import (not `import type`) — `kindsTagged` and the per-domain kind tables it
+// walks are plain data with no node-specific side effects (see event-kinds/index.ts's own
+// import list), so this is safe to bundle into the browser build; the alternative, hand-mirroring
+// the tagged set here, is exactly the drift #933 exists to close (a terminal kind gains
+// `escalation-clear` in the registry and this file silently doesn't hear about it).
+import { kindsTagged } from "../../engine/src/state/event-kinds/index.ts";
 import { hasAttention, isDissentSignal } from "./copy.ts";
 import type { DomainEvent } from "./domain-event.ts";
 
@@ -51,17 +57,14 @@ export function foldEntityTitles(events: readonly DomainEvent[], seed: EntityTit
 /** An open (unresolved) attention-class event, keyed for supersede/eviction tracking. */
 export type OpenAttention = Record<string, DomainEvent>;
 
-/** §3's own "clears when a later event moves that issue" list — `dispatched`, `merged`,
- *  `gated-reentry`, `lane-revived` — mirrored here (matching the engine's `escalation-clear` tag
- *  on those four kinds exactly; dashboard's own workspace doesn't import engine/src at runtime,
- *  same established pattern as `EventKind`'s own doc-table mirror). Exported so
- *  `entities.test.ts` can drift-guard it against the engine's own authoritative
- *  `CLEAR_KINDS`/`escalation-clear` tag, the same way `copy.test.ts` drift-guards attention
- *  membership against `ESCALATION_SOURCE_KINDS` — deliberately NOT widened to include every kind
- *  an issue's own text happens to name (`pr-released`, `plan-approved` carry `tags: []` in the
- *  engine's registry — routine bookkeeping, not `escalation-clear` — see the drift-guard test for
- *  why adding them here would be a regression, not a fix). */
-export const ISSUE_CLEAR_KINDS = new Set(["dispatched", "merged", "gated-reentry", "lane-revived"]);
+/** §3's own "clears when a later event moves that issue" list — DERIVED from the engine's own
+ *  `escalation-clear` tag (#933), not hand-mirrored: the pre-#933 version of this constant was a
+ *  literal `["dispatched", "merged", "gated-reentry", "lane-revived"]` array that had to be
+ *  updated BY HAND every time the engine tagged a new terminal kind `escalation-clear` — exactly
+ *  the drift that let `human-merge-only-closed`/`gated-lane-retired` fall through for weeks (54
+ *  zombie strip rows on the dogfood DB, #933's own measurement). Deriving it means the next
+ *  terminal kind the engine tags can't fall through the same way — this set updates itself. */
+export const ISSUE_CLEAR_KINDS: ReadonlySet<string> = new Set(kindsTagged("escalation-clear"));
 
 /** escalation-reconcile.ts's own `CLEAR_PRODUCES` exemption, mirrored, not re-derived: a `merged`
  *  event must never clear the `rollback-escalated` it itself produced — conductor.ts's merge path
