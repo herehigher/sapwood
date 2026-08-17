@@ -472,13 +472,14 @@ test("#892 AC5: opening the legend popover does not reflow .app-header — same 
  * Escape→cancel, proven for real — happy-dom's `<dialog>` doesn't implement either (see this
  * issue's verification plan and `test-dom.ts`'s own doc), so a component-suite assertion here
  * would prove nothing about the real defect. `PhaseInspectorDrawer` is the one migrated dialog
- * reachable from the `?demo` fixture this pipeline drives (`ConfigDrawer` is live-only; `Controls`
- * — and its confirm dialog — renders only in live mode, per `App.tsx`'s own `mode === "live"`
- * gates) — all three route through the exact same browser mechanism (`.showModal()` on a native
- * `<dialog>`), so this is representative real-browser evidence for the shared mechanism, not proof
- * specific to this one call site. The other two get their `showModal()`-was-invoked/`.open`-state
- * proof at Tier A (ConfigDrawer.test.tsx, Controls.test.tsx) — focus-trap/Escape themselves are a
- * genuine UA behavior no non-live-reachable dialog in this pipeline can additionally demonstrate.
+ * reachable from the `?demo` fixture this pipeline drives without a mocked live route.
+ * `ConfigDrawer` and `Controls`' confirm dialog are both `LiveOnly`-gated (`App.tsx`'s
+ * `mode === "live"`) and get their own dedicated real-browser focus-trap/Escape proof further
+ * below, through the same mocked live-API route `captureLiveLanes` drives — all three route
+ * through the exact same browser mechanism (`.showModal()` on a native `<dialog>`), so this test
+ * plus those two together are this AC's full real-browser coverage, not proof scoped to one call
+ * site alone. `ConfigDrawer.test.tsx`/`Controls.test.tsx` (Tier A) separately pin
+ * `showModal()`-was-invoked/`.open`-state, which happy-dom CAN legitimately cover.
  */
 test("#892 AC3: the phase inspector dialog traps focus (background inert) and Escape cancels it", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -487,11 +488,11 @@ test("#892 AC3: the phase inspector dialog traps focus (background inert) and Es
   await page.waitForLoadState("networkidle");
 
   // Baseline, BEFORE the dialog ever opens: `.icon-rail-config` is a real, natively focusable
-  // `<button>` (unlike `.icon-rail-wordmark`, a plain non-interactive `<span>` — engine-agent
-  // audit run c6643a3b finding [1] inert-probe-nonfocusable-target: calling `.focus()` on a
-  // non-focusable element is ALREADY a no-op with no modal in play, so it can't attribute a later
-  // "still not focused" result to inertness specifically). Confirming it CAN take focus now is
-  // what makes the later "can't focus it anymore" check inside the modal actually mean something.
+  // `<button>` (unlike `.icon-rail-wordmark`, a plain non-interactive `<span>`) — calling
+  // `.focus()` on a non-focusable element is ALREADY a no-op with no modal in play, so it can't
+  // attribute a later "still not focused" result to inertness specifically. Confirming it CAN
+  // take focus now is what makes the later "can't focus it anymore" check inside the modal
+  // actually mean something.
   const bgFocusable = await page.evaluate(() => {
     const bg = document.querySelector<HTMLElement>(".icon-rail-config");
     bg?.focus();
@@ -546,8 +547,7 @@ test("#892 AC3: the phase inspector dialog traps focus (background inert) and Es
 /** #892 AC4: sanity check shared by the two dialog tests below — the SAME background control the
  *  containment check later proves unreachable must be genuinely focusable right now, with no
  *  dialog open, or "still not focused" inside the modal wouldn't mean anything (the phase
- *  inspector test above establishes the same precondition; engine-agent audit run c6643a3b
- *  finding [1] inert-probe-nonfocusable-target). */
+ *  inspector test above establishes the same precondition for its own background target). */
 async function assertBackgroundFocusable(page: Page, backgroundSelector: string): Promise<void> {
   const bgFocusable = await page.evaluate((selector) => {
     const bg = document.querySelector<HTMLElement>(selector);

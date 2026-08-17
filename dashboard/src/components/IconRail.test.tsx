@@ -34,16 +34,15 @@ test("renders the wordmark, both scroll anchors, the theme switch, and the confi
   assert.match(html, /aria-label="open config"/, "config gear");
 });
 
-// #892 AC2 (engine-agent audit run c6643a3b, finding [0] iconrail-title-exclusion-unpinned): the
-// original AC2 coverage above only pinned `title="sapwood"` — the overview/cost anchors' titles
-// were only reachable via their (distinct-selector) `href`, and the theme/config titles were only
-// reachable via their `aria-label`, so a diff that quietly deleted the other four `title=`
-// attributes would have stayed green. This pins all FIVE sites explicitly, each paired with its
-// own accessible-name attribute, distinguishing the two shapes AC2 itself calls out: four sites
-// where `title`/`aria-label` carry the SAME text (overview, cost, theme — decorative/label
-// duplicates), one where they DIVERGE (config: "config" vs. "open config"), and the wordmark,
-// which carries a `title` with no paired `aria-label` at all (decorative chrome, not a data hint
-// — AC2's own wording for why it's excluded).
+// #892 AC2: the original AC2 coverage above only pinned `title="sapwood"` — the overview/cost
+// anchors' titles were only reachable via their (distinct-selector) `href`, and the theme/config
+// titles were only reachable via their `aria-label`, so a diff that quietly deleted the other
+// four `title=` attributes would have stayed green. This pins all FIVE sites explicitly, each
+// paired with its own accessible-name attribute, distinguishing the two shapes AC2 itself calls
+// out: four sites where `title`/`aria-label` carry the SAME text (overview, cost, theme —
+// decorative/label duplicates), one where they DIVERGE (config: "config" vs. "open config"), and
+// the wordmark, which carries a `title` with no paired `aria-label` at all (decorative chrome,
+// not a data hint — AC2's own wording for why it's excluded).
 test("#892 AC2: all five IconRail title= sites survive untouched, each still paired with its own accessible name", () => {
   const html = renderToStaticMarkup(<IconRail onOpenConfig={() => {}} />);
   assert.match(html, /<span class="icon-rail-wordmark" title="sapwood">/, "wordmark: title alone, decorative — no aria-label to duplicate");

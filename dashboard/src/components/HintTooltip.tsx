@@ -24,10 +24,10 @@ export interface HintTooltipProps {
 export function HintTooltip({ content, children }: HintTooltipProps) {
   if (!content) return children;
   return (
-    // #892 AC5 (engine-agent audit run 7d33d9cd finding [0]): no `delayDuration` override here —
-    // that would be a bare millisecond literal this component introduces, exactly what AC5 bans.
-    // Radix's own built-in default (defined inside the library, not authored by this diff) applies
-    // instead; nothing here depends on a specific delay value.
+    // #892 AC5: no `delayDuration` override here — that would be a bare millisecond literal this
+    // component introduces, exactly what AC5 bans. Radix's own built-in default (defined inside
+    // the library, not authored by this diff) applies instead; nothing here depends on a specific
+    // delay value.
     <Tooltip.Provider>
       <Tooltip.Root>
         <Tooltip.Trigger asChild>{children}</Tooltip.Trigger>
