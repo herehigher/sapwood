@@ -51,6 +51,21 @@ function inspectProps(node: StageNode, label: string, onInspect?: ((node: StageN
   };
 }
 
+/**
+ * #920 gate② review thread (PRRT…FAN): a real Playwright regression — clicking an inspectable
+ * node targets the CENTRE of its `<g>`'s own bounding box, which for a circle plus an
+ * offset-beside (planning trio) or offset-below/-above (CI/Review) label routinely lands in the
+ * unpainted gap between them once `PLANNING_NODE_R`/`GATES.r` grew: nothing is drawn there, so
+ * the hit resolves to the bare `<svg>` and the click never reaches the node's own handler — the
+ * same gap a real mouse click into that space would miss. Drawn FIRST inside the node's `<g>` (so
+ * every other child paints over it), transparent but hit-testable — widens the actual clickable
+ * region to the node's full visual footprint (circle + label + caption) instead of just the
+ * circle.
+ */
+function hitTarget(x: number, y: number, width: number, height: number) {
+  return <rect className="hero-hit-target" x={x} y={y} width={width} height={height} fill="transparent" pointerEvents="all" />;
+}
+
 // ── Geometry ──────────────────────────────────────────────────────────────────
 // One coordinate space, shared with Hero.tsx's timelines so travel always lands where
 // the next render draws.
@@ -68,7 +83,10 @@ export const PHASE_X = { plan: 176, implement: 620, outcome: 1030 } as const;
  *  planning trio's circles/GATES.review's own circle (the two nearest neighbours on each side)
  *  rather than the phase captions' own midpoints, so the (thin, low-opacity) guide lines never
  *  cut through the zones' own primary shapes. */
-export const ZONE_DIVIDERS = [280, 905] as const;
+/** #920 gate② review thread (PRRT…JE9): 280 sat INSIDE the planning trio's own label box (the
+ *  widest label, "Goal & align" at `PLANNING_NODE_R`'s wider 12px-font offset, runs to x≈357) —
+ *  366 clears it with margin, still strictly between `PHASE_X.plan`/`PHASE_X.implement`. */
+export const ZONE_DIVIDERS = [366, 905] as const;
 
 // The backlog sits in from the left edge so the "saved for a successor" badge — the widest
 // thing that hangs off a droplet — still fits inside the viewBox.
@@ -119,9 +137,17 @@ const PLANNING_NODES = [
     role: "roles.verificationPlanReviewer",
   },
 ] as const;
-/** Exported so `hero.test.ts` (#920 AC3) derives a channel's own terminal/row coordinates from
- *  this constant + `laneY`'s own arithmetic, never a copied literal. */
-export const LANES = { x: 330, w: 372, top: 150, gap: 44 } as const;
+/**
+ * Exported so `hero.test.ts` (#920 AC3) derives a channel's own terminal/row coordinates from
+ * this constant + `laneY`'s own arithmetic, never a copied literal.
+ *
+ * #920 gate② review thread (PRRT…JE9): `x` moved 330 → 380 — the planning trio's own widest
+ * label ("Goal & align", ending ≈357 at `PLANNING_NODE_R`'s wider offset) ran straight into the
+ * lane label at the old 330, reading as "Goal & aligw1" in a live crop. `w` shrank 372 → 320 to
+ * keep the channel's own end terminal comfortably short of the CI node's circle (`GATES.ci -
+ * GATES.r` = 732) rather than growing into it now that `x` moved right by the same 50 units.
+ */
+export const LANES = { x: 380, w: 320, top: 150, gap: 44 } as const;
 /** #920 AC3: the small hollow-circle terminal drawn at BOTH ends of every lane channel. */
 const LANE_TERMINAL_R = 4;
 /**
@@ -268,19 +294,16 @@ const CHECKPOINT_OVERFLOW_REAL_CAP = CHECKPOINT_COLS * (CHECKPOINT_ROWS_MAX - 1)
  * only the drawn TEXTURE inside that same footprint gets finer.
  */
 export const TRUNK = { x: 1006, y: 190, step: 2, max: 42 } as const;
-/** The ring cross-section's own bottom edge — `TRUNK.max * TRUNK.step` is its max radius. Every
- *  OUTCOME-column label below this line (ring word, hairline rule, outcome tally) stacks
- *  downward from here. */
+/** The ring cross-section's own bottom edge — `TRUNK.max * TRUNK.step` is its max radius. The
+ *  reflection tree's stem (below) starts exactly here — "from the disc bottom", per the issue's
+ *  own wording, with nothing else drawn in between. */
 const RING_BOTTOM = TRUNK.y + TRUNK.max * TRUNK.step;
-/** "ring"/"rings" — the unit word under the big display number. */
-const RING_WORD_Y = RING_BOTTOM + 20;
-/** #920 "What": the outcome tally draws "on one line under a hairline rule" — a thin divider
- *  between the ring word and the tally line, matching the mockup's own outcome-panel treatment. */
-const OUTCOME_RULE_Y = RING_WORD_Y + 10;
-/** §6 outcome tally ("N merged · N pending · N needs human") — #920 AC4: this is the LAST thing
- *  in the OUTCOME column before the reflection tree's own T-stem begins (see
- *  `REFLECTION.stemTop` below), so the stem never has to route around it. */
-const OUTCOME_TALLY_Y = OUTCOME_RULE_Y + 18;
+/** "ring"/"rings" — the unit word under the big display number, kept INSIDE the disc's own
+ *  footprint (well above `RING_BOTTOM`, the stem's own start) rather than below it — #920 gate②
+ *  review thread (PRRT…JE5): the mockup's stem descends from the disc bottom with nothing
+ *  interposed, unlike the ring word/rule/tally trio, which the mockup draws BELOW the whole
+ *  Summary/Retro row instead (see `REFLECTION` below). */
+const RING_WORD_Y = TRUNK.y + 40;
 /**
  * #886 gate② run 2e566ac9 finding [1]: where the newest-merge droplet parks, offset from
  * `dropletPoint`'s "trunk" case — frees the true trunk CENTER for the outcome number (below).
@@ -301,25 +324,34 @@ const TRUNK_DROPLET_OFFSET = { dx: 40, dy: -40 } as const;
  * reflection tree — not beside the trunk at its own y-band (the old `REFLECTION.x` column
  * stacked at y 110/200, alongside `TRUNK.y`).
  *
- * #920 AC4 (D11/D12): `detourX`'s horizontal jog is GONE — a "plain T" (one straight stem,
- * `stemX` exactly `TRUNK.x`, no jog) is what the mockup and the AC's own wording ("no path
- * crossing text") both name. The jog existed only because the OLD layout put the outcome tally
- * BETWEEN the ring's bottom edge and the bar, so a straight stem drawn there would run straight
- * through the tally's own rendered box. `stemTop` is this issue's actual fix: the stem starts
- * BELOW `OUTCOME_TALLY_Y` (the LAST thing in the OUTCOME column, per that constant's own doc) —
- * a straight vertical line from there to `barY` structurally cannot cross either the ring-count
- * box (which sits well above `RING_BOTTOM`) or the tally box (which sits well above `stemTop`),
- * with no coordinate juggling required. Verified against the same digit-stress fixture
- * `hero.test.ts` always uses for this pair.
+ * #920 AC4 (D11/D12) + gate② finding [3] + review thread (PRRT…JE5): `detourX`'s horizontal jog
+ * is GONE — a "plain T": one stem (`stemX` exactly `TRUNK.x`) descends from `RING_BOTTOM` (the
+ * disc's own bottom edge, nothing interposed) to `barY`, where a crossbar's own TWO ENDS are the
+ * Summary/Retro circles themselves (`y` === `barY` — the circles sit ON the bar line, not hung
+ * below it by a separate drop segment). This closes finding [3]'s "no segment joining them" gap
+ * (the stem is genuinely, continuously attached to the disc) without needing detourX's jog OR
+ * the earlier round's right-anchor trick: the ring word/rule/tally all move BELOW the
+ * Summary/Retro row entirely (`OUTCOME_RULE_Y`/`OUTCOME_TALLY_Y` below, past the captions), so
+ * nothing ever sits in the stem's own y-band between the disc and the bar to cross in the first
+ * place — a plain CENTERED tally is safe again once it is no longer between the ring and the bar.
+ * `bottom` is where the dashed return path picks up, directly below the tally (the review
+ * thread's own "connect the return path from the tree… from the tally/rule end").
  */
+const REFLECTION_BAR_Y = RING_BOTTOM + 60;
+/** Below the Summary/Retro captions row (`REFLECTION.y + 32`, the caption's own baseline) — the
+ *  hairline rule, then the tally beneath it, per the mockup's own bottom-of-tree ordering. */
+const OUTCOME_RULE_Y = REFLECTION_BAR_Y + 50;
+const OUTCOME_TALLY_Y = OUTCOME_RULE_Y + 18;
 export const REFLECTION = {
   stemX: TRUNK.x,
   spread: 44,
-  stemTop: OUTCOME_TALLY_Y + 14,
-  barY: OUTCOME_TALLY_Y + 84,
-  y: OUTCOME_TALLY_Y + 114,
+  stemTop: RING_BOTTOM,
+  barY: REFLECTION_BAR_Y,
+  y: REFLECTION_BAR_Y,
   r: 16,
-  bottom: OUTCOME_TALLY_Y + 130,
+  // Where the dashed return path picks up — directly below the tally, the tree's own true
+  // bottom now that the tally moved here (review thread PRRT…JE5's "from the tally/rule end").
+  bottom: OUTCOME_TALLY_Y + 20,
 } as const;
 const REFLECTION_NODES = [
   { node: "summary" as const, x: REFLECTION.stemX - REFLECTION.spread, label: "Summary", role: "roles.harvest" },
@@ -915,6 +947,7 @@ export function HeroStage({
               {...inspectProps(n.node, `inspect ${n.label}`, onInspect)}
             >
               <title>{n.hint}</title>
+              {hitTarget(PLANNING.x - PLANNING_NODE_R - 4, n.y - PLANNING_NODE_R - 4, PLANNING_NODE_R * 2 + 178, PLANNING_NODE_R + 38)}
               <circle className="hero-planning-node" cx={PLANNING.x} cy={n.y} r={PLANNING_NODE_R} />
               {planningIcon(n.node, PLANNING.x, n.y)}
               <text className="hero-node-label" x={PLANNING.x + PLANNING_NODE_R + 14} y={n.y + 4}>
@@ -1037,6 +1070,7 @@ export function HeroStage({
          * the circle (the circle itself carries the icon), matching the planning trio's own
          * circle-then-label-below convention. */}
         <g className="hero-gate" data-gate="ci" data-state={gateState} {...inspectProps("ci", "inspect CI", onInspect)}>
+          {hitTarget(GATES.ci - GATES.r - 4, GATES.y - GATES.r - 30, GATES.r * 2 + 8, GATES.r * 2 + 60)}
           <circle className="hero-gate-node" cx={GATES.ci} cy={GATES.y} r={GATES.r} />
           {gateIcon("ci", GATES.ci, GATES.y)}
           <text className="hero-node-label" x={GATES.ci} y={GATES.y + GATES.r + 16} textAnchor="middle">
@@ -1051,6 +1085,7 @@ export function HeroStage({
           </text>
         </g>
         <g className="hero-gate" data-gate="review" data-state={gateState} {...inspectProps("review", "inspect Review", onInspect)}>
+          {hitTarget(GATES.review - GATES.r - 4, GATES.y - GATES.r - 30, GATES.r * 2 + 8, GATES.r * 2 + 60)}
           <circle className="hero-gate-node" cx={GATES.review} cy={GATES.y} r={GATES.r} />
           {gateIcon("review", GATES.review, GATES.y)}
           <text className="hero-node-label" x={GATES.review} y={GATES.y + GATES.r + 16} textAnchor="middle">
@@ -1133,26 +1168,20 @@ export function HeroStage({
         <text className="hero-ring-count" style={{ fontFamily: "var(--font-display)" }} x={TRUNK.x} y={TRUNK.y + 11} textAnchor="middle">
           {state.rings}
         </text>
+        {/* #920 gate② review thread (PRRT…JE5): the ring word sits INSIDE the disc's own
+         * footprint (`RING_WORD_Y`'s own doc), well above `RING_BOTTOM` where the stem starts —
+         * never between the disc and the tree. */}
         <text className="hero-label" x={TRUNK.x} y={RING_WORD_Y} textAnchor="middle">
           {state.rings === 1 ? "ring" : "rings"}
-        </text>
-        {/* #920 "What": the outcome tally draws "on one line under a hairline rule". */}
-        <line className="hero-outcome-rule" x1={TRUNK.x - 60} y1={OUTCOME_RULE_Y} x2={TRUNK.x + 60} y2={OUTCOME_RULE_Y} />
-        {/* §6: "the round's outcome tally (N merged · N pending · N needs human) — small
-         * numbers, never repeating the all-time ring count." `roundMerged` is the round-
-         * scoped counter (#716 gate② P2-8); `state.rings` above stays the all-time one.
-         * #716 gate② round 2 PO probe P3: shifted left of TRUNK.x (was centered ON it) — the
-         * live probe measured double-digit counts clipping past the STAGE.w right edge. */}
-        <text className="hero-num hero-small hero-outcome-tally" x={TRUNK.x - 30} y={OUTCOME_TALLY_Y} textAnchor="middle">
-          {outcomeTally}
         </text>
       </g>
 
       <g className="hero-reflection" data-node="reflection">
-        {/* #920 AC4: a plain T — one straight stem (x = `REFLECTION.stemX`, exactly `TRUNK.x`)
-         * from below the outcome tally (`REFLECTION.stemTop`'s own doc — the LAST thing above it
-         * in the OUTCOME column) down to a bar carrying SUMMARY/RETRO. No jog: `stemTop` is what
-         * keeps this path clear of the ring-count/tally boxes, not a detour around them. */}
+        {/* #920 AC4/gate② finding [3] + review thread (PRRT…JE5): a plain T — the stem descends
+         * from the disc's own bottom edge (`REFLECTION.stemTop` = `RING_BOTTOM`, nothing
+         * interposed) to `barY`, where a crossbar's own two ENDS are the Summary/Retro circles
+         * (`REFLECTION.y === barY` — the circles sit ON the bar line, not hung below it by a
+         * separate drop). Genuinely, continuously attached to the disc — no jog, no gap. */}
         <path
           className="hero-arm"
           d={[
@@ -1160,10 +1189,6 @@ export function HeroStage({
             `L ${REFLECTION.stemX} ${REFLECTION.barY}`,
             `M ${REFLECTION.stemX - REFLECTION.spread} ${REFLECTION.barY}`,
             `L ${REFLECTION.stemX + REFLECTION.spread} ${REFLECTION.barY}`,
-            `M ${REFLECTION.stemX - REFLECTION.spread} ${REFLECTION.barY}`,
-            `L ${REFLECTION.stemX - REFLECTION.spread} ${REFLECTION.y - REFLECTION.r}`,
-            `M ${REFLECTION.stemX + REFLECTION.spread} ${REFLECTION.barY}`,
-            `L ${REFLECTION.stemX + REFLECTION.spread} ${REFLECTION.y - REFLECTION.r}`,
           ].join(" ")}
         />
         {REFLECTION_NODES.map((n) => {
@@ -1186,6 +1211,16 @@ export function HeroStage({
             </g>
           );
         })}
+        {/* #920 gate② review thread (PRRT…JE5): the hairline rule + outcome tally now sit BELOW
+         * the whole Summary/Retro row, matching the mockup's own bottom-of-tree ordering — the
+         * disc's ring word (above) is the only OUTCOME-column text that stays near the ring. */}
+        <line className="hero-outcome-rule" x1={TRUNK.x - 60} y1={OUTCOME_RULE_Y} x2={TRUNK.x + 60} y2={OUTCOME_RULE_Y} />
+        {/* §6: "the round's outcome tally (N merged · N pending · N needs human) — small
+         * numbers, never repeating the all-time ring count." `roundMerged` is the round-
+         * scoped counter (#716 gate② P2-8); `state.rings` above stays the all-time one. */}
+        <text className="hero-num hero-small hero-outcome-tally" x={TRUNK.x} y={OUTCOME_TALLY_Y} textAnchor="middle">
+          {outcomeTally}
+        </text>
       </g>
 
       {/* The dashed return path that closes the loop back into planning — #920 AC5: terminates in

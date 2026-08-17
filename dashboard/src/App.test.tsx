@@ -28,7 +28,7 @@ import { type DomainEvent, toDomainEvent } from "./domain-event.ts";
 import type { EntityTitles } from "./entities.ts";
 import { Hero } from "./hero/Hero.tsx";
 import { foldEvents, type HeroState, initialHeroState } from "./hero/state.ts";
-import { initialReplayState } from "./replay/reducer.ts";
+import { foldReplay, initialReplayState } from "./replay/reducer.ts";
 import { registerRealDom } from "./test-dom.ts";
 
 registerRealDom();
@@ -94,6 +94,11 @@ function minimalAppViewModel(
     // #895 item 1: the replay cursor's own timestamp — `null` (live/no round loaded) unless a
     // test explicitly sets it to prove the hero's staleness caption rebases against it.
     asOf?: string | null;
+    // #920 gate② finding [0]: `replay.position` defaults to `null` (the loading-window shape) —
+    // a test proving a fixture reflects a genuinely LOADED closed round (not just a selection)
+    // sets this explicitly, same self-consistency posture `rounds`/`selectedRoundId` above
+    // already documents for #733 engine-agent finding [2].
+    replayPosition?: unknown;
   } = {},
 ) {
   return {
@@ -126,7 +131,7 @@ function minimalAppViewModel(
       selectedRoundId: overrides.selectedRoundId ?? null,
       selectRound: () => {},
       loading: false,
-      position: null,
+      position: overrides.replayPosition ?? null,
       playing: false,
       speed: 1,
       play: () => {},
@@ -1330,14 +1335,38 @@ test('#920 AC1: the real App/DemoApp tree renders svg.hero[data-dimmed="false"] 
     estopActive: false,
     standbyNextCheckSec: null,
   };
-  const dimEligibleHero = foldEvents(initialHeroState(1), openCeilingEvents.map(toDomainEvent)).state;
-  assert.ok(dimEligibleHero.openCeilingReasons.size > 0, "fixture sanity: openCeilingReasons must actually be non-empty");
+  // #920 gate② finding [0]: the REAL fold chain (`foldReplay`, the same function
+  // `resolveActiveFold`/`useDemoReplay`'s own `scrubTo`/`endPosition` call under the hood), not a
+  // hand-built HeroState — so the ceiling reason genuinely reaches `openCeilingReasons` the way a
+  // real closed round's replay position would produce it.
+  const replayState = foldReplay(initialReplayState(1), openCeilingEvents.map(toDomainEvent)).state;
+  assert.ok(replayState.hero.openCeilingReasons.size > 0, "fixture sanity: openCeilingReasons must actually be non-empty");
 
-  // Replay: a closed round selected in LiveApp's own replay mode — `appContent` itself derives
-  // `roundPhase={null}` whenever `mode !== "live"`, the real production call site this test
-  // exercises (never a hand-set prop).
+  // #920 gate② finding [0] (ac1-replay-fixtures-bypass-real-fold): `mode: "replay"` with no round
+  // in `rounds`/`selectedRoundId` is a combination real `useReplay`/`useDemoReplay` can never
+  // produce (both derive `mode` FROM `selectedRoundId !== null`) — the SAME self-consistency
+  // #733 engine-agent finding [2] already established for `rounds`/`selectedRoundId` above,
+  // extended here to `replayPosition` too, so this fixture names a genuinely closed, loaded round.
+  const closedRound = {
+    roundId: 42,
+    status: "done" as const,
+    startedAt: "2026-01-01T00:00:00Z",
+    endedAt: "2026-01-01T00:10:00Z",
+    startEventId: 0,
+    startSpendId: 0,
+    eventCount: openCeilingEvents.length,
+    schemaVersion: 1,
+    artifact: null,
+  };
   const replayData = { ...LOOP_STATE_OK, engine: stoppedEngine, round: null };
-  const replayVm = minimalAppViewModel({ mode: "replay", loop: { data: replayData, isPending: false }, activeHero: dimEligibleHero });
+  const replayVm = minimalAppViewModel({
+    mode: "replay",
+    loop: { data: replayData, isPending: false },
+    activeHero: replayState.hero,
+    rounds: [closedRound],
+    selectedRoundId: closedRound.roundId,
+    replayPosition: { state: replayState, cursorId: openCeilingEvents[0]!.id, cursorIndex: openCeilingEvents.length },
+  });
   const replayHtml = renderToStaticMarkup(appContent(replayVm));
   assert.match(
     replayHtml,
@@ -1347,6 +1376,13 @@ test('#920 AC1: the real App/DemoApp tree renders svg.hero[data-dimmed="false"] 
 
   // ?demo: the SAME fixture, through the real DemoApp entry point end-to-end (fetch mock + real
   // QueryClient prefetch, same posture `renderSettledDemoApp` elsewhere in this file uses).
+  // #920 gate② finding [0]: `rounds: []` left `useDemoReplay`'s `selectedRoundId` (and therefore
+  // `mode`) at "live" forever — `resolveActiveFold` then returned the neutral `emptyLive` state,
+  // so the ceiling-breach event was NEVER actually folded and this assertion held vacuously. A
+  // real round (matching `openCeilingEvents` via `startEventId`/`eventCount`, same cursor
+  // discipline `demo/build-round-log.ts` documents) makes `useDemoReplay` select it and land on
+  // `mode: "replay"` from the very first render, so the fixture's ceiling event genuinely reaches
+  // the real fold this assertion is supposed to be proving something about.
   const demoBundle: DemoBundle = {
     loopState: {
       engine: stoppedEngine,
@@ -1360,7 +1396,7 @@ test('#920 AC1: the real App/DemoApp tree renders svg.hero[data-dimmed="false"] 
       controlsEnabled: false,
       build: { distSha: null, distTime: null, repoHeadSha: null },
     },
-    rounds: [],
+    rounds: [closedRound],
     events: openCeilingEvents,
     spend: [],
   };
@@ -1383,10 +1419,19 @@ test('#920 AC1: the real App/DemoApp tree renders svg.hero[data-dimmed="false"] 
     /<svg class="hero"[^>]*data-dimmed="false"/,
     "?demo must never dim, even with engine stopped + an open ceiling reason",
   );
+  // Sanity: the fixture's own round must actually be SELECTED (proof `useDemoReplay` reached
+  // `mode: "replay"`, not stuck at "live" folding nothing) — the same distinguishable-round-id
+  // check the #742 wiring tests already use elsewhere in this file, here proving this test isn't
+  // vacuously true the way the original (`rounds: []`) fixture was.
+  assert.match(
+    demoHtml,
+    new RegExp(`round ${closedRound.roundId}`),
+    "the fixture's own round must reach Transport's real chapter-mark row",
+  );
 
   // The SAME hero state + engine, but LIVE with a genuinely open round: dims exactly as before.
   const liveData = { ...LOOP_STATE_OK, engine: stoppedEngine, round: { id: 1, phase: "executing" } };
-  const liveVm = minimalAppViewModel({ mode: "live", loop: { data: liveData, isPending: false }, activeHero: dimEligibleHero });
+  const liveVm = minimalAppViewModel({ mode: "live", loop: { data: liveData, isPending: false }, activeHero: replayState.hero });
   const liveHtml = renderToStaticMarkup(appContent(liveVm));
   assert.match(liveHtml, /<svg class="hero"[^>]*data-dimmed="true"/, "the SAME fixture, live with an open round, must dim");
 });

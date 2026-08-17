@@ -23,12 +23,12 @@ import {
   GATES,
   HeroStage,
   LANES,
+  PHASE_X,
   PLANNING,
   PLANNING_NODE_R,
   REFLECTION,
   STAGE,
   TRUNK,
-  ZONE_DIVIDERS,
 } from "./stage.tsx";
 import {
   activePlanningNode,
@@ -381,13 +381,16 @@ test("#897 AC2: CI and Review render as circular gate nodes carrying a hand-draw
   const ciGate = html.match(/<g class="hero-gate" data-gate="ci"[^>]*>([\s\S]*?)<\/g>\s*<g class="hero-gate" data-gate="review"/);
   assert.ok(ciGate, "the CI gate group must render");
   assert.match(ciGate![1] as string, /<circle class="hero-gate-node"/, "CI must render as a <circle>, not the old <rect>");
-  assert.doesNotMatch(ciGate![1] as string, /<rect/, "no <rect> left inside the CI gate");
+  // #920 gate② review thread (PRRT…FAN): the only <rect> now inside a gate is the invisible
+  // `.hero-hit-target` (a real, deliberate fix for a Playwright click regression) — the check
+  // narrows to "no VISIBLE rect" instead of "no rect at all".
+  assert.doesNotMatch(ciGate![1] as string, /<rect(?! class="hero-hit-target")/, "no visible <rect> left inside the CI gate");
   assert.match(ciGate![1] as string, /data-icon="gear"/, "CI carries its icon marker via the existing data-icon convention");
 
   const reviewGate = html.match(/<g class="hero-gate" data-gate="review"[^>]*>([\s\S]*?)<\/g>\s*<line/);
   assert.ok(reviewGate, "the Review gate group must render");
   assert.match(reviewGate![1] as string, /<circle class="hero-gate-node"/, "Review must render as a <circle>, not the old <rect>");
-  assert.doesNotMatch(reviewGate![1] as string, /<rect/, "no <rect> left inside the Review gate");
+  assert.doesNotMatch(reviewGate![1] as string, /<rect(?! class="hero-hit-target")/, "no visible <rect> left inside the Review gate");
   assert.match(reviewGate![1] as string, /data-icon="eye"/, "Review carries its icon marker via the existing data-icon convention");
 });
 
@@ -1585,10 +1588,82 @@ test("#920 AC3: every visible lane channel gets hollow-circle terminals at both 
   }
 });
 
+// #920 gate② finding [1] (ac3-hollow-style-unverified): "hollow" is a rendered CSS fact
+// (`fill: none`), not something the markup structure test above can see — a `.hero-lane-terminal`
+// rule declaring `fill: var(--sap)` would leave that test green while violating "hollow-circle
+// terminal" outright. STYLE doctrine (docs/REVIEW-DOCTRINE.md): `registerRealDom()` + a real
+// `getComputedStyle` read against the FULL production cascade, never a regex on the source text —
+// same pattern the #879 gate② finding [1] fix already established in this file.
+test("#920 gate② finding [1]: a real .hero-lane-terminal renders fill:none under the production cascade — hollow is a rendered fact, not just a class name", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const container = document.createElement("div");
+  container.innerHTML = markup(initialHeroState(2), { lanesMax: 2 });
+  document.body.appendChild(container);
+  try {
+    const terminal = container.querySelector(".hero-lane-terminal");
+    assert.ok(terminal, "a real .hero-lane-terminal element must render and match the injected stylesheet's selector");
+    const computed = getComputedStyle(terminal as Element);
+    assert.equal(
+      computed.fill,
+      "none",
+      "a lane terminal must render hollow (fill: none) under the real cascade, not merely carry the class name",
+    );
+  } finally {
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+});
+
+// #920 gate② review thread (PRRT…JE1): a muted `--bark` idle stroke measured at ~half the
+// mockup's own contrast — "no 45% wash" (AC6) isn't only about `[data-dimmed]`, it's every idle
+// stage line drawn at a muted token. STYLE doctrine: prove the RESOLVED colour against a real
+// caption-ink element (`.hero-label`, which always renders — unlike `.hero-node-caption`, which
+// needs a config prop this fixture doesn't pass), never a hardcoded theme RGB that could drift
+// from `--bark-text`'s own definition.
+test("#920 gate② review thread (PRRT…JE1): idle planning/gate node strokes resolve to the SAME colour as the caption ink token, at full opacity — no muted wash", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const container = document.createElement("div");
+  container.innerHTML = markup(initialHeroState(3));
+  document.body.appendChild(container);
+  try {
+    const inkEl = container.querySelector(".hero-label");
+    assert.ok(inkEl, "a real caption-ink (.hero-label) element must render");
+    const inkColor = getComputedStyle(inkEl as Element).fill;
+    assert.notEqual(inkColor, "", "the ink token must actually resolve to a real colour under the mounted cascade");
+
+    const planningNode = container.querySelector(".hero-planning-node");
+    assert.ok(planningNode, "a real .hero-planning-node must render");
+    const planningComputed = getComputedStyle(planningNode as Element);
+    assert.equal(planningComputed.stroke, inkColor, "idle planning-node stroke must resolve to the SAME colour as the caption ink token");
+    assert.equal(planningComputed.strokeOpacity, "1", "idle planning-node stroke must render at full opacity, no muted wash");
+
+    const gateNode = container.querySelector(".hero-gate-node");
+    assert.ok(gateNode, "a real .hero-gate-node must render");
+    const gateComputed = getComputedStyle(gateNode as Element);
+    assert.equal(gateComputed.stroke, inkColor, "idle gate-node stroke must resolve to the SAME colour as the caption ink token");
+    assert.equal(gateComputed.strokeOpacity, "1", "idle gate-node stroke must render at full opacity, no muted wash");
+  } finally {
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+});
+
 // #920 AC5: two dashed zone dividers, a return-path arrowhead marker, and the hero root inside a
 // `.panel` (the last part is a WIRING claim — see the Hero/App-level test in App.test.tsx; this
 // half checks what HeroStage itself draws).
-test("#920 AC5: two dashed PLAN|IMPLEMENT / IMPLEMENT|OUTCOME dividers exist, and the return path ends in an arrowhead marker under the planning trio's x", () => {
+//
+// #920 gate② finding [2] (ac5-divider-test-is-self-referential): comparing the rendered dividers
+// only against `ZONE_DIVIDERS` — the SAME constant used to draw them — proves nothing about
+// where they actually sit relative to the zones they're supposed to separate; moving
+// `ZONE_DIVIDERS` outside the PLAN/IMPLEMENT/OUTCOME boundaries entirely would still pass. This
+// asserts the real boundary inequalities against `PHASE_X` instead.
+test("#920 AC5: two dashed PLAN|IMPLEMENT / IMPLEMENT|OUTCOME dividers sit between their own zone captions, and the return path ends in an arrowhead marker under the planning trio's x", () => {
   const html = markup(initialHeroState(3));
 
   const dividers = [...html.matchAll(/<line class="hero-divider" x1="(-?[\d.]+)" y1="[\d.]+" x2="(-?[\d.]+)" y2="[\d.]+"/g)].map(
@@ -1597,7 +1672,16 @@ test("#920 AC5: two dashed PLAN|IMPLEMENT / IMPLEMENT|OUTCOME dividers exist, an
       return Number(x1);
     },
   );
-  assert.deepEqual(dividers, [...ZONE_DIVIDERS]);
+  assert.equal(dividers.length, 2, "exactly two zone dividers must render");
+  const [plan, implement] = dividers as [number, number];
+  assert.ok(
+    PHASE_X.plan < plan && plan < PHASE_X.implement,
+    `the PLAN|IMPLEMENT divider (${plan}) must sit strictly between PHASE_X.plan (${PHASE_X.plan}) and PHASE_X.implement (${PHASE_X.implement})`,
+  );
+  assert.ok(
+    PHASE_X.implement < implement && implement < PHASE_X.outcome,
+    `the IMPLEMENT|OUTCOME divider (${implement}) must sit strictly between PHASE_X.implement (${PHASE_X.implement}) and PHASE_X.outcome (${PHASE_X.outcome})`,
+  );
 
   assert.match(html, /<marker id="hero-return-arrow"/, "the return path's arrowhead must be a real SVG marker");
   const returnMatch = html.match(/<path class="hero-return" marker-end="url\(#hero-return-arrow\)" d="([^"]*)"/);
@@ -1605,6 +1689,66 @@ test("#920 AC5: two dashed PLAN|IMPLEMENT / IMPLEMENT|OUTCOME dividers exist, an
   const nums = (returnMatch![1] as string).match(/-?[\d.]+/g)!.map(Number);
   const endX = nums[nums.length - 2] as number;
   assert.equal(endX, PLANNING.x, "the return path's own end point must land on the planning trio's shared x");
+});
+
+// #920 gate② finding [2] (ac5-divider-test-is-self-referential, second half): "dashed" is a
+// rendered CSS fact (`stroke-dasharray`), not provable from markup/constant comparisons alone —
+// removing `.hero-divider`'s `stroke-dasharray` would leave the test above green. STYLE doctrine:
+// a real `getComputedStyle` read against the full production cascade.
+test("#920 gate② finding [2]: a real .hero-divider renders a dashed stroke under the production cascade", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const container = document.createElement("div");
+  container.innerHTML = markup(initialHeroState(3));
+  document.body.appendChild(container);
+  try {
+    const divider = container.querySelector(".hero-divider");
+    assert.ok(divider, "a real .hero-divider element must render and match the injected stylesheet's selector");
+    const computed = getComputedStyle(divider as Element);
+    // Doctrine: never `notEqual`/existence (any non-default value would satisfy that) — the
+    // EXACT winning cascaded value, read straight from hero.css's own rule below.
+    const dashRule = heroCss.match(/\.hero-divider\s*\{[^}]*stroke-dasharray:\s*([\d\s]+);/);
+    assert.ok(dashRule, ".hero-divider must declare a stroke-dasharray in hero.css");
+    assert.equal(computed.strokeDasharray, (dashRule[1] as string).trim());
+  } finally {
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+});
+
+// #920 gate② review thread (PRRT…JE9): `PLANNING_NODE_R` growing to 30 pushed the planning trio's
+// own label offset (`PLANNING.x + PLANNING_NODE_R + 14`) far enough right that the widest label
+// ("Goal & align") ran straight into the w1 lane label at the OLD `LANES.x` — a live crop read
+// "Goal &amp;aligw1". `LANES.x`/`ZONE_DIVIDERS[0]` moved to clear it (their own doc in stage.tsx);
+// this is the regression guard, derived from the RENDERED label boxes at every `lanesMax` 1..4 —
+// never a hand-typed pair (COVERAGE doctrine).
+test("#920 gate② review thread (PRRT…JE9): the planning trio's own labels never collide with the lane labels, at lanesMax 1..4", () => {
+  for (const lanesMax of [1, 2, 3, 4]) {
+    const html = markup(initialHeroState(lanesMax), { lanesMax });
+    const planningGroupMatch = html.match(/<g class="hero-planning" data-node="planning">([\s\S]*?)<g class="hero-lanes">/);
+    assert.ok(planningGroupMatch, `lanesMax=${lanesMax}: the planning group must render`);
+    const planningLabels = [
+      ...(planningGroupMatch![1] as string).matchAll(/<text class="hero-node-label" x="(-?[\d.]+)" y="(-?[\d.]+)">([^<]*)</g),
+    ].map(([, x, y, text]) => ({
+      label: `planning label "${text}"`,
+      box: captionSafeTextBox((text as string).replace(/&amp;/g, "&"), Number(x), Number(y), GATE_NODE_LABEL_FONT_PX, "start"),
+    }));
+    assert.equal(planningLabels.length, 3, `lanesMax=${lanesMax}: all three planning labels must render`);
+
+    const laneLabels = laneBlocks(html).map(({ channel, block }) => {
+      const m = block.match(/<text class="hero-node-label" x="(-?[\d.]+)" y="(-?[\d.]+)">([^<]*)</);
+      assert.ok(m, `lane ${channel}: its own label must render`);
+      const [, x, y, text] = m as unknown as [string, string, string, string];
+      return {
+        label: `lane ${channel} label "${text}"`,
+        box: captionSafeTextBox(text, Number(x), Number(y), GATE_NODE_LABEL_FONT_PX, "start"),
+      };
+    });
+
+    assertNoOverlap([...planningLabels, ...laneLabels]);
+  }
 });
 
 test("#728 gate② [0]: backlog chip/droplet text boxes never overlap, by actual rendered extent — not just anchor spacing", () => {
@@ -1671,6 +1815,9 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
   assert.match(tallyText, /24 merged · 13 pending · 6 needs human/);
 
   const boxes: { label: string; box: Box }[] = [
+    // #920 gate② review thread (PRRT…JE5): the tally moved BELOW the Summary/Retro row entirely
+    // (`OUTCOME_TALLY_Y`'s own doc) — centered again, since it no longer shares the stem's own
+    // y-band at all.
     { label: "outcome tally", box: textBox(tallyText, Number(tallyXRaw), Number(tallyYRaw), 9) },
     // Only the OUTERMOST drawn ring — concentric rings sharing one center are, by design,
     // always nested/touching each other (that's the trunk cross-section, not a collision); the
@@ -1734,6 +1881,8 @@ test("#920 AC4: the reflection tree is a plain T — stem x equals the disc cent
   const tallyMatch = html.match(/class="hero-num hero-small hero-outcome-tally" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</);
   assert.ok(tallyMatch, "outcome tally must render");
   const [, tallyXRaw, tallyYRaw, tallyText] = tallyMatch as unknown as [string, string, string, string];
+  // #920 gate② review thread (PRRT…JE5): centered again — the tally now sits BELOW the whole
+  // Summary/Retro row, so it never shares the stem's y-band at all.
   const tallyBox = textBox(tallyText, Number(tallyXRaw), Number(tallyYRaw), 9);
 
   const reflectionGroupMatch = html.match(/<g class="hero-reflection" data-node="reflection">([\s\S]*?)<\/g>\s*<path class="hero-return"/);
@@ -1741,7 +1890,7 @@ test("#920 AC4: the reflection tree is a plain T — stem x equals the disc cent
   const pathMatch = (reflectionGroupMatch![1] as string).match(/<path class="hero-arm" d="([^"]*)"/);
   assert.ok(pathMatch, "the reflection tree's connector <path> must render");
   const segments = pathSegmentBoxes(pathMatch![1] as string);
-  assert.ok(segments.length >= 4, "the T-stem, bar, and both drops must each contribute a segment");
+  assert.ok(segments.length >= 2, "the stem and the bar must each contribute a segment");
 
   for (const seg of segments) {
     assert.ok(
@@ -1755,12 +1904,19 @@ test("#920 AC4: the reflection tree is a plain T — stem x equals the disc cent
   }
 });
 
-// #920: the stem no longer attaches at the ring's own bottom edge (the OLD `detourX`-jog design)
-// — it starts at `REFLECTION.stemTop`, deliberately BELOW the outcome tally, which is what lets
-// it run straight down with no jog at all (the AC4 test above). This pins that the connector's
-// topmost point is exactly `REFLECTION.stemTop`, on the disc's own centre x.
-test("#920: the reflection tree's stem starts at REFLECTION.stemTop, on the disc centre x", () => {
+// #920 gate② finding [3] (reflection-loop-is-disconnected): the tree must be GENUINELY attached
+// at the disc's own bottom edge above — no jog, no gap between `RING_BOTTOM` and the stem's own
+// start — and the dashed return path picks up directly below the tally (the tree's own true
+// bottom now that the tally/rule moved there), never a floating coordinate between the
+// Summary/Retro circles (the review thread's own complaint about the earlier layout).
+test("#920: the reflection tree's stem is genuinely attached to the disc bottom; the return path starts below the tally, on the same column", () => {
   const html = markup(initialHeroState(3));
+  assert.equal(
+    REFLECTION.stemTop,
+    TRUNK.y + TRUNK.max * TRUNK.step,
+    "the stem must start exactly at the disc's own bottom edge (RING_BOTTOM)",
+  );
+
   const reflectionGroupMatch = html.match(/<g class="hero-reflection" data-node="reflection">([\s\S]*?)<\/g>\s*<path class="hero-return"/);
   assert.ok(reflectionGroupMatch, "the hero-reflection group must render");
   const pathMatch = (reflectionGroupMatch![1] as string).match(/<path class="hero-arm" d="([^"]*)"/);
@@ -1770,9 +1926,29 @@ test("#920: the reflection tree's stem starts at REFLECTION.stemTop, on the disc
   const points = [...d.matchAll(/([ML])\s*(-?[\d.]+)\s+(-?[\d.]+)/g)].map(([, , x, y]) => ({ x: Number(x), y: Number(y) }));
   assert.ok(points.length >= 2, "the connector path must carry real coordinate points");
   const topmostY = Math.min(...points.map((p) => p.y));
-  assert.equal(topmostY, REFLECTION.stemTop, "the connector's topmost point must sit at REFLECTION.stemTop");
-  const attachedAtStemX = points.some((p) => p.y === REFLECTION.stemTop && p.x === TRUNK.x);
-  assert.ok(attachedAtStemX, `the connector must carry a point at (TRUNK.x, stemTop) = (${TRUNK.x}, ${REFLECTION.stemTop})`);
+  assert.equal(topmostY, REFLECTION.stemTop, "the connector's topmost point must sit at the disc's own bottom edge");
+  assert.ok(
+    points.some((p) => p.y === topmostY && p.x === TRUNK.x),
+    `the connector must carry a point at (TRUNK.x, RING_BOTTOM) = (${TRUNK.x}, ${topmostY})`,
+  );
+  // The crossbar's own two ends are the Summary/Retro circle centres — `barY` === `REFLECTION.y`.
+  assert.equal(REFLECTION.barY, REFLECTION.y, "the crossbar must sit AT the circles' own centre y, not hung below them by a drop segment");
+  const bottommostY = Math.max(...points.map((p) => p.y));
+  assert.equal(bottommostY, REFLECTION.barY, "the arm's own bottommost point is the bar, where the Summary/Retro circles sit");
+
+  // The return path starts strictly below `REFLECTION.bottom` computed from the tally's own
+  // position — same column, positioned as the visual continuation of the tree, not floating
+  // between the two circles (`REFLECTION.bottom` sits well past both `REFLECTION.y + r` circle
+  // bottoms and the tally's own row).
+  const returnMatch = html.match(/<path class="hero-return" marker-end="url\(#hero-return-arrow\)" d="M (-?[\d.]+) (-?[\d.]+)/);
+  assert.ok(returnMatch, "the return path must render");
+  const [, returnStartX, returnStartY] = returnMatch as unknown as [string, string, string];
+  assert.equal(Number(returnStartX), TRUNK.x, "the return path must start on the disc centre x, the SAME column the stem/tally occupy");
+  assert.equal(Number(returnStartY), REFLECTION.bottom, "the return path must start at REFLECTION.bottom, directly below the tally");
+  assert.ok(
+    REFLECTION.bottom > REFLECTION.y + REFLECTION.r,
+    "REFLECTION.bottom must sit below the Summary/Retro circles' own bottom edge, not between them",
+  );
 });
 
 // #886 gate② run 2e566ac9 finding [1]: the earlier fix kept the droplet dead-center and moved
@@ -2734,6 +2910,8 @@ test("#891 gate① engine-agent finding [0] (ac1-collapsed-chip-overlap): the co
     // 9px, matching `.hero-staleness, .hero-outcome-tally`'s shared CSS rule — the same literal
     // this file's own pre-existing outcome-tally collision tests already use.
     { label: "staleness caption", box: textBox(staleText, Number(staleXRaw), Number(staleYRaw), 9) },
+    // #920 gate② review thread (PRRT…JE5): centered again — the tally now sits below the whole
+    // Summary/Retro row.
     { label: "outcome tally", box: textBox(tallyText, Number(tallyXRaw), Number(tallyYRaw), 9) },
     // The escalation node's own "Needs human" label — the chip's closest neighbor above it —
     // `text-anchor="start"` (no override in stage.tsx), so `x` is the LEFT edge, not the center.
