@@ -36,7 +36,7 @@ with `/api/loop/state` fed a fixture-shaped lanes payload through Playwright's o
 interception), so `1440/1024/720-{dark,light}-idle-lanes.png` are the real `LaneBoard`, not the
 `LiveOnly` placeholder. `active` stays exempted for `lanes` (`OPTIONAL_AT`): the live-mocked page
 has no rounds to scrub, so there is no genuine scrubbed moment to capture — an honest absence, not
-a selector miss. Rows 12–13 below are re-audited against these real captures.
+a selector miss. Rows 12–13 below are re-audited against these real captures; the operator-witnessed Tier-C comparison (all six viewport × theme captures vs `lanes-{dark,light}.png`) is recorded on #882 (2026-08-17, actor/steps/artifacts in the issue comment).
 
 **Dark-only baselines.** `cost` and `needs-attention` have no light-theme mockup on disk. Per
 #361's verification plan (the established convention for this exact gap): the light theme is
