@@ -1,6 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { expect, type Locator, type Page, test } from "@playwright/test";
+import { formatUsd } from "../src/format.ts";
 
 /**
  * `npm run shots` (frontend-design.md §2, #876 D) — captures the `?demo` fixture at every
@@ -498,10 +499,12 @@ function liveLanesLoopState() {
 /** #882: intercepts every `/api/*` call the production `LiveApp` route makes (`api/client.ts`'s
  *  four endpoints) and fulfills it with fixture data, in-browser — the real-Chromium-page
  *  equivalent of `App.test.tsx`'s `stubFetch` (`byPath` -> `{status, body}`), which only works
- *  against that file's Node `fetch` mock. */
-async function mockLiveApi(page: Page): Promise<void> {
+ *  against that file's Node `fetch` mock. Takes the loop-state payload as a parameter (rather than
+ *  building its own) so the caller can derive fixture markers from the SAME object being served,
+ *  never a hand-copied duplicate of it. */
+async function mockLiveApi(page: Page, loopState: unknown): Promise<void> {
   const byPath: Record<string, unknown> = {
-    "/api/loop/state": liveLanesLoopState(),
+    "/api/loop/state": loopState,
     "/api/events": { events: [], lastId: 0 },
     "/api/spend": { spend: [], lastId: 0 },
     "/api/rounds": { rounds: [] },
@@ -519,14 +522,43 @@ async function mockLiveApi(page: Page): Promise<void> {
 /** #882: the `lanes` module's real capture — navigates to `/` (never `?demo`, which is always
  *  `replay` mode and can never mount the real board) with `/api/*` mocked, so the SAME production
  *  `App` -> `LiveApp` -> `LiveOnly mode="live"` -> `LaneBoard` tree this app ships renders for
- *  real, not a standalone/mock stand-in built to bypass that wiring. */
+ *  real, not a standalone/mock stand-in built to bypass that wiring.
+ *
+ * engine-agent audit run d4284445-db66-4057-8858-d3df521f2f56 finding [0]
+ * (live-capture-data-unasserted): `LaneBoard` renders the SAME `section[aria-label="lanes"]`
+ * anchor in its config-unreadable state (`lanesMax === null`, before the mocked
+ * `/api/loop/state` response has actually landed) as it does once the fixture data has arrived —
+ * `waitFor({state: "visible"})` alone can't tell those two apart, so a slow or broken mock could
+ * still pass this capture while showing the wrong state entirely. Before taking the screenshot,
+ * assert the section actually carries the fixture's OWN distinguishable content (every lane name +
+ * issue number, `toContainText` on real, retrying locators) and that the `LiveOnly` placeholder
+ * never rendered instead — real proof the mocked data flowed all the way through the production
+ * `App` -> `LiveApp` -> `LaneBoard` tree, not a config-unreadable or placeholder stand-in.
+ */
 async function captureLiveLanes(page: Page, theme: { key: string; attr: string }, idlePrefix: string): Promise<void> {
-  await mockLiveApi(page);
+  const loopState = liveLanesLoopState();
+  await mockLiveApi(page, loopState);
   await page.goto("/");
   await page.evaluate((attr) => document.documentElement.setAttribute("data-theme", attr), theme.attr);
   const lanes = page.locator('section[aria-label="lanes"]');
   await lanes.waitFor({ state: "visible" });
   await page.waitForLoadState("networkidle");
+
+  for (const lane of loopState.lanes.items) {
+    await expect(lanes, `the live-mocked lanes capture must render fixture lane "${lane.lane}"`).toContainText(lane.lane);
+    await expect(lanes, `the live-mocked lanes capture must render fixture issue #${lane.issue}`).toContainText(`#${lane.issue}`);
+  }
+  const settledLane = loopState.lanes.items.find((lane) => lane.costUsd !== null);
+  if (settledLane) {
+    await expect(lanes, `the live-mocked lanes capture must render fixture lane "${settledLane.lane}"'s real settled cost`).toContainText(
+      formatUsd(settledLane.costUsd as number),
+    );
+  }
+  await expect(
+    page.locator('[aria-label="live only"]'),
+    "the live-mocked capture must never fall back to the LiveOnly placeholder",
+  ).toHaveCount(0);
+
   await lanes.screenshot({ path: `${CAPTURES_DIR}/${idlePrefix}-lanes.png` });
   await page.unroute("**/api/**");
 }
