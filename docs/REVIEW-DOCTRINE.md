@@ -101,9 +101,9 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   - **DECISION (fake-verdict rule, engine side).** Presetting a fake collaborator to already
     return the acceptance criterion's target decision, then asserting against the fake's own
     canned value, proves only that the fake echoes what it was told — the real policy function
-    that is supposed to decide that value never runs. Sibling of VALUE above but distinct: VALUE
-    is a copied constant drifting from its source; DECISION is the deciding code path never
-    executing at all. Worked example: PR #835 (issue #824)'s `ac1`/`ac2` fixtures preset
+    that is supposed to decide that value never runs. Distinct from VALUE (a copied constant
+    drifting from its source): here the deciding code path never executes at all. Worked
+    example: PR #835 (issue #824)'s `ac1`/`ac2` fixtures preset
     `FakeSupervisor.reclaimResults` straight to the AC's target `worktreeRetained` value with no
     baseline ever established, so `WorkerSupervisor.reclaim`'s real mtime/ctime policy never ran;
     fixed by building a real fixture (real directory, real `dispatched_at`, a real post-baseline
@@ -125,7 +125,7 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     prefetched/settled queries and a stubbed `fetch` instead, over a fixture that builds the AC's
     named boundary/adversarial case, not just the nominal one. `docs/dev-guide/07-dashboard.md`'s
     `registerRealDom()` solved this for CLICK wiring (retro #355); QUERY/data-flow wiring has no
-    equivalent shared helper yet — cite one here once a PR extracts it.
+    equivalent shared helper yet.
   - **STYLE (computed-style ACs are VALUE's real-DOM exception).** "Authored" isn't "rendered" —
     a CSS/typography AC needs `registerRealDom()` plus a real `getComputedStyle` read, never a
     stand-in. Same PR, one round apart (#879, PR #886 gate② rounds 1, 3): a regex match on
@@ -134,13 +134,16 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     since it resolves off the *inherited* font-size a partial cascade misses. Mount every
     stylesheet the element inherits, in production order, and assert the exact value — never
     `notEqual`/existence, which any non-default value satisfies.
-  - **COLLISION (scope = relevant neighbors; position = rendered).** `assertNoOverlap`/
-    `boxesOverlap` (`dashboard/src/hero/hero.test.ts`) is sound infra, but each PR hand-curates
-    a partial box list, missing neighbors its author forgot — recurring (#728, #745, #891,
-    #901, #902). Include every element sharing the new one's region (not every drawn
-    element), and read position from the rendered markup wherever filtering/compaction can make a
-    recomputed position diverge (PR #901's raw `state.droplets`-order bug vs `dropletTransform`'s
-    read-off-the-real-`html` fix) — a constant is fine for genuinely static geometry.
+  - **COLLISION → COVERAGE (any AC/doc's "all/every named set" claim, not only neighbor
+    boxes).** `assertNoOverlap`/`boxesOverlap` (`dashboard/src/hero/hero.test.ts`) is sound
+    infra, but each PR hand-curates a partial box list, missing neighbors its author forgot —
+    recurring (#728, #745, #891, #901, #902). Include every element sharing the new one's
+    region, position read off rendered markup wherever filtering/compaction can diverge — a
+    constant is fine for genuinely static geometry. Same shape, #892: Playwright proved only
+    `PhaseInspectorDrawer`, not the AC's own `ConfigDrawer`/`Controls` confirm;
+    `.recipe-list-entry` proved only `NeedsAttention`, not the doc's own
+    `ActivityFeed`/`LaneBoard` rows. Derive the covered set from what the AC/doc names, never a
+    hand-typed list.
 
 ### Documentation claims
 
@@ -148,7 +151,7 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   exact function/branch it describes, not a plausible generalization from a partial read. A
   fallible operation (delete, prune) is best-effort unless the code checks and reports the
   outcome; a policy specific to one call path isn't generalized to every lane in that state when
-  another path (e.g. a human-merge-only exception) handles it differently. A documented procedure
+  another path (e.g. human-merge-only) differs. A documented procedure
   or recipe is itself a claim: either it has actually been run, or it isn't asserted as working. A
   docs-only PR has no test suite to catch a false claim the way code does, so name the exact
   symbol/branch backing a claim rather than writing it from memory of "roughly how it works"
@@ -169,9 +172,9 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   list gives a false NEGATIVE that — per `DEFAULT_LLM_FAILURE_PATTERNS`'s own accounting — the
   empty-spin breaker bounds on the peripheral-role path, but nothing in the classifier bounds on
   the dispatched-WORKER-lane path; only the OUTER safety ceiling (`cost.roundBudgetUsd`/
-  `dailyBudgetUsd`) contains a recurring miss there. Prefer narrow anyway, naming that outer-layer
-  dependency explicitly rather than calling a miss self-bounded. State the residual blind spot
-  honestly (a genuinely narrow gap, not zero) rather than claiming full coverage.
+  `dailyBudgetUsd`) contains a recurring miss there. Prefer narrow anyway, naming that
+  outer-layer dependency and the residual blind spot explicitly rather than claiming full
+  coverage.
 - **Doctrine self-modification rule.** A PR that modifies this review-doctrine file itself must
   be prominently flagged in review, with a recommendation to route it needs-human rather than
   auto-merge. The reviewer applies the doctrine loaded at engine construction, never the version
