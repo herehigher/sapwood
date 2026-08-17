@@ -136,8 +136,8 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     `notEqual`/existence, which any non-default value satisfies.
   - **COLLISION (scope = relevant neighbors; position = rendered).** `assertNoOverlap`/
     `boxesOverlap` (`dashboard/src/hero/hero.test.ts`) is sound infra, but each PR hand-curates
-    its own partial box list, missing neighbors its author forgot — recurring (#728, #745, #891,
-    #901, #902). Include every element sharing the new one's region (not literally every drawn
+    a partial box list, missing neighbors its author forgot — recurring (#728, #745, #891,
+    #901, #902). Include every element sharing the new one's region (not every drawn
     element), and read position from the rendered markup wherever filtering/compaction can make a
     recomputed position diverge (PR #901's raw `state.droplets`-order bug vs `dropletTransform`'s
     read-off-the-real-`html` fix) — a constant is fine for genuinely static geometry.
