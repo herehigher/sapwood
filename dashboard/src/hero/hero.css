@@ -25,6 +25,19 @@
   animation: none !important;
 }
 
+/* #895 item 5: below the app's 720px stacking floor (app.css), `width: 100%` above kept
+ * proportionally SCALING the whole stage down with the viewport — every caption's authored
+ * font-size (set inside the SVG's own 1200×380 viewBox coordinate space, `stage.tsx`'s `STAGE`)
+ * shrank right along with it, down to ~6px at a phone width. Holding the stage at its native
+ * 1200px width instead REFLOWS the page (a horizontal scroll on the excess) rather than
+ * shrinking the stage's own content — every caption keeps rendering at its authored, legible
+ * size, the same size it already has above 720px. */
+@media (max-width: 720px) {
+  .hero {
+    width: 1200px;
+  }
+}
+
 /* ---- Type roles ---------------------------------------------------------- */
 
 /* PLAN / IMPLEMENT / OUTCOME carry --font-display as an inline style in stage.tsx (issue #144

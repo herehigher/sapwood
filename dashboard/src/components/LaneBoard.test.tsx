@@ -142,6 +142,16 @@ test("disconnected renders the disconnected caption instead of lane cards", () =
   assert.doesNotMatch(html, /lane-board-grid/);
 });
 
+// ── #882 (729 ledger row 13, "w1 lane row unnamed on the board") ───────────────────────────────
+
+test("#882: each lane card names its own lane (w1/w2/…), not just the issue it's working", () => {
+  const html = renderToStaticMarkup(
+    <LaneBoard lanesMax={2} lanes={[lane({ lane: "w1", issue: 94 }), lane({ lane: "w2", issue: 90 })]} titles={{}} now={NOW} />,
+  );
+  assert.match(html, /class="data lane-card-name">w1</);
+  assert.match(html, /class="data lane-card-name">w2</);
+});
+
 // #892: EntityRef's folded title moved from a bare `title=` (static-markup-visible) to a Radix
 // tooltip that only mounts on real focus — see EntityRef.test.tsx's own real-DOM tests for the
 // interactive open/aria-describedby proof. `tabindex="0"` is the SSR-visible signal that a title

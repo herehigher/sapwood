@@ -91,6 +91,9 @@ function minimalAppViewModel(
     // #891 gate① engine-agent finding [2]: distinguishable from the default `[]` so a test can
     // prove `appContent` threads this SAME array to both `<Hero>` and `<NeedsAttention>`.
     activeOpenAttention?: DomainEvent[];
+    // #895 item 1: the replay cursor's own timestamp — `null` (live/no round loaded) unless a
+    // test explicitly sets it to prove the hero's staleness caption rebases against it.
+    asOf?: string | null;
   } = {},
 ) {
   return {
@@ -133,6 +136,8 @@ function minimalAppViewModel(
       spendThroughCursor: [],
       phaseWindows: [],
       roundEvents: overrides.roundEvents ?? [],
+      roundSpend: [],
+      asOf: overrides.asOf ?? null,
     },
     activeHero: overrides.activeHero ?? initialHeroState(null),
     activeSteps: [],
@@ -1454,6 +1459,28 @@ test("#766 gate② finding [2]: neither LaneBoard's nor ConfigDrawer's own rende
   assert.doesNotMatch(html, /aria-label="config"/, "ConfigDrawer's own aria-label must not render while replaying");
 });
 
+// ── #895 item 1: the hero's staleness caption rebases against the replay cursor, never the live
+// wall clock — WIRING sub-case: `hero.test.ts` proves `HeroStage`'s own `now` prop drives the
+// caption in isolation, this proves App's REAL tree threads the replay cursor's own timestamp
+// into it while replaying, rather than always falling back to `appContent`'s own `clock`.
+
+test("#895 item 1: while replaying, the hero's staleness caption reads the replay cursor's own 'as of' timestamp, not appContent's live wall clock", () => {
+  const activeHero: HeroState = { ...initialHeroState(null), lastEventTs: "2019-12-31T23:59:50Z" };
+  const vm = minimalAppViewModel({
+    mode: "replay",
+    loop: { data: LOOP_STATE_OK, isPending: false },
+    activeHero,
+    asOf: "2019-12-31T23:59:55Z",
+  });
+  const html = renderToStaticMarkup(appContent(vm));
+  assert.match(
+    html,
+    /last event 5s ago/,
+    "staleness must rebase against the replay cursor's own 'as of' timestamp, not appContent's own wall-clock `clock` (2026-01-01, years later)",
+  );
+  assert.doesNotMatch(html, /last event \d+d ago/, "the live wall clock must never leak into a replayed staleness reading");
+});
+
 // ── #803: App's REAL wiring of `/api/loop/state`'s `mergedPrs` into the hero tally ────────────
 //
 // hero.test.ts proves `HeroStage` itself honors `mergedPrs` in isolation — this proves App.tsx
@@ -1778,6 +1805,68 @@ test("#880: ?demo's real DemoApp wiring populates BOTH the today panel (whole-bu
   // proof the real bucketing pipeline ran, not a hand-authored placeholder.
   assert.match(html, /Unattributed/);
   assert.match(html, /total \$1\.00 · 1 PR merged · \$1\.00\/PR · review \$0\.00/, "footer stats read from the fixture's own artifact");
+});
+
+// #895: no test drove the config gear through a real replay/demo App entry point — the #727
+// tests above invoke `onOpenConfig` directly or preset `configOpen`, and the #766 LiveOnly tests
+// preset `configOpen: true` on a hand-built `minimalAppViewModel`; neither actually CLICKS the
+// real rendered gear inside a real, settled, replayable stateful tree and observes the result.
+// `?demo` is always replay once its fixture loads (`DemoApp`'s own doc), so this is the real
+// production path the AC names: a real DOM mount (`registerRealDom()`, `createRoot`/`act`, same
+// posture as `mountSettledApp` above) of the actual `<App demo>` entry point, clicking the actual
+// rendered gear button, and reading the actual resulting markup.
+test("#895: through the real ?demo/replay production entry point, clicking the real config gear renders the live-only badge in place of ConfigDrawer's content", async () => {
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const path = url.split("?")[0]!;
+    if (path === "/demo-fixture.json") {
+      return new Response(JSON.stringify(demoBundleFixture()), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    throw new Error(`?demo must never call ${url} — it is not a static asset`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await client.prefetchQuery(demoFixtureQuery());
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={client}>
+          <App demo />
+        </QueryClientProvider>,
+      );
+    });
+    // `?demo` is always replay, so LaneBoard's own unconditional `<LiveOnly>` already renders
+    // one "live only" badge before the gear is ever touched — a bare presence check can't tell
+    // that apart from ConfigDrawer's. Counting occurrences isolates the one new badge the click
+    // adds (`configOpen`'s own `<LiveOnly>` wrapper renders nothing at all while `configOpen` is
+    // false, so this is the drawer's own instance, not a coincidence).
+    const badgeCount = () => (container.innerHTML.match(/class="panel live-only"/g) ?? []).length;
+    const before = badgeCount();
+    assert.equal(before, 1, "LaneBoard's own live-only badge is expected before any click — the drawer's own instance isn't rendered yet");
+
+    const gear = container.querySelector<HTMLButtonElement>('[aria-label="open config"]');
+    assert.ok(gear, "the real config gear must render in the real ?demo tree");
+    await act(async () => {
+      gear.click();
+    });
+
+    assert.equal(
+      badgeCount(),
+      before + 1,
+      "clicking the real gear through the real ?demo/replay tree must add exactly one new live-only badge — ConfigDrawer's own",
+    );
+    assert.doesNotMatch(
+      container.innerHTML,
+      /aria-label="config"/,
+      "ConfigDrawer's own rendered signature must never appear behind the badge — it must silently no-op no longer",
+    );
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
 });
 
 // ── #861 phase inspector ─────────────────────────────────────────────────────────────────────

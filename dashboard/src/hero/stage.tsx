@@ -16,6 +16,7 @@
 import type { KeyboardEvent, Ref } from "react";
 import { readConfigPath } from "../config-captions.ts";
 import type { DomainEvent } from "../domain-event.ts";
+import { formatRelativeTime } from "../format-time.ts";
 import type { StageNode } from "../inspector.ts";
 import {
   activePlanningNode,
@@ -498,7 +499,7 @@ export type HeroStageProps = {
   config?: Record<string, unknown> | null;
   /** Test-injectable clock for the staleness caption (#716 gate② P2-8) — defaults to the real
    *  clock; never a real timer inside this component (repo bans timing-dependent tests). */
-  now?: Date;
+  now?: Date | undefined;
   /**
    * The engine's own live lane rows (`/api/loop/state`'s `lanes.items[]`) — the SAME rows
    * `Hero.tsx` already threads through `withLanePrs` for the PR tag, passed straight through
@@ -619,15 +620,21 @@ function gateIcon(gate: "ci" | "review", cx: number, cy: number) {
   }
 }
 
-/** §6: "how long since anything happened" — the OUTCOME zone's staleness caption. Whole
- *  seconds, floored; a future/unparseable timestamp (clock skew) reads as "just now" rather
- *  than a negative or NaN caption. */
+/** §6: "how long since anything happened" — the OUTCOME zone's staleness caption. Reuses
+ *  `format-time.ts`'s `formatRelativeTime` (already the whole app's one relative-time rollover:
+ *  s/m/h/d/mo/y) rather than a raw-seconds count of its own — #895: a multi-day-old replayed
+ *  round used to render "last event 424778s ago". `now` must be the caller's own honest clock
+ *  (`HeroStage`'s own doc: never a real timer inside this component) — in replay that is the
+ *  replay cursor's own timestamp, never the live wall clock (`Hero.tsx`'s `now` prop).
+ *
+ *  #895: `formatRelativeTime` degrades an unparseable date to "just now" — its own honest
+ *  default for callers that always have SOME real elapsed time to show. For this caption that
+ *  default is wrong: an unparseable `lastEventTs` isn't "no time has passed", it's "no honest
+ *  reading exists" — guard it out to no caption, same as the `lastEventTs === null` case. */
 function stalenessCaption(lastEventTs: string | null, now: Date): string | null {
   if (lastEventTs === null) return null;
-  const ts = Date.parse(lastEventTs);
-  if (Number.isNaN(ts)) return null;
-  const secs = Math.max(0, Math.floor((now.getTime() - ts) / 1000));
-  return `last event ${secs}s ago`;
+  if (Number.isNaN(Date.parse(lastEventTs))) return null;
+  return `last event ${formatRelativeTime(lastEventTs, now)}`;
 }
 
 export function HeroStage({
@@ -876,9 +883,22 @@ export function HeroStage({
                   y={laneY(lane.channel) + (lane.phase === "fixing" ? 14 : -10)}
                   textAnchor="end"
                 >
-                  {lane.phase === "fixing"
-                    ? `FIXING · round ${lane.fixRound} of ${fixCap}${lane.reason ? ` · ${lane.reason}` : ""}`
-                    : lane.worker}
+                  {lane.phase === "fixing" ? (
+                    `FIXING · round ${lane.fixRound} of ${fixCap}${lane.reason ? ` · ${lane.reason}` : ""}`
+                  ) : (
+                    // #895 item 7: the engine's raw worker id ("lane-880-a048dacf") used to leak
+                    // here as primary text — a short, stable form instead, full id kept as the
+                    // hover title. `<text>` has no `title` ATTRIBUTE in SVG's own spec (only this
+                    // `<title>` child element is) — but a bare `<title>` here silently vanished:
+                    // React 19's Document Metadata feature hoists any `<title>` it finds straight
+                    // to `document.head` instead of rendering it inline. `itemProp` (any value)
+                    // is React's own documented escape hatch — it marks this as metadata about
+                    // THIS element, not the document, and keeps it in place.
+                    <>
+                      <title itemProp="worker-id">{lane.worker}</title>
+                      {lane.issue !== null ? `#${lane.issue}` : `w${lane.channel + 1}`}
+                    </>
+                  )}
                 </text>
               )}
               {lane.phase === "failed" && (

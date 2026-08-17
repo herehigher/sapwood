@@ -70,6 +70,18 @@ test("renders the state word as text, not color alone", () => {
   assert.match(html, />running</);
 });
 
+// #895 item 3: §5 assigns healthy-engine to --moss, not --sap (the "in motion" token this dot was
+// hard-wired to). Every earlier return (disconnected, connecting) has already exited by the time
+// this dot renders, so reaching it always means a live, reachable engine — a single unconditional
+// token, not a state-dependent one.
+test("#895 item 3: the engine status dot renders --moss (the healthy-engine token), never --sap", () => {
+  const html = renderToStaticMarkup(
+    <Header disconnected={false} isPending={false} engine={engine("running")} spend={SPEND_OK} parked={false} />,
+  );
+  assert.match(html, /class="feed-dot" style="background:var\(--moss\)"/);
+  assert.doesNotMatch(html, /class="feed-dot" style="background:var\(--sap\)"/);
+});
+
 test('the precedence case: stalled + PAUSE set renders `stalled` plus a secondary "PAUSE set" chip', () => {
   const html = renderToStaticMarkup(
     <Header disconnected={false} isPending={false} engine={engine("stalled", { pauseActive: true })} spend={SPEND_OK} parked={false} />,

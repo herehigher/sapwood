@@ -526,6 +526,10 @@ export function appContent(vm: AppViewModel) {
             config={loop.data.config}
             onInspect={onInspect}
             openAttention={activeOpenAttention}
+            // #895 item 1: the staleness caption's honest clock — the replay cursor's own
+            // timestamp while replaying (never the live wall clock, which used to make a
+            // multi-day-old replayed round read as still-current), the real clock otherwise.
+            now={mode === "replay" && replay.asOf ? new Date(replay.asOf) : clock}
           />
         )}
 

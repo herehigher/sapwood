@@ -885,6 +885,60 @@ test("#879 gate② run 2e566ac9 finding [4]: PLAN/IMPLEMENT/OUTCOME headers rend
   );
 });
 
+// #895 item 5: below the app's 720px stacking floor, `.hero`'s `width: 100%` used to scale the
+// whole stage — and every caption's authored font-size along with it — down to ~6px. STYLE
+// doctrine (docs/REVIEW-DOCTRINE.md): a computed-style AC needs `registerRealDom()` plus a real
+// `getComputedStyle` read against the FULL production cascade at a REAL simulated viewport width,
+// never a regex read of the source text (which proves the rule was authored, not that it wins).
+test("#895 item 5: at the 720px floor, the hero stage reflows (holds its native 1200px width) instead of scaling its captions down", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+
+  const readHeroWidth = (viewportWidth: number): string => {
+    (window as unknown as { happyDOM: { setViewport: (v: { width: number }) => void } }).happyDOM.setViewport({
+      width: viewportWidth,
+    });
+    const container = document.createElement("div");
+    container.innerHTML = markup(initialHeroState(3));
+    document.body.appendChild(container);
+    try {
+      const heroEl = container.querySelector(".hero");
+      assert.ok(heroEl, "a real .hero element must render");
+      return getComputedStyle(heroEl as Element).width;
+    } finally {
+      document.body.removeChild(container);
+    }
+  };
+
+  try {
+    // Above the floor, the scaling rule (`width: 100%`) still wins — happy-dom's CSSOM-only
+    // `getComputedStyle` can't resolve a percentage to an actual px layout value (no real layout
+    // engine), but it DOES still report the literal cascaded value, so this confirms the 720px
+    // media query hasn't fired early and pinned 1200px outside its own range.
+    assert.equal(readHeroWidth(1200), "100%", "well above the floor, the scaling rule must still be the one that wins");
+    // #895: 400px/1200px alone never pin the NAMED 720px boundary — a media query shipped as
+    // `max-width: 719px` would still pass both. 721px (just outside) and 720px (the floor
+    // itself, inclusive per `max-width`'s own semantics) pin the exact edge, tied to
+    // `STAGE.w` (stage.tsx's own viewBox width) rather than a hand-copied `1200px` literal so
+    // the two can never silently drift apart.
+    assert.equal(readHeroWidth(721), "100%", "one px above the floor, the media query must not have fired yet");
+    assert.equal(
+      readHeroWidth(720),
+      `${STAGE.w}px`,
+      "AT the 720px floor itself (max-width is inclusive), the stage must already hold its native width",
+    );
+    assert.equal(
+      readHeroWidth(400),
+      `${STAGE.w}px`,
+      "well below the floor, the stage must hold its native STAGE.w px width (reflow via horizontal scroll) rather than scaling down — the exact regression: captions shrinking to ~6px",
+    );
+  } finally {
+    document.head.removeChild(style);
+  }
+});
+
 test("#879: the backlog's READY cards render as taller filled cards with bold, contrasting card text", () => {
   const { state } = run([ev("pool-selected", { issues: [94] })]);
   const html = markup(state);
@@ -967,6 +1021,29 @@ test("P2-8: the planning group's staleness caption reads seconds since the last 
 
   // A fresh stage with nothing folded yet has no event to be stale about.
   assert.doesNotMatch(markup(initialHeroState(3)), /last event/);
+});
+
+test("#895 item 1: the staleness caption rolls over units (s/m/h/d) instead of ever rendering raw seconds", () => {
+  const { state } = run([ev("dispatched", { worker: "w1", issue: 86 })]);
+  const eventTs = state.lastEventTs;
+  assert.ok(eventTs);
+  const at = (deltaMs: number) => new Date(new Date(eventTs).getTime() + deltaMs);
+
+  assert.match(markup(state, { now: at(90_000) }), /last event 1m ago/);
+  assert.match(markup(state, { now: at(7_500_000) }), /last event 2h ago/);
+  // The issue's own reported defect: a multi-day gap used to render as raw seconds
+  // ("last event 424778s ago") — this is that exact scale, now unit-rolled.
+  assert.match(markup(state, { now: at(424_778_000) }), /last event 4d ago/);
+  assert.doesNotMatch(markup(state, { now: at(424_778_000) }), /\d+s ago/);
+});
+
+// #895: an unparseable `lastEventTs` must render no caption at all, never a fabricated "just
+// now" — `formatRelativeTime` (format-time.ts) degrades an unparseable date to "just now" as
+// its own honest default for callers that always have some real elapsed time to show; for this
+// caption a malformed timestamp isn't "no time has passed", it's "no honest reading exists".
+test("#895: an unparseable lastEventTs renders no staleness caption, never a fabricated 'just now'", () => {
+  const state: HeroState = { ...initialHeroState(3), lastEventTs: "not-a-real-timestamp" };
+  assert.doesNotMatch(markup(state), /last event/, "an invalid timestamp must render no caption at all, not a fabricated 'just now'");
 });
 
 test("P2-8: the round outcome tally is THIS round's merges, never the all-time ring count", () => {
@@ -1064,6 +1141,21 @@ test("the stage draws one channel per `lanes.max`, each with its plain-language 
   assert.match(html, />w1</);
   assert.match(html, />w3</);
   assert.doesNotMatch(html, /Work lane/);
+});
+
+test("#895 item 7: a raw engine worker id never renders as primary lane-caption text — a short #issue form renders instead, full id kept as an inline <title> tooltip", () => {
+  const { state } = run([ev("dispatched", { worker: "lane-880-a048dacf", issue: 880 })]);
+  const html = markup(state);
+  // The short display form is the visible text, with the full id in a real, INLINE <title>
+  // tooltip (`itemProp` is what keeps React 19 from hoisting a bare <title> to document.head).
+  assert.match(html, /<title itemProp="worker-id">lane-880-a048dacf<\/title>#880<\/text>/);
+  // The raw id never appears as VISIBLE TEXT anywhere else — strip the tooltip's own text
+  // (the one legitimate occurrence), then every remaining tag (dropping non-text attributes
+  // like the droplet's own pre-existing `data-lane`, out of this item's scope), leaving only
+  // rendered text nodes to check.
+  const withoutTooltipText = html.replace(/<title[^>]*>[^<]*<\/title>/g, "");
+  const visibleText = withoutTooltipText.replace(/<[^>]*>/g, "");
+  assert.doesNotMatch(visibleText, /lane-880-a048dacf/);
 });
 
 test("an unreadable config draws one placeholder channel with the §3 direction", () => {
