@@ -6,6 +6,7 @@
 // state), the statics, and the posture invariants: the SQLite handle stays read-only even with
 // a write route registered, and the listener binds loopback.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -313,6 +314,7 @@ test("/api/loop/state matches the §8 shape against a seeded DB", async () => {
     const body = await getJson(fx, "/api/loop/state");
 
     assert.deepEqual(Object.keys(body).sort(), [
+      "build",
       "config",
       "controlsEnabled",
       "engine",
@@ -527,9 +529,14 @@ test("#642 AC1: /api/loop/state, /api/events, /api/spend are byte-identical to t
       config: loop.config, // static leaf values checked separately below (allowlist coverage
       // already has its own dedicated test) — this route's own SHAPE is what's pinned here
       controlsEnabled: true, // baseConfig() never sets dashboard.controls — schema default
+      // #894: environment-dependent (the real worktree's git HEAD, and whatever dist/build-meta.json
+      // happens to exist on disk) — shape pinned below instead of a hardcoded value; see the
+      // #894-specific tests further down for the actual match/mismatch behavior.
+      build: loop.build,
     });
     assert.ok(String(loop.logPath).endsWith("sapwood.log"));
     assert.equal(loop.config.lanes.max, 3);
+    assert.deepEqual(Object.keys(loop.build).sort(), ["distSha", "distTime", "repoHeadSha"]);
 
     const events = await getJson(fx, "/api/events");
     assert.deepEqual(events, {
@@ -600,6 +607,82 @@ test("/api/loop/state clears ceiling reasons once the kill switch stops the engi
     assert.deepEqual(body.engine.reasons, [], "a stopped engine exposes no ceiling reasons");
   } finally {
     fx.close();
+  }
+});
+
+// ── #894: build identity / dist-vs-repo-HEAD freshness facts ──────────────────────────────
+
+/** Real git plumbing (`git init` + one empty commit), never a fake — `resolveBuildFacts`'s own
+ *  `repoHeadSha` shells out to real `git`, so faking the shape here would prove nothing about the
+ *  actual subprocess wiring. */
+function initGitRepo(dir: string): string {
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  // A fresh temp repo inherits the machine's global git config, including `commit.gpgsign` —
+  // this fixture needs a real commit to exist, not a real signature, so signing is disabled for
+  // this one throwaway repo only (never a real project commit).
+  execFileSync(
+    "git",
+    ["-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "x"],
+    { cwd: dir },
+  );
+  return execFileSync("git", ["-C", dir, "rev-parse", "HEAD"]).toString().trim();
+}
+
+test("#894 /api/loop/state build: a dist build-meta matching repo HEAD serves the real matching SHAs", async () => {
+  const outer = mkdtempSync(join(tmpdir(), "sapwood-build-"));
+  const dist = join(outer, "dist");
+  const repo = join(outer, "repo");
+  mkdirSync(dist, { recursive: true });
+  mkdirSync(repo, { recursive: true });
+  const headSha = initGitRepo(repo);
+  writeFileSync(join(dist, "build-meta.json"), JSON.stringify({ sha: headSha, time: "2026-07-24T10:00:00.000Z" }), "utf8");
+
+  const fx = await fixture(undefined, { staticDir: dist, repoDir: repo });
+  try {
+    const body = await getJson(fx, "/api/loop/state");
+    assert.deepEqual(body.build, { distSha: headSha, distTime: "2026-07-24T10:00:00.000Z", repoHeadSha: headSha });
+  } finally {
+    fx.close();
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
+test("#894 /api/loop/state build: a dist build-meta naming a SHA the repo has since moved past reports the real divergence", async () => {
+  const outer = mkdtempSync(join(tmpdir(), "sapwood-build-"));
+  const dist = join(outer, "dist");
+  const repo = join(outer, "repo");
+  mkdirSync(dist, { recursive: true });
+  mkdirSync(repo, { recursive: true });
+  const headSha = initGitRepo(repo);
+  const staleSha = "0000000000000000000000000000000000dead";
+  writeFileSync(join(dist, "build-meta.json"), JSON.stringify({ sha: staleSha, time: "2026-07-24T08:00:00.000Z" }), "utf8");
+
+  const fx = await fixture(undefined, { staticDir: dist, repoDir: repo });
+  try {
+    const body = await getJson(fx, "/api/loop/state");
+    assert.equal(body.build.distSha, staleSha);
+    assert.equal(body.build.distTime, "2026-07-24T08:00:00.000Z");
+    assert.equal(body.build.repoHeadSha, headSha);
+    assert.notEqual(body.build.distSha, body.build.repoHeadSha, "the two real fixtures are distinguishable, not coincidentally equal");
+  } finally {
+    fx.close();
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
+test("#894 /api/loop/state build: no build-meta.json and a non-git repoDir both degrade to null, never a guess or a 500", async () => {
+  const outer = mkdtempSync(join(tmpdir(), "sapwood-build-"));
+  const noDist = join(outer, "no-such-dist");
+  const notGit = join(outer, "not-a-git-checkout");
+  mkdirSync(notGit, { recursive: true });
+
+  const fx = await fixture(undefined, { staticDir: noDist, repoDir: notGit });
+  try {
+    const body = await getJson(fx, "/api/loop/state");
+    assert.deepEqual(body.build, { distSha: null, distTime: null, repoHeadSha: null });
+  } finally {
+    fx.close();
+    rmSync(outer, { recursive: true, force: true });
   }
 });
 
@@ -1173,6 +1256,9 @@ interface FixtureOpts {
   /** Written as `dashboard.controls` — omitted leaves the schema default (true). */
   controls?: boolean;
   staticDir?: string;
+  /** #894: overrides where `/api/loop/state`'s `build.repoHeadSha` reads its live git HEAD from
+   *  — omitted keeps `createDashboardServer`'s own default (this package's repo root). */
+  repoDir?: string;
   /** #723: overrides the fixed clock the route reads `now` through — needed only by tests that
    *  compare a real `appendEvent`-written `ts` (deliberately unseeded, state.ts's own doc)
    *  against the route's `now`, e.g. the standby-countdown test below. Omitted keeps the same
@@ -1212,6 +1298,7 @@ async function fixture(seed?: (s: State) => void, opts: FixtureOpts = {}): Promi
     // date-rollover time bomb (green on 2026-07-24, red from the 25th — caught live on main).
     now: () => opts.now ?? new Date("2026-07-24T12:00:00.000Z"),
     ...(opts.staticDir === undefined ? {} : { staticDir: opts.staticDir }),
+    ...(opts.repoDir === undefined ? {} : { repoDir: opts.repoDir }),
   });
   return {
     origin: `http://127.0.0.1:${port}`,

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { fetchEvents } from "./api/client.ts";
 import { useDemoFixture, useEventHistory, useLoopState, useRounds, useSpendHistory } from "./api/queries.ts";
 import type { EventsPage, Round, SpendRow } from "./api/types.ts";
+import { BUILD_SHA, BUILD_TIME } from "./build-info.ts";
 import { ActivityFeed } from "./components/ActivityFeed.tsx";
 import { ConfigDrawer } from "./components/ConfigDrawer.tsx";
 import { Controls } from "./components/Controls.tsx";
@@ -569,7 +570,15 @@ export function appContent(vm: AppViewModel) {
 
         {configOpen && (
           <LiveOnly mode={mode}>
-            <ConfigDrawer config={loop.data?.config ?? null} open onClose={() => setConfigOpen(false)} />
+            <ConfigDrawer
+              config={loop.data?.config ?? null}
+              open
+              onClose={() => setConfigOpen(false)}
+              buildSha={BUILD_SHA}
+              buildTime={BUILD_TIME}
+              distSha={loop.data?.build?.distSha ?? null}
+              repoHeadSha={loop.data?.build?.repoHeadSha ?? null}
+            />
           </LiveOnly>
         )}
 

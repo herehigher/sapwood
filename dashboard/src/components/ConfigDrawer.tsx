@@ -1,4 +1,6 @@
+import { isDistStale, shortSha } from "../build-info.ts";
 import { CONFIG_GROUPS, CONFIG_KEYS, readConfigPath } from "../config-captions.ts";
+import { formatAbsoluteTime } from "../format-time.ts";
 
 export interface ConfigDrawerProps {
   /** `null` when the config is unreadable (§3's documented empty state) — server-served, never
@@ -6,6 +8,15 @@ export interface ConfigDrawerProps {
   config: Record<string, unknown> | null;
   open: boolean;
   onClose?: () => void;
+  /** #894: this bundle's own build identity (`build-info.ts`, embedded at build time) — `null`
+   *  under a harness that never ran the real vite build. */
+  buildSha?: string | null;
+  buildTime?: string | null;
+  /** #894: the server's live dist-vs-repo-HEAD comparison facts (`/api/loop/state`'s `build`
+   *  field) — `null` until a poll has landed, or when the server itself can't determine one side
+   *  (no dist build yet, or its repo dir isn't a git checkout). */
+  distSha?: string | null;
+  repoHeadSha?: string | null;
 }
 
 function formatValue(value: unknown): string {
@@ -17,8 +28,17 @@ function formatValue(value: unknown): string {
 /** Read-only, grouped, captioned (§3 E) — and structurally read-only: there is no input, no
  *  button, no form anywhere in this component, so "no edit affordance" is a fact about what does
  *  not exist here, not an unimplemented handler. */
-export function ConfigDrawer({ config, open, onClose }: ConfigDrawerProps) {
+export function ConfigDrawer({
+  config,
+  open,
+  onClose,
+  buildSha = null,
+  buildTime = null,
+  distSha = null,
+  repoHeadSha = null,
+}: ConfigDrawerProps) {
   if (!open) return null;
+  const stale = isDistStale(distSha, repoHeadSha);
   return (
     <aside className="panel config-drawer" aria-label="config">
       <div className="config-drawer-head">
@@ -55,6 +75,19 @@ export function ConfigDrawer({ config, open, onClose }: ConfigDrawerProps) {
           );
         })
       )}
+      {/* #894: quiet, token-language build identity — never chrome. Always renders (a stale
+       *  bundle needs an on-screen tell); the stale-dist chip only joins it once the server has
+       *  actually evidenced a divergence between what it serves and the repo HEAD it serves from. */}
+      <div className="config-drawer-footer muted">
+        <span className="data config-drawer-build">
+          build {shortSha(buildSha)} · {buildTime ? formatAbsoluteTime(buildTime) : "unknown"}
+        </span>
+        {stale && (
+          <span className="data config-drawer-stale-chip" role="status">
+            panel built at {shortSha(distSha)}, repo at {shortSha(repoHeadSha)}
+          </span>
+        )}
+      </div>
     </aside>
   );
 }

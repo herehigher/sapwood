@@ -568,6 +568,21 @@
   padding-block: 2px;
 }
 
+/* #894: build identity — quiet, token-language footer, never chrome. */
+.config-drawer-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--space-3);
+  padding-top: var(--space-2);
+  border-top: var(--hairline);
+  font-size: 11px;
+}
+
+.config-drawer-stale-chip {
+  color: var(--rust);
+}
+
 /*
  * Motion recipes (frontend-design.md §2 adjudication log, owner adjudication 2026-08-14) —
  * CSS-native micro-interactions, tokens only, never a bare millisecond in a component.
