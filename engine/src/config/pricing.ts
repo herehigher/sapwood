@@ -37,6 +37,10 @@ const Rate = z
     output: z.number().finite().positive(),
     /** 5-minute ephemeral cache write premium (~1.25x input — see pricing.yaml's header). */
     cacheWrite: z.number().finite().positive(),
+    /** #935: 1-hour ephemeral cache write premium (~2x input, pricier than the 5-minute tier
+     *  above) — OPTIONAL; a model with no `cacheWrite1h` row falls back to `cacheWrite` for its
+     *  whole cache-creation total (estimateUsd), same as before this field existed. */
+    cacheWrite1h: z.number().finite().positive().optional(),
     /** Cache READS must be priced at this rate, not `input` — pricing a cache-heavy run at the
      *  input rate is the exact over-trigger failure mode #33 exists to prevent: a worker mostly
      *  re-reading a large cached prefix would look artificially expensive and hand off
@@ -141,13 +145,22 @@ function mostExpensiveRate(table: PricingTable): ModelRateUsdPerMTok {
 
 /** Estimated USD for one usage delta (one streamed assistant message's `usage` block, or any
  *  other ModelUsageEntry). Cache-creation tokens are priced at the cache-write rate; cache-read
- *  tokens at the (much cheaper) cache-read rate — see Rate.cacheRead. */
-export function estimateUsd(entry: ModelUsageEntry, table: PricingTable): number {
+ *  tokens at the (much cheaper) cache-read rate — see Rate.cacheRead.
+ *
+ *  #935: `cacheCreation1hTokens` (optional — absent on a plain ModelUsageEntry, e.g. from
+ *  parseModelUsage's terminal-line path) names the subset of `cacheCreationTokens` billed at the
+ *  pricier 1-hour TTL; the remainder is priced at the 5-minute `cacheWrite` rate as before. A
+ *  table entry with no `cacheWrite1h` row falls back to `cacheWrite` for the 1h portion too —
+ *  byte-identical to pre-#935 behavior when neither the entry nor the table carries the split. */
+export function estimateUsd(entry: ModelUsageEntry & { cacheCreation1hTokens?: number }, table: PricingTable): number {
   const rate = resolveRate(entry.model, table);
+  const cache1h = Math.min(entry.cacheCreationTokens, entry.cacheCreation1hTokens ?? 0);
+  const cache5m = entry.cacheCreationTokens - cache1h;
   return (
     (entry.inputTokens / 1_000_000) * rate.input +
     (entry.outputTokens / 1_000_000) * rate.output +
-    (entry.cacheCreationTokens / 1_000_000) * rate.cacheWrite +
+    (cache1h / 1_000_000) * (rate.cacheWrite1h ?? rate.cacheWrite) +
+    (cache5m / 1_000_000) * rate.cacheWrite +
     (entry.cacheReadTokens / 1_000_000) * rate.cacheRead
   );
 }
