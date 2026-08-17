@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { LoopEvent } from "../api/types.ts";
 import { toDomainEvent } from "../domain-event.ts";
 import { foldOpenAttention } from "../entities.ts";
 import { foldEvents, initialHeroState } from "../hero/state.ts";
+// #892: must resolve before "./NeedsAttention.tsx" (transitively imports Radix) — see this
+// module's own doc for why.
+import { unregisterRealDomEager } from "../test-dom-eager.ts";
 import { NeedsAttention } from "./NeedsAttention.tsx";
+
+test.after(() => unregisterRealDomEager());
 
 const NOW = new Date("2026-08-10T12:00:00.000Z");
 
@@ -185,4 +192,36 @@ test("#891 AC3: the strip's header summary line matches the mockup's grammar —
 
   const html = renderToStaticMarkup(<NeedsAttention items={Object.values(open)} titles={{}} now={NOW} />);
   assert.match(html, /3 waiting · oldest 5d · 1 dissent/);
+});
+
+// ── #892 AC1: the attention-age tooltip (was a bare `title=`) is a real Radix tooltip now —
+// Tab-reachable, content visible/queryable on focus. ──────────────────────────────────────────
+
+test("real DOM: the attention-age trigger is Tab-reachable and its tooltip (the absolute timestamp) opens on focus", async () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 42, issue: 7 }));
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
+    });
+    const trigger = container.querySelector(".attention-age") as HTMLElement;
+    assert.ok(trigger, "the age trigger renders");
+    assert.equal(trigger.tabIndex, 0, "must be a real tab stop — a bare title= was pointer-only");
+    assert.equal(container.querySelector('[role="tooltip"]'), null, "not open before any interaction");
+
+    await act(async () => {
+      trigger.focus();
+    });
+
+    const tooltip = container.querySelector('[role="tooltip"]');
+    assert.ok(tooltip, "focusing the trigger opens the tooltip");
+    assert.equal(trigger.getAttribute("aria-describedby"), tooltip?.id);
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
 });

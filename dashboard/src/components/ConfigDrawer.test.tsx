@@ -57,6 +57,70 @@ test("renders nothing when closed", () => {
   assert.equal(html, "");
 });
 
+// ── #892 (#876 C-2): a real <dialog>, opened via .showModal() — Tier A per the verification plan
+// (focus-trap/Escape themselves are Playwright-only, see shots.spec.ts). ─────────────────────────
+
+test("real DOM: renders a real <dialog> element and calls .showModal() on open — .open reflects state", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<ConfigDrawer config={SAMPLE_CONFIG} open />);
+    });
+    const dialog = container.querySelector("dialog") as HTMLDialogElement;
+    assert.ok(dialog, "renders a real <dialog> element");
+    assert.equal(dialog.tagName, "DIALOG");
+    assert.equal(dialog.open, true, ".showModal() must have been invoked");
+
+    await act(async () => {
+      root.render(<ConfigDrawer config={SAMPLE_CONFIG} open={false} />);
+    });
+    assert.equal(container.querySelector("dialog"), null, "closing unmounts the dialog entirely");
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+});
+
+test("real DOM: the close button's onClose wiring fires the caller's onClose callback", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  let closed = false;
+  try {
+    await act(async () => {
+      root.render(<ConfigDrawer config={SAMPLE_CONFIG} open onClose={() => (closed = true)} />);
+    });
+    const closeButton = container.querySelector('[aria-label="close config"]') as HTMLButtonElement;
+    assert.ok(closeButton, "renders a close control");
+    await act(async () => {
+      closeButton.click();
+    });
+    assert.equal(closed, true);
+
+    // The dialog's native `close` event (fired by Escape in a real browser — see shots.spec.ts)
+    // must ALSO reach the same onClose callback, keeping React state in sync with the native
+    // element regardless of how it closed.
+    closed = false;
+    await act(async () => {
+      root.render(<ConfigDrawer config={SAMPLE_CONFIG} open onClose={() => (closed = true)} />);
+    });
+    const dialog = container.querySelector("dialog") as HTMLDialogElement;
+    await act(async () => {
+      dialog.close();
+    });
+    assert.equal(closed, true, "the native close event must reach onClose too");
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+});
+
 // ── #894: build identity + stale-dist chip ──────────────────────────────────────────────────
 
 test("#894 AC1: renders the build SHA + time footer, and no stale chip when distSha/repoHeadSha are unset", () => {

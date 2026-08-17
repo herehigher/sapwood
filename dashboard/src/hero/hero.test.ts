@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { createElement } from "react";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { LoopEvent } from "../api/types.ts";
 import type { DomainEvent } from "../domain-event.ts";
 import { toDomainEvent } from "../domain-event.ts";
 import { foldOpenAttention } from "../entities.ts";
-import { registerRealDom } from "../test-dom.ts";
+// #892: must resolve before "./Legend.tsx" (transitively imports Radix, via Popover) — see this
+// module's own doc for why registerRealDom()'s deferred (test.before) registration is too late
+// for Radix's useLayoutEffect shim, which decides whether happy-dom exists at MODULE EVALUATION
+// time.
+import { unregisterRealDomEager } from "../test-dom-eager.ts";
 import { Hero } from "./Hero.tsx";
 import { LEGEND_ITEMS, Legend } from "./Legend.tsx";
 import { BACKLOG, checkpointOverflowPoint, dropletPoint, ESCALATION, GATES, HeroStage, REFLECTION, STAGE, TRUNK } from "./stage.tsx";
@@ -43,7 +48,7 @@ const ev = (kind: string, payload: Record<string, unknown> = {}): DomainEvent =>
   payload,
 });
 
-registerRealDom();
+test.after(() => unregisterRealDomEager());
 
 /** Fold a script from a fresh stage; the tests assert on both halves of the result. */
 const run = (events: DomainEvent[], lanesMax: number | null = 3) => foldEvents(initialHeroState(lanesMax), events);
@@ -1088,13 +1093,42 @@ test("P2-8: LLM-backed stage nodes render their configured model·effort caption
 
 test("the legend exposes all three metaphor keys — droplet, lane, ring — and role vocabulary lives only here", () => {
   assert.equal(LEGEND_ITEMS.length, 3);
+  // #892: was a native <details> (content always in static markup); now a Radix popover, whose
+  // content only mounts on real interaction — see the real-DOM test below for the open/content
+  // proof. This half stays SSR-only for what's still SSR-visible: the closed trigger button.
   const html = renderToStaticMarkup(createElement(Legend));
+  assert.match(html, /<button[^>]*aria-label="Legend"[^>]*>\?<\/button>/);
+  assert.doesNotMatch(html, /droplet = an issue moving through the loop/, "closed by default — content isn't in the DOM until opened");
+});
 
-  assert.match(html, /<details class="hero-legend">/);
-  assert.match(html, /<summary[^>]*>\?<\/summary>/);
-  assert.match(html, /droplet = an issue moving through the loop/);
-  assert.match(html, /lane = one autonomous worker/);
-  assert.match(html, /ring = one merged PR/);
+test("real DOM: clicking the legend trigger opens the popover with all three metaphor keys, role vocabulary lives only here", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(createElement(Legend));
+    });
+    const trigger = container.querySelector('button[aria-label="Legend"]') as HTMLButtonElement;
+    assert.ok(trigger, "the trigger renders as a real, accessibly-named button");
+    assert.equal(container.querySelector('[role="dialog"], [data-state="open"]'), null, "closed before any interaction");
+
+    await act(async () => {
+      trigger.click();
+    });
+
+    // Popover.Portal renders content into document.body, not `container` — same reason the
+    // header-reflow fix works (the content never becomes part of .app-header's own subtree).
+    const html = document.body.innerHTML;
+    assert.match(html, /droplet = an issue moving through the loop/);
+    assert.match(html, /lane = one autonomous worker/);
+    assert.match(html, /ring = one merged PR/);
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
 });
 
 // ── Stage rendering ───────────────────────────────────────────────────────────

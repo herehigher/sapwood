@@ -59,6 +59,22 @@
   text-decoration: underline;
 }
 
+/* #892: the shared Radix tooltip (`HintTooltip.tsx`) every migrated hint surface renders through
+   — one rule for all three (EntityRef, NeedsAttention's attention-age, Header's spend-meter). */
+.hint-tooltip {
+  background: var(--panel);
+  border: var(--hairline);
+  border-radius: var(--radius-card);
+  padding: 2px var(--space-2);
+  font-size: var(--text-0);
+  color: var(--sapwood);
+  z-index: var(--z-drawer);
+}
+
+.hint-tooltip-arrow {
+  fill: var(--panel);
+}
+
 /* #722: the feed's own scroll container — bounds the panel's contribution to page height so the
  * cost strip/config below it stay reachable without scrolling past thousands of feed rows. */
 .feed-scroll {
@@ -565,6 +581,32 @@
   color: var(--rust);
 }
 
+/* #892 (#876 C-2 ruling): `.config-drawer` (ConfigDrawer.tsx, and PhaseInspectorDrawer.tsx via
+   its more specific `.phase-inspector` override) is a native `<dialog>` now, shown through
+   `.showModal()` — the browser always promotes that to a top-layer, out-of-flow overlay, so the
+   old `.stack > .config-drawer { grid-column: 1 / -1 }` in-page-row layout (app.css) no longer
+   applies once the element leaves normal flow. Docked as a right-edge drawer (the same shape
+   `.phase-inspector` already established, #868) rather than left at the UA's default
+   viewport-centered box, which would read as a random floating card, not a panel. Resets
+   dialog's own UA defaults (`margin: auto`, a `max-width`/`max-height` capped a few px under the
+   viewport) that would otherwise fight these explicit dimensions. */
+.config-drawer {
+  position: fixed;
+  inset-block: 0;
+  right: 0;
+  left: auto;
+  z-index: var(--z-drawer);
+  margin: 0;
+  width: min(92vw, 480px);
+  height: 100vh;
+  max-width: none;
+  max-height: none;
+  overflow-y: auto;
+  border-width: 0 0 0 1px;
+  border-radius: 0;
+  box-shadow: -4px 0 16px color-mix(in srgb, black 30%, transparent);
+}
+
 .config-drawer-head {
   display: flex;
   align-items: center;
@@ -595,9 +637,10 @@
 
 /*
  * Motion recipes (frontend-design.md §2 adjudication log, owner adjudication 2026-08-14) —
- * CSS-native micro-interactions, tokens only, never a bare millisecond in a component.
- * Unapplied here on purpose: this issue lands the toolkit, #729 attaches these classes to
- * the migrated `<dialog>`/list/press markup.
+ * CSS-native micro-interactions, tokens only, never a bare millisecond in a component. #892
+ * applies these: `.recipe-drawer` on the migrated `<dialog>`s (ConfigDrawer, PhaseInspectorDrawer,
+ * Controls' confirm), `.recipe-list-entry` on NeedsAttention's rows, `.recipe-press` on the
+ * drawers'/confirm's/legend's buttons.
  */
 
 /* Drawer slide-in: pairs with `<dialog>.showModal()` (§2 adjudication log) — `--beat`, the

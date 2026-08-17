@@ -76,7 +76,10 @@ function LaneCard({
   workerBudgetUsdSoft: number | null;
 }) {
   return (
-    <div className="lane-card panel">
+    // #892 AC5: `.recipe-list-entry` (panels.css) is the freshly-appended-row recipe — a real
+    // lane card is exactly that (mounts when a slot fills). `EmptyLaneCard` stays untouched: an
+    // outline slot isn't a row appearing, it's the quiet default already there.
+    <div className="lane-card panel recipe-list-entry">
       <div className="lane-card-head">
         {/* #882 (729 ledger row 13, "w1 lane row unnamed"): `lane.lane` (w1/w2/w3…) drove sorting
          *  and the React key only — never rendered anywhere on the board, so a reader had no way

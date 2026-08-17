@@ -435,6 +435,238 @@ test("§889 AC2: navigator/transport controls resolve real token-based styling i
   );
 });
 
+/**
+ * #892 AC5: the Legend "?" popover no longer reflows the header. Was a native `<details>` whose
+ * `<ul>` content grew `.hero-legend`'s own in-flow box on open, shoving everything after it (the
+ * "?" trigger itself included) down — moving it out from under the pointer mid-interaction, the
+ * exact defect this issue's "Why" names. Now a Radix `Popover.Portal`, which renders `.app-header`
+ * a sibling in a completely different part of the tree (document.body), never a child — this is
+ * the real-browser proof no component test (DOM-presence only, no real CSS layout engine) can
+ * give: `.app-header`'s own `boundingBox()` (y/height) must be bit-for-bit identical before and
+ * after the popover opens.
+ */
+test("#892 AC5: opening the legend popover does not reflow .app-header — same y/height before and after", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  const header = page.locator(".app-header");
+  const before = await header.boundingBox();
+  expect(before, "the header must render with a real bounding box before opening the legend").not.toBeNull();
+
+  const trigger = page.locator('button[aria-label="Legend"]');
+  await trigger.click();
+  await expect(page.locator("text=droplet = an issue moving through the loop")).toBeVisible();
+
+  const after = await header.boundingBox();
+  expect(after, "the header must still render with a real bounding box once the legend is open").not.toBeNull();
+  expect(after?.y, "the header's top edge must not move — no reflow from the popover's own content").toBe(before?.y);
+  expect(after?.height, "the header's height must not grow — the popover's content lives outside .app-header entirely").toBe(
+    before?.height,
+  );
+});
+
+/**
+ * #892 AC3 (#876 C-2 ruling): native `<dialog>.showModal()` focus-trap containment and
+ * Escape→cancel, proven for real — happy-dom's `<dialog>` doesn't implement either (see this
+ * issue's verification plan and `test-dom.ts`'s own doc), so a component-suite assertion here
+ * would prove nothing about the real defect. `PhaseInspectorDrawer` is the one migrated dialog
+ * reachable from the `?demo` fixture this pipeline drives without a mocked live route.
+ * `ConfigDrawer` and `Controls`' confirm dialog are both `LiveOnly`-gated (`App.tsx`'s
+ * `mode === "live"`) and get their own dedicated real-browser focus-trap/Escape proof further
+ * below, through the same mocked live-API route `captureLiveLanes` drives — all three route
+ * through the exact same browser mechanism (`.showModal()` on a native `<dialog>`), so this test
+ * plus those two together are this AC's full real-browser coverage, not proof scoped to one call
+ * site alone. `ConfigDrawer.test.tsx`/`Controls.test.tsx` (Tier A) separately pin
+ * `showModal()`-was-invoked/`.open`-state, which happy-dom CAN legitimately cover.
+ */
+test("#892 AC3: the phase inspector dialog traps focus (background inert) and Escape cancels it", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  // Baseline, BEFORE the dialog ever opens: `.icon-rail-config` is a real, natively focusable
+  // `<button>` (unlike `.icon-rail-wordmark`, a plain non-interactive `<span>`) — calling
+  // `.focus()` on a non-focusable element is ALREADY a no-op with no modal in play, so it can't
+  // attribute a later "still not focused" result to inertness specifically. Confirming it CAN
+  // take focus now is what makes the later "can't focus it anymore" check inside the modal
+  // actually mean something.
+  const bgFocusable = await page.evaluate(() => {
+    const bg = document.querySelector<HTMLElement>(".icon-rail-config");
+    bg?.focus();
+    return document.activeElement === bg;
+  });
+  expect(
+    bgFocusable,
+    "sanity check: .icon-rail-config must be focusable with no dialog open, or the inertness check below proves nothing",
+  ).toBe(true);
+
+  const node = page.locator('[aria-label^="inspect "]').first();
+  await node.click();
+  const dialog = page.locator('dialog[aria-label="phase inspector"]');
+  await expect(dialog).toBeVisible();
+
+  // Focus containment: Tab repeatedly. A real UA focus trap keeps the active element either
+  // inside the dialog or resting on `<body>` (Chromium's own behavior once a modal's focusable
+  // descendants are exhausted — a harmless, non-interactive fallback, never the SAME thing as
+  // reaching an actual background control) — but the SAME known-focusable background control
+  // (`.icon-rail-config`, just proven reachable above) must never become the active element,
+  // which is the concrete, unambiguous proof background content stays unreachable.
+  for (let i = 0; i < 12; i++) {
+    await page.keyboard.press("Tab");
+    const info = await dialog.evaluate((el) => ({
+      insideDialog: el.contains(document.activeElement),
+      isBody: document.activeElement === document.body,
+      isBackgroundConfigButton: document.activeElement?.classList.contains("icon-rail-config") ?? false,
+    }));
+    expect(
+      info.insideDialog || info.isBody,
+      `Tab press #${i + 1}: focus must stay inside the dialog (or rest on <body>), never land on a background element`,
+    ).toBe(true);
+    expect(info.isBackgroundConfigButton, `Tab press #${i + 1} must never reach the background icon rail`).toBe(false);
+  }
+
+  // Background inert: the SAME control just proven focusable above must now be a no-op .focus()
+  // target while the dialog is modal — the actual "inert" behavior, not merely "Tab doesn't
+  // happen to land there".
+  const stillOutside = await page.evaluate(() => {
+    const bg = document.querySelector<HTMLElement>(".icon-rail-config");
+    bg?.focus();
+    return document.activeElement !== bg;
+  });
+  expect(stillOutside, "a background element must not be focusable while the dialog is modal (background inert)").toBe(true);
+
+  // Escape -> cancel: the native `close` event this issue wires to `onClose` must actually remove
+  // the dialog from the page.
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+});
+
+/** #892 AC4: sanity check shared by the two dialog tests below — the SAME background control the
+ *  containment check later proves unreachable must be genuinely focusable right now, with no
+ *  dialog open, or "still not focused" inside the modal wouldn't mean anything (the phase
+ *  inspector test above establishes the same precondition for its own background target). */
+async function assertBackgroundFocusable(page: Page, backgroundSelector: string): Promise<void> {
+  const bgFocusable = await page.evaluate((selector) => {
+    const bg = document.querySelector<HTMLElement>(selector);
+    bg?.focus();
+    return document.activeElement === bg;
+  }, backgroundSelector);
+  expect(
+    bgFocusable,
+    `sanity check: ${backgroundSelector} must be focusable with no dialog open, or the inertness check below proves nothing`,
+  ).toBe(true);
+}
+
+/** #892 AC4: the shared native `<dialog>` proof — repeated Tab never lands focus on the
+ *  known-focusable background control (containment) or escapes to nowhere (rests on `<body>` at
+ *  worst, Chromium's own harmless fallback), the SAME control is a `.focus()` no-op while the
+ *  dialog is open (background inert), and Escape closes the dialog via its native `close` event.
+ *  Factored out of the phase inspector test above (which stays as its own inline proof for the
+ *  ORIGINAL migrated dialog) so `ConfigDrawer` and `Controls`' confirm dialog below don't each
+ *  repeat the same 20-line Tab loop for what is, per this issue's own AC4, one shared browser
+ *  mechanism (`.showModal()` on a native `<dialog>`). */
+async function assertDialogTrapsFocusAndEscapeCancels(page: Page, dialog: Locator, backgroundSelector: string): Promise<void> {
+  for (let i = 0; i < 12; i++) {
+    await page.keyboard.press("Tab");
+    const info = await dialog.evaluate(
+      (el, selector) => ({
+        insideDialog: el.contains(document.activeElement),
+        isBody: document.activeElement === document.body,
+        isBackgroundTarget: document.activeElement === document.querySelector(selector),
+      }),
+      backgroundSelector,
+    );
+    expect(
+      info.insideDialog || info.isBody,
+      `Tab press #${i + 1}: focus must stay inside the dialog (or rest on <body>), never land on a background element`,
+    ).toBe(true);
+    expect(info.isBackgroundTarget, `Tab press #${i + 1} must never reach the background control`).toBe(false);
+  }
+
+  const stillOutside = await page.evaluate((selector) => {
+    const bg = document.querySelector<HTMLElement>(selector);
+    bg?.focus();
+    return document.activeElement !== bg;
+  }, backgroundSelector);
+  expect(stillOutside, "a background element must not be focusable while the dialog is modal (background inert)").toBe(true);
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+}
+
+/**
+ * #892 AC4: `ConfigDrawer` is wrapped in `LiveOnly` (App.tsx) — it only ever mounts in live mode,
+ * so the `?demo` fixture the phase-inspector test above uses can never reach it. Reuses the same
+ * `mockLiveApi`/`liveLanesLoopState` fixture `captureLiveLanes` below drives, the real-browser
+ * equivalent of `App.test.tsx`'s live-mode render, to reach the real production `App` ->
+ * `LiveApp` -> `ConfigDrawer` tree rather than a standalone stand-in built to bypass that gate.
+ */
+test("#892 AC4: the config drawer traps focus (background inert) and Escape cancels it", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mockLiveApi(page, liveLanesLoopState());
+  await page.goto("/");
+  await page.locator('section[aria-label="lanes"]').waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  const backgroundSelector = ".icon-rail-config";
+  await assertBackgroundFocusable(page, backgroundSelector);
+
+  await page.locator('[aria-label="open config"]').click();
+  const dialog = page.locator('dialog[aria-label="config"]');
+  await expect(dialog).toBeVisible();
+
+  await assertDialogTrapsFocusAndEscapeCancels(page, dialog, backgroundSelector);
+});
+
+/**
+ * #892 AC4: `Controls`' confirm dialog only renders while `mode === "live"` AND the caller's
+ * `controlsEnabled` is true (App.tsx) — same live-only gate as `ConfigDrawer`, reached the same
+ * way. Beyond the shared focus-trap/Escape proof, this pins the misfire-protection contract
+ * itself in a real browser: Escape must cancel WITHOUT ever reaching `POST /api/control` (the
+ * hold-to-arm/confirm reducer's whole point, `Controls.tsx`'s own doc), and the control must
+ * return to its normal, un-armed, clickable state afterward — not left disabled or wedged in
+ * `confirming`.
+ */
+test("#892 AC4: the operations confirm dialog traps focus (background inert) and Escape cancels without firing the control", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mockLiveApi(page, liveLanesLoopState());
+  let controlCalls = 0;
+  // Registered AFTER `mockLiveApi`'s own `**/api/**` route, so Playwright tries this
+  // more-recently-added, more-specific handler first for `/api/control` — the general route
+  // above has no `/api/control` entry in its `byPath` map and would otherwise 404 it.
+  await page.route("**/api/control", async (route) => {
+    controlCalls++;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ state: "running" }) });
+  });
+  await page.goto("/");
+  await page.locator('section[aria-label="lanes"]').waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  const backgroundSelector = ".icon-rail-config";
+  await assertBackgroundFocusable(page, backgroundSelector);
+
+  const pauseButton = page.locator("fieldset.controls button", { hasText: "Pause" });
+  await expect(pauseButton).toBeVisible();
+  await pauseButton.click();
+  const dialog = page.locator('dialog[aria-label="confirm pause"]');
+  await expect(dialog).toBeVisible();
+
+  await assertDialogTrapsFocusAndEscapeCancels(page, dialog, backgroundSelector);
+
+  expect(controlCalls, "Escape must cancel the confirm dialog without ever POSTing the control").toBe(0);
+
+  // Un-armed afterward: the same verb is visible and clickable again, not left disabled by a
+  // reducer stuck outside `idle` — proves Escape's `cancel` action actually landed, not just that
+  // the dialog element itself closed.
+  await expect(pauseButton).toBeVisible();
+  await expect(pauseButton).toBeEnabled();
+});
+
 /** #882: the fixture-shaped `/api/loop/state` lanes payload fed to `captureLiveLanes` below —
  *  three active-lane variety (running/fixing/driving) plus one open idle slot (`lanesMax: 4`),
  *  matching the card shapes `docs/design/mockup/lanes-{dark,light}.png` exercises: a droplet +

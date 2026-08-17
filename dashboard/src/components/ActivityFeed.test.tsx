@@ -98,13 +98,18 @@ test("disconnected renders the disconnected caption instead of the feed", () => 
   assert.doesNotMatch(html, /feed-list/);
 });
 
-test("issue/PR numbers in feed sentences carry a type glyph and conditional tooltip", () => {
+// #892: EntityRef's folded title moved from a bare `title=` (static-markup-visible) to a Radix
+// tooltip that only mounts on real focus — see EntityRef.test.tsx's own real-DOM tests for the
+// interactive open/aria-describedby proof. Here, `tabindex="0"` is the SSR-visible signal that a
+// title was folded and wired through to a real (Tab-reachable) trigger — EntityRef only adds it
+// when there's a title to show.
+test("issue/PR numbers in feed sentences carry a type glyph and a folded-title tooltip trigger", () => {
   const events = [ev(1, "merged", { issue: 1, pr: 10, prTitle: "Add the widget" })];
   const html = renderToStaticMarkup(
     <ActivityFeed events={events} pinnedAttention={pinnedOf(events)} titles={{ 1: { prTitle: "Add the widget" } }} now={NOW} />,
   );
   assert.match(html, /<svg/);
-  assert.match(html, /title="Add the widget"/);
+  assert.match(html, /tabindex="0"/);
 });
 
 test("#715 gate② [3]: resume-held and needs-human-swept render their issue as a real entity token, not raw text", () => {
@@ -118,7 +123,7 @@ test("#715 gate② [3]: resume-held and needs-human-swept render their issue as 
     />,
   );
   assert.match(withTitle, /<svg/);
-  assert.match(withTitle, /title="Fix the thing"/);
+  assert.match(withTitle, /tabindex="0"/);
   assert.match(withTitle, /#42/);
 
   const withoutTitleEvents = [ev(1, "needs-human-swept", { issue: 7, label: "sapwood:needs-human" })];
@@ -126,7 +131,7 @@ test("#715 gate② [3]: resume-held and needs-human-swept render their issue as 
     <ActivityFeed events={withoutTitleEvents} pinnedAttention={pinnedOf(withoutTitleEvents)} titles={{}} now={NOW} />,
   );
   assert.match(withoutTitle, /<svg/);
-  assert.doesNotMatch(withoutTitle, /title=/);
+  assert.doesNotMatch(withoutTitle, /tabindex=/, "no folded title -> no tooltip trigger, no meaningless tab stop");
   assert.match(withoutTitle, /#7/);
 });
 

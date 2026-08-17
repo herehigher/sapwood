@@ -302,6 +302,51 @@ test("real DOM: clicking a verb button opens the confirm dialog; clicking Confir
   }
 });
 
+// #892 (#876 C-2): the confirm step is a real <dialog>, opened via .showModal() — Tier A per the
+// verification plan (focus-trap/Escape themselves are Playwright-only, see shots.spec.ts). This
+// also proves hold-to-arm/confirm reducer semantics are UNCHANGED by the migration: the dialog's
+// native `close` event (what a real Escape fires) reaches the same `cancel` action the Cancel
+// button does, never a second parallel "closed" state the reducer doesn't know about.
+test("real DOM: the confirm step is a real <dialog>, .showModal() is invoked, and its native close event dispatches the same cancel the Cancel button does", async () => {
+  const onControl = mock.fn(async () => undefined);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<Controls enabled onControl={onControl} />);
+    });
+
+    const stopButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === CONTROL_COPY.stop.label);
+    await act(async () => {
+      stopButton?.click();
+    });
+
+    const dialog = container.querySelector("dialog") as HTMLDialogElement;
+    assert.ok(dialog, "the confirm step renders as a real <dialog> element");
+    assert.equal(dialog.getAttribute("role"), "alertdialog", "role is preserved on the native element");
+    assert.equal(dialog.open, true, ".showModal() must have been invoked");
+
+    // Simulates what a real Escape does (dispatches `close`, per the HTMLDialogElement spec) —
+    // happy-dom doesn't wire Escape itself (see this issue's verification plan), but its `.close()`
+    // DOES fire a real `close` event, which is the exact signal our onClose handler reacts to.
+    await act(async () => {
+      dialog.close();
+    });
+    assert.equal(
+      container.querySelector("dialog"),
+      null,
+      "cancel (via the native close event) unmounts the dialog, same as the Cancel button",
+    );
+    assert.equal(onControl.mock.calls.length, 0, "Escape/close must never fire the control call — only Confirm does");
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+});
+
 // #733 AC3 / §3 Operations: EMERGENCY STOP is hold-to-arm, not a bare click — "armed is never
 // 'release to fire'". mock.timers is the seam (review doctrine's "no timing-dependent assertions"
 // rule): the component's own setTimeout is a fake clock this test drives deterministically,

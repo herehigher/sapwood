@@ -2,6 +2,7 @@ import type { EngineState, Round } from "../api/types.ts";
 import { engineStateCaption } from "../copy.ts";
 import { formatUsd } from "../format.ts";
 import { CostBar } from "./CostBar.tsx";
+import { HintTooltip } from "./HintTooltip.tsx";
 import { RoundNavigator } from "./RoundNavigator.tsx";
 
 /** §8 precedence: staleness, a ceiling breach, and the kill switch all outrank PAUSE in the
@@ -71,22 +72,27 @@ function SpendMeter({ spend, round, estUsd = 0 }: { spend: SpendFacts; round?: R
     // reference element, the text annotates it, never the other way round. DOM order fixes
     // visual order under the `.spend-meter` flex column (panels.css) without a second layout
     // mechanism.
-    <div className={warm ? "spend-meter spend-meter-warm" : "spend-meter"} title={`${view.tier} spend`}>
-      {view.usedUsd !== null && (
-        <CostBar
-          className="spend-meter-bar"
-          settledUsd={view.usedUsd}
-          estUsd={estUsd}
-          max={spendBarMax(view)}
-          label={`${view.tier} spend`}
-        />
-      )}
-      <span className="data spend-meter-value">
-        {usedLabel}
-        {estUsd > 0 && ` + ${formatUsd(estUsd)} est`}
-        {budgetLabel !== null && ` / ${budgetLabel}`}
-      </span>
-    </div>
+    <HintTooltip content={`${view.tier} spend`}>
+      {/* biome-ignore lint/a11y/noNoninteractiveTabindex: this <div> is a Radix Tooltip trigger,
+       *  not a bare non-interactive container — without tabIndex, Tab could never reach it at all
+       *  (#892 AC1), and a <button>/<a> would misrepresent a read-only meter as actionable. */}
+      <div className={warm ? "spend-meter spend-meter-warm" : "spend-meter"} tabIndex={0}>
+        {view.usedUsd !== null && (
+          <CostBar
+            className="spend-meter-bar"
+            settledUsd={view.usedUsd}
+            estUsd={estUsd}
+            max={spendBarMax(view)}
+            label={`${view.tier} spend`}
+          />
+        )}
+        <span className="data spend-meter-value">
+          {usedLabel}
+          {estUsd > 0 && ` + ${formatUsd(estUsd)} est`}
+          {budgetLabel !== null && ` / ${budgetLabel}`}
+        </span>
+      </div>
+    </HintTooltip>
   );
 }
 
