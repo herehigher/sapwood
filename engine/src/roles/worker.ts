@@ -650,16 +650,23 @@ function toCategorized(u: unknown): CategorizedTokenUsageRaw {
 
 type CategorizedTokenUsageRaw = Omit<ModelUsageEntry, "model">;
 
-/** #33: the LIVE in-flight cost-estimation signal — distinct from parseModelUsage/parseCostUsd,
- *  which only ever read the terminal `result` line (absent until the whole run finishes).
- *  Claude Code's stream-json carries a `message.usage` block on every streamed `assistant`
- *  event, and that block is PER-MESSAGE (not cumulative) — so summing every assistant line's
- *  usage across the jsonl-so-far gives the running total spent up to that point. Same tolerance
- *  guarantee as parseModelUsage: a malformed/partial line (the stream may be mid-write, or the
- *  worker's Bash tool literally echoed the string "assistant" as text) is skipped, never thrown,
- *  and a line missing/misshaping `message`/`usage` yields zeros rather than aborting the scan. */
+/** #33/#935: the LIVE in-flight cost-estimation signal — distinct from parseModelUsage/
+ *  parseCostUsd, which only ever read the terminal `result` line (absent until the whole run
+ *  finishes). Claude Code's stream-json carries a `message.usage` block on every streamed
+ *  `assistant` event, and that block IS per-message — but a single API message spans MULTIPLE
+ *  `assistant` lines (one per content block: text, thinking, each `tool_use`), all carrying the
+ *  same `message.id` and the identical `usage` snapshot. Summing every line therefore re-prices
+ *  the same message once per block (#935: measured +55-65% skew). De-duplicate by `message.id` —
+ *  one entry per id, keeping the LAST line seen for that id (a message's usage doesn't change
+ *  between its blocks, so last-wins is only a tie-break, not a behavior choice). A line whose
+ *  `message` carries no `id` keeps the old per-line behavior (tolerance rule unchanged — some
+ *  CLI versions/malformed lines may omit it). Same tolerance guarantee as parseModelUsage: a
+ *  malformed/partial line (the stream may be mid-write, or the worker's Bash tool literally
+ *  echoed the string "assistant" as text) is skipped, never thrown, and a line missing/misshaping
+ *  `message`/`usage` yields zeros rather than aborting the scan. */
 export function parseAssistantUsageDeltas(jsonl: string): ModelUsageEntry[] {
   const out: ModelUsageEntry[] = [];
+  const indexByMessageId = new Map<string, number>();
   for (const line of jsonl.split("\n")) {
     const t = line.trim();
     if (!t.startsWith("{")) continue;
@@ -674,7 +681,15 @@ export function parseAssistantUsageDeltas(jsonl: string): ModelUsageEntry[] {
     if (!message || typeof message !== "object" || Array.isArray(message)) continue;
     const m = message as Record<string, unknown>;
     const model = typeof m.model === "string" && m.model.length > 0 ? m.model : "unknown";
-    out.push({ model, ...toCategorized(m.usage) });
+    const entry = { model, ...toCategorized(m.usage) };
+    const messageId = typeof m.id === "string" && m.id.length > 0 ? m.id : undefined;
+    const existingIndex = messageId === undefined ? undefined : indexByMessageId.get(messageId);
+    if (existingIndex !== undefined) {
+      out[existingIndex] = entry; // same message, another content block — last usage wins in place
+    } else {
+      if (messageId !== undefined) indexByMessageId.set(messageId, out.length);
+      out.push(entry);
+    }
   }
   return out;
 }

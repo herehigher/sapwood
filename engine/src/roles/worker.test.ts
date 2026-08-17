@@ -29,6 +29,7 @@ import { closeOutMergedHumanMergeOnlyLanes } from "../loop/conductor.js";
 import { classifyEnvFailure, DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
 import { mcpToolFullName, PR_TOOLS } from "../proxy/tools.js";
 import { State } from "../state/state.js";
+import { ASSISTANT_USAGE_935_JSONL, ASSISTANT_USAGE_935_TERMINAL_COST_USD } from "./fixtures/assistant-usage-935.js";
 import {
   buildRenderFixPrompt,
   buildRenderPrompt,
@@ -710,6 +711,44 @@ test("parseAssistantUsageDeltas: no assistant lines / malformed message / missin
   assert.deepEqual(parseAssistantUsageDeltas(`{"type":"assistant"}`), []); // no message field at all
   assert.deepEqual(parseAssistantUsageDeltas(JSON.stringify({ type: "assistant", message: { model: "m", usage: {} } })), [
     { model: "m", inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 },
+  ]);
+});
+
+// ── #935: one API message spans several stream-json `assistant` lines (one per content block),
+// all sharing the same `message.id` and `usage` snapshot — parseAssistantUsageDeltas must price
+// each message ONCE, not once per line, or the live soft-budget estimate over-counts real spend.
+test("parseAssistantUsageDeltas (#935 AC1): one message.id emitted as three lines (text+thinking+tool_use, identical usage) prices as ONE message", () => {
+  const usage = { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+  const line = (content: unknown) =>
+    JSON.stringify({ type: "assistant", message: { id: "msg_1", model: "claude-sonnet-4-6", usage, content } });
+  const jsonl = [line([{ type: "thinking" }]), line([{ type: "text" }]), line([{ type: "tool_use" }])].join("\n");
+  assert.deepEqual(parseAssistantUsageDeltas(jsonl), [
+    { model: "claude-sonnet-4-6", inputTokens: 100, outputTokens: 50, cacheCreationTokens: 0, cacheReadTokens: 0 },
+  ]);
+});
+
+test("parseAssistantUsageDeltas (#935 AC1): two distinct message.id values price as two messages", () => {
+  const usage = (n: number) => ({ input_tokens: n, output_tokens: n, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 });
+  const jsonl = [
+    JSON.stringify({ type: "assistant", message: { id: "msg_1", model: "claude-sonnet-4-6", usage: usage(100) } }),
+    JSON.stringify({ type: "assistant", message: { id: "msg_1", model: "claude-sonnet-4-6", usage: usage(100) } }),
+    JSON.stringify({ type: "assistant", message: { id: "msg_2", model: "claude-sonnet-4-6", usage: usage(200) } }),
+  ].join("\n");
+  assert.deepEqual(parseAssistantUsageDeltas(jsonl), [
+    { model: "claude-sonnet-4-6", inputTokens: 100, outputTokens: 100, cacheCreationTokens: 0, cacheReadTokens: 0 },
+    { model: "claude-sonnet-4-6", inputTokens: 200, outputTokens: 200, cacheCreationTokens: 0, cacheReadTokens: 0 },
+  ]);
+});
+
+test("parseAssistantUsageDeltas (#935 AC1): a line whose message has no `id` still counts per-line (tolerance kept)", () => {
+  const usage = (n: number) => ({ input_tokens: n, output_tokens: n, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 });
+  const jsonl = [
+    JSON.stringify({ type: "assistant", message: { model: "claude-sonnet-4-6", usage: usage(100) } }),
+    JSON.stringify({ type: "assistant", message: { model: "claude-sonnet-4-6", usage: usage(100) } }),
+  ].join("\n");
+  assert.deepEqual(parseAssistantUsageDeltas(jsonl), [
+    { model: "claude-sonnet-4-6", inputTokens: 100, outputTokens: 100, cacheCreationTokens: 0, cacheReadTokens: 0 },
+    { model: "claude-sonnet-4-6", inputTokens: 100, outputTokens: 100, cacheCreationTokens: 0, cacheReadTokens: 0 },
   ]);
 });
 
@@ -3760,6 +3799,111 @@ test("#155: a resumed lane's persisted estCostUsd covers only the CURRENT leg (r
     s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── #935 AC2: estimateBaselineUsd (the #33 baseline) is computed through parseAssistantUsageDeltas
+// too, so a pre-handoff message split across several stream-json lines must not over-count either.
+test("#935 AC2: a resumed lane's pre-handoff usage split across THREE lines for one message.id prices as ONE message in both the baseline and the whole-file total", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const name = "lane-935-resume";
+    writeFileSync(
+      join(dir, `${name}.handoff.json`),
+      JSON.stringify({ name, issue: 935, session_id: "33333333-3333-3333-3333-333333333333", total_cost_usd: 0 }),
+    );
+    // Pre-handoff usage: ONE message (id msg_pre) emitted as three content-block lines
+    // (text/thinking/tool_use), all carrying the identical `usage` snapshot — opus
+    // 1000in+1000out ≈ $0.03 for the message, NOT $0.09 for three lines.
+    const preUsage = { input_tokens: 1000, output_tokens: 1000, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+    const preLine = JSON.stringify({ type: "assistant", message: { id: "msg_pre", model: "claude-opus-4-8", usage: preUsage } });
+    writeFileSync(join(dir, `${name}.jsonl`), `${preLine}\n${preLine}\n${preLine}\n`);
+    const marker = join(dir, "emit-new-usage");
+    const bin = mkStub(
+      dir,
+      [
+        `#!/usr/bin/env bash`,
+        `while [ ! -f "${marker}" ]; do sleep 0.02; done`,
+        // New post-resume message (a distinct id): opus 200in+0out -> $0.001.
+        `echo '{"type":"assistant","message":{"id":"msg_post","model":"claude-opus-4-8","usage":{"input_tokens":200,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
+        `for _ in $(seq 1 600); do sleep 1; done`,
+        ``,
+      ].join("\n"),
+    );
+    s = sup(dir, bin);
+    await s.resume({ number: 935, title: "t", labels: [] }, name);
+    // Right after resume: baseline == whole-file total (both dedup the same 3 pre-handoff
+    // lines to one message) -> still cancels to ~0, same behavior as the single-line #155 case.
+    const p1 = await s.probe(name);
+    assert.ok(p1.liveTelemetry, "resumed lane is tracked in-memory too");
+    assert.ok(
+      Math.abs(p1.liveTelemetry!.estCostUsd) < 1e-9,
+      `deduped pre-handoff spend must not leak into the resumed leg's live cost (got ${p1.liveTelemetry!.estCostUsd})`,
+    );
+    writeFileSync(marker, "");
+    let p2 = await s.probe(name);
+    for (let i = 0; i < 200 && !(p2.liveTelemetry && p2.liveTelemetry.estCostUsd > 0); i++) {
+      await sleep(20);
+      p2 = await s.probe(name);
+    }
+    const expectedNewLegCost = (200 / 1_000_000) * 5; // opus input rate
+    assert.ok(
+      Math.abs(p2.liveTelemetry!.estCostUsd - expectedNewLegCost) < 1e-9,
+      `new-leg estCostUsd ${p2.liveTelemetry!.estCostUsd} ~= ${expectedNewLegCost} (must not carry the pre-handoff over-count)`,
+    );
+    // The discriminating assertion: tokenComposition reads the WHOLE jsonl-so-far (not
+    // baseline-adjusted), so it directly proves the multi-line pre-handoff message was priced
+    // once (1000/1000), not three times (3000/3000), once the new single-line message is added.
+    assert.deepEqual(p2.liveTelemetry!.tokenComposition, {
+      inputTokens: 1200,
+      outputTokens: 1000,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+    });
+    await s.reclaim(name);
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #935 AC3: a redacted stream-json excerpt (engine/src/roles/fixtures/assistant-usage-935.ts) —
+// pins the +50% naive-overcount class so it cannot silently come back.
+test("#935 AC3 (replay): de-duplicated estimate is within ±5% of the excerpt's terminal total_cost_usd; naive per-line sum is not", () => {
+  const pricing = loadPricingTable(cfg);
+  const real = ASSISTANT_USAGE_935_TERMINAL_COST_USD;
+
+  const deduped = parseAssistantUsageDeltas(ASSISTANT_USAGE_935_JSONL).reduce((sum, d) => sum + estimateUsd(d, pricing), 0);
+  const dedupedGap = Math.abs(deduped - real) / real;
+  assert.ok(dedupedGap <= 0.05, `deduped estimate ${deduped} should be within 5% of real ${real} (gap ${dedupedGap})`);
+
+  // Pre-#935 behavior, reimplemented locally (never re-exported from worker.ts) purely to prove
+  // the class of bug this AC pins: sum every `assistant` line's usage with no de-duplication.
+  const naive = ASSISTANT_USAGE_935_JSONL.split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("{"))
+    .flatMap((line) => {
+      const obj = JSON.parse(line) as Record<string, unknown>;
+      if (obj.type !== "assistant") return [];
+      const m = (obj.message ?? {}) as Record<string, unknown>;
+      const u = (m.usage ?? {}) as Record<string, number>;
+      return [
+        estimateUsd(
+          {
+            model: typeof m.model === "string" ? m.model : "unknown",
+            inputTokens: u.input_tokens ?? 0,
+            outputTokens: u.output_tokens ?? 0,
+            cacheCreationTokens: u.cache_creation_input_tokens ?? 0,
+            cacheReadTokens: u.cache_read_input_tokens ?? 0,
+          },
+          pricing,
+        ),
+      ];
+    })
+    .reduce((sum, v) => sum + v, 0);
+  const naiveGap = Math.abs(naive - real) / real;
+  assert.ok(naiveGap > 0.05, `naive per-line sum ${naive} should NOT be within 5% of real ${real} (pins the +50% overcount class)`);
 });
 
 test("#155: a DETACHED lane (no in-memory handle) carries no live telemetry — never invents a second baseline", async () => {
