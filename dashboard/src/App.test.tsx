@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test, { mock } from "node:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
@@ -17,7 +18,7 @@ import {
   toggleConfigOpen,
 } from "./App.tsx";
 import { demoFixtureQuery, eventsQuery, loopStateQuery, MAX_EVENT_HISTORY, roundsQuery, spendQuery } from "./api/queries.ts";
-import type { Round, SpendRow } from "./api/types.ts";
+import type { LoopEvent, Round, SpendRow } from "./api/types.ts";
 import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
 import { NeedsAttention } from "./components/NeedsAttention.tsx";
@@ -2517,4 +2518,60 @@ test("AC7: plan-review-escalated/verify-na-proposed/ci-inert-escalated rows each
   } finally {
     await unmount();
   }
+});
+
+// ── #897 AC3: the outcome ring count, proven through the real wire→fold→App wiring ──────────
+
+test("#897 AC3: the hero's ring count reaches the rendered stage through the real /api/events -> fold -> App wiring, not a hand-built HeroStage fixture", async () => {
+  const events: LoopEvent[] = [];
+  // A distinguishable, non-default ring count — 5 real `merged` events, each a distinct
+  // issue/PR, folded through the SAME production entry point every other real-wiring test in
+  // this file uses (`renderSettledApp` -> `appContent` -> `Hero` -> `HeroStage`).
+  for (let i = 1; i <= 5; i++) {
+    events.push({ id: i, ts: `2026-08-14T00:0${i}:00Z`, kind: "merged", payload: { worker: `w${i}`, issue: 100 + i, pr: 200 + i } });
+  }
+  const html = await renderSettledApp({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/events": { status: 200, body: { events, lastId: 5 } },
+  });
+  assert.match(html, /class="hero-ring-count"[^>]*>5</, "the fixture's real ring count must reach the rendered stage");
+  assert.equal(html.match(/class="hero-ring"/g)?.length, 5, "one drawn ring per real merge, through the real fold");
+});
+
+// ── #897 AC5: the lane board / activity feed row uses the mockup's full-width split ─────────
+
+test("#897 AC5: the lane board / activity feed pair renders inside its own full-row-spanning wrapper, not loose siblings sharing .stack's outer column template", () => {
+  const html = renderToStaticMarkup(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      {appContent(minimalAppViewModel())}
+    </QueryClientProvider>,
+  );
+  const rowMatch = html.match(/<div class="lane-activity-row">([\s\S]*?)<\/div>\s*<section id="cost" class="cost-strip"/);
+  assert.ok(rowMatch, "LaneBoard/ActivityFeed must render inside a `.lane-activity-row` wrapper, immediately before the cost strip");
+  assert.match(
+    rowMatch![1] as string,
+    /class="panel live-only"|class="lane-board-grid"/,
+    "the wrapper carries the lane board (or its live-only placeholder)",
+  );
+  assert.match(rowMatch![1] as string, /class="panel activity-feed"/, "the wrapper carries the activity feed");
+});
+
+test("#897 AC5: .lane-activity-row carries its own auto-fit column template and spans the full .stack row", () => {
+  const appCss = readFileSync(new URL("./app.css", import.meta.url), "utf8");
+  // The row must span every column of `.stack`'s own outer grid — same list every other
+  // full-width module (header, hero, cost strip, …) is already on.
+  const spanRule = appCss.match(/\.stack\s*>\s*\.app-header,[\s\S]*?\{([\s\S]*?)\}/);
+  assert.ok(spanRule, ".stack's full-width span rule must exist");
+  assert.match(spanRule![0] as string, /\.stack\s*>\s*\.lane-activity-row/, ".lane-activity-row must be on the full-width span list");
+  assert.match(spanRule![1] as string, /grid-column:\s*1\s*\/\s*-1/);
+
+  // Its OWN nested grid — a column template used by nothing else, so auto-fit's empty-track
+  // collapse actually applies (the App.tsx call-site comment explains why the outer `.stack`
+  // grid can't give this pair a correct collapse on its own).
+  // Anchored to a line START — never the `.stack > .lane-activity-row {` span-list selector
+  // matched just above, which shares the same trailing text but a different, unrelated rule body.
+  const ownRule = appCss.match(/\n\.lane-activity-row\s*\{([^}]*)\}/);
+  assert.ok(ownRule, ".lane-activity-row must declare its own grid");
+  assert.match(ownRule![1] as string, /display:\s*grid/);
+  assert.match(ownRule![1] as string, /grid-template-columns:\s*repeat\(auto-fit/);
 });

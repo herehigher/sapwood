@@ -161,6 +161,80 @@ test("§889 AC1: the round list never renders inline by default, and hero/lanes/
 });
 
 /**
+ * #897 AC5's own verification plan asks for a 1440px viewport measurement of the lanes/activity
+ * row's rendered x-extent, proving the mockup's full-width split (no unused trailing region). The
+ * component test suite (`App.test.tsx`) can only prove the `.lane-activity-row` wrapper exists in
+ * the markup and that its CSS carries the intended `auto-fit` declaration — `happy-dom` (that
+ * suite's DOM) has no real CSS Grid layout engine, so it cannot compute what width that grid
+ * actually resolves to. A REAL browser is the only thing that can prove the cascade genuinely
+ * closes the dead zone the issue reported, the same "real layout, not a stand-in" posture this
+ * file's other tests above already apply to click hit-testing and computed style.
+ */
+test("#897 AC5: at 1440px, the lane board and activity feed together span the row's full width — no trailing dead zone", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  const row = page.locator(".lane-activity-row");
+  const rowBox = await row.boundingBox();
+  expect(rowBox, "the .lane-activity-row wrapper must render with a real bounding box").not.toBeNull();
+
+  // `?demo` is always replay mode (`App.tsx`'s `DemoApp` doc) — the real `LaneBoard` never
+  // mounts there, so the row's first child is `LiveOnly`'s "live only" placeholder instead. Both
+  // are the SAME panel-shaped element the real split renders (`LiveOnly.tsx`'s own doc: "reads as
+  // the SAME panel, dimmed"), so measuring the placeholder's extent is honest evidence for the
+  // row's actual column split either way.
+  const laneSlot = (await firstMatch(page, MODULE_SELECTORS.lanes)) ?? page.locator("nonexistent-lanes-anchor");
+  const feedSlot = page.locator('section[aria-label="activity"]');
+  const laneBox = await laneSlot.boundingBox();
+  const feedBox = await feedSlot.boundingBox();
+  expect(laneBox, "the lane board slot must render with a real bounding box").not.toBeNull();
+  expect(feedBox, "the activity feed must render with a real bounding box").not.toBeNull();
+
+  // The mockup's split is two side-by-side panels filling the row — proven by the pair's
+  // combined horizontal extent actually reaching the row's own edges, not just existing
+  // somewhere inside it. A tolerance covers the row's own padding/gap, never a half-canvas gap.
+  const tolerancePx = 24;
+  const leftmost = Math.min(laneBox!.x, feedBox!.x);
+  const rightmost = Math.max(laneBox!.x + laneBox!.width, feedBox!.x + feedBox!.width);
+  expect(leftmost - rowBox!.x, "the pair's leftmost edge must reach the row's own left edge").toBeLessThan(tolerancePx);
+  expect(
+    rowBox!.x + rowBox!.width - rightmost,
+    "the pair's rightmost edge must reach the row's own right edge — no unused trailing region",
+  ).toBeLessThan(tolerancePx);
+
+  // The two panels must actually be SIDE BY SIDE at this width (the mockup's split), not stacked
+  // — a meaningful overlap in Y with distinct X ranges is what "sharing a row" means.
+  expect(Math.abs(laneBox!.y - feedBox!.y), "lane board and activity feed must sit on the same row, not stacked").toBeLessThan(tolerancePx);
+
+  // #897: the edge-union and same-y checks above also pass if both panels render at the SAME x
+  // range, each spanning the row's full width (full overlap) — neither checks horizontal ordering
+  // or non-overlap. The lane slot renders first in `.lane-activity-row`'s markup (App.tsx) and
+  // this row's own auto-fit grid (app.css) places DOM order left-to-right, so a genuine split
+  // requires the lane slot's right edge to precede the feed's left edge, within the same row-gap
+  // tolerance used above.
+  expect(
+    feedBox!.x - (laneBox!.x + laneBox!.width),
+    "the lane slot's right edge must clear the activity feed's left edge (within the row gap) — proves the panels sit side by side rather than overlapping",
+  ).toBeGreaterThan(-tolerancePx);
+
+  // Each panel must also claim a real share of the row, not a sliver beside a panel that spans
+  // nearly the whole width. `.lane-activity-row` (app.css) is two equal `1fr` auto-fit columns, so
+  // an even split is the design's own target; 20% of the row is a conservative floor only a
+  // genuine two-panel split can clear.
+  const minSharePx = rowBox!.width * 0.2;
+  expect(laneBox!.width, `the lane slot must occupy at least 20% (${minSharePx.toFixed(0)}px) of the row's width`).toBeGreaterThan(
+    minSharePx,
+  );
+  expect(feedBox!.width, `the activity feed must occupy at least 20% (${minSharePx.toFixed(0)}px) of the row's width`).toBeGreaterThan(
+    minSharePx,
+  );
+});
+
+/**
  * engine-agent audit run fe112e01-e488-4d80-864a-9a490750cfb1 finding [0]
  * (dropdown-clipped-by-navigator): `.round-nav`'s `overflow: hidden` (added for the joined-stepper
  * look) used to clip `.round-nav-list-wrap` — its own absolutely positioned child — out of the

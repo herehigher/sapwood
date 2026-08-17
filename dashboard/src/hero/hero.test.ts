@@ -10,7 +10,7 @@ import { foldOpenAttention } from "../entities.ts";
 import { registerRealDom } from "../test-dom.ts";
 import { Hero } from "./Hero.tsx";
 import { LEGEND_ITEMS, Legend } from "./Legend.tsx";
-import { BACKLOG, checkpointOverflowPoint, dropletPoint, ESCALATION, GATES, HeroStage, STAGE, TRUNK } from "./stage.tsx";
+import { BACKLOG, checkpointOverflowPoint, dropletPoint, ESCALATION, GATES, HeroStage, REFLECTION, STAGE, TRUNK } from "./stage.tsx";
 import {
   activePlanningNode,
   activeReflectionNode,
@@ -248,14 +248,14 @@ test("#728: the fix-return arc mounts only for an active fix loop and unmounts o
   ]);
   const fixingHtml = markup(fixing.state);
   assert.match(fixingHtml, /<path id="hero-fixloop-path"/);
-  assert.match(fixingHtml, /<textPath[^>]*href="#hero-fixloop-path"[^>]*>merge conflict<\/textPath>/);
+  assert.match(fixingHtml, /<text class="hero-fixloop-label"[^>]*>merge conflict<\/text>/);
 
   // The fix loop ends — the lane merges straight out of `fixing` — and folding that event
   // must fold the arc itself away, not just its label.
   const folded = foldEvents(fixing.state, [ev("merged", { worker: "w1", issue: 86, pr: 97 })]);
   const foldedHtml = markup(folded.state);
   assert.doesNotMatch(foldedHtml, /<path id="hero-fixloop-path"/);
-  assert.doesNotMatch(foldedHtml, /<textPath/);
+  assert.doesNotMatch(foldedHtml, /hero-fixloop-label/);
 });
 
 test("§6 `fix-leg-resumed` re-lights the same fixing state after a handoff", () => {
@@ -275,7 +275,7 @@ test("§6 `fix-leg-resumed` re-lights the same fixing state after a handoff", ()
   assert.equal(droplet(state, 86)?.handedOff, false);
 });
 
-test("#716 gate② round 2 P2-5: the fix-return arrow carries the send-back reason as a textPath label, not only the lane caption", () => {
+test("#716 gate②: the fix-return arrow carries the send-back reason as its own label, not only the lane caption", () => {
   const { state } = run([
     ev("dispatched", { worker: "w1", issue: 86 }),
     ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING", pr: 97 }),
@@ -284,10 +284,33 @@ test("#716 gate② round 2 P2-5: the fix-return arrow carries the send-back reas
   ]);
   const html = markup(state);
   assert.match(html, /<path id="hero-fixloop-path"/);
-  assert.match(html, /<textPath[^>]*href="#hero-fixloop-path"[^>]*>merge conflict<\/textPath>/);
+  assert.match(html, /<text class="hero-fixloop-label"[^>]*>merge conflict<\/text>/);
 
   // No fixing lane at all — no label on the arrow.
-  assert.doesNotMatch(markup(initialHeroState(3)), /<textPath/);
+  assert.doesNotMatch(markup(initialHeroState(3)), /hero-fixloop-label/);
+});
+
+test("#897 AC1: the fix-loop label renders as plain upright text below the return leg, not a textPath riding the arrow", () => {
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 86 }),
+    ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING", pr: 97 }),
+    ev("drive-fixup", { worker: "w1", issue: 86, pr: 97, fixRounds: 1, reason: "gate:FIXABLE:merge-conflict" }),
+    ev("fix-leg-started", { worker: "w1", issue: 86, pr: 97, fixRounds: 1 }),
+  ]);
+  const html = markup(state);
+
+  // Plain text, not a textPath riding the arrow's own (right-to-left, at this stretch) curve —
+  // no `<textPath>` element at all, so there is no path direction for the label to inherit a
+  // rotation from.
+  assert.doesNotMatch(html, /<textPath/);
+
+  const labelMatch = html.match(/<text class="hero-fixloop-label" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>merge conflict<\/text>/);
+  assert.ok(labelMatch, "the label must render as a plain <text> element carrying its own x/y");
+  assert.doesNotMatch(labelMatch![0], /rotate\(/, "no rotation transform on the label");
+
+  // Below the return leg's own deepest dip (the arc's control-point y, `GATES.y + 78`) —
+  // distinct from the arrow's own path, which the label no longer rides.
+  assert.ok(Number(labelMatch![2]) > GATES.y + 78, "the label must sit below the return leg's deepest point");
 });
 
 test("sendBackReason maps the engine's gate reason to the three §6/§7 words", () => {
@@ -332,6 +355,30 @@ test("§6 `merged`: gates flash ✓, the droplet becomes a ring, the counter inc
   // merged droplet's own label already carries (`stage.tsx`'s `d.at === "trunk" ? "✓ " : ""`),
   // which the old loose `/✓/` match could never actually distinguish from.
   assert.equal(html.match(/class="hero-gate-check"/g)?.length, 2, "both CI and Review gates carry the ✓ glyph element");
+});
+
+test("#897 AC2: CI and Review render as circular gate nodes carrying a hand-drawn icon marker, not rects", () => {
+  const html = markup(initialHeroState(3));
+  const ciGate = html.match(/<g class="hero-gate" data-gate="ci"[^>]*>([\s\S]*?)<\/g>\s*<g class="hero-gate" data-gate="review"/);
+  assert.ok(ciGate, "the CI gate group must render");
+  assert.match(ciGate![1] as string, /<circle class="hero-gate-node"/, "CI must render as a <circle>, not the old <rect>");
+  assert.doesNotMatch(ciGate![1] as string, /<rect/, "no <rect> left inside the CI gate");
+  assert.match(ciGate![1] as string, /data-icon="gear"/, "CI carries its icon marker via the existing data-icon convention");
+
+  const reviewGate = html.match(/<g class="hero-gate" data-gate="review"[^>]*>([\s\S]*?)<\/g>\s*<line/);
+  assert.ok(reviewGate, "the Review gate group must render");
+  assert.match(reviewGate![1] as string, /<circle class="hero-gate-node"/, "Review must render as a <circle>, not the old <rect>");
+  assert.doesNotMatch(reviewGate![1] as string, /<rect/, "no <rect> left inside the Review gate");
+  assert.match(reviewGate![1] as string, /data-icon="eye"/, "Review carries its icon marker via the existing data-icon convention");
+});
+
+test("#897 AC2: Summary/Retro reflection nodes sit below the trunk/outcome disc, not beside it at TRUNK.y", () => {
+  const html = markup(initialHeroState(3));
+  const nodeYs = [...html.matchAll(/<circle class="hero-planning-node" cx="(-?[\d.]+)" cy="(-?[\d.]+)" r="13">/g)].map(([, , y]) =>
+    Number(y),
+  );
+  assert.equal(nodeYs.length, 2, "both Summary and Retro nodes must render");
+  for (const y of nodeYs) assert.ok(y > TRUNK.y, `reflection node y=${y} must sit below TRUNK.y=${TRUNK.y}`);
 });
 
 test("§6 `handoff`: droplet folds back into the backlog with a progress badge", () => {
@@ -743,7 +790,7 @@ test("the merged event's checkpoint flash and the new growth ring use --moss, ne
   // The flash is an imperative anime.js class toggle (`.is-merged`), so its token binding is
   // asserted against the stylesheet that drives it, tied to the class the rendered gate carries.
   assert.match(markup(initialHeroState(3)), /class="hero-gate"/);
-  assert.match(heroCss, /\.hero-gate\.is-merged rect\s*\{[^}]*stroke:\s*var\(--moss\)/);
+  assert.match(heroCss, /\.hero-gate\.is-merged \.hero-gate-node\s*\{[^}]*stroke:\s*var\(--moss\)/);
 
   // The newest ring is a static, server-rendered attribute — directly assertable. `data-ring`
   // (#716 gate② round 2 P1-3) sits between `data-current` and `style` in draw order, hence
@@ -1142,6 +1189,87 @@ test("the backlog renders this round's selection pool", () => {
   assert.match(html, /BACKLOG/);
 });
 
+test("#897 AC4: BACKLOG carries the ready count, and the pool beyond the filled cap draws as an outlined candidate stack", () => {
+  const { state } = run([ev("pool-selected", { round_id: 1, issues: [86, 88, 90, 92, 94] })]);
+  const html = markup(state);
+
+  // N is `state.pool.length` — the same array both the filled and candidate cards below draw
+  // from, never a second guess at "how many are ready".
+  assert.equal(state.pool.length, 5);
+  assert.match(html, /BACKLOG \(5 ready\)/);
+
+  // Two distinguishable element sets: the existing filled pool chips, capped, and a separate
+  // outlined candidate-stack set for the rest — not just one filled-chip list.
+  assert.equal(html.match(/class="hero-pool-chip"/g)?.length, 3, "only the front of the queue draws filled");
+  assert.equal(html.match(/class="hero-pool-candidate"/g)?.length, 2, "the rest draws as a distinguishable outlined set");
+  assert.match(html, /class="hero-pool-candidate" data-issue="92"/);
+  assert.match(html, /class="hero-pool-candidate" data-issue="94"/);
+});
+
+test("#897 AC4: a pool at or under the filled cap draws no candidate stack at all", () => {
+  const { state } = run([ev("pool-selected", { round_id: 1, issues: [86, 88, 90] })]);
+  const html = markup(state);
+  assert.match(html, /BACKLOG \(3 ready\)/);
+  assert.doesNotMatch(html, /hero-pool-candidate/);
+});
+
+// #897: the two tests above assert class names/counts only — removing or overriding
+// `.hero-pool-candidate rect { fill: none; stroke: ... }` would leave both green. This mounts the
+// REAL production cascade (tokens.css → panels.css → hero.css → app.css's body rule, same order
+// the #879 gate② test above already established) into a real DOM and reads `getComputedStyle`,
+// proving the candidate rect actually resolves to no fill with a visible stroke, and that a
+// filled pool chip resolves distinguishably (NOT `fill: none`) under the exact same cascade.
+//
+// #897: `notEqual(stroke, "none")`/`notEqual(stroke, "")` still passes for a transparent stroke
+// or `stroke-opacity: 0` — the STYLE doctrine's own "never notEqual/existence" rule. Every value
+// below is now the EXACT resolved string, verified empirically against this repo's real
+// happy-dom harness rather than assumed: `var(--bark)` (a plain hex, `tokens.css`) resolves to
+// the literal `"#8A7A64"` and `stroke-opacity: 0.35` resolves to the literal `"0.35"`, both
+// through a CSS class rule exactly like `.hero-pool-candidate rect` declares. `var(--sap)` (a
+// `light-dark()` token) resolves through happy-dom's cascade to the literal, deterministic
+// string `"light-dark(#8A5A14, #E8A33D)"` — verified directly against THIS shape (an inline
+// `fill: var(--sap)` on an SVG rect, the exact form `.hero-pool-chip`'s own rect authors), not
+// assumed from `shots/shots.spec.ts`'s own doc, which found a BARE top-level `color`/background
+// `light-dark()` resolves EMPTY in happy-dom — a different context this repo's test suite hasn't
+// previously exercised through a `var()` indirection. Both `--bark` and `--sap` resolve to real,
+// exact, deterministic strings THIS cascade produces every time — not a resolved final RGB (a
+// real browser only would give that, per `shots.spec.ts`'s same doc), but exact and non-fakeable
+// regardless: a transparent/removed stroke or a no-fill regression on either element changes one
+// of these literal strings.
+test("#897 AC4: a candidate card's rect resolves to the EXACT no-fill/visible-stroke values, distinguishable from a filled pool chip's EXACT fill, under the real production cascade", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const container = document.createElement("div");
+  container.innerHTML = markup(run([ev("pool-selected", { round_id: 1, issues: [86, 88, 90, 92, 94] })]).state);
+  document.body.appendChild(container);
+  try {
+    const candidateRect = container.querySelector(".hero-pool-candidate rect");
+    assert.ok(candidateRect, "a real .hero-pool-candidate rect must render and match the injected stylesheet's selector");
+    const candidateComputed = getComputedStyle(candidateRect as Element);
+    assert.equal(candidateComputed.fill, "none", "the candidate card must actually cascade to no fill, not just declare it in source");
+    assert.equal(candidateComputed.stroke, "#8A7A64", "the candidate card's stroke must resolve to the EXACT --bark hex, never a stand-in");
+    assert.equal(
+      candidateComputed.strokeOpacity,
+      "0.35",
+      "the candidate card's stroke must resolve a NONZERO opacity — a `stroke-opacity: 0` regression would still pass a bare non-empty/non-none check",
+    );
+
+    const filledRect = container.querySelector(".hero-pool-chip rect");
+    assert.ok(filledRect, "a real .hero-pool-chip rect must also render for the distinguishability comparison");
+    const filledComputed = getComputedStyle(filledRect as Element);
+    assert.equal(
+      filledComputed.fill,
+      "light-dark(#8A5A14, #E8A33D)",
+      "a filled pool chip must resolve to the EXACT --sap token text, distinguishable from the candidate's exact 'none'",
+    );
+  } finally {
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+});
+
 // ── #728: backlog chip / needs-human / outcome-tally overlap ──────────────────
 //
 // The hero is one `viewBox`-scaled SVG (`.hero { width: 100%; height: auto }`, asserted
@@ -1325,6 +1453,117 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
   assertNoOverlap(boxes);
 
   assert.match(html, /data-node="needs-human" data-count="6"/);
+});
+
+// #897: the reflection tree's bar/drops used to sit ABOVE the outcome tally and run straight
+// through its row — the tally's rendered width is effectively unbounded (a long qualified "N
+// merged · N pending (N unverified) · N needs human" string), so no X position near TRUNK.x
+// reliably dodges it. The fix is a Y-band split (`REFLECTION`'s own doc in stage.tsx); this test
+// proves it against the LONGEST tally text this fixture can produce — merged/pending/needs-human
+// all present AND the windowed qualifier active (unvouched dispatched droplets), not just the
+// unqualified case.
+test("#897 AC2: the reflection tree's bar/drops never overlap the outcome tally, even at the tally's longest (qualified) rendered text", () => {
+  const events: DomainEvent[] = [];
+  for (let i = 1; i <= 24; i++) events.push(ev("merged", { worker: `m${i}`, issue: i, pr: i }));
+  // No liveLanes coverage below (unlike the sibling needs-human collision test) — every one of
+  // these stays unvouched, forcing the LONGER qualified tally format ("(N unverified)") that
+  // stresses the tally's real rendered width the most.
+  for (let i = 1; i <= 13; i++) events.push(ev("dispatched", { worker: `p${i}`, issue: 100 + i }));
+  for (let i = 1; i <= 6; i++) {
+    events.push(ev("dispatched", { worker: `w${i}`, issue: 200 + i }));
+    events.push(ev("reclaim-done", { worker: `w${i}`, issue: 200 + i, next: "DRIVING", pr: 9000 + i }));
+    events.push(ev("drive-needs-human", { worker: `w${i}`, issue: 200 + i, pr: 9000 + i }));
+  }
+  const { state } = run(events, 43);
+  const html = markup(state, { lanesMax: 43 });
+
+  const tallyMatch = html.match(/class="hero-num hero-small hero-outcome-tally" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</);
+  assert.ok(tallyMatch, "outcome tally must render");
+  const [, tallyXRaw, tallyYRaw, tallyText] = tallyMatch as unknown as [string, string, string, string];
+  assert.match(tallyText, /unverified/, "this fixture must actually exercise the LONGER qualified tally format");
+  const tallyBox = textBox(tallyText, Number(tallyXRaw), Number(tallyYRaw), 9);
+  assert.ok(
+    tallyBox.right < REFLECTION.detourX,
+    `the tally's own measured right edge (${tallyBox.right}) must stay clear of REFLECTION.detourX (${REFLECTION.detourX}) — the whole premise the connector's detour route depends on`,
+  );
+
+  const ringBottomY = TRUNK.y + TRUNK.max * TRUNK.step + 4;
+  // The connector's own occupied regions — a thin box per drawn segment, mirroring stage.tsx's
+  // own `d` formula exactly: a stem off the ring, right to `detourX`, down, then into the bar
+  // and its two drops into the nodes (the connector-attachment fix below).
+  const strokeHalf = 2; // generous over the actual ~1px stroke width
+  const ringStemBox: Box = { left: TRUNK.x, right: REFLECTION.detourX, top: ringBottomY - strokeHalf, bottom: ringBottomY + strokeHalf };
+  const detourDropBox: Box = {
+    left: REFLECTION.detourX - strokeHalf,
+    right: REFLECTION.detourX + strokeHalf,
+    top: ringBottomY,
+    bottom: REFLECTION.barY,
+  };
+  const barBox: Box = {
+    left: REFLECTION.stemX - REFLECTION.spread,
+    right: REFLECTION.stemX + REFLECTION.spread,
+    top: REFLECTION.barY - strokeHalf,
+    bottom: REFLECTION.barY + strokeHalf,
+  };
+  const leftDropBox: Box = {
+    left: REFLECTION.stemX - REFLECTION.spread - strokeHalf,
+    right: REFLECTION.stemX - REFLECTION.spread + strokeHalf,
+    top: REFLECTION.barY,
+    bottom: REFLECTION.y - REFLECTION.r,
+  };
+  const rightDropBox: Box = {
+    left: REFLECTION.stemX + REFLECTION.spread - strokeHalf,
+    right: REFLECTION.stemX + REFLECTION.spread + strokeHalf,
+    top: REFLECTION.barY,
+    bottom: REFLECTION.y - REFLECTION.r,
+  };
+  const summaryCircle = circleBox(REFLECTION.stemX - REFLECTION.spread, REFLECTION.y, REFLECTION.r);
+  const retroCircle = circleBox(REFLECTION.stemX + REFLECTION.spread, REFLECTION.y, REFLECTION.r);
+
+  // Only the TALLY vs. each reflection-tree piece is checked — the pieces are DESIGNED to touch
+  // each other at their shared corners (one connected line), so cross-checking them against each
+  // other would flag a false positive on the tree's own joints.
+  for (const { label, box } of [
+    { label: "reflection ring stem", box: ringStemBox },
+    { label: "reflection detour drop", box: detourDropBox },
+    { label: "reflection bar", box: barBox },
+    { label: "reflection left drop (Summary)", box: leftDropBox },
+    { label: "reflection right drop (Retro)", box: rightDropBox },
+    { label: "Summary node circle", box: summaryCircle },
+    { label: "Retro node circle", box: retroCircle },
+  ]) {
+    assert.ok(!boxesOverlap(tallyBox, box), `outcome tally ${JSON.stringify(tallyBox)} overlaps ${label} ${JSON.stringify(box)}`);
+  }
+});
+
+// #897: the earlier fix left the reflection tree floating — a bar/drops with no segment reaching
+// the outcome disc at all. AC2 wants Summary/Retro actually CONNECTED below the disc, and the
+// node-y test alone can't detect a missing connector (it would still pass with the path element
+// absent entirely). This asserts the rendered `<path class="hero-arm">` that draws the reflection
+// tree actually contains a point at (or very near) the ring's own bottom edge — proof the tree is
+// attached to the disc, not just floating near it.
+test("#897 AC2: the reflection tree's connector path actually reaches the outcome disc's own bottom edge, not just a floating bar", () => {
+  const html = markup(initialHeroState(3));
+  const reflectionGroupMatch = html.match(/<g class="hero-reflection" data-node="reflection">([\s\S]*?)<\/g>\s*<path class="hero-return"/);
+  assert.ok(reflectionGroupMatch, "the hero-reflection group must render");
+  const pathMatch = (reflectionGroupMatch![1] as string).match(/<path class="hero-arm" d="([^"]*)"/);
+  assert.ok(pathMatch, "the reflection tree's connector <path> must render");
+  const d = pathMatch![1] as string;
+
+  // Every numeric coordinate pair in the `d` string — the topmost (smallest y) point must sit at
+  // the ring's own bottom edge, not at `REFLECTION.barY` (which would mean the connector never
+  // actually reaches the disc, the exact defect this finding reports).
+  const points = [...d.matchAll(/([ML])\s*(-?[\d.]+)\s+(-?[\d.]+)/g)].map(([, , x, y]) => ({ x: Number(x), y: Number(y) }));
+  assert.ok(points.length >= 2, "the connector path must carry real coordinate points");
+  const ringBottomY = TRUNK.y + TRUNK.max * TRUNK.step + 4;
+  const topmostY = Math.min(...points.map((p) => p.y));
+  assert.equal(
+    topmostY,
+    ringBottomY,
+    "the connector's topmost point must sit at the ring's own bottom edge, proving it is actually attached",
+  );
+  const attachedAtRingX = points.some((p) => p.y === ringBottomY && p.x === TRUNK.x);
+  assert.ok(attachedAtRingX, `the connector must carry a point at (TRUNK.x, ringBottomY) = (${TRUNK.x}, ${ringBottomY})`);
 });
 
 // #886 gate② run 2e566ac9 finding [1]: the earlier fix kept the droplet dead-center and moved
@@ -1615,9 +1854,16 @@ test("#745 AC2: six simultaneous checkpoint droplets — CHECKPOINT_COLS/STEP's 
 // label bbox-intersected the Review gate's own "engine-agent" mode caption — the same defect
 // family as #728/#744 (real rendered extent, not anchor-point spacing). Checked at every rank up
 // to `CHECKPOINT_DRAW_CAP - 1` (the pre-overflow ceiling) against the FULL CI/Review gate
-// cluster: both rects, both node labels, and the Review caption (rendered with `reviewer.mode`
-// set, the exact live shape — the caption doesn't even mount without it).
-test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any rank up to the grid's capacity, intersects the CI/Review gate cluster (rect, label, or mode caption)", () => {
+// cluster: the gate circles, both node labels, and the Review caption (rendered with
+// `reviewer.mode` set, the exact live shape — the caption doesn't even mount without it).
+//
+// #897: rewritten for the circular gate shape (`GATES.r`, not a rect) — label/caption positions
+// are read DYNAMICALLY off the rendered markup (same discipline the caption match already used)
+// rather than hand-copied constants, so a future geometry tweak can't silently desync this
+// oracle from what's actually drawn (the VALUE doctrine's own "read the value from its source"
+// rule) — the STALE version of this test (hardcoded `GATES.y + 5`, a rect box) is exactly the
+// failure this rewrite closes: it kept passing against geometry that no longer existed.
+test("#745 gate②: no checkpoint chip, at any rank up to the grid's capacity, intersects the CI/Review gate cluster (circle, label, or mode caption)", () => {
   const events: DomainEvent[] = [];
   for (let i = 1; i <= 6; i++) {
     events.push(ev("dispatched", { worker: `w${i}`, issue: i }));
@@ -1632,11 +1878,19 @@ test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any
   assert.ok(captionMatch, "the fixture must actually mount the Review gate's mode caption (the live shape under test)");
   const [, capXRaw, capYRaw] = captionMatch as unknown as [string, string, string];
 
+  const ciLabelMatch = html.match(/<text class="hero-node-label" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">CI<\/text>/);
+  assert.ok(ciLabelMatch, "the CI gate label must render");
+  const [, ciLabelXRaw, ciLabelYRaw] = ciLabelMatch as unknown as [string, string, string];
+
+  const reviewLabelMatch = html.match(/<text class="hero-node-label" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">Review<\/text>/);
+  assert.ok(reviewLabelMatch, "the Review gate label must render");
+  const [, reviewLabelXRaw, reviewLabelYRaw] = reviewLabelMatch as unknown as [string, string, string];
+
   const gateBoxes: { label: string; box: Box }[] = [
-    { label: "CI gate rect", box: { left: GATES.ci - 34, right: GATES.ci + 34, top: GATES.y - 20, bottom: GATES.y + 20 } },
-    { label: "CI gate label", box: textBox("CI", GATES.ci, GATES.y + 5, 12) },
-    { label: "Review gate rect", box: { left: GATES.review - 42, right: GATES.review + 42, top: GATES.y - 20, bottom: GATES.y + 20 } },
-    { label: "Review gate label", box: textBox("Review", GATES.review, GATES.y + 5, 12) },
+    { label: "CI gate circle", box: circleBox(GATES.ci, GATES.y, GATES.r) },
+    { label: "CI gate label", box: textBox("CI", Number(ciLabelXRaw), Number(ciLabelYRaw), 12) },
+    { label: "Review gate circle", box: circleBox(GATES.review, GATES.y, GATES.r) },
+    { label: "Review gate label", box: textBox("Review", Number(reviewLabelXRaw), Number(reviewLabelYRaw), 12) },
     { label: "Review gate mode caption (engine-agent)", box: textBox("engine-agent", Number(capXRaw), Number(capYRaw), 9) },
   ];
 
@@ -1647,9 +1901,9 @@ test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any
     checkpointBoxes.push({ label: `checkpoint #${d.issue} label`, box: textBox(`⤳ ${d.pr}`, x, y - 14, 10) });
   }
 
-  // Cross-product only — gate rect/label/caption overlapping EACH OTHER is by design (the
-  // caption and label are drawn inside/beside their own rect); what must never overlap is a
-  // checkpoint chip against any piece of the gate cluster.
+  // Cross-product only — gate circle/label/caption overlapping EACH OTHER is by design (the
+  // caption sits above the circle, the label below it — see `GATES`'s own doc); what must never
+  // overlap is a checkpoint chip against any piece of the gate cluster.
   for (const chip of checkpointBoxes) {
     for (const gate of gateBoxes) {
       assert.ok(
@@ -1664,15 +1918,18 @@ test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any
   // ink-level shave (`CAPTION_SAFE_ASCENT`'s own doc comment). `textBox()` cannot see that gap
   // by construction: it is font-metric/leading blindness in the oracle, not a defect in this
   // specific pair's geometry (this second pass re-checks the SAME ranks against the SAME
-  // cluster and stays green — the margin `CHECKPOINT_BASE_OFFSET`/`GATES.y+26` already carry is
-  // wide enough to absorb the refined ascent too). Re-run with `captionSafeTextBox` as the
-  // regression guard against a FUTURE geometry change that narrows this pair back down to
-  // something only the refined oracle would catch.
+  // cluster and stays green — the margin `GATES`'s own doc already carries is wide enough to
+  // absorb the refined ascent too). Re-run with `captionSafeTextBox` as the regression guard
+  // against a FUTURE geometry change that narrows this pair back down to something only the
+  // refined oracle would catch.
   const gateBoxesRefined: { label: string; box: Box }[] = [
-    { label: "CI gate rect", box: { left: GATES.ci - 34, right: GATES.ci + 34, top: GATES.y - 20, bottom: GATES.y + 20 } },
-    { label: "CI gate label", box: captionSafeTextBox("CI", GATES.ci, GATES.y + 5, GATE_NODE_LABEL_FONT_PX) },
-    { label: "Review gate rect", box: { left: GATES.review - 42, right: GATES.review + 42, top: GATES.y - 20, bottom: GATES.y + 20 } },
-    { label: "Review gate label", box: captionSafeTextBox("Review", GATES.review, GATES.y + 5, GATE_NODE_LABEL_FONT_PX) },
+    { label: "CI gate circle", box: circleBox(GATES.ci, GATES.y, GATES.r) },
+    { label: "CI gate label", box: captionSafeTextBox("CI", Number(ciLabelXRaw), Number(ciLabelYRaw), GATE_NODE_LABEL_FONT_PX) },
+    { label: "Review gate circle", box: circleBox(GATES.review, GATES.y, GATES.r) },
+    {
+      label: "Review gate label",
+      box: captionSafeTextBox("Review", Number(reviewLabelXRaw), Number(reviewLabelYRaw), GATE_NODE_LABEL_FONT_PX),
+    },
     {
       label: "Review gate mode caption (engine-agent)",
       box: captionSafeTextBox("engine-agent", Number(capXRaw), Number(capYRaw), CAPTION_FONT_PX, "middle"),
@@ -1688,6 +1945,66 @@ test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any
         !boxesOverlap(chip.box, gate.box),
         `${chip.label} ${JSON.stringify(chip.box)} overlaps ${gate.label} ${JSON.stringify(gate.box)} (refined ascent)`,
       );
+    }
+  }
+});
+
+// #897: the checkpoint cluster above ONLY exercises checkpoint chips against the gate cluster —
+// this asserts the NEEDS-HUMAN cluster (a DIFFERENT zone, below-and-right of the gates) clears
+// the gate cluster too, at its own documented draw cap (6, `NEEDS_HUMAN_DRAW_CAP`), with the
+// Review mode caption mounted (the live shape the relevant rank-5 math was computed against).
+// Dedicated fixture + oracle, not folded into the checkpoint test above, since the two clusters
+// occupy different geometry.
+test("#897 AC2: no needs-human droplet, at any rank up to the cluster's draw cap, intersects the CI/Review gate cluster (circle, label, or mode caption)", () => {
+  const events: DomainEvent[] = [];
+  for (let i = 1; i <= 6; i++) {
+    events.push(ev("dispatched", { worker: `w${i}`, issue: 200 + i }));
+    events.push(ev("reclaim-done", { worker: `w${i}`, issue: 200 + i, next: "DRIVING", pr: 9000 + i }));
+    events.push(ev("drive-needs-human", { worker: `w${i}`, issue: 200 + i, pr: 9000 + i }));
+  }
+  const { state } = run(events, 43);
+  const escalated = state.droplets.filter((d) => d.at === "needs-human");
+  assert.equal(escalated.length, 6, "exercise every rank up to NEEDS_HUMAN_DRAW_CAP (0..5), including the finding's own rank 5");
+
+  const html = markup(state, { lanesMax: 43, config: { reviewer: { mode: "engine-agent" } } });
+  const captionMatch = html.match(/class="hero-node-caption" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">engine-agent</);
+  assert.ok(captionMatch, "the fixture must actually mount the Review gate's mode caption (the live shape the finding computed against)");
+  const [, capXRaw, capYRaw] = captionMatch as unknown as [string, string, string];
+  const ciLabelMatch = html.match(/<text class="hero-node-label" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">CI<\/text>/);
+  assert.ok(ciLabelMatch);
+  const [, ciLabelXRaw, ciLabelYRaw] = ciLabelMatch as unknown as [string, string, string];
+  const reviewLabelMatch = html.match(/<text class="hero-node-label" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">Review<\/text>/);
+  assert.ok(reviewLabelMatch);
+  const [, reviewLabelXRaw, reviewLabelYRaw] = reviewLabelMatch as unknown as [string, string, string];
+
+  const gateBoxesRefined: { label: string; box: Box }[] = [
+    { label: "CI gate circle", box: circleBox(GATES.ci, GATES.y, GATES.r) },
+    { label: "CI gate label", box: captionSafeTextBox("CI", Number(ciLabelXRaw), Number(ciLabelYRaw), GATE_NODE_LABEL_FONT_PX) },
+    { label: "Review gate circle", box: circleBox(GATES.review, GATES.y, GATES.r) },
+    {
+      label: "Review gate label",
+      box: captionSafeTextBox("Review", Number(reviewLabelXRaw), Number(reviewLabelYRaw), GATE_NODE_LABEL_FONT_PX),
+    },
+    {
+      label: "Review gate mode caption (engine-agent)",
+      box: captionSafeTextBox("engine-agent", Number(capXRaw), Number(capYRaw), CAPTION_FONT_PX, "middle"),
+    },
+  ];
+
+  for (const d of escalated) {
+    const { x, y } = dropletPoint(state, d);
+    const label = d.pr === null ? `⊙ ${d.issue}` : `⤳ ${d.pr}`;
+    const needsHumanBoxes: { label: string; box: Box }[] = [
+      { label: `needs-human #${d.issue} circle`, box: circleBox(x, y, 9) },
+      { label: `needs-human #${d.issue} label`, box: captionSafeTextBox(label, x, y - 14, DROPLET_LABEL_FONT_PX) },
+    ];
+    for (const nh of needsHumanBoxes) {
+      for (const gate of gateBoxesRefined) {
+        assert.ok(
+          !boxesOverlap(nh.box, gate.box),
+          `${nh.label} ${JSON.stringify(nh.box)} overlaps ${gate.label} ${JSON.stringify(gate.box)}`,
+        );
+      }
     }
   }
 });
