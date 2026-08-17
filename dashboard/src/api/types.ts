@@ -75,6 +75,14 @@ export type LoopState = {
    *  own fail-closed gate on whether `POST /api/control` is even registered (an unreadable
    *  config reads as `false`, never the schema's `true` default). */
   controlsEnabled: boolean;
+  /** #894: the server's own dist build identity vs. the repo HEAD it currently serves from —
+   *  the stale-dist chip's data source. Either field `null` when unknown (no dist build yet, or
+   *  the server's repo dir isn't a git checkout) — never a guessed match/mismatch. */
+  build: {
+    distSha: string | null;
+    distTime: string | null;
+    repoHeadSha: string | null;
+  };
 };
 
 /** §3 Operations / §8: the exhaustive verb set `POST /api/control` accepts. `estop` joined once

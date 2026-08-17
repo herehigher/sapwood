@@ -1,33 +1,22 @@
-import type { CostBar, CostPanelData, RoundCostFooter } from "../cost-panel.ts";
+import type { CostBar as CostBarData, CostPanelData, RoundCostFooter } from "../cost-panel.ts";
 import { tickPositionPct } from "../cost-panel.ts";
+import { CostBar } from "./CostBar.tsx";
 
 export type { CostBar, CostPanelData } from "../cost-panel.ts";
 
-/** Hand-rolled SVG bar (frontend-design.md §3 E) — zero chart-library dependency, on purpose (§2
- *  dependency budget, `scaffold.test.ts`'s banned-package check). One `<rect>` fill over a faint
- *  track `<rect>`, plus an optional target-tick `<line>` shared across a group's bars. */
-function Bar({ bar, max, targetPct }: { bar: CostBar; max: number; targetPct: number | null }) {
-  const pct = max > 0 ? Math.min(100, (bar.usd / max) * 100) : 0;
+/** #890 (§3 E): the shared `<CostBar>` primitive — no per-module divergence — settled fill plus a
+ *  hatched est tail (`bar.estUsd`, #890, present only on the "today" panel's "Lanes" bar). */
+function Bar({ bar, max, targetPct }: { bar: CostBarData; max: number; targetPct: number | null }) {
   return (
     <li className="cost-bar-row">
       <span className="data muted cost-bar-label">{bar.label}</span>
-      <svg
-        viewBox="0 0 100 10"
-        preserveAspectRatio="none"
-        className="cost-bar"
-        role="img"
-        aria-label={`${bar.label}: $${bar.usd.toFixed(2)}`}
-      >
-        <rect x="0" y="0" width="100" height="10" fill="var(--bark)" opacity="0.25" />
-        <rect x="0" y="0" width={pct} height="10" fill="var(--sap)" />
-        {targetPct != null && <line x1={targetPct} y1="0" x2={targetPct} y2="10" className="cost-bar-target" />}
-      </svg>
+      <CostBar settledUsd={bar.usd} estUsd={bar.estUsd} max={max} targetPct={targetPct} label={bar.label} />
       <span className="data cost-bar-value">${bar.usd.toFixed(2)}</span>
     </li>
   );
 }
 
-function BarGroup({ title, bars, max, targetPct = null }: { title: string; bars: CostBar[]; max: number; targetPct?: number | null }) {
+function BarGroup({ title, bars, max, targetPct = null }: { title: string; bars: CostBarData[]; max: number; targetPct?: number | null }) {
   return (
     <div className="cost-panel-group">
       <h4 className="muted">{title}</h4>
@@ -54,7 +43,7 @@ function footerLine(footer: RoundCostFooter): string {
  *  shape, distinguished only by which optional fields are populated (`avgRoundUsd` for today,
  *  `closed`/`footer` for a round). */
 function CostPanel({ heading, closed, avgRoundUsd, stageBars, targetUsd, modelBars, footer }: CostPanelData) {
-  const stageMax = Math.max(0, ...stageBars.map((b) => b.usd), targetUsd ?? 0);
+  const stageMax = Math.max(0, ...stageBars.map((b) => b.usd + (b.estUsd ?? 0)), targetUsd ?? 0);
   const targetPct = targetUsd != null ? tickPositionPct(targetUsd, stageMax) : null;
   const modelMax = Math.max(0, ...modelBars.map((b) => b.usd));
   return (

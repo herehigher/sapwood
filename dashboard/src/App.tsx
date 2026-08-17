@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { fetchEvents } from "./api/client.ts";
 import { useDemoFixture, useEventHistory, useLoopState, useRounds, useSpendHistory } from "./api/queries.ts";
 import type { EventsPage, Round, SpendRow } from "./api/types.ts";
+import { BUILD_SHA, BUILD_TIME } from "./build-info.ts";
 import { ActivityFeed } from "./components/ActivityFeed.tsx";
 import { ConfigDrawer } from "./components/ConfigDrawer.tsx";
 import { Controls } from "./components/Controls.tsx";
@@ -23,6 +24,7 @@ import {
   buildTodayCostPanelFromBuckets,
   modelCostBars,
   roundsForDay,
+  sumEstCostUsd,
 } from "./cost-panel.ts";
 import { useDemoReplay } from "./demo/useDemoReplay.ts";
 import { type DomainEvent, toDomainEvent } from "./domain-event.ts";
@@ -49,6 +51,15 @@ import { loadRoundLog, type ReplayView, useReplay } from "./replay/useReplay.ts"
 export function resolveFixCap(config: Record<string, unknown> | null | undefined): number {
   const raw = config ? readConfigPath(config, "lanes.prFixCap") : undefined;
   return typeof raw === "number" && Number.isFinite(raw) ? raw : 2;
+}
+
+/** #890: `worker.budgetUsdSoft` (allowlisted config, `config-captions.ts`) — the lane card
+ *  bar's own ceiling, `LaneBoard.tsx`'s `laneCostBarMax`.
+ *  `null` (never a guessed number) when the config is unreadable, same honest-unknown posture
+ *  `resolveFixCap` above takes for `lanes.prFixCap`. */
+export function resolveWorkerBudgetUsdSoft(config: Record<string, unknown> | null | undefined): number | null {
+  const raw = config ? readConfigPath(config, "worker.budgetUsdSoft") : undefined;
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
 }
 
 /**
@@ -391,6 +402,9 @@ type AppViewModel = {
    *  output, present only in replay mode. `undefined` in live mode, where `spendFacts` alone
    *  drives the meter. */
   roundSpend: RoundSpend | undefined;
+  /** #890 (§3 E): the header meter's est tail — `sumEstCostUsd` over the live lanes, live mode
+   *  only (`undefined` in replay/demo, where no lane is actually running). */
+  estUsd: number | undefined;
 };
 
 /**
@@ -432,6 +446,7 @@ export function appContent(vm: AppViewModel) {
     activeOpenAttention,
     spendFacts,
     roundSpend,
+    estUsd,
   } = vm;
   const onInspect = (node: StageNode) => setInspectorNode(node);
   return (
@@ -453,6 +468,7 @@ export function appContent(vm: AppViewModel) {
             }
             spend={spendFacts}
             round={roundSpend}
+            estUsd={estUsd}
             parked={parked}
             rounds={rounds}
             selectedRoundId={replay.selectedRoundId}
@@ -537,6 +553,7 @@ export function appContent(vm: AppViewModel) {
               titles={activeTitles}
               repoUrl={repoUrl}
               disconnected={disconnected}
+              workerBudgetUsdSoft={resolveWorkerBudgetUsdSoft(loop.data?.config)}
             />
           </LiveOnly>
 
@@ -553,7 +570,15 @@ export function appContent(vm: AppViewModel) {
 
         {configOpen && (
           <LiveOnly mode={mode}>
-            <ConfigDrawer config={loop.data?.config ?? null} open onClose={() => setConfigOpen(false)} />
+            <ConfigDrawer
+              config={loop.data?.config ?? null}
+              open
+              onClose={() => setConfigOpen(false)}
+              buildSha={BUILD_SHA}
+              buildTime={BUILD_TIME}
+              distSha={loop.data?.build?.distSha ?? null}
+              repoHeadSha={loop.data?.build?.repoHeadSha ?? null}
+            />
           </LiveOnly>
         )}
 
@@ -657,7 +682,17 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
     const raw = loop.data?.config ? readConfigPath(loop.data.config, "cost.roundBudgetUsd") : undefined;
     return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
   })();
-  const costToday = buildTodayCostPanelFromBuckets(todayLog.buckets, todayModelBars, avgRoundCostUsd(todayRounds), roundBudgetUsdConfig);
+  // #890 (§3 E): the header meter's and the "Lanes" stage bar's shared est source — live lanes
+  // only (`mode === "replay"` has no live lane data to sum, same gate `Hero`'s own `lanes` prop
+  // above already applies).
+  const lanesEstUsd = mode === "live" ? sumEstCostUsd(loop.data?.lanes.items ?? []) : 0;
+  const costToday = buildTodayCostPanelFromBuckets(
+    todayLog.buckets,
+    todayModelBars,
+    avgRoundCostUsd(todayRounds),
+    roundBudgetUsdConfig,
+    lanesEstUsd,
+  );
 
   // #880: "COST · ROUND N" — a round explicitly selected in the navigator (replay mode) reads its
   // OWN full, never-cursor-truncated log (`replay.roundSpend`/`replay.phaseWindows` — see
@@ -723,6 +758,7 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
     activeOpenAttention,
     spendFacts: loop.data?.spend,
     roundSpend,
+    estUsd: mode === "live" ? lanesEstUsd : undefined,
   });
 }
 
@@ -846,6 +882,9 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
     activeOpenAttention,
     spendFacts: bundle?.loopState.spend,
     roundSpend,
+    // #890: demo mode is always "replay" (this function's own doc) — no live lane exists to sum
+    // an est from, same honest-absent posture `liveRoundId`/`inspectorEvents` above already take.
+    estUsd: undefined,
   });
 }
 

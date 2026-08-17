@@ -777,7 +777,7 @@ checklist item**):
 |---|---|
 | `dispatched` | Started work on issue #{issue} |
 | `dispatch-failed` | Couldn't start issue #{issue} — it's back in the backlog |
-| `reclaim-done` | Branches on `payload.next`: PR produced → "Lane {worker} opened a PR — now in review"; ended without a PR → "Lane {worker} ended without a PR — {reason, or "reason not recorded" — #881 payload gap, see below} · asks: review the lane's outcome and decide whether to retry" |
+| `reclaim-done` | Branches on `payload.next`: PR produced → "Lane {worker} opened a PR — now in review"; ended without a PR → "Lane {worker} ended without a PR — {reason, or "reason not recorded" — #881 payload gap, see below} · asks: review the lane's outcome and decide whether to retry". #890: either branch appends " · est $X → real $Y" when the payload carries `estCostUsd` (the lane's last live estimate) AND `costUsd` is known-real (`costEstimated === false`) — omitted whenever `estCostUsd` is absent or `costUsd`'s provenance is itself an estimate or unknown, never a fabricated "real". |
 | `reclaim-failed` | Lane {worker} hit a problem and stopped — {reason, or "reason not recorded"} · asks: investigate and decide whether to retry |
 | `reclaim-dead` | Lane {worker} went silent — cleaned up; its issue goes back to the backlog |
 | `handoff` | Lane {worker} reached its budget and saved its progress for a successor |

@@ -1,6 +1,7 @@
 import type { EngineState, Round } from "../api/types.ts";
 import { engineStateCaption } from "../copy.ts";
 import { formatUsd } from "../format.ts";
+import { CostBar } from "./CostBar.tsx";
 import { HintTooltip } from "./HintTooltip.tsx";
 import { RoundNavigator } from "./RoundNavigator.tsx";
 
@@ -50,20 +51,44 @@ export function resolveSpendMeter(spend: SpendFacts): SpendMeterView {
   return { tier: "daily", usedUsd: spend.todayUsd, budgetUsd: spend.dailyBudgetUsd };
 }
 
-function SpendMeter({ spend, round }: { spend: SpendFacts; round?: RoundSpend | undefined }) {
+/** #890 (§3 E): the capsule bar's own settled/est split, against the SAME `pct`/`warm` logic
+ *  `SpendMeter` already computed — the bar's `max` is the meter's own budget (the ceiling context
+ *  `header-dark.png` draws), never a second reference. `estUsd` is folded on top of the settled
+ *  figure, same as the "+ $x.xx est" text — a running lane's live estimate that hasn't settled
+ *  into the tier's own `usedUsd` yet. `null`/no-budget tiers render a zero-width bar (nothing to
+ *  measure a ceiling against), same honest-empty posture `pct` already had. */
+export function spendBarMax(view: SpendMeterView): number {
+  return view.budgetUsd ?? 0;
+}
+
+function SpendMeter({ spend, round, estUsd = 0 }: { spend: SpendFacts; round?: RoundSpend | undefined; estUsd?: number }) {
   const view: SpendMeterView = round ? { tier: "round", usedUsd: round.usedUsd, budgetUsd: round.budgetUsd } : resolveSpendMeter(spend);
   const usedLabel = view.usedUsd === null ? "—" : formatUsd(view.usedUsd);
   const budgetLabel = view.budgetUsd === null ? null : formatUsd(view.budgetUsd);
   const pct = view.usedUsd !== null && view.budgetUsd ? Math.min(100, (view.usedUsd / view.budgetUsd) * 100) : 0;
   const warm = view.budgetUsd !== null && pct >= 75;
   return (
+    // #890: `header-dark.png` places the capsule bar ABOVE the amount line — the bar is the
+    // reference element, the text annotates it, never the other way round. DOM order fixes
+    // visual order under the `.spend-meter` flex column (panels.css) without a second layout
+    // mechanism.
     <HintTooltip content={`${view.tier} spend`}>
       {/* biome-ignore lint/a11y/noNoninteractiveTabindex: this <div> is a Radix Tooltip trigger,
        *  not a bare non-interactive container — without tabIndex, Tab could never reach it at all
        *  (#892 AC1), and a <button>/<a> would misrepresent a read-only meter as actionable. */}
       <div className={warm ? "spend-meter spend-meter-warm" : "spend-meter"} tabIndex={0}>
+        {view.usedUsd !== null && (
+          <CostBar
+            className="spend-meter-bar"
+            settledUsd={view.usedUsd}
+            estUsd={estUsd}
+            max={spendBarMax(view)}
+            label={`${view.tier} spend`}
+          />
+        )}
         <span className="data spend-meter-value">
           {usedLabel}
+          {estUsd > 0 && ` + ${formatUsd(estUsd)} est`}
           {budgetLabel !== null && ` / ${budgetLabel}`}
         </span>
       </div>
@@ -101,6 +126,10 @@ export interface HeaderProps {
   onSelectRound?: (roundId: number | null) => void;
   /** The currently OPEN round's id in live mode — see `RoundNavigator`'s own doc. */
   liveRoundId?: number | null;
+  /** #890 (§3 E): the sum of every currently-running lane's live estimate
+   *  (`cost-panel.ts`'s `sumEstCostUsd`) — live mode only; `undefined` under replay/demo, where
+   *  no lane is actually running. Folded onto the meter's own tier as the hatched est tail. */
+  estUsd?: number | undefined;
   now?: Date;
 }
 
@@ -120,6 +149,7 @@ export function Header({
   selectedRoundId = null,
   onSelectRound = () => {},
   liveRoundId = null,
+  estUsd,
   now,
 }: HeaderProps) {
   if (disconnected) {
@@ -147,7 +177,7 @@ export function Header({
         engineState={engine.state}
         now={now}
       />
-      <SpendMeter spend={spend} round={round} />
+      <SpendMeter spend={spend} round={round} estUsd={estUsd ?? 0} />
     </div>
   );
 }

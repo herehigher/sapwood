@@ -9,7 +9,7 @@ import type { EngineState } from "../api/types.ts";
 // see this module's own doc for why. Replaces registerRealDom() (this file needs real focus
 // interaction now, not just a real `document` for getComputedStyle).
 import { unregisterRealDomEager } from "../test-dom-eager.ts";
-import { type EngineFacts, Header, resolveSpendMeter, showsPauseChip } from "./Header.tsx";
+import { type EngineFacts, Header, resolveSpendMeter, showsPauseChip, spendBarMax } from "./Header.tsx";
 
 test.after(() => unregisterRealDomEager());
 
@@ -181,6 +181,63 @@ test("the `round` prop wins outright over `spend` — renders the round figures,
   assert.match(html, /\$12\.50/);
   assert.match(html, /\$250/);
   assert.doesNotMatch(html, /999/, "the run/daily spend passed alongside round must never leak through");
+});
+
+// ── #890 (§3 E): the capsule bar — settled solid + hatched est tail, `header-dark.png` ─────────
+
+test("spendBarMax is the tier's own budget, 0 (no ceiling to measure against) when unset", () => {
+  assert.equal(spendBarMax({ tier: "daily", usedUsd: 10, budgetUsd: 100 }), 100);
+  assert.equal(spendBarMax({ tier: "daily", usedUsd: 10, budgetUsd: null }), 0);
+});
+
+test("the meter renders '$used + $est est / $budget' and the shared CostBar, matching header-dark.png's text line", () => {
+  const html = renderToStaticMarkup(
+    <Header
+      disconnected={false}
+      isPending={false}
+      engine={engine("running")}
+      spend={{ runUsd: 10.4, runBudgetUsd: 100, todayUsd: 999, dailyBudgetUsd: 999 }}
+      estUsd={2.2}
+      parked={false}
+    />,
+  );
+  assert.match(html, /\$10\.40 \+ \$2\.20 est \/ \$100\.00/);
+  assert.match(html, /class="cost-bar spend-meter-bar"/);
+});
+
+test("the est tail renders hatched — the shared cost-bar-est-hatch pattern, never a second hand-rolled texture", () => {
+  const html = renderToStaticMarkup(
+    <Header
+      disconnected={false}
+      isPending={false}
+      engine={engine("running")}
+      spend={{ runUsd: 10.4, runBudgetUsd: 100, todayUsd: 0, dailyBudgetUsd: 0 }}
+      estUsd={2.2}
+      parked={false}
+    />,
+  );
+  assert.match(html, /url\(#cost-bar-est-hatch\)/);
+});
+
+test("no estUsd (replay/demo, or a live snapshot with no running lane): no ' + est' text, no hatch segment", () => {
+  const html = renderToStaticMarkup(
+    <Header disconnected={false} isPending={false} engine={engine("running")} spend={SPEND_OK} parked={false} />,
+  );
+  assert.doesNotMatch(html, / est/);
+  assert.doesNotMatch(html, /url\(#cost-bar-est-hatch\)/);
+});
+
+test("a null usedUsd (a run tier with runBudgetUsd set but runUsd not yet computed) renders no bar at all, never a bar with a fabricated 0", () => {
+  const html = renderToStaticMarkup(
+    <Header
+      disconnected={false}
+      isPending={false}
+      engine={engine("running")}
+      spend={{ runUsd: null, runBudgetUsd: 100, todayUsd: 0, dailyBudgetUsd: null }}
+      parked={false}
+    />,
+  );
+  assert.doesNotMatch(html, /class="cost-bar/);
 });
 
 test("a null budgetUsd on `round` (artifact-less round) renders the used amount alone, no '/ $x' suffix", () => {

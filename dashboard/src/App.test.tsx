@@ -14,6 +14,7 @@ import {
   resolveInspectorArtifact,
   resolveInspectorRound,
   resolveRoundSpend,
+  resolveWorkerBudgetUsdSoft,
   toggleConfigOpen,
 } from "./App.tsx";
 import { demoFixtureQuery, eventsQuery, loopStateQuery, MAX_EVENT_HISTORY, roundsQuery, spendQuery } from "./api/queries.ts";
@@ -262,6 +263,15 @@ test("#716 gate② P1-3: resolveFixCap reads the nested lanes.prFixCap path, not
   assert.equal(resolveFixCap({ lanes: { prFixCap: "6" } }), 2, "a non-number value is never coerced");
 });
 
+test("#890: resolveWorkerBudgetUsdSoft reads the nested worker.budgetUsdSoft path, honest-null when unreadable", () => {
+  assert.equal(resolveWorkerBudgetUsdSoft({ worker: { budgetUsdSoft: 12 } }), 12);
+  assert.equal(resolveWorkerBudgetUsdSoft({ "worker.budgetUsdSoft": 12 }), null, "a flat dotted key must not match");
+  assert.equal(resolveWorkerBudgetUsdSoft(null), null);
+  assert.equal(resolveWorkerBudgetUsdSoft(undefined), null);
+  assert.equal(resolveWorkerBudgetUsdSoft({ worker: {} }), null);
+  assert.equal(resolveWorkerBudgetUsdSoft({ worker: { budgetUsdSoft: "12" } }), null, "a non-number value is never coerced");
+});
+
 // ── PR #900 gate② finding [1] (attention-strip-wiring-proof): #893's newly-mapped attention
 // kinds proven through the REAL production path — a raw wire event from `/api/events`, through
 // `useEventHistory`'s real `foldOpenAttention` fold, into `App`'s own `activeOpenAttention` prop
@@ -439,6 +449,119 @@ test("both queries succeeding renders the normal header, not disconnected", asyn
   });
   assert.doesNotMatch(html, /disconnected/);
   assert.match(html, />running</);
+});
+
+// #890 (§3 E): a running lane's engine-provided `estCostUsd`, through the REAL wire→`LiveApp`→
+// `sumEstCostUsd`→`<Header estUsd>`/`<CostStrip>` derivation — never a hand-assembled `estUsd`
+// prop. WIRING doctrine's data-flow sub-shape: mounted with a real prefetched/settled
+// `/api/loop/state` query, not `appContent` called directly with a constructed view model.
+test("#890: a live lane's estCostUsd flows through the real fetch pipeline into the header's est tail and the Lanes cost bar's hatch", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": {
+      status: 200,
+      body: {
+        ...LOOP_STATE_OK,
+        spend: { todayUsd: 10.4, dailyBudgetUsd: 100, runUsd: null, runBudgetUsd: null, byModel: [] },
+        lanes: {
+          max: 1,
+          items: [
+            {
+              lane: "w1",
+              issue: 90,
+              state: "running",
+              pr: null,
+              startedAt: "2026-08-14T00:00:00Z",
+              endedAt: null,
+              costUsd: null,
+              estCostUsd: 2.2,
+              contextTokens: null,
+              tokenComposition: null,
+            },
+          ],
+        },
+      },
+    },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  assert.match(html, /\$10\.40 \+ \$2\.20 est \/ \$100\.00/, "the header meter's est tail must read the lane's own live estimate");
+  // #890: a hatch fill-url ANYWHERE on the page is non-discriminating — Header's own est tail
+  // already guarantees one regardless of whether the cost panel's own `estUsd` wiring works.
+  // Scoping the check to the markup FROM the cost strip's own `id="cost"` anchor onward
+  // isolates CostStrip's own subtree — dropping
+  // `sumEstCostUsd`'s wiring into `buildTodayCostPanelFromBuckets` would leave THIS assertion red
+  // even though the header's own hatch (rendered earlier in the DOM) stays green.
+  const costSectionHtml = html.slice(html.indexOf('id="cost"'));
+  assert.match(
+    costSectionHtml,
+    /url\(#cost-bar-est-hatch\)/,
+    "the cost panel's own Lanes stage bar must render hatched, independent of the header's own bar",
+  );
+  // #890: the header/cost-panel assertions above prove `estCostUsd` reached THOSE two
+  // consumers, but AC2 is about the LANE CARD itself — this same fixture's lane must render
+  // its own "$2.20 est" text and its own hatched bar, isolated to the `aria-label="lanes"`
+  // subtree so this can't pass on the header's or cost panel's hatch alone.
+  const laneSectionHtml = html.slice(html.indexOf('aria-label="lanes"'), html.indexOf('id="cost"'));
+  assert.match(laneSectionHtml, /\$2\.20 est/, "the lane card's own settled/est text must read the lane's live estimate, not '—'");
+  assert.match(laneSectionHtml, /class="cost-bar lane-card-bar"/, "the lane card's own CostBar must render");
+  assert.match(
+    laneSectionHtml,
+    /url\(#cost-bar-est-hatch\)/,
+    "the lane card's own bar must render hatched, independent of the header's/cost panel's own bars",
+  );
+});
+
+// #890: a self-scaled `max` (settledUsd + estUsd) draws every positive lane spend as a
+// 100%-wide bar regardless of size, losing all budget context. Proven through the real fetch
+// pipeline: a lane settled at $2 against a configured `worker.budgetUsdSoft: 10` must draw a
+// 20%-wide solid fill, never 100%.
+test("#890: a lane's settled cost bar scales against worker.budgetUsdSoft, not itself — a small settled amount never draws a full-width bar", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": {
+      status: 200,
+      body: {
+        ...LOOP_STATE_OK,
+        config: { worker: { budgetUsdSoft: 10 } },
+        lanes: {
+          max: 1,
+          items: [
+            {
+              lane: "w1",
+              issue: 90,
+              state: "running",
+              pr: null,
+              startedAt: "2026-08-14T00:00:00Z",
+              endedAt: null,
+              costUsd: 2,
+              estCostUsd: null,
+              contextTokens: null,
+              tokenComposition: null,
+            },
+          ],
+        },
+      },
+    },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  const laneBarSvg = html.slice(
+    html.indexOf('class="cost-bar lane-card-bar"'),
+    html.indexOf("</svg>", html.indexOf('class="cost-bar lane-card-bar"')),
+  );
+  // The background TRACK rect is always width="100" (a fixed reference) — the settled FILL rect
+  // (`fill="var(--sap)"`) is the one that must scale against the configured ceiling.
+  assert.match(laneBarSvg, /width="20" height="10" fill="var\(--sap\)"/, "$2 against a $10 soft budget must draw a 20%-wide fill");
+  assert.doesNotMatch(
+    laneBarSvg,
+    /width="100" height="10" fill="var\(--sap\)"/,
+    "the settled fill must never self-scale to a full-width bar regardless of the real dollar amount",
+  );
+});
+
+test("#890: no running lane (LOOP_STATE_OK's own empty lanes.items) renders no est tail at all — never a fabricated one", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  assert.doesNotMatch(html, / est/);
 });
 
 // #723: AC12 operator probe — the header must render `standby` (with its calm caption and the
@@ -908,6 +1031,46 @@ test("#727 gate②: configOpen=true renders the SAME ConfigDrawer the rail gear 
   );
   assert.match(openHtml, /aria-label="config"/, "the exact #145 ConfigDrawer component renders once configOpen is true");
   assert.doesNotMatch(openHtml, /Config ▸/);
+});
+
+// #894 AC2 verification plan: "through the actual production data path — the dashboard server's
+// served payload ... consumed by the client component that renders the stale-dist chip". This
+// goes through the SAME real `/api/loop/state` fetch -> `useLoopState` -> `App` -> `ConfigDrawer`
+// wiring the tests above already proved opens the real component — never a synthetic prop handed
+// straight to `ConfigDrawer` (that path is `ConfigDrawer.test.tsx`'s job, proving the component's
+// own render logic in isolation). Two distinguishable real-shaped `build` payloads: matching
+// (chip absent) and diverging (chip present, naming both short SHAs).
+test("#894 AC2: through the real server-payload -> App -> ConfigDrawer path, the stale-dist chip is absent when the served build.distSha matches repoHeadSha", async () => {
+  const html = await renderSettledApp(
+    {
+      "/api/loop/state": {
+        status: 200,
+        body: { ...LOOP_STATE_OK, build: { distSha: "cccccccdist", distTime: "2026-08-17T09:00:00.000Z", repoHeadSha: "cccccccdist" } },
+      },
+      "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+    },
+    undefined,
+    true,
+  );
+  assert.match(html, /aria-label="config"/, "the real ConfigDrawer renders (configOpen=true)");
+  assert.doesNotMatch(html, /config-drawer-stale-chip/, "matching dist/repo SHAs — no false staleness claim");
+});
+
+test("#894 AC2: through the real server-payload -> App -> ConfigDrawer path, the stale-dist chip renders when the served build.distSha diverges from repoHeadSha", async () => {
+  const html = await renderSettledApp(
+    {
+      "/api/loop/state": {
+        status: 200,
+        body: { ...LOOP_STATE_OK, build: { distSha: "aaaaaaadist", distTime: "2026-08-17T07:00:00.000Z", repoHeadSha: "bbbbbbbhead" } },
+      },
+      "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+    },
+    undefined,
+    true,
+  );
+  assert.match(html, /aria-label="config"/, "the real ConfigDrawer renders (configOpen=true)");
+  assert.match(html, /config-drawer-stale-chip/, "the server's own served payload evidences a real divergence");
+  assert.match(html, /panel built at aaaaaaa, repo at bbbbbbb/);
 });
 
 // #727 gate② finding config-trigger-wiring-unexercised (round 2): the test above proves "IF
@@ -1512,6 +1675,7 @@ function demoBundleFixture(): DemoBundle {
       logPath: null,
       config: {},
       controlsEnabled: false,
+      build: { distSha: null, distTime: null, repoHeadSha: null },
     },
     rounds: [
       {

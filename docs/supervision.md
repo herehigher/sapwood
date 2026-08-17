@@ -390,6 +390,18 @@ Before ending a supervision session:
    the audit trail for *process* — this durable-knowledge doc is not where a single
    session's blow-by-blow belongs (see this repo's own `CLAUDE.md`, "Documentation
    principle").
+4. **Dashboard rebuild.** If this session merged any dashboard-touching PR, rebuild
+   before the next viewing (`npm run build -w dashboard`) and restart the running
+   `sapwood dashboard` process (stop it, then re-run `sapwood dashboard`) rather than
+   leaving the old one up. An in-place rebuild alone already reaches the build-identity
+   chip (#894) — the server rereads its dist statics per request and its build-meta
+   sidecar per poll, so it never needs a restart just to notice a fresher `dist/`.
+   Restart anyway: it's the only way to run this session's own server-code changes
+   (`server.ts`/`start.ts` — Node doesn't hot-reload a running process) and to cover a
+   deploy that repoints the `dist` symlink to a new target rather than overwriting it in
+   place (the server resolves its static root's real path once at startup, not per
+   request). The chip catches a stale *dist*, not stale server code or a re-pointed
+   symlink — restarting is still on the operator for those.
 
 ## Stop ritual
 

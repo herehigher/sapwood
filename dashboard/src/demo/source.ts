@@ -35,6 +35,10 @@ export const DEMO_SOURCE: DemoBundle = {
     // pairing (the tick sits inside the group's real max, visible mid-track on the empty stages).
     config: { board: { owner: "herehigher", repo: "sapwood" }, lanes: { prFixCap: 2 }, cost: { roundBudgetUsd: 15 } },
     controlsEnabled: false,
+    // #894: a recorded demo has no live server behind it to compare against — honestly unknown,
+    // same posture `logPath`'s real recording-machine path doesn't extend to (this fixture is
+    // replay-only, and ConfigDrawer never renders in replay mode — LiveOnly).
+    build: { distSha: null, distTime: null, repoHeadSha: null },
   },
   rounds: [
     {
