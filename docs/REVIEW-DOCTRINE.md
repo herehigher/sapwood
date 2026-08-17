@@ -180,17 +180,17 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   deliberately NOT guard-protected (docs/security.md) — this prose IS the enforcement.
 - **A tier-C cannot-confirm is not a producer stall signal, and it burns spend twice**
   (#791; #857, #862, #863; #865, #901, #902, #903; #911). `docs/security.md`'s evidence tiers
-  make tier-C (human-witnessed probe) evidence producer-unforgeable BY DESIGN — the producer
-  never self-executes or self-attests it, so a missing tier-C RECORD stays `cannot-confirm`
-  until the operator posts it. Unlabeled, the gap reads as a producer failure to
-  `review/convergence.ts` and any human; labeling changes what the finding SAYS, not what
-  `driveDecision` (`conductor.ts`) DOES — the gate stays `FIXABLE`, so a paid fix leg
-  dispatches, disputes, and escalates with nothing producer-actionable. Even once posted,
-  re-triggering review buys nothing either — `engine-agent.ts` reads the AC snapshot frozen at
-  DISPATCH time (`ac-snapshot.ts`, design #279 §5), never live comments or a re-fetched body, so
-  a comment or a pointer-only commit can never flip the verdict. #865 files an unimplemented fix
-  (a per-finding owner tag routing all-operator-owned verdicts to `ESCALATE`, mixed verdicts
-  keep `FIXUP`); until then, only a human merge decision reading the record closes the verdict.
+  make tier-C (human-witnessed probe) producer-unforgeable BY DESIGN — the producer never
+  self-executes or self-attests it, so a missing tier-C RECORD stays `cannot-confirm` until
+  posted. Name the gap operator-owned in the finding body — unlabeled, it reads as a producer
+  failure to `review/convergence.ts` and any human — the gate stays `FIXABLE` regardless: a
+  paid fix leg dispatches, disputes, and escalates with nothing producer-actionable.
+  `evaluate`/`buildPrompt` (`engine-agent.ts`) read only `getAcSnapshot`'s snapshot, never a
+  comment: a COMMENT-carried record can't reach a later review; a BODY-carried one can, via
+  `checkAcDriftBeforeDrive` flagging drift and gated re-entry's `buildAcSnapshot`
+  (`ac-snapshot.ts`)/`State.recordAcSnapshotAndReclaimWorker` re-snapshot. #865's unimplemented
+  fix routes an all-operator-owned verdict to `ESCALATE` (mixed: `FIXUP`); until then, closing
+  one needs a human merge decision reading the record, or (body-carried only) that rebaseline.
   Grounding: `docs/security.md`'s AC-evidence-tier doctrine, Decision #8.
 
 How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbatim principles):
