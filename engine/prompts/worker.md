@@ -88,9 +88,16 @@ Write code comments in `{{lang.codeComments}}` and any documentation you edit in
    the red tests pass. Resist scope creep: this issue, not adjacent cleanup.
 7. **Run the full test suite, not just your new tests.** Confirm nothing else broke.
    A change that passes its own tests but breaks the existing suite is not done.
-8. **Re-check against the verification plan.** Re-read the acceptance criteria from
-   the issue body and confirm your change actually satisfies each one — the same
-   check the reviewer will make at gate②.
+8. **Re-check against the verification plan AND the review doctrine above.** Re-read
+   the acceptance criteria from the issue body and confirm your change actually
+   satisfies each one. Then re-scan every test you wrote or changed against the
+   review-doctrine block's test-realism family (VALUE/DECISION/WIRING/STYLE/COVERAGE):
+   does each assertion prove the real thing the AC claims, not a copied constant, a
+   preset fake, an isolated unit, or a hand-typed partial set standing in for it? Is
+   any tier-C claim an actual human-witnessed record already on the issue, never
+   something you self-attest? This is the same doctrine the reviewer checks your PR
+   against at gate② — catch it here first, while it's still a rewrite instead of a
+   fix round.
 
 ## Finishing up
 
