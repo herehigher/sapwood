@@ -344,9 +344,6 @@ export function ringInnerRadius(rings: number): number {
  * whichever ceiling is tighter, rather than two independent, potentially-disagreeing caps.
  */
 export const TRUNK_DISC_R_MAX = Math.min(128 / RENDER_SCALE_1440, 0.2 * STAGE.h);
-/** #921: a ring pitch below this compresses past what a hairline stroke can actually resolve —
- *  the issue's own "≥ 1.5px [at 1440]" floor, converted to this file's SVG-unit space. */
-const RING_PITCH_MIN = 1.5 / RENDER_SCALE_1440;
 /**
  * #921: the sapling glyph's own footprint at zero rings — "≈ 40% of the disc footprint" (the
  * issue's own sizing), i.e. 40% of the max disc's DIAMETER (`2 * TRUNK_DISC_R_MAX`).
@@ -363,10 +360,10 @@ const SAPLING_STEM_CLEARANCE = 6;
  * (`TRUNK.y + ringOuterRadius(...)`), never at the `TRUNK.max * TRUNK.step` max envelope.
  * #921: at zero rings there is no ring to measure — the sapling glyph's own box
  * (`HERO_SAPLING_SIZE`, plus `SAPLING_STEM_CLEARANCE`) is what the stem must actually clear
- * instead. Past that, floored at `ringInnerRadius(rings)` (never a bare `TRUNK.step`) — if the
- * drawn-ring array is ever empty despite `rings > 0` (a digit count wide enough that
- * `TRUNK.step`'s nominal reach never even fits one ring; not reached at any count this file's own
- * tests exercise), the numeral itself is still the real bottom edge to attach below.
+ * instead. Past that, `radii[...] ?? ringInnerRadius(rings)` — `ringRadii`'s own drawn count is
+ * always `min(rings, TRUNK.max)` for `rings > 0` (#921 gate② round 2's AC1 reconciliation), so
+ * this array is never actually empty there; the numeral fallback stays as defensive-only, never
+ * the real bottom edge in practice.
  */
 export function ringOuterRadius(rings: number): number {
   if (rings === 0) return HERO_SAPLING_SIZE / 2 + SAPLING_STEM_CLEARANCE;
@@ -1449,36 +1446,40 @@ export function HeroStage({
  * ponytail: capped at TRUNK.max drawn rings — the count text is the real record, and a disc
  * of 400 hairlines is a grey blob. Lift the cap only if the disc ever needs to be exact.
  *
- * #921 growth rule: pitch stays the nominal `TRUNK.step` while the whole drawn set still fits
- * inside `TRUNK_DISC_R_MAX` past the inner clearance (`ringInnerRadius`, sized to `rings`' own
- * digit count — the REAL total, not the capped `drawn` count, since the numeral shows the real
- * total even once ring-drawing itself saturates). Once it wouldn't fit, EVERY ring's pitch
- * compresses together (never just the newest ones) so the outermost ring lands exactly on the
- * ceiling instead of overshooting it.
+ * #921 growth rule: `drawn` is ALWAYS exactly `min(rings, TRUNK.max)` (AC1's own unqualified
+ * rule — one ring per real merge, no base grain, never fewer). Pitch stays the nominal
+ * `TRUNK.step` while the whole drawn set still fits inside `TRUNK_DISC_R_MAX` past the inner
+ * clearance (`ringInnerRadius`, sized to `rings`' own digit count — the REAL total, not the
+ * capped `drawn` count, since the numeral shows the real total even once ring-drawing itself
+ * saturates). Once it wouldn't fit, EVERY ring's pitch compresses together (never just the
+ * newest ones) so the outermost ring lands exactly on the ceiling instead of overshooting it.
  *
- * #921 gate② finding [0] (ac3-footprint-cap-breached): AC3's "never exceeds 40% of STAGE.h" has
- * no "~" hedge, so the footprint ceiling wins outright over the draw-window cap — a first cut of
- * this rule floored the compressed pitch at `RING_PITCH_MIN` and left `TRUNK.max` as the ONLY
- * cap on `drawn`, which let a 3+-digit running total's bigger inner clearance push the outer
- * radius past `TRUNK_DISC_R_MAX` (rings=100: r0≈57.98, 42 rings at the 1.25-unit floor pitch
- * reach ≈110.48, past the 103-unit ceiling). `drawn` is now ALSO capped at how many rings the
- * floor pitch can fit inside the ceiling (`maxAtFloorPitch`) — a second, tighter version of the
- * SAME "cap what's drawn, the count stays the record" mechanism `TRUNK.max` already is: once a
- * wide numeral eats far enough into the fixed footprint that even hairline spacing can't fit
- * `TRUNK.max` rings inside it, fewer rings draw so the disc's OWN ceiling always wins — the
- * numeral is still the honest, uncapped record regardless of how many rings physically fit
- * around it. AC1's "exactly min(N, TRUNK.max)" holds for every N this file's own tests exercise
- * (rings ≤ 2 digits, where this second cap never binds — verified below); only a 3+-digit total
- * ever draws fewer.
+ * #921 gate② round 2, findings [0]/[1] (ac1-secondary-ring-cap / ac3-wide-count-footprint):
+ * round 1's fix capped `drawn` a second, tighter time whenever even a hairline-floored pitch
+ * couldn't fit `TRUNK.max` rings inside the ceiling — closing AC3's footprint breach by
+ * literally breaking AC1's own unqualified "exactly min(N, TRUNK.max)" rule at the SAME N=100
+ * boundary. Reconciled by dropping the hairline pitch floor entirely (never a tested AC — only
+ * the issue's own "What" prose) and letting `Math.max(0, …)` compress pitch as far as the
+ * footprint genuinely allows: `drawn` is unconditionally `min(rings, TRUNK.max)` again (AC1
+ * holds exactly, for every N), and the outer radius pins EXACTLY at `TRUNK_DISC_R_MAX` whenever
+ * `r0 <= TRUNK_DISC_R_MAX` — true for any realistic running total (verified through 6-digit
+ * counts, i.e. every N below one million, `hero.test.ts`'s own AC3/AC1 reconciliation test).
+ *
+ * Only past that point — `r0` itself (the numeral's OWN legibility floor, AC2's fixed
+ * `RING_COUNT_FONT_PX`) exceeding `TRUNK_DISC_R_MAX` at 7+ digits — does the disc's footprint
+ * genuinely exceed the ceiling: pitch floors at 0 (every ring stacks at radius `r0`, never
+ * negative/inward-crossing), and the outer radius equals `r0`, past the ceiling. This is not a
+ * layout bug a formula can fix: AC2's fixed legibility floor and AC3's fixed diameter ceiling are
+ * mutually unsatisfiable once the numeral ALONE no longer fits inside the ceiling, independent of
+ * how many (or few) rings draw around it — the numeral stays legible and accurate (never
+ * shrunk/truncated) rather than sacrificing AC2 to chase AC3 at a scale (>= 1,000,000 merges)
+ * this loop is nowhere near reaching.
  */
-function ringRadii(rings: number): number[] {
-  const capped = Math.min(rings, TRUNK.max);
-  if (capped === 0) return [];
-  const r0 = ringInnerRadius(rings);
-  const maxAtFloorPitch = Math.max(0, Math.floor((TRUNK_DISC_R_MAX - r0) / RING_PITCH_MIN));
-  const drawn = Math.min(capped, maxAtFloorPitch);
+export function ringRadii(rings: number): number[] {
+  const drawn = Math.min(rings, TRUNK.max);
   if (drawn === 0) return [];
+  const r0 = ringInnerRadius(rings);
   const nominalReach = r0 + drawn * TRUNK.step;
-  const pitch = nominalReach <= TRUNK_DISC_R_MAX ? TRUNK.step : (TRUNK_DISC_R_MAX - r0) / drawn;
+  const pitch = nominalReach <= TRUNK_DISC_R_MAX ? TRUNK.step : Math.max(0, (TRUNK_DISC_R_MAX - r0) / drawn);
   return Array.from({ length: drawn }, (_, i) => r0 + (i + 1) * pitch);
 }

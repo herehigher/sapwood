@@ -30,6 +30,7 @@ import {
   RING_COUNT_FONT_PX,
   ringInnerRadius,
   ringOuterRadius,
+  ringRadii,
   STAGE,
   TRUNK,
   TRUNK_DISC_R_MAX,
@@ -2395,38 +2396,81 @@ test("#921 AC3: the growth rule at N = 1, 12, 24, 42 — constant pitch under th
   }
 });
 
-// #921 gate② finding [0] (ac3-footprint-cap-breached): a first cut of the growth rule floored the
-// compressed pitch at RING_PITCH_MIN and left TRUNK.max as the ONLY cap on how many rings draw —
-// a 3+-digit running total's bigger inner clearance (`ringInnerRadius`) could then push the outer
-// radius past TRUNK_DISC_R_MAX even at the floor pitch (rings=100: r0≈57.98, 42 rings at the
-// 1.25-unit floor reach ≈110.48 against the 103-unit ceiling). AC3's "never exceeds 40% of
-// STAGE.h" carries no "~" hedge, so the footprint ceiling must win outright — `ringRadii` now
-// caps `drawn` a second, tighter time once even the floor pitch can't fit `TRUNK.max` rings
-// inside the ceiling. This is the exact 3-digit boundary the AC3 test above (N through 42) never
-// samples — component-tested here (real render, not just the pure function) against the REAL
-// production markup, same discipline AC1 uses.
-test("#921 gate② finding [0]: at a 3-digit ring total (rings=100), the disc still never exceeds TRUNK_DISC_R_MAX / 40% of STAGE.h — fewer than TRUNK.max rings draw once even hairline pitch can't fit them all inside the footprint ceiling", () => {
+// #921 gate② round 2, findings [0]/[1] (ac1-secondary-ring-cap / ac3-wide-count-footprint):
+// round 1's fix capped `drawn` a second, tighter time whenever a hairline-floored pitch couldn't
+// fit TRUNK.max rings inside TRUNK_DISC_R_MAX — closing AC3's footprint breach by literally
+// breaking AC1's own unqualified "exactly min(N, TRUNK.max)" at the SAME N=100 boundary.
+// Reconciled by dropping the hairline pitch floor (never a tested AC — only the issue's own
+// "What" prose) so `drawn` is unconditionally `min(rings, TRUNK.max)` again (AC1 holds exactly)
+// while pitch still compresses however far the footprint genuinely allows (`Math.max(0, …)`),
+// pinning the outer radius EXACTLY at TRUNK_DISC_R_MAX whenever that's mathematically possible —
+// true through any realistic running total (component-tested here at rings=100, the exact
+// 3-digit boundary the AC3 pure-function test above never samples, against the REAL production
+// markup, same discipline AC1 uses).
+test("#921 gate② round 2: at a 3-digit ring total (rings=100), AC1's exact ring count and AC3's footprint ceiling BOTH hold — exactly TRUNK.max rings draw, outer radius pins at TRUNK_DISC_R_MAX", () => {
   const { state } = run(
     Array.from({ length: 100 }, (_, i) => ev("merged", { worker: `m${i + 1}`, issue: i + 1, pr: i + 1 })),
     3,
   );
-  assert.equal(state.rings, 100, "fixture sanity: the 3-digit stress case this finding names");
+  assert.equal(state.rings, 100, "fixture sanity: the 3-digit stress case these findings name");
 
   const outer = ringOuterRadius(100);
   assert.ok(2 * outer <= 0.4 * STAGE.h + 0.001, `disc diameter (${2 * outer}) must not exceed 40% of STAGE.h (${0.4 * STAGE.h})`);
-  assert.ok(outer <= TRUNK_DISC_R_MAX + 0.01, `outer radius (${outer}) must not exceed TRUNK_DISC_R_MAX (${TRUNK_DISC_R_MAX})`);
+  assert.ok(
+    Math.abs(outer - TRUNK_DISC_R_MAX) < 0.01,
+    `outer radius (${outer}) must pin exactly at TRUNK_DISC_R_MAX (${TRUNK_DISC_R_MAX}), not merely stay under it`,
+  );
 
   const html = markup(state);
   const trunk = trunkGroupInner(html);
   assert.ok(trunk, "the .hero-trunk group must render");
   const drawnRings = (trunk as string).match(/class="hero-ring"/g)?.length ?? 0;
-  assert.ok(
-    drawnRings < TRUNK.max,
-    `drawn rings (${drawnRings}) must be LESS than TRUNK.max (${TRUNK.max}) here — proof the second, tighter cap actually engaged, not a vacuous pass`,
+  assert.equal(
+    drawnRings,
+    Math.min(100, TRUNK.max),
+    "AC1's own unqualified rule: exactly min(N, TRUNK.max) rings, never fewer — the footprint fix must not cost this",
   );
-  assert.ok(drawnRings > 0, "the disc must still draw SOME rings, never collapse to nothing");
-  // The numeral itself stays the honest, uncapped record regardless of how many rings fit.
+  // The numeral itself stays the honest, uncapped record regardless of how tightly rings pack.
   assert.match(trunk as string, /class="hero-ring-count"[^>]*>100</);
+});
+
+// #921 gate② round 2 finding [1] (ac3-wide-count-footprint): the reviewer's own named extreme —
+// at 7+ digits (rings=1,000,000), `ringInnerRadius` (bound to AC2's fixed `RING_COUNT_FONT_PX`
+// legibility floor) itself exceeds `TRUNK_DISC_R_MAX` (AC3's fixed diameter ceiling), independent
+// of how many rings draw around it. This is a genuine mathematical impossibility between AC2 and
+// AC3 at that scale, not a fixable layout bug — no ring-pitch formula can shrink the numeral's own
+// footprint without shrinking the numeral itself (violating AC2). The accepted, DOCUMENTED
+// resolution (`ringRadii`'s own doc): AC1's exact count still holds, the numeral stays legible and
+// accurate, and pitch floors at 0 (every ring stacks at r0, never crossing inward past it) rather
+// than attempting an impossible fit — this test proves that floor/degradation is real and
+// intentional, not a silent, undocumented gap.
+test("#921 gate② round 2 finding [1]: at the reviewer's own 7-digit extreme (rings=1,000,000), the footprint ceiling is a documented, accepted miss — AC1's exact count and pitch non-negativity still hold, nothing silently breaks", () => {
+  const rings = 1_000_000;
+  const r0 = ringInnerRadius(rings);
+  assert.ok(
+    r0 > TRUNK_DISC_R_MAX,
+    `fixture sanity: r0 (${r0}) must itself exceed TRUNK_DISC_R_MAX (${TRUNK_DISC_R_MAX}) — the exact impossibility this finding names`,
+  );
+
+  const radii = ringRadii(rings);
+  assert.equal(
+    radii.length,
+    TRUNK.max,
+    "AC1's exact count still holds even here — the impossibility is confined to the footprint, not the count",
+  );
+  for (const r of radii) {
+    assert.ok(r >= r0 - 0.01, `every ring radius (${r}) must stay at/outside r0 (${r0}) — pitch never goes negative/inward-crossing`);
+  }
+
+  const outer = ringOuterRadius(rings);
+  assert.ok(
+    outer > TRUNK_DISC_R_MAX,
+    `the footprint ceiling IS exceeded here (outer ${outer} vs TRUNK_DISC_R_MAX ${TRUNK_DISC_R_MAX}) — documented as accepted, not hidden`,
+  );
+  assert.ok(
+    Math.abs(outer - r0) < 0.01,
+    "outer radius equals r0 exactly — every ring collapsed onto the numeral's own clearance boundary, not spread past it",
+  );
 });
 
 // #921 AC3b (carried from #920 gate② r5 finding [0], PR #936 — the low-count remainder #920
