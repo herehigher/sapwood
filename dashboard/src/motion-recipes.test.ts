@@ -70,3 +70,32 @@ test("no bare millisecond duration on the touched dialog/drawer/legend component
     assert.doesNotMatch(rule, /\b\d+ms\b/, `${selector} must not introduce a bare ms duration`);
   }
 });
+
+// ── #892 AC5 (engine-agent audit run 7d33d9cd, finding [0] bare-tooltip-delay): a bare ms value
+// can hide in a JSX timing PROP just as easily as in a CSS rule (`HintTooltip`'s own
+// `delayDuration={300}` was exactly this — a literal Radix interprets as milliseconds, in a
+// component this issue touches, that the CSS-only checks above could never see). Extends the
+// same "no bare ms" guard to component SOURCE, not just CSS. ──────────────────────────────────
+
+const TOUCHED_COMPONENT_SOURCES = [
+  "./components/HintTooltip.tsx",
+  "./components/EntityRef.tsx",
+  "./components/NeedsAttention.tsx",
+  "./components/Header.tsx",
+  "./components/ConfigDrawer.tsx",
+  "./components/PhaseInspectorDrawer.tsx",
+  "./components/Controls.tsx",
+  "./hero/Legend.tsx",
+];
+
+test("#892 AC5: no bare millisecond timing prop (delay/duration) is introduced on the touched components", () => {
+  const bareTimingProp = /\b\w*(?:[Dd]elay|[Dd]uration)\w*=\{\s*\d+\s*\}/;
+  for (const file of TOUCHED_COMPONENT_SOURCES) {
+    const source = readFileSync(new URL(file, import.meta.url), "utf8");
+    assert.doesNotMatch(
+      source,
+      bareTimingProp,
+      `${file} must not pass a bare numeric delay/duration prop — drop the override and use the library's own default, or route it through a var(--beat)/var(--tap) CSS token instead`,
+    );
+  }
+});
