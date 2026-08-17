@@ -61,9 +61,8 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   probes running past a breached ceiling, and drains falsely clearing or permanently wedging a
   canary episode, were both misses of exactly this cross-product.)
 - **Unwired-function rule.** A shipped recovery/cleanup function with zero production callers is
-  a defect, not a reserve: verify every new cleanup, resume, or clear entry point has a live
-  caller on the path that needs it. (Recurring class: `supervisor.resume()` in #172,
-  `clearEscalationMarker()` in #168's first round.)
+  a defect: verify every new cleanup, resume, or clear entry point has a live caller on the path
+  that needs it. (`supervisor.resume()` #172, `clearEscalationMarker()` #168 round 1.)
 
 ### Is this test real?
 
@@ -145,14 +144,11 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
 ### Documentation claims
 
 - **Doc-claim grounding rule.** Ground every behavioral/guarantee claim in a doc change in the
-  exact function/branch it describes, not a plausible generalization from a partial read. A
-  fallible operation (delete, prune) is best-effort unless the code checks and reports the
-  outcome; a policy specific to one call path isn't generalized to every lane in that state when
-  another path (e.g. a human-merge-only exception) handles it differently. A documented procedure
-  or recipe is itself a claim: either it has actually been run, or it isn't asserted as working. A
-  docs-only PR has no test suite to catch a false claim the way code does, so name the exact
-  symbol/branch backing a claim rather than writing it from memory of "roughly how it works"
-  (#854, #700).
+  exact function/branch it describes, not a generalization from a partial read. A fallible
+  operation (delete, prune) is best-effort unless the code checks and reports the outcome; a
+  policy specific to one call path isn't generalized to every lane when another path (e.g.
+  human-merge-only) handles it differently. A documented procedure is itself a claim — it must
+  actually have been run, not asserted from memory of "roughly how it works" (#854, #700).
 
 ### Signal classification & escalation
 
@@ -172,25 +168,27 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   `dailyBudgetUsd`) contains a recurring miss there. Prefer narrow anyway, naming that outer-layer
   dependency explicitly rather than calling a miss self-bounded. State the residual blind spot
   honestly (a genuinely narrow gap, not zero) rather than claiming full coverage.
-- **Doctrine self-modification rule.** A PR that modifies this review-doctrine file itself must
-  be prominently flagged in review, with a recommendation to route it needs-human rather than
-  auto-merge. The reviewer applies the doctrine loaded at engine construction, never the version
-  on the PR's branch — the change cannot influence the doctrine used for its own review, but it
-  can still pass under the prior rules, so a human should confirm rule changes. This file is
-  deliberately NOT guard-protected (docs/security.md) — this prose IS the enforcement.
+- **Doctrine self-modification rule.** A PR touching this file must be prominently flagged,
+  recommending needs-human over auto-merge. The reviewer applies the doctrine loaded at engine
+  construction, never the branch's version — a change can't influence its own review, but it
+  could still pass under the prior rules, so a human should confirm rule changes. Deliberately
+  NOT guard-protected (docs/security.md) — this prose IS the enforcement.
 - **A tier-C cannot-confirm is not a producer stall signal, but it still burns a fix leg today**
-  (#791; #857, #862, #863; #865, #901, #902, #903). `docs/security.md`'s evidence tiers make
-  tier-C (human-witnessed probe) evidence producer-unforgeable BY DESIGN — the producer never
+  (#791; #857, #862, #863; #865, #901-903, #911). `docs/security.md`'s evidence tiers make tier-C
+  (human-witnessed probe) evidence producer-unforgeable BY DESIGN — the producer never
   self-executes or self-attests it. When a criterion's only remaining gap is a missing tier-C
-  RECORD, no fix round can close it; only the operator posting the record can, so it stays
-  `cannot-confirm` and the PR unmerged. Name the gap operator-owned in the finding body —
-  unlabeled, it reads as a producer failure to `review/convergence.ts` and to any human. That
-  labeling changes what the finding SAYS, not what `driveDecision` (`conductor.ts`) DOES: the gate
-  stays `FIXABLE`, so a paid leg still dispatches with nothing producer-actionable, disputes, and
+  RECORD, no fix round can close it. Name the gap operator-owned in the finding body — unlabeled,
+  it reads as a producer failure to `review/convergence.ts` and to any human. That labeling
+  changes what the finding SAYS, not what `driveDecision` (`conductor.ts`) DOES: the gate stays
+  `FIXABLE`, so a paid leg still dispatches with nothing producer-actionable, disputes, and
   escalates — spend that buys nothing either way the operator later rules. A structured
   per-finding owner tag routing an all-operator-owned verdict straight to `ESCALATE` (mixed
-  verdicts keep `FIXUP`) is #865's filed, unimplemented fix — not something the current schema
-  carries yet. Grounding: `docs/security.md`'s AC-evidence-tier doctrine, Decision #8.
+  verdicts keep `FIXUP`) is #865's filed, unimplemented fix. Posting the record does NOT make the
+  SAME lane's next review see it: `EngineAgentReviewer.evaluate()` reads `getAcSnapshot(issue)` —
+  the body frozen at DISPATCH (design #279 §5/§6), never a live re-fetch, by construction (a
+  producer holding `gh issue edit` must not move the AC goalposts mid-drive) — not even a
+  re-review-only commit. Closing it takes a human decision (merge call or fresh dispatch), never
+  another paid fix leg. Grounding: `docs/security.md`'s AC-evidence-tier doctrine, Decision #8.
 
 How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbatim principles):
 
