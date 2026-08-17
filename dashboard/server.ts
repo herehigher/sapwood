@@ -16,9 +16,12 @@
 // It deliberately imports the ENGINE's own State/config rather than re-querying SQLite itself:
 // §8 requires that `sapwood status` and the dashboard can never disagree about engine state, and
 // that only holds if both read through the same module.
+import { execFile } from "node:child_process";
 import { createReadStream, existsSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, join, resolve, sep } from "node:path";
+import { promisify } from "node:util";
 import { loadConfig, type SapwoodConfig } from "../engine/src/config/config.js";
 // #642: engine-state derivation, the config allowlist, and the paging cap moved to
 // engine/src/state/read-model.ts — the shared read-model module `sapwood status --json`/
@@ -182,6 +185,52 @@ export function loopState(state: State, cfg: SapwoodConfig | null, now: Date): R
   };
 }
 
+// ── build identity (#894) ───────────────────────────────────────────────────────────────────
+
+const pexecFile = promisify(execFile);
+
+export interface BuildFacts {
+  distSha: string | null;
+  distTime: string | null;
+  repoHeadSha: string | null;
+}
+
+/** `vite.config.ts`'s `sapwood-build-meta` plugin writes this sidecar alongside every real
+ *  build — read fresh on every call (not cached at server start) so a rebuild landing while this
+ *  server keeps running is reflected immediately, without a restart. Missing/malformed (no build
+ *  yet, or a build predating this feature) degrades to both fields `null` — never a 500, never a
+ *  guessed value. */
+async function readDistBuildMeta(staticRoot: string): Promise<{ sha: string | null; time: string | null }> {
+  try {
+    const parsed = JSON.parse(await readFile(join(staticRoot, "build-meta.json"), "utf8")) as { sha?: unknown; time?: unknown };
+    return { sha: typeof parsed.sha === "string" ? parsed.sha : null, time: typeof parsed.time === "string" ? parsed.time : null };
+  } catch {
+    return { sha: null, time: null };
+  }
+}
+
+/** The repo HEAD this server is running against, read live (never cached) for the same reason
+ *  `readDistBuildMeta` reads live — a `git pull`/merge landing must be reflected on the very next
+ *  poll. `null` (never thrown) when `repoDir` isn't a git checkout at all, or `git` itself is
+ *  unavailable — an honest unknown, same posture as every other best-effort field here. */
+async function repoHeadSha(repoDir: string): Promise<string | null> {
+  try {
+    const { stdout } = await pexecFile("git", ["-C", repoDir, "rev-parse", "HEAD"]);
+    return stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+/** §8-style honest facts, never a comparison verdict — `build-info.ts`'s `isDistStale` (the
+ *  freshness-comparison unit under its own direct test) is what turns these two into a
+ *  match/mismatch client-side, so the server stays a facts source, same posture `loopState`
+ *  already holds for `pauseActive`/`estopActive` vs. the derived `state` word. */
+async function resolveBuildFacts(staticRoot: string, repoDir: string): Promise<BuildFacts> {
+  const [dist, head] = await Promise.all([readDistBuildMeta(staticRoot), repoHeadSha(repoDir)]);
+  return { distSha: dist.sha, distTime: dist.time, repoHeadSha: head };
+}
+
 // ── routing ────────────────────────────────────────────────────────────────────────────────
 
 interface Reply {
@@ -193,6 +242,10 @@ interface Ctx {
   state: State;
   config: SapwoodConfig | null;
   now: () => Date;
+  /** #894: the resolved dist root / repo dir `resolveBuildFacts` reads — carried on `Ctx` rather
+   *  than a module-level constant so `server.test.ts` can point both at temp fixtures. */
+  staticRoot: string;
+  repoDir: string;
 }
 
 type Handler = (url: URL, ctx: Ctx, req: IncomingMessage) => Reply | Promise<Reply>;
@@ -324,7 +377,10 @@ function sameOrigin(origin: string, host: string | undefined): boolean {
 
 const ROUTES: Record<string, Partial<Record<string, Handler>>> = {
   "/api/loop/state": {
-    GET: (_url, ctx) => ({ status: 200, body: loopState(ctx.state, ctx.config, ctx.now()) }),
+    GET: async (_url, ctx) => ({
+      status: 200,
+      body: { ...loopState(ctx.state, ctx.config, ctx.now()), build: await resolveBuildFacts(ctx.staticRoot, ctx.repoDir) },
+    }),
   },
   "/api/events": {
     GET: (url, ctx) => pagedReply(url, "events", (a, l) => ctx.state.eventsPage(a, l)),
@@ -421,6 +477,9 @@ export interface DashboardServerOptions {
   port?: number;
   /** The vite build to serve; defaults to this package's own `dist`. */
   staticDir?: string;
+  /** #894: where `resolveBuildFacts` reads the live repo HEAD from; defaults to this package's
+   *  own repo root (`dashboard/..`) — the checkout this server's own dist was built from. */
+  repoDir?: string;
   now: () => Date;
 }
 
@@ -437,7 +496,6 @@ export async function createDashboardServer(opts: DashboardServerOptions): Promi
       config = null; // reported as null fields, never fatal — the DB read is the point
     }
   }
-  const ctx: Ctx = { state, config, now: opts.now };
   // Realpath'd ONCE here so every request compares a real path against a real root. Without it
   // the comparison is real-vs-lexical and breaks wherever an ancestor is itself a link (macOS
   // `/var` -> `/private/var`, a symlinked deploy dir). An unbuilt `dist` cannot be resolved yet;
@@ -449,6 +507,8 @@ export async function createDashboardServer(opts: DashboardServerOptions): Promi
   } catch {
     /* not built — every static request 404s, which is what "no build" should look like */
   }
+  const repoDir = resolve(opts.repoDir ?? join(import.meta.dirname, ".."));
+  const ctx: Ctx = { state, config, now: opts.now, staticRoot, repoDir };
 
   // The write route is REGISTERED per config, not hidden per config: with `dashboard.controls`
   // false there is no such route to POST at, which is what makes the spectator posture

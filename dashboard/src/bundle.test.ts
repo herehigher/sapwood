@@ -13,6 +13,12 @@ import { CREDENTIAL_PATTERNS, HOST_ABSOLUTE_PATH } from "./demo/export.ts";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const BANNED = /chart\.js|recharts|d3-|victory-|nivo|apexcharts|billboard\.js|highcharts/i;
 
+// #894: the real `git rev-parse HEAD` of THIS tree, computed the same way `vite.config.ts`'s
+// build-time `define` computes it — asserted against below, not hardcoded, so this test actually
+// pins "the embedded value equals the built tree's own SHA" rather than a copied constant that
+// could silently drift from it (docs/REVIEW-DOCTRINE.md's VALUE rule).
+const realHeadSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root }).toString().trim();
+
 // One real build, shared by every test below (#742: the `?demo` export step runs first, exactly
 // like `npm run build` — dashboard/package.json — chains it, so `dist/demo-fixture.json` exists by
 // the time `vite build` copies `public/` verbatim into `dist/`). A second `vite build` invocation
@@ -30,6 +36,26 @@ test("the built bundle carries no chart-library code", () => {
     const content = readFileSync(new URL(file, assetsDir), "utf8");
     assert.doesNotMatch(content, BANNED, `${file} appears to bundle a chart library`);
   }
+});
+
+// #894 build-injection test: the build step embeds THIS tree's real git SHA + a build timestamp
+// into the shipped bundle — checked against `realHeadSha` (computed independently above, not
+// copied), and also against the sidecar `dist/build-meta.json` `server.ts`'s freshness comparison
+// reads outside the JS bundle.
+test("#894: the built bundle embeds this tree's real git SHA + a build timestamp", () => {
+  const assetsDir = new URL("../dist/assets/", import.meta.url);
+  const files = readdirSync(assetsDir).filter((f) => f.endsWith(".js"));
+  const combined = files.map((f) => readFileSync(new URL(f, assetsDir), "utf8")).join("\n");
+  assert.match(combined, new RegExp(realHeadSha), "the built bundle must embed the exact SHA of the tree it was built from");
+  // The minifier may render string literals with either quote style — match the ISO-8601 shape
+  // itself rather than assuming a specific quote character.
+  assert.match(combined, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/, "an ISO-8601 build timestamp is embedded alongside the SHA");
+});
+
+test("#894: the build also writes a dist/build-meta.json sidecar with the same SHA — the fact server.ts's freshness comparison reads", () => {
+  const meta = JSON.parse(readFileSync(new URL("../dist/build-meta.json", import.meta.url), "utf8"));
+  assert.equal(meta.sha, realHeadSha);
+  assert.match(meta.time, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
 });
 
 // #742 Tier B: the automated post-build check — runs the REAL `?demo` export against the REAL

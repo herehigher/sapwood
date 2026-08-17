@@ -390,6 +390,13 @@ Before ending a supervision session:
    the audit trail for *process* — this durable-knowledge doc is not where a single
    session's blow-by-blow belongs (see this repo's own `CLAUDE.md`, "Documentation
    principle").
+4. **Dashboard rebuild.** If this session merged any dashboard-touching PR, rebuild
+   before the next viewing (`npm run build -w dashboard`) and restart the running
+   `sapwood dashboard` process (stop it, then re-run `sapwood dashboard`) rather than
+   leaving the old one up. A long-running server keeps serving the `dist/` it started
+   with until restarted — the build-identity chip (#894) makes a stale one visible on
+   screen instead of only discoverable by hashing dist files, but restarting is still on
+   the operator; the chip does not rebuild anything for you.
 
 ## Stop ritual
 

@@ -910,6 +910,46 @@ test("#727 gate②: configOpen=true renders the SAME ConfigDrawer the rail gear 
   assert.doesNotMatch(openHtml, /Config ▸/);
 });
 
+// #894 AC2 verification plan: "through the actual production data path — the dashboard server's
+// served payload ... consumed by the client component that renders the stale-dist chip". This
+// goes through the SAME real `/api/loop/state` fetch -> `useLoopState` -> `App` -> `ConfigDrawer`
+// wiring the tests above already proved opens the real component — never a synthetic prop handed
+// straight to `ConfigDrawer` (that path is `ConfigDrawer.test.tsx`'s job, proving the component's
+// own render logic in isolation). Two distinguishable real-shaped `build` payloads: matching
+// (chip absent) and diverging (chip present, naming both short SHAs).
+test("#894 AC2: through the real server-payload -> App -> ConfigDrawer path, the stale-dist chip is absent when the served build.distSha matches repoHeadSha", async () => {
+  const html = await renderSettledApp(
+    {
+      "/api/loop/state": {
+        status: 200,
+        body: { ...LOOP_STATE_OK, build: { distSha: "cccccccdist", distTime: "2026-08-17T09:00:00.000Z", repoHeadSha: "cccccccdist" } },
+      },
+      "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+    },
+    undefined,
+    true,
+  );
+  assert.match(html, /aria-label="config"/, "the real ConfigDrawer renders (configOpen=true)");
+  assert.doesNotMatch(html, /config-drawer-stale-chip/, "matching dist/repo SHAs — no false staleness claim");
+});
+
+test("#894 AC2: through the real server-payload -> App -> ConfigDrawer path, the stale-dist chip renders when the served build.distSha diverges from repoHeadSha", async () => {
+  const html = await renderSettledApp(
+    {
+      "/api/loop/state": {
+        status: 200,
+        body: { ...LOOP_STATE_OK, build: { distSha: "aaaaaaadist", distTime: "2026-08-17T07:00:00.000Z", repoHeadSha: "bbbbbbbhead" } },
+      },
+      "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+    },
+    undefined,
+    true,
+  );
+  assert.match(html, /aria-label="config"/, "the real ConfigDrawer renders (configOpen=true)");
+  assert.match(html, /config-drawer-stale-chip/, "the server's own served payload evidences a real divergence");
+  assert.match(html, /panel built at aaaaaaa, repo at bbbbbbb/);
+});
+
 // #727 gate② finding config-trigger-wiring-unexercised (round 2): the test above proves "IF
 // configOpen is true THEN ConfigDrawer renders" but never touches the gear's ACTUAL onClick — it
 // presets state directly. This closes that gap by driving the rail's REAL rendered gear (the
@@ -1512,6 +1552,7 @@ function demoBundleFixture(): DemoBundle {
       logPath: null,
       config: {},
       controlsEnabled: false,
+      build: { distSha: null, distTime: null, repoHeadSha: null },
     },
     rounds: [
       {
