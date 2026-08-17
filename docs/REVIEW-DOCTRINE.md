@@ -178,19 +178,20 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   on the PR's branch — the change cannot influence the doctrine used for its own review, but it
   can still pass under the prior rules, so a human should confirm rule changes. This file is
   deliberately NOT guard-protected (docs/security.md) — this prose IS the enforcement.
-- **A tier-C cannot-confirm is not a producer stall signal, but it still burns a fix leg today**
-  (#791; #857, #862, #863; #865, #901, #902, #903). `docs/security.md`'s evidence tiers make
-  tier-C (human-witnessed probe) evidence producer-unforgeable BY DESIGN — the producer never
-  self-executes or self-attests it. When a criterion's only remaining gap is a missing tier-C
-  RECORD, no fix round can close it; only the operator posting the record can, so it stays
-  `cannot-confirm` and the PR unmerged. Name the gap operator-owned in the finding body —
-  unlabeled, it reads as a producer failure to `review/convergence.ts` and to any human. That
-  labeling changes what the finding SAYS, not what `driveDecision` (`conductor.ts`) DOES: the gate
-  stays `FIXABLE`, so a paid leg still dispatches with nothing producer-actionable, disputes, and
-  escalates — spend that buys nothing either way the operator later rules. A structured
-  per-finding owner tag routing an all-operator-owned verdict straight to `ESCALATE` (mixed
-  verdicts keep `FIXUP`) is #865's filed, unimplemented fix — not something the current schema
-  carries yet. Grounding: `docs/security.md`'s AC-evidence-tier doctrine, Decision #8.
+- **A tier-C cannot-confirm is not a producer stall signal, and it burns spend twice**
+  (#791; #857, #862, #863; #865, #901, #902, #903; #911). `docs/security.md`'s evidence tiers
+  make tier-C (human-witnessed probe) producer-unforgeable BY DESIGN — the producer never
+  self-executes or self-attests it, so a missing tier-C RECORD stays `cannot-confirm` until
+  posted. Name the gap operator-owned in the finding body — unlabeled, it reads as a producer
+  failure to `review/convergence.ts` and any human — the gate stays `FIXABLE` regardless: a
+  paid fix leg dispatches, disputes, and escalates with nothing producer-actionable.
+  `evaluate`/`buildPrompt` (`engine-agent.ts`) read only `getAcSnapshot`'s snapshot, never a
+  comment: a COMMENT-carried record can't reach a later review; a BODY-carried one can, via
+  `checkAcDriftBeforeDrive` flagging drift and gated re-entry's `buildAcSnapshot`
+  (`ac-snapshot.ts`)/`State.recordAcSnapshotAndReclaimWorker` re-snapshot. #865's unimplemented
+  fix routes an all-operator-owned verdict to `ESCALATE` (mixed: `FIXUP`); until then, closing
+  one needs a human merge decision reading the record, or (body-carried only) that rebaseline.
+  Grounding: `docs/security.md`'s AC-evidence-tier doctrine, Decision #8.
 
 How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbatim principles):
 
@@ -203,10 +204,10 @@ How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbati
 3. **A reviewer's angle can be wrong.** Divergence between the reviewer's read and the author's
    is signal for adjudication, not automatic compliance — weigh it, don't just apply it.
 4. **Runaway complexity escalates to the top of the loop, not more patches.** When a feature's
-   implementation effort turns counterintuitive or runaway-complex, re-examine the feature's
-   design/technical direction (architect/plan re-review) instead of grinding through more fix
-   rounds. The nearest mechanism today is the fix-round cap escalating to a human — but the
-   doctrine names DESIGN RE-ENTRY, not just human escalation, as the intended response.
+   implementation effort turns counterintuitive or runaway-complex, re-examine its design/
+   technical direction (architect/plan re-review) instead of grinding through more fix rounds —
+   the doctrine names DESIGN RE-ENTRY, not just the fix-round cap's human escalation, as the
+   intended response.
 
 ## Prompt architecture doctrine (#699)
 
