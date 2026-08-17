@@ -106,7 +106,8 @@ export function useDemoReplay(bundle: DemoBundle | undefined, lanesMax: number |
     dispatch({ type: "play" });
   };
 
-  const spendThroughCursor = log && position ? spendThroughTs(log.spend, cursorTs(position, log.events, log.round.startedAt)) : [];
+  const asOf = log && position ? cursorTs(position, log.events, log.round.startedAt) : null;
+  const spendThroughCursor = log && asOf !== null ? spendThroughTs(log.spend, asOf) : [];
 
   return {
     mode: selectedRoundId === null ? "live" : "replay",
@@ -132,5 +133,6 @@ export function useDemoReplay(bundle: DemoBundle | undefined, lanesMax: number |
     // that field's doc for why the ROUND N cost panel needs the round's FULL spend, not
     // `spendThroughCursor`.
     roundSpend: log?.spend ?? [],
+    asOf,
   };
 }

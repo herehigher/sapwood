@@ -7,7 +7,7 @@
  * because the stage already drew the new state — the timelines only narrate the difference.
  */
 
-import { createTimeline, utils } from "animejs";
+import { createTimeline, cubicBezier, utils } from "animejs";
 import { useEffect, useRef, useState } from "react";
 import type { EngineState } from "../api/types.ts";
 import type { DomainEvent } from "../domain-event.ts";
@@ -22,7 +22,12 @@ import { HeroStage } from "./stage.tsx";
 import type { FoldStep, HeroState } from "./state.ts";
 import { isStageDimmed, withLanePrs } from "./state.ts";
 
-const EASE = "cubicBezier(.3,.7,.3,1)";
+// #895 item 2: anime.js v4 dropped the string easing syntax — passing it through still "works"
+// (falls back silently) but prints a console warning per resolved property and never actually
+// applies the §5 easing token. The imported-function form is the only v4 form that both applies
+// the curve and stays warning-free. Exported so a test can assert this exact curve is what
+// `createTimeline`'s `defaults.ease` actually carries.
+export const EASE = cubicBezier(0.3, 0.7, 0.3, 1);
 
 type Timeline = ReturnType<typeof createTimeline>;
 
@@ -62,6 +67,13 @@ export type HeroProps = {
    *  its own doc for why the hero tally/aria-label and the needs-attention strip must read this
    *  SAME fold rather than two independently-derived counts. */
   openAttention?: readonly DomainEvent[] | undefined;
+  /** #895 item 1: the caller's own honest clock for the staleness caption — threaded straight to
+   *  `HeroStage`'s own `now` prop (which already defaults to the real clock when this is absent).
+   *  `App.tsx` passes the live wall clock in live mode, but the REPLAY CURSOR's own timestamp
+   *  while replaying — without this, `HeroStage` fell back to `new Date()` even mid-replay, so a
+   *  multi-day-old replayed round's staleness caption compared a historical event against the
+   *  real live clock instead of the "as-of" instant the rest of the replayed view honors. */
+  now?: Date | undefined;
 };
 
 export function Hero({
@@ -77,6 +89,7 @@ export function Hero({
   config = null,
   onInspect,
   openAttention,
+  now,
 }: HeroProps) {
   const reducedMotion = useReducedMotion();
   const svgRef = useRef<SVGSVGElement>(null);
@@ -120,6 +133,7 @@ export function Hero({
       mergedPrs={mergedPrs}
       onInspect={onInspect}
       openAttention={openAttention}
+      now={now}
     />
   );
 }

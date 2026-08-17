@@ -90,6 +90,9 @@ function minimalAppViewModel(
     // #891 gate① engine-agent finding [2]: distinguishable from the default `[]` so a test can
     // prove `appContent` threads this SAME array to both `<Hero>` and `<NeedsAttention>`.
     activeOpenAttention?: DomainEvent[];
+    // #895 item 1: the replay cursor's own timestamp — `null` (live/no round loaded) unless a
+    // test explicitly sets it to prove the hero's staleness caption rebases against it.
+    asOf?: string | null;
   } = {},
 ) {
   return {
@@ -132,6 +135,8 @@ function minimalAppViewModel(
       spendThroughCursor: [],
       phaseWindows: [],
       roundEvents: overrides.roundEvents ?? [],
+      roundSpend: [],
+      asOf: overrides.asOf ?? null,
     },
     activeHero: overrides.activeHero ?? initialHeroState(null),
     activeSteps: [],
@@ -1289,6 +1294,28 @@ test("#766 gate② finding [2]: neither LaneBoard's nor ConfigDrawer's own rende
   const html = renderToStaticMarkup(appContent(vm));
   assert.doesNotMatch(html, /aria-label="lanes"/, "LaneBoard's own aria-label must not render while replaying");
   assert.doesNotMatch(html, /aria-label="config"/, "ConfigDrawer's own aria-label must not render while replaying");
+});
+
+// ── #895 item 1: the hero's staleness caption rebases against the replay cursor, never the live
+// wall clock — WIRING sub-case: `hero.test.ts` proves `HeroStage`'s own `now` prop drives the
+// caption in isolation, this proves App's REAL tree threads the replay cursor's own timestamp
+// into it while replaying, rather than always falling back to `appContent`'s own `clock`.
+
+test("#895 item 1: while replaying, the hero's staleness caption reads the replay cursor's own 'as of' timestamp, not appContent's live wall clock", () => {
+  const activeHero: HeroState = { ...initialHeroState(null), lastEventTs: "2019-12-31T23:59:50Z" };
+  const vm = minimalAppViewModel({
+    mode: "replay",
+    loop: { data: LOOP_STATE_OK, isPending: false },
+    activeHero,
+    asOf: "2019-12-31T23:59:55Z",
+  });
+  const html = renderToStaticMarkup(appContent(vm));
+  assert.match(
+    html,
+    /last event 5s ago/,
+    "staleness must rebase against the replay cursor's own 'as of' timestamp, not appContent's own wall-clock `clock` (2026-01-01, years later)",
+  );
+  assert.doesNotMatch(html, /last event \d+d ago/, "the live wall clock must never leak into a replayed staleness reading");
 });
 
 // ── #803: App's REAL wiring of `/api/loop/state`'s `mergedPrs` into the hero tally ────────────
