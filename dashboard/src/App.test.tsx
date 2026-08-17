@@ -2888,7 +2888,9 @@ function fullCoverageViewModel() {
       avgRoundUsd: 4.8,
       stageBars,
       targetUsd: 5,
-      modelBars: [{ label: "opus", usd: 7.8 }],
+      // #924 gate② PO item 2's own observed boundary case: a by-model label longer than the
+      // 7em floor ("claude-sonnet-5") — the exact shape that wrapped under the fixed-width column.
+      modelBars: [{ label: "claude-sonnet-5", usd: 7.8 }],
       footer: null,
     },
     costRound: {
@@ -2905,8 +2907,15 @@ function fullCoverageViewModel() {
 /** Mounts the FULL production cascade (tokens → panels → hero → app, `app.css`'s own `@import`
  *  order) plus a real `appContent` tree into a real DOM container — AC1/AC2/AC3's own "derived
  *  from the rendered App" requirement, the STYLE doctrine family (`registerRealDom()` + a real
- *  `getComputedStyle` read, never a regex on source text for a cascade-dependent claim). */
+ *  `getComputedStyle` read, never a regex on source text for a cascade-dependent claim). #924
+ *  gate② finding [0]: AC1 is explicitly scoped to "at 1440" — happy-dom's default viewport is
+ *  narrower, which silently changes which rules win wherever a width-scoped `@media` rule exists
+ *  (app.css's own 720px stacking floor). `window.happyDOM.setViewport` (the SAME mechanism
+ *  `hero.test.ts`/`Controls.test.tsx` already use for their own width-scoped assertions) forces it
+ *  BEFORE the tree mounts, not after — a media query's effect on initial layout/class application
+ *  can depend on the width at mount time, not just at the moment a later assertion reads it. */
 async function mountAppWithCascade(vm: Parameters<typeof appContent>[0]) {
+  (window as unknown as { happyDOM: { setViewport: (v: { width: number }) => void } }).happyDOM.setViewport({ width: 1440 });
   const style = document.createElement("style");
   style.textContent = `${tokensCss924}\n${panelsCss924}\n${heroCss924}\n${appCss924}`;
   document.head.appendChild(style);
@@ -2930,19 +2939,37 @@ async function mountAppWithCascade(vm: Parameters<typeof appContent>[0]) {
   return { container, cleanup };
 }
 
-/** Every `.panel-head` element the derived set requires, keyed by the head's OWN title text —
- *  every module in AC1's set renders a distinct one ("loop", "needs attention", "lanes",
- *  "activity", "cost · today", "cost · round 9"), including the cost strip's two panels, which
- *  share an outer `aria-label="cost"` ancestor and so can't be told apart by that alone.
- *  COVERAGE (doctrine): read off the rendered tree, never a hand count. */
-function panelHeadsByModule(container: HTMLElement): Record<string, Element> {
-  const out: Record<string, Element> = {};
+/**
+ * Every `.panel-head` element the derived set requires, keyed by the head's OWN title text —
+ * every module in AC1's set renders a distinct one ("loop", "needs attention", "lanes",
+ * "activity", "cost · today", "cost · round 9"), including the cost strip's two panels, which
+ * share an outer `aria-label="cost"` ancestor and so can't be told apart by that alone.
+ * COVERAGE (doctrine): read off the rendered tree, never a hand count.
+ *
+ * #924 gate② finding [0]: returns `Element[]` per key, NEVER collapsing same-titled heads onto
+ * one another the way an overwriting `Record<string, Element>` would — a regression that rendered
+ * a head TWICE (or renamed one module's title to collide with another's) would silently vanish
+ * behind "some entry exists for this key" instead of failing the exact-one-per-key check callers
+ * now make explicit.
+ */
+function panelHeadsByModule(container: HTMLElement): Record<string, Element[]> {
+  const out: Record<string, Element[]> = {};
   for (const el of container.querySelectorAll(".panel-head")) {
     const title = el.querySelector("h1, h2, h3");
     const key = title?.textContent?.trim().toLowerCase() ?? "unknown";
-    out[key] = el;
+    if (!out[key]) out[key] = [];
+    out[key]!.push(el);
   }
   return out;
+}
+
+/** Asserts `key` has EXACTLY one `.panel-head` and returns it — the single call site every AC1
+ *  test below uses, so "exactly one, not merely present" is checked uniformly rather than
+ *  re-derived per test. */
+function theOnlyPanelHead(heads: Record<string, Element[]>, key: string): Element {
+  const matches = heads[key] ?? [];
+  assert.equal(matches.length, 1, `expected exactly one .panel-head for "${key}"; found ${matches.length}`);
+  return matches[0]!;
 }
 
 test("AC1: every module in the derived set (hero, needs-attention, lanes, activity, cost×2) renders exactly one .panel-head", async () => {
@@ -2950,28 +2977,39 @@ test("AC1: every module in the derived set (hero, needs-attention, lanes, activi
   try {
     const heads = panelHeadsByModule(container);
     for (const key of ["loop", "needs attention", "lanes", "activity", "cost · today", "cost · round 9"]) {
-      assert.ok(key in heads, `expected a .panel-head for "${key}"; got: ${Object.keys(heads).join(", ")}`);
+      theOnlyPanelHead(heads, key);
     }
   } finally {
     await cleanup();
   }
 });
 
-test("AC1: every panel-head title resolves Fraunces/uppercase/letter-spacing >= 0.06em-equivalent, and the head's own border-bottom-width is 1px", async () => {
+const DERIVED_MODULE_HEADS = ["loop", "needs attention", "lanes", "activity", "cost · today", "cost · round 9"];
+
+// #924 gate② PO item 3: the first pass shipped a 16px title (--text-1) at a bare 1px
+// letter-spacing — measured on the mockup crops at roughly 18px cap-height / ~0.1em tracking,
+// far past this AC's own 0.06em floor. Asserting the EXACT corrected target (not just ">= floor")
+// pins the fix in place, not just "still legal."
+const TITLE_FONT_PX = 26; // --text-3 (tokens.css)
+const TITLE_LETTER_SPACING_PX = 2.2; // ~0.085em at 26px
+
+test("AC1: every panel-head title resolves Fraunces/uppercase, the mockup-scale 26px/2.2px-tracking size (not the undersized first pass), and the head's own border-bottom-width is 1px", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   try {
     const heads = panelHeadsByModule(container);
-    for (const [key, head] of Object.entries(heads)) {
+    for (const key of DERIVED_MODULE_HEADS) {
+      const head = theOnlyPanelHead(heads, key);
       const title = head.querySelector("h1, h2, h3");
       assert.ok(title, `"${key}"'s .panel-head must carry a title element`);
       const titleComputed = getComputedStyle(title as Element);
       assert.match(titleComputed.fontFamily, /Fraunces/, `"${key}" title font-family`);
       assert.equal(titleComputed.textTransform, "uppercase", `"${key}" title text-transform`);
-      const fontSize = Number.parseFloat(titleComputed.fontSize);
+      assert.equal(titleComputed.fontSize, `${TITLE_FONT_PX}px`, `"${key}" title font-size`);
       const letterSpacing = Number.parseFloat(titleComputed.letterSpacing);
+      assert.equal(letterSpacing, TITLE_LETTER_SPACING_PX, `"${key}" title letter-spacing`);
       assert.ok(
-        letterSpacing >= fontSize * 0.06,
-        `"${key}" title letter-spacing ${letterSpacing}px must be >= 0.06em (${fontSize * 0.06}px at ${fontSize}px)`,
+        letterSpacing >= TITLE_FONT_PX * 0.06,
+        `"${key}" title letter-spacing ${letterSpacing}px must clear the AC's own 0.06em floor (${TITLE_FONT_PX * 0.06}px at ${TITLE_FONT_PX}px)`,
       );
       const headComputed = getComputedStyle(head);
       assert.equal(headComputed.borderBottomWidth, "1px", `"${key}" .panel-head border-bottom-width`);
@@ -2986,9 +3024,8 @@ test("AC1: where a panel-head carries a stat cluster, it is the head's last chil
   try {
     const heads = panelHeadsByModule(container);
     for (const key of ["needs attention", "lanes", "cost · today"]) {
-      const head = heads[key];
-      assert.ok(head, `"${key}" must render a .panel-head`);
-      const lastChild = head!.lastElementChild;
+      const head = theOnlyPanelHead(heads, key);
+      const lastChild = head.lastElementChild;
       assert.ok(lastChild?.classList.contains("panel-head-stat"), `"${key}"'s .panel-head last child must carry .panel-head-stat`);
       assert.equal(getComputedStyle(lastChild as Element).marginLeft, "auto", `"${key}" stat cluster margin-left`);
     }
@@ -3013,41 +3050,143 @@ test("AC2: .cost-bar-target stroke resolves to the real --sap-text colour, and .
   }
 });
 
-test("AC2: .cost-bar-row's label column is >= 7em, read from panels.css's own declared grid-template-columns", () => {
+/**
+ * #924 gate② finding [1]: `CostBar.tsx`'s track/fill/tick geometry (height="1", height="6", a
+ * tick spanning y1=1..y2=11) is set in the SVG's own LOCAL user-unit space (viewBox="0 0 100 12")
+ * — with `preserveAspectRatio="none"`, those numbers only equal real rendered CSS pixels when the
+ * `<svg>`'s own CSS height ALSO equals 12; any other CSS height non-uniformly rescales the Y axis
+ * (the finding's own numbers: a 10px container rendered the "1px" track at ~0.83px). happy-dom has
+ * no real layout engine — `getBoundingClientRect()` on an SVG shape returns all-zero regardless of
+ * its attributes (verified directly; also documented in `docs/dev-guide/07-dashboard.md`'s "DOM-
+ * free by default" posture) — so the RENDERED pixel size of an SVG shape's geometry ATTRIBUTE
+ * cannot be read directly in this harness. What CAN be read is the outer `<svg>` element's own
+ * CSS `height` (a plain box property, unaffected by that gap) — asserting it equals the SAME
+ * viewBox height CostBar.tsx declares (read from the rendered markup, never hand-copied) is the
+ * exact condition that makes the scale factor 1 and therefore makes CostBar.test.tsx's own
+ * attribute-value assertions (track height="1", fill height="6" >= 6, tick taller than the fill)
+ * equal to real rendered pixels too — combined, these two facts are the achievable ceiling this
+ * harness allows for proving the bug is fixed, for every production bar context at once.
+ */
+test("AC2 gate② finding [1]: every hairline-bar instance's own CSS height matches its SVG viewBox height exactly — the fix for the preserveAspectRatio scale-distortion bug", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const bars = [...container.querySelectorAll("svg.cost-bar")];
+    // COVERAGE: every production bar context this fixture renders — a cost-panel bar (multiple:
+    // by-stage/by-model, today AND round), the lane card's own bar, and the header spend-meter's
+    // bar — never a hand-picked subset.
+    const contexts = new Set(bars.map((b) => b.getAttribute("class")));
+    for (const required of ["cost-bar", "cost-bar lane-card-bar", "cost-bar spend-meter-bar"]) {
+      assert.ok(contexts.has(required), `expected a rendered "${required}" bar; got classes: ${[...contexts].join(", ")}`);
+    }
+    for (const bar of bars) {
+      const viewBox = bar.getAttribute("viewBox");
+      assert.ok(viewBox, "every bar must declare its own viewBox");
+      const viewBoxHeight = Number(viewBox!.trim().split(/\s+/)[3]);
+      const cssHeight = getComputedStyle(bar as Element).height;
+      assert.equal(
+        cssHeight,
+        `${viewBoxHeight}px`,
+        `"${bar.getAttribute("class")}" CSS height (${cssHeight}) must equal its own viewBox height (${viewBoxHeight}px) — any mismatch re-introduces the non-uniform preserveAspectRatio scale distortion`,
+      );
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+// #924 gate② PO item 2: a fixed em floor alone still wrapped a longer label (a by-model row's own
+// model name, e.g. "claude-sonnet-5") — `minmax(7em, max-content)` keeps the >= 7em floor AC2
+// names while growing to fit whatever the longest rendered label actually needs.
+test("AC2: .cost-bar-row's label column is minmax(>= 7em, max-content) — a floor, not a fixed width that can still wrap a longer label", () => {
   const rowRule = panelsCss924.match(/\.cost-bar-row\s*\{([^}]*)\}/);
   assert.ok(rowRule, ".cost-bar-row rule must exist");
   const columns = rowRule![1]!.match(/grid-template-columns:\s*([^;]+);/);
   assert.ok(columns, ".cost-bar-row must declare grid-template-columns");
-  const firstColumnEm = Number.parseFloat(columns![1]!.trim().split(/\s+/)[0]!);
-  assert.ok(firstColumnEm >= 7, `the label column (${firstColumnEm}em) must be >= 7em`);
+  // The first grid TRACK is the whole `minmax(...)` call, commas and all — a naive whitespace
+  // split would cut it at the comma inside the parens and see only "minmax(7em,".
+  const minmax = columns![1]!.trim().match(/^minmax\(([\d.]+)em,\s*max-content\)/);
+  assert.ok(minmax, `the label column must start with minmax(<em>, max-content); got "${columns![1]!.trim()}"`);
+  const floorEm = Number.parseFloat(minmax![1]!);
+  assert.ok(floorEm >= 7, `the label column's floor (${floorEm}em) must be >= 7em`);
 });
 
-test("AC3: .hero-pool-chip, an in-motion droplet, and .spend-meter-bar's own fill all carry a real 1px outline stroke that resolves --sap-text in light theme (transparent/invisible in dark)", async () => {
+// #924 gate② finding [1] / PO item 2: a rendered CASCADE fact, not just source text — proves
+// `white-space: nowrap` actually resolves onto a REAL rendered label (including the fixture's own
+// longer-than-7em "claude-sonnet-5" model name), not merely that the source declares it. happy-dom
+// has no real layout engine (`getBoundingClientRect()` on any element returns an all-zero box,
+// verified directly — matching this harness's documented "DOM-free by default" posture,
+// docs/dev-guide/07-dashboard.md) — so an actual "does this box span one line or two" pixel
+// measurement isn't achievable here; `white-space: nowrap` resolving onto the real element is the
+// STYLE-provable half of "never wrapped," and the label column's own `minmax(7em, max-content)`
+// sizing (VALUE-checked above, from source) is what gives that nowrap text room to exist without
+// being clipped instead.
+test("AC2: every rendered cost-bar label, including one longer than the 7em floor, resolves white-space: nowrap", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   try {
-    // `light-dark()` is a <color> function — stroke-width itself is a constant 1px in BOTH
-    // themes (tokens.css's own doc); only the stroke COLOUR toggles per theme via
-    // --sap-fill-outline, so this is the one geometry fact this test can assert theme-agnostic.
-    // happy-dom does textual var() substitution without evaluating light-dark() (confirmed
-    // against #920's own active-planning-node test, same file) — the resolved stroke is the raw
-    // "light-dark(<raw --sap-text declaration>, transparent)" text, not a per-theme hex.
-    const expectedOutlineStroke = `light-dark(${parseTokensLocal(tokensCss924)["--sap-text"]}, transparent)`;
-
-    const chipRect = container.querySelector(".hero-pool-chip rect");
-    assert.ok(chipRect, "a real .hero-pool-chip rect must render (the fixture's backlog pool is non-empty)");
-    assert.equal(getComputedStyle(chipRect as Element).stroke, expectedOutlineStroke, "hero-pool-chip outline stroke");
-    assert.equal(getComputedStyle(chipRect as Element).strokeWidth, "1px", "hero-pool-chip outline width");
-
-    const droplet = container.querySelector('.hero-droplet:not([data-at="trunk"]):not([data-at="needs-human"]) .hero-droplet-shape');
-    assert.ok(droplet, "a real in-motion droplet must render (the fixture dispatches one)");
-    assert.equal(getComputedStyle(droplet as Element).stroke, expectedOutlineStroke, "in-motion droplet outline stroke");
-    assert.equal(getComputedStyle(droplet as Element).strokeWidth, "1px", "in-motion droplet outline width");
-
-    const spendFill = container.querySelector(".spend-meter-bar .cost-bar-fill");
-    assert.ok(spendFill, "the header's own spend-meter-bar fill must render");
-    assert.equal(getComputedStyle(spendFill as Element).stroke, expectedOutlineStroke, "spend-meter-bar fill outline stroke");
-    assert.equal(getComputedStyle(spendFill as Element).strokeWidth, "1px", "spend-meter-bar fill outline width");
+    const labels = [...container.querySelectorAll(".cost-bar-label")];
+    assert.ok(labels.length > 0, "at least one cost-bar-label must render (the fixture's by-stage/by-model bars)");
+    const longLabel = labels.find((l) => l.textContent === "claude-sonnet-5");
+    assert.ok(longLabel, "the fixture's own longer-than-7em label (claude-sonnet-5) must actually render");
+    for (const label of labels) {
+      assert.equal(getComputedStyle(label as Element).whiteSpace, "nowrap", `"${label.textContent}" label must never wrap`);
+    }
   } finally {
+    await cleanup();
+  }
+});
+
+/**
+ * #924 gate② finding [3]: the prior version of this test never switched `data-theme` at all —
+ * fixed below to loop both themes explicitly, the SAME pattern the pre-existing `#920 gate②
+ * finding [1]` active-planning-node test (this file's hero.test.ts counterpart) already
+ * establishes for exactly this class of claim. What it can prove, and what it provably cannot,
+ * verified directly (a scratch happy-dom probe, both a bare `color: var(--sap-text)` on an HTML
+ * element and a nested `stroke: var(--sap-fill-outline)` on an SVG shape, toggling `data-theme`
+ * between probes): happy-dom does textual `var()` substitution but NEVER evaluates `light-dark()`
+ * — the resolved `stroke` is the SAME raw "light-dark(<raw --sap-text decl>, transparent)" text
+ * regardless of `data-theme`, in every theme. This is a confirmed, repo-precedented harness gap
+ * (`docs/REVIEW-DOCTRINE.md`'s STYLE family + this file's own #897 finding for the SAME
+ * light-dark() function, a different property), not a choice — no test in this suite has ever
+ * gotten a per-theme resolved value out of happy-dom for a `light-dark()`-declared property, and
+ * a real-browser proof (Playwright, `shots/shots.spec.ts`'s own `§889 AC2` test) already exists
+ * for the equivalent per-theme cascade claim on a sibling token. What THIS test still proves, in
+ * both themes: the outline rule actually CASCADES onto all three real rendered elements (not just
+ * declared in source), at the exact 1px width, referencing the exact `--sap-fill-outline` chain —
+ * a regression that dropped the rule, or scoped it to only ONE of the three, would fail this.
+ * `stroke-width` itself is a plain 1px in both themes (never `light-dark()`-typed — that function
+ * is <color>-only), so it resolves correctly regardless of the gap above.
+ */
+test("AC3: .hero-pool-chip, an in-motion droplet, and every .cost-bar-fill (cost panel, lane card, header meter alike) carry the same real 1px outline stroke, in both theme contexts", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  const expectedOutlineStroke = `light-dark(${parseTokensLocal(tokensCss924)["--sap-text"]}, transparent)`;
+  try {
+    for (const themeAttr of ["heartwood", "sapwood"] as const) {
+      document.documentElement.setAttribute("data-theme", themeAttr);
+
+      const chipRect = container.querySelector(".hero-pool-chip rect");
+      assert.ok(chipRect, `${themeAttr}: a real .hero-pool-chip rect must render (the fixture's backlog pool is non-empty)`);
+      assert.equal(getComputedStyle(chipRect as Element).stroke, expectedOutlineStroke, `${themeAttr}: hero-pool-chip outline stroke`);
+      assert.equal(getComputedStyle(chipRect as Element).strokeWidth, "1px", `${themeAttr}: hero-pool-chip outline width`);
+
+      const droplet = container.querySelector('.hero-droplet:not([data-at="trunk"]):not([data-at="needs-human"]) .hero-droplet-shape');
+      assert.ok(droplet, `${themeAttr}: a real in-motion droplet must render (the fixture dispatches one)`);
+      assert.equal(getComputedStyle(droplet as Element).stroke, expectedOutlineStroke, `${themeAttr}: in-motion droplet outline stroke`);
+      assert.equal(getComputedStyle(droplet as Element).strokeWidth, "1px", `${themeAttr}: in-motion droplet outline width`);
+
+      // Every `.cost-bar-fill` instance now carries the SAME outline rule (#924 gate② finding
+      // [2] fix) — cross-checked across all three real contexts, not just the header meter.
+      const fills = [...container.querySelectorAll(".cost-bar-fill")];
+      assert.ok(
+        fills.length >= 3,
+        `${themeAttr}: expected fill rects across cost panel/lane card/header meter contexts; found ${fills.length}`,
+      );
+      for (const fill of fills) {
+        assert.equal(getComputedStyle(fill as Element).stroke, expectedOutlineStroke, `${themeAttr}: .cost-bar-fill outline stroke`);
+        assert.equal(getComputedStyle(fill as Element).strokeWidth, "1px", `${themeAttr}: .cost-bar-fill outline width`);
+      }
+    }
+  } finally {
+    document.documentElement.removeAttribute("data-theme");
     await cleanup();
   }
 });

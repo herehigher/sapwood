@@ -5,8 +5,8 @@ import test from "node:test";
 import {
   AA,
   checkContrast,
-  checkFillGroundContrast,
   checkFillTextContrast,
+  checkFillTrackContrast,
   contrastRatio,
   FILL_TOKENS,
   GROUNDS,
@@ -118,20 +118,24 @@ test("AC3: --on-sap-fill on --sap-fill clears AA (4.5:1) in both themes", () => 
   assert.deepEqual(failures, [], failures.map((f) => `${f.theme} ${f.text} on ${f.ground} = ${f.ratio}`).join("; "));
 });
 
-test("AC3: --sap-fill vs the page ground clears the 3:1 non-text boundary in dark, and the known light-theme shortfall (1.88:1) the outline rule compensates for is on record", () => {
-  const rows = checkFillGroundContrast(css);
+// #924 gate② finding [2]: modeled against the REAL rendered .cost-bar-track (--bark at its own
+// declared opacity, composited over --panel) — not a bare --heartwood pair that never existed as
+// a rendered surface. Light theme's real composite (1.15:1) is even further below the 3:1
+// boundary than the naive heartwood pairing (1.88:1) suggested.
+test("AC3: --sap-fill vs the real .cost-bar-track composite clears the 3:1 non-text boundary in dark, and the known light-theme shortfall (1.15:1) the outline rule compensates for is on record", () => {
+  const rows = checkFillTrackContrast(css);
   const dark = rows.find((r) => r.theme === "heartwood");
   const light = rows.find((r) => r.theme === "sapwood");
-  assert.ok(dark?.pass, `dark --sap-fill vs --heartwood must clear ${NON_TEXT_AA}:1: ${dark?.ratio}`);
-  assert.equal(light?.ratio, 1.88);
+  assert.ok(dark?.pass, `dark --sap-fill vs .cost-bar-track must clear ${NON_TEXT_AA}:1: ${dark?.ratio}`);
+  assert.equal(light?.ratio, 1.15);
   assert.ok(!light?.pass, "light theme is the documented exception the --sap-text outline compensates for");
 });
 
-/** Every source file under `dashboard/src`, recursively — excluding `node_modules`/`dist`. */
+/** Every file under `dir`, recursively — excluding `node_modules`/`dist`/generated output dirs. */
 function listSourceFiles(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
-    if (entry === "node_modules" || entry === "dist") continue;
+    if (entry === "node_modules" || entry === "dist" || entry === "dist-server" || entry === "shots-output") continue;
     const full = join(dir, entry);
     if (statSync(full).isDirectory()) out.push(...listSourceFiles(full));
     else out.push(full);
@@ -139,11 +143,15 @@ function listSourceFiles(dir: string): string[] {
   return out;
 }
 
-test("AC4: no var(--sap) literal remains anywhere in dashboard/src — every site repoints to --sap-text or --sap-fill", () => {
-  const srcDir = new URL(".", import.meta.url).pathname;
+// PO gate② (issue #924, 2026-08-17): the original AC4 sweep only scanned `dashboard/src` — a
+// regression shipped in `dashboard/shots/shots.spec.ts` (outside that scan) and broke
+// `npm run shots -w dashboard`. Scans the whole `dashboard/` tree (src/, shots/, and any future
+// sibling) so a renamed token can never again hide from this test in a directory it doesn't cover.
+test("AC4: no var(--sap) literal remains anywhere under dashboard/ — every site repoints to --sap-text or --sap-fill", () => {
+  const dashboardDir = new URL("..", import.meta.url).pathname;
   const self = new URL(import.meta.url).pathname;
   const offenders: string[] = [];
-  for (const file of listSourceFiles(srcDir)) {
+  for (const file of listSourceFiles(dashboardDir)) {
     if (file === self) continue; // this test's own doc comments name the banned literal
     if (!/\.(ts|tsx|css)$/.test(file)) continue;
     const text = readFileSync(file, "utf8");

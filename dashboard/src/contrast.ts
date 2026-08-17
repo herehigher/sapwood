@@ -35,6 +35,10 @@ export function readTokensCss(): string {
   return readFileSync(new URL("./tokens.css", import.meta.url), "utf8");
 }
 
+export function readPanelsCss(): string {
+  return readFileSync(new URL("./panels.css", import.meta.url), "utf8");
+}
+
 /** Every `--token: value` declaration, last one wins. Values keep their raw CSS text. */
 export function parseTokens(css: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -80,6 +84,30 @@ export function contrastRatio(a: string, b: string): number {
   return Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100;
 }
 
+/** Standard "source-over" alpha compositing in sRGB space, per-channel — what a browser actually
+ *  paints for a solid-fill shape at `opacity: alpha` over an opaque background. */
+export function compositeOver(fgHex: string, alpha: number, bgHex: string): string {
+  const fg = Number.parseInt(fgHex.slice(1), 16);
+  const bg = Number.parseInt(bgHex.slice(1), 16);
+  const mix = (shift: number) => {
+    const f = (fg >> shift) & 0xff;
+    const b = (bg >> shift) & 0xff;
+    return Math.round(f * alpha + b * (1 - alpha));
+  };
+  const channelHex = (n: number) => n.toString(16).padStart(2, "0");
+  return `#${channelHex(mix(16))}${channelHex(mix(8))}${channelHex(mix(0))}`.toUpperCase();
+}
+
+/** `.cost-bar-track`'s own declared opacity (panels.css) — read from source (VALUE family) so a
+ *  future edit to the track's own faintness can't silently desync `checkFillTrackContrast` from
+ *  what actually renders. */
+export function readTrackOpacity(css: string = readPanelsCss()): number {
+  const rule = css.match(/\.cost-bar-track\s*\{([^}]*)\}/);
+  const match = rule?.[1]?.match(/opacity:\s*([\d.]+)/);
+  if (!match) throw new Error(".cost-bar-track must declare an opacity for checkFillTrackContrast to read");
+  return Number(match[1]);
+}
+
 /** Every text-on-ground pair, both themes. */
 export function checkContrast(css: string = readTokensCss()): ContrastRow[] {
   const themes = parseColorTokens(css);
@@ -117,26 +145,32 @@ export function checkFillTextContrast(css: string = readTokensCss()): ContrastRo
 }
 
 /**
- * §5 Q5 ruling: a filled surface (`--sap-fill`) against the page ground (`--heartwood`) — the
- * WCAG 3:1 *non-text* boundary a graphical shape's own edge must clear against its surroundings.
- * Light theme measures 1.88:1, below the boundary, because `--sap-fill` no longer darkens per
- * theme the way `--sap-text` still does — every filled chip/droplet/bar-pill compensates with a
- * 1px `--sap-text` outline in the light theme (STYLE-tested per element, not here). `pass` uses
- * the 3:1 non-text threshold, not `AA` (4.5:1, text-only) — this function only records the ratio
- * the outline rule exists to fix, it never asserts both themes must clear it.
+ * §5 Q5 ruling: a filled surface (`--sap-fill`) against the REAL rendered `.cost-bar-track`
+ * (`--bark` at its own declared opacity, composited over `--panel` — every hairline bar renders
+ * inside a `.panel` card) — the WCAG 3:1 *non-text* boundary a graphical shape's own edge must
+ * clear against its surroundings. #924 gate② finding [2]: a bare `--sap-fill` vs `--heartwood`
+ * pair never modeled a surface this app actually paints — no bar's fill sits directly on the page
+ * ground, it sits next to its own track. Light theme measures well under the boundary (the track
+ * composite is a faint near-panel tint, and `--sap-fill` no longer darkens per theme the way
+ * `--sap-text` still does) — every filled chip/droplet/bar-pill compensates with a 1px
+ * `--sap-text` outline in the light theme (STYLE-tested per element, not here). `pass` uses the
+ * 3:1 non-text threshold, not `AA` (4.5:1, text-only) — this function only records the ratio the
+ * outline rule exists to fix, it never asserts both themes must clear it unaided.
  */
 export const NON_TEXT_AA = 3;
 
-export function checkFillGroundContrast(css: string = readTokensCss()): ContrastRow[] {
-  const themes = parseColorTokens(css);
+export function checkFillTrackContrast(tokensCss: string = readTokensCss(), panelsCss: string = readPanelsCss()): ContrastRow[] {
+  const themes = parseColorTokens(tokensCss);
+  const opacity = readTrackOpacity(panelsCss);
   const rows: ContrastRow[] = [];
   for (const [theme, tokens] of [
     ["heartwood", themes.dark],
     ["sapwood", themes.light],
   ] as const) {
     for (const fill of FILL_TOKENS) {
-      const ratio = contrastRatio(tokens[fill]!, tokens["--heartwood"]!);
-      rows.push({ theme, text: fill, ground: "--heartwood", ratio, pass: ratio >= NON_TEXT_AA });
+      const trackComposite = compositeOver(tokens["--bark"]!, opacity, tokens["--panel"]!);
+      const ratio = contrastRatio(tokens[fill]!, trackComposite);
+      rows.push({ theme, text: fill, ground: ".cost-bar-track", ratio, pass: ratio >= NON_TEXT_AA });
     }
   }
   return rows;
@@ -157,7 +191,7 @@ if (import.meta.filename === process.argv[1]) {
   for (const r of fillTextRows) {
     console.log(`${r.pass ? "PASS" : "FAIL"}  ${r.theme.padEnd(9)} ${r.text} on ${r.ground}  ${r.ratio.toFixed(2)}:1`);
   }
-  const fillGroundRows = checkFillGroundContrast();
+  const fillGroundRows = checkFillTrackContrast();
   for (const r of fillGroundRows) {
     console.log(
       `${r.pass ? "PASS" : "FAIL (compensated by a --sap-text outline)"}  ${r.theme.padEnd(9)} ${r.text} on ${r.ground}  ${r.ratio.toFixed(2)}:1 (non-text ${NON_TEXT_AA}:1)`,

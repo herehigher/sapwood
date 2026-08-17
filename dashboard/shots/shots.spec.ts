@@ -326,17 +326,21 @@ test("§889 finding [0]: the opened round-list dropdown is not clipped by the na
  * 3. The closed-pill's tint (`.round-nav-pill-closed`) resolves to a DIFFERENT real color between
  *    the two themes — the concrete, non-fakeable proof that `light-dark()` genuinely cascades here
  *    rather than a theme-invariant hardcoded value.
- * 4. `--sap` itself (the exact token `.transport-scrub`'s thumb/track rules consume) resolves to a
- *    different real color per theme at `:root` — AND the source declaration for the thumb rule
- *    references that same token by name. Together these are the closest available real-browser
- *    proof for the thumb specifically: `getComputedStyle(el, pseudo)` is NOT usable for vendor
- *    slider pseudo-elements — verified directly (a scratch probe against this exact page returned
- *    the BASE element's own box for `::-webkit-slider-thumb`, while a `::before` sanity probe on
- *    the same API resolved correctly), which is a documented Chromium limitation of the query API
- *    itself, not of the underlying paint. A single-pixel screenshot sample would be the only way to
- *    query the pseudo-element's actual paint color directly, and this file's own stated posture is
- *    "no pixel-diff gate" — the token-level computed proof plus the source-level rule binding is
- *    the honest ceiling here, not a shortcut around a harder check.
+ * 4. `--sap-fill` itself (#924: the filled-surface role split off `--sap`, the exact token
+ *    `.transport-scrub`'s thumb/track rules now consume) resolves to a real, non-empty color at
+ *    `:root` in both themes, AND — unlike `--sap-text` above, which still varies per theme — it
+ *    resolves to the SAME color in both, proving the split's own deliberate invariant (tokens.css:
+ *    `--sap-fill` is a flat amber in both themes, no longer `light-dark()`) rather than a stale
+ *    assumption every themed token must differ. The source declaration for the thumb rule is
+ *    cross-checked to reference that same token by name. Together these are the closest available
+ *    real-browser proof for the thumb specifically: `getComputedStyle(el, pseudo)` is NOT usable
+ *    for vendor slider pseudo-elements — verified directly (a scratch probe against this exact
+ *    page returned the BASE element's own box for `::-webkit-slider-thumb`, while a `::before`
+ *    sanity probe on the same API resolved correctly), which is a documented Chromium limitation
+ *    of the query API itself, not of the underlying paint. A single-pixel screenshot sample would
+ *    be the only way to query the pseudo-element's actual paint color directly, and this file's
+ *    own stated posture is "no pixel-diff gate" — the token-level computed proof plus the
+ *    source-level rule binding is the honest ceiling here, not a shortcut around a harder check.
  */
 test("§889 AC2: navigator/transport controls resolve real token-based styling in both themes, not native chrome", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -412,16 +416,21 @@ test("§889 AC2: navigator/transport controls resolve real token-based styling i
     expect(pillClosedColor, `${theme.key}: the closed-round pill's tint must resolve to a real color`).not.toBe("");
     pillClosedColorByTheme[theme.key] = pillClosedColor;
 
-    const sapToken = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--sap").trim());
-    expect(sapToken, `${theme.key}: --sap must resolve to a real color at :root`).not.toBe("");
-    sapTokenByTheme[theme.key] = sapToken;
+    const sapFillToken = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--sap-fill").trim());
+    expect(sapFillToken, `${theme.key}: --sap-fill must resolve to a real color at :root`).not.toBe("");
+    sapTokenByTheme[theme.key] = sapFillToken;
   }
 
   expect(
     pillClosedColorByTheme.light,
     "the closed-pill tint must actually differ between light and dark themes — proof light-dark() genuinely cascades, not a theme-invariant hardcoded value",
   ).not.toBe(pillClosedColorByTheme.dark);
-  expect(sapTokenByTheme.light, "--sap itself must differ between light and dark themes at :root").not.toBe(sapTokenByTheme.dark);
+  // #924: --sap-fill is deliberately FLAT (same value both themes, tokens.css) — the inverse of
+  // the light-dark() proofs above, on purpose.
+  expect(
+    sapTokenByTheme.light,
+    "--sap-fill must resolve to the SAME color in both themes — it is deliberately flat, not light-dark()",
+  ).toBe(sapTokenByTheme.dark);
   expect(
     buttonBackgroundByTheme.light,
     "the transport button background must actually differ between light and dark themes — proof light-dark() genuinely cascades onto it, not a theme-invariant hardcoded value",
@@ -430,8 +439,8 @@ test("§889 AC2: navigator/transport controls resolve real token-based styling i
   const panelsCss = readFileSync(fileURLToPath(new URL("../src/panels.css", import.meta.url)), "utf8");
   const thumbRule = panelsCss.match(/\.transport-scrub::-webkit-slider-thumb\s*\{([^}]*)\}/);
   expect(thumbRule, ".transport-scrub::-webkit-slider-thumb rule must exist").not.toBeNull();
-  expect(thumbRule?.[1], "the thumb rule must consume the SAME --sap token just proven to differ per theme above").toMatch(
-    /background:\s*var\(--sap\)/,
+  expect(thumbRule?.[1], "the thumb rule must consume the SAME --sap-fill token just proven above").toMatch(
+    /background:\s*var\(--sap-fill\)/,
   );
 });
 

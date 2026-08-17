@@ -10,12 +10,15 @@
  * (2026-08-17): #728 stays scoped to FONT FAMILY only; casing/tracking/scale here follow the
  * mockups, not that entry.
  */
+/* #924 gate② PO item 3: a taller head band, matching the mockup's own weight (measured on the
+ * crops at roughly double this row's original padding/margin) now that the title itself (below)
+ * is set at the mockup's actual scale rather than the body-text size the first pass shipped. */
 .panel-head {
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
-  padding-bottom: var(--space-2);
-  margin-bottom: var(--space-2);
+  padding-bottom: var(--space-3);
+  margin-bottom: var(--space-4);
   /* Same rendered value as `--hairline` (tokens.css), spelled as longhands instead of the
    * shorthand `var()` indirection: happy-dom's CSS engine cannot resolve a `color-mix()` that
    * appears INSIDE a border shorthand (empirically confirmed — `border-bottom: var(--hairline)`
@@ -27,15 +30,19 @@
   border-bottom-color: color-mix(in srgb, var(--bark) 25%, transparent);
 }
 
-/* A literal px value, not `0.06em` — the same happy-dom `em`-resolves-against-the-DEFAULT-16px
- * quirk `hero.css`'s `.hero-phase` comment documents sidesteps here too. 1px at the 16px title
- * size below is ~0.0625em, clearing the AC's 0.06em-equivalent floor. */
+/* #924 gate② PO item 3: the first pass undershot the mockup badly (crop-measured ~12px cap-height/
+ * ~0.04em vs the mockup's ~18px cap/~0.1em) — `--text-3` (26px) is the closest step on this app's
+ * fixed 1.25-ratio type scale to the mockup's own measured ~18px cap-height (Fraunces caps set at
+ * roughly 0.7em: 26 * 0.7 ~= 18). A literal px value, not `0.08em`, for letter-spacing — the same
+ * happy-dom `em`-resolves-against-the-DEFAULT-16px quirk `hero.css`'s `.hero-phase` comment
+ * documents sidesteps here too. 2.2px at this 26px title size is ~0.085em, clearing the AC's
+ * 0.06em-equivalent floor with room for the mockup's own heavier ~0.1em tracking. */
 .panel-head > h1,
 .panel-head > h2,
 .panel-head > h3 {
-  font-size: var(--text-1);
+  font-size: var(--text-3);
   text-transform: uppercase;
-  letter-spacing: 1px;
+  letter-spacing: 2.2px;
 }
 
 /* The head's own right-aligned stat cluster (AC1: "last child, margin-left: auto") — absent
@@ -236,47 +243,60 @@
   gap: var(--space-2);
 }
 
-/* AC2: the label column is >= 7em so a name like "Goal & align" never wraps. */
+/* AC2 / #924 gate② PO item 2: >= 7em is a FLOOR, not a fixed width — `minmax(7em, max-content)`
+ * grows the column to fit whichever label is actually longest ("Goal & align", a by-model row's
+ * own model name like "claude-sonnet-5") rather than a guessed em value that wraps the next label
+ * that comes along. `.cost-bar-label`'s own `white-space: nowrap` (below) is what actually stops
+ * the wrap; the grid column sizing is what gives that nowrap text room to exist without
+ * overflowing into the bar column next to it. */
 .cost-bar-row {
   display: grid;
-  grid-template-columns: 7em 1fr 4em;
+  grid-template-columns: minmax(7em, max-content) 1fr 4em;
   align-items: center;
   gap: var(--space-2);
 }
 
+.cost-bar-label {
+  white-space: nowrap;
+}
+
+/* #924 gate② finding [1]: `CostBar.tsx`'s viewBox is 12 user units tall (TRACK_Y/FILL_HEIGHT/
+ * TICK_Y1/TICK_Y2's own local coordinate space) — with `preserveAspectRatio="none"`, any CSS
+ * height OTHER than 12px non-uniformly rescales that space, so a 10px/8px/6px container (this
+ * rule's old values) rendered the "1px" track/">=6px" fill at a FRACTION of a real pixel. Setting
+ * every hairline-bar instance's own CSS height to the SAME 12px the viewBox declares makes the Y
+ * scale factor exactly 1 — the component's own local units and real rendered CSS pixels are the
+ * same number, everywhere `<CostBar>` mounts (cost panels, lane cards, the header meter alike). */
 .cost-bar {
   width: 100%;
-  height: 10px;
+  height: 12px;
 }
 
 /* #924 (D29/D30) — the shared hairline-bar grammar `CostBar.tsx` draws: a 1px `--bark` track,
  * an amber pill fill >= 6px tall (`.cost-bar-fill`, `--sap-fill`), and a 1px `--sap-text` tick
  * taller than the pill (`.cost-bar-target`). Geometry (heights/y/rx) is fixed per instance as SVG
- * attributes in `CostBar.tsx` itself — same local user-unit space regardless of which container
- * (cost panel / lane card / header capsule) stretches the `<svg>`'s own CSS height around it. */
+ * attributes in `CostBar.tsx` itself, at the SAME 1:1 scale `.cost-bar`'s own 12px height (above)
+ * guarantees regardless of which container mounts it. */
 .cost-bar-track {
   fill: var(--bark);
   opacity: 0.4;
 }
 
+/* #924 gate② finding [2]: the REAL rendered `.cost-bar-track` (this fill's own immediate
+ * neighbour — `--bark` at 0.4 opacity over `--panel`, `contrast.ts`'s `checkFillTrackContrast`)
+ * clears 3:1 against `--sap-fill` in dark theme (4.24:1) but NOT in light (1.15:1) — every use of
+ * this fill, not only the header meter, compensates with the same 1px `--sap-text` outline
+ * (invisible in dark theme, where it already clears unaided — `--sap-fill-outline`, tokens.css). */
 .cost-bar-fill {
   fill: var(--sap-fill);
+  stroke: var(--sap-fill-outline);
+  stroke-width: 1px;
 }
 
 /* The by-stage group's shared target/ceiling tick (`cost-panel.ts`'s `tickPositionPct`). */
 .cost-bar-target {
   stroke: var(--sap-text);
   stroke-width: 1;
-}
-
-/* AC3/Q5: the light theme's flat `--sap-fill` measures only 1.88:1 against the page ground —
- * the header capsule's own fill pill compensates with a 1px `--sap-text` outline there (invisible
- * in dark theme, where the fill already clears 3:1 unaided — `--sap-fill-outline`, tokens.css).
- * The cost/lane-card bar's own fill sits directly against its own hairline track, not bare
- * ground, so it is outside this rule. */
-.spend-meter-bar .cost-bar-fill {
-  stroke: var(--sap-fill-outline);
-  stroke-width: 1px;
 }
 
 /* ---- header: engine state word + spend meter (§3 A, #361) ---------------- */
@@ -316,17 +336,20 @@
   gap: 4px;
 }
 
+/* #924 gate② finding [1]: height is deliberately UNCHANGED from `.cost-bar`'s own 12px (no
+ * override here) — a distinct height would re-introduce the same non-uniform-scale distortion the
+ * base rule's own comment documents. Only width/shape (rounded, wider) differ per instance. */
 .spend-meter-bar {
   width: 140px;
-  height: 8px;
   border-radius: var(--radius-pill);
   overflow: hidden;
 }
 
-/* #890: the lane card's own settled/est bar — full card width, flush with the foot row above it. */
+/* #890: the lane card's own settled/est bar — full card width, flush with the foot row above it.
+ * #924 gate② finding [1]: height also deliberately unchanged from `.cost-bar`'s 12px, same
+ * reasoning as `.spend-meter-bar` above. */
 .lane-card-bar {
   width: 100%;
-  height: 6px;
 }
 
 /* ---- round navigator (§3 A, #889) ----------------------------------------- */
