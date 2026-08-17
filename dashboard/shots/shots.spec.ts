@@ -524,8 +524,7 @@ async function mockLiveApi(page: Page, loopState: unknown): Promise<void> {
  *  `App` -> `LiveApp` -> `LiveOnly mode="live"` -> `LaneBoard` tree this app ships renders for
  *  real, not a standalone/mock stand-in built to bypass that wiring.
  *
- * engine-agent audit run d4284445-db66-4057-8858-d3df521f2f56 finding [0]
- * (live-capture-data-unasserted): `LaneBoard` renders the SAME `section[aria-label="lanes"]`
+ * #882: `LaneBoard` renders the SAME `section[aria-label="lanes"]`
  * anchor in its config-unreadable state (`lanesMax === null`, before the mocked
  * `/api/loop/state` response has actually landed) as it does once the fixture data has arrived —
  * `waitFor({state: "visible"})` alone can't tell those two apart, so a slow or broken mock could
