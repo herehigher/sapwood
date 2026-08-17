@@ -90,7 +90,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `lane-pr-unknown` — **expected-noise**: a lane's PR association came back UNKNOWN (transient forge write failure); the lane is deferred rather than settled (#377). (see #377)
 - `lane-revived` — **routine** [escalation-clear]: an env-failed lane holding an OPEN PR was revived back to `driving` rather than left stranded between owners (#447). (see #447)
 - `lane-revival-terminal` — **routine** [merged-witness]: the revival pass found the lane's PR already MERGED (recorded for the merged case only) and closed it out instead of reviving it (#447). (see #447)
-- `human-merge-only-closed` — **routine** [merged-witness]: a parked human-merge-only lane's PR (#397 bucket 2) was found MERGED and closed out — in-progress cleared, board set done, worktree run through the same mtime/ctime reclaim policy the DEAD path uses, worker row terminalized. Never re-drives the lane (#824). (see #824)
+- `human-merge-only-closed` — **routine** [merged-witness, escalation-clear]: a parked human-merge-only lane's PR (#397 bucket 2) was found MERGED and closed out — in-progress cleared, board set done, worktree run through the same mtime/ctime reclaim policy the DEAD path uses, worker row terminalized. Never re-drives the lane (#824). `escalation-clear` (#933): this IS the engine's own terminal witness for the `drive-human-merge-only` attention item — the dashboard strip fold must retire it here, not leave it waiting on a resolution nothing ever observes. (see #824)
 - `ceiling-escalated` — **intervene** [retro, round-artifact, escalation-source:never]: a lane was drained for a cost/wall-clock ceiling breach; `never` a proof of the needs-human label (the drain's own label write is best-effort).
 - `worktree-retained` — **investigate**: a lane's worktree was kept on disk (dirty/uncommitted state) instead of being deleted on reclaim, for a human to salvage.
 - `worktree-released` — **routine**: a lane's worktree was deleted after reclaim (clean, nothing to salvage).
@@ -104,7 +104,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `orphan-pr-escalated` — **intervene** [escalation-source:payload]: an orphaned lane's PR was escalated to needs-human; proof of the label write rides in the payload.
 - `gated-flag-unprovable` — **intervene**: a gated-reentry lane's escalation label could not be found on either carrier (#391/#398) — a standing alarm, one per engine start, for a lane only a human can move. (see #391)
 - `gated-flag-healed` — **routine**: a gated-reentry lane's escalation label was found on one carrier and the local flag was corrected to match (#391/#398). (see #391)
-- `gated-lane-retired` — **routine**: a gated-reentry lane was retired (not reentered) because the audit proved it terminal by merge or issue-close (#593) — nothing left to reenter. (see #593)
+- `gated-lane-retired` — **routine** [escalation-clear]: a gated-reentry lane was retired (not reentered) because the audit proved it terminal by merge or issue-close (#593) — nothing left to reenter. `escalation-clear` (#933): this IS the engine's own terminal witness for the `gated-flag-unprovable` attention item — the dashboard strip fold must retire it here. (see #593)
 - `worker-heartbeat` — **routine**: a per-cadence heartbeat proving an in-flight worker lane is still alive.
 - `role-session-heartbeat` — **routine**: a per-cadence heartbeat proving an in-flight peripheral role session is still alive.
 - `role-env-failure` — **investigate**: a peripheral role session hit an LLM/forge environment failure; the durable record IS this event (no companion -degraded event).
@@ -163,7 +163,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `fix-thread-write-escalated` — **intervene**: a queued thread-write (reply/resolve) exhausted its retry budget; escalated to needs-human on the PR (#398 — PR-born, its issue-side twin was deleted). (see #398)
 - `fix-thread-write-escalation-label-failed` — **investigate**: the needs-human label write for an escalated thread-write failure itself failed; the durable event is the only record.
 - `fix-thread-write-retry-failed` — **expected-noise**: one attempt at a queued thread-write failed, under the retry cap; retried next tick.
-- `ac-snapshot-drift` — **intervene**: a PR's issue body changed after its acceptance-criteria snapshot was taken (#279 §5); the lane fails closed and needs-human is applied outside the event-kind escalation-source table (its own bespoke label site, escalation-buckets.test.ts's SITE_INVENTORY). (see #279)
+- `ac-snapshot-drift` — **intervene** [escalation-source:never]: a PR's issue body changed after its acceptance-criteria snapshot was taken (#279 §5); the lane fails closed and needs-human is applied via its own bespoke label site (escalation-buckets.test.ts's SITE_INVENTORY), not the shared addLabel call the other `always`/`payload` sources share — so `never` is the honest proof mode: the reconciler now OBSERVES this kind for external resolution (a merged/closed PR, a closed issue), but `never` keeps escalation-sweep.ts from ever removing the label off this event's own say-so (#933). (see #279)
 - `blocked-by-cleared` — **routine**: a `blocked-by:<issue>` fence label was removed because the referenced blocker issue had already closed (#485). (see #485)
 - `drain-driving-escalation-label-failed` — **investigate**: the needs-human label write for a driving lane drained by a ceiling/kill-switch failed; the lane may be escalated with no visible label.
 - `drain-driving-escalation-comment-failed` — **routine**: the explanatory PR comment for a drained driving lane's escalation failed to post; the label/event are unaffected.
@@ -185,7 +185,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `review-non-convergent` — **intervene** [escalation-source:always]: successive fix-leg review rounds failed to converge past the configured bound (#450); always proven by presence. (see #450)
 - `review-non-convergent-label-failed` — **investigate**: the needs-human label write for a review-non-convergent PR failed; the durable event is the only record.
 - `review-non-convergent-comment-failed` — **routine**: the explanatory PR comment for a review-non-convergent PR failed to post; the label/event are unaffected.
-- `comment-cursor-stale` — **intervene**: a checkpoint (gate⓪, dispatch, or drive) found the issue's comment-adjudication cursor stale or invalid relative to its own comment thread and refused to spend/dispatch/drive; needs-human applied with a deduplicated pointer comment. (see #652)
+- `comment-cursor-stale` — **intervene** [escalation-source:never]: a checkpoint (gate⓪, dispatch, or drive) found the issue's comment-adjudication cursor stale or invalid relative to its own comment thread and refused to spend/dispatch/drive; needs-human applied with a deduplicated pointer comment. (see #652)
 
 ### Governance (align, triage, proposals, plan review, architect, harvest, retro)
 

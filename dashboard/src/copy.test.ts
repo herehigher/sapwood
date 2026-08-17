@@ -4,7 +4,7 @@ import test from "node:test";
 // Test-only import (same pattern as config-captions.test.ts's CONFIG_ALLOWLIST cross-check): the
 // engine's own tagged registry is the AUTHORITATIVE attention-membership signal, not frontend-
 // design.md §3's prose list, which has already drifted once (finding [2] below).
-import { ESCALATION_SOURCE_KINDS } from "../../engine/src/loop/escalation-reconcile.ts";
+import { CLEAR_KINDS, ESCALATION_SOURCE_KINDS } from "../../engine/src/loop/escalation-reconcile.ts";
 // Test-only import (same pattern as ESCALATION_SOURCE_KINDS above): the engine's own registry —
 // not a re-transcribed count — is the oracle for the #893 cross-package exhaustiveness test.
 import { EVENT_KIND_NAMES as ENGINE_EVENT_KIND_NAMES, kindGlossary } from "../../engine/src/state/event-kinds/index.ts";
@@ -22,6 +22,10 @@ import {
   type SentencePart,
   TELEMETRY_KINDS,
 } from "./copy.ts";
+// #933 What③: the SAME fold the dashboard strip renders from — the cross-registry clearing-path
+// test below proves each attention kind's classified clear BEHAVIORALLY closes it, not merely
+// that a partner kind's name is spelled right.
+import { foldOpenAttention } from "./entities.ts";
 
 // `copyFor`, not `COPY[kind]` directly — #893: `COPY` is now `Partial<Record<EventKind,
 // CopyEntry>>` (only the narrative half of the full engine-derived union), so a direct index would
@@ -433,6 +437,98 @@ test("#715 gate② [2]: attention drift guard — every §7-table kind the engin
       true,
       `${kind} is escalation-source:* in the engine's registry but carries no attention marker in COPY`,
     );
+  }
+});
+
+// ── #933 What③: every attention kind has a clearing path ───────────────────────────────────────
+//
+// Three-way rule (issue #933): (a) the kind is ENTITY-LESS (no `issue` in its real payload —
+// `park-escalated`, the three breaker `*-detected` kinds, `emergency-stop`, `empty-spin-park`,
+// `worktree-retained`) with its OWN explicit clear in `entities.ts`'s `foldOpenAttention`; (b) it
+// is OBSERVED BY THE RECONCILER (`escalation-reconcile.ts` — tagged `escalation-source:*`, or
+// `base-ci-red-escalated`'s own dedicated reconciler arm, `reconcileBaseCiEscalation`); or (c) it
+// is issue-scoped and resolves through the SAME #147 GATED RECLAIM handshake every bucket-1
+// `needs-human` escalation shares (which emits `gated-reentry` — an `escalation-clear` kind — for
+// that issue once a human clears the hold), or through its own dedicated terminal witness
+// (`drive-human-merge-only`/`gated-flag-unprovable` — bucket-2 / GATED-RECLAIM-excluded, #933).
+//
+// Hand-curated below, like `escalation-reconcile.ts`'s own `GOLDEN_ESCALATION_SOURCES`: WHICH
+// CODE PATH resolves a kind is a claim about behavior a tag alone cannot prove, so this is
+// deliberately NOT derived — adding a new attention kind is a deliberate act here too, same
+// tradeoff that table's own doc names. Before #933, `ac-snapshot-drift`/`comment-cursor-stale`
+// (registered in neither the entity-less map nor the reconciler's `ESCALATION_SOURCE_KINDS`) and
+// `drive-human-merge-only`/`gated-flag-unprovable` (their only real-world clear kind untagged
+// `escalation-clear`) satisfied NONE of the three — this is the test that would have caught all
+// four, and does, run against the pre-#933 registry.
+const ENTITY_LESS_ATTENTION: Partial<Record<EventKind, { open: Record<string, unknown>; clear: [EventKind, Record<string, unknown>] }>> = {
+  "park-escalated": { open: {}, clear: ["park-resumed", {}] },
+  "emergency-stop": { open: {}, clear: ["run-started", {}] },
+  "empty-spin-park": { open: { source: "llm" }, clear: ["park-resumed", { source: "llm" }] },
+  "worktree-retained": {
+    open: { worker: "w1", issue: 1, worktreePath: "/tmp/w1" },
+    clear: ["worktree-released", { worker: "w1", issue: 1, worktreePath: "/tmp/w1" }],
+  },
+  "rapid-restart-detected": { open: {}, clear: ["park-resumed", { source: "rapid-restart" }] },
+  "consecutive-stalls-detected": { open: {}, clear: ["park-resumed", { source: "consecutive-stalls" }] },
+  "idle-churn-detected": { open: {}, clear: ["park-resumed", { source: "idle-churn" }] },
+};
+
+/** Path (c): every OTHER issue-scoped attention kind not observed by the reconciler, paired with
+ *  the `escalation-clear` kind that actually retires it. `gated-reentry` for the ordinary bucket-1
+ *  `needs-human` escalations (verified above each site's own "#147 gated reentry" comment in
+ *  conductor.ts/fix-response.ts/round.ts/plan-review.ts/align.ts); the two #933 fixes get their
+ *  own dedicated terminal witness instead, since neither is GATED-RECLAIM-eligible. */
+const ISSUE_SCOPE_CLEAR_PARTNER: Partial<Record<EventKind, EventKind>> = {
+  "drive-human-merge-only": "human-merge-only-closed",
+  "gated-flag-unprovable": "gated-lane-retired",
+  "ci-inert-escalated": "gated-reentry",
+  "ci-pending-escalated": "gated-reentry",
+  "fix-thread-write-escalated": "gated-reentry",
+  "review-silence-escalated": "gated-reentry",
+  "operator-fence-violated": "gated-reentry",
+  "fix-leg-dispatch-unconfigured": "gated-reentry",
+  "estop-lane-sweep-incapable": "gated-reentry",
+};
+
+test("#933 What③: every dashboard attention kind is classified into a clearing path, and the classified path actually clears it", () => {
+  const reconcilerObserved: Set<string> = new Set([...ESCALATION_SOURCE_KINDS, "base-ci-red-escalated"]);
+  // PR #937 gate② finding [0]: `attention` is `true` OR a PAYLOAD PREDICATE (`reclaim-done`/
+  // `reclaim-failed`, #404) — filtering on `=== true` silently dropped both predicate-based
+  // kinds from this exhaustiveness sweep, so a future predicate-attention kind with no clearing
+  // path could never fail it. `!== undefined` (the same idiom the taxonomy-completeness test
+  // below already uses) admits every attention marker regardless of shape; both predicate kinds
+  // are already `escalation-source:always` (lane.ts) and so are caught by `reconcilerObserved`
+  // below without needing a hand-curated entry of their own.
+  const attentionKinds = EVENT_KINDS.filter((k) => copyFor(k)?.attention !== undefined);
+  assert.ok(attentionKinds.length > 5, "sanity: the attention set should not be trivially empty");
+  assert.ok(attentionKinds.includes("reclaim-done"), "predicate-based attention kinds must be enumerated too");
+  assert.ok(attentionKinds.includes("reclaim-failed"), "predicate-based attention kinds must be enumerated too");
+
+  for (const kind of attentionKinds) {
+    const entityLess = ENTITY_LESS_ATTENTION[kind];
+    if (entityLess !== undefined) {
+      const { open, clear } = entityLess;
+      const opened = foldOpenAttention([{ known: true, id: 1, ts: "2026-01-01T00:00:00Z", kind, payload: open }]);
+      assert.equal(Object.keys(opened).length, 1, `${kind}: expected to open as an entity-less attention item (path a)`);
+      const closed = foldOpenAttention([{ known: true, id: 2, ts: "2026-01-01T00:00:01Z", kind: clear[0], payload: clear[1] }], opened);
+      assert.deepEqual(closed, {}, `${kind}: its documented clear "${clear[0]}" did not clear it`);
+      continue;
+    }
+    if (reconcilerObserved.has(kind)) continue; // path (b): escalation-reconcile.ts observes it externally
+    const partner = ISSUE_SCOPE_CLEAR_PARTNER[kind];
+    assert.notEqual(partner, undefined, `${kind}: no clearing path classified — assign one of the three paths in What③ (#933)`);
+    assert.ok(
+      (CLEAR_KINDS as readonly string[]).includes(partner as string),
+      `${kind}: its partner "${partner}" is not tagged escalation-clear in the engine's registry`,
+    );
+    const issue = 1;
+    const opened = foldOpenAttention([{ known: true, id: 1, ts: "2026-01-01T00:00:00Z", kind, payload: { issue, worker: "w1", pr: 9 } }]);
+    assert.equal(Object.keys(opened).length, 1, `${kind}: expected to open as an issue-scoped attention item (path c)`);
+    const closed = foldOpenAttention(
+      [{ known: true, id: 2, ts: "2026-01-01T00:00:01Z", kind: partner as EventKind, payload: { issue, worker: "w1", pr: 9 } }],
+      opened,
+    );
+    assert.deepEqual(closed, {}, `${kind}: its partner clear "${partner}" did not clear it for the same issue`);
   }
 });
 

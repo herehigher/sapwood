@@ -110,12 +110,13 @@ export const REVIEW_EVENT_KINDS = defineKinds({
   },
 
   // #652: the comment-adjudication cursor's shared degrade — recorded at whichever checkpoint
-  // (gate⓪ pre-spend/pre-apply, dispatch, drive) observed the stale/invalid cursor. `tags: []`,
-  // like `ac-snapshot-drift` (drive.ts): needs-human is applied outside the event-kind
-  // escalation-source table — its own bespoke label site is classified in
-  // escalation-buckets.test.ts's SITE_INVENTORY instead.
+  // (gate⓪ pre-spend/pre-apply, dispatch, drive) observed the stale/invalid cursor. Like
+  // `ac-snapshot-drift` (drive.ts): needs-human is applied via its own bespoke label site
+  // (escalation-buckets.test.ts's SITE_INVENTORY), not the shared addLabel call the other
+  // `always`/`payload` sources share — so `escalation-source:never` (#933) is the honest proof
+  // mode: observed for external resolution, never sweep-eligible off this event's own say-so.
   "comment-cursor-stale": {
-    tags: [],
+    tags: ["escalation-source:never"],
     meaning:
       "a checkpoint (gate⓪, dispatch, or drive) found the issue's comment-adjudication cursor stale or invalid relative to its own comment thread and refused to spend/dispatch/drive; needs-human applied with a deduplicated pointer comment.",
     actionability: "intervene",

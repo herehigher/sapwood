@@ -491,6 +491,59 @@ test("reconcileEscalations: ceiling-escalated and resume-undecidable both resolv
   state.close();
 });
 
+// #933 AC3: `ac-snapshot-drift` and `comment-cursor-stale` were unobserved by this reconciler —
+// `tags: []` in the registry, never in ESCALATION_SOURCES — even though both are dashboard
+// `attention: true` items with an `issue` in their payload. The 2026-08-17 dogfood measurement
+// found 6 + 4 open rows across issues hand-resolved weeks earlier with no reconciliation path at
+// all. Both are now `escalation-source:never`: observed here (a merged/closed PR or a closed
+// issue resolves them), but `never` keeps escalation-sweep.ts from ever treating this event's own
+// presence as proof the engine's bespoke label site succeeded — see that module's own test below.
+test("reconcileEscalations (#933): ac-snapshot-drift resolves via a merged PR, comment-cursor-stale resolves via a closed issue", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  // Drive-checkpoint shape (conductor.ts's checkAcDriftBeforeDrive): always carries a pr.
+  state.appendEvent("ac-snapshot-drift", { worker: "w1", issue: 7, pr: 12, reason: "body changed", labeled: 1 });
+  // Dispatch-checkpoint shape (conductor.ts's dispatch loop): issue-only, no pr yet.
+  state.appendEvent("comment-cursor-stale", { issue: 8, checkpoint: "dispatch", labeled: true, posted: true });
+  forge.prStates[12] = "MERGED";
+  forge.issueStates[8] = "CLOSED";
+  const logged = tapEvents(state);
+
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), [
+    { issue: 7, pr: 12, source: "ac-snapshot-drift", via: "merged" },
+    { issue: 8, source: "comment-cursor-stale", via: "issue-closed" },
+  ]);
+  state.close();
+});
+
+test("reconcileEscalations (#933): a re-run after both resolve appends nothing (last-event-wins dedupe unchanged)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  state.appendEvent("ac-snapshot-drift", { worker: "w1", issue: 7, pr: 12, reason: "body changed", labeled: 1 });
+  state.appendEvent("comment-cursor-stale", { issue: 8, checkpoint: "dispatch", labeled: true, posted: true });
+  forge.prStates[12] = "MERGED";
+  forge.issueStates[8] = "CLOSED";
+  await reconcileEscalations(forge, state, mkCfg());
+
+  const logged = tapEvents(state);
+  await reconcileEscalations(forge, state, mkCfg());
+  await reconcileEscalations(forge, state, mkCfg());
+
+  assert.deepEqual(resolvedEvents(logged), []);
+  state.close();
+});
+
+test("openEscalations (#933): ac-snapshot-drift and comment-cursor-stale are never label-proven — their bespoke label site is not the shared addLabel proof", () => {
+  const open = openEscalations([
+    { kind: "ac-snapshot-drift", payload: { worker: "w1", issue: 7, pr: 12, reason: "x", labeled: 1 } },
+    { kind: "comment-cursor-stale", payload: { issue: 8, checkpoint: "dispatch", labeled: true, posted: true } },
+  ]);
+  assert.equal(open.get("ac-snapshot-drift:7")?.labelProven, false);
+  assert.equal(open.get("comment-cursor-stale:8")?.labelProven, false);
+});
+
 // ── transition-only (#295 AC2) ───────────────────────────────────────────────────────────────
 
 test("reconcileEscalations: a steady-state re-sweep re-emits NOTHING and costs zero forge reads (#295 AC2)", async () => {

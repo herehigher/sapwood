@@ -198,6 +198,26 @@ test("foldOpenAttention: `gated-reentry` and `lane-revived` also clear open issu
   assert.deepEqual(laneRevived, {});
 });
 
+// #933: the two engine terminal witnesses that were missing from ISSUE_CLEAR_KINDS — 44 of the
+// 54 zombie strip rows measured on the dogfood DB. Both flow through `foldOpenAttention` directly
+// (not just a tag-membership check), so removing either kind's `escalation-clear` tag in the
+// registry silently shrinks the DERIVED `ISSUE_CLEAR_KINDS` and reddens these.
+test("foldOpenAttention: a later `human-merge-only-closed` clears an open drive-human-merge-only on the same issue (#933)", () => {
+  const open = foldOpenAttention([
+    event(1, "drive-human-merge-only", { issue: 5, pr: 50 }),
+    event(2, "human-merge-only-closed", { worker: "w1", issue: 5, pr: 50 }),
+  ]);
+  assert.deepEqual(open, {});
+});
+
+test("foldOpenAttention: a later `gated-lane-retired` clears an open gated-flag-unprovable on the same issue (#933)", () => {
+  const open = foldOpenAttention([
+    event(1, "gated-flag-unprovable", { worker: "w1", issue: 5 }),
+    event(2, "gated-lane-retired", { worker: "w1", issue: 5, pr: null, witness: "merged" }),
+  ]);
+  assert.deepEqual(open, {});
+});
+
 // #739 gate② round 1 finding [0] (ac4-missing-clear-kinds) asked for `pr-released` and
 // `plan-approved` to join ISSUE_CLEAR_KINDS, quoting the issue's own AC text. This drift guard is
 // the disputed reply's actual evidence: the engine's own `escalation-clear` tag — the tag

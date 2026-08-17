@@ -85,6 +85,16 @@ test("consumer list: CLEAR_KINDS is derived from the escalation-clear tag", () =
   assertDerivedFromTag("CLEAR_KINDS", "escalation-clear", CLEAR_KINDS);
 });
 
+// #933: the two engine terminal witnesses whose absence from `escalation-clear` left 44 of the
+// 54-zombie-row count on the dogfood strip forever (`human-merge-only-closed` for
+// `drive-human-merge-only`, `gated-lane-retired` for `gated-flag-unprovable`). Pinned by name, not
+// just by the derived-set test above, so a future accidental removal of either tag reds HERE with
+// the issue number attached, rather than only as an unexplained CLEAR_KINDS membership diff.
+test("registry (#933): human-merge-only-closed and gated-lane-retired both carry escalation-clear", () => {
+  assert.ok(EVENT_KINDS["human-merge-only-closed"].tags.includes("escalation-clear"));
+  assert.ok(EVENT_KINDS["gated-lane-retired"].tags.includes("escalation-clear"));
+});
+
 test("consumer list: dissent's decision/receipt kinds are derived from their tags", () => {
   assertDerivedFromTag("DISSENT_DECISION_KINDS", "dissent-decision", DISSENT_DECISION_KINDS);
   assertDerivedFromTag("DISSENT_RECEIPT_KIND", "dissent-receipt", [DISSENT_RECEIPT_KIND]);
@@ -128,8 +138,10 @@ test("consumer list: ESCALATION_SOURCES is derived from the escalation-source:* 
  *  does this kind carry an ISSUE and provably apply the needs-human label? If not, it belongs in
  *  that module's DELIBERATELY-ABSENT block instead, not here. */
 const GOLDEN_ESCALATION_SOURCES: Record<string, "always" | "payload" | "never"> = {
+  "ac-snapshot-drift": "never",
   "architect-repeat-drop-escalated": "payload",
   "ceiling-escalated": "never",
+  "comment-cursor-stale": "never",
   "concern-post-escalated": "payload",
   "drive-needs-human": "payload",
   "drive-no-pr": "always",

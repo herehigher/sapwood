@@ -185,9 +185,9 @@ export const LANE_EVENT_KINDS = defineKinds({
     see: "#447",
   },
   "human-merge-only-closed": {
-    tags: ["merged-witness"],
+    tags: ["merged-witness", "escalation-clear"],
     meaning:
-      "a parked human-merge-only lane's PR (#397 bucket 2) was found MERGED and closed out — in-progress cleared, board set done, worktree run through the same mtime/ctime reclaim policy the DEAD path uses, worker row terminalized. Never re-drives the lane (#824).",
+      "a parked human-merge-only lane's PR (#397 bucket 2) was found MERGED and closed out — in-progress cleared, board set done, worktree run through the same mtime/ctime reclaim policy the DEAD path uses, worker row terminalized. Never re-drives the lane (#824). `escalation-clear` (#933): this IS the engine's own terminal witness for the `drive-human-merge-only` attention item — the dashboard strip fold must retire it here, not leave it waiting on a resolution nothing ever observes.",
     actionability: "routine",
     see: "#824",
   },
@@ -271,9 +271,9 @@ export const LANE_EVENT_KINDS = defineKinds({
     see: "#391",
   },
   "gated-lane-retired": {
-    tags: [],
+    tags: ["escalation-clear"],
     meaning:
-      "a gated-reentry lane was retired (not reentered) because the audit proved it terminal by merge or issue-close (#593) — nothing left to reenter.",
+      "a gated-reentry lane was retired (not reentered) because the audit proved it terminal by merge or issue-close (#593) — nothing left to reenter. `escalation-clear` (#933): this IS the engine's own terminal witness for the `gated-flag-unprovable` attention item — the dashboard strip fold must retire it here.",
     actionability: "routine",
     see: "#593",
   },

@@ -307,9 +307,9 @@ export const DRIVE_EVENT_KINDS = defineKinds({
 
   // Misc drive-path records.
   "ac-snapshot-drift": {
-    tags: [],
+    tags: ["escalation-source:never"],
     meaning:
-      "a PR's issue body changed after its acceptance-criteria snapshot was taken (#279 §5); the lane fails closed and needs-human is applied outside the event-kind escalation-source table (its own bespoke label site, escalation-buckets.test.ts's SITE_INVENTORY).",
+      "a PR's issue body changed after its acceptance-criteria snapshot was taken (#279 §5); the lane fails closed and needs-human is applied via its own bespoke label site (escalation-buckets.test.ts's SITE_INVENTORY), not the shared addLabel call the other `always`/`payload` sources share — so `never` is the honest proof mode: the reconciler now OBSERVES this kind for external resolution (a merged/closed PR, a closed issue), but `never` keeps escalation-sweep.ts from ever removing the label off this event's own say-so (#933).",
     actionability: "intervene",
     see: "#279",
   },
