@@ -557,11 +557,12 @@ test("#890: a lane's settled cost bar scales against worker.budgetUsdSoft, not i
     html.indexOf("</svg>", html.indexOf('class="cost-bar lane-card-bar"')),
   );
   // The background TRACK rect is always width="100" (a fixed reference) — the settled FILL rect
-  // (`fill="var(--sap)"`) is the one that must scale against the configured ceiling.
-  assert.match(laneBarSvg, /width="20" height="10" fill="var\(--sap\)"/, "$2 against a $10 soft budget must draw a 20%-wide fill");
+  // (`class="cost-bar-fill"`, its color resolved through CSS from `--sap-fill`) is the one that
+  // must scale against the configured ceiling.
+  assert.match(laneBarSvg, /class="cost-bar-fill"[^>]*width="20"/, "$2 against a $10 soft budget must draw a 20%-wide fill");
   assert.doesNotMatch(
     laneBarSvg,
-    /width="100" height="10" fill="var\(--sap\)"/,
+    /class="cost-bar-fill"[^>]*width="100"/,
     "the settled fill must never self-scale to a full-width bar regardless of the real dollar amount",
   );
 });
@@ -2829,3 +2830,235 @@ test("#897 AC5: .lane-activity-row carries its own auto-fit column template and 
   assert.match(ownRule![1] as string, /display:\s*grid/);
   assert.match(ownRule![1] as string, /grid-template-columns:\s*repeat\(auto-fit/);
 });
+
+// ── #924: one `.panel-head` recipe + one bar grammar + the --sap-text/--sap-fill split ─────────
+
+const tokensCss924 = readFileSync(new URL("./tokens.css", import.meta.url), "utf8");
+const panelsCss924 = readFileSync(new URL("./panels.css", import.meta.url), "utf8");
+const heroCss924 = readFileSync(new URL("./hero/hero.css", import.meta.url), "utf8");
+// `@import` lines resolve under Vite's bundler only — happy-dom's plain <style> injection can't
+// follow them (same posture hero.test.ts's own tokensCss/panelsCss/heroCss concatenation takes).
+const appCss924 = readFileSync(new URL("./app.css", import.meta.url), "utf8").replace(/^@import.*$/gm, "");
+
+/** A real, fully-populated `AppViewModel` — every module in AC1's derived set (hero,
+ *  needs-attention, lanes, activity, cost×2) has real content to render its panel-head from,
+ *  including a stat cluster where the design calls for one. */
+function fullCoverageViewModel() {
+  const heroEvents: DomainEvent[] = [
+    { known: false, id: 1, ts: "2026-01-01T00:00:00Z", kind: "pool-selected", payload: { issues: [94] } },
+    { known: false, id: 2, ts: "2026-01-01T00:01:00Z", kind: "dispatched", payload: { worker: "w1", issue: 95 } },
+  ];
+  const stageBars = [{ label: "Goal & align", usd: 0.22 }];
+  const vm = minimalAppViewModel({
+    loop: {
+      isPending: false,
+      data: {
+        ...LOOP_STATE_OK,
+        lanes: {
+          max: 1,
+          items: [
+            {
+              lane: "w1",
+              issue: 95,
+              state: "running",
+              pr: null,
+              startedAt: "2026-01-01T00:00:00Z",
+              endedAt: null,
+              costUsd: 2,
+              estCostUsd: null,
+              contextTokens: null,
+              tokenComposition: null,
+            },
+          ],
+        },
+        config: { worker: { model: "opus", effort: "high", budgetUsdSoft: 10 } },
+      },
+    },
+    activeHero: foldEvents(initialHeroState(3), heroEvents).state,
+    activeOpenAttention: [domainEvent(42, "drive-needs-human")],
+    activeEvents: [domainEvent(43, "dispatched")],
+  });
+  // `minimalAppViewModel` always sets `costToday`/`costRound` itself (never driven by its own
+  // overrides param) — same override-by-spread posture the #880 wiring test above (`{ ...vm,
+  // costRound }`) already takes.
+  return {
+    ...vm,
+    costToday: {
+      heading: "cost · today",
+      avgRoundUsd: 4.8,
+      stageBars,
+      targetUsd: 5,
+      modelBars: [{ label: "opus", usd: 7.8 }],
+      footer: null,
+    },
+    costRound: {
+      heading: "cost · round 9",
+      closed: true,
+      stageBars,
+      targetUsd: 5,
+      modelBars: [{ label: "opus", usd: 4.9 }],
+      footer: { totalUsd: 6.2, prsMerged: 3, usdPerPr: 6.2 / 3, reviewUsd: 0 },
+    },
+  };
+}
+
+/** Mounts the FULL production cascade (tokens → panels → hero → app, `app.css`'s own `@import`
+ *  order) plus a real `appContent` tree into a real DOM container — AC1/AC2/AC3's own "derived
+ *  from the rendered App" requirement, the STYLE doctrine family (`registerRealDom()` + a real
+ *  `getComputedStyle` read, never a regex on source text for a cascade-dependent claim). */
+async function mountAppWithCascade(vm: Parameters<typeof appContent>[0]) {
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss924}\n${panelsCss924}\n${heroCss924}\n${appCss924}`;
+  document.head.appendChild(style);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        {appContent(vm)}
+      </QueryClientProvider>,
+    );
+  });
+  const cleanup = async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    document.head.removeChild(style);
+  };
+  return { container, cleanup };
+}
+
+/** Every `.panel-head` element the derived set requires, keyed by the head's OWN title text —
+ *  every module in AC1's set renders a distinct one ("loop", "needs attention", "lanes",
+ *  "activity", "cost · today", "cost · round 9"), including the cost strip's two panels, which
+ *  share an outer `aria-label="cost"` ancestor and so can't be told apart by that alone.
+ *  COVERAGE (doctrine): read off the rendered tree, never a hand count. */
+function panelHeadsByModule(container: HTMLElement): Record<string, Element> {
+  const out: Record<string, Element> = {};
+  for (const el of container.querySelectorAll(".panel-head")) {
+    const title = el.querySelector("h1, h2, h3");
+    const key = title?.textContent?.trim().toLowerCase() ?? "unknown";
+    out[key] = el;
+  }
+  return out;
+}
+
+test("AC1: every module in the derived set (hero, needs-attention, lanes, activity, cost×2) renders exactly one .panel-head", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const heads = panelHeadsByModule(container);
+    for (const key of ["loop", "needs attention", "lanes", "activity", "cost · today", "cost · round 9"]) {
+      assert.ok(key in heads, `expected a .panel-head for "${key}"; got: ${Object.keys(heads).join(", ")}`);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test("AC1: every panel-head title resolves Fraunces/uppercase/letter-spacing >= 0.06em-equivalent, and the head's own border-bottom-width is 1px", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const heads = panelHeadsByModule(container);
+    for (const [key, head] of Object.entries(heads)) {
+      const title = head.querySelector("h1, h2, h3");
+      assert.ok(title, `"${key}"'s .panel-head must carry a title element`);
+      const titleComputed = getComputedStyle(title as Element);
+      assert.match(titleComputed.fontFamily, /Fraunces/, `"${key}" title font-family`);
+      assert.equal(titleComputed.textTransform, "uppercase", `"${key}" title text-transform`);
+      const fontSize = Number.parseFloat(titleComputed.fontSize);
+      const letterSpacing = Number.parseFloat(titleComputed.letterSpacing);
+      assert.ok(
+        letterSpacing >= fontSize * 0.06,
+        `"${key}" title letter-spacing ${letterSpacing}px must be >= 0.06em (${fontSize * 0.06}px at ${fontSize}px)`,
+      );
+      const headComputed = getComputedStyle(head);
+      assert.equal(headComputed.borderBottomWidth, "1px", `"${key}" .panel-head border-bottom-width`);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test("AC1: where a panel-head carries a stat cluster, it is the head's last child with margin-left: auto", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const heads = panelHeadsByModule(container);
+    for (const key of ["needs attention", "lanes", "cost · today"]) {
+      const head = heads[key];
+      assert.ok(head, `"${key}" must render a .panel-head`);
+      const lastChild = head!.lastElementChild;
+      assert.ok(lastChild?.classList.contains("panel-head-stat"), `"${key}"'s .panel-head last child must carry .panel-head-stat`);
+      assert.equal(getComputedStyle(lastChild as Element).marginLeft, "auto", `"${key}" stat cluster margin-left`);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test("AC2: .cost-bar-target stroke resolves to the real --sap-text colour, and .cost-panel-footer is right-aligned", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const tick = container.querySelector(".cost-bar-target");
+    assert.ok(tick, "the by-stage group's target tick must render (costToday.targetUsd is set)");
+    const expectedSapText = parseTokensLocal(tokensCss924)["--sap-text"];
+    assert.equal(getComputedStyle(tick as Element).stroke, expectedSapText, ".cost-bar-target stroke must resolve to --sap-text");
+
+    const footer = container.querySelector(".cost-panel-footer");
+    assert.ok(footer, "the closed round panel's footer must render (roundSpend.footer is set)");
+    assert.equal(getComputedStyle(footer as Element).textAlign, "right");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("AC2: .cost-bar-row's label column is >= 7em, read from panels.css's own declared grid-template-columns", () => {
+  const rowRule = panelsCss924.match(/\.cost-bar-row\s*\{([^}]*)\}/);
+  assert.ok(rowRule, ".cost-bar-row rule must exist");
+  const columns = rowRule![1]!.match(/grid-template-columns:\s*([^;]+);/);
+  assert.ok(columns, ".cost-bar-row must declare grid-template-columns");
+  const firstColumnEm = Number.parseFloat(columns![1]!.trim().split(/\s+/)[0]!);
+  assert.ok(firstColumnEm >= 7, `the label column (${firstColumnEm}em) must be >= 7em`);
+});
+
+test("AC3: .hero-pool-chip, an in-motion droplet, and .spend-meter-bar's own fill all carry a real 1px outline stroke that resolves --sap-text in light theme (transparent/invisible in dark)", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    // `light-dark()` is a <color> function — stroke-width itself is a constant 1px in BOTH
+    // themes (tokens.css's own doc); only the stroke COLOUR toggles per theme via
+    // --sap-fill-outline, so this is the one geometry fact this test can assert theme-agnostic.
+    // happy-dom does textual var() substitution without evaluating light-dark() (confirmed
+    // against #920's own active-planning-node test, same file) — the resolved stroke is the raw
+    // "light-dark(<raw --sap-text declaration>, transparent)" text, not a per-theme hex.
+    const expectedOutlineStroke = `light-dark(${parseTokensLocal(tokensCss924)["--sap-text"]}, transparent)`;
+
+    const chipRect = container.querySelector(".hero-pool-chip rect");
+    assert.ok(chipRect, "a real .hero-pool-chip rect must render (the fixture's backlog pool is non-empty)");
+    assert.equal(getComputedStyle(chipRect as Element).stroke, expectedOutlineStroke, "hero-pool-chip outline stroke");
+    assert.equal(getComputedStyle(chipRect as Element).strokeWidth, "1px", "hero-pool-chip outline width");
+
+    const droplet = container.querySelector('.hero-droplet:not([data-at="trunk"]):not([data-at="needs-human"]) .hero-droplet-shape');
+    assert.ok(droplet, "a real in-motion droplet must render (the fixture dispatches one)");
+    assert.equal(getComputedStyle(droplet as Element).stroke, expectedOutlineStroke, "in-motion droplet outline stroke");
+    assert.equal(getComputedStyle(droplet as Element).strokeWidth, "1px", "in-motion droplet outline width");
+
+    const spendFill = container.querySelector(".spend-meter-bar .cost-bar-fill");
+    assert.ok(spendFill, "the header's own spend-meter-bar fill must render");
+    assert.equal(getComputedStyle(spendFill as Element).stroke, expectedOutlineStroke, "spend-meter-bar fill outline stroke");
+    assert.equal(getComputedStyle(spendFill as Element).strokeWidth, "1px", "spend-meter-bar fill outline width");
+  } finally {
+    await cleanup();
+  }
+});
+
+/** Same raw-value read `contrast.ts`'s own `parseTokens` performs — duplicated locally (rather
+ *  than importing `contrast.ts` into this already-large file) since only the ONE token this
+ *  suite needs is read; `tokens.test.ts` is the file that actually exercises `contrast.ts` itself. */
+function parseTokensLocal(css: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [, name, value] of css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/(--[\w-]+)\s*:\s*([^;}]+)/g)) {
+    out[name!] = value!.trim();
+  }
+  return out;
+}

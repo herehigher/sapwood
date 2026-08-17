@@ -588,11 +588,12 @@ export function checkpointOverflowPoint(): { x: number; y: number } {
   return { x: (GATES.ci + GATES.review) / 2 + col * CHECKPOINT_COL_STEP, y: GATES.y - CHECKPOINT_BASE_OFFSET - row * CHECKPOINT_ROW_STEP };
 }
 
-/** A droplet's fill token — §6/§5: `--sap` in motion, `--rust` stopped/escalated, `--moss` merged. */
+/** A droplet's fill token — §6/§5: `--sap-fill` in motion, `--rust` stopped/escalated, `--moss`
+ *  merged (#924: the filled-surface role, split from the stroke/text role `--sap-text`). */
 function dropletFill(d: Droplet): string {
   if (d.at === "trunk") return "var(--moss)";
   if (d.failed || d.at === "needs-human") return "var(--rust)";
-  return "var(--sap)";
+  return "var(--sap-fill)";
 }
 
 /**
@@ -918,16 +919,15 @@ export function HeroStage({
         {state.pool.slice(0, BACKLOG_FILLED_CAP).map((issue, i) => (
           <g className="hero-pool-chip" key={issue} data-issue={issue}>
             <rect
-              style={{ fill: "var(--sap)" }}
+              style={{ fill: "var(--sap-fill)" }}
               x={BACKLOG.x + 8}
               y={BACKLOG.y + 6 + i * BACKLOG.chip}
               width={BACKLOG.w - 16}
               height={24}
               rx={8}
             />
-            {/* #879: --heartwood is the frozen baseline's dark-on-amber card text — it inverts
-             * with --sap the same way it inverts with the page ground, so one token reads dark
-             * on the bright dark-theme amber AND light on the darker light-theme amber. */}
+            {/* #924: `.hero-pool-num` (hero.css) fills from --on-sap-fill — always dark ink on
+             * this card's amber, in both themes (see hero.css's own doc). */}
             <text
               className="hero-num hero-pool-num"
               x={BACKLOG.x + BACKLOG.w / 2}

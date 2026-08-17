@@ -30,7 +30,16 @@
   --sapwood: light-dark(#251B10, #F1E7D2); /* primary text */
   --bark: #8A7A64; /* borders and hairlines ONLY — below AA for text, both themes */
   --bark-text: light-dark(#57604A, #A6957C); /* muted text */
-  --sap: light-dark(#8A5A14, #E8A33D); /* amber — "in motion" */
+  /* #924 (#729 remainder, Q5): the old --sap split in two by ROLE, never by theme —
+     --sap-text (stroke/text/outline; unchanged value, this is today's --sap renamed) and
+     --sap-fill (filled surfaces: chips, droplets, bar pills, filled buttons), which stays a flat
+     amber in BOTH themes rather than darkening in light mode the way --sap-text still does. */
+  --sap-text: light-dark(#8A5A14, #E8A33D); /* amber — "in motion"; stroke/text/outline role */
+  --sap-fill: #E8A33D; /* amber filled-surface role — same value both themes */
+  /* Ink drawn ON a --sap-fill surface — always dark, since --sap-fill no longer darkens for
+     light theme the way --sap-text does (a live light-dark(--heartwood) alias would resolve to
+     the PALE light-theme heartwood there, reading as light-on-amber — the wrong direction). */
+  --on-sap-fill: #251B10;
   --moss: light-dark(#3E6B4F, #8FA36B); /* success — "done well" */
   /* failure/escalation — "a person should look".
      Dark value lightened from the spec's #C05A2E (3.46:1 on --panel) to clear AA as
@@ -62,6 +71,13 @@
   --radius-card: 6px;
   --radius-pill: 999px;
   --hairline: 1px solid color-mix(in srgb, var(--bark) 25%, transparent);
+  /* Q5: light theme's --sap-fill vs the cream ground measures 1.88:1, below the 3:1 non-text
+     boundary (dark theme clears it at 7.83:1) — every filled chip/droplet/bar-pill compensates
+     with a 1px --sap-text outline in light theme only. `light-dark()` is a <color> function — it
+     cannot apply to stroke-width itself (that stays a constant 1px everywhere), so the toggle
+     lives entirely in the STROKE COLOUR: --sap-text in light theme, transparent (invisible, same
+     effect as 0-width) in dark, where the fill already clears 3:1 unaided. */
+  --sap-fill-outline: light-dark(var(--sap-text), transparent);
 
   /* ---- Motion ------------------------------------------------------------ */
   --beat: 240ms; /* state flips */
@@ -71,7 +87,7 @@
   --ambient: 3s; /* ambient pulses are never faster than this */
 
   /* ---- Focus (§2 adjudication log, 2026-08-14) ----------------------------- */
-  --focus-ring: 2px solid var(--sap);
+  --focus-ring: 2px solid var(--sap-text);
   --focus-ring-offset: 2px;
 
   /* ---- Z-layers (§2 adjudication log, 2026-08-14) --------------------------

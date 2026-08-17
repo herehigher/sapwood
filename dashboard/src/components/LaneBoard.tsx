@@ -2,9 +2,20 @@ import type { Lane } from "../api/types.ts";
 import { laneStateCaption } from "../copy.ts";
 import type { EntityTitles } from "../entities.ts";
 import { formatElapsed, formatUsd } from "../format.ts";
+import { modelEffortCaption } from "../hero/stage.tsx";
 import { CostBar } from "./CostBar.tsx";
 import { EntityRef } from "./EntityRef.tsx";
 import { StateGlyph } from "./icons.tsx";
+
+/** #924: the lanes panel-head's own stat cluster ("model · effort · soft budget $N") —
+ *  `modelEffortCaption` is the SAME `worker.*` config reader the hero's own lane captions use
+ *  (`stage.tsx`), never a second guess at the same config path. `null` when neither half of the
+ *  fact is readable (unconfigured/unreadable config) — an honest gap, not a fabricated caption. */
+export function laneHeadStat(config: Record<string, unknown> | null | undefined, workerBudgetUsdSoft: number | null): string | null {
+  const modelEffort = modelEffortCaption(config, "worker");
+  const budget = workerBudgetUsdSoft !== null ? `soft budget ${formatUsd(workerBudgetUsdSoft)}` : null;
+  return [modelEffort, budget].filter((s): s is string => s !== null).join(" · ") || null;
+}
 
 /** #890 (§3 E): the lane card's own settled/est text — a running lane's engine-provided
  *  `estCostUsd` is never silently dropped (the pre-#890 behavior: any lane with `costUsd: null`
@@ -59,6 +70,9 @@ export interface LaneBoardProps {
   /** #890: `worker.budgetUsdSoft` (allowlisted config) — the lane bar's own ceiling. `null`
    *  when the config is unreadable, same honest-unknown posture as `lanesMax`. */
   workerBudgetUsdSoft?: number | null;
+  /** #924: allowlisted config, threaded straight to `laneHeadStat` for the panel-head's own
+   *  "model · effort · soft budget $N" stat cluster. */
+  config?: Record<string, unknown> | null;
   now?: Date;
 }
 
@@ -126,12 +140,23 @@ function EmptyLaneCard({ caption }: { caption?: string }) {
   );
 }
 
-export function LaneBoard({ lanesMax, lanes, titles, repoUrl, disconnected, workerBudgetUsdSoft = null, now }: LaneBoardProps) {
+export function LaneBoard({
+  lanesMax,
+  lanes,
+  titles,
+  repoUrl,
+  disconnected,
+  workerBudgetUsdSoft = null,
+  config = null,
+  now,
+}: LaneBoardProps) {
   const clock = now ?? new Date();
   if (disconnected) {
     return (
       <section className="panel lane-board" aria-label="lanes">
-        <h2>lanes</h2>
+        <div className="panel-head">
+          <h2>lanes</h2>
+        </div>
         <p className="muted" style={{ color: "var(--rust)" }}>
           disconnected — restart sapwood to reconnect
         </p>
@@ -141,7 +166,9 @@ export function LaneBoard({ lanesMax, lanes, titles, repoUrl, disconnected, work
   if (lanesMax === null) {
     return (
       <section className="panel lane-board" aria-label="lanes">
-        <h2>lanes</h2>
+        <div className="panel-head">
+          <h2>lanes</h2>
+        </div>
         <div className="lane-board-grid">
           <EmptyLaneCard caption="lane count unknown — config unreadable" />
         </div>
@@ -150,9 +177,13 @@ export function LaneBoard({ lanesMax, lanes, titles, repoUrl, disconnected, work
   }
   const sorted = [...lanes].sort((a, b) => a.lane.localeCompare(b.lane));
   const slots = Array.from({ length: lanesMax }, (_, i) => sorted[i] ?? null);
+  const headStat = laneHeadStat(config, workerBudgetUsdSoft);
   return (
     <section className="panel lane-board" aria-label="lanes">
-      <h2>lanes</h2>
+      <div className="panel-head">
+        <h2>lanes</h2>
+        {headStat && <span className="data muted panel-head-stat">{headStat}</span>}
+      </div>
       <div className="lane-board-grid">
         {slots.map((lane, i) =>
           lane ? (

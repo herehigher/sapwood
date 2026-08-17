@@ -3,6 +3,47 @@
  * Plain CSS only — no CSS-in-JS, no framework (scaffold.test.ts's banned-package check).
  */
 
+/*
+ * #924 (#729 remainder, D32): one shared module-head anatomy — title (Fraunces, uppercase,
+ * letter-spaced) + an optional right-aligned stat cluster + a closing hairline — used by every
+ * module: the hero card, needs-attention, lanes, activity, and both cost panels. Owner ruling Q2
+ * (2026-08-17): #728 stays scoped to FONT FAMILY only; casing/tracking/scale here follow the
+ * mockups, not that entry.
+ */
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+  margin-bottom: var(--space-2);
+  /* Same rendered value as `--hairline` (tokens.css), spelled as longhands instead of the
+   * shorthand `var()` indirection: happy-dom's CSS engine cannot resolve a `color-mix()` that
+   * appears INSIDE a border shorthand (empirically confirmed — `border-bottom: var(--hairline)`
+   * computes an empty string for every longhand, width included, though a real browser renders
+   * it correctly; this is this suite's first `getComputedStyle` probe of a hairline's own width,
+   * so no earlier test had hit the gap). Longhands sidestep it without changing what renders. */
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+  border-bottom-color: color-mix(in srgb, var(--bark) 25%, transparent);
+}
+
+/* A literal px value, not `0.06em` — the same happy-dom `em`-resolves-against-the-DEFAULT-16px
+ * quirk `hero.css`'s `.hero-phase` comment documents sidesteps here too. 1px at the 16px title
+ * size below is ~0.0625em, clearing the AC's 0.06em-equivalent floor. */
+.panel-head > h1,
+.panel-head > h2,
+.panel-head > h3 {
+  font-size: var(--text-1);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+/* The head's own right-aligned stat cluster (AC1: "last child, margin-left: auto") — absent
+ * entirely on a title-only head (activity). */
+.panel-head-stat {
+  margin-left: auto;
+}
+
 .lane-board-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
@@ -136,20 +177,22 @@
   gap: var(--space-4);
 }
 
+/* #924: `.panel-head` is the shared row anatomy (title/uppercase/letter-spacing/hairline); this
+ * panel's own stat cluster ("avg round $N") is `.cost-panel-avg` below, `.panel-head-stat`'s own
+ * margin-left: auto. */
 .cost-panel-head {
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
-  margin-bottom: var(--space-2);
 }
 
-/* `cost-dark.png`'s heading/group-label treatment — bold, letter-spaced caps, matching the
- * `.cost-panel-badge`/hero-panel section-header convention (#879's own row-2 finding) rather than
- * plain sentence case. Text CONTENT stays plain-language (`heading`/`title` props, §7's
- * terminology rule) — only the rendered CASE changes here, so copy/accessibility text is
- * unaffected. */
-.cost-panel-head h3,
+/* #924: the by-stage/by-model GROUP header ("BY STAGE"/"BY MODEL") is deliberately NOT the
+ * `.panel-head` title treatment — `cost-dark.png` draws it uppercase MONO muted, a sub-level
+ * label, not a second Fraunces module title. */
 .cost-panel-group h4 {
+  font-family: var(--font-data);
+  font-weight: 400;
+  color: var(--bark-text);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -169,12 +212,19 @@
 
 .cost-panel-footer {
   margin-top: var(--space-2);
+  text-align: right;
 }
 
 .cost-panel-groups {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: var(--space-4);
+}
+
+/* `cost-dark.png`'s vertical rule between the BY STAGE / BY MODEL groups. */
+.cost-panel-group + .cost-panel-group {
+  border-left: var(--hairline);
+  padding-left: var(--space-4);
 }
 
 .cost-bar-list {
@@ -186,9 +236,10 @@
   gap: var(--space-2);
 }
 
+/* AC2: the label column is >= 7em so a name like "Goal & align" never wraps. */
 .cost-bar-row {
   display: grid;
-  grid-template-columns: 5em 1fr 4em;
+  grid-template-columns: 7em 1fr 4em;
   align-items: center;
   gap: var(--space-2);
 }
@@ -198,12 +249,34 @@
   height: 10px;
 }
 
-/* The by-stage group's shared target/ceiling tick (`cost-panel.ts`'s `tickPositionPct`) — a thin
- * line across the bar's full height, drawn in the primary text color so it reads against both the
- * faint track and the amber fill. */
+/* #924 (D29/D30) — the shared hairline-bar grammar `CostBar.tsx` draws: a 1px `--bark` track,
+ * an amber pill fill >= 6px tall (`.cost-bar-fill`, `--sap-fill`), and a 1px `--sap-text` tick
+ * taller than the pill (`.cost-bar-target`). Geometry (heights/y/rx) is fixed per instance as SVG
+ * attributes in `CostBar.tsx` itself — same local user-unit space regardless of which container
+ * (cost panel / lane card / header capsule) stretches the `<svg>`'s own CSS height around it. */
+.cost-bar-track {
+  fill: var(--bark);
+  opacity: 0.4;
+}
+
+.cost-bar-fill {
+  fill: var(--sap-fill);
+}
+
+/* The by-stage group's shared target/ceiling tick (`cost-panel.ts`'s `tickPositionPct`). */
 .cost-bar-target {
-  stroke: var(--sapwood);
+  stroke: var(--sap-text);
   stroke-width: 1;
+}
+
+/* AC3/Q5: the light theme's flat `--sap-fill` measures only 1.88:1 against the page ground —
+ * the header capsule's own fill pill compensates with a 1px `--sap-text` outline there (invisible
+ * in dark theme, where the fill already clears 3:1 unaided — `--sap-fill-outline`, tokens.css).
+ * The cost/lane-card bar's own fill sits directly against its own hairline track, not bare
+ * ground, so it is outside this rule. */
+.spend-meter-bar .cost-bar-fill {
+  stroke: var(--sap-fill-outline);
+  stroke-width: 1px;
 }
 
 /* ---- header: engine state word + spend meter (§3 A, #361) ---------------- */
@@ -335,8 +408,8 @@
  * background wash (not just text color) keeps the tint visible now that the pill has no border
  * of its own to recolor — the joined group's border is shared, not per-slot. */
 .round-nav-pill-closed {
-  background: color-mix(in srgb, var(--sap) 16%, transparent);
-  color: var(--sap);
+  background: color-mix(in srgb, var(--sap-text) 16%, transparent);
+  color: var(--sap-text);
 }
 
 .round-nav-list-wrap {
@@ -439,8 +512,8 @@
 }
 
 .transport-controls button[aria-pressed="true"] {
-  border-color: var(--sap);
-  color: var(--sap);
+  border-color: var(--sap-text);
+  color: var(--sap-text);
 }
 
 .transport-speeds {
@@ -486,7 +559,7 @@
   margin-top: -5px; /* centers the 14px thumb on the 4px track (webkit doesn't do this itself) */
   border-radius: var(--radius-pill);
   border: none;
-  background: var(--sap);
+  background: var(--sap-fill);
 }
 
 .transport-scrub::-moz-range-thumb {
@@ -494,7 +567,7 @@
   height: 14px;
   border-radius: var(--radius-pill);
   border: none;
-  background: var(--sap);
+  background: var(--sap-fill);
 }
 
 .transport-scrub:focus-visible {

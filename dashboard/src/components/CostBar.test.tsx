@@ -59,3 +59,30 @@ test("no target tick renders when targetPct is null", () => {
   const html = renderToStaticMarkup(<CostBar settledUsd={4} max={10} label="lane" />);
   assert.doesNotMatch(html, /cost-bar-target/);
 });
+
+// ── #924 AC2: the hairline-bar grammar's own geometry ───────────────────────────────────────────
+
+test("AC2: the track is a 1px-tall rect, drawn full-width regardless of the settled fill", () => {
+  const html = renderToStaticMarkup(<CostBar settledUsd={4} max={10} label="lane" />);
+  assert.match(html, /class="cost-bar-track"[^>]*width="100"[^>]*height="1"/);
+});
+
+test("AC2: the fill pill is >= 6px tall and carries a pill radius (rx = half its own height)", () => {
+  const html = renderToStaticMarkup(<CostBar settledUsd={4} max={10} label="lane" />);
+  const match = html.match(/class="cost-bar-fill"[^>]*height="([\d.]+)"[^>]*rx="([\d.]+)"/);
+  assert.ok(match, "the fill rect must declare both height and rx");
+  const height = Number(match![1]);
+  const rx = Number(match![2]);
+  assert.ok(height >= 6, `fill height ${height} must be >= 6`);
+  assert.equal(rx, height / 2, "rx must be exactly half the fill's own height — a true pill radius");
+});
+
+test("AC2: the target tick spans a taller height than the fill pill", () => {
+  const html = renderToStaticMarkup(<CostBar settledUsd={4} max={10} targetPct={50} label="lane" />);
+  const fillMatch = html.match(/class="cost-bar-fill"[^>]*height="([\d.]+)"/);
+  const tickMatch = html.match(/class="cost-bar-target"[^>]*y1="([\d.]+)"[^>]*y2="([\d.]+)"/);
+  assert.ok(fillMatch && tickMatch, "both the fill rect and the target tick must render");
+  const fillHeight = Number(fillMatch![1]);
+  const tickHeight = Math.abs(Number(tickMatch![2]) - Number(tickMatch![1]));
+  assert.ok(tickHeight > fillHeight, `tick height ${tickHeight} must exceed fill height ${fillHeight}`);
+});

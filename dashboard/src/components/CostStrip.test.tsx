@@ -40,6 +40,14 @@ test("renders the today panel's by-stage and by-model groups, and the avg-round 
   assert.match(html, /\$7\.80/);
 });
 
+test("#924 AC1: the today panel's head carries .panel-head, with the avg-round stat as its own .panel-head-stat last child", () => {
+  const html = renderToStaticMarkup(<CostStrip today={todayPanel()} round={null} />);
+  assert.match(
+    html,
+    /<div class="cost-panel-head panel-head"><h3>cost · today<\/h3><span class="data muted cost-panel-avg panel-head-stat">avg round \$4\.80<\/span><\/div>/,
+  );
+});
+
 test("a round with no artifact data still renders all six stage rows, zero-filled — never a blank chart", () => {
   const html = renderToStaticMarkup(
     <CostStrip today={todayPanel({ stageBars: [], modelBars: [], avgRoundUsd: null, targetUsd: null })} round={null} />,

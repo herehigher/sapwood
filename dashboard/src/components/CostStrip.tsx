@@ -52,10 +52,10 @@ function CostPanel({ heading, closed, avgRoundUsd, stageBars, targetUsd, modelBa
     // what actually draws that border/background per card; the outer `<section>` below stays
     // unframed on purpose, since a THIRD border around both cards is not in the baseline.
     <div className="cost-panel panel">
-      <div className="cost-panel-head">
+      <div className="cost-panel-head panel-head">
         <h3>{heading}</h3>
         {closed && <span className="cost-panel-badge">closed</span>}
-        {avgRoundUsd != null && <span className="data muted cost-panel-avg">avg round ${avgRoundUsd.toFixed(2)}</span>}
+        {avgRoundUsd != null && <span className="data muted cost-panel-avg panel-head-stat">avg round ${avgRoundUsd.toFixed(2)}</span>}
       </div>
       <div className="cost-panel-groups">
         <BarGroup title="by stage" bars={stageBars} max={stageMax} targetPct={targetPct} />

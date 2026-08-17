@@ -2,7 +2,44 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Lane } from "../api/types.ts";
-import { LaneBoard } from "./LaneBoard.tsx";
+import { LaneBoard, laneHeadStat } from "./LaneBoard.tsx";
+
+// ── #924: the lanes panel-head's own stat cluster ───────────────────────────────────────────────
+
+test("laneHeadStat joins model·effort and soft budget, matching the mockup's 'opus · high · soft budget $10'", () => {
+  assert.equal(laneHeadStat({ worker: { model: "opus", effort: "high" } }, 10), "opus · high · soft budget $10.00");
+});
+
+test("laneHeadStat renders just the readable half when the other is unavailable", () => {
+  assert.equal(laneHeadStat({ worker: { model: "opus", effort: "high" } }, null), "opus · high");
+  assert.equal(laneHeadStat(null, 10), "soft budget $10.00");
+});
+
+test("laneHeadStat is null (no stat cluster at all) when config is unreadable and no budget is configured", () => {
+  assert.equal(laneHeadStat(null, null), null);
+  assert.equal(laneHeadStat({}, null), null);
+});
+
+test("the lanes panel-head renders the real config-sourced stat cluster as its last child", () => {
+  const html = renderToStaticMarkup(
+    <LaneBoard
+      lanesMax={1}
+      lanes={[]}
+      titles={{}}
+      config={{ worker: { model: "opus", effort: "high", budgetUsdSoft: 10 } }}
+      workerBudgetUsdSoft={10}
+    />,
+  );
+  assert.match(
+    html,
+    /<div class="panel-head"><h2>lanes<\/h2><span class="data muted panel-head-stat">opus · high · soft budget \$10\.00<\/span><\/div>/,
+  );
+});
+
+test("the lanes panel-head renders title-only (no stat cluster) when config is unreadable", () => {
+  const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[]} titles={{}} />);
+  assert.match(html, /<div class="panel-head"><h2>lanes<\/h2><\/div>/);
+});
 
 const NOW = new Date("2026-08-06T12:00:00.000Z");
 
@@ -80,9 +117,10 @@ test("workerBudgetUsdSoft is the bar's ceiling — a small settled amount agains
     <LaneBoard lanesMax={1} lanes={[lane({ costUsd: 2 })]} titles={{}} workerBudgetUsdSoft={10} now={NOW} />,
   );
   // The background TRACK rect is always width="100" (a fixed full-width reference) — the settled
-  // FILL rect (`fill="var(--sap)"`) is the one whose width must scale against the ceiling.
-  assert.match(html, /width="20" height="10" fill="var\(--sap\)"/, "$2 of a $10 soft budget is a 20%-wide fill");
-  assert.doesNotMatch(html, /width="100" height="10" fill="var\(--sap\)"/, "the settled fill itself must never self-scale to full width");
+  // FILL rect (`class="cost-bar-fill"`, its color resolved through CSS from `--sap-fill`) is the
+  // one whose width must scale against the ceiling.
+  assert.match(html, /class="cost-bar-fill"[^>]*width="20"/, "$2 of a $10 soft budget is a 20%-wide fill");
+  assert.doesNotMatch(html, /class="cost-bar-fill"[^>]*width="100"/, "the settled fill itself must never self-scale to full width");
 });
 
 test("workerBudgetUsdSoft unset (config unreadable) falls back to the self-scaled total, same as before #890", () => {

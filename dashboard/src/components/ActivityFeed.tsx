@@ -79,7 +79,7 @@ function FeedEntry({ event, titles, repoUrl, now }: { event: DomainEvent; titles
   const parts: SentencePart[] = event.known ? copyFor(event.kind)!.sentence(payload) : [`Unrecognized event: ${event.kind}`];
   const attention = event.known && hasAttention(event.kind, payload);
   const glyph = event.known ? gateGlyph(event.kind, payload) : null;
-  const dotColor = attention ? "var(--rust)" : glyph === true ? "var(--moss)" : "var(--sap)";
+  const dotColor = attention ? "var(--rust)" : glyph === true ? "var(--moss)" : "var(--sap-fill)";
   return (
     // #892 AC5: `.recipe-list-entry` (panels.css) is the freshly-appended-row recipe — a feed
     // entry is exactly that (a newest-first row that mounts on every fresh event).
@@ -113,7 +113,9 @@ export function ActivityFeed({ events, pinnedAttention, titles, repoUrl, disconn
   if (disconnected) {
     return (
       <section className="panel activity-feed" aria-label="activity">
-        <h2>activity</h2>
+        <div className="panel-head">
+          <h2>activity</h2>
+        </div>
         <p className="muted" style={{ color: "var(--rust)" }}>
           disconnected — restart sapwood to reconnect
         </p>
@@ -123,7 +125,9 @@ export function ActivityFeed({ events, pinnedAttention, titles, repoUrl, disconn
   if (events.length === 0 && pinnedAttention.length === 0) {
     return (
       <section className="panel activity-feed" aria-label="activity">
-        <h2>activity</h2>
+        <div className="panel-head">
+          <h2>activity</h2>
+        </div>
         <p className="muted">Waiting for the first dispatch — point sapwood at a Ready issue</p>
       </section>
     );
@@ -175,7 +179,9 @@ export function ActivityFeed({ events, pinnedAttention, titles, repoUrl, disconn
   }
   return (
     <section className="panel activity-feed" aria-label="activity">
-      <h2>activity</h2>
+      <div className="panel-head">
+        <h2>activity</h2>
+      </div>
       {capNote && <p className="muted feed-cap-note">{capNote}</p>}
       {telemetryCount > 0 && (
         <p className="muted feed-telemetry-note">

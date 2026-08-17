@@ -43,6 +43,21 @@ export interface CostBarProps {
   className?: string;
 }
 
+/**
+ * #924 (D29/D30) — the hairline-bar grammar: a 1px track, an amber pill fill >= 6px tall (pill
+ * radius = half its own height), and a target tick taller than the pill. The viewBox's 12-unit
+ * height is a fixed LOCAL coordinate space every instance shares — `preserveAspectRatio="none"`
+ * lets each caller's own CSS height (cost panel / lane card / header capsule, panels.css) stretch
+ * it non-uniformly, but the three shapes' own local heights (and the track-vs-fill-vs-tick
+ * relationship AC2 checks) never change per instance.
+ */
+const TRACK_Y = 5.5;
+const FILL_HEIGHT = 6;
+const FILL_Y = (12 - FILL_HEIGHT) / 2;
+const FILL_RADIUS = FILL_HEIGHT / 2;
+const TICK_Y1 = 1;
+const TICK_Y2 = 11;
+
 /** Hand-rolled SVG bar (frontend-design.md §3 E) — zero chart-library dependency, on purpose (§2
  *  dependency budget). Settled fill first, hatched est tail immediately after it, both clamped to
  *  the track so neither segment ever draws past 100%. */
@@ -54,17 +69,17 @@ export function CostBar({ settledUsd, estUsd, max, targetPct = null, label, clas
   const ariaLabel = est > 0 ? `${label}: $${settledUsd.toFixed(2)} + $${est.toFixed(2)} est` : `${label}: $${settledUsd.toFixed(2)}`;
   return (
     <svg
-      viewBox="0 0 100 10"
+      viewBox="0 0 100 12"
       preserveAspectRatio="none"
       className={className ? `cost-bar ${className}` : "cost-bar"}
       role="img"
       aria-label={ariaLabel}
     >
       <HatchDef />
-      <rect x="0" y="0" width="100" height="10" fill="var(--bark)" opacity="0.25" />
-      <rect x="0" y="0" width={settledPct} height="10" fill="var(--sap)" />
-      {estPct > 0 && <rect x={settledPct} y="0" width={estPct} height="10" fill={`url(#${HATCH_PATTERN_ID})`} />}
-      {targetPct != null && <line x1={targetPct} y1="0" x2={targetPct} y2="10" className="cost-bar-target" />}
+      <rect className="cost-bar-track" x="0" y={TRACK_Y} width="100" height="1" />
+      <rect className="cost-bar-fill" x="0" y={FILL_Y} width={settledPct} height={FILL_HEIGHT} rx={FILL_RADIUS} />
+      {estPct > 0 && <rect x={settledPct} y={FILL_Y} width={estPct} height={FILL_HEIGHT} fill={`url(#${HATCH_PATTERN_ID})`} />}
+      {targetPct != null && <line className="cost-bar-target" x1={targetPct} y1={TICK_Y1} x2={targetPct} y2={TICK_Y2} />}
     </svg>
   );
 }

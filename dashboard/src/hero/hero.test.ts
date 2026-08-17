@@ -5,6 +5,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { LoopEvent } from "../api/types.ts";
+import { parseTokens } from "../contrast.ts";
 import type { DomainEvent } from "../domain-event.ts";
 import { toDomainEvent } from "../domain-event.ts";
 import { foldOpenAttention } from "../entities.ts";
@@ -800,15 +801,15 @@ test("prefers-reduced-motion turns every transition — ring strokes included �
 
 // ── AC 8/9/10: design tokens, never hardcoded hex ──────────────────────────────
 
-test("the backlog's selected chips read their fill from --sap, never a hardcoded hex", () => {
+test("the backlog's selected chips read their fill from --sap-fill, never a hardcoded hex", () => {
   const { state } = run([ev("pool-selected", { issues: [86] })]);
   const html = markup(state);
-  assert.match(html, /class="hero-pool-chip"[\s\S]*?style="fill:var\(--sap\)"/);
+  assert.match(html, /class="hero-pool-chip"[\s\S]*?style="fill:var\(--sap-fill\)"/);
 });
 
-test("a lane droplet in motion reads its fill from --sap; escalated/failed from --rust; merged from --moss", () => {
+test("a lane droplet in motion reads its fill from --sap-fill; escalated/failed from --rust; merged from --moss", () => {
   const inMotion = run([ev("dispatched", { worker: "w1", issue: 1 })]);
-  assert.match(markup(inMotion.state), /data-issue="1"[\s\S]*?<path class="hero-droplet-shape" d="[^"]*" style="fill:var\(--sap\)"/);
+  assert.match(markup(inMotion.state), /data-issue="1"[\s\S]*?<path class="hero-droplet-shape" d="[^"]*" style="fill:var\(--sap-fill\)"/);
 
   const escalated = run([
     ev("dispatched", { worker: "w1", issue: 1 }),
@@ -980,12 +981,12 @@ test("#895 item 5: at the 720px floor, the hero stage reflows (holds its native 
 test("#879: the backlog's READY cards render as taller filled cards with bold, contrasting card text", () => {
   const { state } = run([ev("pool-selected", { issues: [94] })]);
   const html = markup(state);
-  assert.match(html, /class="hero-pool-chip"[\s\S]*?<rect style="fill:var\(--sap\)"[^>]*height="24"[^>]*rx="8"/);
+  assert.match(html, /class="hero-pool-chip"[\s\S]*?<rect style="fill:var\(--sap-fill\)"[^>]*height="24"[^>]*rx="8"/);
   assert.match(html, /class="hero-num hero-pool-num"[^>]*>⊙ 94</);
   const poolNumRule = heroCss.match(/\.hero-pool-num\s*\{([^}]*)\}/);
   assert.ok(poolNumRule, ".hero-pool-num rule must exist");
   assert.match(poolNumRule?.[1] as string, /font-weight:\s*600/);
-  assert.match(poolNumRule?.[1] as string, /fill:\s*var\(--heartwood\)/);
+  assert.match(poolNumRule?.[1] as string, /fill:\s*var\(--on-sap-fill\)/);
 });
 
 test("#879: each PLAN circle (goal-align/arch-review/verify) draws its own distinct icon", () => {
@@ -1389,17 +1390,17 @@ test("#897 AC4: a pool at or under the filled cap draws no candidate stack at al
 // below is now the EXACT resolved string, verified empirically against this repo's real
 // happy-dom harness rather than assumed: `var(--bark)` (a plain hex, `tokens.css`) resolves to
 // the literal `"#8A7A64"` and `stroke-opacity: 0.35` resolves to the literal `"0.35"`, both
-// through a CSS class rule exactly like `.hero-pool-candidate rect` declares. `var(--sap)` (a
-// `light-dark()` token) resolves through happy-dom's cascade to the literal, deterministic
-// string `"light-dark(#8A5A14, #E8A33D)"` — verified directly against THIS shape (an inline
-// `fill: var(--sap)` on an SVG rect, the exact form `.hero-pool-chip`'s own rect authors), not
-// assumed from `shots/shots.spec.ts`'s own doc, which found a BARE top-level `color`/background
-// `light-dark()` resolves EMPTY in happy-dom — a different context this repo's test suite hasn't
-// previously exercised through a `var()` indirection. Both `--bark` and `--sap` resolve to real,
-// exact, deterministic strings THIS cascade produces every time — not a resolved final RGB (a
-// real browser only would give that, per `shots.spec.ts`'s same doc), but exact and non-fakeable
-// regardless: a transparent/removed stroke or a no-fill regression on either element changes one
-// of these literal strings.
+// through a CSS class rule exactly like `.hero-pool-candidate rect` declares. `var(--sap-fill)`
+// (#924: a plain hex, unlike `--sap-text`'s `light-dark()`) resolves through happy-dom's cascade
+// to the literal, deterministic string `"#E8A33D"` — verified directly against THIS shape (an
+// inline `fill: var(--sap-fill)` on an SVG rect, the exact form `.hero-pool-chip`'s own rect
+// authors), not assumed from `shots/shots.spec.ts`'s own doc, which found a BARE top-level
+// `color`/background `light-dark()` resolves EMPTY in happy-dom — a different context this
+// repo's test suite hasn't previously exercised through a `var()` indirection. Both `--bark` and
+// `--sap-fill` resolve to real, exact, deterministic strings THIS cascade produces every time —
+// not a resolved final RGB (a real browser only would give that, per `shots.spec.ts`'s same
+// doc), but exact and non-fakeable regardless: a transparent/removed stroke or a no-fill
+// regression on either element changes one of these literal strings.
 test("#897 AC4: a candidate card's rect resolves to the EXACT no-fill/visible-stroke values, distinguishable from a filled pool chip's EXACT fill, under the real production cascade", () => {
   assert.ok(bodyFontSizeRule);
   const style = document.createElement("style");
@@ -1425,8 +1426,8 @@ test("#897 AC4: a candidate card's rect resolves to the EXACT no-fill/visible-st
     const filledComputed = getComputedStyle(filledRect as Element);
     assert.equal(
       filledComputed.fill,
-      "light-dark(#8A5A14, #E8A33D)",
-      "a filled pool chip must resolve to the EXACT --sap token text, distinguishable from the candidate's exact 'none'",
+      "#E8A33D",
+      "a filled pool chip must resolve to the EXACT --sap-fill token text, distinguishable from the candidate's exact 'none'",
     );
   } finally {
     document.body.removeChild(container);
@@ -1591,8 +1592,8 @@ test("#920 AC3: every visible lane channel gets hollow-circle terminals at both 
 
 // #920 gate② finding [1] (ac3-hollow-style-unverified): "hollow" is a rendered CSS fact
 // (`fill: none`), not something the markup structure test above can see — a `.hero-lane-terminal`
-// rule declaring `fill: var(--sap)` would leave that test green while violating "hollow-circle
-// terminal" outright. STYLE doctrine (docs/REVIEW-DOCTRINE.md): `registerRealDom()` + a real
+// rule declaring `fill: var(--sap-fill)` would leave that test green while violating
+// "hollow-circle terminal" outright. STYLE doctrine (docs/REVIEW-DOCTRINE.md): `registerRealDom()` + a real
 // `getComputedStyle` read against the FULL production cascade, never a regex on the source text —
 // same pattern the #879 gate② finding [1] fix already established in this file.
 test("#920 gate② finding [1]: a real .hero-lane-terminal renders fill:none under the production cascade — hollow is a rendered fact, not just a class name", () => {
@@ -1703,11 +1704,16 @@ test("#920 gate② review thread (PRRT…gI/…GgJ) + finding [1]: idle planning
 
 // #920 gate② finding [1] (ac7-style-coverage-incomplete): "Keep the ACTIVE amber treatment as
 // is" (the review thread's own instruction) had no regression guard at all — a future edit could
-// silently drop `[data-active="true"] .hero-planning-node`'s own `--sap` override (collapsing
+// silently drop `[data-active="true"] .hero-planning-node`'s own `--sap-text` override (collapsing
 // active nodes onto the same idle ink this round just fixed) and nothing would catch it. Proves
-// the active node's resolved stroke is DIFFERENT from — and matches the real `--sap` token used
-// elsewhere on the stage (`.hero-pool-chip rect`'s own fill), never the idle ink.
-test("#920 gate② finding [1]: an ACTIVE planning node keeps the amber --sap stroke, distinct from the idle primary-ink treatment, in BOTH themes", () => {
+// the active node's resolved stroke is DIFFERENT from the idle ink and matches the exact raw
+// `--sap-text` declaration `tokens.css` itself carries (#897's own precedent: happy-dom doesn't
+// evaluate `light-dark()` per theme at all, it echoes the raw `"light-dark(A, B)"` text back
+// unconditionally — this is a same-cascade, theme-invariant comparison, not a per-theme resolve).
+// #924: no longer the SAME token as `.hero-pool-chip rect`'s own fill — that one is now
+// `--sap-fill`, a flat amber that no longer darkens for light theme the way `--sap-text` still
+// does.
+test("#920 gate② finding [1]: an ACTIVE planning node keeps the amber --sap-text stroke, distinct from the idle primary-ink treatment, in BOTH themes", () => {
   assert.ok(bodyFontSizeRule);
   const style = document.createElement("style");
   style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
@@ -1718,19 +1724,20 @@ test("#920 gate② finding [1]: an ACTIVE planning node keeps the amber --sap st
   // the SAME live-cursor mechanism production drives this from, never a hand-set `data-active`.
   container.innerHTML = markup(state, { roundPhase: "aligning" });
   document.body.appendChild(container);
+  const expectedSapText = parseTokens(tokensCss)["--sap-text"];
+  assert.ok(expectedSapText, "--sap-text must be declared in tokens.css");
   try {
-    for (const themeAttr of ["heartwood", "sapwood"]) {
+    for (const themeAttr of ["heartwood", "sapwood"] as const) {
       document.documentElement.setAttribute("data-theme", themeAttr);
-
-      const amberEl = container.querySelector(".hero-pool-chip rect");
-      assert.ok(amberEl, `${themeAttr}: a real .hero-pool-chip rect (drawn with --sap) must render`);
-      const amberColor = getComputedStyle(amberEl as Element).fill;
-      assert.notEqual(amberColor, "", `${themeAttr}: --sap must actually resolve to a real colour under the mounted cascade`);
 
       const activeNode = container.querySelector('[data-active="true"] .hero-planning-node');
       assert.ok(activeNode, `${themeAttr}: the active planning node must render`);
       const activeComputed = getComputedStyle(activeNode as Element);
-      assert.equal(activeComputed.stroke, amberColor, `${themeAttr}: the ACTIVE node's stroke must resolve to the SAME colour as --sap`);
+      assert.equal(
+        activeComputed.stroke,
+        expectedSapText,
+        `${themeAttr}: the ACTIVE node's stroke must resolve to the exact --sap-text declaration`,
+      );
       assert.equal(
         activeComputed.strokeOpacity,
         "0.9",
@@ -3216,10 +3223,13 @@ test("#920 AC5: the REAL <Hero> wrapper draws the stage inside an element carryi
   const html = renderToStaticMarkup(
     createElement(Hero, { heroState: initialHeroState(3), steps: [], lanesMax: 3, engine: "running", fixCap: 2 }),
   );
+  // #924: the `.panel-head` title row (AC1) now sits between the `.panel` wrapper and the `<svg>`
+  // — still the SAME wrapper element, `<svg class="hero">` still its direct-child sibling of the
+  // head, never re-parented outside it.
   assert.match(
     html,
-    /<div class="[^"]*\bpanel\b[^"]*">\s*<svg class="hero"/,
-    'the rendered <svg class="hero"> must sit directly inside an element carrying the .panel class',
+    /<div class="[^"]*\bpanel\b[^"]*">\s*<div class="panel-head">[\s\S]*?<\/div>\s*<svg class="hero"/,
+    'the rendered <svg class="hero"> must sit inside the same element carrying the .panel class, after its panel-head',
   );
 });
 

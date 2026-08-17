@@ -16,9 +16,17 @@ export const GROUNDS = ["--heartwood", "--panel"] as const;
 
 /**
  * Tokens that are ever used as text. `--bark` is deliberately absent: §5 scopes it to
- * "borders and hairlines **only**" precisely because it is ≈3.9:1 on `--heartwood`.
+ * "borders and hairlines **only**" precisely because it is ≈3.9:1 on `--heartwood`. `--sap-fill`
+ * is also absent — it is a filled-SURFACE role (chips, droplets, bar pills), never text; its own
+ * ink (`--on-sap-fill`) and ground contrast are checked separately below, against ITS fill, not
+ * `GROUNDS`.
  */
-export const TEXT_TOKENS = ["--sapwood", "--bark-text", "--sap", "--moss", "--rust"] as const;
+export const TEXT_TOKENS = ["--sapwood", "--bark-text", "--sap-text", "--moss", "--rust"] as const;
+
+/** Tokens ever used as a filled surface (§924/Q5: chips, droplets, bar pills, filled buttons). */
+export const FILL_TOKENS = ["--sap-fill"] as const;
+/** The ink role drawn ON every `FILL_TOKENS` surface. */
+export const ON_FILL_TOKEN = "--on-sap-fill";
 
 export type Theme = "heartwood" | "sapwood";
 export type ContrastRow = { theme: Theme; text: string; ground: string; ratio: number; pass: boolean };
@@ -90,6 +98,50 @@ export function checkContrast(css: string = readTokensCss()): ContrastRow[] {
   return rows;
 }
 
+/** AC3: the ink drawn ON a filled surface, against that surface's own fill — both themes. Unlike
+ *  `checkContrast`'s text-on-ground pairs, a filled shape's legibility depends on its OWN fill
+ *  color, never the page/panel ground behind it. */
+export function checkFillTextContrast(css: string = readTokensCss()): ContrastRow[] {
+  const themes = parseColorTokens(css);
+  const rows: ContrastRow[] = [];
+  for (const [theme, tokens] of [
+    ["heartwood", themes.dark],
+    ["sapwood", themes.light],
+  ] as const) {
+    for (const fill of FILL_TOKENS) {
+      const ratio = contrastRatio(tokens[ON_FILL_TOKEN]!, tokens[fill]!);
+      rows.push({ theme, text: ON_FILL_TOKEN, ground: fill, ratio, pass: ratio >= AA });
+    }
+  }
+  return rows;
+}
+
+/**
+ * §5 Q5 ruling: a filled surface (`--sap-fill`) against the page ground (`--heartwood`) — the
+ * WCAG 3:1 *non-text* boundary a graphical shape's own edge must clear against its surroundings.
+ * Light theme measures 1.88:1, below the boundary, because `--sap-fill` no longer darkens per
+ * theme the way `--sap-text` still does — every filled chip/droplet/bar-pill compensates with a
+ * 1px `--sap-text` outline in the light theme (STYLE-tested per element, not here). `pass` uses
+ * the 3:1 non-text threshold, not `AA` (4.5:1, text-only) — this function only records the ratio
+ * the outline rule exists to fix, it never asserts both themes must clear it.
+ */
+export const NON_TEXT_AA = 3;
+
+export function checkFillGroundContrast(css: string = readTokensCss()): ContrastRow[] {
+  const themes = parseColorTokens(css);
+  const rows: ContrastRow[] = [];
+  for (const [theme, tokens] of [
+    ["heartwood", themes.dark],
+    ["sapwood", themes.light],
+  ] as const) {
+    for (const fill of FILL_TOKENS) {
+      const ratio = contrastRatio(tokens[fill]!, tokens["--heartwood"]!);
+      rows.push({ theme, text: fill, ground: "--heartwood", ratio, pass: ratio >= NON_TEXT_AA });
+    }
+  }
+  return rows;
+}
+
 if (import.meta.filename === process.argv[1]) {
   const rows = checkContrast();
   const colors = parseColorTokens(readTokensCss());
@@ -100,5 +152,16 @@ if (import.meta.filename === process.argv[1]) {
   }
   const failed = rows.filter((r) => !r.pass).length;
   console.log(`\n${rows.length - failed}/${rows.length} pairs pass WCAG AA (${AA}:1)`);
-  if (failed) process.exitCode = 1;
+
+  const fillTextRows = checkFillTextContrast();
+  for (const r of fillTextRows) {
+    console.log(`${r.pass ? "PASS" : "FAIL"}  ${r.theme.padEnd(9)} ${r.text} on ${r.ground}  ${r.ratio.toFixed(2)}:1`);
+  }
+  const fillGroundRows = checkFillGroundContrast();
+  for (const r of fillGroundRows) {
+    console.log(
+      `${r.pass ? "PASS" : "FAIL (compensated by a --sap-text outline)"}  ${r.theme.padEnd(9)} ${r.text} on ${r.ground}  ${r.ratio.toFixed(2)}:1 (non-text ${NON_TEXT_AA}:1)`,
+    );
+  }
+  if (failed || fillTextRows.some((r) => !r.pass)) process.exitCode = 1;
 }

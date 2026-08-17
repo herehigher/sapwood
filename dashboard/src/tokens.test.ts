@@ -1,12 +1,38 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
-import { AA, checkContrast, contrastRatio, GROUNDS, parseColorTokens, parseTokens, readTokensCss, TEXT_TOKENS } from "./contrast.ts";
+import {
+  AA,
+  checkContrast,
+  checkFillGroundContrast,
+  checkFillTextContrast,
+  contrastRatio,
+  FILL_TOKENS,
+  GROUNDS,
+  NON_TEXT_AA,
+  ON_FILL_TOKEN,
+  parseColorTokens,
+  parseTokens,
+  readTokensCss,
+  TEXT_TOKENS,
+} from "./contrast.ts";
 
 const css = readTokensCss();
 
 // frontend-design.md §5 — every token named in the spec, colour and non-colour.
-const COLOR_TOKENS = ["--heartwood", "--panel", "--sapwood", "--bark", "--bark-text", "--sap", "--moss", "--rust"];
+const COLOR_TOKENS = [
+  "--heartwood",
+  "--panel",
+  "--sapwood",
+  "--bark",
+  "--bark-text",
+  "--sap-text",
+  "--sap-fill",
+  "--on-sap-fill",
+  "--moss",
+  "--rust",
+];
 const TYPE_TOKENS = [
   "--font-display",
   "--font-body",
@@ -76,4 +102,55 @@ test("contrastRatio matches known WCAG values", () => {
   assert.equal(contrastRatio("#000000", "#FFFFFF"), 21);
   assert.equal(contrastRatio("#777777", "#777777"), 1);
   assert.equal(AA, 4.5);
+});
+
+// ── #924 (§729 remainder, Q5): --sap split into --sap-text/--sap-fill ──────────────────────────
+
+test("AC3: --sap-text and --sap-fill are both listed in the text/fill sets contrast.ts checks", () => {
+  assert.ok((TEXT_TOKENS as readonly string[]).includes("--sap-text"));
+  assert.ok(!(TEXT_TOKENS as readonly string[]).includes("--sap-fill"), "a filled surface is never checked as text-on-ground");
+  assert.deepEqual([...FILL_TOKENS], ["--sap-fill"]);
+  assert.equal(ON_FILL_TOKEN, "--on-sap-fill");
+});
+
+test("AC3: --on-sap-fill on --sap-fill clears AA (4.5:1) in both themes", () => {
+  const failures = checkFillTextContrast(css).filter((row) => !row.pass);
+  assert.deepEqual(failures, [], failures.map((f) => `${f.theme} ${f.text} on ${f.ground} = ${f.ratio}`).join("; "));
+});
+
+test("AC3: --sap-fill vs the page ground clears the 3:1 non-text boundary in dark, and the known light-theme shortfall (1.88:1) the outline rule compensates for is on record", () => {
+  const rows = checkFillGroundContrast(css);
+  const dark = rows.find((r) => r.theme === "heartwood");
+  const light = rows.find((r) => r.theme === "sapwood");
+  assert.ok(dark?.pass, `dark --sap-fill vs --heartwood must clear ${NON_TEXT_AA}:1: ${dark?.ratio}`);
+  assert.equal(light?.ratio, 1.88);
+  assert.ok(!light?.pass, "light theme is the documented exception the --sap-text outline compensates for");
+});
+
+/** Every source file under `dashboard/src`, recursively — excluding `node_modules`/`dist`. */
+function listSourceFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    if (entry === "node_modules" || entry === "dist") continue;
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) out.push(...listSourceFiles(full));
+    else out.push(full);
+  }
+  return out;
+}
+
+test("AC4: no var(--sap) literal remains anywhere in dashboard/src — every site repoints to --sap-text or --sap-fill", () => {
+  const srcDir = new URL(".", import.meta.url).pathname;
+  const self = new URL(import.meta.url).pathname;
+  const offenders: string[] = [];
+  for (const file of listSourceFiles(srcDir)) {
+    if (file === self) continue; // this test's own doc comments name the banned literal
+    if (!/\.(ts|tsx|css)$/.test(file)) continue;
+    const text = readFileSync(file, "utf8");
+    // The exact 10-char literal `var(--sap)` — a closing paren immediately after "sap" never
+    // matches `var(--sap-text)`/`var(--sap-fill)`, which have more characters before their own
+    // closing paren.
+    if (/var\(--sap\)/.test(text)) offenders.push(file);
+  }
+  assert.deepEqual(offenders, []);
 });

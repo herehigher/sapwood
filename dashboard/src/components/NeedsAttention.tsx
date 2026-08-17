@@ -97,7 +97,9 @@ export function NeedsAttention({ items, titles, repoUrl, now, onInspect, roundEs
     if (roundEscalated === 0) return null;
     return (
       <section className="panel needs-attention" aria-label="needs attention">
-        <h2>needs attention</h2>
+        <div className="panel-head">
+          <h2>needs attention</h2>
+        </div>
         <p className="muted attention-reconciled">
           {roundEscalated} escalation{roundEscalated === 1 ? "" : "s"} this round, all since resolved
         </p>
@@ -111,9 +113,9 @@ export function NeedsAttention({ items, titles, repoUrl, now, onInspect, roundEs
   const summary = attentionSummary(items, clock);
   return (
     <section className="panel needs-attention" aria-label="needs attention">
-      <div className="attention-header">
+      <div className="attention-header panel-head">
         <h2>needs attention</h2>
-        <span className="muted data attention-summary">
+        <span className="muted data attention-summary panel-head-stat">
           {summary.waiting} waiting · oldest {summary.oldestDays}d · {summary.dissent} dissent
         </span>
       </div>

@@ -61,6 +61,14 @@ test("relative timestamps render, not raw ISO strings", () => {
   assert.match(html, /ago|just now/);
 });
 
+// ── #924: the shared .panel-head recipe — title only, no stat cluster ──────────────────────────
+
+test("#924 AC1: the populated feed's head carries .panel-head (title only, no stat cluster)", () => {
+  const events = [ev(1, "dispatched", { issue: 1 })];
+  const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={pinnedOf(events)} titles={{}} now={NOW} />);
+  assert.match(html, /<div class="panel-head"><h2>activity<\/h2><\/div>/);
+});
+
 test("aria-live polite is set on the feed list", () => {
   const events = [ev(1, "dispatched", { issue: 1 })];
   const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={pinnedOf(events)} titles={{}} now={NOW} />);
