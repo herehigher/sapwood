@@ -118,6 +118,11 @@ export interface ReplayView {
    *  labeled "CLOSED" while its footer stats (sourced from the round's persisted artifact) stayed
    *  fixed. Empty outside replay, same as `roundEvents`. */
   roundSpend: SpendRow[];
+  /** #895 item 1: the replay cursor's own timestamp (`player.ts`'s `cursorTs`) — the honest "as
+   *  of" instant every replayable panel's staleness/elapsed reading should compare against
+   *  instead of the live wall clock. `null` outside replay (or before the round's log has
+   *  loaded), where callers fall back to the real clock. */
+  asOf: string | null;
 }
 
 /**
@@ -223,10 +228,8 @@ export function useReplay(rounds: Round[], lanesMax: number | null): ReplayView 
     setPosition(scrubTo(activeLog.events, activeLog.checkpoints, eventId, lanesMax));
   };
 
-  const spendThroughCursor =
-    activeLog && activePosition
-      ? spendThroughTs(activeLog.spend, cursorTs(activePosition, activeLog.events, activeLog.round.startedAt))
-      : [];
+  const asOf = activeLog && activePosition ? cursorTs(activePosition, activeLog.events, activeLog.round.startedAt) : null;
+  const spendThroughCursor = activeLog && asOf !== null ? spendThroughTs(activeLog.spend, asOf) : [];
 
   return {
     mode: selectedRoundId === null ? "live" : "replay",
@@ -246,5 +249,6 @@ export function useReplay(rounds: Round[], lanesMax: number | null): ReplayView 
     phaseWindows: activeLog?.phaseWindows ?? [],
     roundEvents: activeLog?.events ?? [],
     roundSpend: activeLog?.spend ?? [],
+    asOf,
   };
 }

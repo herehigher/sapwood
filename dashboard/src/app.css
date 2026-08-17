@@ -191,6 +191,18 @@ code,
   color: var(--rust);
 }
 
+/* #895 item 6: below the app's 720px stacking floor, `.app-header`'s flex row squeezed
+ * `.controls` narrower than its buttons' own natural width — with no wrap allowed, the text
+ * INSIDE the fixed-width EMERGENCY STOP button wrapped onto two lines instead. Letting the
+ * fieldset itself wrap moves whole buttons onto a new line as a group, so no single button is
+ * ever squeezed below the width its own label needs. Visual-only: the verbs/order/behavior are
+ * unchanged, only how they lay out at this width. */
+@media (max-width: 720px) {
+  .controls {
+    flex-wrap: wrap;
+  }
+}
+
 /* ---- "?" legend toggle (§7) — the header's whole onboarding surface ------- */
 
 .hero-legend summary {

@@ -158,7 +158,11 @@ export function Header({
   }
   return (
     <div className="engine-status">
-      <span className="feed-dot" style={{ background: "var(--sap)" }} aria-hidden="true" />
+      {/* §5: --moss is "healthy engine dot" — every earlier return above (disconnected,
+       *  connecting) has already exited by the time this renders, so reaching here always means
+       *  a live, reachable engine (#895 item 3: this was hard-wired to --sap, the "in motion"
+       *  token, which is the wrong semantic for a plain presence dot). */}
+      <span className="feed-dot" style={{ background: "var(--moss)" }} aria-hidden="true" />
       <span className="data engine-word">{engine.state}</span>
       <span className="muted engine-caption"> — {engineStateCaption(engine.state, engine.standbyNextCheckSec)}</span>
       {engine.state === "standby" && parked && <span className="muted engine-park-caption">park</span>}

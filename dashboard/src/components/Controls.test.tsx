@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test, { mock } from "node:test";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -424,5 +425,62 @@ test("real DOM: EMERGENCY STOP is keyboard-operable — holding Enter/Space arms
       root.unmount();
     });
     container.remove();
+  }
+});
+
+// #895 item 6: below the app's 720px stacking floor, `.app-header`'s flex row squeezed `.controls`
+// narrower than its buttons' own natural width — with no wrap allowed, EMERGENCY STOP's own text
+// wrapped onto two lines INSIDE the button instead. STYLE doctrine (docs/REVIEW-DOCTRINE.md): a
+// computed-style AC needs `registerRealDom()` plus a real `getComputedStyle` read against the
+// full production cascade at a real simulated viewport, never a regex read of the source text.
+test("#895 item 6: at the 720px floor, the operations fieldset wraps as a group (flex-wrap: wrap) instead of squeezing EMERGENCY STOP's own text", () => {
+  const tokensCss = readFileSync(new URL("../tokens.css", import.meta.url), "utf8");
+  const panelsCss = readFileSync(new URL("../panels.css", import.meta.url), "utf8");
+  const appCss = readFileSync(new URL("../app.css", import.meta.url), "utf8");
+  // Literal concatenation, not `appCss`'s own `@import` lines — those resolve against a real
+  // stylesheet's own base URL, which a dynamically injected `<style>` tag doesn't have (same
+  // discipline `hero.test.ts`'s own full-cascade tests already use).
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${appCss}`;
+  document.head.appendChild(style);
+
+  const readFlexWrap = (viewportWidth: number): string => {
+    (window as unknown as { happyDOM: { setViewport: (v: { width: number }) => void } }).happyDOM.setViewport({
+      width: viewportWidth,
+    });
+    const container = document.createElement("div");
+    container.innerHTML = renderToStaticMarkup(<Controls enabled running estopActive={false} />);
+    document.body.appendChild(container);
+    try {
+      const fieldset = container.querySelector(".controls");
+      assert.ok(fieldset, "the real operations fieldset must render");
+      return getComputedStyle(fieldset as Element).flexWrap;
+    } finally {
+      document.body.removeChild(container);
+    }
+  };
+
+  try {
+    // Above the floor, `.controls` declares no `flex-wrap` of its own (relying on flex's
+    // implicit `nowrap` default) — happy-dom's CSSOM-only `getComputedStyle` reports an
+    // undeclared property as "", not the resolved initial value, so this only confirms the
+    // media rule hasn't fired early, not the literal string "nowrap".
+    assert.notEqual(readFlexWrap(1200), "wrap", "well above the floor, the media rule must not have fired early");
+    // #895: 400px/1200px alone never pin the NAMED 720px boundary — a media query shipped as
+    // `max-width: 719px` would still pass both. 721px (just outside) and 720px (the floor
+    // itself, inclusive per `max-width`'s own semantics) pin the exact edge.
+    assert.notEqual(readFlexWrap(721), "wrap", "one px above the floor, the media query must not have fired yet");
+    assert.equal(
+      readFlexWrap(720),
+      "wrap",
+      "AT the 720px floor itself (max-width is inclusive), the fieldset must already wrap as a group",
+    );
+    assert.equal(
+      readFlexWrap(400),
+      "wrap",
+      "well below the floor, the fieldset must wrap as a group so no single button (EMERGENCY STOP) gets squeezed below its own label's width",
+    );
+  } finally {
+    document.head.removeChild(style);
   }
 });
