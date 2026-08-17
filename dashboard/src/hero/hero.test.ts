@@ -2395,6 +2395,40 @@ test("#921 AC3: the growth rule at N = 1, 12, 24, 42 — constant pitch under th
   }
 });
 
+// #921 gate② finding [0] (ac3-footprint-cap-breached): a first cut of the growth rule floored the
+// compressed pitch at RING_PITCH_MIN and left TRUNK.max as the ONLY cap on how many rings draw —
+// a 3+-digit running total's bigger inner clearance (`ringInnerRadius`) could then push the outer
+// radius past TRUNK_DISC_R_MAX even at the floor pitch (rings=100: r0≈57.98, 42 rings at the
+// 1.25-unit floor reach ≈110.48 against the 103-unit ceiling). AC3's "never exceeds 40% of
+// STAGE.h" carries no "~" hedge, so the footprint ceiling must win outright — `ringRadii` now
+// caps `drawn` a second, tighter time once even the floor pitch can't fit `TRUNK.max` rings
+// inside the ceiling. This is the exact 3-digit boundary the AC3 test above (N through 42) never
+// samples — component-tested here (real render, not just the pure function) against the REAL
+// production markup, same discipline AC1 uses.
+test("#921 gate② finding [0]: at a 3-digit ring total (rings=100), the disc still never exceeds TRUNK_DISC_R_MAX / 40% of STAGE.h — fewer than TRUNK.max rings draw once even hairline pitch can't fit them all inside the footprint ceiling", () => {
+  const { state } = run(
+    Array.from({ length: 100 }, (_, i) => ev("merged", { worker: `m${i + 1}`, issue: i + 1, pr: i + 1 })),
+    3,
+  );
+  assert.equal(state.rings, 100, "fixture sanity: the 3-digit stress case this finding names");
+
+  const outer = ringOuterRadius(100);
+  assert.ok(2 * outer <= 0.4 * STAGE.h + 0.001, `disc diameter (${2 * outer}) must not exceed 40% of STAGE.h (${0.4 * STAGE.h})`);
+  assert.ok(outer <= TRUNK_DISC_R_MAX + 0.01, `outer radius (${outer}) must not exceed TRUNK_DISC_R_MAX (${TRUNK_DISC_R_MAX})`);
+
+  const html = markup(state);
+  const trunk = trunkGroupInner(html);
+  assert.ok(trunk, "the .hero-trunk group must render");
+  const drawnRings = (trunk as string).match(/class="hero-ring"/g)?.length ?? 0;
+  assert.ok(
+    drawnRings < TRUNK.max,
+    `drawn rings (${drawnRings}) must be LESS than TRUNK.max (${TRUNK.max}) here — proof the second, tighter cap actually engaged, not a vacuous pass`,
+  );
+  assert.ok(drawnRings > 0, "the disc must still draw SOME rings, never collapse to nothing");
+  // The numeral itself stays the honest, uncapped record regardless of how many rings fit.
+  assert.match(trunk as string, /class="hero-ring-count"[^>]*>100</);
+});
+
 // #921 AC3b (carried from #920 gate② r5 finding [0], PR #936 — the low-count remainder #920
 // could not close inside its fix cap): today at rings = 1, `ringOuterRadius(1) = 2` puts the
 // stem top at y ≈ 192 while the 33px numeral box spans ≈ 174–209 — the stem abuts/crosses the

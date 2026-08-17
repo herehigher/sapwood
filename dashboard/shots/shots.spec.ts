@@ -2,6 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync,
 import { fileURLToPath } from "node:url";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import { formatUsd } from "../src/format.ts";
+import { STAGE, ZONE_DIVIDERS } from "../src/hero/stage.tsx";
 
 /**
  * `npm run shots` (frontend-design.md §2, #876 D) — captures the `?demo` fixture at every
@@ -78,6 +79,13 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
         const locator = await firstMatch(page, selectors);
         if (locator) await locator.screenshot({ path: `${CAPTURES_DIR}/${idlePrefix}-${moduleKey}.png` });
       }
+      // #921 AC4/gate② finding [1]: the OUTCOME right-zone crop, at the mockup's own canonical
+      // width only — the `?demo` idle end-state carries exactly 1 ring (this issue's own "single
+      // ring, count legible" case). Confirmed against the REAL rendered `data-rings`, not assumed.
+      if (width === CANONICAL_WIDTH) {
+        await page.locator('.hero-trunk[data-rings="1"]').waitFor({ state: "visible" });
+        await captureOutcomeZone(page, page.locator("svg.hero"), `${CAPTURES_DIR}/${idlePrefix}-hero-panel-outcome-zone.png`);
+      }
 
       // #882 (729 ledger rows 12-13, capture gap closure): a SEPARATE live-mocked navigation of
       // the SAME production `App` tree — `/` (not `?demo`) with `/api/loop/state` fed a
@@ -108,6 +116,12 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
           const locator = await firstMatch(page, selectors);
           if (locator) await locator.screenshot({ path: `${CAPTURES_DIR}/${activePrefix}-${moduleKey}.png` });
         }
+        // #921 AC4/gate② finding [1]: the OUTCOME right-zone crop at rings=0 — the round's
+        // midpoint scrub lands before its one merge, the real (not fabricated) sapling moment.
+        if (width === CANONICAL_WIDTH) {
+          await page.locator('.hero-trunk[data-rings="0"]').waitFor({ state: "visible" });
+          await captureOutcomeZone(page, page.locator("svg.hero"), `${CAPTURES_DIR}/${activePrefix}-hero-panel-outcome-zone.png`);
+        }
       }
     }
   }
@@ -120,6 +134,33 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
     await captureRings24Hero(page, theme);
     const file = `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-rings24-hero-panel.png`;
     expect(existsSync(file), `rings24 hero-panel capture must exist: ${file}`).toBe(true);
+  }
+
+  // #921 AC4/gate② finding [1]: the mockup's OWN OUTCOME right-zone crop, one per theme — paired
+  // against the live crops above in `buildContactSheet()`'s own dedicated section below.
+  for (const theme of THEMES) {
+    const src = `${MOCKUPS_SRC_DIR}/hero-panel-${theme.key}.png`;
+    if (existsSync(src)) await cropMockupOutcomeZone(page, src, `${MOCKUPS_OUT_DIR}/hero-panel-${theme.key}-outcome-zone.png`);
+  }
+
+  // #921 AC4/gate② finding [1]: presence-of-evidence assertion for every OUTCOME right-zone crop
+  // named in the contact sheet's own AC4 section (`buildContactSheet()`, `AC4_MOMENTS`) — a
+  // missing crop here is a real regression (a selector/route change silently broke a capture),
+  // not something the contact sheet should quietly render blank.
+  for (const prefix of [
+    `${CANONICAL_WIDTH}-light-idle`,
+    `${CANONICAL_WIDTH}-dark-idle`,
+    `${CANONICAL_WIDTH}-light-active`,
+    `${CANONICAL_WIDTH}-dark-active`,
+  ]) {
+    const file = `${CAPTURES_DIR}/${prefix}-hero-panel-outcome-zone.png`;
+    expect(existsSync(file), `OUTCOME right-zone capture must exist: ${file}`).toBe(true);
+  }
+  for (const theme of THEMES) {
+    const rings24Zone = `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-rings24-hero-panel-outcome-zone.png`;
+    expect(existsSync(rings24Zone), `rings24 OUTCOME right-zone capture must exist: ${rings24Zone}`).toBe(true);
+    const mockupZone = `${MOCKUPS_OUT_DIR}/hero-panel-${theme.key}-outcome-zone.png`;
+    expect(existsSync(mockupZone), `mockup OUTCOME right-zone crop must exist: ${mockupZone}`).toBe(true);
   }
 
   // Every module's selector chain (the `lanes` fallback included — the chain only guarantees
@@ -878,7 +919,48 @@ async function captureRings24Hero(page: Page, theme: { key: string; attr: string
   await expect(page.locator(".hero-ring"), "the real fold must draw exactly 24 rings, one per merge").toHaveCount(24);
 
   await hero.screenshot({ path: `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-rings24-hero-panel.png` });
+  // #921 AC4/gate② finding [1]: the OUTCOME right-zone crop, so the disc footprint/count scale
+  // can be judged against the mockup's own right zone directly, not the whole panel.
+  await captureOutcomeZone(page, hero, `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-rings24-hero-panel-outcome-zone.png`);
   await page.unroute("**/api/**");
+}
+
+/** #921 AC4/gate② finding [1]: the OUTCOME zone's own right-hand boundary — everything from the
+ *  IMPLEMENT|OUTCOME divider (`ZONE_DIVIDERS[1]`, `stage.tsx`) to the stage's right edge —
+ *  expressed as a fraction of `STAGE.w` so the SAME fraction crops both the live SVG's own
+ *  rendered width AND the mockup PNG's pixel width identically: the mockup
+ *  (`docs/design/mockup/hero-panel-dark.png`, 1915×821 per a direct pixel-dimension read) shares
+ *  the stage's own 2.33:1 aspect ratio, so a fraction of one is the same region as that fraction
+ *  of the other — never a hand-picked pixel rectangle that could silently drift from either.
+ */
+const OUTCOME_ZONE_X_FRACTION = ZONE_DIVIDERS[1] / STAGE.w;
+
+/** #921 AC4/gate② finding [1]: crops the LIVE hero capture down to just the OUTCOME right zone —
+ *  a page-relative `clip` computed from the hero SVG's own real rendered bounding box.
+ *  `page.screenshot`'s own `clip` crops the VIEWPORT's captured pixels, not the full scrollable
+ *  page — `scrollIntoViewIfNeeded()` (then re-reading the box, since scrolling moves it) is what
+ *  keeps the whole element, and therefore the whole clip, actually within that viewport. */
+async function captureOutcomeZone(page: Page, heroLocator: Locator, destPath: string): Promise<void> {
+  await heroLocator.scrollIntoViewIfNeeded();
+  const box = await heroLocator.boundingBox();
+  if (!box) throw new Error("hero locator has no bounding box to crop the OUTCOME zone from");
+  const x = box.x + box.width * OUTCOME_ZONE_X_FRACTION;
+  await page.screenshot({ path: destPath, clip: { x, y: box.y, width: box.x + box.width - x, height: box.height } });
+}
+
+/** #921 AC4/gate② finding [1]: the SAME OUTCOME-zone crop, applied to a frozen mockup PNG on
+ *  disk — loaded into a blank page at its own natural pixel size (never re-scaled) so the same
+ *  fraction crops the same region. No new dependency: `page.screenshot`'s own `clip` option
+ *  (already what crops the live captures above) does the cropping, not an image library. */
+async function cropMockupOutcomeZone(page: Page, srcPath: string, destPath: string): Promise<void> {
+  const dataUri = `data:image/png;base64,${readFileSync(srcPath).toString("base64")}`;
+  await page.setContent(`<!doctype html><html><body style="margin:0"><img id="mockup-src" src="${dataUri}"></body></html>`);
+  const size = await page
+    .locator("#mockup-src")
+    .evaluate((img) => ({ width: (img as HTMLImageElement).naturalWidth, height: (img as HTMLImageElement).naturalHeight }));
+  await page.setViewportSize(size);
+  const x = Math.round(size.width * OUTCOME_ZONE_X_FRACTION);
+  await page.screenshot({ path: destPath, clip: { x, y: 0, width: size.width - x, height: size.height } });
 }
 
 async function firstMatch(page: Page, selectors: string[]): Promise<Locator | null> {
@@ -1006,23 +1088,35 @@ function buildContactSheet(): void {
        which have no per-module mockup at all, are visible only there).</p>`
     : "";
 
-  // #921 AC4: a THIRD moment (rings=24, real fold) alongside idle/active — outside the STATES
-  // grid `missingCaptures()`/the rows above enforce, so it gets its own dedicated section rather
-  // than a hand-typed third STATES entry that would force every OTHER module through this same
-  // moment too. Named so an operator can find it and record the Tier-C witnessed comparison
-  // (`docs/security.md`'s evidence tiers — this repo's own review doctrine is explicit that a
-  // producer can never self-attest a Tier-C record) directly on issue #921.
-  const rings24RowsHtml = THEMES.map((t) => {
-    const mockupFile = `mockups/hero-panel-${t.key}.png`;
-    const captureFile = `captures/${CANONICAL_WIDTH}-${t.key}-rings24-hero-panel.png`;
-    if (!existsSync(`${OUTPUT_DIR}/${mockupFile}`) || !existsSync(`${OUTPUT_DIR}/${captureFile}`)) return "";
-    return `
+  // #921 AC4 / gate② finding [1]: three moments (rings=0 sapling, 1 single legible ring, 24 full
+  // mockup-scale footprint) alongside idle/active — outside the STATES grid `missingCaptures()`/
+  // the rows above enforce (only idle/active exist there, and only the WHOLE panel, never a
+  // zone crop), so this gets its own dedicated section rather than a hand-typed third STATES
+  // entry that would force every OTHER module through this same moment/crop too. Right-zone
+  // crops (`captureOutcomeZone`/`cropMockupOutcomeZone`, same `ZONE_DIVIDERS[1]`-derived fraction
+  // on both sides) so the disc footprint/count scale is judged at comparable scale, not against
+  // the whole panel's unrelated PLAN/IMPLEMENT content. Named so an operator can find it and
+  // record the Tier-C witnessed comparison (`docs/security.md`'s evidence tiers — this repo's own
+  // review doctrine is explicit that a producer can never self-attest a Tier-C record) directly
+  // on issue #921.
+  const AC4_MOMENTS = [
+    { rings: 0, label: "sapling", capturePrefix: (t: string) => `${CANONICAL_WIDTH}-${t}-active` },
+    { rings: 1, label: "single ring", capturePrefix: (t: string) => `${CANONICAL_WIDTH}-${t}-idle` },
+    { rings: 24, label: "mockup-scale footprint", capturePrefix: (t: string) => `${CANONICAL_WIDTH}-${t}-rings24` },
+  ] as const;
+  const outcomeZoneRowsHtml = AC4_MOMENTS.flatMap((moment) =>
+    THEMES.map((t) => {
+      const mockupFile = `mockups/hero-panel-${t.key}-outcome-zone.png`;
+      const captureFile = `captures/${moment.capturePrefix(t.key)}-hero-panel-outcome-zone.png`;
+      if (!existsSync(`${OUTPUT_DIR}/${mockupFile}`) || !existsSync(`${OUTPUT_DIR}/${captureFile}`)) return "";
+      return `
       <tr>
-        <td class="label">hero-panel · ${t.key} · rings24<br><span class="tag">mockup vs. a real 24-merge fold</span></td>
-        <td><img src="${mockupFile}" alt="hero-panel ${t.key} mockup"></td>
-        <td><img src="${captureFile}" alt="hero-panel ${t.key} rings24 live capture"></td>
+        <td class="label">OUTCOME zone · ${t.key} · rings=${moment.rings} (${moment.label})<br><span class="tag">mockup vs. a real fold</span></td>
+        <td><img src="${mockupFile}" alt="OUTCOME zone ${t.key} mockup"></td>
+        <td><img src="${captureFile}" alt="OUTCOME zone ${t.key} rings=${moment.rings} live capture"></td>
       </tr>`;
-  }).join("");
+    }),
+  ).join("");
 
   const html = `<!doctype html>
 <html lang="en">
@@ -1050,8 +1144,8 @@ function buildContactSheet(): void {
 <table>${rowsHtml || "<tr><td>No mockup/capture pairs found.</td></tr>"}</table>
 ${noMockupNote}
 
-<h2>Ring disc at 24 merges (#921) — Tier-C: record the witnessed crop comparison on the issue</h2>
-<table>${rings24RowsHtml || "<tr><td>No rings24 capture/mockup pair found.</td></tr>"}</table>
+<h2>OUTCOME right-zone crop pairs at rings = 0, 1, 24 (#921 AC4) — Tier-C: record the witnessed crop comparison on the issue</h2>
+<table>${outcomeZoneRowsHtml || "<tr><td>No OUTCOME-zone capture/mockup pair found.</td></tr>"}</table>
 
 <h2>Full-page captures — every viewport × theme combination</h2>
 <table>${fullPageRowsHtml}</table>

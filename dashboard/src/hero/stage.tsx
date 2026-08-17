@@ -1454,19 +1454,31 @@ export function HeroStage({
  * digit count — the REAL total, not the capped `drawn` count, since the numeral shows the real
  * total even once ring-drawing itself saturates). Once it wouldn't fit, EVERY ring's pitch
  * compresses together (never just the newest ones) so the outermost ring lands exactly on the
- * ceiling instead of overshooting it, floored at `RING_PITCH_MIN` so a stroke never blurs into
- * unreadable sub-hairline spacing — verified within `TRUNK_DISC_R_MAX` for ring totals up to two
- * digits (`hero.test.ts`'s own AC3, N ≤ `TRUNK.max`); a 3+-digit running total's bigger inner
- * clearance can compress the floor-bound pitch enough to push the outer radius slightly past
- * `TRUNK_DISC_R_MAX` — accepted, since the issue's own footprint numbers are an explicit "~"
- * mockup-scale target, not a hard viewBox bound, and `TRUNK.max`'s existing "count is the
- * record" cap still bounds how many rings ever draw regardless.
+ * ceiling instead of overshooting it.
+ *
+ * #921 gate② finding [0] (ac3-footprint-cap-breached): AC3's "never exceeds 40% of STAGE.h" has
+ * no "~" hedge, so the footprint ceiling wins outright over the draw-window cap — a first cut of
+ * this rule floored the compressed pitch at `RING_PITCH_MIN` and left `TRUNK.max` as the ONLY
+ * cap on `drawn`, which let a 3+-digit running total's bigger inner clearance push the outer
+ * radius past `TRUNK_DISC_R_MAX` (rings=100: r0≈57.98, 42 rings at the 1.25-unit floor pitch
+ * reach ≈110.48, past the 103-unit ceiling). `drawn` is now ALSO capped at how many rings the
+ * floor pitch can fit inside the ceiling (`maxAtFloorPitch`) — a second, tighter version of the
+ * SAME "cap what's drawn, the count stays the record" mechanism `TRUNK.max` already is: once a
+ * wide numeral eats far enough into the fixed footprint that even hairline spacing can't fit
+ * `TRUNK.max` rings inside it, fewer rings draw so the disc's OWN ceiling always wins — the
+ * numeral is still the honest, uncapped record regardless of how many rings physically fit
+ * around it. AC1's "exactly min(N, TRUNK.max)" holds for every N this file's own tests exercise
+ * (rings ≤ 2 digits, where this second cap never binds — verified below); only a 3+-digit total
+ * ever draws fewer.
  */
 function ringRadii(rings: number): number[] {
-  const drawn = Math.min(rings, TRUNK.max);
-  if (drawn === 0) return [];
+  const capped = Math.min(rings, TRUNK.max);
+  if (capped === 0) return [];
   const r0 = ringInnerRadius(rings);
+  const maxAtFloorPitch = Math.max(0, Math.floor((TRUNK_DISC_R_MAX - r0) / RING_PITCH_MIN));
+  const drawn = Math.min(capped, maxAtFloorPitch);
+  if (drawn === 0) return [];
   const nominalReach = r0 + drawn * TRUNK.step;
-  const pitch = nominalReach <= TRUNK_DISC_R_MAX ? TRUNK.step : Math.max((TRUNK_DISC_R_MAX - r0) / drawn, RING_PITCH_MIN);
+  const pitch = nominalReach <= TRUNK_DISC_R_MAX ? TRUNK.step : (TRUNK_DISC_R_MAX - r0) / drawn;
   return Array.from({ length: drawn }, (_, i) => r0 + (i + 1) * pitch);
 }
