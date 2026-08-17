@@ -1618,13 +1618,14 @@ test("#920 gate② finding [1]: a real .hero-lane-terminal renders fill:none und
   }
 });
 
-// #920 gate② review thread (PRRT…JE1): a muted `--bark` idle stroke measured at ~half the
-// mockup's own contrast — "no 45% wash" (AC6) isn't only about `[data-dimmed]`, it's every idle
+// #920 gate② review thread (PRRT…JE1, revised at …gI/…GgJ): round 1's fix (`--bark-text`, the
+// MUTED text token) still only reached 51% of the mockup's own contrast in dark theme — the
+// mockup draws these in the SAME PRIMARY ink as `.hero-node-label` (`--sapwood`), not a
+// separately-muted variant. "No 45% wash" (AC6) isn't only about `[data-dimmed]`, it's every idle
 // stage line drawn at a muted token. STYLE doctrine: prove the RESOLVED colour against a real
-// caption-ink element (`.hero-label`, which always renders — unlike `.hero-node-caption`, which
-// needs a config prop this fixture doesn't pass), never a hardcoded theme RGB that could drift
-// from `--bark-text`'s own definition.
-test("#920 gate② review thread (PRRT…JE1): idle planning/gate node strokes resolve to the SAME colour as the caption ink token, at full opacity — no muted wash", () => {
+// `.hero-node-label` element (never a hardcoded theme RGB that could drift from `--sapwood`'s own
+// definition).
+test("#920 gate② review thread (PRRT…gI/…GgJ): idle planning/gate node strokes resolve to the SAME colour as .hero-node-label's PRIMARY ink, at full opacity — no muted wash", () => {
   assert.ok(bodyFontSizeRule);
   const style = document.createElement("style");
   style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
@@ -1633,22 +1634,48 @@ test("#920 gate② review thread (PRRT…JE1): idle planning/gate node strokes r
   container.innerHTML = markup(initialHeroState(3));
   document.body.appendChild(container);
   try {
-    const inkEl = container.querySelector(".hero-label");
-    assert.ok(inkEl, "a real caption-ink (.hero-label) element must render");
+    const inkEl = container.querySelector(".hero-node-label");
+    assert.ok(inkEl, "a real .hero-node-label element must render");
     const inkColor = getComputedStyle(inkEl as Element).fill;
-    assert.notEqual(inkColor, "", "the ink token must actually resolve to a real colour under the mounted cascade");
+    assert.notEqual(inkColor, "", "the primary ink token must actually resolve to a real colour under the mounted cascade");
 
     const planningNode = container.querySelector(".hero-planning-node");
     assert.ok(planningNode, "a real .hero-planning-node must render");
     const planningComputed = getComputedStyle(planningNode as Element);
-    assert.equal(planningComputed.stroke, inkColor, "idle planning-node stroke must resolve to the SAME colour as the caption ink token");
+    assert.equal(
+      planningComputed.stroke,
+      inkColor,
+      "idle planning-node stroke must resolve to the SAME colour as .hero-node-label's primary ink",
+    );
     assert.equal(planningComputed.strokeOpacity, "1", "idle planning-node stroke must render at full opacity, no muted wash");
 
     const gateNode = container.querySelector(".hero-gate-node");
     assert.ok(gateNode, "a real .hero-gate-node must render");
     const gateComputed = getComputedStyle(gateNode as Element);
-    assert.equal(gateComputed.stroke, inkColor, "idle gate-node stroke must resolve to the SAME colour as the caption ink token");
+    assert.equal(gateComputed.stroke, inkColor, "idle gate-node stroke must resolve to the SAME colour as .hero-node-label's primary ink");
     assert.equal(gateComputed.strokeOpacity, "1", "idle gate-node stroke must render at full opacity, no muted wash");
+
+    // #920 gate② review thread (PRRT…JE1's own family): the reflection T + return path share
+    // this same fix (`.hero-arm`/`.hero-return` in hero.css).
+    const armEl = container.querySelector(".hero-arm");
+    assert.ok(armEl, "a real .hero-arm element (the reflection tree) must render");
+    const armComputed = getComputedStyle(armEl as Element);
+    assert.equal(
+      armComputed.stroke,
+      inkColor,
+      "the reflection tree's stroke must resolve to the SAME colour as .hero-node-label's primary ink",
+    );
+    assert.equal(armComputed.strokeOpacity, "1", "the reflection tree's stroke must render at full opacity, no muted wash");
+
+    const returnEl = container.querySelector(".hero-return");
+    assert.ok(returnEl, "a real .hero-return element must render");
+    const returnComputed = getComputedStyle(returnEl as Element);
+    assert.equal(
+      returnComputed.stroke,
+      inkColor,
+      "the return path's stroke must resolve to the SAME colour as .hero-node-label's primary ink",
+    );
+    assert.equal(returnComputed.strokeOpacity, "1", "the return path's stroke must render at full opacity, no muted wash");
   } finally {
     document.body.removeChild(container);
     document.head.removeChild(style);
@@ -1696,7 +1723,12 @@ test("#920 AC5: two dashed PLAN|IMPLEMENT / IMPLEMENT|OUTCOME dividers sit betwe
 // rendered CSS fact (`stroke-dasharray`), not provable from markup/constant comparisons alone —
 // removing `.hero-divider`'s `stroke-dasharray` would leave the test above green. STYLE doctrine:
 // a real `getComputedStyle` read against the full production cascade.
-test("#920 gate② finding [2]: a real .hero-divider renders a dashed stroke under the production cascade", () => {
+//
+// #920 gate② review thread (PRRT…gG/…GgE): round 1's 0.34-opacity `--bark-text` fix still
+// measured ~15% of the mockup's own contrast — the mockup's dividers are the SAME primary ink as
+// the labels (`--sapwood`), just dashed. Extended to assert the resolved colour/opacity too, not
+// only the dash pattern.
+test("#920 gate② finding [2] + review thread (PRRT…gG/…GgE): a real .hero-divider renders a dashed stroke, at the SAME primary ink as .hero-node-label, full opacity, under the production cascade", () => {
   assert.ok(bodyFontSizeRule);
   const style = document.createElement("style");
   style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
@@ -1713,6 +1745,22 @@ test("#920 gate② finding [2]: a real .hero-divider renders a dashed stroke und
     const dashRule = heroCss.match(/\.hero-divider\s*\{[^}]*stroke-dasharray:\s*([\d\s]+);/);
     assert.ok(dashRule, ".hero-divider must declare a stroke-dasharray in hero.css");
     assert.equal(computed.strokeDasharray, (dashRule[1] as string).trim());
+
+    const inkEl = container.querySelector(".hero-node-label");
+    assert.ok(inkEl, "a real .hero-node-label element must render");
+    const inkColor = getComputedStyle(inkEl as Element).fill;
+    assert.equal(computed.stroke, inkColor, "the divider's stroke must resolve to the SAME colour as .hero-node-label's primary ink");
+    assert.equal(computed.strokeOpacity, "1", "the divider must render at full opacity — the dash pattern alone carries the 'quiet' read");
+
+    const rule = container.querySelector(".hero-outcome-rule");
+    assert.ok(rule, "a real .hero-outcome-rule element must render");
+    const ruleComputed = getComputedStyle(rule as Element);
+    assert.equal(
+      ruleComputed.stroke,
+      inkColor,
+      "the outcome hairline rule must resolve to the SAME colour as .hero-node-label's primary ink",
+    );
+    assert.equal(ruleComputed.strokeOpacity, "1", "the outcome hairline rule must render at full opacity");
   } finally {
     document.body.removeChild(container);
     document.head.removeChild(style);
@@ -1903,6 +1951,52 @@ test("#920 AC4: the reflection tree is a plain T — stem x equals the disc cent
       `reflection path segment ${JSON.stringify(seg)} overlaps the outcome-tally box ${JSON.stringify(tallyBox)}`,
     );
   }
+});
+
+// #920 gate② review thread (PRRT…gJ/…GgK), COLLISION class: a live crop showed the "Summary"/
+// "Retro" labels sitting ON the circles' own bottom arc (text-on-stroke) — extends the AC4
+// collision set with the caption boxes × the circle boxes those findings named, derived from
+// rendered coordinates rather than a hand-typed pair (COVERAGE doctrine).
+test("#920 gate② review thread (PRRT…gJ/…GgK): the Summary/Retro labels never collide with their own circles, and the crossbar stops at the circles' edges (not centre-to-centre)", () => {
+  const html = markup(initialHeroState(3));
+  const reflectionGroupMatch = html.match(/<g class="hero-reflection" data-node="reflection">([\s\S]*?)<\/g>\s*<path class="hero-return"/);
+  assert.ok(reflectionGroupMatch, "the hero-reflection group must render");
+  const group = reflectionGroupMatch![1] as string;
+
+  const circles = [...group.matchAll(/<circle class="hero-planning-node" cx="(-?[\d.]+)" cy="(-?[\d.]+)" r="(-?[\d.]+)">/g)].map(
+    ([, cx, cy, r]) => ({ x: Number(cx), y: Number(cy), r: Number(r) }),
+  );
+  assert.equal(circles.length, 2, "both Summary and Retro circles must render");
+
+  const labels = [...group.matchAll(/<text class="hero-node-label" x="(-?[\d.]+)" y="(-?[\d.]+)" text-anchor="middle">([^<]*)</g)].map(
+    ([, x, y, text]) => ({ x: Number(x), y: Number(y), text: text as string }),
+  );
+  assert.equal(labels.length, 2, "both Summary and Retro labels must render");
+
+  const boxes: { label: string; box: Box }[] = [];
+  for (const c of circles) boxes.push({ label: `circle at (${c.x},${c.y})`, box: circleBox(c.x, c.y, c.r) });
+  for (const l of labels)
+    boxes.push({ label: `label "${l.text}"`, box: captionSafeTextBox(l.text, l.x, l.y, GATE_NODE_LABEL_FONT_PX, "middle") });
+  assertNoOverlap(boxes);
+
+  // The crossbar must stop at each circle's own EDGE, not run centre-to-centre through them.
+  const pathMatch = group.match(/<path class="hero-arm" d="([^"]*)"/);
+  assert.ok(pathMatch, "the reflection tree's connector <path> must render");
+  // Excludes the stem's own end point (also at y === barY, x === stemX) — the bar's own two
+  // points are the only ones off that shared x.
+  const barPoints = [...(pathMatch![1] as string).matchAll(/([ML])\s*(-?[\d.]+)\s+(-?[\d.]+)/g)]
+    .map(([, , x, y]) => ({ x: Number(x), y: Number(y) }))
+    .filter((p) => p.y === REFLECTION.barY && p.x !== REFLECTION.stemX);
+  const barXs = barPoints.map((p) => p.x).sort((a, b) => a - b);
+  assert.equal(barXs.length, 2, "the bar must carry exactly two points at barY, excluding the stem's own end point");
+  const sortedCircles = [...circles].sort((a, b) => a.x - b.x);
+  const [leftCircle, rightCircle] = sortedCircles as unknown as [(typeof circles)[number], (typeof circles)[number]];
+  assert.equal(barXs[0], leftCircle.x + leftCircle.r, "the bar's left end must sit exactly on the left circle's own edge, not its centre");
+  assert.equal(
+    barXs[1],
+    rightCircle.x - rightCircle.r,
+    "the bar's right end must sit exactly on the right circle's own edge, not its centre",
+  );
 });
 
 // #920 gate② finding [3] (reflection-loop-is-disconnected) + finding [0]

@@ -185,16 +185,17 @@
   stroke-width: 2;
 }
 
-/* #920 gate② review thread (PRRT…JE1): a muted `--bark` hairline measured at ~half the mockup's
- * own contrast (idle ring stroke luma 124 vs the mockup's ~252) — the "45% wash" AC6 names isn't
- * only the `[data-dimmed]` opacity, it's every idle stage line drawn at a muted token. The
- * caption ink token (`--bark-text`) at full opacity is what the mockup actually uses for these —
- * no separate muted variant. */
+/* #920 gate② review thread (PRRT…JE1, revised at …gJ/…GgJ): a muted stroke measured well short
+ * of the mockup's own contrast — the "45% wash" AC6 names isn't only the `[data-dimmed]` opacity,
+ * it's every idle stage line drawn at a muted token. `--bark-text` (round 1's own fix) still only
+ * reached 51% of the mockup's contrast in dark theme (`--bark-text` is the MUTED text token,
+ * `tokens.css`'s own doc) — the mockup draws these in the SAME primary ink (`--sapwood`) as
+ * `.hero-node-label`, not a separately-muted variant. */
 .hero-arm,
 .hero-fixloop,
 .hero-return {
   fill: none;
-  stroke: var(--bark-text);
+  stroke: var(--sapwood);
   stroke-opacity: 1;
   stroke-width: 2;
 }
@@ -210,22 +211,23 @@
   fill-opacity: 0.4;
 }
 
-/* #920 AC5: two dashed zone dividers (PLAN|IMPLEMENT, IMPLEMENT|OUTCOME) — a quiet background
- * guide, below every foreground shape's own opacity but still visible.
- * #920 gate② review thread (PRRT…JE1): 0.15 measured invisible at 1× against the mockup's own
- * Δ96 — a dashed line still needs to READ as a line. ~1/3 of the ink token's own (now full)
- * opacity keeps it clearly the quietest line on the stage without vanishing. */
+/* #920 AC5: two dashed zone dividers (PLAN|IMPLEMENT, IMPLEMENT|OUTCOME).
+ * #920 gate② review thread (PRRT…JE1, revised at …gG/…GgE): 0.15, then 0.34 of `--bark-text`,
+ * both still measured invisible at 1× against the mockup's own contrast (~15% of it at 0.34) —
+ * the mockup's dividers are the SAME ink as the labels (`--sapwood`), just dashed; the dash
+ * pattern alone is what reads as "quiet", not a separately muted opacity on top of it. */
 .hero-divider {
-  stroke: var(--bark-text);
-  stroke-opacity: 0.34;
+  stroke: var(--sapwood);
+  stroke-opacity: 1;
   stroke-width: 1;
   stroke-dasharray: 3 5;
 }
 
-/* #920 "What": the hairline rule the outcome tally draws "on one line under". */
+/* #920 "What": the hairline rule the outcome tally draws "on one line under" — same ink/opacity
+ * fix as `.hero-divider` above, for the same reason (review thread PRRT…gG/…GgE). */
 .hero-outcome-rule {
-  stroke: var(--bark);
-  stroke-opacity: 0.25;
+  stroke: var(--sapwood);
+  stroke-opacity: 1;
   stroke-width: 1;
 }
 
@@ -244,12 +246,13 @@
  * `.hero-gate-node` (the outer node circle), not a bare `circle` selector, since `gateIcon`
  * also draws smaller `<circle>` primitives (the gear hub, the eye pupil) inside the same group
  * that must not pick up the node's own fill/breathe/merge styling. */
-/* #920 gate② review thread (PRRT…JE1): idle at the caption ink token, full opacity — see
- * `.hero-arm`'s own doc on why a muted `--bark` idle stroke reads as an unwanted second "wash"
- * on top of AC1's dimming, at ANY dimmed state. */
+/* #920 gate② review thread (PRRT…JE1, revised at …gI/…GgJ): idle at the PRIMARY ink token
+ * (`--sapwood`, matching `.hero-node-label`), full opacity — see `.hero-arm`'s own doc on why
+ * the muted `--bark-text` token round 1 used still only reached 51% of the mockup's own
+ * contrast in dark theme. */
 .hero-gate-node {
   fill: var(--panel);
-  stroke: var(--bark-text);
+  stroke: var(--sapwood);
   stroke-opacity: 1;
 }
 
@@ -341,11 +344,11 @@
  * pulse halo — the *only* motion difference, and it stops the instant the phase moves on.
  */
 
-/* #920 gate② review thread (PRRT…JE1): idle at the caption ink token, full opacity — measured
- * against the mockup at ~half its own contrast before this fix (`.hero-gate-node`'s own doc). */
+/* #920 gate② review thread (PRRT…JE1, revised at …gI/…GgJ): idle at the PRIMARY ink token
+ * (`--sapwood`, matching `.hero-node-label`), full opacity — `.hero-gate-node`'s own doc. */
 .hero-planning-node {
   fill: none;
-  stroke: var(--bark-text);
+  stroke: var(--sapwood);
   stroke-opacity: 1;
 }
 

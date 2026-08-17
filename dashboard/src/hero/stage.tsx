@@ -357,16 +357,21 @@ const TRUNK_DROPLET_OFFSET = { dx: 40, dy: -40 } as const;
  * it has to travel to reach the disc) is what varies with the count.
  */
 const REFLECTION_BAR_Y = TRUNK.y + TRUNK.max * TRUNK.step + 60;
-/** Below the Summary/Retro captions row (`REFLECTION.y + 32`, the caption's own baseline) — the
- *  hairline rule, then the tally beneath it, per the mockup's own bottom-of-tree ordering. */
-const OUTCOME_RULE_Y = REFLECTION_BAR_Y + 50;
+const REFLECTION_R = 16;
+/** #920 gate② review thread (PRRT…gJ/…GgK): the Summary/Retro label's own baseline, clear of the
+ *  circle's bottom edge (`REFLECTION_R + 12`, not the old `+20` that sat ON the circle's stroke) —
+ *  the model-effort caption (when present) sits a further 12 below that. */
+const REFLECTION_CAPTION_BOTTOM = REFLECTION_BAR_Y + REFLECTION_R + 24;
+/** Below the Summary/Retro captions row above — the hairline rule, then the tally beneath it,
+ *  per the mockup's own bottom-of-tree ordering. */
+const OUTCOME_RULE_Y = REFLECTION_CAPTION_BOTTOM + 18;
 const OUTCOME_TALLY_Y = OUTCOME_RULE_Y + 18;
 export const REFLECTION = {
   stemX: TRUNK.x,
   spread: 44,
   barY: REFLECTION_BAR_Y,
   y: REFLECTION_BAR_Y,
-  r: 16,
+  r: REFLECTION_R,
   // Where the dashed return path picks up — directly below the tally, the tree's own true
   // bottom now that the tally moved here (review thread PRRT…JE5's "from the tally/rule end").
   bottom: OUTCOME_TALLY_Y + 20,
@@ -1200,14 +1205,18 @@ export function HeroStage({
          * the max envelope — gate② finding [0]) to `barY`, where a crossbar's own two ENDS are
          * the Summary/Retro circles (`REFLECTION.y === barY` — the circles sit ON the bar line,
          * not hung below it by a separate drop). Genuinely, continuously attached to the disc at
-         * every ring count — no jog, no gap. */}
+         * every ring count — no jog, no gap.
+         * #920 gate② review thread (PRRT…gJ/…GgK): the bar used to run CENTRE-to-CENTRE
+         * (`stemX ± spread`), passing straight THROUGH both circles — it now stops at each
+         * circle's own EDGE (`± (spread - r)`), matching the mockup's own bar-meets-circle-edge
+         * drawing. */}
         <path
           className="hero-arm"
           d={[
             `M ${REFLECTION.stemX} ${TRUNK.y + ringOuterRadius(state.rings)}`,
             `L ${REFLECTION.stemX} ${REFLECTION.barY}`,
-            `M ${REFLECTION.stemX - REFLECTION.spread} ${REFLECTION.barY}`,
-            `L ${REFLECTION.stemX + REFLECTION.spread} ${REFLECTION.barY}`,
+            `M ${REFLECTION.stemX - REFLECTION.spread + REFLECTION.r} ${REFLECTION.barY}`,
+            `L ${REFLECTION.stemX + REFLECTION.spread - REFLECTION.r} ${REFLECTION.barY}`,
           ].join(" ")}
         />
         {REFLECTION_NODES.map((n) => {
@@ -1219,11 +1228,14 @@ export function HeroStage({
               {...inspectProps(n.node, `inspect ${n.label}`, onInspect)}
             >
               <circle className="hero-planning-node" cx={n.x} cy={REFLECTION.y} r={REFLECTION.r} />
-              <text className="hero-node-label" x={n.x} y={REFLECTION.y + 20} textAnchor="middle">
+              {/* #920 gate② review thread (PRRT…gJ/…GgK): the label used to sit ON the circle's
+               * own bottom arc (`REFLECTION.y + 20` vs a circle bottom of `REFLECTION.y + r` =
+               * +16) — text-on-stroke. `REFLECTION.r + 12` gives real clearance below the edge. */}
+              <text className="hero-node-label" x={n.x} y={REFLECTION.y + REFLECTION.r + 12} textAnchor="middle">
                 {n.label}
               </text>
               {caption && (
-                <text className="hero-node-caption" x={n.x} y={REFLECTION.y + 32} textAnchor="middle">
+                <text className="hero-node-caption" x={n.x} y={REFLECTION.y + REFLECTION.r + 24} textAnchor="middle">
                   {caption}
                 </text>
               )}
