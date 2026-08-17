@@ -252,8 +252,23 @@ code,
 .stack > .hero,
 .stack > .cost-strip,
 .stack > .config-drawer,
-.stack > .needs-attention {
+.stack > .needs-attention,
+.stack > .lane-activity-row {
   grid-column: 1 / -1;
+}
+
+/*
+ * #897 AC5: the lane board / activity feed pair's own nested grid — `.stack`'s shared
+ * `auto-fit` column template never collapses unused columns in THIS row specifically (see the
+ * App.tsx comment on `.lane-activity-row`'s call site for why), which left the row using only
+ * half of a 1425px canvas with the rest empty. Scoping the SAME auto-fit pattern to a grid only
+ * these two items ever populate restores the full-width split — collapse now has a column
+ * template with nothing else claiming its tracks.
+ */
+.lane-activity-row {
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
 }
 
 /*
