@@ -139,12 +139,11 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     infra, but each PR hand-curates a partial box list, missing neighbors its author forgot —
     recurring (#728, #745, #891, #901, #902). Include every element sharing the new one's
     region, position read off rendered markup wherever filtering/compaction can diverge — a
-    constant is fine for genuinely static geometry. Same shape, #892/PR #908 (gate② rounds
-    3–4): Playwright coverage proved only `PhaseInspectorDrawer`, not the AC's own
-    `ConfigDrawer`/`Controls` confirm dialog; `.recipe-list-entry` motion coverage proved only
-    `NeedsAttention`, not the doc's own `ActivityFeed`/`LaneBoard` rows — both survived a full
-    round unfixed before the fix-cap rescue caught them. Derive the covered set from what the
-    AC/doc names, never a hand-typed list.
+    constant is fine for genuinely static geometry. Same shape, #892: Playwright proved only
+    `PhaseInspectorDrawer`, not the AC's own `ConfigDrawer`/`Controls` confirm;
+    `.recipe-list-entry` proved only `NeedsAttention`, not the doc's own
+    `ActivityFeed`/`LaneBoard` rows. Derive the covered set from what the AC/doc names, never a
+    hand-typed list.
 
 ### Documentation claims
 
@@ -174,7 +173,8 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   empty-spin breaker bounds on the peripheral-role path, but nothing in the classifier bounds on
   the dispatched-WORKER-lane path; only the OUTER safety ceiling (`cost.roundBudgetUsd`/
   `dailyBudgetUsd`) contains a recurring miss there. Prefer narrow anyway, naming that
-  outer-layer dependency and the residual gap explicitly rather than claiming full coverage.
+  outer-layer dependency and the residual blind spot explicitly rather than claiming full
+  coverage.
 - **Doctrine self-modification rule.** A PR that modifies this review-doctrine file itself must
   be prominently flagged in review, with a recommendation to route it needs-human rather than
   auto-merge. The reviewer applies the doctrine loaded at engine construction, never the version
