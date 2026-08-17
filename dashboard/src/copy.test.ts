@@ -492,8 +492,17 @@ const ISSUE_SCOPE_CLEAR_PARTNER: Partial<Record<EventKind, EventKind>> = {
 
 test("#933 What③: every dashboard attention kind is classified into a clearing path, and the classified path actually clears it", () => {
   const reconcilerObserved: Set<string> = new Set([...ESCALATION_SOURCE_KINDS, "base-ci-red-escalated"]);
-  const attentionKinds = EVENT_KINDS.filter((k) => copyFor(k)?.attention === true);
+  // PR #937 gate② finding [0]: `attention` is `true` OR a PAYLOAD PREDICATE (`reclaim-done`/
+  // `reclaim-failed`, #404) — filtering on `=== true` silently dropped both predicate-based
+  // kinds from this exhaustiveness sweep, so a future predicate-attention kind with no clearing
+  // path could never fail it. `!== undefined` (the same idiom the taxonomy-completeness test
+  // below already uses) admits every attention marker regardless of shape; both predicate kinds
+  // are already `escalation-source:always` (lane.ts) and so are caught by `reconcilerObserved`
+  // below without needing a hand-curated entry of their own.
+  const attentionKinds = EVENT_KINDS.filter((k) => copyFor(k)?.attention !== undefined);
   assert.ok(attentionKinds.length > 5, "sanity: the attention set should not be trivially empty");
+  assert.ok(attentionKinds.includes("reclaim-done"), "predicate-based attention kinds must be enumerated too");
+  assert.ok(attentionKinds.includes("reclaim-failed"), "predicate-based attention kinds must be enumerated too");
 
   for (const kind of attentionKinds) {
     const entityLess = ENTITY_LESS_ATTENTION[kind];
