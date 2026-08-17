@@ -912,11 +912,22 @@ test("#895 item 5: at the 720px floor, the hero stage reflows (holds its native 
     // `getComputedStyle` can't resolve a percentage to an actual px layout value (no real layout
     // engine), but it DOES still report the literal cascaded value, so this confirms the 720px
     // media query hasn't fired early and pinned 1200px outside its own range.
-    assert.equal(readHeroWidth(1200), "100%", "above the floor, the scaling rule must still be the one that wins");
+    assert.equal(readHeroWidth(1200), "100%", "well above the floor, the scaling rule must still be the one that wins");
+    // #895: 400px/1200px alone never pin the NAMED 720px boundary — a media query shipped as
+    // `max-width: 719px` would still pass both. 721px (just outside) and 720px (the floor
+    // itself, inclusive per `max-width`'s own semantics) pin the exact edge, tied to
+    // `STAGE.w` (stage.tsx's own viewBox width) rather than a hand-copied `1200px` literal so
+    // the two can never silently drift apart.
+    assert.equal(readHeroWidth(721), "100%", "one px above the floor, the media query must not have fired yet");
+    assert.equal(
+      readHeroWidth(720),
+      `${STAGE.w}px`,
+      "AT the 720px floor itself (max-width is inclusive), the stage must already hold its native width",
+    );
     assert.equal(
       readHeroWidth(400),
-      "1200px",
-      "at/below the 720px floor, the stage must hold its native STAGE.w px width (reflow via horizontal scroll) rather than scaling down — the exact regression: captions shrinking to ~6px",
+      `${STAGE.w}px`,
+      "well below the floor, the stage must hold its native STAGE.w px width (reflow via horizontal scroll) rather than scaling down — the exact regression: captions shrinking to ~6px",
     );
   } finally {
     document.head.removeChild(style);
@@ -1019,6 +1030,15 @@ test("#895 item 1: the staleness caption rolls over units (s/m/h/d) instead of e
   // ("last event 424778s ago") — this is that exact scale, now unit-rolled.
   assert.match(markup(state, { now: at(424_778_000) }), /last event 4d ago/);
   assert.doesNotMatch(markup(state, { now: at(424_778_000) }), /\d+s ago/);
+});
+
+// #895: an unparseable `lastEventTs` must render no caption at all, never a fabricated "just
+// now" — `formatRelativeTime` (format-time.ts) degrades an unparseable date to "just now" as
+// its own honest default for callers that always have some real elapsed time to show; for this
+// caption a malformed timestamp isn't "no time has passed", it's "no honest reading exists".
+test("#895: an unparseable lastEventTs renders no staleness caption, never a fabricated 'just now'", () => {
+  const state: HeroState = { ...initialHeroState(3), lastEventTs: "not-a-real-timestamp" };
+  assert.doesNotMatch(markup(state), /last event/, "an invalid timestamp must render no caption at all, not a fabricated 'just now'");
 });
 
 test("P2-8: the round outcome tally is THIS round's merges, never the all-time ring count", () => {

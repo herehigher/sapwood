@@ -465,11 +465,20 @@ test("#895 item 6: at the 720px floor, the operations fieldset wraps as a group 
     // implicit `nowrap` default) — happy-dom's CSSOM-only `getComputedStyle` reports an
     // undeclared property as "", not the resolved initial value, so this only confirms the
     // media rule hasn't fired early, not the literal string "nowrap".
-    assert.notEqual(readFlexWrap(1200), "wrap", "above the floor, the media rule must not have fired early");
+    assert.notEqual(readFlexWrap(1200), "wrap", "well above the floor, the media rule must not have fired early");
+    // #895: 400px/1200px alone never pin the NAMED 720px boundary — a media query shipped as
+    // `max-width: 719px` would still pass both. 721px (just outside) and 720px (the floor
+    // itself, inclusive per `max-width`'s own semantics) pin the exact edge.
+    assert.notEqual(readFlexWrap(721), "wrap", "one px above the floor, the media query must not have fired yet");
+    assert.equal(
+      readFlexWrap(720),
+      "wrap",
+      "AT the 720px floor itself (max-width is inclusive), the fieldset must already wrap as a group",
+    );
     assert.equal(
       readFlexWrap(400),
       "wrap",
-      "at/below the 720px floor, the fieldset must wrap as a group so no single button (EMERGENCY STOP) gets squeezed below its own label's width",
+      "well below the floor, the fieldset must wrap as a group so no single button (EMERGENCY STOP) gets squeezed below its own label's width",
     );
   } finally {
     document.head.removeChild(style);

@@ -625,9 +625,15 @@ function gateIcon(gate: "ci" | "review", cx: number, cy: number) {
  *  s/m/h/d/mo/y) rather than a raw-seconds count of its own — #895: a multi-day-old replayed
  *  round used to render "last event 424778s ago". `now` must be the caller's own honest clock
  *  (`HeroStage`'s own doc: never a real timer inside this component) — in replay that is the
- *  replay cursor's own timestamp, never the live wall clock (`Hero.tsx`'s `now` prop). */
+ *  replay cursor's own timestamp, never the live wall clock (`Hero.tsx`'s `now` prop).
+ *
+ *  #895: `formatRelativeTime` degrades an unparseable date to "just now" — its own honest
+ *  default for callers that always have SOME real elapsed time to show. For this caption that
+ *  default is wrong: an unparseable `lastEventTs` isn't "no time has passed", it's "no honest
+ *  reading exists" — guard it out to no caption, same as the `lastEventTs === null` case. */
 function stalenessCaption(lastEventTs: string | null, now: Date): string | null {
   if (lastEventTs === null) return null;
+  if (Number.isNaN(Date.parse(lastEventTs))) return null;
   return `last event ${formatRelativeTime(lastEventTs, now)}`;
 }
 

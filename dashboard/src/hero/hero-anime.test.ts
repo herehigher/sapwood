@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { cubicBezier } from "animejs";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { registerRealDom } from "../test-dom.ts";
+import { AnimationController } from "./animator.ts";
 import { EASE, Hero } from "./Hero.tsx";
 import { foldEvents, initialHeroState } from "./state.ts";
 
@@ -66,4 +67,41 @@ test("#895 item 2: mounting Hero through a real animating transition emits zero 
     undefined,
     `mounting Hero must never emit anime.js's dropped-string-easing warning; got: ${JSON.stringify(warnings)}`,
   );
+});
+
+// #895: the two tests above prove `EASE` itself has the right curve, and that mounting emits no
+// warning — neither proves the timeline `Hero.tsx`'s `play()` actually builds
+// (`createTimeline({ defaults: { ease: EASE } })`) is the one that ends up running; production
+// could quietly switch to a different, still-valid easing function and both would stay green.
+// `AnimationController.prototype.start` (animator.ts) is the one place the created `Timeline`
+// instance ever leaves `play()` — spying there (a class-prototype method, not an ES module
+// namespace export, so `mock.method` can wrap it and still call through) captures the real
+// object the real mounted path builds.
+test("#895: the real Timeline anime.js's createTimeline() builds during a real Hero mount carries the exact EASE function, not a different valid easing", async () => {
+  const { state, steps } = foldEvents(initialHeroState(3), [
+    { known: false, id: 1, ts: "2026-08-14T12:00:00Z", kind: "dispatched", payload: { worker: "w1", issue: 86 } },
+  ]);
+
+  const startSpy = mock.method(AnimationController.prototype, "start");
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(createElement(Hero, { heroState: state, steps, lanesMax: 3, engine: "running" }));
+    });
+    assert.equal(startSpy.mock.calls.length, 1, "a real animating transition must start exactly one tracked timeline");
+    const timeline = startSpy.mock.calls[0]?.arguments[0] as { defaults: { ease: unknown } };
+    assert.equal(
+      timeline.defaults.ease,
+      EASE,
+      "the real Timeline's own defaults.ease must be the exact EASE export, not a re-derived or different curve",
+    );
+  } finally {
+    startSpy.mock.restore();
+    await act(async () => {
+      root.unmount();
+    });
+    document.body.removeChild(container);
+  }
 });
