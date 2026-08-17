@@ -112,6 +112,16 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
     }
   }
 
+  // #921 AC4: a real 24-merge fold, at the mockup's own canonical 1440px width, to judge the
+  // ring disc at mockup scale (`?demo`'s own bundle carries only 1 ring — nowhere near enough to
+  // show the footprint growing to the mockup's ~256px disc). One capture per theme, named for
+  // `buildContactSheet()`'s own dedicated pairing section below.
+  for (const theme of THEMES) {
+    await captureRings24Hero(page, theme);
+    const file = `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-rings24-hero-panel.png`;
+    expect(existsSync(file), `rings24 hero-panel capture must exist: ${file}`).toBe(true);
+  }
+
   // Every module's selector chain (the `lanes` fallback included — the chain only guarantees
   // "one of these matched", not which one) must have matched SOMETHING at every
   // viewport/theme/state combination. A selector miss here (a renamed aria-label, a removed id) is
@@ -794,6 +804,83 @@ async function captureLiveLanes(page: Page, theme: { key: string; attr: string }
   await page.unroute("**/api/**");
 }
 
+/** #921 AC4: 24 `merged` events, real `LoopEvent` shape (`api/types.ts`) — the moment needed to
+ *  judge the ring disc at mockup scale, which `?demo`'s own demo bundle (1 merge) can't show. */
+function rings24Events(): { id: number; ts: string; kind: string; payload: Record<string, unknown> }[] {
+  const now = Date.now();
+  return Array.from({ length: 24 }, (_, i) => {
+    const n = i + 1;
+    return {
+      id: n,
+      ts: new Date(now - (24 - n) * 60_000).toISOString(),
+      kind: "merged",
+      payload: { worker: `w${(n % 4) + 1}`, issue: 900 + n, pr: 9000 + n },
+    };
+  });
+}
+
+/** #921 AC4: mocks `/api/loop/state` (rings: 24) and `/api/events` (the same 24 merges) so the
+ *  capture comes from the REAL production fold (`useEventHistory` -> `foldReplay`), never a prop
+ *  override — same posture as `mockLiveApi`/`captureLiveLanes` above. `/api/events` respects its
+ *  own `after` cursor (real API paging semantics): a poll past `after=24` returns nothing fresh,
+ *  so a capture slower than `POLL_MS` (3s) can't re-fold the same 24 merges twice and double the
+ *  ring count out from under the screenshot. */
+async function mockRings24Api(page: Page): Promise<void> {
+  const events = rings24Events();
+  const loopState = {
+    engine: { state: "running", reasons: [], lastTickAt: null, pauseActive: false, estopActive: false, standbyNextCheckSec: null },
+    lanes: { max: 3, items: [] },
+    round: null,
+    spend: { todayUsd: 0, dailyBudgetUsd: null, runUsd: null, runBudgetUsd: null, byModel: [] },
+    rings: 24,
+    mergedPrs: events.map((e) => (e.payload as { pr: number }).pr),
+    logPath: null,
+    config: { board: { owner: "herehigher", repo: "sapwood" } },
+    controlsEnabled: true,
+  };
+  const byPath: Record<string, unknown> = {
+    "/api/loop/state": loopState,
+    "/api/spend": { spend: [], lastId: 0 },
+    "/api/rounds": { rounds: [] },
+  };
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/events") {
+      const after = Number(url.searchParams.get("after") ?? "0");
+      const fresh = events.filter((e) => e.id > after);
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ events: fresh, lastId: 24 }) });
+      return;
+    }
+    const body = byPath[url.pathname];
+    if (body === undefined) {
+      await route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+  });
+}
+
+/** #921 AC4: navigates the real production `App` -> `LiveApp` tree (never `?demo`, and never a
+ *  `HeroStage` prop override) with `/api/*` mocked to a real 24-merge fold, and crops the hero
+ *  panel — the same "real fold, not a prop override" discipline `captureLiveLanes` already
+ *  applies to the lanes module. Asserts the fold actually produced 24 real rings (not just that
+ *  SOMETHING rendered) before the screenshot is evidence of anything. */
+async function captureRings24Hero(page: Page, theme: { key: string; attr: string }): Promise<void> {
+  await mockRings24Api(page);
+  await page.setViewportSize({ width: CANONICAL_WIDTH, height: 900 });
+  await page.goto("/");
+  await page.evaluate((attr) => document.documentElement.setAttribute("data-theme", attr), theme.attr);
+  const hero = page.locator("svg.hero");
+  await hero.waitFor({ state: "visible" });
+  await page.locator('.hero-trunk[data-rings="24"]').waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  await expect(page.locator(".hero-ring"), "the real fold must draw exactly 24 rings, one per merge").toHaveCount(24);
+
+  await hero.screenshot({ path: `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-rings24-hero-panel.png` });
+  await page.unroute("**/api/**");
+}
+
 async function firstMatch(page: Page, selectors: string[]): Promise<Locator | null> {
   for (const selector of selectors) {
     const locator = page.locator(selector).first();
@@ -919,6 +1006,24 @@ function buildContactSheet(): void {
        which have no per-module mockup at all, are visible only there).</p>`
     : "";
 
+  // #921 AC4: a THIRD moment (rings=24, real fold) alongside idle/active — outside the STATES
+  // grid `missingCaptures()`/the rows above enforce, so it gets its own dedicated section rather
+  // than a hand-typed third STATES entry that would force every OTHER module through this same
+  // moment too. Named so an operator can find it and record the Tier-C witnessed comparison
+  // (`docs/security.md`'s evidence tiers — this repo's own review doctrine is explicit that a
+  // producer can never self-attest a Tier-C record) directly on issue #921.
+  const rings24RowsHtml = THEMES.map((t) => {
+    const mockupFile = `mockups/hero-panel-${t.key}.png`;
+    const captureFile = `captures/${CANONICAL_WIDTH}-${t.key}-rings24-hero-panel.png`;
+    if (!existsSync(`${OUTPUT_DIR}/${mockupFile}`) || !existsSync(`${OUTPUT_DIR}/${captureFile}`)) return "";
+    return `
+      <tr>
+        <td class="label">hero-panel · ${t.key} · rings24<br><span class="tag">mockup vs. a real 24-merge fold</span></td>
+        <td><img src="${mockupFile}" alt="hero-panel ${t.key} mockup"></td>
+        <td><img src="${captureFile}" alt="hero-panel ${t.key} rings24 live capture"></td>
+      </tr>`;
+  }).join("");
+
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -944,6 +1049,9 @@ function buildContactSheet(): void {
 <h2>Per-module comparisons (${CANONICAL_WIDTH}px)</h2>
 <table>${rowsHtml || "<tr><td>No mockup/capture pairs found.</td></tr>"}</table>
 ${noMockupNote}
+
+<h2>Ring disc at 24 merges (#921) — Tier-C: record the witnessed crop comparison on the issue</h2>
+<table>${rings24RowsHtml || "<tr><td>No rings24 capture/mockup pair found.</td></tr>"}</table>
 
 <h2>Full-page captures — every viewport × theme combination</h2>
 <table>${fullPageRowsHtml}</table>
