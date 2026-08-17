@@ -411,6 +411,98 @@ test("§889 AC2: navigator/transport controls resolve real token-based styling i
   );
 });
 
+/**
+ * #892 AC5: the Legend "?" popover no longer reflows the header. Was a native `<details>` whose
+ * `<ul>` content grew `.hero-legend`'s own in-flow box on open, shoving everything after it (the
+ * "?" trigger itself included) down — moving it out from under the pointer mid-interaction, the
+ * exact defect this issue's "Why" names. Now a Radix `Popover.Portal`, which renders `.app-header`
+ * a sibling in a completely different part of the tree (document.body), never a child — this is
+ * the real-browser proof no component test (DOM-presence only, no real CSS layout engine) can
+ * give: `.app-header`'s own `boundingBox()` (y/height) must be bit-for-bit identical before and
+ * after the popover opens.
+ */
+test("#892 AC5: opening the legend popover does not reflow .app-header — same y/height before and after", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  const header = page.locator(".app-header");
+  const before = await header.boundingBox();
+  expect(before, "the header must render with a real bounding box before opening the legend").not.toBeNull();
+
+  const trigger = page.locator('button[aria-label="Legend"]');
+  await trigger.click();
+  await expect(page.locator("text=droplet = an issue moving through the loop")).toBeVisible();
+
+  const after = await header.boundingBox();
+  expect(after, "the header must still render with a real bounding box once the legend is open").not.toBeNull();
+  expect(after?.y, "the header's top edge must not move — no reflow from the popover's own content").toBe(before?.y);
+  expect(after?.height, "the header's height must not grow — the popover's content lives outside .app-header entirely").toBe(
+    before?.height,
+  );
+});
+
+/**
+ * #892 AC3 (#876 C-2 ruling): native `<dialog>.showModal()` focus-trap containment and
+ * Escape→cancel, proven for real — happy-dom's `<dialog>` doesn't implement either (see this
+ * issue's verification plan and `test-dom.ts`'s own doc), so a component-suite assertion here
+ * would prove nothing about the real defect. `PhaseInspectorDrawer` is the one migrated dialog
+ * reachable from the `?demo` fixture this pipeline drives (`ConfigDrawer` is live-only; `Controls`
+ * — and its confirm dialog — renders only in live mode, per `App.tsx`'s own `mode === "live"`
+ * gates) — all three route through the exact same browser mechanism (`.showModal()` on a native
+ * `<dialog>`), so this is representative real-browser evidence for the shared mechanism, not proof
+ * specific to this one call site. The other two get their `showModal()`-was-invoked/`.open`-state
+ * proof at Tier A (ConfigDrawer.test.tsx, Controls.test.tsx) — focus-trap/Escape themselves are a
+ * genuine UA behavior no non-live-reachable dialog in this pipeline can additionally demonstrate.
+ */
+test("#892 AC3: the phase inspector dialog traps focus (background inert) and Escape cancels it", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  const node = page.locator('[aria-label^="inspect "]').first();
+  await node.click();
+  const dialog = page.locator('dialog[aria-label="phase inspector"]');
+  await expect(dialog).toBeVisible();
+
+  // Focus containment: Tab repeatedly. A real UA focus trap keeps the active element either
+  // inside the dialog or resting on `<body>` (Chromium's own behavior once a modal's focusable
+  // descendants are exhausted — a harmless, non-interactive fallback, never the SAME thing as
+  // reaching an actual background control) — but a KNOWN background control (the icon-rail
+  // wordmark, always present, never inside this dialog) must never become the active element,
+  // which is the concrete, unambiguous proof background content stays unreachable.
+  for (let i = 0; i < 12; i++) {
+    await page.keyboard.press("Tab");
+    const info = await dialog.evaluate((el) => ({
+      insideDialog: el.contains(document.activeElement),
+      isBody: document.activeElement === document.body,
+      isBackgroundWordmark: document.activeElement?.classList.contains("icon-rail-wordmark") ?? false,
+    }));
+    expect(
+      info.insideDialog || info.isBody,
+      `Tab press #${i + 1}: focus must stay inside the dialog (or rest on <body>), never land on a background element`,
+    ).toBe(true);
+    expect(info.isBackgroundWordmark, `Tab press #${i + 1} must never reach the background icon rail`).toBe(false);
+  }
+
+  // Background inert: a background control (the icon-rail wordmark, always present) must not be
+  // focusable via a direct .focus() call while the dialog is modal — this is what "inert" means in
+  // practice (a no-op focus attempt), not just "Tab doesn't happen to land there".
+  const stillOutside = await page.evaluate(() => {
+    const bg = document.querySelector<HTMLElement>(".icon-rail-wordmark");
+    bg?.focus();
+    return document.activeElement !== bg;
+  });
+  expect(stillOutside, "a background element must not be focusable while the dialog is modal (background inert)").toBe(true);
+
+  // Escape -> cancel: the native `close` event this issue wires to `onClose` must actually remove
+  // the dialog from the page.
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+});
+
 async function firstMatch(page: Page, selectors: string[]): Promise<Locator | null> {
   for (const selector of selectors) {
     const locator = page.locator(selector).first();

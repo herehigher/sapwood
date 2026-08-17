@@ -85,10 +85,15 @@ test("disconnected renders the disconnected caption instead of lane cards", () =
   assert.doesNotMatch(html, /lane-board-grid/);
 });
 
-test("issue numbers carry a type glyph and conditional tooltip, same as EntityRef", () => {
+// #892: EntityRef's folded title moved from a bare `title=` (static-markup-visible) to a Radix
+// tooltip that only mounts on real focus — see EntityRef.test.tsx's own real-DOM tests for the
+// interactive open/aria-describedby proof. `tabindex="0"` is the SSR-visible signal that a title
+// was folded and wired through to a real (Tab-reachable) trigger — EntityRef only adds it when
+// there's a title to show.
+test("issue numbers carry a type glyph and a folded-title tooltip trigger, same as EntityRef", () => {
   const html = renderToStaticMarkup(
     <LaneBoard lanesMax={1} lanes={[lane({ issue: 86 })]} titles={{ 86: { issueTitle: "Fix the thing" } }} now={NOW} />,
   );
-  assert.match(html, /title="Fix the thing"/);
+  assert.match(html, /tabindex="0"/);
   assert.match(html, /<svg/);
 });

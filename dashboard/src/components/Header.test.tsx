@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { EngineState } from "../api/types.ts";
-import { registerRealDom } from "../test-dom.ts";
+// #892: must resolve before "./Header.tsx" (transitively imports Radix, via HintTooltip.tsx) —
+// see this module's own doc for why. Replaces registerRealDom() (this file needs real focus
+// interaction now, not just a real `document` for getComputedStyle).
+import { unregisterRealDomEager } from "../test-dom-eager.ts";
 import { type EngineFacts, Header, resolveSpendMeter, showsPauseChip } from "./Header.tsx";
 
-registerRealDom();
+test.after(() => unregisterRealDomEager());
 
 const panelsCss = readFileSync(new URL("../panels.css", import.meta.url), "utf8");
 const tokensCss = readFileSync(new URL("../tokens.css", import.meta.url), "utf8");
@@ -157,8 +162,11 @@ test("the meter renders the run tier's numerator/denominator, never the daily pa
 });
 
 // #766 gate② finding [1]: the `round` prop (replay's honest, correctly-scoped reading) always
-// wins over `spend`'s run/daily tiers when present — the header's own title attribute names the
-// tier explicitly, so a reader (and a test) can tell "round spend" apart from "run"/"daily".
+// wins over `spend`'s run/daily tiers when present — the meter's own tooltip names the tier
+// explicitly, so a reader (and a test) can tell "round spend" apart from "run"/"daily".
+// #892: the tier label moved from a bare `title=` (static-markup-visible) to a Radix tooltip
+// (only visible/queryable on real focus) — see the real-DOM tests at the end of this file for
+// the "round spend"/"run spend" tier-label proofs.
 test("the `round` prop wins outright over `spend` — renders the round figures, never the run/daily pair also passed", () => {
   const html = renderToStaticMarkup(
     <Header
@@ -173,20 +181,6 @@ test("the `round` prop wins outright over `spend` — renders the round figures,
   assert.match(html, /\$12\.50/);
   assert.match(html, /\$250/);
   assert.doesNotMatch(html, /999/, "the run/daily spend passed alongside round must never leak through");
-  assert.match(html, /title="round spend"/, "the meter must be explicitly labeled 'round', never conflated with run/daily");
-});
-
-test("no `round` prop: the meter falls back to the ordinary run/daily resolution, unaffected", () => {
-  const html = renderToStaticMarkup(
-    <Header
-      disconnected={false}
-      isPending={false}
-      engine={engine("running")}
-      spend={{ runUsd: 5, runBudgetUsd: 50, todayUsd: 1, dailyBudgetUsd: 10 }}
-      parked={false}
-    />,
-  );
-  assert.match(html, /title="run spend"/);
 });
 
 test("a null budgetUsd on `round` (artifact-less round) renders the used amount alone, no '/ $x' suffix", () => {
@@ -289,4 +283,57 @@ test("does not render, import, or re-implement the legend", () => {
   );
   assert.doesNotMatch(html, /droplet = an issue moving through the loop/);
   assert.doesNotMatch(html, /aria-label="Legend"/);
+});
+
+// ── #892 AC1: the spend-meter tooltip (was a bare `title=`) is a real Radix tooltip now — Tab-
+// reachable, tier label visible/queryable on focus. ──────────────────────────────────────────
+
+async function focusSpendMeter(element: React.ReactElement): Promise<{ trigger: HTMLElement; tooltipText: string | null | undefined }> {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(element);
+    });
+    const trigger = container.querySelector(".spend-meter") as HTMLElement;
+    assert.ok(trigger, "the spend-meter trigger renders");
+    assert.equal(trigger.tabIndex, 0, "must be a real tab stop — a <div> isn't focusable by default");
+    await act(async () => {
+      trigger.focus();
+    });
+    return { trigger, tooltipText: container.querySelector('[role="tooltip"]')?.textContent };
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+}
+
+test("real DOM: the `round` prop's meter tooltip is explicitly labeled 'round spend', never conflated with run/daily", async () => {
+  const { tooltipText } = await focusSpendMeter(
+    <Header
+      disconnected={false}
+      isPending={false}
+      engine={engine("running")}
+      spend={{ runUsd: 999, runBudgetUsd: 999, todayUsd: 999, dailyBudgetUsd: 999 }}
+      round={{ usedUsd: 12.5, budgetUsd: 250 }}
+      parked={false}
+    />,
+  );
+  assert.equal(tooltipText, "round spend");
+});
+
+test("real DOM: no `round` prop falls back to the run tier's own tooltip label", async () => {
+  const { tooltipText } = await focusSpendMeter(
+    <Header
+      disconnected={false}
+      isPending={false}
+      engine={engine("running")}
+      spend={{ runUsd: 5, runBudgetUsd: 50, todayUsd: 1, dailyBudgetUsd: 10 }}
+      parked={false}
+    />,
+  );
+  assert.equal(tooltipText, "run spend");
 });

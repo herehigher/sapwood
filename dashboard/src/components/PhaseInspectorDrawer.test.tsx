@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import { registerRealDom } from "../test-dom.ts";
+import { PhaseInspectorDrawer } from "./PhaseInspectorDrawer.tsx";
+
+registerRealDom();
 
 /** Same pattern `IconRail.test.tsx`/`hero/hero.test.ts` already use for pinning a real CSS rule's
  *  declarations, rather than asserting against a hand-copied string a stylesheet edit could drift
@@ -41,4 +47,43 @@ test("#868 gate② finding [0]: .phase-inspector renders as a real side drawer �
     /^100%$/,
     "a full-viewport-width value would just reproduce the bottom-panel bug one level down — a side drawer's width must be bounded",
   );
+});
+
+// ── #892 (#876 C-2): a real <dialog>, opened via .showModal() — Tier A per the verification plan
+// (focus-trap/Escape themselves are Playwright-only, see shots.spec.ts; App.test.tsx covers the
+// click-to-open/close-button wiring end to end). ──────────────────────────────────────────────
+
+test("real DOM: renders a real <dialog> element and calls .showModal() when a node opens it — .open reflects state, unmounts entirely when node is null", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <PhaseInspectorDrawer node={null} onClose={() => {}} artifact={null} events={[]} config={null} logPath={null} titles={{}} />,
+      );
+    });
+    assert.equal(container.querySelector("dialog"), null, "no node -> nothing renders");
+
+    await act(async () => {
+      root.render(
+        <PhaseInspectorDrawer node="goal-align" onClose={() => {}} artifact={null} events={[]} config={null} logPath={null} titles={{}} />,
+      );
+    });
+    const dialog = container.querySelector("dialog") as HTMLDialogElement;
+    assert.ok(dialog, "renders a real <dialog> element");
+    assert.equal(dialog.open, true, ".showModal() must have been invoked");
+
+    await act(async () => {
+      root.render(
+        <PhaseInspectorDrawer node={null} onClose={() => {}} artifact={null} events={[]} config={null} logPath={null} titles={{}} />,
+      );
+    });
+    assert.equal(container.querySelector("dialog"), null, "closing (node -> null) unmounts the dialog entirely");
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
 });

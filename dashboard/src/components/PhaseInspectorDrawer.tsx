@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { readConfigPath } from "../config-captions.ts";
 import type { EntityTitles } from "../entities.ts";
 import { modelEffortCaption } from "../hero/stage.tsx";
@@ -180,16 +180,18 @@ function RetroBody({ artifact, repoUrl }: { artifact: unknown; repoUrl?: string 
  * `ConfigDrawer` (no input/button/form other than close). `node` decides both which of the five
  * §6 phases renders (`NODE_PHASE`) and which caption shows (AC3): CI/merge show none, REVIEW
  * shows the review mode word, every other node shows its configured model·effort.
+ *
+ * #892 (#876 C-2 ruling): a native `<dialog>` via `.showModal()` — this drops the hand-rolled
+ * `document`-level Escape listener entirely; `showModal()`'s own native Escape→`cancel`→`close`
+ * sequence covers it now (wired to `onClose` below), same as `ConfigDrawer`.
  */
 export function PhaseInspectorDrawer({ node, onClose, artifact, events, config, logPath, repoUrl, titles }: PhaseInspectorDrawerProps) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `node` isn't read in the body, but it's the trigger for re-running showModal() each time the dialog element gets freshly mounted (node flips null -> non-null unmounts then remounts it).
   useEffect(() => {
-    if (!node) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [node, onClose]);
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.open) dialog.showModal();
+  }, [node]);
 
   if (!node) return null;
 
@@ -197,10 +199,10 @@ export function PhaseInspectorDrawer({ node, onClose, artifact, events, config, 
   const caption = captionForNode(node, config);
 
   return (
-    <aside className="panel config-drawer phase-inspector" aria-label="phase inspector">
+    <dialog ref={dialogRef} className="panel config-drawer phase-inspector recipe-drawer" aria-label="phase inspector" onClose={onClose}>
       <div className="config-drawer-head">
         <h2>{PHASE_HEADING[phase]}</h2>
-        <button type="button" onClick={onClose} className="config-drawer-close" aria-label="close phase inspector">
+        <button type="button" onClick={onClose} className="config-drawer-close recipe-press" aria-label="close phase inspector">
           ✕
         </button>
       </div>
@@ -211,7 +213,7 @@ export function PhaseInspectorDrawer({ node, onClose, artifact, events, config, 
       {phase === "summary" && <SummaryBody artifact={artifact} />}
       {phase === "retro" && <RetroBody artifact={artifact} repoUrl={repoUrl} />}
       {logPath !== null && <p className="muted data">view log: {logPath}</p>}
-    </aside>
+    </dialog>
   );
 }
 

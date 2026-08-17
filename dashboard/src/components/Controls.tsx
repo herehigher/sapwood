@@ -170,6 +170,15 @@ export function Controls({ enabled, running = false, estopActive = false, onCont
   // (buttons re-enabled) while surfacing that it failed — never the raw error/status text (same
   // no-leaked-fetch-error posture App.tsx's own `disconnected` header already holds to).
   const [failed, setFailed] = useState(false);
+  // #892 (#876 C-2 ruling): the confirm step is a native `<dialog>` via `.showModal()` — this is
+  // the ONLY thing this migration changes about §3 Operations' misfire protection; the reducer's
+  // idle→confirming→sending state machine (and every effect above/below it) is untouched.
+  const confirmDialogRef = useRef<HTMLDialogElement>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `state.phase` isn't read in the body, but it's the trigger for re-running showModal() each time the dialog element gets freshly mounted (phase flips to "confirming" unmounts then remounts it).
+  useEffect(() => {
+    const dialog = confirmDialogRef.current;
+    if (dialog && !dialog.open) dialog.showModal();
+  }, [state.phase]);
 
   useEffect(() => {
     let cancelled = false;
@@ -238,15 +247,25 @@ export function Controls({ enabled, running = false, estopActive = false, onCont
       )}
       {failed && <p className="muted controls-error">Couldn't reach the engine — try again.</p>}
       {state.phase === "confirming" && (
-        <div className="controls-confirm" role="alertdialog" aria-label={`confirm ${state.verb}`}>
+        <dialog
+          ref={confirmDialogRef}
+          className="controls-confirm recipe-drawer"
+          role="alertdialog"
+          aria-label={`confirm ${state.verb}`}
+          // Native Escape→cancel→close (#876 C-2, #892 AC3): the dialog's own `close` event is the
+          // ONE thing that can desync the reducer from what's on screen (Escape closes the native
+          // element without going through either button), so it dispatches the same `cancel` action
+          // the Cancel button does — never a second, parallel "closed" state.
+          onClose={() => dispatch({ type: "cancel" })}
+        >
           <p>{CONTROL_COPY[state.verb].confirm}</p>
-          <button type="button" onClick={() => dispatch({ type: "confirm" })}>
+          <button type="button" className="recipe-press" onClick={() => dispatch({ type: "confirm" })}>
             Confirm
           </button>
-          <button type="button" onClick={() => dispatch({ type: "cancel" })}>
+          <button type="button" className="recipe-press" onClick={() => dispatch({ type: "cancel" })}>
             Cancel
           </button>
-        </div>
+        </dialog>
       )}
     </fieldset>
   );

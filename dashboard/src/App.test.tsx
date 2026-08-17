@@ -1634,7 +1634,8 @@ function escapeRegExp(s: string): string {
  *  model·effort/review-mode captions next to its own stage nodes regardless of drawer state, so
  *  an unscoped "does this string appear anywhere" check would be a false positive/negative. */
 function extractDrawerHtml(html: string): string {
-  const match = html.match(/<aside[^>]*aria-label="phase inspector"[^>]*>[\s\S]*?<\/aside>/);
+  // #892: PhaseInspectorDrawer is a native <dialog> now (was <aside>) — see its own file comment.
+  const match = html.match(/<dialog[^>]*aria-label="phase inspector"[^>]*>[\s\S]*?<\/dialog>/);
   assert.ok(match, "phase inspector drawer not found in rendered html");
   return match[0];
 }
@@ -1918,7 +1919,7 @@ test("#868 gate② finding [1]: the real live wiring excludes a PRIOR round's ma
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    const drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    const drawer = container.querySelector('dialog[aria-label="phase inspector"]');
     assert.ok(drawer);
     assertRow(
       drawer!.innerHTML,
@@ -1982,7 +1983,7 @@ test("gate② finding [0]: the real /api/rounds artifact and /api/events respons
     await act(async () => {
       goalAlignNode.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    let drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    let drawer = container.querySelector('dialog[aria-label="phase inspector"]');
     assert.ok(drawer);
     assert.match(
       drawer.textContent ?? "",
@@ -1995,7 +1996,7 @@ test("gate② finding [0]: the real /api/rounds artifact and /api/events respons
     await act(async () => {
       verifyNode.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    drawer = container.querySelector('dialog[aria-label="phase inspector"]');
     assert.ok(drawer);
     assert.match(
       drawer.textContent ?? "",
@@ -2009,7 +2010,7 @@ test("gate② finding [0]: the real /api/rounds artifact and /api/events respons
     await act(async () => {
       laneNode.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    drawer = container.querySelector('dialog[aria-label="phase inspector"]');
     assert.ok(drawer);
     assertRow(drawer.innerHTML, "dispatches", 3);
     assertRow(drawer.innerHTML, "merges", 2);
@@ -2210,7 +2211,13 @@ test("AC1: every §6 phase-inspector stage node renders as a keyboard-reachable,
   }
 });
 
-test("AC1/AC5: clicking a hero stage node opens its phase inspector drawer; the close control and Escape both close it; the node is keyboard-operable; no unexpected fetch happens", async () => {
+// #892: was "...the close control and Escape both close it..." — the drawer is a native
+// `<dialog>` now, and Escape closing it is a real browser (UA) behavior happy-dom's own
+// `HTMLDialogElement` doesn't implement (see `HTMLDialogElement.ts`: `showModal`/`close` just
+// toggle the `open` attribute and fire `close`, with no keydown wiring at all) — asserted instead
+// at the ONE carrier that can actually prove it, `shots/shots.spec.ts` (Playwright), per this
+// issue's verification plan. The close CONTROL (a plain button click) stays provable here.
+test("AC1: clicking a hero stage node opens its phase inspector drawer; the close control closes it; the node is keyboard-operable; no unexpected fetch happens", async () => {
   const { container, fetchCalls, unmount } = await mountSettledApp({
     "/api/loop/state": {
       status: 200,
@@ -2225,26 +2232,21 @@ test("AC1/AC5: clicking a hero stage node opens its phase inspector drawer; the 
     await act(async () => {
       node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    assert.ok(container.querySelector('aside[aria-label="phase inspector"]'), "clicking the node must open the drawer");
-    assert.match(container.querySelector('aside[aria-label="phase inspector"]')?.textContent ?? "", /Goal & align/);
+    assert.ok(container.querySelector('dialog[aria-label="phase inspector"]'), "clicking the node must open the drawer");
+    assert.match(container.querySelector('dialog[aria-label="phase inspector"]')?.textContent ?? "", /Goal & align/);
 
     const closeButton = container.querySelector('[aria-label="close phase inspector"]');
     assert.ok(closeButton, "the drawer must render a close control");
     await act(async () => {
       closeButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    assert.equal(container.querySelector('aside[aria-label="phase inspector"]'), null, "the close control must close the drawer");
+    assert.equal(container.querySelector('dialog[aria-label="phase inspector"]'), null, "the close control must close the drawer");
 
     // Keyboard: Enter on the focused node opens it too — proves keyboard operability, not just click.
     await act(async () => {
       node.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     });
-    assert.ok(container.querySelector('aside[aria-label="phase inspector"]'), "Enter on the node must open the drawer too");
-
-    await act(async () => {
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-    });
-    assert.equal(container.querySelector('aside[aria-label="phase inspector"]'), null, "Escape must close the drawer");
+    assert.ok(container.querySelector('dialog[aria-label="phase inspector"]'), "Enter on the node must open the drawer too");
 
     assert.ok(
       fetchCalls.every(
@@ -2277,7 +2279,7 @@ test("AC5: a real non-null logPath renders as plain text once the drawer opens, 
     await act(async () => {
       node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    const drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    const drawer = container.querySelector('dialog[aria-label="phase inspector"]');
     assert.ok(drawer, "clicking the node must open the drawer");
     assert.match(drawer.textContent ?? "", /run-861-gate2-unique\.log/, "the real, query-sourced logPath must render as plain text");
 
@@ -2350,7 +2352,7 @@ test("AC7: plan-review-escalated/verify-na-proposed/ci-inert-escalated rows each
       planReviewLink.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
     assert.equal(
-      container.querySelector('aside[aria-label="phase inspector"]'),
+      container.querySelector('dialog[aria-label="phase inspector"]'),
       null,
       "clicking the row's GitHub link must never open the drawer",
     );
@@ -2359,14 +2361,14 @@ test("AC7: plan-review-escalated/verify-na-proposed/ci-inert-escalated rows each
     await act(async () => {
       planReviewButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    let drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    let drawer = container.querySelector('dialog[aria-label="phase inspector"]');
     assert.ok(drawer, "the plan-review-escalated row's inspect control must open a drawer");
     assert.match(drawer.textContent ?? "", /Arch review \/ Verify/, "plan-review-escalated must open the Arch review / Verify drawer");
 
     await act(async () => {
       verifyNaButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    drawer = container.querySelector('dialog[aria-label="phase inspector"]');
     assert.ok(drawer, "the verify-na-proposed row's inspect control must open a drawer");
     assert.match(drawer.textContent ?? "", /Arch review \/ Verify/, "verify-na-proposed must open the Arch review / Verify drawer");
 
@@ -2382,7 +2384,7 @@ test("AC7: plan-review-escalated/verify-na-proposed/ci-inert-escalated rows each
     await act(async () => {
       ciButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    drawer = container.querySelector('aside[aria-label="phase inspector"]');
+    drawer = container.querySelector('dialog[aria-label="phase inspector"]');
     assert.ok(drawer, "clicking the inspect control must open the drawer");
     assert.match(drawer.textContent ?? "", /Lanes \/ CI \/ Review \/ merge/, "ci-inert-escalated must open the CI/lanes drawer");
 

@@ -4,6 +4,7 @@ import { attentionSummary, type EntityTitles } from "../entities.ts";
 import { formatRelativeWithAbsoluteTitle } from "../format-time.ts";
 import { ATTENTION_KIND_TO_NODE, type StageNode } from "../inspector.ts";
 import { SentencePartView } from "./ActivityFeed.tsx";
+import { HintTooltip } from "./HintTooltip.tsx";
 
 export interface NeedsAttentionProps {
   /** The caller's durable `foldOpenAttention` result (`useEventHistory().openAttention`) —
@@ -48,7 +49,7 @@ function AttentionRow({
   // fabricated) rather than rendering an empty/misleading chip.
   const category = event.known ? attentionCategory(event.kind) : undefined;
   return (
-    <li className="attention-row">
+    <li className="attention-row recipe-list-entry">
       {category && <span className="attention-chip">{category}</span>}
       <span className="attention-sentence">
         {parts.map((part, i) => (
@@ -65,9 +66,15 @@ function AttentionRow({
           inspect
         </button>
       )}
-      <span className="muted data attention-ts attention-age" title={title}>
-        {text}
-      </span>
+      <HintTooltip content={title}>
+        {/* biome-ignore lint/a11y/noNoninteractiveTabindex: this <span> is a Radix Tooltip
+         *  trigger, not a bare non-interactive label — `title` is always a real absolute-time
+         *  string here (never optional), so this trigger is always focusable, unlike EntityRef's
+         *  conditional case — Tab must reach it (#892 AC1). */}
+        <span className="muted data attention-ts attention-age" tabIndex={0}>
+          {text}
+        </span>
+      </HintTooltip>
     </li>
   );
 }

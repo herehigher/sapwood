@@ -193,7 +193,7 @@ code,
 
 /* ---- "?" legend toggle (§7) — the header's whole onboarding surface ------- */
 
-.hero-legend summary {
+.hero-legend-trigger {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -201,18 +201,17 @@ code,
   height: 22px;
   border-radius: var(--radius-pill);
   border: var(--hairline);
+  background: transparent;
   cursor: pointer;
   font-family: var(--font-body);
   color: var(--bark-text);
-  list-style: none;
 }
 
-.hero-legend summary::-webkit-details-marker {
-  display: none;
-}
-
-.hero-legend ul {
-  margin: var(--space-2) 0 0;
+/* #892: a Radix Popover, not `<details>` — `Popover.Content` renders through its own Portal
+   (react-portal to document.body), so this never becomes a child of `.app-header` and can never
+   add to its box regardless of content length (the bug this migration fixes). */
+.hero-legend-content {
+  margin: 0;
   padding: var(--space-2) var(--space-3);
   list-style: none;
   background: var(--panel);
@@ -220,10 +219,21 @@ code,
   border-radius: var(--radius-card);
   font-size: var(--text-0);
   color: var(--sapwood);
+  z-index: var(--z-drawer);
 }
 
-.hero-legend li {
+.hero-legend-content ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hero-legend-content li {
   white-space: nowrap;
+}
+
+.hero-legend-arrow {
+  fill: var(--panel);
 }
 
 /* §5 quality floor: visible keyboard focus, the shared --focus-ring token. */
@@ -241,17 +251,18 @@ code,
 }
 
 /*
- * §3's A→B→C→D→E layout: header and hero always span the full row, same as the cost strip
- * and the config drawer when open — only the lane board / activity feed share a row (§3's
- * C | D split), which `.stack`'s own auto-fit already gives the two remaining items.
- * #716 gate② P2-7: without this, the hero's fixed 1200×380 stage landed in the SAME
- * minmax(320px, 1fr) cell as a single lane card — live-measured at 374×118px with ~3px
- * labels, instead of the full-width band the design calls for.
+ * §3's A→B→C→D→E layout: header and hero always span the full row, same as the cost strip —
+ * only the lane board / activity feed share a row (§3's C | D split), which `.stack`'s own
+ * auto-fit already gives the two remaining items. #716 gate② P2-7: without this, the hero's fixed
+ * 1200×380 stage landed in the SAME minmax(320px, 1fr) cell as a single lane card — live-measured
+ * at 374×118px with ~3px labels, instead of the full-width band the design calls for.
+ * #892: `.config-drawer` dropped out of this list — now a native `<dialog>` (`.showModal()`),
+ * always `position: fixed` (panels.css) and therefore never a participant in this grid at all,
+ * same reasoning `.phase-inspector`'s own comment already gives.
  */
 .stack > .app-header,
 .stack > .hero,
 .stack > .cost-strip,
-.stack > .config-drawer,
 .stack > .needs-attention,
 .stack > .lane-activity-row {
   grid-column: 1 / -1;

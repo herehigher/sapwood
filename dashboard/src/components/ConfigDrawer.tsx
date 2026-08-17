@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { CONFIG_GROUPS, CONFIG_KEYS, readConfigPath } from "../config-captions.ts";
 
 export interface ConfigDrawerProps {
@@ -16,15 +17,27 @@ function formatValue(value: unknown): string {
 
 /** Read-only, grouped, captioned (§3 E) — and structurally read-only: there is no input, no
  *  button, no form anywhere in this component, so "no edit affordance" is a fact about what does
- *  not exist here, not an unimplemented handler. */
+ *  not exist here, not an unimplemented handler.
+ *
+ *  #892 (#876 C-2 ruling): a native `<dialog>`, opened via `.showModal()` — focus trap, Escape,
+ *  and backdrop all come from the browser, not hand-rolled. The `open` prop still fully owns
+ *  mount/unmount (same contract as before: closed renders nothing at all); the effect below only
+ *  drives the ALREADY-MOUNTED element's modal state. */
 export function ConfigDrawer({ config, open, onClose }: ConfigDrawerProps) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `open` isn't read in the body, but it's the trigger for re-running showModal() each time the dialog element gets freshly mounted (open flips false -> true unmounts then remounts it).
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.open) dialog.showModal();
+  }, [open]);
+
   if (!open) return null;
   return (
-    <aside className="panel config-drawer" aria-label="config">
+    <dialog ref={dialogRef} className="panel config-drawer recipe-drawer" aria-label="config" onClose={onClose}>
       <div className="config-drawer-head">
         <h2>config</h2>
         {onClose && (
-          <button type="button" onClick={onClose} className="config-drawer-close" aria-label="close config">
+          <button type="button" onClick={onClose} className="config-drawer-close recipe-press" aria-label="close config">
             ✕
           </button>
         )}
@@ -55,6 +68,6 @@ export function ConfigDrawer({ config, open, onClose }: ConfigDrawerProps) {
           );
         })
       )}
-    </aside>
+    </dialog>
   );
 }
