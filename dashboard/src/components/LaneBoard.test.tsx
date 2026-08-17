@@ -22,7 +22,7 @@ const lane = (overrides: Partial<Lane> = {}): Lane => ({
 
 test("renders exactly lanes.max slots, real lanes plus quiet outlines for the rest", () => {
   const html = renderToStaticMarkup(<LaneBoard lanesMax={3} lanes={[lane()]} titles={{}} now={NOW} />);
-  const realCards = html.match(/class="lane-card panel"/g) ?? [];
+  const realCards = html.match(/class="lane-card panel recipe-list-entry"/g) ?? [];
   const emptyCards = html.match(/class="lane-card lane-card-empty"/g) ?? [];
   assert.equal(realCards.length, 1);
   assert.equal(emptyCards.length, 2);

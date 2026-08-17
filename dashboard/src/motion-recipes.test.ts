@@ -50,13 +50,29 @@ const targets: { file: string; className: string }[] = [
   { file: "./components/Controls.tsx", className: "recipe-drawer" },
   { file: "./components/Controls.tsx", className: "recipe-press" },
   { file: "./components/NeedsAttention.tsx", className: "recipe-list-entry" },
+  // #892 AC5 (panels.css's own "freshly-appended activity/lane row" doc for
+  // `.recipe-list-entry`): the activity feed's entries and the lane board's cards are exactly
+  // that appended-row case, on top of NeedsAttention's rows above — omitted from the original
+  // migration and caught by this issue's own recipe-target audit.
+  { file: "./components/ActivityFeed.tsx", className: "recipe-list-entry" },
+  { file: "./components/LaneBoard.tsx", className: "recipe-list-entry" },
   { file: "./hero/Legend.tsx", className: "recipe-press" },
 ];
 
 test("every migrated dialog/list/press component's source carries its target motion-recipe class", () => {
   for (const { file, className } of targets) {
     const source = readFileSync(new URL(file, import.meta.url), "utf8");
-    assert.match(source, new RegExp(`className="[^"]*\\b${className}\\b`), `${file} must apply .${className}`);
+    const escaped = className.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Matches either a plain `className="…"` literal (every pre-existing target) or a
+    // `className={…}` expression whose own literal text carries the class name — ActivityFeed's
+    // feed entry conditionally adds `feed-entry-attention` alongside it, so its recipe class
+    // lives inside a ternary, not a bare string. Either way this only matches when the class name
+    // is genuinely present in the attribute, so removing it still fails this assertion.
+    assert.match(
+      source,
+      new RegExp(`className=(?:"[^"]*\\b${escaped}\\b[^"]*"|\\{[^{}]*\\b${escaped}\\b[^{}]*\\})`),
+      `${file} must apply .${className}`,
+    );
   }
 });
 

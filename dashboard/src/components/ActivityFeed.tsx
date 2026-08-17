@@ -81,7 +81,9 @@ function FeedEntry({ event, titles, repoUrl, now }: { event: DomainEvent; titles
   const glyph = event.known ? gateGlyph(event.kind, payload) : null;
   const dotColor = attention ? "var(--rust)" : glyph === true ? "var(--moss)" : "var(--sap)";
   return (
-    <li className={attention ? "feed-entry feed-entry-attention" : "feed-entry"}>
+    // #892 AC5: `.recipe-list-entry` (panels.css) is the freshly-appended-row recipe — a feed
+    // entry is exactly that (a newest-first row that mounts on every fresh event).
+    <li className={attention ? "feed-entry feed-entry-attention recipe-list-entry" : "feed-entry recipe-list-entry"}>
       <span className="feed-dot" style={{ background: dotColor }} aria-hidden="true" />
       {glyph !== null && <StateGlyph ok={glyph} className={glyph ? "glyph-ok" : "glyph-fail"} />}
       <span className="feed-sentence">
