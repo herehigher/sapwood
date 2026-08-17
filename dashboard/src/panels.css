@@ -209,6 +209,27 @@
   color: var(--rust);
 }
 
+/* #890 (§3 E): the header's own capsule bar — same `.cost-bar` SVG the cost panels/lane cards
+ * use, just rounded and widened to read as a pill (`header-dark.png`'s thick capsule track). */
+.spend-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.spend-meter-bar {
+  width: 140px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+
+/* #890: the lane card's own settled/est bar — full card width, flush with the foot row above it. */
+.lane-card-bar {
+  width: 100%;
+  height: 6px;
+}
+
 /* ---- round navigator (§3 A, #889) ----------------------------------------- */
 
 /* engine-agent audit run 9aaabee8-5885-40d3-a15e-6fecb47b17f3 finding [0]: `header-dark.png`

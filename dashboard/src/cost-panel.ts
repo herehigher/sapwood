@@ -5,13 +5,26 @@
  * than re-bucketing (that module owns the window/cursor logic; this one owns display shaping).
  */
 
-import type { Round, SpendRow } from "./api/types.ts";
+import type { Lane, Round, SpendRow } from "./api/types.ts";
 import { readSummary } from "./inspector.ts";
 import { bucketSpendByPhase, type PhaseSpendBucket, type PhaseWindow, phaseSpendBars, UNATTRIBUTED_PHASE } from "./replay/spend-replay.ts";
 
 export interface CostBar {
   label: string;
   usd: number;
+  /** #890 (§3 E): the currently-running share not yet in `spend_ledger` — present only on the
+   *  "Lanes" bar of the LIVE "today" panel (the one stage where money can be actively in flight);
+   *  absent everywhere else, including every bar of a CLOSED round's panel (nothing is still
+   *  running in a round that's already closed). */
+  estUsd?: number;
+}
+
+/** #890 (§3 E): the header meter's own est tail, and the "today" cost panel's "Lanes" bar est
+ *  share — both read the SAME sum of every currently-running lane's live estimate
+ *  (`Lane.estCostUsd`, cleared the instant a lane stops) so the two never diverge. A lane with no
+ *  live estimate yet (not yet probed, or already reclaiming) contributes 0, never `NaN`. */
+export function sumEstCostUsd(lanes: readonly Lane[]): number {
+  return lanes.reduce((sum, l) => sum + (l.estCostUsd ?? 0), 0);
 }
 
 /** The round's own ceiling, spread evenly across the six stages — the ONE target/ceiling value a
@@ -39,10 +52,16 @@ const STAGE_ORDER: readonly { phase: string; label: string }[] = [
 /** The mockup's "by stage" rows: all six phases always present (zero-filled when a phase spent
  *  nothing), in a fixed order — never the bucket's own first-seen insertion order. `Unattributed`
  *  (pre-#206 history, or spend with no covering `round-phase` window) is appended last, and only
- *  when it's genuinely non-empty — an honest leftover, never a fabricated row. */
-export function stageCostBars(buckets: readonly PhaseSpendBucket[]): CostBar[] {
+ *  when it's genuinely non-empty — an honest leftover, never a fabricated row. `executingEstUsd`
+ *  (#890, default 0) folds onto the "Lanes" bar only — the one stage where currently-running
+ *  spend can exist ahead of its `spend_ledger` settlement. */
+export function stageCostBars(buckets: readonly PhaseSpendBucket[], executingEstUsd = 0): CostBar[] {
   const byPhase = new Map(phaseSpendBars(buckets).map((b) => [b.label, b.usd]));
-  const bars = STAGE_ORDER.map(({ phase, label }) => ({ label, usd: byPhase.get(phase) ?? 0 }));
+  const bars = STAGE_ORDER.map(({ phase, label }) => ({
+    label,
+    usd: byPhase.get(phase) ?? 0,
+    ...(phase === "executing" && executingEstUsd > 0 ? { estUsd: executingEstUsd } : {}),
+  }));
   const unattributedUsd = byPhase.get(UNATTRIBUTED_PHASE);
   if (unattributedUsd !== undefined) bars.push({ label: "Unattributed", usd: unattributedUsd });
   return bars;
@@ -148,11 +167,12 @@ export function buildTodayCostPanelFromBuckets(
   modelBars: readonly CostBar[],
   avgRoundUsd: number | null,
   roundBudgetUsd: number | null,
+  lanesEstUsd = 0,
 ): CostPanelData {
   return {
     heading: "cost · today",
     avgRoundUsd,
-    stageBars: stageCostBars(buckets),
+    stageBars: stageCostBars(buckets, lanesEstUsd),
     targetUsd: stageTargetUsd(roundBudgetUsd),
     modelBars: [...modelBars],
     footer: null,
@@ -171,8 +191,9 @@ export function buildTodayCostPanel(
   modelBars: readonly CostBar[],
   avgRoundUsd: number | null,
   roundBudgetUsd: number | null,
+  lanesEstUsd = 0,
 ): CostPanelData {
-  return buildTodayCostPanelFromBuckets(bucketSpendByPhase(spend, phaseWindows), modelBars, avgRoundUsd, roundBudgetUsd);
+  return buildTodayCostPanelFromBuckets(bucketSpendByPhase(spend, phaseWindows), modelBars, avgRoundUsd, roundBudgetUsd, lanesEstUsd);
 }
 
 /** The "COST · ROUND N" panel — a CLOSED round's frozen by-stage + by-model breakdown plus footer

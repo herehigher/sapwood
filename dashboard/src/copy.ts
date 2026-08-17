@@ -114,6 +114,20 @@ function ceilingReasonWord(reason: unknown): "wall-clock" | "daily-budget" | nul
   return reason === "wall-clock" || reason === "daily-budget" ? reason : null;
 }
 
+/** #890 (§3 E): the est→real calibration clause appended to `reclaim-done`'s sentence —
+ *  `conductor.ts`'s `reclaimTerminalLane` attaches `estCostUsd` (the lane's own last-known
+ *  live estimate, present only when the lane was still probed at least once while running)
+ *  and `costUsd`'s OWN provenance flag, `costEstimated`. The clause labels `costUsd` "real",
+ *  so it renders ONLY when that label is actually true — `costEstimated === false` (a
+ *  provider-reported figure, known-real). Absent or `true` (unknown or itself an estimate)
+ *  renders no clause at all — never a fabricated "real", and never an "est → est". */
+function calibrationClause(payload: Payload): string {
+  const est = payload.estCostUsd;
+  const real = payload.costUsd;
+  if (typeof est !== "number" || typeof real !== "number" || payload.costEstimated !== false) return "";
+  return ` · est $${est.toFixed(2)} → real $${real.toFixed(2)}`;
+}
+
 const RESOLUTION_SENTENCE: Record<string, (p: Payload) => SentencePart[]> = {
   merged: (p) => ["Issue ", issueTok(p.issue), " no longer needs you — PR ", prTok(p.pr, p.issue), " was merged"],
   "issue-closed": (p) => ["Issue ", issueTok(p.issue), " no longer needs you — it was closed"],
@@ -137,12 +151,16 @@ export const COPY: Partial<Record<EventKind, CopyEntry>> = {
     // #881: the non-DRIVING branch is an attention row — payload carries an OPTIONAL `reason`
     // (the worker's own stated exit reason, `doneReason` in conductor.ts) when the worker gave
     // one; absent otherwise, rendered as an explicit not-recorded rather than silently dropped.
-    sentence: (p) =>
-      p.next === "DRIVING"
-        ? [`Lane ${p.worker} opened a PR — now in review`]
+    // #890: `calibrationClause` appends the est→real calibration reading on either branch — a
+    // lane's settlement, not its PR outcome, is what decides whether it applies.
+    sentence: (p) => {
+      const calibration = calibrationClause(p);
+      return p.next === "DRIVING"
+        ? [`Lane ${p.worker} opened a PR — now in review${calibration}`]
         : [
-            `Lane ${p.worker} ended without a PR — ${typeof p.reason === "string" && p.reason ? p.reason : REASON_NOT_RECORDED} · asks: review the lane's outcome and decide whether to retry`,
-          ],
+            `Lane ${p.worker} ended without a PR — ${typeof p.reason === "string" && p.reason ? p.reason : REASON_NOT_RECORDED} · asks: review the lane's outcome and decide whether to retry${calibration}`,
+          ];
+    },
     attention: reclaimNeedsAttention,
   },
   "reclaim-failed": {
