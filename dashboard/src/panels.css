@@ -31,6 +31,16 @@
   gap: var(--space-2);
 }
 
+.lane-card-head-left {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.lane-card-name {
+  font-weight: 600;
+}
+
 .lane-card-state {
   display: inline-flex;
   align-items: center;

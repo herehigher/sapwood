@@ -78,7 +78,14 @@ function LaneCard({
   return (
     <div className="lane-card panel">
       <div className="lane-card-head">
-        <EntityRef token={{ kind: "issue", number: lane.issue }} titles={titles} repoUrl={repoUrl} />
+        {/* #882 (729 ledger row 13, "w1 lane row unnamed"): `lane.lane` (w1/w2/w3…) drove sorting
+         *  and the React key only — never rendered anywhere on the board, so a reader had no way
+         *  to cross-reference a card against the same lane's own mentions elsewhere (activity feed
+         *  sentences, `docs/design/mockup/lanes-{dark,light}.png`'s own per-card header). */}
+        <span className="lane-card-head-left">
+          <span className="data lane-card-name">{lane.lane}</span>
+          <EntityRef token={{ kind: "issue", number: lane.issue }} titles={titles} repoUrl={repoUrl} />
+        </span>
         <span className="data muted lane-card-state">
           {!KNOWN_ACTIVE_LANE_STATES.has(lane.state) && <StateGlyph ok={false} className="glyph-fail" />}
           {laneStateCaption(lane.state)}

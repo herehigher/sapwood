@@ -69,9 +69,27 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
       const idlePrefix = `${width}-${theme.key}-idle`;
       await page.screenshot({ path: `${CAPTURES_DIR}/${idlePrefix}-full.png`, fullPage: true });
       for (const [moduleKey, selectors] of Object.entries(MODULE_SELECTORS)) {
+        // #882: `lanes` is captured separately below, through a live-mocked navigation of the
+        // REAL production `LaneBoard` — this `?demo` page can only ever reach this module
+        // selector chain's fallback (`LiveOnly`'s "live only" placeholder), since `?demo` is
+        // always `replay` mode (`App.tsx`'s `DemoApp` doc) and the real board only mounts live.
+        if (moduleKey === "lanes") continue;
         const locator = await firstMatch(page, selectors);
         if (locator) await locator.screenshot({ path: `${CAPTURES_DIR}/${idlePrefix}-${moduleKey}.png` });
       }
+
+      // #882 (729 ledger rows 12-13, capture gap closure): a SEPARATE live-mocked navigation of
+      // the SAME production `App` tree — `/` (not `?demo`) with `/api/loop/state` fed a
+      // fixture-shaped lanes payload through Playwright's own request interception, the
+      // real-browser equivalent of `App.test.tsx`'s `stubFetch` pattern. No `/api/rounds` rows
+      // means `mode` never leaves "live", so `LiveOnly` renders its real `children` — the actual
+      // `LaneBoard` — instead of the placeholder. Writes into the same `${idlePrefix}-lanes.png`
+      // slot the loop above deliberately skipped.
+      await captureLiveLanes(page, theme, idlePrefix);
+      await page.goto("/?demo");
+      await page.evaluate((attr) => document.documentElement.setAttribute("data-theme", attr), theme.attr);
+      await page.locator("#overview").waitFor({ state: "visible" });
+      await page.waitForLoadState("networkidle");
 
       // Second state: scrub the transport back to the round's midpoint — a real, work-in-flight
       // fold (`scrubTo`'s own doc: a checkpointed re-fold to an earlier event, not a fabricated
@@ -81,6 +99,11 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
         const activePrefix = `${width}-${theme.key}-active`;
         await page.screenshot({ path: `${CAPTURES_DIR}/${activePrefix}-full.png`, fullPage: true });
         for (const [moduleKey, selectors] of Object.entries(MODULE_SELECTORS)) {
+          // #882: the live-mocked capture above has no rounds to scrub (mode never leaves
+          // "live"), so there is no genuine scrubbed moment for `lanes` to capture at "active" —
+          // `OPTIONAL_AT` exempts it, same posture as `needs-attention`'s own empty-state
+          // exemption below.
+          if (moduleKey === "lanes") continue;
           const locator = await firstMatch(page, selectors);
           if (locator) await locator.screenshot({ path: `${CAPTURES_DIR}/${activePrefix}-${moduleKey}.png` });
         }
@@ -411,6 +434,103 @@ test("§889 AC2: navigator/transport controls resolve real token-based styling i
   );
 });
 
+/** #882: the fixture-shaped `/api/loop/state` lanes payload fed to `captureLiveLanes` below —
+ *  three active-lane variety (running/fixing/driving) plus one open idle slot (`lanesMax: 4`),
+ *  matching the card shapes `docs/design/mockup/lanes-{dark,light}.png` exercises: a droplet +
+ *  issue, a PR link, a spend bar, and elapsed time. Timestamps are computed relative to the
+ *  capture's own run time so "elapsed" never balloons as this fixture ages. */
+function liveLanesLoopState() {
+  const now = Date.now();
+  const minutesAgo = (m: number) => new Date(now - m * 60_000).toISOString();
+  return {
+    engine: { state: "running", reasons: [], lastTickAt: null, pauseActive: false, estopActive: false, standbyNextCheckSec: null },
+    lanes: {
+      max: 4,
+      items: [
+        {
+          lane: "w1",
+          issue: 94,
+          state: "running",
+          pr: null,
+          startedAt: minutesAgo(8),
+          endedAt: null,
+          costUsd: null,
+          estCostUsd: 0.53,
+          contextTokens: null,
+          tokenComposition: null,
+        },
+        {
+          lane: "w2",
+          issue: 90,
+          state: "fixing",
+          pr: 99,
+          startedAt: minutesAgo(32),
+          endedAt: null,
+          costUsd: null,
+          estCostUsd: 1.69,
+          contextTokens: null,
+          tokenComposition: null,
+        },
+        {
+          lane: "w3",
+          issue: 87,
+          state: "driving",
+          pr: 96,
+          startedAt: minutesAgo(5),
+          endedAt: null,
+          costUsd: 1.1,
+          estCostUsd: null,
+          contextTokens: null,
+          tokenComposition: null,
+        },
+      ],
+    },
+    round: null,
+    spend: { todayUsd: 3.32, dailyBudgetUsd: null, runUsd: null, runBudgetUsd: null, byModel: [] },
+    rings: 0,
+    mergedPrs: [],
+    logPath: null,
+    config: { board: { owner: "herehigher", repo: "sapwood" }, worker: { budgetUsdSoft: 10 } },
+    controlsEnabled: true,
+  };
+}
+
+/** #882: intercepts every `/api/*` call the production `LiveApp` route makes (`api/client.ts`'s
+ *  four endpoints) and fulfills it with fixture data, in-browser — the real-Chromium-page
+ *  equivalent of `App.test.tsx`'s `stubFetch` (`byPath` -> `{status, body}`), which only works
+ *  against that file's Node `fetch` mock. */
+async function mockLiveApi(page: Page): Promise<void> {
+  const byPath: Record<string, unknown> = {
+    "/api/loop/state": liveLanesLoopState(),
+    "/api/events": { events: [], lastId: 0 },
+    "/api/spend": { spend: [], lastId: 0 },
+    "/api/rounds": { rounds: [] },
+  };
+  await page.route("**/api/**", async (route) => {
+    const body = byPath[new URL(route.request().url()).pathname];
+    if (body === undefined) {
+      await route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+  });
+}
+
+/** #882: the `lanes` module's real capture — navigates to `/` (never `?demo`, which is always
+ *  `replay` mode and can never mount the real board) with `/api/*` mocked, so the SAME production
+ *  `App` -> `LiveApp` -> `LiveOnly mode="live"` -> `LaneBoard` tree this app ships renders for
+ *  real, not a standalone/mock stand-in built to bypass that wiring. */
+async function captureLiveLanes(page: Page, theme: { key: string; attr: string }, idlePrefix: string): Promise<void> {
+  await mockLiveApi(page);
+  await page.goto("/");
+  await page.evaluate((attr) => document.documentElement.setAttribute("data-theme", attr), theme.attr);
+  const lanes = page.locator('section[aria-label="lanes"]');
+  await lanes.waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+  await lanes.screenshot({ path: `${CAPTURES_DIR}/${idlePrefix}-lanes.png` });
+  await page.unroute("**/api/**");
+}
+
 async function firstMatch(page: Page, selectors: string[]): Promise<Locator | null> {
   for (const selector of selectors) {
     const locator = page.locator(selector).first();
@@ -443,7 +563,12 @@ async function scrubToMidpoint(page: Page): Promise<boolean> {
 // waiting at this point in the round" fact, not a selector miss. Exempted from the presence
 // requirement for `active` only; still required for `idle` (the round's settled end, where the
 // fixture's own final needs-human item is expected to exist).
-const OPTIONAL_AT: Partial<Record<(typeof STATES)[number], string[]>> = { active: ["needs-attention"] };
+//
+// #882: `lanes` is exempted from `active` too — its capture comes from a SEPARATE live-mocked
+// navigation (`captureLiveLanes`) that has no rounds to scrub, so `mode` never leaves "live" and
+// there is no genuine scrubbed moment to capture; `idle` still required (that's the capture the
+// re-audit needs).
+const OPTIONAL_AT: Partial<Record<(typeof STATES)[number], string[]>> = { active: ["needs-attention", "lanes"] };
 
 /** Every module × viewport × theme × state crop the capture loop above is supposed to have
  *  written — anything absent (and not exempted above) means a selector chain matched nothing for
