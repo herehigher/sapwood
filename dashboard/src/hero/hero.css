@@ -165,6 +165,26 @@
   stroke-width: 2;
 }
 
+/* #920 AC3: the hollow-circle terminal drawn at both ends of a lane channel — never filled, so
+ * it reads as an open joint rather than a droplet marker (`.hero-droplet-shape`, which IS
+ * filled). */
+.hero-lane-terminal {
+  fill: none;
+  stroke: var(--bark);
+  stroke-opacity: 0.5;
+  stroke-width: 2;
+}
+
+/* #920 AC3: the curved connector carrying a lane channel the rest of the way into the CI node —
+ * same stroke as the channel it extends (`.hero-channel`'s own opacity/width), just a path
+ * instead of a straight line. */
+.hero-lane-connector {
+  fill: none;
+  stroke: var(--bark);
+  stroke-opacity: 0.35;
+  stroke-width: 2;
+}
+
 .hero-arm,
 .hero-fixloop,
 .hero-return {
@@ -176,6 +196,29 @@
 
 .hero-return {
   stroke-dasharray: 4 6;
+}
+
+/* #920 AC5: the return path's own arrowhead — filled, not stroked, so it reads as a solid
+ * closing point rather than another hairline. */
+.hero-arrowhead {
+  fill: var(--bark);
+  fill-opacity: 0.4;
+}
+
+/* #920 AC5: two dashed zone dividers (PLAN|IMPLEMENT, IMPLEMENT|OUTCOME) — a quiet background
+ * guide, well below every foreground shape's own opacity. */
+.hero-divider {
+  stroke: var(--bark);
+  stroke-opacity: 0.15;
+  stroke-width: 1;
+  stroke-dasharray: 3 5;
+}
+
+/* #920 "What": the hairline rule the outcome tally draws "on one line under". */
+.hero-outcome-rule {
+  stroke: var(--bark);
+  stroke-opacity: 0.25;
+  stroke-width: 1;
 }
 
 .hero-branch {

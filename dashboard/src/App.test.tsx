@@ -24,7 +24,7 @@ import { IconRail, railContent } from "./components/IconRail.tsx";
 import { NeedsAttention } from "./components/NeedsAttention.tsx";
 import { buildClosedRoundCostPanel } from "./cost-panel.ts";
 import type { DemoBundle } from "./demo/types.ts";
-import type { DomainEvent } from "./domain-event.ts";
+import { type DomainEvent, toDomainEvent } from "./domain-event.ts";
 import type { EntityTitles } from "./entities.ts";
 import { Hero } from "./hero/Hero.tsx";
 import { foldEvents, type HeroState, initialHeroState } from "./hero/state.ts";
@@ -1311,6 +1311,84 @@ test("#891 AC2: appContent threads the SAME activeOpenAttention array into BOTH 
     7,
     "NeedsAttention must receive activeHero.roundEscalated (the reconciliation-sentence input) through appContent's own wiring",
   );
+});
+
+// #920 AC1 (WIRING): dimming is a LIVE-open-round-only concept — a present engine state and an
+// open ceiling reason dimming an as-of-cursor PAST round is exactly the §11 mode-purity
+// contradiction this issue fixes. This test proves it through the REAL appContent/App tree (never
+// a hand-built HeroStage fixture), with the SAME dimming-eligible fixture (engine "stopped" AND
+// openCeilingReasons non-empty) rendered three ways.
+test('#920 AC1: the real App/DemoApp tree renders svg.hero[data-dimmed="false"] in replay and ?demo, even with engine stopped + an open ceiling reason — the same fixture live with an open round dims', async () => {
+  const openCeilingEvents: LoopEvent[] = [
+    { id: 1, ts: "2026-01-01T00:00:00Z", kind: "ceiling-breach-entered", payload: { reason: "dailyBudgetUsd" } },
+  ];
+  const stoppedEngine = {
+    state: "stopped" as const,
+    reasons: [],
+    lastTickAt: null,
+    pauseActive: false,
+    estopActive: false,
+    standbyNextCheckSec: null,
+  };
+  const dimEligibleHero = foldEvents(initialHeroState(1), openCeilingEvents.map(toDomainEvent)).state;
+  assert.ok(dimEligibleHero.openCeilingReasons.size > 0, "fixture sanity: openCeilingReasons must actually be non-empty");
+
+  // Replay: a closed round selected in LiveApp's own replay mode — `appContent` itself derives
+  // `roundPhase={null}` whenever `mode !== "live"`, the real production call site this test
+  // exercises (never a hand-set prop).
+  const replayData = { ...LOOP_STATE_OK, engine: stoppedEngine, round: null };
+  const replayVm = minimalAppViewModel({ mode: "replay", loop: { data: replayData, isPending: false }, activeHero: dimEligibleHero });
+  const replayHtml = renderToStaticMarkup(appContent(replayVm));
+  assert.match(
+    replayHtml,
+    /<svg class="hero"[^>]*data-dimmed="false"/,
+    "replay must never dim, even with engine stopped + an open ceiling reason",
+  );
+
+  // ?demo: the SAME fixture, through the real DemoApp entry point end-to-end (fetch mock + real
+  // QueryClient prefetch, same posture `renderSettledDemoApp` elsewhere in this file uses).
+  const demoBundle: DemoBundle = {
+    loopState: {
+      engine: stoppedEngine,
+      lanes: { max: 1, items: [] },
+      round: null,
+      spend: { todayUsd: 0, dailyBudgetUsd: null, runUsd: null, runBudgetUsd: null, byModel: [] },
+      rings: 0,
+      mergedPrs: [],
+      logPath: null,
+      config: {},
+      controlsEnabled: false,
+      build: { distSha: null, distTime: null, repoHeadSha: null },
+    },
+    rounds: [],
+    events: openCeilingEvents,
+    spend: [],
+  };
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const path = url.split("?")[0]!;
+    if (path === "/demo-fixture.json") {
+      return new Response(JSON.stringify(demoBundle), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    throw new Error(`?demo must never call ${url} — it is not a static asset`);
+  });
+  const demoClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await demoClient.prefetchQuery(demoFixtureQuery());
+  const demoHtml = renderToStaticMarkup(
+    <QueryClientProvider client={demoClient}>
+      <App demo />
+    </QueryClientProvider>,
+  );
+  assert.match(
+    demoHtml,
+    /<svg class="hero"[^>]*data-dimmed="false"/,
+    "?demo must never dim, even with engine stopped + an open ceiling reason",
+  );
+
+  // The SAME hero state + engine, but LIVE with a genuinely open round: dims exactly as before.
+  const liveData = { ...LOOP_STATE_OK, engine: stoppedEngine, round: { id: 1, phase: "executing" } };
+  const liveVm = minimalAppViewModel({ mode: "live", loop: { data: liveData, isPending: false }, activeHero: dimEligibleHero });
+  const liveHtml = renderToStaticMarkup(appContent(liveVm));
+  assert.match(liveHtml, /<svg class="hero"[^>]*data-dimmed="true"/, "the SAME fixture, live with an open round, must dim");
 });
 
 test("resolveActiveFold: live mode returns the live fold's own fields, untouched", () => {

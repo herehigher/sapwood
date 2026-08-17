@@ -168,8 +168,20 @@ export type PlannedTransition = Transition & { animate: boolean };
 /** §6: the stage dims for the safety tiers as well as for a ceiling breach. */
 const DIMMING_ENGINE_STATES: ReadonlySet<EngineState> = new Set<EngineState>(["paused", "winding-down", "stopping", "stopped"]);
 
-export const isStageDimmed = (state: HeroState, engine: EngineState): boolean =>
-  state.openCeilingReasons.size > 0 || DIMMING_ENGINE_STATES.has(engine);
+/**
+ * #920 owner ruling Q6 (2026-08-17): a *present* engine state dimming an *as-of-cursor past*
+ * round is a §11 mode-purity contradiction — `src/demo/source.ts` hard-codes `engine.state:
+ * "stopped"`, so every hero capture (and the shipped `?demo` launch artifact) rendered at 45%
+ * opacity regardless of what the replayed/demo scene actually shows. Dimming now applies ONLY to
+ * a LIVE OPEN round under a safety tier or ceiling breach — `isLiveOpenRound` is the caller's own
+ * knowledge of that (`Hero.tsx` derives it from `roundPhase !== null`, itself already `null` in
+ * both replay and `?demo` — #6/§11). Defaults to `true` so every pre-#920 direct caller of this
+ * function (testing the ceiling-reason bookkeeping in isolation, implicitly under live semantics)
+ * keeps its existing meaning unchanged. `false` short-circuits the whole expression — `engine` is
+ * never consulted for a replayed view, per the ruling's own wording.
+ */
+export const isStageDimmed = (state: HeroState, engine: EngineState, isLiveOpenRound = true): boolean =>
+  isLiveOpenRound && (state.openCeilingReasons.size > 0 || DIMMING_ENGINE_STATES.has(engine));
 
 export function initialHeroState(lanesMax: number | null): HeroState {
   const channels = lanesMax ?? 1;

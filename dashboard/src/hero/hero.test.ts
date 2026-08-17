@@ -15,7 +15,21 @@ import { foldOpenAttention } from "../entities.ts";
 import { unregisterRealDomEager } from "../test-dom-eager.ts";
 import { Hero } from "./Hero.tsx";
 import { LEGEND_ITEMS, Legend } from "./Legend.tsx";
-import { BACKLOG, checkpointOverflowPoint, dropletPoint, ESCALATION, GATES, HeroStage, REFLECTION, STAGE, TRUNK } from "./stage.tsx";
+import {
+  BACKLOG,
+  checkpointOverflowPoint,
+  dropletPoint,
+  ESCALATION,
+  GATES,
+  HeroStage,
+  LANES,
+  PLANNING,
+  PLANNING_NODE_R,
+  REFLECTION,
+  STAGE,
+  TRUNK,
+  ZONE_DIVIDERS,
+} from "./stage.tsx";
 import {
   activePlanningNode,
   activeReflectionNode,
@@ -379,9 +393,9 @@ test("#897 AC2: CI and Review render as circular gate nodes carrying a hand-draw
 
 test("#897 AC2: Summary/Retro reflection nodes sit below the trunk/outcome disc, not beside it at TRUNK.y", () => {
   const html = markup(initialHeroState(3));
-  const nodeYs = [...html.matchAll(/<circle class="hero-planning-node" cx="(-?[\d.]+)" cy="(-?[\d.]+)" r="13">/g)].map(([, , y]) =>
-    Number(y),
-  );
+  const nodeYs = [
+    ...html.matchAll(new RegExp(`<circle class="hero-planning-node" cx="(-?[\\d.]+)" cy="(-?[\\d.]+)" r="${REFLECTION.r}">`, "g")),
+  ].map(([, , y]) => Number(y));
   assert.equal(nodeYs.length, 2, "both Summary and Retro nodes must render");
   for (const y of nodeYs) assert.ok(y > TRUNK.y, `reflection node y=${y} must sit below TRUNK.y=${TRUNK.y}`);
 });
@@ -544,6 +558,26 @@ test("#716 gate② P1-2: a HISTORICAL ceiling-escalated does not dim a scene tha
   ]);
   assert.equal(state.openCeilingReasons.size, 0);
   assert.equal(isStageDimmed(state, "running"), false);
+});
+
+// #920 owner ruling Q6: dimming is a LIVE-open-round-only concept — replay (closed round at any
+// cursor) and `?demo` must never dim, even when the folded state carries every signal that WOULD
+// dim a live open round (a dimming engine state AND open ceiling reasons). `isLiveOpenRound`
+// short-circuits the whole expression, so `engine` is never consulted for a replayed view.
+test("#920 AC1: isStageDimmed only dims a LIVE OPEN round — the third param gates both engine state and ceiling reasons", () => {
+  const dimmed = run([ev("ceiling-escalated", { worker: "w1", issue: 86, reasons: ["dailyBudgetUsd"] })]);
+  assert.deepEqual([...dimmed.state.openCeilingReasons], ["dailyBudgetUsd"]);
+
+  // Every signal that would dim a live open round is present — engine "stopped" AND an open
+  // ceiling reason — but `isLiveOpenRound: false` (replay / `?demo`) must still read false.
+  assert.equal(isStageDimmed(dimmed.state, "stopped", false), false, "replay/demo must never dim, regardless of engine state");
+  assert.equal(isStageDimmed(dimmed.state, "running", false), false, "not even a dimming-adjacent engine state changes this");
+
+  // The SAME state, viewed live with an open round, dims exactly as before.
+  assert.equal(isStageDimmed(dimmed.state, "stopped", true), true);
+
+  // Default (no third arg) preserves every pre-#920 direct caller's existing meaning.
+  assert.equal(isStageDimmed(dimmed.state, "stopped"), true);
 });
 
 // ── Travel origin ─────────────────────────────────────────────────────────────
@@ -1499,6 +1533,80 @@ test("#728: the stage scales as one unit — geometry checked once covers every 
   assert.match(heroCss, /\.hero\s*\{[^}]*width:\s*100%;[^}]*height:\s*auto;/);
 });
 
+// #920 AC2: the mockup's own 2.33:1 band, re-based from the old 3.16:1 (1200×380). Reads
+// STAGE/GATES/PLANNING_NODE_R straight from stage.tsx — never a copied literal.
+test("#920 AC2: STAGE is a 2.2-2.5:1 band, and the planning/CI/Review nodes are >= 30 stage units radius", () => {
+  const ratio = STAGE.w / STAGE.h;
+  assert.ok(ratio >= 2.2 && ratio <= 2.5, `STAGE.w/STAGE.h = ${ratio} must be within [2.2, 2.5]`);
+  assert.ok(PLANNING_NODE_R >= 30, `PLANNING_NODE_R (${PLANNING_NODE_R}) must be >= 30 stage units`);
+  assert.ok(GATES.r >= 30, `GATES.r (${GATES.r}) must be >= 30 stage units`);
+});
+
+/** Every rendered `.hero-lane` group, by its own `data-lane-index` — #920 AC3's own "derived from
+ *  the rendered elements, not a hand list" requirement. */
+function laneBlocks(html: string): { channel: number; block: string }[] {
+  return [...html.matchAll(/<g class="hero-lane"[^>]*data-lane-index="(\d+)"[^>]*>([\s\S]*?)<\/g>/g)].map(([, ch, block]) => ({
+    channel: Number(ch),
+    block: block as string,
+  }));
+}
+
+// #920 AC3: every visible lane channel — at lanesMax 1..4, the SET the AC itself names — carries
+// hollow-circle terminals at both ends and a curved connector whose start is the end terminal and
+// whose end point lies exactly on the CI node's own circle.
+test("#920 AC3: every visible lane channel gets hollow-circle terminals at both ends, and a connector reaching the CI node's own circle boundary", () => {
+  for (const lanesMax of [1, 2, 3, 4]) {
+    const html = markup(initialHeroState(lanesMax), { lanesMax });
+    const blocks = laneBlocks(html);
+    assert.equal(blocks.length, lanesMax, `lanesMax=${lanesMax} must render exactly that many .hero-lane groups`);
+
+    for (const { channel, block } of blocks) {
+      const terminals = [...block.matchAll(/<circle class="hero-lane-terminal" cx="(-?[\d.]+)" cy="(-?[\d.]+)"/g)].map(([, cx, cy]) => ({
+        x: Number(cx),
+        y: Number(cy),
+      }));
+      assert.equal(terminals.length, 2, `lane ${channel} must carry exactly two hollow terminals (lanesMax=${lanesMax})`);
+      const rowY = LANES.top + channel * LANES.gap;
+      assert.deepEqual(terminals[0], { x: LANES.x, y: rowY }, `lane ${channel} start terminal`);
+      assert.deepEqual(terminals[1], { x: LANES.x + LANES.w, y: rowY }, `lane ${channel} end terminal`);
+
+      const pathMatch = block.match(/<path class="hero-lane-connector" d="([^"]*)"/);
+      assert.ok(pathMatch, `lane ${channel} must render a connector path (lanesMax=${lanesMax})`);
+      const nums = (pathMatch![1] as string).match(/-?[\d.]+/g)!.map(Number);
+      assert.equal(nums.length, 8, "M sx sy C c1x c1y, c2x c2y, ex ey — 8 numbers");
+      const [startX, startY, , , , , endX, endY] = nums as [number, number, number, number, number, number, number, number];
+      assert.deepEqual({ x: startX, y: startY }, terminals[1], `lane ${channel} connector must start at its own end terminal`);
+      const dist = Math.hypot(endX - GATES.ci, endY - GATES.y);
+      assert.ok(
+        Math.abs(dist - GATES.r) <= 1,
+        `lane ${channel} connector end must land on the CI circle: distance ${dist} vs GATES.r ${GATES.r}`,
+      );
+    }
+  }
+});
+
+// #920 AC5: two dashed zone dividers, a return-path arrowhead marker, and the hero root inside a
+// `.panel` (the last part is a WIRING claim — see the Hero/App-level test in App.test.tsx; this
+// half checks what HeroStage itself draws).
+test("#920 AC5: two dashed PLAN|IMPLEMENT / IMPLEMENT|OUTCOME dividers exist, and the return path ends in an arrowhead marker under the planning trio's x", () => {
+  const html = markup(initialHeroState(3));
+
+  const dividers = [...html.matchAll(/<line class="hero-divider" x1="(-?[\d.]+)" y1="[\d.]+" x2="(-?[\d.]+)" y2="[\d.]+"/g)].map(
+    ([, x1, x2]) => {
+      assert.equal(x1, x2, "a zone divider must be a vertical line");
+      return Number(x1);
+    },
+  );
+  assert.deepEqual(dividers, [...ZONE_DIVIDERS]);
+
+  assert.match(html, /<marker id="hero-return-arrow"/, "the return path's arrowhead must be a real SVG marker");
+  const returnMatch = html.match(/<path class="hero-return" marker-end="url\(#hero-return-arrow\)" d="([^"]*)"/);
+  assert.ok(returnMatch, "the return path must carry marker-end pointing at the arrowhead def");
+  const nums = (returnMatch![1] as string).match(/-?[\d.]+/g)!.map(Number);
+  const endX = nums[nums.length - 2] as number;
+  assert.equal(endX, PLANNING.x, "the return path's own end point must land on the planning trio's shared x");
+});
+
 test("#728 gate② [0]: backlog chip/droplet text boxes never overlap, by actual rendered extent — not just anchor spacing", () => {
   const { state } = run([
     ev("pool-selected", { round_id: 1, issues: [10, 11] }),
@@ -1581,94 +1689,77 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
   assert.match(html, /data-node="needs-human" data-count="6"/);
 });
 
-// #897: the reflection tree's bar/drops used to sit ABOVE the outcome tally and run straight
-// through its row — the tally's rendered width is effectively unbounded (a long qualified "N
-// merged · N pending (N unverified) · N needs human" string), so no X position near TRUNK.x
-// reliably dodges it. The fix is a Y-band split (`REFLECTION`'s own doc in stage.tsx); this test
-// proves it against the LONGEST tally text this fixture can produce — merged/pending/needs-human
-// all present AND the windowed qualifier active (unvouched dispatched droplets), not just the
-// unqualified case.
-test("#897 AC2: the reflection tree's bar/drops never overlap the outcome tally, even at the tally's longest (qualified) rendered text", () => {
-  const events: DomainEvent[] = [];
-  for (let i = 1; i <= 24; i++) events.push(ev("merged", { worker: `m${i}`, issue: i, pr: i }));
-  // No liveLanes coverage below (unlike the sibling needs-human collision test) — every one of
-  // these stays unvouched, forcing the LONGER qualified tally format ("(N unverified)") that
-  // stresses the tally's real rendered width the most.
-  for (let i = 1; i <= 13; i++) events.push(ev("dispatched", { worker: `p${i}`, issue: 100 + i }));
-  for (let i = 1; i <= 6; i++) {
-    events.push(ev("dispatched", { worker: `w${i}`, issue: 200 + i }));
-    events.push(ev("reclaim-done", { worker: `w${i}`, issue: 200 + i, next: "DRIVING", pr: 9000 + i }));
-    events.push(ev("drive-needs-human", { worker: `w${i}`, issue: 200 + i, pr: 9000 + i }));
+/** A path `d`'s straight-line segments (this file only ever draws axis-aligned M/L moves for the
+ *  reflection tree), each turned into a thin occupied box — the same "real rendered extent, not
+ *  just an anchor point" discipline `textBox()`/`circleBox()` already apply to text/circles. */
+function pathSegmentBoxes(d: string): Box[] {
+  const strokeHalf = 2; // generous over the arm's actual ~1px-2px stroke-width
+  const boxes: Box[] = [];
+  for (const sub of d.split(/(?=M)/).filter(Boolean)) {
+    const pts = [...sub.matchAll(/([ML])\s*(-?[\d.]+)\s+(-?[\d.]+)/g)].map(([, , x, y]) => ({ x: Number(x), y: Number(y) }));
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i]!;
+      const b = pts[i + 1]!;
+      boxes.push({
+        left: Math.min(a.x, b.x) - strokeHalf,
+        right: Math.max(a.x, b.x) + strokeHalf,
+        top: Math.min(a.y, b.y) - strokeHalf,
+        bottom: Math.max(a.y, b.y) + strokeHalf,
+      });
+    }
   }
-  const { state } = run(events, 43);
-  const html = markup(state, { lanesMax: 43 });
+  return boxes;
+}
+
+// #920 AC4: the reflection tree is now a PLAIN T (no `detourX` jog) — the stem's x is pinned to
+// the disc centre x, and the fix that keeps the straight stem clear of the ring-count/tally boxes
+// is purely a Y-band one (`REFLECTION.stemTop`'s own doc in stage.tsx), not an X detour. Stressed
+// at a 3-digit ring count / 6-digit PR, the same fixture #886's own ring-count-vs-droplet test
+// already established as this stage's worst-case digit stretch.
+test("#920 AC4: the reflection tree is a plain T — stem x equals the disc centre x, detourX is gone, and no reflection path intersects the outcome-tally or ring-count boxes", () => {
+  assert.equal(REFLECTION.stemX, TRUNK.x, "the reflection stem's x must equal the disc centre x");
+  assert.ok(!("detourX" in REFLECTION), "REFLECTION.detourX must no longer exist");
+
+  const events: DomainEvent[] = [];
+  for (let i = 1; i <= 999; i++) events.push(ev("merged", { worker: `m${i}`, issue: i, pr: 999999 }));
+  const { state } = run(events, 3);
+  assert.equal(state.rings, 999, "stress case: a 3-digit ring total");
+  const html = markup(state);
+
+  const countMatch = html.match(/class="hero-ring-count"[^>]*x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</);
+  assert.ok(countMatch, "hero-ring-count must render");
+  const [, cxRaw, cyRaw, countText] = countMatch as unknown as [string, string, string, string];
+  const countBox = textBox(countText, Number(cxRaw), Number(cyRaw), 33);
 
   const tallyMatch = html.match(/class="hero-num hero-small hero-outcome-tally" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</);
   assert.ok(tallyMatch, "outcome tally must render");
   const [, tallyXRaw, tallyYRaw, tallyText] = tallyMatch as unknown as [string, string, string, string];
-  assert.match(tallyText, /unverified/, "this fixture must actually exercise the LONGER qualified tally format");
   const tallyBox = textBox(tallyText, Number(tallyXRaw), Number(tallyYRaw), 9);
-  assert.ok(
-    tallyBox.right < REFLECTION.detourX,
-    `the tally's own measured right edge (${tallyBox.right}) must stay clear of REFLECTION.detourX (${REFLECTION.detourX}) — the whole premise the connector's detour route depends on`,
-  );
 
-  const ringBottomY = TRUNK.y + TRUNK.max * TRUNK.step + 4;
-  // The connector's own occupied regions — a thin box per drawn segment, mirroring stage.tsx's
-  // own `d` formula exactly: a stem off the ring, right to `detourX`, down, then into the bar
-  // and its two drops into the nodes (the connector-attachment fix below).
-  const strokeHalf = 2; // generous over the actual ~1px stroke width
-  const ringStemBox: Box = { left: TRUNK.x, right: REFLECTION.detourX, top: ringBottomY - strokeHalf, bottom: ringBottomY + strokeHalf };
-  const detourDropBox: Box = {
-    left: REFLECTION.detourX - strokeHalf,
-    right: REFLECTION.detourX + strokeHalf,
-    top: ringBottomY,
-    bottom: REFLECTION.barY,
-  };
-  const barBox: Box = {
-    left: REFLECTION.stemX - REFLECTION.spread,
-    right: REFLECTION.stemX + REFLECTION.spread,
-    top: REFLECTION.barY - strokeHalf,
-    bottom: REFLECTION.barY + strokeHalf,
-  };
-  const leftDropBox: Box = {
-    left: REFLECTION.stemX - REFLECTION.spread - strokeHalf,
-    right: REFLECTION.stemX - REFLECTION.spread + strokeHalf,
-    top: REFLECTION.barY,
-    bottom: REFLECTION.y - REFLECTION.r,
-  };
-  const rightDropBox: Box = {
-    left: REFLECTION.stemX + REFLECTION.spread - strokeHalf,
-    right: REFLECTION.stemX + REFLECTION.spread + strokeHalf,
-    top: REFLECTION.barY,
-    bottom: REFLECTION.y - REFLECTION.r,
-  };
-  const summaryCircle = circleBox(REFLECTION.stemX - REFLECTION.spread, REFLECTION.y, REFLECTION.r);
-  const retroCircle = circleBox(REFLECTION.stemX + REFLECTION.spread, REFLECTION.y, REFLECTION.r);
+  const reflectionGroupMatch = html.match(/<g class="hero-reflection" data-node="reflection">([\s\S]*?)<\/g>\s*<path class="hero-return"/);
+  assert.ok(reflectionGroupMatch, "the hero-reflection group must render");
+  const pathMatch = (reflectionGroupMatch![1] as string).match(/<path class="hero-arm" d="([^"]*)"/);
+  assert.ok(pathMatch, "the reflection tree's connector <path> must render");
+  const segments = pathSegmentBoxes(pathMatch![1] as string);
+  assert.ok(segments.length >= 4, "the T-stem, bar, and both drops must each contribute a segment");
 
-  // Only the TALLY vs. each reflection-tree piece is checked — the pieces are DESIGNED to touch
-  // each other at their shared corners (one connected line), so cross-checking them against each
-  // other would flag a false positive on the tree's own joints.
-  for (const { label, box } of [
-    { label: "reflection ring stem", box: ringStemBox },
-    { label: "reflection detour drop", box: detourDropBox },
-    { label: "reflection bar", box: barBox },
-    { label: "reflection left drop (Summary)", box: leftDropBox },
-    { label: "reflection right drop (Retro)", box: rightDropBox },
-    { label: "Summary node circle", box: summaryCircle },
-    { label: "Retro node circle", box: retroCircle },
-  ]) {
-    assert.ok(!boxesOverlap(tallyBox, box), `outcome tally ${JSON.stringify(tallyBox)} overlaps ${label} ${JSON.stringify(box)}`);
+  for (const seg of segments) {
+    assert.ok(
+      !boxesOverlap(seg, countBox),
+      `reflection path segment ${JSON.stringify(seg)} overlaps the ring-count box ${JSON.stringify(countBox)}`,
+    );
+    assert.ok(
+      !boxesOverlap(seg, tallyBox),
+      `reflection path segment ${JSON.stringify(seg)} overlaps the outcome-tally box ${JSON.stringify(tallyBox)}`,
+    );
   }
 });
 
-// #897: the earlier fix left the reflection tree floating — a bar/drops with no segment reaching
-// the outcome disc at all. AC2 wants Summary/Retro actually CONNECTED below the disc, and the
-// node-y test alone can't detect a missing connector (it would still pass with the path element
-// absent entirely). This asserts the rendered `<path class="hero-arm">` that draws the reflection
-// tree actually contains a point at (or very near) the ring's own bottom edge — proof the tree is
-// attached to the disc, not just floating near it.
-test("#897 AC2: the reflection tree's connector path actually reaches the outcome disc's own bottom edge, not just a floating bar", () => {
+// #920: the stem no longer attaches at the ring's own bottom edge (the OLD `detourX`-jog design)
+// — it starts at `REFLECTION.stemTop`, deliberately BELOW the outcome tally, which is what lets
+// it run straight down with no jog at all (the AC4 test above). This pins that the connector's
+// topmost point is exactly `REFLECTION.stemTop`, on the disc's own centre x.
+test("#920: the reflection tree's stem starts at REFLECTION.stemTop, on the disc centre x", () => {
   const html = markup(initialHeroState(3));
   const reflectionGroupMatch = html.match(/<g class="hero-reflection" data-node="reflection">([\s\S]*?)<\/g>\s*<path class="hero-return"/);
   assert.ok(reflectionGroupMatch, "the hero-reflection group must render");
@@ -1676,20 +1767,12 @@ test("#897 AC2: the reflection tree's connector path actually reaches the outcom
   assert.ok(pathMatch, "the reflection tree's connector <path> must render");
   const d = pathMatch![1] as string;
 
-  // Every numeric coordinate pair in the `d` string — the topmost (smallest y) point must sit at
-  // the ring's own bottom edge, not at `REFLECTION.barY` (which would mean the connector never
-  // actually reaches the disc, the exact defect this finding reports).
   const points = [...d.matchAll(/([ML])\s*(-?[\d.]+)\s+(-?[\d.]+)/g)].map(([, , x, y]) => ({ x: Number(x), y: Number(y) }));
   assert.ok(points.length >= 2, "the connector path must carry real coordinate points");
-  const ringBottomY = TRUNK.y + TRUNK.max * TRUNK.step + 4;
   const topmostY = Math.min(...points.map((p) => p.y));
-  assert.equal(
-    topmostY,
-    ringBottomY,
-    "the connector's topmost point must sit at the ring's own bottom edge, proving it is actually attached",
-  );
-  const attachedAtRingX = points.some((p) => p.y === ringBottomY && p.x === TRUNK.x);
-  assert.ok(attachedAtRingX, `the connector must carry a point at (TRUNK.x, ringBottomY) = (${TRUNK.x}, ${ringBottomY})`);
+  assert.equal(topmostY, REFLECTION.stemTop, "the connector's topmost point must sit at REFLECTION.stemTop");
+  const attachedAtStemX = points.some((p) => p.y === REFLECTION.stemTop && p.x === TRUNK.x);
+  assert.ok(attachedAtStemX, `the connector must carry a point at (TRUNK.x, stemTop) = (${TRUNK.x}, ${REFLECTION.stemTop})`);
 });
 
 // #886 gate② run 2e566ac9 finding [1]: the earlier fix kept the droplet dead-center and moved
@@ -2711,6 +2794,21 @@ test("#891 gate① engine-agent finding [1] (ac2-hero-wrapper-unpinned): the REA
     "Hero must forward openAttention through to HeroStage — reverting Hero.tsx's own forward would leave this at 1 (the stale droplet count) instead",
   );
   assert.match(html, /0 items currently waiting on a person/);
+});
+
+// #920 AC5: "the hero root sits inside an element carrying `.panel`" — a WIRING claim about
+// `Hero.tsx`'s own wrapper, not `HeroStage`'s markup (`HeroStage` draws only the bare `<svg>`).
+// Same `createElement(Hero, ...)` posture as the wrapper-forwarding test above, for the same
+// reason: `HeroStage` rendered directly would never exercise the wrapper at all.
+test("#920 AC5: the REAL <Hero> wrapper draws the stage inside an element carrying .panel", () => {
+  const html = renderToStaticMarkup(
+    createElement(Hero, { heroState: initialHeroState(3), steps: [], lanesMax: 3, engine: "running", fixCap: 2 }),
+  );
+  assert.match(
+    html,
+    /<div class="[^"]*\bpanel\b[^"]*">\s*<svg class="hero"/,
+    'the rendered <svg class="hero"> must sit directly inside an element carrying the .panel class',
+  );
 });
 
 test("#891 gate① engine-agent finding [0] (ac1-null-round-never-collapses): a droplet folded BEFORE the fold ever saw a round boundary (roundId still null) collapses to historical once a LATER round opens — null is not permanently 'current'", () => {
