@@ -210,6 +210,29 @@ test("#897 AC5 / engine-agent audit f82d2468 finding [4]: at 1440px, the lane bo
   // The two panels must actually be SIDE BY SIDE at this width (the mockup's split), not stacked
   // — a meaningful overlap in Y with distinct X ranges is what "sharing a row" means.
   expect(Math.abs(laneBox!.y - feedBox!.y), "lane board and activity feed must sit on the same row, not stacked").toBeLessThan(tolerancePx);
+
+  // engine-agent audit run 73d1b65e finding [3] (ac5-split-oracle-allows-overlap): the edge-union
+  // and same-y checks above also pass if both panels render at the SAME x range, each spanning the
+  // row's full width (full overlap) — neither checks horizontal ordering or non-overlap. The lane
+  // slot renders first in `.lane-activity-row`'s markup (App.tsx) and this row's own auto-fit grid
+  // (app.css) places DOM order left-to-right, so a genuine split requires the lane slot's right
+  // edge to precede the feed's left edge, within the same row-gap tolerance used above.
+  expect(
+    feedBox!.x - (laneBox!.x + laneBox!.width),
+    "the lane slot's right edge must clear the activity feed's left edge (within the row gap) — proves the panels sit side by side rather than overlapping",
+  ).toBeGreaterThan(-tolerancePx);
+
+  // Each panel must also claim a real share of the row, not a sliver beside a panel that spans
+  // nearly the whole width. `.lane-activity-row` (app.css) is two equal `1fr` auto-fit columns, so
+  // an even split is the design's own target; 20% of the row is a conservative floor only a
+  // genuine two-panel split can clear.
+  const minSharePx = rowBox!.width * 0.2;
+  expect(laneBox!.width, `the lane slot must occupy at least 20% (${minSharePx.toFixed(0)}px) of the row's width`).toBeGreaterThan(
+    minSharePx,
+  );
+  expect(feedBox!.width, `the activity feed must occupy at least 20% (${minSharePx.toFixed(0)}px) of the row's width`).toBeGreaterThan(
+    minSharePx,
+  );
 });
 
 /**
