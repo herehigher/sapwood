@@ -5,10 +5,19 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CONFIG_GROUPS } from "../config-captions.ts";
+import { formatAbsoluteTime } from "../format-time.ts";
 import { registerRealDom } from "../test-dom.ts";
 import { ConfigDrawer } from "./ConfigDrawer.tsx";
 
 registerRealDom();
+
+// #905 engine-agent finding [0] (ac1-time-visibility-unasserted): the fixed build time this file's
+// AC1 tests pass, plus its expected rendering — computed through the SAME `formatAbsoluteTime`
+// `ConfigDrawer` itself calls, so this proves "the formatted time text actually appears", not
+// just "some SHA-shaped text appears" (deleting the time expression from `ConfigDrawer` left every
+// prior AC1 test green).
+const SAMPLE_BUILD_TIME = "2026-08-17T10:00:00.000Z";
+const EXPECTED_BUILD_TIME_TEXT = formatAbsoluteTime(SAMPLE_BUILD_TIME);
 
 const SAMPLE_CONFIG = {
   board: { owner: "herehigher", repo: "sapwood" },
@@ -51,12 +60,11 @@ test("renders nothing when closed", () => {
 // ── #894: build identity + stale-dist chip ──────────────────────────────────────────────────
 
 test("#894 AC1: renders the build SHA + time footer, and no stale chip when distSha/repoHeadSha are unset", () => {
-  const html = renderToStaticMarkup(
-    <ConfigDrawer config={SAMPLE_CONFIG} open buildSha="abc1234deadbeef" buildTime="2026-08-17T10:00:00.000Z" />,
-  );
+  const html = renderToStaticMarkup(<ConfigDrawer config={SAMPLE_CONFIG} open buildSha="abc1234deadbeef" buildTime={SAMPLE_BUILD_TIME} />);
   assert.match(html, /config-drawer-build/);
   assert.match(html, /abc1234/, "the shown SHA is the real 7-char short form");
   assert.doesNotMatch(html, /deadbeef/, "shortSha truncates — never the full 40-char SHA on screen");
+  assert.ok(html.includes(EXPECTED_BUILD_TIME_TEXT), "the actual formatAbsoluteTime rendering of buildTime is present, not just the SHA");
   assert.doesNotMatch(html, /config-drawer-stale-chip/, "no server comparison facts supplied — nothing to claim stale");
 });
 
@@ -122,7 +130,7 @@ async function renderThemedFooter(theme: "sapwood" | "heartwood") {
   document.body.appendChild(container);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<ConfigDrawer config={SAMPLE_CONFIG} open buildSha="abc1234deadbeef" buildTime="2026-08-17T10:00:00.000Z" />);
+    root.render(<ConfigDrawer config={SAMPLE_CONFIG} open buildSha="abc1234deadbeef" buildTime={SAMPLE_BUILD_TIME} />);
   });
   const cleanup = async () => {
     await act(async () => {
@@ -142,6 +150,10 @@ test("#894 AC1: the build-identity footer is present and legible in the sapwood 
     assert.ok(el, "the real build-identity element renders");
     assert.ok((el.textContent ?? "").trim().length > 0, "non-empty text");
     assert.match(el.textContent ?? "", /abc1234/);
+    assert.ok(
+      (el.textContent ?? "").includes(EXPECTED_BUILD_TIME_TEXT),
+      "the actual formatAbsoluteTime rendering of buildTime is present — a test asserting only the SHA would stay green with the time expression deleted",
+    );
     const computed = getComputedStyle(el);
     assert.notEqual(computed.display, "none");
     assert.notEqual(computed.visibility, "hidden");
@@ -158,6 +170,10 @@ test("#894 AC1: the build-identity footer is present and legible in the heartwoo
     assert.ok(el, "the real build-identity element renders");
     assert.ok((el.textContent ?? "").trim().length > 0, "non-empty text");
     assert.match(el.textContent ?? "", /abc1234/);
+    assert.ok(
+      (el.textContent ?? "").includes(EXPECTED_BUILD_TIME_TEXT),
+      "the actual formatAbsoluteTime rendering of buildTime is present — a test asserting only the SHA would stay green with the time expression deleted",
+    );
     const computed = getComputedStyle(el);
     assert.notEqual(computed.display, "none");
     assert.notEqual(computed.visibility, "hidden");
