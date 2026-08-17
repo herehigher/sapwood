@@ -650,22 +650,76 @@ function toCategorized(u: unknown): CategorizedTokenUsageRaw {
 
 type CategorizedTokenUsageRaw = Omit<ModelUsageEntry, "model">;
 
+/** #935: one streamed usage delta, carrying the extra tier split estimateUsd needs beyond plain
+ *  ModelUsageEntry. `cacheCreationTokens` stays the exact TOTAL (input/cache dedup is still
+ *  exact-equality-checkable against a terminal `result.usage`); `cacheCreation1hTokens` names the
+ *  subset of that total billed at the pricier 1-hour TTL (the remainder is the 5-minute tier). */
+export interface LiveUsageEntry extends ModelUsageEntry {
+  cacheCreation1hTokens: number;
+}
+
+/** #935: the portion of a streamed usage block's `cache_creation_input_tokens` billed at the
+ *  1-hour ephemeral TTL, read from Claude Code's own `usage.cache_creation.ephemeral_1h_input_tokens`
+ *  breakdown. Missing/malformed -> 0 (the whole cache-creation total falls to the cheaper 5-minute
+ *  tier), same tolerance stance as toCategorized. */
+function cacheCreation1hTokens(u: unknown): number {
+  const r = (u && typeof u === "object" ? u : {}) as Record<string, unknown>;
+  const cc = r.cache_creation;
+  if (!cc || typeof cc !== "object") return 0;
+  const v = (cc as Record<string, unknown>).ephemeral_1h_input_tokens;
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0;
+}
+
+/** #935: chars/4 output-token estimate source — sums the character length of every streamed
+ *  `text` block's `text` and every `tool_use` block's serialized `input`, across ONE assistant
+ *  line's `content` array. `thinking` blocks contribute 0 (Claude Code's stream carries them
+ *  empty, per design — the estimate is not meant to reconstruct thinking length). Malformed/
+ *  missing content -> 0, never a throw. */
+function contentChars(content: unknown): number {
+  if (!Array.isArray(content)) return 0;
+  let chars = 0;
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const b = block as Record<string, unknown>;
+    if (b.type === "text" && typeof b.text === "string") chars += b.text.length;
+    else if (b.type === "tool_use") chars += JSON.stringify(b.input ?? {}).length;
+  }
+  return chars;
+}
+
 /** #33/#935: the LIVE in-flight cost-estimation signal — distinct from parseModelUsage/
  *  parseCostUsd, which only ever read the terminal `result` line (absent until the whole run
  *  finishes). Claude Code's stream-json carries a `message.usage` block on every streamed
  *  `assistant` event, and that block IS per-message — but a single API message spans MULTIPLE
  *  `assistant` lines (one per content block: text, thinking, each `tool_use`), all carrying the
- *  same `message.id` and the identical `usage` snapshot. Summing every line therefore re-prices
- *  the same message once per block (#935: measured +55-65% skew). De-duplicate by `message.id` —
- *  one entry per id, keeping the LAST line seen for that id (a message's usage doesn't change
- *  between its blocks, so last-wins is only a tie-break, not a behavior choice). A line whose
- *  `message` carries no `id` keeps the old per-line behavior (tolerance rule unchanged — some
- *  CLI versions/malformed lines may omit it). Same tolerance guarantee as parseModelUsage: a
- *  malformed/partial line (the stream may be mid-write, or the worker's Bash tool literally
- *  echoed the string "assistant" as text) is skipped, never thrown, and a line missing/misshaping
- *  `message`/`usage` yields zeros rather than aborting the scan. */
-export function parseAssistantUsageDeltas(jsonl: string): ModelUsageEntry[] {
-  const out: ModelUsageEntry[] = [];
+ *  same `message.id`. Summing every line's raw usage therefore re-prices the same message once
+ *  per block (#935: measured +55-65% skew). De-duplicate by `message.id` for input/cache-write/
+ *  cache-read — one entry per id, keeping the LAST line seen for that id (those fields don't
+ *  change between a message's blocks, so last-wins is only a tie-break). A line whose `message`
+ *  carries no `id` keeps the old per-line behavior (tolerance rule unchanged — some CLI versions/
+ *  malformed lines may omit it).
+ *
+ *  `usage.output_tokens` is NOT treated the same way: verified against real captured transcripts
+ *  (engine/src/roles/fixtures/lane-920-leg{2,5}.redacted.jsonl), it's a START-OF-GENERATION
+ *  snapshot, not the message's true output count — de-duplicating it (by any rule) still misses
+ *  the real total by roughly 40-50x on those captures. Instead, `outputTokens` is estimated as
+ *  `ceil(chars/4)` over the message's streamed `text` and serialized `tool_use.input` content,
+ *  ACCUMULATED across every line belonging to that message id (each line is a different content
+ *  block, so its chars add rather than overwrite). This is a deliberately UNDER-biased estimate,
+ *  never over: `thinking` content is invisible in the stream (empty text) and contributes nothing,
+ *  so a thinking-heavy message's real output is undercounted, not overcounted — the same
+ *  conservative direction #935's own doc history already argues for (over-estimating only costs
+ *  an earlier graceful handoff; under-estimating is the dangerous direction, mitigated here by
+ *  layering on top of `worker.timeoutSec` + the engine's hard ceiling, never relying on this
+ *  estimate alone).
+ *
+ *  Same tolerance guarantee as parseModelUsage throughout: a malformed/partial line (the stream
+ *  may be mid-write, or the worker's Bash tool literally echoed the string "assistant" as text)
+ *  is skipped, never thrown, and a line missing/misshaping `message`/`usage`/`content` yields
+ *  zeros for that piece rather than aborting the scan. */
+export function parseAssistantUsageDeltas(jsonl: string): LiveUsageEntry[] {
+  const out: LiveUsageEntry[] = [];
+  const charsAccum: number[] = [];
   const indexByMessageId = new Map<string, number>();
   for (const line of jsonl.split("\n")) {
     const t = line.trim();
@@ -681,16 +735,28 @@ export function parseAssistantUsageDeltas(jsonl: string): ModelUsageEntry[] {
     if (!message || typeof message !== "object" || Array.isArray(message)) continue;
     const m = message as Record<string, unknown>;
     const model = typeof m.model === "string" && m.model.length > 0 ? m.model : "unknown";
-    const entry = { model, ...toCategorized(m.usage) };
+    const usage = toCategorized(m.usage);
+    const entry: LiveUsageEntry = {
+      model,
+      inputTokens: usage.inputTokens,
+      outputTokens: 0, // patched below, once every line's chars for this id are accumulated
+      cacheCreationTokens: usage.cacheCreationTokens,
+      cacheCreation1hTokens: cacheCreation1hTokens(m.usage),
+      cacheReadTokens: usage.cacheReadTokens,
+    };
+    const chars = contentChars(m.content);
     const messageId = typeof m.id === "string" && m.id.length > 0 ? m.id : undefined;
     const existingIndex = messageId === undefined ? undefined : indexByMessageId.get(messageId);
     if (existingIndex !== undefined) {
       out[existingIndex] = entry; // same message, another content block — last usage wins in place
+      charsAccum[existingIndex] = charsAccum[existingIndex]! + chars; // ...but chars ACCUMULATE
     } else {
       if (messageId !== undefined) indexByMessageId.set(messageId, out.length);
       out.push(entry);
+      charsAccum.push(chars);
     }
   }
+  for (let i = 0; i < out.length; i++) out[i]!.outputTokens = Math.ceil(charsAccum[i]! / 4);
   return out;
 }
 
