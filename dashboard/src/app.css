@@ -273,7 +273,7 @@ code,
  * same reasoning `.phase-inspector`'s own comment already gives.
  */
 .stack > .app-header,
-.stack > .hero,
+.stack > .hero-frame,
 .stack > .cost-strip,
 .stack > .needs-attention,
 .stack > .lane-activity-row {

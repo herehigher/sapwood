@@ -165,17 +165,70 @@
   stroke-width: 2;
 }
 
+/* #920 AC3: the hollow-circle terminal drawn at both ends of a lane channel — never filled, so
+ * it reads as an open joint rather than a droplet marker (`.hero-droplet-shape`, which IS
+ * filled). */
+.hero-lane-terminal {
+  fill: none;
+  stroke: var(--bark);
+  stroke-opacity: 0.5;
+  stroke-width: 2;
+}
+
+/* #920 AC3: the curved connector carrying a lane channel the rest of the way into the CI node —
+ * same stroke as the channel it extends (`.hero-channel`'s own opacity/width), just a path
+ * instead of a straight line. */
+.hero-lane-connector {
+  fill: none;
+  stroke: var(--bark);
+  stroke-opacity: 0.35;
+  stroke-width: 2;
+}
+
+/* #920 gate② review thread (PRRT…JE1, revised at …gJ/…GgJ): a muted stroke measured well short
+ * of the mockup's own contrast — the "45% wash" AC6 names isn't only the `[data-dimmed]` opacity,
+ * it's every idle stage line drawn at a muted token. `--bark-text` (round 1's own fix) still only
+ * reached 51% of the mockup's contrast in dark theme (`--bark-text` is the MUTED text token,
+ * `tokens.css`'s own doc) — the mockup draws these in the SAME primary ink (`--sapwood`) as
+ * `.hero-node-label`, not a separately-muted variant. */
 .hero-arm,
 .hero-fixloop,
 .hero-return {
   fill: none;
-  stroke: var(--bark);
-  stroke-opacity: 0.4;
+  stroke: var(--sapwood);
+  stroke-opacity: 1;
   stroke-width: 2;
 }
 
 .hero-return {
   stroke-dasharray: 4 6;
+}
+
+/* #920 AC5: the return path's own arrowhead — filled, not stroked, so it reads as a solid
+ * closing point rather than another hairline. */
+.hero-arrowhead {
+  fill: var(--bark);
+  fill-opacity: 0.4;
+}
+
+/* #920 AC5: two dashed zone dividers (PLAN|IMPLEMENT, IMPLEMENT|OUTCOME).
+ * #920 gate② review thread (PRRT…JE1, revised at …gG/…GgE): 0.15, then 0.34 of `--bark-text`,
+ * both still measured invisible at 1× against the mockup's own contrast (~15% of it at 0.34) —
+ * the mockup's dividers are the SAME ink as the labels (`--sapwood`), just dashed; the dash
+ * pattern alone is what reads as "quiet", not a separately muted opacity on top of it. */
+.hero-divider {
+  stroke: var(--sapwood);
+  stroke-opacity: 1;
+  stroke-width: 1;
+  stroke-dasharray: 3 5;
+}
+
+/* #920 "What": the hairline rule the outcome tally draws "on one line under" — same ink/opacity
+ * fix as `.hero-divider` above, for the same reason (review thread PRRT…gG/…GgE). */
+.hero-outcome-rule {
+  stroke: var(--sapwood);
+  stroke-opacity: 1;
+  stroke-width: 1;
 }
 
 .hero-branch {
@@ -193,10 +246,14 @@
  * `.hero-gate-node` (the outer node circle), not a bare `circle` selector, since `gateIcon`
  * also draws smaller `<circle>` primitives (the gear hub, the eye pupil) inside the same group
  * that must not pick up the node's own fill/breathe/merge styling. */
+/* #920 gate② review thread (PRRT…JE1, revised at …gI/…GgJ): idle at the PRIMARY ink token
+ * (`--sapwood`, matching `.hero-node-label`), full opacity — see `.hero-arm`'s own doc on why
+ * the muted `--bark-text` token round 1 used still only reached 51% of the mockup's own
+ * contrast in dark theme. */
 .hero-gate-node {
   fill: var(--panel);
-  stroke: var(--bark);
-  stroke-opacity: 0.4;
+  stroke: var(--sapwood);
+  stroke-opacity: 1;
 }
 
 /*
@@ -287,10 +344,12 @@
  * pulse halo — the *only* motion difference, and it stops the instant the phase moves on.
  */
 
+/* #920 gate② review thread (PRRT…JE1, revised at …gI/…GgJ): idle at the PRIMARY ink token
+ * (`--sapwood`, matching `.hero-node-label`), full opacity — `.hero-gate-node`'s own doc. */
 .hero-planning-node {
   fill: none;
-  stroke: var(--bark);
-  stroke-opacity: 0.5;
+  stroke: var(--sapwood);
+  stroke-opacity: 1;
 }
 
 [data-active="true"] .hero-planning-node {

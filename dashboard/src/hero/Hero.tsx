@@ -119,22 +119,32 @@ export function Hero({
     return () => controller.current.cancel();
   }, [steps, heroState, lanesMax, reducedMotion, speed]);
 
+  // #920 owner ruling Q6: dimming is a LIVE-open-round-only concept — `roundPhase` is already
+  // `null` in both replay and `?demo` (`App.tsx`'s own call site: `mode === "live" ? round.phase
+  // : null`), so this is the same signal `App.tsx` already computes `roundPhase` from, not a new
+  // one invented here.
+  const isLiveOpenRound = roundPhase !== null;
+
   return (
-    <HeroStage
-      ref={svgRef}
-      state={state}
-      lanesMax={lanesMax}
-      fixCap={fixCap}
-      roundPhase={roundPhase}
-      dimmed={isStageDimmed(state, engine)}
-      reducedMotion={reducedMotion}
-      config={config}
-      liveLanes={lanes}
-      mergedPrs={mergedPrs}
-      onInspect={onInspect}
-      openAttention={openAttention}
-      now={now}
-    />
+    // #920: the hero draws inside a `.panel` card, matching the mockup band rather than floating
+    // bare SVG furniture directly in the page grid.
+    <div className="hero-frame panel">
+      <HeroStage
+        ref={svgRef}
+        state={state}
+        lanesMax={lanesMax}
+        fixCap={fixCap}
+        roundPhase={roundPhase}
+        dimmed={isStageDimmed(state, engine, isLiveOpenRound)}
+        reducedMotion={reducedMotion}
+        config={config}
+        liveLanes={lanes}
+        mergedPrs={mergedPrs}
+        onInspect={onInspect}
+        openAttention={openAttention}
+        now={now}
+      />
+    </div>
   );
 }
 
