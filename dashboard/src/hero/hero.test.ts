@@ -1625,7 +1625,13 @@ test("#920 gate② finding [1]: a real .hero-lane-terminal renders fill:none und
 // stage line drawn at a muted token. STYLE doctrine: prove the RESOLVED colour against a real
 // `.hero-node-label` element (never a hardcoded theme RGB that could drift from `--sapwood`'s own
 // definition).
-test("#920 gate② review thread (PRRT…gI/…GgJ): idle planning/gate node strokes resolve to the SAME colour as .hero-node-label's PRIMARY ink, at full opacity — no muted wash", () => {
+//
+// #920 gate② finding [1] (ac7-style-coverage-incomplete): mounting the cascade ONCE without ever
+// setting `data-theme` never actually exercised the explicit `sapwood`/`heartwood` overrides
+// (`--sapwood`'s own `light-dark()` definition could regress in one theme's own branch and this
+// would still pass) — looped over both, same `document.documentElement.setAttribute("data-theme",
+// …)` pattern `Transport.test.tsx`'s own gate② fix already established.
+test("#920 gate② review thread (PRRT…gI/…GgJ) + finding [1]: idle planning/gate node strokes resolve to the SAME colour as .hero-node-label's PRIMARY ink, at full opacity, in BOTH themes — no muted wash", () => {
   assert.ok(bodyFontSizeRule);
   const style = document.createElement("style");
   style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
@@ -1634,49 +1640,114 @@ test("#920 gate② review thread (PRRT…gI/…GgJ): idle planning/gate node str
   container.innerHTML = markup(initialHeroState(3));
   document.body.appendChild(container);
   try {
-    const inkEl = container.querySelector(".hero-node-label");
-    assert.ok(inkEl, "a real .hero-node-label element must render");
-    const inkColor = getComputedStyle(inkEl as Element).fill;
-    assert.notEqual(inkColor, "", "the primary ink token must actually resolve to a real colour under the mounted cascade");
+    for (const themeAttr of ["heartwood", "sapwood"]) {
+      document.documentElement.setAttribute("data-theme", themeAttr);
 
-    const planningNode = container.querySelector(".hero-planning-node");
-    assert.ok(planningNode, "a real .hero-planning-node must render");
-    const planningComputed = getComputedStyle(planningNode as Element);
-    assert.equal(
-      planningComputed.stroke,
-      inkColor,
-      "idle planning-node stroke must resolve to the SAME colour as .hero-node-label's primary ink",
-    );
-    assert.equal(planningComputed.strokeOpacity, "1", "idle planning-node stroke must render at full opacity, no muted wash");
+      const inkEl = container.querySelector(".hero-node-label");
+      assert.ok(inkEl, `${themeAttr}: a real .hero-node-label element must render`);
+      const inkColor = getComputedStyle(inkEl as Element).fill;
+      assert.notEqual(inkColor, "", `${themeAttr}: the primary ink token must actually resolve to a real colour under the mounted cascade`);
 
-    const gateNode = container.querySelector(".hero-gate-node");
-    assert.ok(gateNode, "a real .hero-gate-node must render");
-    const gateComputed = getComputedStyle(gateNode as Element);
-    assert.equal(gateComputed.stroke, inkColor, "idle gate-node stroke must resolve to the SAME colour as .hero-node-label's primary ink");
-    assert.equal(gateComputed.strokeOpacity, "1", "idle gate-node stroke must render at full opacity, no muted wash");
+      const planningNode = container.querySelector(".hero-planning-node");
+      assert.ok(planningNode, `${themeAttr}: a real .hero-planning-node must render`);
+      const planningComputed = getComputedStyle(planningNode as Element);
+      assert.equal(
+        planningComputed.stroke,
+        inkColor,
+        `${themeAttr}: idle planning-node stroke must resolve to the SAME colour as .hero-node-label's primary ink`,
+      );
+      assert.equal(
+        planningComputed.strokeOpacity,
+        "1",
+        `${themeAttr}: idle planning-node stroke must render at full opacity, no muted wash`,
+      );
 
-    // #920 gate② review thread (PRRT…JE1's own family): the reflection T + return path share
-    // this same fix (`.hero-arm`/`.hero-return` in hero.css).
-    const armEl = container.querySelector(".hero-arm");
-    assert.ok(armEl, "a real .hero-arm element (the reflection tree) must render");
-    const armComputed = getComputedStyle(armEl as Element);
-    assert.equal(
-      armComputed.stroke,
-      inkColor,
-      "the reflection tree's stroke must resolve to the SAME colour as .hero-node-label's primary ink",
-    );
-    assert.equal(armComputed.strokeOpacity, "1", "the reflection tree's stroke must render at full opacity, no muted wash");
+      const gateNode = container.querySelector(".hero-gate-node");
+      assert.ok(gateNode, `${themeAttr}: a real .hero-gate-node must render`);
+      const gateComputed = getComputedStyle(gateNode as Element);
+      assert.equal(
+        gateComputed.stroke,
+        inkColor,
+        `${themeAttr}: idle gate-node stroke must resolve to the SAME colour as .hero-node-label's primary ink`,
+      );
+      assert.equal(gateComputed.strokeOpacity, "1", `${themeAttr}: idle gate-node stroke must render at full opacity, no muted wash`);
 
-    const returnEl = container.querySelector(".hero-return");
-    assert.ok(returnEl, "a real .hero-return element must render");
-    const returnComputed = getComputedStyle(returnEl as Element);
-    assert.equal(
-      returnComputed.stroke,
-      inkColor,
-      "the return path's stroke must resolve to the SAME colour as .hero-node-label's primary ink",
-    );
-    assert.equal(returnComputed.strokeOpacity, "1", "the return path's stroke must render at full opacity, no muted wash");
+      // #920 gate② review thread (PRRT…JE1's own family): the reflection T + return path share
+      // this same fix (`.hero-arm`/`.hero-return` in hero.css).
+      const armEl = container.querySelector(".hero-arm");
+      assert.ok(armEl, `${themeAttr}: a real .hero-arm element (the reflection tree) must render`);
+      const armComputed = getComputedStyle(armEl as Element);
+      assert.equal(
+        armComputed.stroke,
+        inkColor,
+        `${themeAttr}: the reflection tree's stroke must resolve to the SAME colour as .hero-node-label's primary ink`,
+      );
+      assert.equal(armComputed.strokeOpacity, "1", `${themeAttr}: the reflection tree's stroke must render at full opacity, no muted wash`);
+
+      const returnEl = container.querySelector(".hero-return");
+      assert.ok(returnEl, `${themeAttr}: a real .hero-return element must render`);
+      const returnComputed = getComputedStyle(returnEl as Element);
+      assert.equal(
+        returnComputed.stroke,
+        inkColor,
+        `${themeAttr}: the return path's stroke must resolve to the SAME colour as .hero-node-label's primary ink`,
+      );
+      assert.equal(returnComputed.strokeOpacity, "1", `${themeAttr}: the return path's stroke must render at full opacity, no muted wash`);
+    }
   } finally {
+    document.documentElement.removeAttribute("data-theme");
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+});
+
+// #920 gate② finding [1] (ac7-style-coverage-incomplete): "Keep the ACTIVE amber treatment as
+// is" (the review thread's own instruction) had no regression guard at all — a future edit could
+// silently drop `[data-active="true"] .hero-planning-node`'s own `--sap` override (collapsing
+// active nodes onto the same idle ink this round just fixed) and nothing would catch it. Proves
+// the active node's resolved stroke is DIFFERENT from — and matches the real `--sap` token used
+// elsewhere on the stage (`.hero-pool-chip rect`'s own fill), never the idle ink.
+test("#920 gate② finding [1]: an ACTIVE planning node keeps the amber --sap stroke, distinct from the idle primary-ink treatment, in BOTH themes", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const { state } = run([ev("pool-selected", { issues: [1] })]);
+  const container = document.createElement("div");
+  // `roundPhase: "aligning"` lights the "goal-align" node (`activePlanningNode`, state.ts) —
+  // the SAME live-cursor mechanism production drives this from, never a hand-set `data-active`.
+  container.innerHTML = markup(state, { roundPhase: "aligning" });
+  document.body.appendChild(container);
+  try {
+    for (const themeAttr of ["heartwood", "sapwood"]) {
+      document.documentElement.setAttribute("data-theme", themeAttr);
+
+      const amberEl = container.querySelector(".hero-pool-chip rect");
+      assert.ok(amberEl, `${themeAttr}: a real .hero-pool-chip rect (drawn with --sap) must render`);
+      const amberColor = getComputedStyle(amberEl as Element).fill;
+      assert.notEqual(amberColor, "", `${themeAttr}: --sap must actually resolve to a real colour under the mounted cascade`);
+
+      const activeNode = container.querySelector('[data-active="true"] .hero-planning-node');
+      assert.ok(activeNode, `${themeAttr}: the active planning node must render`);
+      const activeComputed = getComputedStyle(activeNode as Element);
+      assert.equal(activeComputed.stroke, amberColor, `${themeAttr}: the ACTIVE node's stroke must resolve to the SAME colour as --sap`);
+      assert.equal(
+        activeComputed.strokeOpacity,
+        "0.9",
+        `${themeAttr}: the active node keeps its own 0.9 opacity, unchanged by this round's idle fix`,
+      );
+
+      const idleNode = container.querySelector('[data-active="false"] .hero-planning-node');
+      assert.ok(idleNode, `${themeAttr}: an idle (inactive) planning node must also render, for contrast`);
+      const idleComputed = getComputedStyle(idleNode as Element);
+      assert.notEqual(
+        activeComputed.stroke,
+        idleComputed.stroke,
+        `${themeAttr}: the active node's amber stroke must be visually distinct from an idle node's primary-ink stroke`,
+      );
+    }
+  } finally {
+    document.documentElement.removeAttribute("data-theme");
     document.body.removeChild(container);
     document.head.removeChild(style);
   }
@@ -1728,7 +1799,15 @@ test("#920 AC5: two dashed PLAN|IMPLEMENT / IMPLEMENT|OUTCOME dividers sit betwe
 // measured ~15% of the mockup's own contrast — the mockup's dividers are the SAME primary ink as
 // the labels (`--sapwood`), just dashed. Extended to assert the resolved colour/opacity too, not
 // only the dash pattern.
-test("#920 gate② finding [2] + review thread (PRRT…gG/…GgE): a real .hero-divider renders a dashed stroke, at the SAME primary ink as .hero-node-label, full opacity, under the production cascade", () => {
+//
+// #920 gate② finding [1] (ac7-style-coverage-incomplete): the dash check used to read its own
+// EXPECTED value out of `heroCss` via the SAME regex it then compared against — a rule changed to
+// the WRONG dash pattern (e.g. `2 4` instead of the mockup's own `3 5`) would still pass, since
+// the oracle just echoes whatever hero.css happens to say. `3 5` is now a pinned literal (the
+// mockup's own dash cadence, not a value this file owns) — VALUE doctrine's own "a literal that
+// IS the specification" exception. Also looped over both explicit themes, same as the sibling
+// ink-colour test above.
+test("#920 gate② finding [2] + review thread (PRRT…gG/…GgE) + finding [1]: a real .hero-divider renders the mockup's own 3 5 dash, at the SAME primary ink as .hero-node-label, full opacity, in BOTH themes", () => {
   assert.ok(bodyFontSizeRule);
   const style = document.createElement("style");
   style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
@@ -1737,31 +1816,41 @@ test("#920 gate② finding [2] + review thread (PRRT…gG/…GgE): a real .hero-
   container.innerHTML = markup(initialHeroState(3));
   document.body.appendChild(container);
   try {
-    const divider = container.querySelector(".hero-divider");
-    assert.ok(divider, "a real .hero-divider element must render and match the injected stylesheet's selector");
-    const computed = getComputedStyle(divider as Element);
-    // Doctrine: never `notEqual`/existence (any non-default value would satisfy that) — the
-    // EXACT winning cascaded value, read straight from hero.css's own rule below.
-    const dashRule = heroCss.match(/\.hero-divider\s*\{[^}]*stroke-dasharray:\s*([\d\s]+);/);
-    assert.ok(dashRule, ".hero-divider must declare a stroke-dasharray in hero.css");
-    assert.equal(computed.strokeDasharray, (dashRule[1] as string).trim());
+    for (const themeAttr of ["heartwood", "sapwood"]) {
+      document.documentElement.setAttribute("data-theme", themeAttr);
 
-    const inkEl = container.querySelector(".hero-node-label");
-    assert.ok(inkEl, "a real .hero-node-label element must render");
-    const inkColor = getComputedStyle(inkEl as Element).fill;
-    assert.equal(computed.stroke, inkColor, "the divider's stroke must resolve to the SAME colour as .hero-node-label's primary ink");
-    assert.equal(computed.strokeOpacity, "1", "the divider must render at full opacity — the dash pattern alone carries the 'quiet' read");
+      const divider = container.querySelector(".hero-divider");
+      assert.ok(divider, `${themeAttr}: a real .hero-divider element must render and match the injected stylesheet's selector`);
+      const computed = getComputedStyle(divider as Element);
+      // Pinned literal (the mockup's own dash cadence), not read back from hero.css's own rule.
+      assert.equal(computed.strokeDasharray, "3 5", `${themeAttr}: the divider must render the mockup's own 3 5 dash pattern exactly`);
 
-    const rule = container.querySelector(".hero-outcome-rule");
-    assert.ok(rule, "a real .hero-outcome-rule element must render");
-    const ruleComputed = getComputedStyle(rule as Element);
-    assert.equal(
-      ruleComputed.stroke,
-      inkColor,
-      "the outcome hairline rule must resolve to the SAME colour as .hero-node-label's primary ink",
-    );
-    assert.equal(ruleComputed.strokeOpacity, "1", "the outcome hairline rule must render at full opacity");
+      const inkEl = container.querySelector(".hero-node-label");
+      assert.ok(inkEl, `${themeAttr}: a real .hero-node-label element must render`);
+      const inkColor = getComputedStyle(inkEl as Element).fill;
+      assert.equal(
+        computed.stroke,
+        inkColor,
+        `${themeAttr}: the divider's stroke must resolve to the SAME colour as .hero-node-label's primary ink`,
+      );
+      assert.equal(
+        computed.strokeOpacity,
+        "1",
+        `${themeAttr}: the divider must render at full opacity — the dash pattern alone carries the 'quiet' read`,
+      );
+
+      const rule = container.querySelector(".hero-outcome-rule");
+      assert.ok(rule, `${themeAttr}: a real .hero-outcome-rule element must render`);
+      const ruleComputed = getComputedStyle(rule as Element);
+      assert.equal(
+        ruleComputed.stroke,
+        inkColor,
+        `${themeAttr}: the outcome hairline rule must resolve to the SAME colour as .hero-node-label's primary ink`,
+      );
+      assert.equal(ruleComputed.strokeOpacity, "1", `${themeAttr}: the outcome hairline rule must render at full opacity`);
+    }
   } finally {
+    document.documentElement.removeAttribute("data-theme");
     document.body.removeChild(container);
     document.head.removeChild(style);
   }
