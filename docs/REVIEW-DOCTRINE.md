@@ -69,19 +69,16 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
 
 - **No timing-dependent assertions.** BANNED: an assertion whose pass/fail is decided by a close
   race between uncontrolled real operations — real work vs. a real timer, no seam controlling
-  either side. This class has reddened `main` three times (#403, #416). For a LOAD-BEARING race,
-  the fix is always a seam: inject a fake clock/collaborator, or a fast, deterministic, selectively
-  self-terminating fake (PR #418's fake-git shim — hangs only on the operation under test, `exec`s
-  the real binary for everything else). FINE, and not the same failure class: an outer hang-guard
-  bounding catastrophe rather than deciding the test's verdict, or a real passthrough timed against
-  a generous, documented, non-load-bearing margin — PR #418's `REAL_OP_TIMEOUT_MS` is the worked
-  example: widened 500ms→1000ms (#418 round 3), then 1000ms→3000ms (#403, under measured
-  contention) — each widen stated in-code as measured-cost < margin < guard-ceiling, not chosen by
-  feel. A red PR that passes on its own branch but reds on `main` under the same runner is a strong
-  BANNED-shape signal. Ask: does the verdict depend on which of two uncontrolled real operations
-  finishes first? If yes, it needs a seam; if it's a documented backstop around a deterministic
-  fake or bounded passthrough, it is compliant.
-- **Test-realism family — prove it against the real thing, not a stand-in for it.** Three variants
+  either side. Reddened `main` three times (#403, #416). For a LOAD-BEARING race, the fix is a
+  seam: a fake clock/collaborator, or a fast, deterministic, selectively self-terminating fake
+  (PR #418's fake-git shim). FINE, and a different failure class: an outer hang-guard bounding
+  catastrophe rather than deciding the verdict, or a real passthrough timed against a generous,
+  documented, non-load-bearing margin — PR #418's `REAL_OP_TIMEOUT_MS` widened 500ms→1000ms
+  (#418), then 1000ms→3000ms (#403), each widen stated in-code as measured-cost < margin <
+  guard-ceiling, not chosen by feel. Ask: does the verdict depend on which of two uncontrolled
+  real operations finishes first? If yes, it needs a seam; if it's a documented backstop around a
+  deterministic fake or bounded passthrough, it is compliant.
+- **Test-realism family — prove it against the real thing, not a stand-in for it.** Four variants
   of one failure: an assertion that looks like it proves an acceptance criterion but actually
   proves something else — a copied constant, a fixture's own preset, or an isolated unit — never
   engaging the production path the AC is actually about.
@@ -137,6 +134,13 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     since it resolves off the *inherited* font-size a partial cascade misses. Mount every
     stylesheet the element inherits, in production order, and assert the exact value — never
     `notEqual`/existence, which any non-default value satisfies.
+  - **COLLISION (scope = relevant neighbors; position = rendered).** `assertNoOverlap`/
+    `boxesOverlap` (`dashboard/src/hero/hero.test.ts`) is sound infra, but each PR hand-curates
+    a partial box list, missing neighbors its author forgot — recurring (#728, #745, #891,
+    #901, #902). Include every element sharing the new one's region (not every drawn
+    element), and read position from the rendered markup wherever filtering/compaction can make a
+    recomputed position diverge (PR #901's raw `state.droplets`-order bug vs `dropletTransform`'s
+    read-off-the-real-`html` fix) — a constant is fine for genuinely static geometry.
 
 ### Documentation claims
 
@@ -174,23 +178,19 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   on the PR's branch — the change cannot influence the doctrine used for its own review, but it
   can still pass under the prior rules, so a human should confirm rule changes. This file is
   deliberately NOT guard-protected (docs/security.md) — this prose IS the enforcement.
-- **A tier-C cannot-confirm is not a producer stall signal** (round #368 retro, PR #791).
-  `docs/security.md`'s evidence tiers make tier-C (human-witnessed probe) evidence
-  producer-unforgeable BY DESIGN — the producer never self-executes or self-attests it. When a
-  criterion's only remaining gap is a missing tier-C RECORD — every other clause and sub-fact
-  already confirmed — no fix round can close it; only the operator posting the record can. It is
-  correct for that criterion to stay `cannot-confirm` and the PR to stay unmerged — do not weaken
-  the gate. But name the gap as operator-owned in the finding's body, not producer-owned —
-  unlabeled, it reads exactly like a producer failure to the convergence classifier
-  (`review/convergence.ts`) and to any human reading the thread.
-- **A fully operator-owned rejection still pays for a fix leg it cannot use** — residual gap in
-  the rule above. Labeling a tier-C gap `operator-owned` changes what the finding SAYS, not what
-  `driveDecision` (`conductor.ts`) DOES: the gate stays `FIXABLE`, so a paid leg can still
-  dispatch with nothing producer-actionable, dispute, and escalate — spend that buys no
-  information either way the operator later rules. The only lever today is that BODY-prose label;
-  a structured per-finding owner tag routing an all-operator-owned verdict straight to `ESCALATE`
-  (mixed verdicts keep `FIXUP`) is #865's code fix, not something the current finding schema can
-  carry. Grounding: `docs/security.md`'s AC-evidence-tier doctrine, Decision #8. (#857, #862, #863)
+- **A tier-C cannot-confirm is not a producer stall signal, but it still burns a fix leg today**
+  (#791; #857, #862, #863; #865, #901, #902, #903). `docs/security.md`'s evidence tiers make
+  tier-C (human-witnessed probe) evidence producer-unforgeable BY DESIGN — the producer never
+  self-executes or self-attests it. When a criterion's only remaining gap is a missing tier-C
+  RECORD, no fix round can close it; only the operator posting the record can, so it stays
+  `cannot-confirm` and the PR unmerged. Name the gap operator-owned in the finding body —
+  unlabeled, it reads as a producer failure to `review/convergence.ts` and to any human. That
+  labeling changes what the finding SAYS, not what `driveDecision` (`conductor.ts`) DOES: the gate
+  stays `FIXABLE`, so a paid leg still dispatches with nothing producer-actionable, disputes, and
+  escalates — spend that buys nothing either way the operator later rules. A structured
+  per-finding owner tag routing an all-operator-owned verdict straight to `ESCALATE` (mixed
+  verdicts keep `FIXUP`) is #865's filed, unimplemented fix — not something the current schema
+  carries yet. Grounding: `docs/security.md`'s AC-evidence-tier doctrine, Decision #8.
 
 How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbatim principles):
 
