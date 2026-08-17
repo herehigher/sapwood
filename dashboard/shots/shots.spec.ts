@@ -462,6 +462,22 @@ test("#892 AC3: the phase inspector dialog traps focus (background inert) and Es
   await page.locator("#overview").waitFor({ state: "visible" });
   await page.waitForLoadState("networkidle");
 
+  // Baseline, BEFORE the dialog ever opens: `.icon-rail-config` is a real, natively focusable
+  // `<button>` (unlike `.icon-rail-wordmark`, a plain non-interactive `<span>` — engine-agent
+  // audit run c6643a3b finding [1] inert-probe-nonfocusable-target: calling `.focus()` on a
+  // non-focusable element is ALREADY a no-op with no modal in play, so it can't attribute a later
+  // "still not focused" result to inertness specifically). Confirming it CAN take focus now is
+  // what makes the later "can't focus it anymore" check inside the modal actually mean something.
+  const bgFocusable = await page.evaluate(() => {
+    const bg = document.querySelector<HTMLElement>(".icon-rail-config");
+    bg?.focus();
+    return document.activeElement === bg;
+  });
+  expect(
+    bgFocusable,
+    "sanity check: .icon-rail-config must be focusable with no dialog open, or the inertness check below proves nothing",
+  ).toBe(true);
+
   const node = page.locator('[aria-label^="inspect "]').first();
   await node.click();
   const dialog = page.locator('dialog[aria-label="phase inspector"]');
@@ -470,28 +486,28 @@ test("#892 AC3: the phase inspector dialog traps focus (background inert) and Es
   // Focus containment: Tab repeatedly. A real UA focus trap keeps the active element either
   // inside the dialog or resting on `<body>` (Chromium's own behavior once a modal's focusable
   // descendants are exhausted — a harmless, non-interactive fallback, never the SAME thing as
-  // reaching an actual background control) — but a KNOWN background control (the icon-rail
-  // wordmark, always present, never inside this dialog) must never become the active element,
+  // reaching an actual background control) — but the SAME known-focusable background control
+  // (`.icon-rail-config`, just proven reachable above) must never become the active element,
   // which is the concrete, unambiguous proof background content stays unreachable.
   for (let i = 0; i < 12; i++) {
     await page.keyboard.press("Tab");
     const info = await dialog.evaluate((el) => ({
       insideDialog: el.contains(document.activeElement),
       isBody: document.activeElement === document.body,
-      isBackgroundWordmark: document.activeElement?.classList.contains("icon-rail-wordmark") ?? false,
+      isBackgroundConfigButton: document.activeElement?.classList.contains("icon-rail-config") ?? false,
     }));
     expect(
       info.insideDialog || info.isBody,
       `Tab press #${i + 1}: focus must stay inside the dialog (or rest on <body>), never land on a background element`,
     ).toBe(true);
-    expect(info.isBackgroundWordmark, `Tab press #${i + 1} must never reach the background icon rail`).toBe(false);
+    expect(info.isBackgroundConfigButton, `Tab press #${i + 1} must never reach the background icon rail`).toBe(false);
   }
 
-  // Background inert: a background control (the icon-rail wordmark, always present) must not be
-  // focusable via a direct .focus() call while the dialog is modal — this is what "inert" means in
-  // practice (a no-op focus attempt), not just "Tab doesn't happen to land there".
+  // Background inert: the SAME control just proven focusable above must now be a no-op .focus()
+  // target while the dialog is modal — the actual "inert" behavior, not merely "Tab doesn't
+  // happen to land there".
   const stillOutside = await page.evaluate(() => {
-    const bg = document.querySelector<HTMLElement>(".icon-rail-wordmark");
+    const bg = document.querySelector<HTMLElement>(".icon-rail-config");
     bg?.focus();
     return document.activeElement !== bg;
   });
