@@ -27,6 +27,7 @@ import {
   PLANNING,
   PLANNING_NODE_R,
   REFLECTION,
+  ringOuterRadius,
   STAGE,
   TRUNK,
 } from "./stage.tsx";
@@ -1860,7 +1861,7 @@ function pathSegmentBoxes(d: string): Box[] {
 
 // #920 AC4: the reflection tree is now a PLAIN T (no `detourX` jog) — the stem's x is pinned to
 // the disc centre x, and the fix that keeps the straight stem clear of the ring-count/tally boxes
-// is purely a Y-band one (`REFLECTION.stemTop`'s own doc in stage.tsx), not an X detour. Stressed
+// is purely a Y-band one (`REFLECTION_BAR_Y`'s own doc in stage.tsx), not an X detour. Stressed
 // at a 3-digit ring count / 6-digit PR, the same fixture #886's own ring-count-vs-droplet test
 // already established as this stage's worst-case digit stretch.
 test("#920 AC4: the reflection tree is a plain T — stem x equals the disc centre x, detourX is gone, and no reflection path intersects the outcome-tally or ring-count boxes", () => {
@@ -1904,17 +1905,28 @@ test("#920 AC4: the reflection tree is a plain T — stem x equals the disc cent
   }
 });
 
-// #920 gate② finding [3] (reflection-loop-is-disconnected): the tree must be GENUINELY attached
-// at the disc's own bottom edge above — no jog, no gap between `RING_BOTTOM` and the stem's own
-// start — and the dashed return path picks up directly below the tally (the tree's own true
-// bottom now that the tally/rule moved there), never a floating coordinate between the
-// Summary/Retro circles (the review thread's own complaint about the earlier layout).
-test("#920: the reflection tree's stem is genuinely attached to the disc bottom; the return path starts below the tally, on the same column", () => {
-  const html = markup(initialHeroState(3));
+// #920 gate② finding [3] (reflection-loop-is-disconnected) + finding [0]
+// (reflection-stem-max-envelope-gap): the tree must be GENUINELY attached at the disc's own
+// ACTUAL rendered bottom edge — `ringOuterRadius(state.rings)`, never the max envelope, which
+// left an 82-unit undrawn gap at the shipped demo's own 1-ring count (finding [0]'s own report)
+// — and the dashed return path picks up directly below the tally (the tree's own true bottom now
+// that the tally/rule moved there), never a floating coordinate between the Summary/Retro
+// circles (the review thread's own complaint about the earlier layout).
+test("#920: the reflection tree's stem is genuinely attached to the disc's OWN rendered bottom edge (not the max envelope); the return path starts below the tally, on the same column", () => {
+  // The fixture's own default (`initialHeroState`) is a 0-ring, low-count state — exactly the
+  // regime finding [0] reports as broken (the shipped demo itself sits at 1 ring). `ringOuterRadius`
+  // is read from stage.tsx, never re-derived, so this can't silently drift from the real formula.
+  const state = initialHeroState(3);
   assert.equal(
-    REFLECTION.stemTop,
-    TRUNK.y + TRUNK.max * TRUNK.step,
-    "the stem must start exactly at the disc's own bottom edge (RING_BOTTOM)",
+    state.rings,
+    0,
+    "fixture sanity: this must be the LOW-count regime finding [0] reports, not the saturated 999-ring stress case",
+  );
+  const html = markup(state);
+  const expectedStemTop = TRUNK.y + ringOuterRadius(state.rings);
+  assert.ok(
+    expectedStemTop < TRUNK.y + TRUNK.max * TRUNK.step,
+    "sanity: at this low a ring count, the real outer radius must be well short of the max envelope",
   );
 
   const reflectionGroupMatch = html.match(/<g class="hero-reflection" data-node="reflection">([\s\S]*?)<\/g>\s*<path class="hero-return"/);
@@ -1926,10 +1938,14 @@ test("#920: the reflection tree's stem is genuinely attached to the disc bottom;
   const points = [...d.matchAll(/([ML])\s*(-?[\d.]+)\s+(-?[\d.]+)/g)].map(([, , x, y]) => ({ x: Number(x), y: Number(y) }));
   assert.ok(points.length >= 2, "the connector path must carry real coordinate points");
   const topmostY = Math.min(...points.map((p) => p.y));
-  assert.equal(topmostY, REFLECTION.stemTop, "the connector's topmost point must sit at the disc's own bottom edge");
+  assert.equal(
+    topmostY,
+    expectedStemTop,
+    "the connector's topmost point must sit at the disc's own ACTUAL rendered bottom edge, not the max envelope",
+  );
   assert.ok(
     points.some((p) => p.y === topmostY && p.x === TRUNK.x),
-    `the connector must carry a point at (TRUNK.x, RING_BOTTOM) = (${TRUNK.x}, ${topmostY})`,
+    `the connector must carry a point at (TRUNK.x, the real outer radius) = (${TRUNK.x}, ${topmostY})`,
   );
   // The crossbar's own two ends are the Summary/Retro circle centres — `barY` === `REFLECTION.y`.
   assert.equal(REFLECTION.barY, REFLECTION.y, "the crossbar must sit AT the circles' own centre y, not hung below them by a drop segment");
@@ -1948,6 +1964,41 @@ test("#920: the reflection tree's stem is genuinely attached to the disc bottom;
   assert.ok(
     REFLECTION.bottom > REFLECTION.y + REFLECTION.r,
     "REFLECTION.bottom must sit below the Summary/Retro circles' own bottom edge, not between them",
+  );
+});
+
+// #920 gate② finding [0]'s own named regression: "the shipped demo has one ring, so its circle
+// ends at y=192... Derive the stem start from the rendered outer radius." This is that exact
+// low-count/demo case, checked against the ACTUAL rendered `<circle class="hero-ring">` radius —
+// never `ringOuterRadius` compared only to itself.
+test("#920 gate② finding [0]: at the demo's own 1-ring count, the stem attaches exactly to the RENDERED outer ring circle's radius", () => {
+  const { state } = run([ev("merged", { worker: "w1", issue: 1, pr: 1 })], 3);
+  assert.equal(state.rings, 1, "fixture sanity: this is the shipped demo's own reported ring count");
+  const html = markup(state);
+
+  const ringMatch = html.match(/<circle class="hero-ring" cx="[\d.]+" cy="[\d.]+" r="(-?[\d.]+)" data-current="true"/);
+  assert.ok(ringMatch, "the outermost (current) ring circle must render");
+  const renderedOuterRadius = Number(ringMatch![1]);
+  assert.equal(
+    renderedOuterRadius,
+    ringOuterRadius(1),
+    "ringOuterRadius must match the ACTUAL rendered outer ring's own radius, not a copied value",
+  );
+  assert.ok(renderedOuterRadius < TRUNK.max * TRUNK.step, "sanity: at 1 ring, the real radius is nowhere near the max envelope");
+
+  const reflectionGroupMatch = html.match(/<g class="hero-reflection" data-node="reflection">([\s\S]*?)<\/g>\s*<path class="hero-return"/);
+  assert.ok(reflectionGroupMatch, "the hero-reflection group must render");
+  const pathMatch = (reflectionGroupMatch![1] as string).match(/<path class="hero-arm" d="([^"]*)"/);
+  assert.ok(pathMatch, "the reflection tree's connector <path> must render");
+  const points = [...(pathMatch![1] as string).matchAll(/([ML])\s*(-?[\d.]+)\s+(-?[\d.]+)/g)].map(([, , x, y]) => ({
+    x: Number(x),
+    y: Number(y),
+  }));
+  const topmostY = Math.min(...points.map((p) => p.y));
+  assert.equal(
+    topmostY,
+    TRUNK.y + renderedOuterRadius,
+    "the stem's own topmost point must sit exactly at the rendered ring's own edge — no gap",
   );
 });
 

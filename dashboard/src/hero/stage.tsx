@@ -294,16 +294,30 @@ const CHECKPOINT_OVERFLOW_REAL_CAP = CHECKPOINT_COLS * (CHECKPOINT_ROWS_MAX - 1)
  * only the drawn TEXTURE inside that same footprint gets finer.
  */
 export const TRUNK = { x: 1006, y: 190, step: 2, max: 42 } as const;
-/** The ring cross-section's own bottom edge — `TRUNK.max * TRUNK.step` is its max radius. The
- *  reflection tree's stem (below) starts exactly here — "from the disc bottom", per the issue's
- *  own wording, with nothing else drawn in between. */
-const RING_BOTTOM = TRUNK.y + TRUNK.max * TRUNK.step;
-/** "ring"/"rings" — the unit word under the big display number, kept INSIDE the disc's own
- *  footprint (well above `RING_BOTTOM`, the stem's own start) rather than below it — #920 gate②
- *  review thread (PRRT…JE5): the mockup's stem descends from the disc bottom with nothing
- *  interposed, unlike the ring word/rule/tally trio, which the mockup draws BELOW the whole
- *  Summary/Retro row instead (see `REFLECTION` below). */
+/**
+ * #920 gate② finding [0] (reflection-stem-max-envelope-gap): the ring cross-section's own
+ * ACTUAL rendered outer radius at a given count — `ringRadii(rings)`'s own last element, without
+ * re-drawing it. The reflection stem must attach HERE, not at `TRUNK.max * TRUNK.step` (the max
+ * envelope) — that stayed visually correct only once the count saturates the cap; at the shipped
+ * demo's 1 ring, the drawn circle's real radius is 2, not 84, leaving an 82-unit undrawn gap
+ * before the stem's old fixed start. Floored at `TRUNK.step` (never 0) so a fresh 0-ring state
+ * still gets a real, non-degenerate attachment point instead of starting exactly on the ring-count
+ * number's own centre.
+ */
+export function ringOuterRadius(rings: number): number {
+  const radii = ringRadii(rings);
+  return Math.max(radii[radii.length - 1] ?? 0, TRUNK.step);
+}
+/**
+ * "ring"/"rings" — the unit word under the big display number. #920 gate② finding [0]: now that
+ * the stem's own start (`ringOuterRadius`) shrinks to as little as `TRUNK.step` at a low count,
+ * there is no Y-band left between the number's own text and the disc edge wide enough to fit a
+ * caption without it landing inside the stem's (now much shorter) own path — the fix used for the
+ * outcome tally in the SAME situation applies here too: offset OFF the stem's shared x column
+ * (`RING_WORD_RIGHT_X`) rather than trying to out-race a shrinking Y gap.
+ */
 const RING_WORD_Y = TRUNK.y + 40;
+const RING_WORD_RIGHT_X = TRUNK.x - 10;
 /**
  * #886 gate② run 2e566ac9 finding [1]: where the newest-merge droplet parks, offset from
  * `dropletPoint`'s "trunk" case — frees the true trunk CENTER for the outcome number (below).
@@ -325,19 +339,24 @@ const TRUNK_DROPLET_OFFSET = { dx: 40, dy: -40 } as const;
  * stacked at y 110/200, alongside `TRUNK.y`).
  *
  * #920 AC4 (D11/D12) + gate② finding [3] + review thread (PRRT…JE5): `detourX`'s horizontal jog
- * is GONE — a "plain T": one stem (`stemX` exactly `TRUNK.x`) descends from `RING_BOTTOM` (the
- * disc's own bottom edge, nothing interposed) to `barY`, where a crossbar's own TWO ENDS are the
- * Summary/Retro circles themselves (`y` === `barY` — the circles sit ON the bar line, not hung
- * below it by a separate drop segment). This closes finding [3]'s "no segment joining them" gap
- * (the stem is genuinely, continuously attached to the disc) without needing detourX's jog OR
- * the earlier round's right-anchor trick: the ring word/rule/tally all move BELOW the
- * Summary/Retro row entirely (`OUTCOME_RULE_Y`/`OUTCOME_TALLY_Y` below, past the captions), so
- * nothing ever sits in the stem's own y-band between the disc and the bar to cross in the first
- * place — a plain CENTERED tally is safe again once it is no longer between the ring and the bar.
- * `bottom` is where the dashed return path picks up, directly below the tally (the review
- * thread's own "connect the return path from the tree… from the tally/rule end").
+ * is GONE — a "plain T": one stem (`stemX` exactly `TRUNK.x`) descends from the disc's own bottom
+ * edge (`ringOuterRadius`, gate② finding [0] — NOT the max envelope) to `barY`, where a crossbar's
+ * own TWO ENDS are the Summary/Retro circles themselves (`y` === `barY` — the circles sit ON the
+ * bar line, not hung below it by a separate drop segment). This closes finding [3]'s "no segment
+ * joining them" gap (the stem is genuinely, continuously attached to the disc) without needing
+ * detourX's jog OR the earlier round's right-anchor trick: the ring word/rule/tally all move
+ * BELOW the Summary/Retro row entirely (`OUTCOME_RULE_Y`/`OUTCOME_TALLY_Y` below, past the
+ * captions), so nothing ever sits in the stem's own y-band between the disc and the bar to cross
+ * in the first place — a plain CENTERED tally is safe again once it is no longer between the ring
+ * and the bar. `bottom` is where the dashed return path picks up, directly below the tally (the
+ * review thread's own "connect the return path from the tree… from the tally/rule end").
+ *
+ * `barY`/`y`/`OUTCOME_RULE_Y`/`OUTCOME_TALLY_Y`/`bottom` stay anchored to the disc's own MAX
+ * envelope (`TRUNK.max * TRUNK.step`), not the dynamic `ringOuterRadius` — the crossbar/captions/
+ * rule/tally are a fixed-size readout regardless of ring count; only the stem's own TOP (how far
+ * it has to travel to reach the disc) is what varies with the count.
  */
-const REFLECTION_BAR_Y = RING_BOTTOM + 60;
+const REFLECTION_BAR_Y = TRUNK.y + TRUNK.max * TRUNK.step + 60;
 /** Below the Summary/Retro captions row (`REFLECTION.y + 32`, the caption's own baseline) — the
  *  hairline rule, then the tally beneath it, per the mockup's own bottom-of-tree ordering. */
 const OUTCOME_RULE_Y = REFLECTION_BAR_Y + 50;
@@ -345,7 +364,6 @@ const OUTCOME_TALLY_Y = OUTCOME_RULE_Y + 18;
 export const REFLECTION = {
   stemX: TRUNK.x,
   spread: 44,
-  stemTop: RING_BOTTOM,
   barY: REFLECTION_BAR_Y,
   y: REFLECTION_BAR_Y,
   r: 16,
@@ -1168,24 +1186,25 @@ export function HeroStage({
         <text className="hero-ring-count" style={{ fontFamily: "var(--font-display)" }} x={TRUNK.x} y={TRUNK.y + 11} textAnchor="middle">
           {state.rings}
         </text>
-        {/* #920 gate② review thread (PRRT…JE5): the ring word sits INSIDE the disc's own
-         * footprint (`RING_WORD_Y`'s own doc), well above `RING_BOTTOM` where the stem starts —
-         * never between the disc and the tree. */}
-        <text className="hero-label" x={TRUNK.x} y={RING_WORD_Y} textAnchor="middle">
+        {/* #920 gate② finding [0]: right-anchored (`RING_WORD_RIGHT_X`'s own doc) — the stem's
+         * own start now shrinks with the ring count, leaving no safe Y-gap to sit in at a low
+         * count, so this clears the stem's shared x column instead. */}
+        <text className="hero-label" x={RING_WORD_RIGHT_X} y={RING_WORD_Y} textAnchor="end">
           {state.rings === 1 ? "ring" : "rings"}
         </text>
       </g>
 
       <g className="hero-reflection" data-node="reflection">
-        {/* #920 AC4/gate② finding [3] + review thread (PRRT…JE5): a plain T — the stem descends
-         * from the disc's own bottom edge (`REFLECTION.stemTop` = `RING_BOTTOM`, nothing
-         * interposed) to `barY`, where a crossbar's own two ENDS are the Summary/Retro circles
-         * (`REFLECTION.y === barY` — the circles sit ON the bar line, not hung below it by a
-         * separate drop). Genuinely, continuously attached to the disc — no jog, no gap. */}
+        {/* #920 AC4/gate② finding [3] + finding [0] + review thread (PRRT…JE5): a plain T — the
+         * stem descends from the disc's own ACTUAL rendered bottom edge (`ringOuterRadius`, not
+         * the max envelope — gate② finding [0]) to `barY`, where a crossbar's own two ENDS are
+         * the Summary/Retro circles (`REFLECTION.y === barY` — the circles sit ON the bar line,
+         * not hung below it by a separate drop). Genuinely, continuously attached to the disc at
+         * every ring count — no jog, no gap. */}
         <path
           className="hero-arm"
           d={[
-            `M ${REFLECTION.stemX} ${REFLECTION.stemTop}`,
+            `M ${REFLECTION.stemX} ${TRUNK.y + ringOuterRadius(state.rings)}`,
             `L ${REFLECTION.stemX} ${REFLECTION.barY}`,
             `M ${REFLECTION.stemX - REFLECTION.spread} ${REFLECTION.barY}`,
             `L ${REFLECTION.stemX + REFLECTION.spread} ${REFLECTION.barY}`,
