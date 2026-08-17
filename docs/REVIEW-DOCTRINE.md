@@ -182,20 +182,16 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   (#791; #857, #862, #863; #865, #901, #902, #903; #911). `docs/security.md`'s evidence tiers
   make tier-C (human-witnessed probe) evidence producer-unforgeable BY DESIGN — the producer
   never self-executes or self-attests it, so a missing tier-C RECORD stays `cannot-confirm`
-  until the operator posts it; no fix round can close it. Name the gap operator-owned in the
-  finding body — unlabeled, it reads as a producer failure to `review/convergence.ts` and to
-  any human. Labeling changes what the finding SAYS, not what `driveDecision` (`conductor.ts`)
-  DOES: the gate stays `FIXABLE`, so (a) a paid fix leg still dispatches, disputes, and
-  escalates with nothing producer-actionable, and (b) once the record IS posted, re-triggering
-  review buys nothing either — `engine-agent.ts` reads the AC snapshot frozen at DISPATCH time
-  (`ac-snapshot.ts`, design #279 §5), never live comments or a re-fetched body, so a comment or
-  a pointer-only commit can never flip the verdict (#911: three paid review runs rejected the
-  same finding, the third triggered by an operator commit meant to help a "fresh snapshot" see
-  evidence it structurally cannot reach). A structured per-finding owner tag routing an
-  all-operator-owned verdict straight to `ESCALATE` (mixed verdicts keep `FIXUP`) is #865's
-  filed, unimplemented fix; until it ships, only a human merge decision reading the record
-  directly closes an all-operator-owned verdict — never a re-triggered review. Grounding:
-  `docs/security.md`'s AC-evidence-tier doctrine, Decision #8.
+  until the operator posts it. Unlabeled, the gap reads as a producer failure to
+  `review/convergence.ts` and any human; labeling changes what the finding SAYS, not what
+  `driveDecision` (`conductor.ts`) DOES — the gate stays `FIXABLE`, so a paid fix leg
+  dispatches, disputes, and escalates with nothing producer-actionable. Even once posted,
+  re-triggering review buys nothing either — `engine-agent.ts` reads the AC snapshot frozen at
+  DISPATCH time (`ac-snapshot.ts`, design #279 §5), never live comments or a re-fetched body, so
+  a comment or a pointer-only commit can never flip the verdict. #865 files an unimplemented fix
+  (a per-finding owner tag routing all-operator-owned verdicts to `ESCALATE`, mixed verdicts
+  keep `FIXUP`); until then, only a human merge decision reading the record closes the verdict.
+  Grounding: `docs/security.md`'s AC-evidence-tier doctrine, Decision #8.
 
 How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbatim principles):
 
