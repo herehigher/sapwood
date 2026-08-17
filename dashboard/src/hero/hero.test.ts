@@ -275,7 +275,7 @@ test("§6 `fix-leg-resumed` re-lights the same fixing state after a handoff", ()
   assert.equal(droplet(state, 86)?.handedOff, false);
 });
 
-test("#716 gate② round 2 P2-5: the fix-return arrow carries the send-back reason as its own label, not only the lane caption", () => {
+test("#716 gate②: the fix-return arrow carries the send-back reason as its own label, not only the lane caption", () => {
   const { state } = run([
     ev("dispatched", { worker: "w1", issue: 86 }),
     ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING", pr: 97 }),
@@ -1213,17 +1213,15 @@ test("#897 AC4: a pool at or under the filled cap draws no candidate stack at al
   assert.doesNotMatch(html, /hero-pool-candidate/);
 });
 
-// engine-agent audit run f82d2468 finding [3] (candidate-outline-not-tested): the two tests above
-// assert class names/counts only — removing or overriding `.hero-pool-candidate rect { fill:
-// none; stroke: ... }` would leave both green. This mounts the REAL production cascade
-// (tokens.css → panels.css → hero.css → app.css's body rule, same order the #879 gate② finding
-// [4] test above already established) into a real DOM and reads `getComputedStyle`, proving the
-// candidate rect actually resolves to no fill with a visible stroke, and that a filled pool chip
-// resolves distinguishably (NOT `fill: none`) under the exact same cascade.
+// #897: the two tests above assert class names/counts only — removing or overriding
+// `.hero-pool-candidate rect { fill: none; stroke: ... }` would leave both green. This mounts the
+// REAL production cascade (tokens.css → panels.css → hero.css → app.css's body rule, same order
+// the #879 gate② test above already established) into a real DOM and reads `getComputedStyle`,
+// proving the candidate rect actually resolves to no fill with a visible stroke, and that a
+// filled pool chip resolves distinguishably (NOT `fill: none`) under the exact same cascade.
 //
-// engine-agent audit run aafcbc3f finding [2] (ac4-outline-oracle-nonexact): the prior cut's
-// `notEqual(stroke, "none")`/`notEqual(stroke, "")` still passes for a transparent stroke or
-// `stroke-opacity: 0` — the STYLE doctrine's own "never notEqual/existence" rule. Every value
+// #897: `notEqual(stroke, "none")`/`notEqual(stroke, "")` still passes for a transparent stroke
+// or `stroke-opacity: 0` — the STYLE doctrine's own "never notEqual/existence" rule. Every value
 // below is now the EXACT resolved string, verified empirically against this repo's real
 // happy-dom harness rather than assumed: `var(--bark)` (a plain hex, `tokens.css`) resolves to
 // the literal `"#8A7A64"` and `stroke-opacity: 0.35` resolves to the literal `"0.35"`, both
@@ -1231,14 +1229,14 @@ test("#897 AC4: a pool at or under the filled cap draws no candidate stack at al
 // `light-dark()` token) resolves through happy-dom's cascade to the literal, deterministic
 // string `"light-dark(#8A5A14, #E8A33D)"` — verified directly against THIS shape (an inline
 // `fill: var(--sap)` on an SVG rect, the exact form `.hero-pool-chip`'s own rect authors), not
-// assumed from `shots/shots.spec.ts`'s own doc (engine-agent audit run 509eb47b finding [1]),
-// which found a BARE top-level `color`/background `light-dark()` resolves EMPTY in happy-dom — a
-// different context this repo's test suite hasn't previously exercised through a `var()`
-// indirection. Both `--bark` and `--sap` resolve to real, exact, deterministic strings THIS
-// cascade produces every time — not a resolved final RGB (a real browser only would give that,
-// per `shots.spec.ts`'s same doc), but exact and non-fakeable regardless: a transparent/removed
-// stroke or a no-fill regression on either element changes one of these literal strings.
-test("engine-agent audit f82d2468 finding [3] / aafcbc3f finding [2]: a candidate card's rect resolves to the EXACT no-fill/visible-stroke values, distinguishable from a filled pool chip's EXACT fill, under the real production cascade", () => {
+// assumed from `shots/shots.spec.ts`'s own doc, which found a BARE top-level `color`/background
+// `light-dark()` resolves EMPTY in happy-dom — a different context this repo's test suite hasn't
+// previously exercised through a `var()` indirection. Both `--bark` and `--sap` resolve to real,
+// exact, deterministic strings THIS cascade produces every time — not a resolved final RGB (a
+// real browser only would give that, per `shots.spec.ts`'s same doc), but exact and non-fakeable
+// regardless: a transparent/removed stroke or a no-fill regression on either element changes one
+// of these literal strings.
+test("#897 AC4: a candidate card's rect resolves to the EXACT no-fill/visible-stroke values, distinguishable from a filled pool chip's EXACT fill, under the real production cascade", () => {
   assert.ok(bodyFontSizeRule);
   const style = document.createElement("style");
   style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
@@ -1457,14 +1455,14 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
   assert.match(html, /data-node="needs-human" data-count="6"/);
 });
 
-// engine-agent audit run f82d2468 finding [0] (reflection-branches-cross-tally): the reflection
-// tree's bar/drops used to sit ABOVE the outcome tally and run straight through its row — the
-// tally's rendered width is effectively unbounded (a long qualified "N merged · N pending (N
-// unverified) · N needs human" string), so no X position near TRUNK.x reliably dodges it. The fix
-// is a Y-band split (`REFLECTION`'s own doc in stage.tsx); this test proves it against the
-// LONGEST tally text this fixture can produce — merged/pending/needs-human all present AND the
-// windowed qualifier active (unvouched dispatched droplets), not just the unqualified case.
-test("engine-agent audit f82d2468 finding [0]: the reflection tree's bar/drops never overlap the outcome tally, even at the tally's longest (qualified) rendered text", () => {
+// #897: the reflection tree's bar/drops used to sit ABOVE the outcome tally and run straight
+// through its row — the tally's rendered width is effectively unbounded (a long qualified "N
+// merged · N pending (N unverified) · N needs human" string), so no X position near TRUNK.x
+// reliably dodges it. The fix is a Y-band split (`REFLECTION`'s own doc in stage.tsx); this test
+// proves it against the LONGEST tally text this fixture can produce — merged/pending/needs-human
+// all present AND the windowed qualifier active (unvouched dispatched droplets), not just the
+// unqualified case.
+test("#897 AC2: the reflection tree's bar/drops never overlap the outcome tally, even at the tally's longest (qualified) rendered text", () => {
   const events: DomainEvent[] = [];
   for (let i = 1; i <= 24; i++) events.push(ev("merged", { worker: `m${i}`, issue: i, pr: i }));
   // No liveLanes coverage below (unlike the sibling needs-human collision test) — every one of
@@ -1492,7 +1490,7 @@ test("engine-agent audit f82d2468 finding [0]: the reflection tree's bar/drops n
   const ringBottomY = TRUNK.y + TRUNK.max * TRUNK.step + 4;
   // The connector's own occupied regions — a thin box per drawn segment, mirroring stage.tsx's
   // own `d` formula exactly: a stem off the ring, right to `detourX`, down, then into the bar
-  // and its two drops into the nodes (engine-agent audit run 001f18a1 finding [0]'s own fix).
+  // and its two drops into the nodes (the connector-attachment fix below).
   const strokeHalf = 2; // generous over the actual ~1px stroke width
   const ringStemBox: Box = { left: TRUNK.x, right: REFLECTION.detourX, top: ringBottomY - strokeHalf, bottom: ringBottomY + strokeHalf };
   const detourDropBox: Box = {
@@ -1538,14 +1536,13 @@ test("engine-agent audit f82d2468 finding [0]: the reflection tree's bar/drops n
   }
 });
 
-// engine-agent audit run 001f18a1 finding [0] (reflection-tree-disconnected): the earlier fix
-// left the reflection tree floating — a bar/drops with no segment reaching the outcome disc at
-// all. AC2 wants Summary/Retro actually CONNECTED below the disc, and the node-y test alone
-// can't detect a missing connector (it would still pass with the path element absent entirely).
-// This asserts the rendered `<path class="hero-arm">` that draws the reflection tree actually
-// contains a point at (or very near) the ring's own bottom edge — proof the tree is attached to
-// the disc, not just floating near it.
-test("engine-agent audit 001f18a1 finding [0]: the reflection tree's connector path actually reaches the outcome disc's own bottom edge, not just a floating bar", () => {
+// #897: the earlier fix left the reflection tree floating — a bar/drops with no segment reaching
+// the outcome disc at all. AC2 wants Summary/Retro actually CONNECTED below the disc, and the
+// node-y test alone can't detect a missing connector (it would still pass with the path element
+// absent entirely). This asserts the rendered `<path class="hero-arm">` that draws the reflection
+// tree actually contains a point at (or very near) the ring's own bottom edge — proof the tree is
+// attached to the disc, not just floating near it.
+test("#897 AC2: the reflection tree's connector path actually reaches the outcome disc's own bottom edge, not just a floating bar", () => {
   const html = markup(initialHeroState(3));
   const reflectionGroupMatch = html.match(/<g class="hero-reflection" data-node="reflection">([\s\S]*?)<\/g>\s*<path class="hero-return"/);
   assert.ok(reflectionGroupMatch, "the hero-reflection group must render");
@@ -1866,7 +1863,7 @@ test("#745 AC2: six simultaneous checkpoint droplets — CHECKPOINT_COLS/STEP's 
 // oracle from what's actually drawn (the VALUE doctrine's own "read the value from its source"
 // rule) — the STALE version of this test (hardcoded `GATES.y + 5`, a rect box) is exactly the
 // failure this rewrite closes: it kept passing against geometry that no longer existed.
-test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any rank up to the grid's capacity, intersects the CI/Review gate cluster (circle, label, or mode caption)", () => {
+test("#745 gate②: no checkpoint chip, at any rank up to the grid's capacity, intersects the CI/Review gate cluster (circle, label, or mode caption)", () => {
   const events: DomainEvent[] = [];
   for (let i = 1; i <= 6; i++) {
     events.push(ev("dispatched", { worker: `w${i}`, issue: i }));
@@ -1952,13 +1949,13 @@ test("#745 gate② round 5 PO pre-merge Tier-C probe: no checkpoint chip, at any
   }
 });
 
-// engine-agent audit run e759fef7 finding [0] (gate-label-needs-human-collision): the checkpoint
-// cluster above ONLY exercises checkpoint chips against the gate cluster — the finding's own
-// scenario is the NEEDS-HUMAN cluster (a DIFFERENT zone, below-and-right of the gates) at its own
-// documented draw cap (6, `NEEDS_HUMAN_DRAW_CAP`), with the Review mode caption mounted (the
-// live shape the finding's own rank-5 math was computed against). Dedicated fixture + oracle, not
-// folded into the checkpoint test above, since the two clusters occupy different geometry.
-test("engine-agent audit e759fef7 finding [0]: no needs-human droplet, at any rank up to the cluster's draw cap, intersects the CI/Review gate cluster (circle, label, or mode caption)", () => {
+// #897: the checkpoint cluster above ONLY exercises checkpoint chips against the gate cluster —
+// this asserts the NEEDS-HUMAN cluster (a DIFFERENT zone, below-and-right of the gates) clears
+// the gate cluster too, at its own documented draw cap (6, `NEEDS_HUMAN_DRAW_CAP`), with the
+// Review mode caption mounted (the live shape the relevant rank-5 math was computed against).
+// Dedicated fixture + oracle, not folded into the checkpoint test above, since the two clusters
+// occupy different geometry.
+test("#897 AC2: no needs-human droplet, at any rank up to the cluster's draw cap, intersects the CI/Review gate cluster (circle, label, or mode caption)", () => {
   const events: DomainEvent[] = [];
   for (let i = 1; i <= 6; i++) {
     events.push(ev("dispatched", { worker: `w${i}`, issue: 200 + i }));

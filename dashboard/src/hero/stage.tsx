@@ -106,9 +106,8 @@ const LANES = { x: 330, w: 372, top: 92, gap: 44 } as const;
  * TRUNK.max * TRUNK.step` = 922) — margin only grows (was 22px at the old rect's 900 edge, now
  * 44px).
  *
- * engine-agent audit run e759fef7 finding [0] (gate-label-needs-human-collision): `r` shrank
- * from an earlier 26 specifically to make room for the "CI"/"Review" word BELOW the circle
- * without reaching the needs-human cluster's own fixed ceiling (rank 5's droplet label top,
+ * #897: `r` shrank from an earlier 26 specifically to make room for the "CI"/"Review" word BELOW
+ * the circle without reaching the needs-human cluster's own fixed ceiling (rank 5's droplet label top,
  * `ESCALATION.y - 30 - 2 * NEEDS_HUMAN_ROW_STEP - DROPLET_LABEL_FONT_PX` ≈ 198) — the cluster's
  * own row cap (`NEEDS_HUMAN_DRAW_CAP`'s doc) was tuned against the OLD rect geometry, which drew
  * no text below itself at all; this stage's own below-circle label is what newly competes for
@@ -254,23 +253,22 @@ const TRUNK_DROPLET_OFFSET = { dx: 40, dy: -40 } as const;
  * reflection tree — not beside the trunk at its own y-band (the old `REFLECTION.x` column
  * stacked at y 110/200, alongside `TRUNK.y` = 156).
  *
- * engine-agent audit run f82d2468 finding [0] (reflection-branches-cross-tally): an earlier cut
- * placed the bar ABOVE the outcome tally (`TRUNK.y + 140` = 296) and dropped straight through
- * its row into the nodes below — the tally's rendered width is realistically wide (a long
- * "N merged · N pending (N unverified) · N needs human" string; `hero.test.ts`'s own dedicated
- * stress fixture measures a practical worst-case rendered box of roughly x∈[825,1127]), so any
- * vertical line anywhere near `TRUNK.x` (1006, inside that range) sits inside its typical
+ * #897: an earlier cut placed the bar ABOVE the outcome tally (`TRUNK.y + 140` = 296) and dropped
+ * straight through its row into the nodes below — the tally's rendered width is realistically
+ * wide (a long "N merged · N pending (N unverified) · N needs human" string; `hero.test.ts`'s own
+ * dedicated stress fixture measures a practical worst-case rendered box of roughly x∈[825,1127]),
+ * so any vertical line anywhere near `TRUNK.x` (1006, inside that range) sits inside its typical
  * footprint. Fixed with a Y-band split — `barY`/`y` sit entirely below the tally's own
  * worst-case rendered box (bottom edge ≈ 298, `CAPTION_SAFE_ASCENT`-modeled).
  *
- * engine-agent audit run 001f18a1 finding [0] (reflection-tree-disconnected): the Y-band fix
- * above then dropped the ring-to-bar STEM entirely — AC2 wants the tree actually attached to the
- * disc, not a floating bar. `detourX` (1140) is the second half of the same fix: past the
- * tally's own worst-case right edge (1127, this doc's own measured figure) with margin, so a
- * connector can run RIGHT from the ring's bottom edge to `detourX` (a horizontal segment at the
- * ring's own tangent y, never inside the tally's y-band at all), then DOWN past the tally's row
- * at that clear x, then LEFT into the bar — never crossing the tally's rendered box at any point,
- * verified against the same stress text by `hero.test.ts`'s own connector-path test.
+ * #897: the Y-band fix above then dropped the ring-to-bar STEM entirely — AC2 wants the tree
+ * actually attached to the disc, not a floating bar. `detourX` (1140) is the second half of the
+ * fix: past the tally's own worst-case right edge (1127, this doc's own measured figure) with
+ * margin, so a connector can run RIGHT from the ring's bottom edge to `detourX` (a horizontal
+ * segment at the ring's own tangent y, never inside the tally's y-band at all), then DOWN past
+ * the tally's row at that clear x, then LEFT into the bar — never crossing the tally's rendered
+ * box at any point, verified against the same stress text by `hero.test.ts`'s own connector-path
+ * test.
  */
 export const REFLECTION = { stemX: TRUNK.x, spread: 44, barY: 305, y: 324, r: 13, bottom: 358, detourX: 1140 } as const;
 const REFLECTION_NODES = [
@@ -956,8 +954,8 @@ export function HeroStage({
            * chip's label bbox-intersected this caption — pushed further from the gate box as the
            * cheap half of the fix, paired with the checkpoint grid's own extra clearance below
            * (`dropletPoint`'s checkpoint case).
-           * engine-agent audit run e759fef7 finding [0]: moved ABOVE the circle (`GATES.y -
-           * GATES.r - 12`) — the space below the circle is spoken for by the "Review" word label
+           * #897: moved ABOVE the circle (`GATES.y - GATES.r - 12`) — the space below the circle
+           * is spoken for by the "Review" word label
            * alone (`GATES`'s own doc: no room below for two stacked lines before the needs-human
            * cluster's fixed ceiling). Above the circle sits comfortably clear of the checkpoint
            * grid's own closest content — same doc's own margin accounting. */}
@@ -1037,7 +1035,7 @@ export function HeroStage({
       </g>
 
       <g className="hero-reflection" data-node="reflection">
-        {/* #897 AC2 / engine-agent audit run 001f18a1 finding [0]: the lower reflection tree
+        {/* #897 AC2: the lower reflection tree
          * actually CONNECTS to the outcome disc — a stem off the ring's own bottom edge, routed
          * right to `REFLECTION.detourX` (past the outcome tally's own worst-case rendered right
          * edge, `REFLECTION`'s own doc) before dropping down and back left into the bar, so no

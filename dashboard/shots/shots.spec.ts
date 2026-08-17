@@ -161,17 +161,16 @@ test("§889 AC1: the round list never renders inline by default, and hero/lanes/
 });
 
 /**
- * engine-agent audit run f82d2468 finding [4] (ac5-no-1440-layout-proof): #897 AC5's own
- * verification plan asks for a 1440px viewport measurement of the lanes/activity row's rendered
- * x-extent, proving the mockup's full-width split (no unused trailing region). The component test
- * suite (`App.test.tsx`) can only prove the `.lane-activity-row` wrapper exists in the markup and
- * that its CSS carries the intended `auto-fit` declaration — `happy-dom` (that suite's DOM) has no
- * real CSS Grid layout engine, so it cannot compute what width that grid actually resolves to. A
- * REAL browser is the only thing that can prove the cascade genuinely closes the dead zone the
- * issue reported, the same "real layout, not a stand-in" posture this file's other engine-agent
- * findings above already apply to click hit-testing and computed style.
+ * #897 AC5's own verification plan asks for a 1440px viewport measurement of the lanes/activity
+ * row's rendered x-extent, proving the mockup's full-width split (no unused trailing region). The
+ * component test suite (`App.test.tsx`) can only prove the `.lane-activity-row` wrapper exists in
+ * the markup and that its CSS carries the intended `auto-fit` declaration — `happy-dom` (that
+ * suite's DOM) has no real CSS Grid layout engine, so it cannot compute what width that grid
+ * actually resolves to. A REAL browser is the only thing that can prove the cascade genuinely
+ * closes the dead zone the issue reported, the same "real layout, not a stand-in" posture this
+ * file's other tests above already apply to click hit-testing and computed style.
  */
-test("#897 AC5 / engine-agent audit f82d2468 finding [4]: at 1440px, the lane board and activity feed together span the row's full width — no trailing dead zone", async ({
+test("#897 AC5: at 1440px, the lane board and activity feed together span the row's full width — no trailing dead zone", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -211,12 +210,12 @@ test("#897 AC5 / engine-agent audit f82d2468 finding [4]: at 1440px, the lane bo
   // — a meaningful overlap in Y with distinct X ranges is what "sharing a row" means.
   expect(Math.abs(laneBox!.y - feedBox!.y), "lane board and activity feed must sit on the same row, not stacked").toBeLessThan(tolerancePx);
 
-  // engine-agent audit run 73d1b65e finding [3] (ac5-split-oracle-allows-overlap): the edge-union
-  // and same-y checks above also pass if both panels render at the SAME x range, each spanning the
-  // row's full width (full overlap) — neither checks horizontal ordering or non-overlap. The lane
-  // slot renders first in `.lane-activity-row`'s markup (App.tsx) and this row's own auto-fit grid
-  // (app.css) places DOM order left-to-right, so a genuine split requires the lane slot's right
-  // edge to precede the feed's left edge, within the same row-gap tolerance used above.
+  // #897: the edge-union and same-y checks above also pass if both panels render at the SAME x
+  // range, each spanning the row's full width (full overlap) — neither checks horizontal ordering
+  // or non-overlap. The lane slot renders first in `.lane-activity-row`'s markup (App.tsx) and
+  // this row's own auto-fit grid (app.css) places DOM order left-to-right, so a genuine split
+  // requires the lane slot's right edge to precede the feed's left edge, within the same row-gap
+  // tolerance used above.
   expect(
     feedBox!.x - (laneBox!.x + laneBox!.width),
     "the lane slot's right edge must clear the activity feed's left edge (within the row gap) — proves the panels sit side by side rather than overlapping",
