@@ -115,14 +115,16 @@ function ceilingReasonWord(reason: unknown): "wall-clock" | "daily-budget" | nul
 }
 
 /** #890 (§3 E): the est→real calibration clause appended to `reclaim-done`'s sentence —
- *  `conductor.ts`'s `reclaimTerminalLane` attaches BOTH fields only once a lane genuinely
- *  settles (`costUsd` is always the real, settled figure; `estCostUsd` is the lane's own
- *  last-known live estimate, present only when the lane was still probed at least once while
- *  running). Either one missing renders no clause at all — never a fabricated half-figure. */
+ *  `conductor.ts`'s `reclaimTerminalLane` attaches `estCostUsd` (the lane's own last-known
+ *  live estimate, present only when the lane was still probed at least once while running)
+ *  and `costUsd`'s OWN provenance flag, `costEstimated`. The clause labels `costUsd` "real",
+ *  so it renders ONLY when that label is actually true — `costEstimated === false` (a
+ *  provider-reported figure, known-real). Absent or `true` (unknown or itself an estimate)
+ *  renders no clause at all — never a fabricated "real", and never an "est → est". */
 function calibrationClause(payload: Payload): string {
   const est = payload.estCostUsd;
   const real = payload.costUsd;
-  if (typeof est !== "number" || typeof real !== "number") return "";
+  if (typeof est !== "number" || typeof real !== "number" || payload.costEstimated !== false) return "";
   return ` · est $${est.toFixed(2)} → real $${real.toFixed(2)}`;
 }
 

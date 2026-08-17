@@ -263,7 +263,7 @@ test("#716 gate② P1-3: resolveFixCap reads the nested lanes.prFixCap path, not
   assert.equal(resolveFixCap({ lanes: { prFixCap: "6" } }), 2, "a non-number value is never coerced");
 });
 
-test("#890 gate② finding [1]: resolveWorkerBudgetUsdSoft reads the nested worker.budgetUsdSoft path, honest-null when unreadable", () => {
+test("#890: resolveWorkerBudgetUsdSoft reads the nested worker.budgetUsdSoft path, honest-null when unreadable", () => {
   assert.equal(resolveWorkerBudgetUsdSoft({ worker: { budgetUsdSoft: 12 } }), 12);
   assert.equal(resolveWorkerBudgetUsdSoft({ "worker.budgetUsdSoft": 12 }), null, "a flat dotted key must not match");
   assert.equal(resolveWorkerBudgetUsdSoft(null), null);
@@ -484,10 +484,10 @@ test("#890: a live lane's estCostUsd flows through the real fetch pipeline into 
     "/api/events": { status: 200, body: { events: [], lastId: 0 } },
   });
   assert.match(html, /\$10\.40 \+ \$2\.20 est \/ \$100\.00/, "the header meter's est tail must read the lane's own live estimate");
-  // #890 gate② finding [2] (cost-panel-hatch-test-vacuous): a hatch fill-url ANYWHERE on the page
-  // is non-discriminating — Header's own est tail already guarantees one regardless of whether
-  // the cost panel's own `estUsd` wiring works. Scoping the check to the markup FROM the cost
-  // strip's own `id="cost"` anchor onward isolates CostStrip's own subtree — dropping
+  // #890: a hatch fill-url ANYWHERE on the page is non-discriminating — Header's own est tail
+  // already guarantees one regardless of whether the cost panel's own `estUsd` wiring works.
+  // Scoping the check to the markup FROM the cost strip's own `id="cost"` anchor onward
+  // isolates CostStrip's own subtree — dropping
   // `sumEstCostUsd`'s wiring into `buildTodayCostPanelFromBuckets` would leave THIS assertion red
   // even though the header's own hatch (rendered earlier in the DOM) stays green.
   const costSectionHtml = html.slice(html.indexOf('id="cost"'));
@@ -496,11 +496,10 @@ test("#890: a live lane's estCostUsd flows through the real fetch pipeline into 
     /url\(#cost-bar-est-hatch\)/,
     "the cost panel's own Lanes stage bar must render hatched, independent of the header's own bar",
   );
-  // #890 gate② round 2 finding [1] (ac2-live-lane-est-wiring-unasserted): the header/cost-panel
-  // assertions above prove `estCostUsd` reached THOSE two consumers, but AC2 is about the LANE
-  // CARD itself — this same fixture's lane must render its own "$2.20 est" text and its own
-  // hatched bar, isolated to the `aria-label="lanes"` subtree so this can't pass on the header's
-  // or cost panel's hatch alone.
+  // #890: the header/cost-panel assertions above prove `estCostUsd` reached THOSE two
+  // consumers, but AC2 is about the LANE CARD itself — this same fixture's lane must render
+  // its own "$2.20 est" text and its own hatched bar, isolated to the `aria-label="lanes"`
+  // subtree so this can't pass on the header's or cost panel's hatch alone.
   const laneSectionHtml = html.slice(html.indexOf('aria-label="lanes"'), html.indexOf('id="cost"'));
   assert.match(laneSectionHtml, /\$2\.20 est/, "the lane card's own settled/est text must read the lane's live estimate, not '—'");
   assert.match(laneSectionHtml, /class="cost-bar lane-card-bar"/, "the lane card's own CostBar must render");
@@ -511,11 +510,11 @@ test("#890: a live lane's estCostUsd flows through the real fetch pipeline into 
   );
 });
 
-// #890 gate② finding [1] (lane-bars-self-scale): a self-scaled `max` (settledUsd + estUsd) draws
-// every positive lane spend as a 100%-wide bar regardless of size, losing all budget context.
-// Proven through the real fetch pipeline: a lane settled at $2 against a configured
-// `worker.budgetUsdSoft: 10` must draw a 20%-wide solid fill, never 100%.
-test("#890 gate② finding [1]: a lane's settled cost bar scales against worker.budgetUsdSoft, not itself — a small settled amount never draws a full-width bar", async () => {
+// #890: a self-scaled `max` (settledUsd + estUsd) draws every positive lane spend as a
+// 100%-wide bar regardless of size, losing all budget context. Proven through the real fetch
+// pipeline: a lane settled at $2 against a configured `worker.budgetUsdSoft: 10` must draw a
+// 20%-wide solid fill, never 100%.
+test("#890: a lane's settled cost bar scales against worker.budgetUsdSoft, not itself — a small settled amount never draws a full-width bar", async () => {
   const html = await renderSettledApp({
     "/api/loop/state": {
       status: 200,

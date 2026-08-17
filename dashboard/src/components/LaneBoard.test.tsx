@@ -72,9 +72,8 @@ test("a lane with neither a settled nor an est figure renders no bar at all — 
   assert.doesNotMatch(html, /class="cost-bar/);
 });
 
-// ── #890 gate② finding [1] (lane-bars-self-scale): the bar scales against the configured worker
-// soft budget, not the amount it draws — a self-scaled max made every positive figure render
-// 100% full, losing all budget context.
+// ── #890: the bar scales against the configured worker soft budget, not the amount it draws —
+// a self-scaled max made every positive figure render 100% full, losing all budget context.
 
 test("workerBudgetUsdSoft is the bar's ceiling — a small settled amount against a real budget draws a partial-width fill, never full", () => {
   const html = renderToStaticMarkup(
@@ -86,7 +85,7 @@ test("workerBudgetUsdSoft is the bar's ceiling — a small settled amount agains
   assert.doesNotMatch(html, /width="100" height="10" fill="var\(--sap\)"/, "the settled fill itself must never self-scale to full width");
 });
 
-test("workerBudgetUsdSoft unset (config unreadable) falls back to the self-scaled total, same as before #890 gate② round 2", () => {
+test("workerBudgetUsdSoft unset (config unreadable) falls back to the self-scaled total, same as before #890", () => {
   const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ costUsd: 2 })]} titles={{}} now={NOW} />);
   assert.match(html, /width="100"/, "with no real ceiling to measure against, the settled figure fills its own bar");
 });

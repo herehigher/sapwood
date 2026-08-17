@@ -112,11 +112,11 @@ test("the outer section keeps its #cost anchor id (§3 rail target, #727) — th
 
 // ── #890 (§3 E): the shared CostBar primitive's hatched est share ──────────────────────────────
 
-// #890 gate② finding [2] (cost-panel-hatch-test-vacuous): `<CostBar>` unconditionally emits its
-// own `<pattern id="cost-bar-est-hatch">` def, present/absent est alike — matching the bare
-// `cost-bar-est-hatch` substring proves only that SOME bar mounted, not that a hatch RECT
-// actually drew. The discriminating check is the fill-url USAGE (`url(#cost-bar-est-hatch)`),
-// which only a bar with a real est segment ever emits.
+// #890: `<CostBar>` unconditionally emits its own `<pattern id="cost-bar-est-hatch">` def,
+// present/absent est alike — matching the bare `cost-bar-est-hatch` substring proves only that
+// SOME bar mounted, not that a hatch RECT actually drew. The discriminating check is the
+// fill-url USAGE (`url(#cost-bar-est-hatch)`), which only a bar with a real est segment ever
+// emits.
 test("a bar carrying estUsd renders the hatch fill-url usage (the actual rect, not just the pattern def); a bar with none does not", () => {
   const withEst = renderToStaticMarkup(
     <CostStrip today={todayPanel({ stageBars: [{ label: "Lanes", usd: 8.9, estUsd: 2.2 }] })} round={null} />,

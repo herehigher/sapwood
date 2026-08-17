@@ -67,10 +67,10 @@ function SpendMeter({ spend, round, estUsd = 0 }: { spend: SpendFacts; round?: R
   const pct = view.usedUsd !== null && view.budgetUsd ? Math.min(100, (view.usedUsd / view.budgetUsd) * 100) : 0;
   const warm = view.budgetUsd !== null && pct >= 75;
   return (
-    // #890 gate② finding [0] (header-meter-reference-mismatch): `header-dark.png` places the
-    // capsule bar ABOVE the amount line — the bar is the reference element, the text
-    // annotates it, never the other way round. DOM order fixes visual order under the
-    // `.spend-meter` flex column (panels.css) without a second layout mechanism.
+    // #890: `header-dark.png` places the capsule bar ABOVE the amount line — the bar is the
+    // reference element, the text annotates it, never the other way round. DOM order fixes
+    // visual order under the `.spend-meter` flex column (panels.css) without a second layout
+    // mechanism.
     <div className={warm ? "spend-meter spend-meter-warm" : "spend-meter"} title={`${view.tier} spend`}>
       {view.usedUsd !== null && (
         <CostBar

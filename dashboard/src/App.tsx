@@ -52,8 +52,8 @@ export function resolveFixCap(config: Record<string, unknown> | null | undefined
   return typeof raw === "number" && Number.isFinite(raw) ? raw : 2;
 }
 
-/** #890 gate② finding [1] (lane-bars-self-scale): `worker.budgetUsdSoft` (allowlisted config,
- *  `config-captions.ts`) — the lane card bar's own ceiling, `LaneBoard.tsx`'s `laneCostBarMax`.
+/** #890: `worker.budgetUsdSoft` (allowlisted config, `config-captions.ts`) — the lane card
+ *  bar's own ceiling, `LaneBoard.tsx`'s `laneCostBarMax`.
  *  `null` (never a guessed number) when the config is unreadable, same honest-unknown posture
  *  `resolveFixCap` above takes for `lanes.prFixCap`. */
 export function resolveWorkerBudgetUsdSoft(config: Record<string, unknown> | null | undefined): number | null {

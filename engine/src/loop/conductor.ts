@@ -2887,12 +2887,17 @@ async function reclaimTerminalLane(
       worker: w.name,
       issue: w.issue,
       next,
-      // #890 (§3 E): `costUsd` is the just-settled real figure computed above; `estCostUsd` is
+      // #890 (§3 E): `costUsd` is the just-settled figure computed above; `estCostUsd` is
       // `w`'s own last live-telemetry snapshot, read here BEFORE `clearLiveTelemetry` (above)
       // wipes it — absent (never a fabricated 0) for a lane that reclaimed before its first
-      // live-telemetry probe ever landed. The dashboard's est→real calibration line (copy.ts)
-      // reads both off this SAME event, never a second source.
+      // live-telemetry probe ever landed. `costEstimated` carries `costUsd`'s OWN provenance
+      // (the same flag the cost events above attach, from `p.costEstimated` /
+      // `LaneProbe.costEstimated`'s own doc) — absent when unknown, never coerced to a guessed
+      // boolean. The dashboard's est→real calibration line (copy.ts) reads all three off this
+      // SAME event, never a second source, and only renders once `costEstimated` is knowably
+      // `false`.
       costUsd,
+      ...(costEstimated !== undefined ? { costEstimated } : {}),
       ...(typeof w.est_cost_usd === "number" ? { estCostUsd: w.est_cost_usd } : {}),
       ...(doneReason ? { reason: doneReason } : {}),
       ...prTitlePayload(p),

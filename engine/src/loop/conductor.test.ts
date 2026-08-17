@@ -2223,6 +2223,48 @@ test("#890: a lane that reclaims before its first live-telemetry probe carries c
   st.close();
 });
 
+test("#890: reclaim-done carries costEstimated: true when the probe's settled cost is itself the pinned-price estimator's figure, never a real provider total", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-est", 92);
+  sup.probes["lane-est"] = { ...DEFAULT_PROBE, done: true, hasPr: true, costUsd: 2, costEstimated: true };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-done"]);
+  const payload = events[0]!.payload as Record<string, unknown>;
+  assert.equal(payload.costEstimated, true);
+  st.close();
+});
+
+test("#890: reclaim-done carries costEstimated: false for a known-real, provider-reported settled cost", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-real", 93);
+  sup.probes["lane-real"] = { ...DEFAULT_PROBE, done: true, hasPr: true, costUsd: 3, costEstimated: false };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-done"]);
+  const payload = events[0]!.payload as Record<string, unknown>;
+  assert.equal(payload.costEstimated, false);
+  st.close();
+});
+
+test("#890: reclaim-done carries no costEstimated field when the probe never classified the settled cost's provenance", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-unknown-provenance", 94);
+  sup.probes["lane-unknown-provenance"] = { ...DEFAULT_PROBE, done: true, hasPr: true, costUsd: 4 };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["reclaim-done"]);
+  const payload = events[0]!.payload as Record<string, unknown>;
+  assert.ok(!Object.hasOwn(payload, "costEstimated"), "provenance unknown — never coerced to a guessed boolean");
+  st.close();
+});
+
 // ── #601 mirror: the FAILED (no PR, no env signature) ESCALATE path. Forge writes there already
 //   precede the terminal upsert (parity with the DEAD path, unrelated to #223 — see the ordinary
 //   `next === "ESCALATE"` branch's own comment) — the new comment slots in alongside the

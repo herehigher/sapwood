@@ -4,8 +4,10 @@ import test from "node:test";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
+import type { LoopEvent } from "../api/types.ts";
 import type { EventKind } from "../copy.ts";
 import type { DomainEvent, KnownDomainEvent, UnknownDomainEvent } from "../domain-event.ts";
+import { toDomainEvent } from "../domain-event.ts";
 import { foldOpenAttention } from "../entities.ts";
 import { registerRealDom } from "../test-dom.ts";
 import { ActivityFeed, FEED_RENDER_CAP } from "./ActivityFeed.tsx";
@@ -24,6 +26,17 @@ const NOW = new Date("2026-08-06T12:00:00.000Z");
 // (domain-event.ts) actually classifies any real, mapped wire kind into.
 const ev = (id: number, kind: EventKind, payload: Record<string, unknown> = {}): KnownDomainEvent => ({
   known: true,
+  id,
+  ts: new Date(NOW.getTime() - (100 - id) * 1000).toISOString(),
+  kind,
+  payload,
+});
+
+/** A raw, engine-shaped wire row (`api/types.ts`'s `LoopEvent` — `id`/`ts`/`kind`/`payload`,
+ *  nothing else), for tests that must prove a payload survives the real `toDomainEvent` parse
+ *  boundary rather than a hand-built `KnownDomainEvent` fixture (same pattern as
+ *  `NeedsAttention.test.tsx`'s own `wire` helper). */
+const wire = (id: number, kind: string, payload: Record<string, unknown> | null): LoopEvent => ({
   id,
   ts: new Date(NOW.getTime() - (100 - id) * 1000).toISOString(),
   kind,
@@ -467,17 +480,26 @@ test("#900 finding [0]: with pinned rows alone exceeding the cap, the shown-stat
 
 // ── #890 (§3 E): est→real calibration line on lane settlement — issue verification plan Tier A ─
 //
-// A `reclaim-done` domain event shaped like the engine's real payload (`conductor.ts`'s
-// `reclaimTerminalLane` — `costUsd` the settled real figure, `estCostUsd` the lane's own
-// last-known live estimate), fed through the feed's ordinary event pipeline (`ev()`, the SAME
-// fixture helper every other test in this file uses to build a `KnownDomainEvent` — never a
-// hand-built calibration prop), asserting the rendered sentence carries the exact "est $X → real
-// $Y" text.
+// A raw, engine-shaped `reclaim-done` wire row (`conductor.ts`'s `reclaimTerminalLane` —
+// `costUsd` the settled figure, `costEstimated` its own known-real flag, `estCostUsd` the lane's
+// last-known live estimate), pushed through the REAL `toDomainEvent` parse boundary rather than
+// a hand-built `KnownDomainEvent` fixture, asserting the rendered sentence carries the exact
+// "est $X → real $Y" text.
 
-test("#890: a lane-settlement event carrying both estCostUsd and costUsd renders the est→real calibration line, through the real event pipeline", () => {
-  const events = [ev(1, "reclaim-done", { worker: "w1", issue: 90, next: "DRIVING", estCostUsd: 6.21, costUsd: 5.8 })];
-  const html = renderToStaticMarkup(<ActivityFeed events={events} pinnedAttention={[]} titles={{}} now={NOW} />);
+test("#890: a lane-settlement event carrying estCostUsd and a known-real costUsd renders the est→real calibration line, through the real toDomainEvent boundary", () => {
+  const event = toDomainEvent(
+    wire(1, "reclaim-done", { worker: "w1", issue: 90, next: "DRIVING", costUsd: 5.8, estCostUsd: 6.21, costEstimated: false }),
+  );
+  const html = renderToStaticMarkup(<ActivityFeed events={[event]} pinnedAttention={[]} titles={{}} now={NOW} />);
   assert.match(html, /est \$6\.21 → real \$5\.80/);
+});
+
+test("#890: a lane-settlement event whose settled costUsd is itself an estimate renders no calibration line — never labels an estimate as real", () => {
+  const event = toDomainEvent(
+    wire(1, "reclaim-done", { worker: "w1", issue: 90, next: "DRIVING", costUsd: 5.8, estCostUsd: 6.21, costEstimated: true }),
+  );
+  const html = renderToStaticMarkup(<ActivityFeed events={[event]} pinnedAttention={[]} titles={{}} now={NOW} />);
+  assert.doesNotMatch(html, /est \$/);
 });
 
 test("#890: a lane-settlement event with no est/real figures on the payload renders no calibration line at all", () => {

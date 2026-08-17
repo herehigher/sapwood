@@ -24,9 +24,9 @@ function laneHasCostToShow(lane: Lane): boolean {
   return (lane.costUsd ?? 0) + (lane.costUsd === null ? (lane.estCostUsd ?? 0) : 0) > 0;
 }
 
-/** #890 gate② finding [1] (lane-bars-self-scale): the card's own bar ceiling is the common
- *  worker soft-budget (`worker.budgetUsdSoft`, allowlisted config — the SAME reference a reader
- *  compares every lane's spend against, `ConfigDrawer`'s own "Worker" group), never the amount
+/** #890: the card's own bar ceiling is the common worker soft-budget (`worker.budgetUsdSoft`,
+ *  allowlisted config — the SAME reference a reader compares every lane's spend against,
+ *  `ConfigDrawer`'s own "Worker" group), never the amount
  *  being drawn itself — a self-scaled max made every positive figure render 100% full regardless
  *  of size, losing all budget context. `CostBar` already clamps a bar past 100% (a lane that
  *  overran its soft budget still draws full, never off-track), so an unreadable config's fallback
@@ -56,8 +56,8 @@ export interface LaneBoardProps {
   repoUrl?: string | undefined;
   /** The loop-state fetch itself failed — the documented `disconnected` empty state. */
   disconnected?: boolean;
-  /** #890 gate② finding [1]: `worker.budgetUsdSoft` (allowlisted config) — the lane bar's own
-   *  ceiling. `null` when the config is unreadable, same honest-unknown posture as `lanesMax`. */
+  /** #890: `worker.budgetUsdSoft` (allowlisted config) — the lane bar's own ceiling. `null`
+   *  when the config is unreadable, same honest-unknown posture as `lanesMax`. */
   workerBudgetUsdSoft?: number | null;
   now?: Date;
 }
