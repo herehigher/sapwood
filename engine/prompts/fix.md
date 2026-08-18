@@ -59,6 +59,13 @@ an attempt in your reasoning is not evidence that it happened.
    you are unsure whether any part of the finding is code-verifiable, it is not
    tier-C-only — fix it. This does not apply when the finding also names a
    code-verifiable gap alongside the missing probe; fix that part first.
+   **A tier-C-only finding is disputed in THIS round's report even when the same
+   review also raised other, code-verifiable findings you're fixing here** — disputing
+   costs nothing and needs none of that other work finished first. Never omit it from
+   `findingResponses` planning to dispute it "once the rest is done" or in a later
+   round; that leaves it neither addressed nor disputed, so the next re-review just
+   raises the identical finding again and burns a whole extra fix/review round to reach
+   the same dispute you could have filed now.
 6. **Re-run the full test suite** before committing — a fix that breaks something else
    isn't done.
 7. **Authoritative signals over inferred ones.** Widening a free-text pattern until the failing
