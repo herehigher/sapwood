@@ -281,6 +281,11 @@ item becomes a routed page, that is a scope amendment to this section.
   the feed (`plan-review-escalated`, `verify-na-proposed`, …) and all
   pre-#207 history — simply shows no tooltip; that bounded blind spot is
   accepted, never patched with a live lookup.
+
+  Owner ruling Q3, 2026-08-17 (#729 design review; implementing issue #926): lanes take
+  one full-width row above the activity feed (`lanes-dark.png`'s 3-card composition), replacing
+  this section's C|D half-split — the feed renders full-width below. Today's C|D half-split
+  (`.lane-activity-row`, `App.tsx`) and the diagram above stand until #926 lands.
 - **D — Activity feed.** The `events` stream through the copy map (§7),
   newest first, relative timestamps; kind-colored dot per entry. Payload
   details (worker, head, mode) collapse behind each entry — never in the
@@ -522,6 +527,12 @@ calm panels, hairline rules, data set in mono. Deliberately **not** another
 near-black dev dashboard with an acid accent, and not a generic cream+serif
 landing page — the palette is drawn from the material itself.
 
+Owner ruling Q1, 2026-08-17 (#729 design review; implemented by #921): ring-disc honesty over
+constant-footprint mimicry — the count stays strictly one ring per merge (no phantom base
+grain), and the zero-merge state opens with a small sapling glyph in place of an empty disc
+(§6 zone 4's `TRUNK`/`ringRadii` growth rule, `stage.tsx`). The mockup's always-full disc and
+this section's "the rings are the record" pulled opposite ways at low counts; honesty won.
+
 ## 5. Design tokens
 
 One `tokens.css`; both themes derive from the same names. Dark ("heartwood")
@@ -576,6 +587,12 @@ Rules: amber means "in motion", `--moss` means "done well", `--rust` means
 "a person should look" — never decorative use of any of the three. Rings are
 stroked in `--bark` at 40% alpha; the growing (current) ring in `--sap-text`.
 
+Owner ruling Q5, 2026-08-17 (#729 design review; implemented by #924): `--sap` splits into
+`--sap-text` (stroke/text/outline role) and `--sap-fill` (filled-surface role, flat in both
+themes); light theme adds a `--sap-fill-outline` 1px `--sap-text` outline on every filled
+`.hero-pool-chip`/droplet/`.spend-meter-bar` fill, since the flat `--sap-fill` alone fails the
+3:1 non-text contrast floor there. Detail below.
+
 Amended 2026-08-17 (#924, #729 remainder D32/Q5): `--sap` split into `--sap-text`
 (stroke/text/outline role — unchanged value, `light-dark(#8A5A14, #E8A33D)`, still
 darkening for light theme) and `--sap-fill` (filled-surface role — chips, droplets,
@@ -628,11 +645,15 @@ the dashboard concept renders) both recorded the shipped headers as a deviation 
 baseline mockups render all-mono; both probes filed it as non-blocking and pointed at one
 shared adjudication rather than two. Ruling: the token table stands as specced — Fraunces for
 display headers — and the baseline PNGs are the out-of-date artifact, not the implementation.
-**Scope: FONT FAMILY only** (owner ruling Q2, 2026-08-17, #924/#729 remainder) — this entry
-never spoke to casing, letter-spacing, or scale; those follow the mockups directly (uppercase,
-letter-spaced, ~16–18px at 1440 — `.panel-head`, panels.css) and are #924's own scope, not a
-reopening of this one. No code change follows from this #728 entry itself; it exists so
-#144/#145's "recorded for adjudication" deviation has a resolved answer on file.
+No code change follows from this #728 entry itself; it exists so #144/#145's "recorded for
+adjudication" deviation has a resolved answer on file.
+
+Owner ruling Q2, 2026-08-17 (#729 design review; implemented by #924, hero labels by #922):
+narrows the #728 entry above to FONT FAMILY only — casing, letter-spacing, and scale follow
+the mockups (uppercase, letter-spaced, ~16–18px at 1440), not #728's own scope. Hero node
+labels render `--font-data` mono uppercase below their node (§6 zone descriptions). Every
+panel's title row shares one anatomy: title + right-aligned stat cluster + hairline rule
+(`.panel-head`, panels.css).
 
 Scale: 13 px base (data-dense surface), 1.25 ratio up to the 33 px display
 size; line-height 1.5 body, 1.2 display. Weights: 400/600 only.
@@ -654,6 +675,10 @@ numbers carry their type glyphs (⊙ / merge-arrow, §3 C), and the
 activity feed is the hero's accessible text channel (`aria-live="polite"` on
 new entries). The est/settled budget-bar split (§3 E) also never relies on
 color alone — the est segment carries a texture (hatch) or the `est` label.
+
+**Process note** (#729 design review, 2026-08-17): a design-fidelity issue's ACs carry a
+mockup/live crop pair as their own oracle — element-present or token-exact alone is never
+finish evidence (REVIEW-DOCTRINE.md's STRUCTURE-AS-FINISH sub-case).
 
 ## 6. Motion spec — the hero Loop
 
@@ -762,6 +787,10 @@ drive it, via one anime.js timeline per transition:
 | `handoff` | Droplet folds back into the backlog with a small progress badge ("saved for a successor"). |
 | `reclaim-failed`, `reclaim-dead`, `rollback-escalated` | Droplet stops, flips `--rust` with a static ✕; no shaking, no bouncing — failures are still, not loud. (`drive-needs-human` routes via the escalation branch above.) |
 | `ceiling-escalated` / PAUSE / kill switch | Stage dims; ambient sap flow stops; header state word explains. |
+
+Owner ruling Q6, 2026-08-17 (#729 design review; implemented by #920): dimming applies only to
+a LIVE OPEN round under a safety tier or ceiling breach — replay and `?demo` never dim,
+regardless of engine state (`isStageDimmed`'s `isLiveOpenRound` param, `hero/state.ts`).
 
 Ambient (CSS only): a faint sap shimmer along active lane channels (≥ 3 s
 cycle); the current outermost ring breathes at low amplitude while any lane
@@ -1427,6 +1456,12 @@ mutable snapshot or outside the engine's own DB is live-only.
 - Panels that cannot replay dim with an **on-panel** "live only" badge. A
   footer note alone is not acceptable — the badge belongs on the panel that
   would otherwise lie.
+
+Owner ruling Q4, 2026-08-17 (#729 design review; implementing issue #927): the lane
+board reconstructs a replayed lane NARRATIVE from the event stream (`dispatched`/`handoff`/
+`reclaim-done`, incl. cost/est/merged) in replay and `?demo`, labelled **REPLAYED** — never a
+fake live snapshot. Today's `LiveOnly` wrap (`App.tsx`) and the boundary table row stand until
+#927 lands.
 
 ### Renderer contract
 

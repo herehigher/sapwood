@@ -33,9 +33,9 @@ than once, and doctrine for how the loop should treat review findings in general
 
 **Carrier split (#434).** This file governs the **engine's own** reviewer; standing
 review-*discipline* rules for the **external** review bot live in the repo-root
-[`AGENTS.md`](../AGENTS.md), which that bot reads directly, and per-PR context stays in the
-verification plan appended to the review-request comment. The three carriers deliberately do not
-restate each other — a rule belongs to exactly one of them.
+[`AGENTS.md`](../AGENTS.md), which it reads directly; per-PR context lives in the
+review-request comment's own verification plan. The three carriers deliberately do not restate
+each other — a rule belongs to exactly one of them.
 
 ## Technical invariants
 
@@ -57,13 +57,10 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
 - **Safety-layer cross-check rule.** Any new engine state machine or dispatch path must be
   reviewed against each existing safety layer — kill switch, pause, cost/wall-clock ceiling, and
   both drain paths (graceful handoff and hard escalation): what does this mechanism do while that
-  layer is active, and what does that layer's firing do to this mechanism's state? (#168: paid
-  probes running past a breached ceiling, and drains falsely clearing or permanently wedging a
-  canary episode, were both misses of exactly this cross-product.)
+  layer is active, and what does that layer's firing do to this mechanism's state? (#168.)
 - **Unwired-function rule.** A shipped recovery/cleanup function with zero production callers is
   a defect, not a reserve: verify every new cleanup, resume, or clear entry point has a live
-  caller on the path that needs it. (Recurring class: `supervisor.resume()` in #172,
-  `clearEscalationMarker()` in #168's first round.)
+  caller on the path that needs it. (#172, #168.)
 
 ### Is this test real?
 
@@ -71,13 +68,13 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   race between uncontrolled real operations — real work vs. a real timer, no seam controlling
   either side. Reddened `main` three times (#403, #416). For a LOAD-BEARING race, the fix is a
   seam: a fake clock/collaborator, or a fast, deterministic, selectively self-terminating fake
-  (PR #418's fake-git shim). FINE, and a different failure class: an outer hang-guard bounding
-  catastrophe rather than deciding the verdict, or a real passthrough timed against a generous,
-  documented, non-load-bearing margin — PR #418's `REAL_OP_TIMEOUT_MS` widened 500ms→1000ms
-  (#418), then 1000ms→3000ms (#403), each widen stated in-code as measured-cost < margin <
-  guard-ceiling, not chosen by feel. Ask: does the verdict depend on which of two uncontrolled
-  real operations finishes first? If yes, it needs a seam; if it's a documented backstop around a
-  deterministic fake or bounded passthrough, it is compliant.
+  (PR #418's fake-git shim). FINE: an outer hang-guard bounding catastrophe rather than deciding
+  the verdict, or a real passthrough timed against a generous, documented, non-load-bearing
+  margin — PR #418's `REAL_OP_TIMEOUT_MS` widened 500ms→1000ms, then 1000ms→3000ms (#403), each
+  widen stated in-code as measured-cost < margin < guard-ceiling, not chosen by feel. Ask: does
+  the verdict depend on which of two uncontrolled real operations finishes first? If yes, it
+  needs a seam; if it's a documented backstop around a deterministic fake or bounded passthrough,
+  it is compliant.
 - **Test-realism family — prove it against the real thing, not a stand-in for it.** Four variants
   of one failure: an assertion that looks like it proves an acceptance criterion but actually
   proves something else — a copied constant, a fixture's own preset, or an isolated unit — never
@@ -148,6 +145,12 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     region, position read off rendered markup wherever filtering/compaction can diverge — a
     constant is fine for genuinely static geometry. Derive the covered set from what the AC/doc
     names, never a hand-typed list.
+  - **STRUCTURE-AS-FINISH (design-fidelity ACs need a crop-pair oracle, not element-presence).**
+    Failure: a ledger/AC closes "resolved" because the element exists and its token resolved,
+    while the render is far from mockup finish (#729). Rule: name the visual properties
+    claimed — type family/scale/weight, stroke, contrast, density, size ratio, alignment — against
+    a mockup crop pair; element-present/token-exact alone is never finish evidence, and
+    "resolved" needs the crop pair on record.
 
 ### Documentation claims
 
@@ -172,19 +175,18 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   two structured, provider-authoritative signals first (a rejected `rate_limit_event`, an errored
   result carrying `api_error_status:429`) before falling back to the enumerated pattern list
   (`DEFAULT_LLM_FAILURE_PATTERNS`). The two failure directions are NOT symmetric: a too-wide
-  pattern gives a false POSITIVE that halts a healthy engine immediately and visibly; a too-narrow
-  list gives a false NEGATIVE that — per `DEFAULT_LLM_FAILURE_PATTERNS`'s own accounting — the
-  empty-spin breaker bounds on the peripheral-role path, but nothing in the classifier bounds on
-  the dispatched-WORKER-lane path; only the OUTER safety ceiling (`cost.roundBudgetUsd`/
-  `dailyBudgetUsd`) contains a recurring miss there. Prefer narrow anyway, naming that
-  outer-layer dependency and the residual blind spot explicitly rather than claiming full
-  coverage.
+  pattern gives a false POSITIVE that halts a healthy engine immediately; a too-narrow list gives
+  a false NEGATIVE that — per `DEFAULT_LLM_FAILURE_PATTERNS`'s own accounting — the empty-spin
+  breaker bounds only on the peripheral-role path; the dispatched-WORKER-lane path depends
+  instead on the OUTER safety ceiling (`cost.roundBudgetUsd`/`dailyBudgetUsd`). Prefer narrow
+  anyway, naming that outer-layer dependency and the residual blind spot explicitly rather than
+  claiming full coverage.
 - **Doctrine self-modification rule.** A PR that modifies this review-doctrine file itself must
-  be prominently flagged in review, with a recommendation to route it needs-human rather than
-  auto-merge. The reviewer applies the doctrine loaded at engine construction, never the version
-  on the PR's branch — the change cannot influence the doctrine used for its own review, but it
-  can still pass under the prior rules, so a human should confirm rule changes. This file is
-  deliberately NOT guard-protected (docs/security.md) — this prose IS the enforcement.
+  be prominently flagged in review, recommended needs-human rather than auto-merge. The reviewer
+  applies the doctrine loaded at engine construction, never the version on the PR's branch — the
+  change cannot influence its own review, but can still pass under the prior rules, so a human
+  should confirm rule changes. This file is deliberately NOT guard-protected (docs/security.md)
+  — this prose IS the enforcement.
 - **A tier-C cannot-confirm is not a producer stall signal, and it burns spend twice**
   (#791; #857, #862, #863; #865, #901, #902, #903; #911). `docs/security.md`'s evidence tiers
   make tier-C (human-witnessed probe) producer-unforgeable BY DESIGN — the producer never
@@ -196,9 +198,9 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   comment: a COMMENT-carried record can't reach a later review; a BODY-carried one can, via
   `checkAcDriftBeforeDrive` flagging drift and gated re-entry's `buildAcSnapshot`
   (`ac-snapshot.ts`)/`State.recordAcSnapshotAndReclaimWorker` re-snapshot. #865's unimplemented
-  fix routes an all-operator-owned verdict to `ESCALATE` (mixed: `FIXUP`); until then, closing
-  one needs a human merge decision reading the record, or (body-carried only) that rebaseline.
-  Grounding: `docs/security.md`'s AC-evidence-tier doctrine, Decision #8.
+  fix routes an all-operator-owned verdict to `ESCALATE`; until then, closing one needs a human
+  merge decision reading the record, or a body-carried rebaseline. Grounding: `docs/security.md`'s
+  AC-evidence-tier doctrine, Decision #8.
 
 How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbatim principles):
 
@@ -219,8 +221,8 @@ How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbati
 ## Prompt architecture doctrine (#699)
 
 Three governing principles for what belongs in a role's SHIPPED PROMPT TEXT
-(`engine/prompts/*.md`), owner ruling 2026-08-06. Standing test for gate② on any prompt-touching
-PR; apply clause-by-clause, not file-by-file. Worked example:
+(`engine/prompts/*.md`), owner ruling 2026-08-06. Gate② standard for any prompt-touching PR,
+applied clause-by-clause, not file-by-file. Worked example:
 `docs/design/699-prompt-architecture-audit.md`.
 
 1. **A — legitimate content.** Role definition, duties, scope, goals, deliverables, norms,
@@ -235,10 +237,9 @@ PR; apply clause-by-clause, not file-by-file. Worked example:
 
 **Q3 safety-floor exception.** A rule whose omission produces unsafe output (the AC-evidence-tier
 floor; the human-merge-only-paths enumeration) stays prompt-resident even where a pull-model
-channel — `engine/src/roles/skills-plugin.ts`'s (#639/#640) on-demand skill serving the same
-`docs/security.md` content — also exists: a session must actively invoke a skill, so it is never
-a load-bearing substitute for content that must be unconditionally seen. Where principle 3
-collides with a floor like this, record the tension and the proposed carrier instead of
-deleting — a mechanically-pinned mirror-pair test against the canonical source
-(`engine/src/roles/prompts.test.ts`'s `#628`/`#653` tests) is the shipped answer when a floor has
-more than one hand-maintained carrier.
+channel (`skills-plugin.ts`, #639/#640, serving the same `docs/security.md` content) also
+exists: a session must actively invoke a skill, so it is never a load-bearing substitute for
+content that must be unconditionally seen. Where principle 3 collides with a floor like this,
+record the tension and the proposed carrier instead of deleting — a mechanically-pinned
+mirror-pair test against the canonical source (`prompts.test.ts`'s `#628`/`#653` tests) is the
+shipped answer when a floor has more than one hand-maintained carrier.
