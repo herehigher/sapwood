@@ -102,7 +102,7 @@ export function railContent(themeKey: "system" | "sapwood" | "heartwood", onTogg
         <ThemeGlyph />
       </button>
       <button type="button" className="icon-rail-item icon-rail-config" title="config" aria-label="open config" onClick={onOpenConfig}>
-        <Settings size={16} aria-hidden="true" />
+        <Settings size={16} strokeWidth={1.5} aria-hidden="true" />
       </button>
     </nav>
   );

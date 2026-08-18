@@ -268,6 +268,9 @@ test("#955 AC1: the config button renders lucide-react's Settings icon, not the 
   // No hand-drawn GearGlyph remnants: its 2.4-radius hub circle and its eight-stroke radiating path.
   assert.doesNotMatch(button as string, /<circle[^>]*r="2\.4"/);
   assert.doesNotMatch(button as string, /M8 1\.5 V3\.3/);
+
+  // icons.tsx header spec for adopted lucide icons: 1.5 stroke width, not lucide's own 2px default.
+  assert.match(button as string, /<svg[^>]*stroke-width="1\.5"/);
 });
 
 // #955 AC2: source-text assertion — GearGlyph must be gone, not just unused.
