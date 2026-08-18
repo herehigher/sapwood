@@ -242,6 +242,25 @@ test("#891 AC3: the strip's header summary line matches the mockup's grammar —
   assert.match(html, /3 waiting · oldest 5d · 1 dissent/);
 });
 
+// #925 AC4 follow-up: the header's "oldest" figure used to floor to whole days — a fold whose
+// oldest item is only hours old (a real `?demo` idle-state shape, since B3's demo-clock fix)
+// read "oldest 0d", contradicting the row right below it plainly showing "3h". The header now
+// shares NeedsAttention's own `formatCompactAge` unit ladder via `attentionSummary`, so it reads
+// the SAME magnitude the emphasized row does.
+test('#925 AC4: the header "oldest" figure reads the compact age (e.g. "oldest 3h"), never floored to "oldest 0d", for a sub-day-old fold', () => {
+  const wireEvents: LoopEvent[] = [
+    // Oldest — 3 hours back.
+    wire(1, "2026-08-10T09:00:00.000Z", "fix-rounds-capped", { issue: 10, pr: 1, fixRounds: 3, cap: 3 }),
+    // Newest — 10 minutes back.
+    wire(2, "2026-08-10T11:50:00.000Z", "drive-needs-human", { pr: 2, issue: 20 }),
+  ];
+  const open = foldAt(wireEvents);
+  assert.equal(Object.keys(open).length, 2);
+
+  const html = renderToStaticMarkup(<NeedsAttention items={Object.values(open)} titles={{}} now={NOW} />);
+  assert.match(html, /2 waiting · oldest 3h · 0 dissent/);
+});
+
 // ── #892 AC1: the attention-age tooltip (was a bare `title=`) is a real Radix tooltip now —
 // Tab-reachable, content visible/queryable on focus. ──────────────────────────────────────────
 

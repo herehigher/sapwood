@@ -6,6 +6,7 @@
 import { kindsTagged } from "../../engine/src/state/event-kinds/index.ts";
 import { hasAttention, isDissentSignal } from "./copy.ts";
 import type { DomainEvent } from "./domain-event.ts";
+import { formatCompactAge } from "./format-time.ts";
 
 /** An entity's remembered title, keyed by ISSUE number (frontend-design.md §3 C). Every event
  *  that carries a PR number also carries that PR's issue number in the same payload (`merged`,
@@ -213,14 +214,20 @@ export function foldOpenAttention(events: readonly DomainEvent[], seed: OpenAtte
  *  dissent" (frontend-design.md mockup) — computed from the SAME `foldOpenAttention` result the
  *  strip already renders rows from, never a second derivation. ISO timestamps compare correctly
  *  as plain strings (same convention `foldOpenAttention`'s own ordering relies on), so the
- *  oldest item is just the lexical minimum `ts`. `oldestDays` floors — an item open for under a
- *  day reads "oldest 0d", honest rather than rounding up to a day that hasn't passed. */
-export function attentionSummary(items: readonly DomainEvent[], now: Date): { waiting: number; oldestDays: number; dissent: number } {
+ *  oldest item is just the lexical minimum `ts`.
+ *
+ *  #925 AC4 follow-up: `oldestAge` is `format-time.ts`'s `formatCompactAge` — the SAME formatter,
+ *  same `now` argument, as the rows' own emphasis box — never a second, independently-floored
+ *  "days since" figure. A day-floor here used to read "oldest 0d" for anything under 24h wide
+ *  (honest about not rounding UP, but silently wrong once a real fixture/round has a sub-day
+ *  oldest item and the row right below it plainly reads "3h") — the compact age reports the
+ *  SAME magnitude the emphasized row does, at whatever unit actually fits (s/m/h/d). */
+export function attentionSummary(items: readonly DomainEvent[], now: Date): { waiting: number; oldestAge: string; dissent: number } {
   const oldestTs = items.reduce<string | null>((min, e) => (min === null || e.ts < min ? e.ts : min), null);
-  const oldestDays = oldestTs === null ? 0 : Math.floor((now.getTime() - new Date(oldestTs).getTime()) / 86_400_000);
+  const oldestAge = oldestTs === null ? "0s" : formatCompactAge(oldestTs, now);
   return {
     waiting: items.length,
-    oldestDays,
+    oldestAge,
     dissent: items.filter((e) => isDissentSignal(e.kind)).length,
   };
 }

@@ -233,7 +233,7 @@ export function NeedsAttention({ items, titles, repoUrl, now, onInspect, roundEs
       <div className="attention-header panel-head">
         <h2>needs attention</h2>
         <span className="muted data attention-summary panel-head-stat">
-          {summary.waiting} waiting · oldest {summary.oldestDays}d · {summary.dissent} dissent
+          {summary.waiting} waiting · oldest {summary.oldestAge} · {summary.dissent} dissent
         </span>
       </div>
       <ul aria-live="polite" className="attention-list">
