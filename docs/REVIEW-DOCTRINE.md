@@ -94,7 +94,7 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     Worked example: `textBox()`/`CHAR_ADVANCE` (`dashboard/src/hero/hero.test.ts`) turns
     font-size/char-count into a rendered extent without a browser, tied to the real draw path's
     own inputs, plus a cascade/source-order assertion instead of hand-copying which rule wins.
-    Four shapes seen (#353, PR #738 (issue #728), PR #737): (1) the test computes its
+    Four shapes (#353, #728, #737): (1) the test computes its
     expected value outside the thing it's testing instead of reading/pinning it against the real
     source; (2) the test exercises only the easy/nominal instance while the AC's own wording
     names a combinatorial or boundary case it never constructs; (3) the test asserts identity
