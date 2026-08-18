@@ -421,9 +421,15 @@
 
 /* #890: the lane card's own settled/est bar — full card width, flush with the foot row above it.
  * #924 AC2: height also deliberately unchanged from `.cost-bar`'s 12px, same reasoning as
- * `.spend-meter-bar` above. */
+ * `.spend-meter-bar` above.
+ * #926 gate② finding [0] (ac3-lane-est-hatch): a custom-property override, not a second hatch
+ * paint site — `CostBar.tsx`'s `<line stroke="var(--hatch-stroke)">` still reads ONE shared
+ * declaration, it just resolves `--hatch-stroke-lane` (tokens.css) here instead of the global
+ * `--hatch-stroke` default, since a lane card is the only bar instance that needed dark theme's
+ * >= 3:1-vs-track floor the shared hatch stroke doesn't clear. */
 .lane-card-bar {
   width: 100%;
+  --hatch-stroke: var(--hatch-stroke-lane);
 }
 
 /* ---- round navigator (§3 A, #889) ----------------------------------------- */

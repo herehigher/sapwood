@@ -154,6 +154,17 @@
   --hatch-stroke-width: 1.5px;
   --hatch-gap: 4px;
   --hatch-angle: 45deg;
+  /* #926 gate② finding [0] (ac3-lane-est-hatch): the shared --hatch-stroke above (--bark, full
+   * opacity) reads under 2:1 against the real .cost-bar-track (--bark at the track's own reduced
+   * opacity) in dark theme — well short of AC3's own "est hatch ... >= 3:1 vs track" floor for a
+   * LANE card's bar specifically. Scoped to `.lane-card-bar` only (panels.css) via a custom-
+   * property override, so the shared header/cost-panel hatch (still --hatch-stroke's own global
+   * --bark value) is untouched. Aliases --sap-fill directly (never a hand-duplicated hex) — the
+   * SAME hue tokens.test.ts's own checkFillTrackContrast already proves clears 3:1 against this
+   * exact track in dark theme (4.24:1). Light theme inherits the same documented 1.15:1 shortfall
+   * --sap-fill's own fill pill already carries there (tokens.test.ts) — a thin hatch line has no
+   * meaningful place for its own outline stroke, so this is accepted, not "fixed," in light. */
+  --hatch-stroke-lane: var(--sap-fill);
 }
 
 :root[data-theme="heartwood"] {
