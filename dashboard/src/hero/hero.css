@@ -76,9 +76,19 @@
   fill: var(--bark-text);
 }
 
+/* #922 AC1: uppercase letter-spaced mono, matching every OTHER small-print label on the stage
+ * (`.hero-num`/`.hero-node-caption`) — #728 stands for FONT FAMILY only (owner ruling Q2); casing/
+ * tracking follow the mockups directly. `letter-spacing` is a literal px value (0.96px = 0.08em at
+ * this rule's own 12px), not `0.08em` — the SAME happy-dom em-resolution quirk `.hero-phase`'s own
+ * doc already worked around (an em value resolves against the DEFAULT 16px font-size, not this
+ * rule's own cascaded 12px, whenever the SAME selector declares its own font-size). 12px stage
+ * units already clears AC1's "≥ 12px at 1440" floor before any scaling (12 × RENDER_SCALE_1440
+ * 1.2 = 14.4px). */
 .hero-node-label {
-  font-family: var(--font-body);
+  font-family: var(--font-data);
   font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.96px;
   fill: var(--sapwood);
 }
 
@@ -93,6 +103,22 @@
  * light theme the way --sap-text still does (see tokens.css's own doc on why --heartwood itself
  * would get this backwards in light theme). */
 .hero-pool-num {
+  font-weight: 600;
+  fill: var(--on-sap-fill);
+}
+
+/* #922 AC3: both the filled and outlined backlog cards' own numeral — declared AFTER .hero-num
+ * (11px) so its 12px (→ 14.4px at 1440, clearing the AC's own ≥ 14px floor) wins on equal
+ * specificity, same later-wins discipline as `.hero-small`'s own doc above. */
+.hero-backlog-num {
+  font-size: 12px;
+}
+
+/* #922 AC2: the droplet's own number, now inside the shape instead of floating above it.
+ * `font-size` is inline (`stage.tsx`'s `dropletNumFontPx`) — the nominal 10px for any realistic
+ * issue/PR number, shrinking only past `DROPLET_MAX_R` (extreme digit counts); no redundant
+ * value declared here to drift from that (`.hero-ring-count`'s own doc, same reasoning). */
+.hero-droplet-num {
   font-weight: 600;
   fill: var(--on-sap-fill);
 }
@@ -163,12 +189,6 @@
 }
 
 /* ---- Structure ----------------------------------------------------------- */
-
-.hero-well {
-  fill: none;
-  stroke: var(--bark);
-  stroke-opacity: 0.25;
-}
 
 /* #924 AC3: the READY chip must be fully opaque — a translucent `fill-opacity` composites the
  * flat, opaque `--sap-fill` role over the panel (~#573F1F in dark theme) instead of painting the
@@ -275,6 +295,13 @@
   stroke-width: 2;
 }
 
+/* #922 AC4/AC6: the person glyph inside the escalation circle — the SAME currentColor
+ * inheritance every other node icon uses (`.hero-planning-icon`/`.hero-gate-icon`'s own doc),
+ * pinned to `--rust` (the escalation node's own colour) rather than the idle `--bark` those use. */
+.hero-escalation-icon {
+  color: var(--rust);
+}
+
 /* #897: circular gate nodes, not rects — see `GATES.r`/`gateIcon` in stage.tsx. Scoped to
  * `.hero-gate-node` (the outer node circle), not a bare `circle` selector, since `gateIcon`
  * also draws smaller `<circle>` primitives (the gear hub, the eye pupil) inside the same group
@@ -293,8 +320,13 @@
  * §6: the checkpoints are ONE calm waiting area. They breathe together while a PR waits and
  * never render per-gate progress — v0.2 persists no gate substate to render.
  */
+/* #922 AC8: "waiting is work" — its own STROKE-only breathe channel (never the fill channel the
+ * active node uses below), --sap-text (not the idle --sapwood), a higher floor (~0.6→0.85) than
+ * the plain hero-breathe keyframe, and its own 3.6s period so three simultaneous breathers on
+ * the stage (this, the active-node fill at 2.8s, the current ring at 4.4s) never beat. */
 .hero-gate[data-state="waiting"] .hero-gate-node {
-  animation: hero-breathe 3.2s ease-in-out infinite;
+  stroke: var(--sap-text);
+  animation: hero-breathe-wait 3.6s cubic-bezier(0.45, 0, 0.55, 1) infinite;
 }
 
 .hero-gate.is-merged .hero-gate-node {
@@ -353,9 +385,12 @@
   stroke-width: 3;
 }
 
-/* §6 ambient: the outermost ring breathes at low amplitude while any lane is running. */
+/* §6 ambient: the outermost ring breathes at low amplitude while any lane is running.
+ * #922 AC8: 3.6s → 4.4s — its own period, distinct from the active-node fill (2.8s) and the
+ * waiting-gate stroke (3.6s, freed up by this move) so no two breathers on the stage share or
+ * integer-multiple each other's period. */
 .hero[data-running="true"] .hero-ring[data-current="true"] {
-  animation: hero-breathe 3.6s ease-in-out infinite;
+  animation: hero-breathe 4.4s ease-in-out infinite;
 }
 
 /* ---- Droplets ------------------------------------------------------------ */
@@ -385,38 +420,48 @@
   stroke-opacity: 1;
 }
 
+/* #922 AC8: the RUNNING role reads as a breathing LED — the whole disc breathes, not its edge.
+ * `fill` is the ACTUAL colour (`--sap-fill`, flat in both themes) with `fill-opacity` doing the
+ * breathing (`--sap-fill-halo-floor`/`-peak`, tokens.css, theme-scoped — the SAME floor
+ * `contrast.ts`'s `checkFillFloorContrast` proves clears 3:1 against `--on-sap-fill`); the
+ * hairline STOPS animating and goes static `--bark` at 0.7 — the two channels (fill breathing,
+ * stroke static) don't compete for the viewer's eye the way an animated edge alone did before. */
 [data-active="true"] .hero-planning-node {
-  stroke: var(--sap-text);
-  stroke-opacity: 0.9;
-  animation: hero-breathe 3s ease-in-out infinite;
+  fill: var(--sap-fill);
+  fill-opacity: var(--sap-fill-halo-floor);
+  stroke: var(--bark);
+  stroke-opacity: 0.7;
+  animation: hero-breathe-fill 2.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
 }
 
-/* #879: the target/tree/check glyph inside each PLAN circle — same inactive/active colour
- * split as the circle it sits in, so the icon never carries state the circle doesn't already.
- * #897: `.hero-gate-icon` (the CI gear / Review eye) shares this same stroke styling — a
- * separate class only so `hero.test.ts`'s planning-trio icon count stays scoped to the
- * planning zone; gates carry no active/inactive state, so they never pick up the
- * `[data-active="true"]` rule below either way. */
+/* #922 AC8: the soft glow ring — a second, larger circle behind the disc (`nodeHalo`, stage.tsx),
+ * blurred (`#hero-node-glow`, the `<filter>` def) and breathing in sync at its own, much lower
+ * alpha band so it reads as a halo, never a second disc. Only rendered in markup for the active
+ * node (`stage.tsx`) — an inactive node has no halo at all, not just a hidden/zero-opacity one. */
+.hero-node-halo {
+  fill: var(--sap-fill);
+  fill-opacity: var(--sap-fill-glow-floor);
+  stroke: none;
+  animation: hero-breathe-glow 2.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+/* #922: every planning/gate icon is now a `lucide-react` glyph (or, for CI, the pasted
+ * `GithubActionsGlyph` static asset) — both draw with `currentColor` (lucide's own stroke
+ * default; the pasted asset's own `fill="currentColor"`), so ONE `color` declaration recolors
+ * either kind identically, the same inheritance `Sprout`'s sapling glyph already validates
+ * (`stage.tsx`'s own doc). `.hero-gate-icon` shares this rule — a separate class only so
+ * `hero.test.ts`'s planning-trio icon count stays scoped to the planning zone; gates carry no
+ * active/inactive state, so they never pick up the `[data-active="true"]` rule below either way. */
 .hero-planning-icon,
 .hero-gate-icon {
-  fill: none;
-  stroke: var(--bark);
-  stroke-width: 1.4;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  color: var(--bark);
 }
 
-.hero-planning-icon-dot {
-  fill: var(--bark);
-  stroke: none;
-}
-
+/* #922 AC8: the glyph sits FIXED in --on-sap-fill once its disc is filled — it never itself
+ * animates (contrast: the disc under it IS moving, so the glyph's own ink must stay put and
+ * simply clear AA against the disc's floor alpha, `checkFillFloorContrast`'s own job). */
 [data-active="true"] .hero-planning-icon {
-  stroke: var(--sap-text);
-}
-
-[data-active="true"] .hero-planning-icon-dot {
-  fill: var(--sap-text);
+  color: var(--on-sap-fill);
 }
 
 /* ---- Ambient ------------------------------------------------------------- */
@@ -428,6 +473,43 @@
   }
   50% {
     stroke-opacity: 0.9;
+  }
+}
+
+/* #922 AC8: the waiting-gate stroke's own floor/peak — higher than `hero-breathe`'s ("waiting is
+ * work", not idle) and a distinct keyframe (not just a reused one at different values) so its own
+ * cubic-bezier easing is authored once, here. */
+@keyframes hero-breathe-wait {
+  0%,
+  100% {
+    stroke-opacity: 0.6;
+  }
+  50% {
+    stroke-opacity: 0.85;
+  }
+}
+
+/* #922 AC8: the active-node disc's own fill-opacity floor↔peak — `--sap-fill-halo-floor`/`-peak`
+ * (tokens.css, theme-scoped). One min→max→min keyframe, no hold at zero — what makes it read as
+ * breathing, not blinking (the AC's own wording). */
+@keyframes hero-breathe-fill {
+  0%,
+  100% {
+    fill-opacity: var(--sap-fill-halo-floor);
+  }
+  50% {
+    fill-opacity: var(--sap-fill-halo-peak);
+  }
+}
+
+/* #922 AC8: the halo's own, much fainter floor↔peak — `--sap-fill-glow-floor`/`-peak`. */
+@keyframes hero-breathe-glow {
+  0%,
+  100% {
+    fill-opacity: var(--sap-fill-glow-floor);
+  }
+  50% {
+    fill-opacity: var(--sap-fill-glow-peak);
   }
 }
 
@@ -450,4 +532,28 @@
 
 .hero[data-motion="reduced"] * {
   animation: none !important;
+}
+
+/* #922 AC8: reduced motion drops the ANIMATION, not the signal — the active node's disc/halo
+ * still render, statically, at their own peak alpha (the halo at a fixed ~0.24, "lit,
+ * identifiable, no motion" per the AC's own wording — not the theme's own peak, which is a moving
+ * TARGET only the animation ever reaches). Both selectors, matching every other reduced-motion
+ * rule in this file (the media query for real OS preference, the data-attribute for the manual/
+ * replay path — `data-motion`'s own doc above). */
+@media (prefers-reduced-motion: reduce) {
+  [data-active="true"] .hero-planning-node {
+    fill-opacity: var(--sap-fill-halo-peak);
+  }
+
+  .hero-node-halo {
+    fill-opacity: 0.24;
+  }
+}
+
+.hero[data-motion="reduced"] [data-active="true"] .hero-planning-node {
+  fill-opacity: var(--sap-fill-halo-peak);
+}
+
+.hero[data-motion="reduced"] .hero-node-halo {
+  fill-opacity: 0.24;
 }

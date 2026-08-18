@@ -176,6 +176,41 @@ export function checkFillTrackContrast(tokensCss: string = readTokensCss(), pane
   return rows;
 }
 
+/**
+ * #922 AC8: the breathing active-node disc's fill oscillates between this FLOOR alpha and a
+ * higher peak — the floor is the worst-case point `--on-sap-fill`'s glyph (which never animates,
+ * §6) must still clear against, composited over `--panel` (every hero node sits inside a panel
+ * card). Exported so `hero.css`'s own `@keyframes` and this check can never silently diverge on
+ * what "floor" means.
+ *
+ * AC8's own text names 0.45 for dark — measured at 2.85:1 here, short of the AC's own 3:1 floor
+ * (`checkFillFloorContrast`'s own test run). Per the AC's own instruction ("raise the floor if it
+ * falls short, never repoint the ink token off --on-sap-fill"), dark is raised to 0.50 (3.15:1,
+ * real margin) — still >= the AC's 0.45 lower bound and well under the "amplitude <= ~1.9x floor"
+ * ceiling that keeps the animation reading as breathing rather than blinking.
+ */
+export const SAP_FILL_HALO_FLOOR = { sapwood: 0.55, heartwood: 0.5 } as const;
+
+/** AC8: `--on-sap-fill` on the breathing disc's floor-alpha `--sap-fill`, composited over
+ *  `--panel` — the WCAG 3:1 non-text boundary (a filled shape's edge/ink against its
+ *  surroundings), same threshold `checkFillTrackContrast` already uses for the same reason. */
+export function checkFillFloorContrast(css: string = readTokensCss()): ContrastRow[] {
+  const themes = parseColorTokens(css);
+  const rows: ContrastRow[] = [];
+  for (const [theme, tokens] of [
+    ["heartwood", themes.dark],
+    ["sapwood", themes.light],
+  ] as const) {
+    const floor = SAP_FILL_HALO_FLOOR[theme];
+    for (const fill of FILL_TOKENS) {
+      const composite = compositeOver(tokens[fill]!, floor, tokens["--panel"]!);
+      const ratio = contrastRatio(tokens[ON_FILL_TOKEN]!, composite);
+      rows.push({ theme, text: ON_FILL_TOKEN, ground: `${fill}@floor(${floor}) over --panel`, ratio, pass: ratio >= NON_TEXT_AA });
+    }
+  }
+  return rows;
+}
+
 if (import.meta.filename === process.argv[1]) {
   const rows = checkContrast();
   const colors = parseColorTokens(readTokensCss());
@@ -197,5 +232,11 @@ if (import.meta.filename === process.argv[1]) {
       `${r.pass ? "PASS" : "FAIL (compensated by a --sap-text outline)"}  ${r.theme.padEnd(9)} ${r.text} on ${r.ground}  ${r.ratio.toFixed(2)}:1 (non-text ${NON_TEXT_AA}:1)`,
     );
   }
-  if (failed || fillTextRows.some((r) => !r.pass)) process.exitCode = 1;
+  const fillFloorRows = checkFillFloorContrast();
+  for (const r of fillFloorRows) {
+    console.log(
+      `${r.pass ? "PASS" : "FAIL"}  ${r.theme.padEnd(9)} ${r.text} on ${r.ground}  ${r.ratio.toFixed(2)}:1 (non-text ${NON_TEXT_AA}:1)`,
+    );
+  }
+  if (failed || fillTextRows.some((r) => !r.pass) || fillFloorRows.some((r) => !r.pass)) process.exitCode = 1;
 }

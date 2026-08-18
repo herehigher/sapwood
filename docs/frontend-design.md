@@ -184,6 +184,8 @@ above points at):
 | 2026-08-14 | `@playwright/test` — devDependency, outside the runtime allowlist | `npm run shots`: renders the `?demo` fixture at 1440/1024/720 × both themes into a static side-by-side contact sheet (frozen mockup vs. live capture) — no pixel-diff assertions, evidence for humans and gate② (`docs/dev-guide/07-dashboard.md`). |
 | 2026-08-14 | `@testing-library/react` — devDependency, outside the runtime allowlist | Real interaction testing alongside the existing `registerRealDom()` opt-in pattern (`docs/dev-guide/07-dashboard.md`). |
 | 2026-08-17 | `lucide-react`'s `Sprout` icon (#921, zero-ring sapling glyph) — no new dependency, new import off the existing `lucide-react` allowlist row | Owner ruling: standard resources first — hand-draw only what has no standard equivalent. The sapling is the one exception to the identity-glyph-set's own "hand-drawn permanently" rule (`icons.tsx`'s header, sap droplet/rings/⊙/merge-arrow) — a sapling has no bespoke visual metaphor to protect the way those do, so `Sprout` (`stage.tsx`'s `.hero-sapling`, coloured via `--moss`) is sourced instead of hand-drawn. |
+| 2026-08-17 | `lucide-react`'s `Target`, `GitFork`, `Check`, `Eye`, `ChartNoAxesColumn`, `TrendingUp`, `UserRound` icons (#922, D5–D9) — no new dependency, new imports off the existing `lucide-react` allowlist row | Owner ruling: one glyph language on the hero stage. Every remaining hand-drawn UTILITY glyph the planning trio/gates/reflection pair/escalation node drew (target/tree/check/eye, plus the previously-empty Summary/Retro/Needs-human circles) swaps to its lucide equivalent — the hero's own IDENTITY set (droplet, rings) is unaffected. |
+| 2026-08-17 | `GithubActionsGlyph` (#922, D5–D9) — a pasted static SVG asset, not a package dependency | Owner ruling: standard resources first, extended to a vetted static asset when no icon-SET entry exists (no lucide icon names GitHub Actions). Verbatim path data from the devicon/techicons GitHub Actions SVG (`viewBox 0 0 128 128`, two `<path>`s, MIT — source https://techicons.dev/icons/githubactions, upstream https://github.com/devicons/devicon/blob/master/icons/githubactions/githubactions-original.svg), pasted into `icons.tsx`. Recoloured: both original literal fills (`#2088ff`/`#79b8ff`) become `currentColor` — the lighter second path kept at its own `opacity="0.55"` so the two-tone shape still reads once both resolve to one theme colour. Supersedes the frozen mockup's hand-drawn CI gear for the CI gate only (`stage.tsx:gateIcon`, `data-icon="github-actions"`). |
 
 This issue (#876) lands the toolkit and the rules above; applying any of it — module
 restyling, the icon migration, the `<dialog>` migration, attaching the motion recipes — is
@@ -680,7 +682,10 @@ The four zones:
    horizontal channels (`w1…`), each independently in its own state;
    droplets ride them. Lanes converge into two adjacent checkpoints in the
    same node style — **CI** and **REVIEW** — which render as *one calm
-   waiting area* (no per-gate progress, §10). The **fix loop is drawn as
+   waiting area* (no per-gate progress, §10). CI's own icon is the standard
+   GitHub Actions asset (`icons.tsx`'s `GithubActionsGlyph`, §2 adjudication
+   table), superseding the frozen mockup's hand-drawn gear for that one node
+   (#922, owner ruling 2026-08-17). The **fix loop is drawn as
    the engine's true shape**: a return arrow from the checkpoint area back
    *into the lane itself*, labeled with the send-back reason (**review
    findings / checks failed / merge conflict**, from `drive-fixup.reason` /

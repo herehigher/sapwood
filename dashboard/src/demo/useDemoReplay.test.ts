@@ -38,8 +38,14 @@ test("endPosition: the fixture's dispatched issueTitle reaches the folded titles
 // empty at BOTH, so `.hero-pool-chip` never appeared in the contact sheet the AC 1 evidence plan
 // requires. This proves the fixture itself (not stage.tsx's rendering, already covered by
 // hero.test.ts) carries a real, undispatched backlog issue all the way to the captured end state.
+// #922 AC3: extended 9103 -> 9103-9108 — the AC's own floor (>= 3 filled + >= 3 outlined
+// candidate cards) needs >= 6 undispatched issues in the pool, not just 1.
 test("endPosition: the fixture's pool is non-empty at the captured end state — #886's shots-coverage fix", () => {
   const log = buildRoundLog(DEMO_SOURCE, round, 2);
   const position = endPosition(log, 2);
-  assert.deepEqual(position!.state.hero.pool, [9103], "9103 must reach the end state undispatched — the whole point of the fixture change");
+  assert.deepEqual(
+    position!.state.hero.pool,
+    [9103, 9104, 9105, 9106, 9107, 9108],
+    "9103-9108 must reach the end state undispatched — the whole point of the fixture change",
+  );
 });
