@@ -3,6 +3,54 @@
  * Plain CSS only — no CSS-in-JS, no framework (scaffold.test.ts's banned-package check).
  */
 
+/*
+ * #924 (#729 remainder, D32): one shared module-head anatomy — title (Fraunces, uppercase,
+ * letter-spaced) + an optional right-aligned stat cluster + a closing hairline — used by every
+ * module: the hero card, needs-attention, lanes, activity, and both cost panels. Owner ruling Q2
+ * (2026-08-17): #728 stays scoped to FONT FAMILY only; casing/tracking/scale here follow the
+ * mockups, not that entry.
+ */
+/* #924 gate② PO item 3: a taller head band, matching the mockup's own weight (measured on the
+ * crops at roughly double this row's original padding/margin) now that the title itself (below)
+ * is set at the mockup's actual scale rather than the body-text size the first pass shipped. */
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding-bottom: var(--space-3);
+  margin-bottom: var(--space-4);
+  /* Same rendered value as `--hairline` (tokens.css), spelled as longhands instead of the
+   * shorthand `var()` indirection: happy-dom's CSS engine cannot resolve a `color-mix()` that
+   * appears INSIDE a border shorthand (empirically confirmed — `border-bottom: var(--hairline)`
+   * computes an empty string for every longhand, width included, though a real browser renders
+   * it correctly; this is this suite's first `getComputedStyle` probe of a hairline's own width,
+   * so no earlier test had hit the gap). Longhands sidestep it without changing what renders. */
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+  border-bottom-color: color-mix(in srgb, var(--bark) 25%, transparent);
+}
+
+/* #924 gate② PO item 3: the first pass undershot the mockup badly (crop-measured ~12px cap-height/
+ * ~0.04em vs the mockup's ~18px cap/~0.1em) — `--text-3` (26px) is the closest step on this app's
+ * fixed 1.25-ratio type scale to the mockup's own measured ~18px cap-height (Fraunces caps set at
+ * roughly 0.7em: 26 * 0.7 ~= 18). A literal px value, not `0.08em`, for letter-spacing — the same
+ * happy-dom `em`-resolves-against-the-DEFAULT-16px quirk `hero.css`'s `.hero-phase` comment
+ * documents sidesteps here too. 2.2px at this 26px title size is ~0.085em, clearing the AC's
+ * 0.06em-equivalent floor with room for the mockup's own heavier ~0.1em tracking. */
+.panel-head > h1,
+.panel-head > h2,
+.panel-head > h3 {
+  font-size: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 2.2px;
+}
+
+/* The head's own right-aligned stat cluster (AC1: "last child, margin-left: auto") — absent
+ * entirely on a title-only head (activity). */
+.panel-head-stat {
+  margin-left: auto;
+}
+
 .lane-board-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
@@ -136,20 +184,22 @@
   gap: var(--space-4);
 }
 
+/* #924: `.panel-head` is the shared row anatomy (title/uppercase/letter-spacing/hairline); this
+ * panel's own stat cluster ("avg round $N") is `.cost-panel-avg` below, `.panel-head-stat`'s own
+ * margin-left: auto. */
 .cost-panel-head {
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
-  margin-bottom: var(--space-2);
 }
 
-/* `cost-dark.png`'s heading/group-label treatment — bold, letter-spaced caps, matching the
- * `.cost-panel-badge`/hero-panel section-header convention (#879's own row-2 finding) rather than
- * plain sentence case. Text CONTENT stays plain-language (`heading`/`title` props, §7's
- * terminology rule) — only the rendered CASE changes here, so copy/accessibility text is
- * unaffected. */
-.cost-panel-head h3,
+/* #924: the by-stage/by-model GROUP header ("BY STAGE"/"BY MODEL") is deliberately NOT the
+ * `.panel-head` title treatment — `cost-dark.png` draws it uppercase MONO muted, a sub-level
+ * label, not a second Fraunces module title. */
 .cost-panel-group h4 {
+  font-family: var(--font-data);
+  font-weight: 400;
+  color: var(--bark-text);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -169,6 +219,7 @@
 
 .cost-panel-footer {
   margin-top: var(--space-2);
+  text-align: right;
 }
 
 .cost-panel-groups {
@@ -177,32 +228,89 @@
   gap: var(--space-4);
 }
 
+/* `cost-dark.png`'s vertical rule between the BY STAGE / BY MODEL groups. */
+.cost-panel-group + .cost-panel-group {
+  border-left: var(--hairline);
+  padding-left: var(--space-4);
+}
+
+/* AC2: >= 7em is a FLOOR, not a fixed width — `minmax(7em, max-content)` grows the column to fit
+ * whichever label is actually longest ("Goal & align", a by-model row's own model name like
+ * "claude-sonnet-5") rather than a guessed em value that wraps the next label that comes along.
+ * `.cost-bar-label`'s own `white-space: nowrap` (below) is what actually stops the wrap; the grid
+ * column sizing is what gives that nowrap text room to exist without overflowing into the bar
+ * column next to it. Declared HERE (the shared list), not per-row: each `<li>` computing its own
+ * independent `max-content` sized every row to only its OWN label's width, so a longer label (e.g.
+ * "Goal & align", the widest in its group) left every shorter-labeled row's bar starting at a
+ * different x than that row's — a visible misalignment down the column. `grid-template-columns:
+ * subgrid` on `.cost-bar-row` below shares these SAME column tracks across every row instead, so
+ * the label column is sized ONCE, to the group's own widest label, and every bar starts flush. */
 .cost-bar-list {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(7em, max-content) 1fr 4em;
   gap: var(--space-2);
 }
 
 .cost-bar-row {
   display: grid;
-  grid-template-columns: 5em 1fr 4em;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   align-items: center;
-  gap: var(--space-2);
 }
 
+.cost-bar-label {
+  white-space: nowrap;
+}
+
+/* `CostBar.tsx` has no `viewBox` — its own coordinates are already real CSS px (or SVG
+ * percentages resolved against this real rendered box), so this rule's only job is picking that
+ * box's own size: full width, and 12px tall (`TRACK_Y`/`FILL_HEIGHT`/`TICK_Y1`/`TICK_Y2`'s shared
+ * local space), everywhere `<CostBar>` mounts (cost panels, lane cards, the header meter alike). */
 .cost-bar {
   width: 100%;
-  height: 10px;
+  height: 12px;
+  /* #924 AC2: a 1px stroke is CENTERED on its own path, so it straddles the box edge by 0.5px at
+   * either end (x=0 always; x=100% at 100% settled) — the default SVG viewport clip would shave
+   * that 0.5px off, thinning the light outline right where it matters most. The pill's own FILL
+   * (the cap itself) never needs this: a `rect`'s `rx` rounds inward, never past its own box, so
+   * the 0.5px overshoot here is the stroke alone, and harmless once nothing else relies on this
+   * SVG clipping its own contents. */
+  overflow: visible;
 }
 
-/* The by-stage group's shared target/ceiling tick (`cost-panel.ts`'s `tickPositionPct`) — a thin
- * line across the bar's full height, drawn in the primary text color so it reads against both the
- * faint track and the amber fill. */
+/* #924 (D29/D30) — the shared hairline-bar grammar `CostBar.tsx` draws: a 1px `--bark` track, an
+ * amber pill fill 6px tall (`.cost-bar-fill`, `--sap-fill`, `rx` = a true semicircle at both
+ * ends), and a 1px `--sap-text` tick taller than the pill (`.cost-bar-target`). Geometry is fixed
+ * per instance as SVG attributes in `CostBar.tsx` itself. */
+.cost-bar-track {
+  stroke: var(--bark);
+  stroke-width: 1;
+  opacity: 0.4;
+}
+
+/* #924 AC2/AC3: the pill body — a filled, rounded rect (`rx` = half its own height, CostBar.tsx),
+ * so both caps are a true semicircle, fully contained inside the rect's own x/width box at every
+ * settled percentage including 0 and 100 (a rounded CORNER is carved INWARD, never bulging past
+ * its own bounds the way a stroked line's round LINECAP does past its endpoint). #924 AC3: the
+ * SAME rect carries the light-theme outline directly (`stroke: var(--sap-fill-outline)`, 1px) —
+ * the real rendered `.cost-bar-track` (this fill's own immediate neighbour — `--bark` at 0.4
+ * opacity over `--panel`, `contrast.ts`'s `checkFillTrackContrast`) clears 3:1 against `--sap-fill`
+ * in dark theme (4.24:1) but NOT in light (1.15:1); `--sap-fill-outline` is invisible in dark
+ * theme, where it already clears unaided (tokens.css). The stroke traces the rect's own already-
+ * rounded path directly, so one element carries both fill and outline — no second element needed. */
+.cost-bar-fill {
+  fill: var(--sap-fill);
+  stroke: var(--sap-fill-outline);
+  stroke-width: 1;
+}
+
+/* #924 AC2: the by-stage group's shared target/ceiling tick (`cost-panel.ts`'s `tickPositionPct`)
+ * — a plain 1px vertical hairline, taller than the pill. */
 .cost-bar-target {
-  stroke: var(--sapwood);
+  stroke: var(--sap-text);
   stroke-width: 1;
 }
 
@@ -243,17 +351,21 @@
   gap: 4px;
 }
 
+/* #924 AC2: height is deliberately UNCHANGED from `.cost-bar`'s own 12px (no override here) —
+ * `CostBar.tsx`'s own y-coordinates (track/fill/tick) are plain CSS px assuming that exact box
+ * height; a different height here would misposition them, not merely rescale them. Only
+ * width/shape (rounded, wider) differ per instance. */
 .spend-meter-bar {
   width: 140px;
-  height: 8px;
   border-radius: var(--radius-pill);
   overflow: hidden;
 }
 
-/* #890: the lane card's own settled/est bar — full card width, flush with the foot row above it. */
+/* #890: the lane card's own settled/est bar — full card width, flush with the foot row above it.
+ * #924 AC2: height also deliberately unchanged from `.cost-bar`'s 12px, same reasoning as
+ * `.spend-meter-bar` above. */
 .lane-card-bar {
   width: 100%;
-  height: 6px;
 }
 
 /* ---- round navigator (§3 A, #889) ----------------------------------------- */
@@ -335,8 +447,8 @@
  * background wash (not just text color) keeps the tint visible now that the pill has no border
  * of its own to recolor — the joined group's border is shared, not per-slot. */
 .round-nav-pill-closed {
-  background: color-mix(in srgb, var(--sap) 16%, transparent);
-  color: var(--sap);
+  background: color-mix(in srgb, var(--sap-text) 16%, transparent);
+  color: var(--sap-text);
 }
 
 .round-nav-list-wrap {
@@ -439,8 +551,8 @@
 }
 
 .transport-controls button[aria-pressed="true"] {
-  border-color: var(--sap);
-  color: var(--sap);
+  border-color: var(--sap-text);
+  color: var(--sap-text);
 }
 
 .transport-speeds {
@@ -478,6 +590,9 @@
   background: color-mix(in srgb, var(--bark) 35%, transparent);
 }
 
+/* #924 AC3: a flat --sap-fill surface needs the light-theme 1px --sap-text boundary — the SAME
+ * compensation every other filled --sap-fill surface carries (`--sap-fill-outline`, tokens.css;
+ * transparent/invisible in dark theme). */
 .transport-scrub::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
@@ -485,16 +600,16 @@
   height: 14px;
   margin-top: -5px; /* centers the 14px thumb on the 4px track (webkit doesn't do this itself) */
   border-radius: var(--radius-pill);
-  border: none;
-  background: var(--sap);
+  border: 1px solid var(--sap-fill-outline);
+  background: var(--sap-fill);
 }
 
 .transport-scrub::-moz-range-thumb {
   width: 14px;
   height: 14px;
   border-radius: var(--radius-pill);
-  border: none;
-  background: var(--sap);
+  border: 1px solid var(--sap-fill-outline);
+  background: var(--sap-fill);
 }
 
 .transport-scrub:focus-visible {

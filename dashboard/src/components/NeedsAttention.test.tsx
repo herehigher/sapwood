@@ -38,6 +38,17 @@ test("aria-live is present so a new row announces itself", () => {
   assert.match(html, /aria-live="polite"/);
 });
 
+// ── #924: the shared .panel-head recipe ─────────────────────────────────────────────────────────
+
+test("#924 AC1: the populated strip's head carries .panel-head, with the summary stat cluster as its own .panel-head-stat last child", () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 42, issue: 7 }));
+  const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
+  assert.match(
+    html,
+    /<div class="attention-header panel-head"><h2>needs attention<\/h2><span class="muted data attention-summary panel-head-stat">/,
+  );
+});
+
 // ── #881: category chip + reason/ask row shape (needs-attention-dark.png fidelity) ───────────
 
 test("renders the row's category chip, matching the mockup's taxonomy", () => {

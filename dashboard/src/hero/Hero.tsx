@@ -127,8 +127,14 @@ export function Hero({
 
   return (
     // #920: the hero draws inside a `.panel` card, matching the mockup band rather than floating
-    // bare SVG furniture directly in the page grid.
+    // bare SVG furniture directly in the page grid. #924: `.panel-head` — the same title-row
+    // anatomy every other module carries (§6 calls this section "the Loop") — title only, no stat
+    // cluster: the SVG's own outcome ring/tally already carries the hero's own numbers, so a
+    // second header count would just duplicate them.
     <div className="hero-frame panel">
+      <div className="panel-head">
+        <h2>loop</h2>
+      </div>
       <HeroStage
         ref={svgRef}
         state={state}

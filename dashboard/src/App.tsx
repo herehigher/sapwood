@@ -558,6 +558,7 @@ export function appContent(vm: AppViewModel) {
               repoUrl={repoUrl}
               disconnected={disconnected}
               workerBudgetUsdSoft={resolveWorkerBudgetUsdSoft(loop.data?.config)}
+              config={loop.data?.config ?? null}
             />
           </LiveOnly>
 

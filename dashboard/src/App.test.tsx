@@ -22,6 +22,7 @@ import type { LoopEvent, Round, SpendRow } from "./api/types.ts";
 import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
 import { NeedsAttention } from "./components/NeedsAttention.tsx";
+import { parseColorTokens } from "./contrast.ts";
 import { buildClosedRoundCostPanel } from "./cost-panel.ts";
 import type { DemoBundle } from "./demo/types.ts";
 import { type DomainEvent, toDomainEvent } from "./domain-event.ts";
@@ -556,12 +557,13 @@ test("#890: a lane's settled cost bar scales against worker.budgetUsdSoft, not i
     html.indexOf('class="cost-bar lane-card-bar"'),
     html.indexOf("</svg>", html.indexOf('class="cost-bar lane-card-bar"')),
   );
-  // The background TRACK rect is always width="100" (a fixed reference) — the settled FILL rect
-  // (`fill="var(--sap)"`) is the one that must scale against the configured ceiling.
-  assert.match(laneBarSvg, /width="20" height="10" fill="var\(--sap\)"/, "$2 against a $10 soft budget must draw a 20%-wide fill");
+  // The background TRACK line is always full-width (x1="0" x2="100%", a fixed reference) — the
+  // settled FILL rect (`class="cost-bar-fill"`, its colour resolved through CSS from
+  // `--sap-fill`) is the one whose own `width` must scale against the configured ceiling.
+  assert.match(laneBarSvg, /class="cost-bar-fill" x="0"[^>]*width="20%"/, "$2 against a $10 soft budget must draw a 20%-wide fill");
   assert.doesNotMatch(
     laneBarSvg,
-    /width="100" height="10" fill="var\(--sap\)"/,
+    /class="cost-bar-fill" x="0"[^>]*width="100%"/,
     "the settled fill must never self-scale to a full-width bar regardless of the real dollar amount",
   );
 });
@@ -2829,3 +2831,479 @@ test("#897 AC5: .lane-activity-row carries its own auto-fit column template and 
   assert.match(ownRule![1] as string, /display:\s*grid/);
   assert.match(ownRule![1] as string, /grid-template-columns:\s*repeat\(auto-fit/);
 });
+
+// ── #924: one `.panel-head` recipe + one bar grammar + the --sap-text/--sap-fill split ─────────
+
+const tokensCss924 = readFileSync(new URL("./tokens.css", import.meta.url), "utf8");
+const panelsCss924 = readFileSync(new URL("./panels.css", import.meta.url), "utf8");
+const heroCss924 = readFileSync(new URL("./hero/hero.css", import.meta.url), "utf8");
+// `@import` lines resolve under Vite's bundler only — happy-dom's plain <style> injection can't
+// follow them (same posture hero.test.ts's own tokensCss/panelsCss/heroCss concatenation takes).
+const appCss924 = readFileSync(new URL("./app.css", import.meta.url), "utf8").replace(/^@import.*$/gm, "");
+
+/** A real, fully-populated `AppViewModel` — every module in AC1's derived set (hero,
+ *  needs-attention, lanes, activity, cost×2) has real content to render its panel-head from,
+ *  including a stat cluster where the design calls for one. */
+function fullCoverageViewModel() {
+  const heroEvents: DomainEvent[] = [
+    { known: false, id: 1, ts: "2026-01-01T00:00:00Z", kind: "pool-selected", payload: { issues: [94] } },
+    { known: false, id: 2, ts: "2026-01-01T00:01:00Z", kind: "dispatched", payload: { worker: "w1", issue: 95 } },
+  ];
+  const stageBars = [{ label: "Goal & align", usd: 0.22 }];
+  const vm = minimalAppViewModel({
+    loop: {
+      isPending: false,
+      data: {
+        ...LOOP_STATE_OK,
+        // #924: a nonzero settled spend is what makes the header's own spend-meter bar render
+        // its `.cost-bar-fill` rect at all — that's guarded on `settledPct > 0` (no phantom
+        // zero-width pill), so LOOP_STATE_OK's own `todayUsd: 0` would silently drop this module
+        // out of the "full coverage" fixture.
+        spend: { todayUsd: 4, dailyBudgetUsd: 10, runUsd: null, runBudgetUsd: null, byModel: [] },
+        lanes: {
+          max: 1,
+          items: [
+            {
+              lane: "w1",
+              issue: 95,
+              state: "running",
+              pr: null,
+              startedAt: "2026-01-01T00:00:00Z",
+              endedAt: null,
+              costUsd: 2,
+              estCostUsd: null,
+              contextTokens: null,
+              tokenComposition: null,
+            },
+          ],
+        },
+        config: { worker: { model: "opus", effort: "high", budgetUsdSoft: 10 } },
+      },
+    },
+    activeHero: foldEvents(initialHeroState(3), heroEvents).state,
+    activeOpenAttention: [domainEvent(42, "drive-needs-human")],
+    activeEvents: [domainEvent(43, "dispatched")],
+  });
+  // `minimalAppViewModel` always sets `costToday`/`costRound` itself (never driven by its own
+  // overrides param) — same override-by-spread posture the #880 wiring test above (`{ ...vm,
+  // costRound }`) already takes.
+  return {
+    ...vm,
+    costToday: {
+      heading: "cost · today",
+      avgRoundUsd: 4.8,
+      stageBars,
+      targetUsd: 5,
+      // #924 gate② PO item 2's own observed boundary case: a by-model label longer than the
+      // 7em floor ("claude-sonnet-5") — the exact shape that wrapped under the fixed-width column.
+      modelBars: [{ label: "claude-sonnet-5", usd: 7.8 }],
+      footer: null,
+    },
+    costRound: {
+      heading: "cost · round 9",
+      closed: true,
+      stageBars,
+      targetUsd: 5,
+      modelBars: [{ label: "opus", usd: 4.9 }],
+      footer: { totalUsd: 6.2, prsMerged: 3, usdPerPr: 6.2 / 3, reviewUsd: 0 },
+    },
+  };
+}
+
+/** Mounts the FULL production cascade (tokens → panels → hero → app, `app.css`'s own `@import`
+ *  order) plus a real `appContent` tree into a real DOM container — AC1/AC2/AC3's own "derived
+ *  from the rendered App" requirement, the STYLE doctrine family (`registerRealDom()` + a real
+ *  `getComputedStyle` read, never a regex on source text for a cascade-dependent claim). #924
+ *  gate② finding [0]: AC1 is explicitly scoped to "at 1440" — happy-dom's default viewport is
+ *  narrower, which silently changes which rules win wherever a width-scoped `@media` rule exists
+ *  (app.css's own 720px stacking floor). `window.happyDOM.setViewport` (the SAME mechanism
+ *  `hero.test.ts`/`Controls.test.tsx` already use for their own width-scoped assertions) forces it
+ *  BEFORE the tree mounts, not after — a media query's effect on initial layout/class application
+ *  can depend on the width at mount time, not just at the moment a later assertion reads it. */
+async function mountAppWithCascade(vm: Parameters<typeof appContent>[0]) {
+  (window as unknown as { happyDOM: { setViewport: (v: { width: number }) => void } }).happyDOM.setViewport({ width: 1440 });
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss924}\n${panelsCss924}\n${heroCss924}\n${appCss924}`;
+  document.head.appendChild(style);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        {appContent(vm)}
+      </QueryClientProvider>,
+    );
+  });
+  const cleanup = async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    document.head.removeChild(style);
+  };
+  return { container, cleanup };
+}
+
+/**
+ * Every `.panel-head` element the derived set requires, keyed by the head's OWN title text —
+ * every module in AC1's set renders a distinct one ("loop", "needs attention", "lanes",
+ * "activity", "cost · today", "cost · round 9"), including the cost strip's two panels, which
+ * share an outer `aria-label="cost"` ancestor and so can't be told apart by that alone.
+ * COVERAGE (doctrine): read off the rendered tree, never a hand count.
+ *
+ * #924 gate② finding [0]: returns `Element[]` per key, NEVER collapsing same-titled heads onto
+ * one another the way an overwriting `Record<string, Element>` would — a regression that rendered
+ * a head TWICE (or renamed one module's title to collide with another's) would silently vanish
+ * behind "some entry exists for this key" instead of failing the exact-one-per-key check callers
+ * now make explicit.
+ */
+function panelHeadsByModule(container: HTMLElement): Record<string, Element[]> {
+  const out: Record<string, Element[]> = {};
+  for (const el of container.querySelectorAll(".panel-head")) {
+    const title = el.querySelector("h1, h2, h3");
+    const key = title?.textContent?.trim().toLowerCase() ?? "unknown";
+    if (!out[key]) out[key] = [];
+    out[key]!.push(el);
+  }
+  return out;
+}
+
+/** Asserts `key` has EXACTLY one `.panel-head` and returns it — the single call site every AC1
+ *  test below uses, so "exactly one, not merely present" is checked uniformly rather than
+ *  re-derived per test. */
+function theOnlyPanelHead(heads: Record<string, Element[]>, key: string): Element {
+  const matches = heads[key] ?? [];
+  assert.equal(matches.length, 1, `expected exactly one .panel-head for "${key}"; found ${matches.length}`);
+  return matches[0]!;
+}
+
+test("AC1: every module in the derived set (hero, needs-attention, lanes, activity, cost×2) renders exactly one .panel-head", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const heads = panelHeadsByModule(container);
+    for (const key of ["loop", "needs attention", "lanes", "activity", "cost · today", "cost · round 9"]) {
+      theOnlyPanelHead(heads, key);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+const DERIVED_MODULE_HEADS = ["loop", "needs attention", "lanes", "activity", "cost · today", "cost · round 9"];
+
+// #924 gate② PO item 3: the first pass shipped a 16px title (--text-1) at a bare 1px
+// letter-spacing — measured on the mockup crops at roughly 18px cap-height / ~0.1em tracking,
+// far past this AC's own 0.06em floor. Asserting the EXACT corrected target (not just ">= floor")
+// pins the fix in place, not just "still legal."
+const TITLE_FONT_PX = 26; // --text-3 (tokens.css)
+const TITLE_LETTER_SPACING_PX = 2.2; // ~0.085em at 26px
+
+test("AC1: every panel-head title resolves Fraunces/uppercase, the mockup-scale 26px/2.2px-tracking size (not the undersized first pass), and the head's own border-bottom-width is 1px", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const heads = panelHeadsByModule(container);
+    for (const key of DERIVED_MODULE_HEADS) {
+      const head = theOnlyPanelHead(heads, key);
+      const title = head.querySelector("h1, h2, h3");
+      assert.ok(title, `"${key}"'s .panel-head must carry a title element`);
+      const titleComputed = getComputedStyle(title as Element);
+      assert.match(titleComputed.fontFamily, /Fraunces/, `"${key}" title font-family`);
+      assert.equal(titleComputed.textTransform, "uppercase", `"${key}" title text-transform`);
+      assert.equal(titleComputed.fontSize, `${TITLE_FONT_PX}px`, `"${key}" title font-size`);
+      const letterSpacing = Number.parseFloat(titleComputed.letterSpacing);
+      assert.equal(letterSpacing, TITLE_LETTER_SPACING_PX, `"${key}" title letter-spacing`);
+      assert.ok(
+        letterSpacing >= TITLE_FONT_PX * 0.06,
+        `"${key}" title letter-spacing ${letterSpacing}px must clear the AC's own 0.06em floor (${TITLE_FONT_PX * 0.06}px at ${TITLE_FONT_PX}px)`,
+      );
+      const headComputed = getComputedStyle(head);
+      assert.equal(headComputed.borderBottomWidth, "1px", `"${key}" .panel-head border-bottom-width`);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test("AC1: where a panel-head carries a stat cluster, it is the head's last child with margin-left: auto", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const heads = panelHeadsByModule(container);
+    for (const key of ["needs attention", "lanes", "cost · today"]) {
+      const head = theOnlyPanelHead(heads, key);
+      const lastChild = head.lastElementChild;
+      assert.ok(lastChild?.classList.contains("panel-head-stat"), `"${key}"'s .panel-head last child must carry .panel-head-stat`);
+      assert.equal(getComputedStyle(lastChild as Element).marginLeft, "auto", `"${key}" stat cluster margin-left`);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test("AC2: .cost-bar-target stroke resolves to the real --sap-text colour, and .cost-panel-footer is right-aligned", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const tick = container.querySelector(".cost-bar-target");
+    assert.ok(tick, "the by-stage group's target tick must render (costToday.targetUsd is set)");
+    const expectedSapText = parseTokensLocal(tokensCss924)["--sap-text"];
+    assert.equal(getComputedStyle(tick as Element).stroke, expectedSapText, ".cost-bar-target stroke must resolve to --sap-text");
+
+    const footer = container.querySelector(".cost-panel-footer");
+    assert.ok(footer, "the closed round panel's footer must render (roundSpend.footer is set)");
+    assert.equal(getComputedStyle(footer as Element).textAlign, "right");
+  } finally {
+    await cleanup();
+  }
+});
+
+/**
+ * #924 AC2: `CostBar.tsx` has no `viewBox` — its track/fill/tick geometry (y=5.5, y=3/height=6, a
+ * tick spanning y1=1..y2=11) is set directly in real CSS px, so those numbers only land where
+ * they're drawn to when the `<svg>`'s own CSS height ALSO equals 12 (its own default, panels.css);
+ * a shorter box would clip the tick, a taller one would leave dead space below the bar — never a
+ * distortion now (no scale transform exists to distort), but still a real positioning contract
+ * every context sharing this primitive must hold. COVERAGE: every production bar context this
+ * fixture renders — a cost-panel bar (multiple: by-stage/by-model, today AND round), the lane
+ * card's own bar, and the header spend-meter's bar — never a hand-picked subset.
+ */
+test("AC2: every hairline-bar instance's own CSS height is exactly 12px, the box its track/fill/tick coordinates assume", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const bars = [...container.querySelectorAll("svg.cost-bar")];
+    const contexts = new Set(bars.map((b) => b.getAttribute("class")));
+    for (const required of ["cost-bar", "cost-bar lane-card-bar", "cost-bar spend-meter-bar"]) {
+      assert.ok(contexts.has(required), `expected a rendered "${required}" bar; got classes: ${[...contexts].join(", ")}`);
+    }
+    for (const bar of bars) {
+      assert.equal(
+        getComputedStyle(bar as Element).height,
+        "12px",
+        `"${bar.getAttribute("class")}" CSS height must be exactly 12px — the box CostBar.tsx's own y-coordinates assume`,
+      );
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+/**
+ * #924 AC2: `CostBar.tsx` has no `viewBox` — the track and tick's own `stroke-width: 1` (panels.css)
+ * is already a real device px, with no scale-compensation mechanism (`vector-effect`) needed to
+ * keep it one. happy-dom has no real layout engine (confirmed directly, repeatedly, in this file
+ * and hero.test.ts — `getBoundingClientRect()` returns an all-zero box for every element), so the
+ * ACTUAL rendered pixel width still can't be measured here — that is a real-browser fact, same
+ * ceiling the light-dark()-outline tests above already document. What IS provable in this harness:
+ * the `stroke-width` declaration cascades onto the real elements at all (a regression that dropped
+ * it would fail this) — the achievable half of the proof, same STYLE-doctrine posture as the rest
+ * of this file.
+ */
+test("AC2 (track/tick stroke-width): the track and target tick both resolve stroke-width: 1", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const track = container.querySelector(".cost-bar-track");
+    assert.ok(track, "a real .cost-bar-track must render");
+    assert.equal(getComputedStyle(track as Element).strokeWidth, "1", ".cost-bar-track stroke-width");
+
+    const tick = container.querySelector(".cost-bar-target");
+    assert.ok(tick, "a real .cost-bar-target must render (costToday.targetUsd is set)");
+    assert.equal(getComputedStyle(tick as Element).strokeWidth, "1", ".cost-bar-target stroke-width");
+  } finally {
+    await cleanup();
+  }
+});
+
+/**
+ * #924 AC2 (pill end caps): the pill is a real rounded `<rect rx>` (CostBar.tsx), not a stroked
+ * line — a rounded CORNER is carved INWARD from the rect's own x/width box, so it's fully
+ * contained at every settled percentage with no scale-compensation mechanism needed (unlike a
+ * stroked line's round LINECAP, which bulges OUTWARD past its own endpoint and needed
+ * `vector-effect: non-scaling-stroke` to stay a true circle under a non-uniform scale that no
+ * longer exists here). Same STYLE-doctrine ceiling as the track/tick test above: happy-dom cannot
+ * measure the actual rendered corner radius (no real layout engine), so this proves the
+ * mechanism is correctly wired — `rx`/`fill`/`stroke` all resolving on the real element is what
+ * GUARANTEES a true semicircle cap, fully inside the box, in any real browser (the real-pixel half
+ * of that proof — cap containment and the light outline's own visibility at the tip — lives in
+ * `shots.spec.ts`, which has a real layout engine).
+ */
+test("AC2 (pill end caps): the fill pill is a rect with rx=3 (half its own 6px height) and resolves the real --sap-fill/--sap-fill-outline colours", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  const { light: lightTokens } = parseColorTokens(tokensCss924);
+  try {
+    const fills = [...container.querySelectorAll(".cost-bar-fill")];
+    assert.ok(fills.length >= 3, `expected fill rects across cost panel/lane card/header meter contexts; found ${fills.length}`);
+    for (const fill of fills) {
+      assert.equal(fill.tagName.toLowerCase(), "rect", ".cost-bar-fill must be a real <rect>, not a stroked line");
+      assert.equal(fill.getAttribute("rx"), "3", ".cost-bar-fill rx — half of FILL_HEIGHT (CostBar.tsx), a true pill radius");
+      const computed = getComputedStyle(fill as Element);
+      assert.equal(computed.fill, lightTokens["--sap-fill"], ".cost-bar-fill's own fill must resolve the real --sap-fill hex");
+      assert.equal(
+        computed.stroke,
+        lightTokens["--sap-fill-outline"],
+        ".cost-bar-fill's own stroke (the light outline) must resolve --sap-fill-outline",
+      );
+      assert.equal(
+        computed.strokeWidth,
+        "1",
+        ".cost-bar-fill stroke-width — the light outline is a plain 1px stroke, no extra element needed",
+      );
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+// #924 AC2: a fixed em floor alone still wrapped a longer label (a by-model row's own model
+// name, e.g. "claude-sonnet-5") — `minmax(7em, max-content)` keeps the >= 7em floor while growing
+// to fit whatever the longest rendered label actually needs. Declared on `.cost-bar-list` (the
+// shared grid every `.cost-bar-row` subgrids into, panels.css) — not per-row — so the column is
+// sized ONCE across a whole group, keeping every row's bar starting at the same x.
+test("AC2: .cost-bar-list's label column is minmax(>= 7em, max-content) — a floor, not a fixed width that can still wrap a longer label", () => {
+  const listRule = panelsCss924.match(/\.cost-bar-list\s*\{([^}]*)\}/);
+  assert.ok(listRule, ".cost-bar-list rule must exist");
+  const columns = listRule![1]!.match(/grid-template-columns:\s*([^;]+);/);
+  assert.ok(columns, ".cost-bar-list must declare grid-template-columns");
+  // The first grid TRACK is the whole `minmax(...)` call, commas and all — a naive whitespace
+  // split would cut it at the comma inside the parens and see only "minmax(7em,".
+  const minmax = columns![1]!.trim().match(/^minmax\(([\d.]+)em,\s*max-content\)/);
+  assert.ok(minmax, `the label column must start with minmax(<em>, max-content); got "${columns![1]!.trim()}"`);
+  const floorEm = Number.parseFloat(minmax![1]!);
+  assert.ok(floorEm >= 7, `the label column's floor (${floorEm}em) must be >= 7em`);
+
+  const rowRule = panelsCss924.match(/\.cost-bar-row\s*\{([^}]*)\}/);
+  assert.ok(rowRule, ".cost-bar-row rule must exist");
+  assert.match(
+    rowRule![1]!,
+    /grid-template-columns:\s*subgrid\s*;/,
+    ".cost-bar-row must subgrid into .cost-bar-list's own column tracks, not size its own independent columns",
+  );
+});
+
+/**
+ * #924 AC2: assert the winning `grid-template-columns` on a rendered `.cost-bar-list` under the
+ * full cascade (`getComputedStyle`), not the authored rule — a VALUE test on source alone only
+ * proves the SOURCE declares the right thing; a later, more-specific, or width/media-scoped rule
+ * could still win on the real element while that test stayed green. Verified directly that
+ * happy-dom's
+ * `getComputedStyle().gridTemplateColumns` DOES resolve for a real element (unlike the SVG-
+ * geometry/`light-dark()` gaps elsewhere in this file) — it echoes the winning declaration's exact
+ * text (not a computed max-content pixel value, since happy-dom has no real layout engine for
+ * that), which is exactly the CASCADE-APPLICATION fact this finding asks for: a competing rule
+ * that changed which value wins would show up here even though it can't fail on rendered pixels.
+ * `.cost-bar-row`'s own winning value is checked alongside it — it must actually subgrid into
+ * the list's tracks, not size its own columns independently (the fix for the per-row-drift bug).
+ */
+test("AC2: the winning grid-template-columns on a REAL rendered .cost-bar-list is exactly minmax(7em, max-content) 1fr 4em, and every .cost-bar-row subgrids into it", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const list = container.querySelector(".cost-bar-list");
+    assert.ok(list, "a real .cost-bar-list must render (the fixture's stage/model bars)");
+    assert.equal(getComputedStyle(list as Element).gridTemplateColumns, "minmax(7em, max-content) 1fr 4em");
+
+    const rows = [...container.querySelectorAll(".cost-bar-row")];
+    assert.ok(rows.length > 1, "expected multiple rows sharing one list, to prove the subgrid keeps them aligned");
+    for (const row of rows) {
+      assert.equal(
+        getComputedStyle(row as Element).gridTemplateColumns,
+        "subgrid",
+        "every .cost-bar-row must subgrid, never size its own columns",
+      );
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+// #924 gate② finding [1] / PO item 2: a rendered CASCADE fact, not just source text — proves
+// `white-space: nowrap` actually resolves onto a REAL rendered label (including the fixture's own
+// longer-than-7em "claude-sonnet-5" model name), not merely that the source declares it. happy-dom
+// has no real layout engine (`getBoundingClientRect()` on any element returns an all-zero box,
+// verified directly — matching this harness's documented "DOM-free by default" posture,
+// docs/dev-guide/07-dashboard.md) — so an actual "does this box span one line or two" pixel
+// measurement isn't achievable here; `white-space: nowrap` resolving onto the real element is the
+// STYLE-provable half of "never wrapped," and the label column's own `minmax(7em, max-content)`
+// sizing (VALUE-checked above, from source) is what gives that nowrap text room to exist without
+// being clipped instead.
+test("AC2: every rendered cost-bar label, including one longer than the 7em floor, resolves white-space: nowrap", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const labels = [...container.querySelectorAll(".cost-bar-label")];
+    assert.ok(labels.length > 0, "at least one cost-bar-label must render (the fixture's by-stage/by-model bars)");
+    const longLabel = labels.find((l) => l.textContent === "claude-sonnet-5");
+    assert.ok(longLabel, "the fixture's own longer-than-7em label (claude-sonnet-5) must actually render");
+    for (const label of labels) {
+      assert.equal(getComputedStyle(label as Element).whiteSpace, "nowrap", `"${label.textContent}" label must never wrap`);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+/**
+ * #924 AC3: the proof is a STYLE test whose expected colour is computed from the token table via
+ * `contrast.ts` (resolve the `light-dark()` pair yourself for the light theme and compare to the
+ * resolved value the outline rule declares) — light = 1px stroke of that exact colour, dark =
+ * none. Comparing the same unresolved `light-dark(...)` source string in both themes is not the
+ * proof; happy-dom never evaluates `light-dark()` (confirmed directly, twice, both with and
+ * without a `var()` indirection). `--sap-fill-outline` itself is a literal light-theme hex
+ * (tokens.css's `:root[data-theme="sapwood"]` /
+ * `@media (prefers-color-scheme: light)` rules, pinned against `--sap-text`'s own light value by
+ * `tokens.test.ts`), so a REAL resolved hex now reaches `getComputedStyle` to assert against —
+ * `parseColorTokens` (this repo's own light/dark token splitter, `contrast.ts`) is what "resolve
+ * the light-dark() pair yourself" means here. Every one of the AC's own named shapes is checked
+ * individually, not folded into one generic `.cost-bar-fill` query.
+ *
+ * #924 AC3: `CostBar.tsx`'s own three shapes (`.cost-bar` pill, `.lane-card-bar` pill,
+ * `.spend-meter-bar`) carry their outline directly on `.cost-bar-fill` itself (a plain 1px stroke
+ * tracing the rect's own already-rounded path) — same width as the bare `.hero-pool-chip`/droplet
+ * outlines below, no second wider element needed.
+ */
+test("AC3: every named filled shape (.cost-bar pill, .lane-card-bar pill, .hero-pool-chip, an in-motion droplet, .spend-meter-bar) resolves the REAL --sap-text hex as a 1px outline in light theme, and none in dark", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  const { light: lightTokens } = parseColorTokens(tokensCss924);
+  const lightOutlineHex = lightTokens["--sap-text"]!;
+  assert.ok(lightOutlineHex, "--sap-text must resolve a light-theme hex via parseColorTokens");
+
+  const namedShapes: [string, () => Element | null, string][] = [
+    [".cost-bar pill (cost panel)", () => container.querySelector("#cost .cost-bar-fill"), "1"],
+    [".lane-card-bar pill", () => container.querySelector("svg.lane-card-bar .cost-bar-fill"), "1"],
+    [".hero-pool-chip", () => container.querySelector(".hero-pool-chip rect"), "1px"],
+    [
+      "an in-motion droplet",
+      () => container.querySelector('.hero-droplet:not([data-at="trunk"]):not([data-at="needs-human"]) .hero-droplet-shape'),
+      "1px",
+    ],
+    [".spend-meter-bar", () => container.querySelector("svg.spend-meter-bar .cost-bar-fill"), "1"],
+  ];
+
+  try {
+    document.documentElement.setAttribute("data-theme", "sapwood");
+    for (const [label, find, expectedWidth] of namedShapes) {
+      const el = find();
+      assert.ok(el, `light theme: ${label} must render`);
+      const computed = getComputedStyle(el as Element);
+      assert.equal(computed.stroke, lightOutlineHex, `light theme: ${label} outline stroke must resolve the exact --sap-text hex`);
+      assert.equal(computed.strokeWidth, expectedWidth, `light theme: ${label} outline width`);
+    }
+
+    document.documentElement.setAttribute("data-theme", "heartwood");
+    for (const [label, find] of namedShapes) {
+      const el = find();
+      assert.ok(el, `dark theme: ${label} must render`);
+      assert.equal(getComputedStyle(el as Element).stroke, "transparent", `dark theme: ${label} outline stroke must resolve to none`);
+    }
+  } finally {
+    document.documentElement.removeAttribute("data-theme");
+    await cleanup();
+  }
+});
+
+/** Same raw-value read `contrast.ts`'s own `parseTokens` performs — duplicated locally (rather
+ *  than importing `contrast.ts` into this already-large file) since only the ONE token this
+ *  suite needs is read; `tokens.test.ts` is the file that actually exercises `contrast.ts` itself. */
+function parseTokensLocal(css: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [, name, value] of css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/(--[\w-]+)\s*:\s*([^;}]+)/g)) {
+    out[name!] = value!.trim();
+  }
+  return out;
+}

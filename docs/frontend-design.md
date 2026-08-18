@@ -551,7 +551,9 @@ below are unchanged:
 | `--sapwood` | `#F1E7D2` | Primary text (dark theme) / background (light theme) |
 | `--bark` | `#8A7A64` | Borders and hairlines **only** (≈3.9:1 on `--heartwood` — below AA for text) |
 | `--bark-text` | `#A6957C` | Muted text (AA-passing on both grounds) |
-| `--sap` | `#E8A33D` | Amber — the *activity* color: flowing tokens, running lanes, spend meter |
+| `--sap-text` | `#E8A33D` | Amber — the *activity* color, stroke/text/outline role: flowing tokens, running lanes, spend meter, focus ring |
+| `--sap-fill` | `#E8A33D` | Amber, filled-surface role: chips, droplets, bar pills, filled buttons — flat, same value both themes (see amendment below) |
+| `--on-sap-fill` | `#251B10` | Ink drawn ON a `--sap-fill` surface — always dark, since `--sap-fill` no longer darkens for light theme |
 | `--moss` | `#8FA36B` | Success: merged, CI green, healthy engine dot |
 | `--rust` | `#D9713F` | Failure/escalation: failed lanes, `needs-human`, ceiling breach |
 
@@ -565,9 +567,27 @@ dashboard` prints the table, and `dashboard/src/tokens.test.ts` fails the build 
 any pair regresses. Both themes live in a single `light-dark(light, dark)`
 declaration per token, so a theme cannot silently drift from its twin.
 
-Rules: `--sap` means "in motion", `--moss` means "done well", `--rust` means
+Rules: amber means "in motion", `--moss` means "done well", `--rust` means
 "a person should look" — never decorative use of any of the three. Rings are
-stroked in `--bark` at 40% alpha; the growing (current) ring in `--sap`.
+stroked in `--bark` at 40% alpha; the growing (current) ring in `--sap-text`.
+
+Amended 2026-08-17 (#924, #729 remainder D32/Q5): `--sap` split into `--sap-text`
+(stroke/text/outline role — unchanged value, `light-dark(#8A5A14, #E8A33D)`, still
+darkening for light theme) and `--sap-fill` (filled-surface role — chips, droplets,
+bar pills, filled buttons — a flat `#E8A33D` in BOTH themes, no longer light-dark).
+No alias for the old `--sap` name (pre-v1) — every site re-pointed by role. The flat
+`--sap-fill` no longer darkens for light theme the way `--sap-text` does, so it
+measures only 1.88:1 against the light-theme page ground (`--heartwood`), below the
+WCAG 3:1 non-text boundary (dark theme clears it at 7.83:1) — every filled
+`.hero-pool-chip`/in-motion-droplet/`.spend-meter-bar` fill compensates with a 1px
+`--sap-text` outline in light theme only (`--sap-fill-outline`, tokens.css;
+`hero-panel-light.png`'s own drawn fill/outline treatment). `--on-sap-fill` (the ink
+drawn on a filled surface, e.g. `.hero-pool-chip`'s issue number) is a fixed `#251B10`
+rather than a `light-dark()` alias of `--heartwood` — `--heartwood`'s own light-theme
+value is the PALE ground color, which would read as light-on-amber against the now
+constant-bright `--sap-fill` and fail AA (1.88:1); a fixed dark ink clears AA (7.83:1)
+in both themes since `--sap-fill` no longer varies. `npm run contrast -w dashboard`
+prints both the existing text-on-ground table and this fill/outline accounting.
 
 **Type** — three roles, one bundled file:
 
@@ -603,8 +623,11 @@ the dashboard concept renders) both recorded the shipped headers as a deviation 
 baseline mockups render all-mono; both probes filed it as non-blocking and pointed at one
 shared adjudication rather than two. Ruling: the token table stands as specced — Fraunces for
 display headers — and the baseline PNGs are the out-of-date artifact, not the implementation.
-No code change follows from this entry; it exists so #144/#145's "recorded for adjudication"
-deviation has a resolved answer on file.
+**Scope: FONT FAMILY only** (owner ruling Q2, 2026-08-17, #924/#729 remainder) — this entry
+never spoke to casing, letter-spacing, or scale; those follow the mockups directly (uppercase,
+letter-spaced, ~16–18px at 1440 — `.panel-head`, panels.css) and are #924's own scope, not a
+reopening of this one. No code change follows from this #728 entry itself; it exists so
+#144/#145's "recorded for adjudication" deviation has a resolved answer on file.
 
 Scale: 13 px base (data-dense surface), 1.25 ratio up to the 33 px display
 size; line-height 1.5 body, 1.2 display. Weights: 400/600 only.

@@ -30,7 +30,16 @@
   --sapwood: light-dark(#251B10, #F1E7D2); /* primary text */
   --bark: #8A7A64; /* borders and hairlines ONLY — below AA for text, both themes */
   --bark-text: light-dark(#57604A, #A6957C); /* muted text */
-  --sap: light-dark(#8A5A14, #E8A33D); /* amber — "in motion" */
+  /* #924 (#729 remainder, Q5): the old --sap split in two by ROLE, never by theme —
+     --sap-text (stroke/text/outline; unchanged value, this is today's --sap renamed) and
+     --sap-fill (filled surfaces: chips, droplets, bar pills, filled buttons), which stays a flat
+     amber in BOTH themes rather than darkening in light mode the way --sap-text still does. */
+  --sap-text: light-dark(#8A5A14, #E8A33D); /* amber — "in motion"; stroke/text/outline role */
+  --sap-fill: #E8A33D; /* amber filled-surface role — same value both themes */
+  /* Ink drawn ON a --sap-fill surface — always dark, since --sap-fill no longer darkens for
+     light theme the way --sap-text does (a live light-dark(--heartwood) alias would resolve to
+     the PALE light-theme heartwood there, reading as light-on-amber — the wrong direction). */
+  --on-sap-fill: #251B10;
   --moss: light-dark(#3E6B4F, #8FA36B); /* success — "done well" */
   /* failure/escalation — "a person should look".
      Dark value lightened from the spec's #C05A2E (3.46:1 on --panel) to clear AA as
@@ -62,6 +71,14 @@
   --radius-card: 6px;
   --radius-pill: 999px;
   --hairline: 1px solid color-mix(in srgb, var(--bark) 25%, transparent);
+  /* Q5: light theme's --sap-fill vs the cream ground measures 1.88:1, below the 3:1 non-text
+     boundary (dark theme clears it at 7.83:1) — every filled chip/droplet/bar-pill compensates
+     with a 1px --sap-text outline in light theme only (transparent — invisible, same effect as
+     0-width — in dark, where the fill already clears 3:1 unaided). Dark-theme/no-preference
+     default lives here; the two light-theme trigger conditions (explicit override, system
+     preference with no override) are the two rules below `:root` — see their own doc for why this
+     is NOT `light-dark(var(--sap-text), transparent)` despite being the same effective values. */
+  --sap-fill-outline: transparent;
 
   /* ---- Motion ------------------------------------------------------------ */
   --beat: 240ms; /* state flips */
@@ -71,7 +88,7 @@
   --ambient: 3s; /* ambient pulses are never faster than this */
 
   /* ---- Focus (§2 adjudication log, 2026-08-14) ----------------------------- */
-  --focus-ring: 2px solid var(--sap);
+  --focus-ring: 2px solid var(--sap-text);
   --focus-ring-offset: 2px;
 
   /* ---- Z-layers (§2 adjudication log, 2026-08-14) --------------------------
@@ -94,6 +111,31 @@
   color-scheme: dark;
 }
 
+/*
+ * #924 AC3: the outline proof needs a STYLE test that reads a REAL resolved colour via
+ * `getComputedStyle` — happy-dom's CSS engine never evaluates `light-dark()` at all, in any form,
+ * regardless of theme; it always echoes the raw, unresolved `"light-dark(A, B)"` text back, so a
+ * `--sap-fill-outline` declared as `light-dark(var(--sap-text), transparent)` is permanently
+ * unprovable in that harness, no matter how the test itself is written. The fix is this token
+ * declaring its light-theme value as a literal hex here instead, so the winning declaration never
+ * contains a `light-dark()` call for `getComputedStyle` to fail to evaluate. `#8A5A14` is
+ * `--sap-text`'s own light-theme hex, duplicated deliberately — `tokens.test.ts` pins it against
+ * `parseColorTokens(tokensCss).light["--sap-text"]` so the two can never silently drift apart, the
+ * same VALUE-family guarantee `light-dark()` gave for free before this workaround.
+ */
 :root[data-theme="sapwood"] {
   color-scheme: light;
+  --sap-fill-outline: #8A5A14;
+}
+
+/* The other light-theme trigger `light-dark()` used to cover for free: system preference, with NO
+ * explicit override at all (`theme.ts`'s `null` state — a real, common default, not just an edge
+ * case). `:root:not([data-theme])` is what keeps this from firing OVER an explicit `heartwood`
+ * override on a light-preferring system — that combination must stay outline-less, and the
+ * `:root[data-theme="sapwood"]` rule above already covers the explicit-light-override case on its
+ * own regardless of system preference. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --sap-fill-outline: #8A5A14;
+  }
 }

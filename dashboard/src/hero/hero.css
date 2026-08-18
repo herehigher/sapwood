@@ -88,11 +88,31 @@
   fill: var(--bark-text);
 }
 
-/* #879: backlog READY cards are filled --sap — --heartwood is the contrasting card-text token
- * (see stage.tsx's own doc on why the same token works dark-on-amber AND light-on-amber). */
+/* #924: backlog READY cards are filled --sap-fill — --on-sap-fill is the dedicated
+ * text-on-filled-surface token (AC3), always dark ink since --sap-fill no longer darkens for
+ * light theme the way --sap-text still does (see tokens.css's own doc on why --heartwood itself
+ * would get this backwards in light theme). */
 .hero-pool-num {
   font-weight: 600;
-  fill: var(--heartwood);
+  fill: var(--on-sap-fill);
+}
+
+/* AC3/Q5: light theme's flat --sap-fill only clears 1.88:1 against the page ground — every
+ * filled READY chip compensates with a 1px --sap-text outline there (invisible in dark theme —
+ * --sap-fill-outline, tokens.css). */
+.hero-pool-chip rect {
+  stroke: var(--sap-fill-outline);
+  stroke-width: 1px;
+}
+
+/* AC3/Q5: same outline rule, scoped to the in-motion (--sap-fill) droplets only — merged/failed
+ * droplets (`--moss`/`--rust`, both `light-dark()` and already >= 3:1 vs ground) don't need it.
+ * `dropletFill` (stage.tsx) is the single source for which droplet gets which fill; this selector
+ * mirrors its exact "not trunk, not needs-human, not failed" condition off the SAME data
+ * attributes the parent `<g>` already carries, rather than a second class/data-attr on the shape. */
+.hero-droplet:not([data-at="trunk"]):not([data-at="needs-human"]):not([data-failed="true"]) .hero-droplet-shape {
+  stroke: var(--sap-fill-outline);
+  stroke-width: 1px;
 }
 
 /* #728 gate② finding [0] (run 31f166a9): must precede every 9px caption rule below — a lane
@@ -150,8 +170,18 @@
   stroke-opacity: 0.25;
 }
 
+/* #924 AC3: the READY chip must be fully opaque — a translucent `fill-opacity` composites the
+ * flat, opaque `--sap-fill` role over the panel (~#573F1F in dark theme) instead of painting the
+ * real token colour, leaving `--on-sap-fill`'s ink at ~1.7:1 against the ACTUAL rendered surface
+ * even though `checkFillTextContrast` (both tokens at full opacity) reports 7.83:1 — the mockup's
+ * chip is a fully opaque, high-contrast card. `1` is the SVG initial value, so this rule is
+ * behaviourally a no-op — declared explicitly anyway, both to document the choice (opaque is
+ * deliberate, not merely "never touched") and because happy-dom's `getComputedStyle` reports an
+ * empty string for an SVG presentation property with no matching rule at all, rather than
+ * resolving the initial value — an explicit declaration is what makes `hero.test.ts`'s own STYLE
+ * assertion able to read a real "1" back. */
 .hero-pool-chip rect {
-  fill-opacity: 0.22;
+  fill-opacity: 1;
 }
 
 /* #897 AC4: the rest of the ready pool beyond `BACKLOG_FILLED_CAP` — an outlined candidate
@@ -290,14 +320,14 @@
 
 .hero-lane[data-phase="writing"] .hero-channel,
 .hero-lane[data-phase="fixing"] .hero-channel {
-  stroke: var(--sap);
+  stroke: var(--sap-text);
   stroke-opacity: 1;
   animation: hero-shimmer 3.4s linear infinite;
   stroke-dasharray: 10 6;
 }
 
 .hero-lane[data-phase="driving"] .hero-channel {
-  stroke: var(--sap);
+  stroke: var(--sap-text);
   stroke-opacity: 0.5;
 }
 
@@ -356,7 +386,7 @@
 }
 
 [data-active="true"] .hero-planning-node {
-  stroke: var(--sap);
+  stroke: var(--sap-text);
   stroke-opacity: 0.9;
   animation: hero-breathe 3s ease-in-out infinite;
 }
@@ -382,11 +412,11 @@
 }
 
 [data-active="true"] .hero-planning-icon {
-  stroke: var(--sap);
+  stroke: var(--sap-text);
 }
 
 [data-active="true"] .hero-planning-icon-dot {
-  fill: var(--sap);
+  fill: var(--sap-text);
 }
 
 /* ---- Ambient ------------------------------------------------------------- */

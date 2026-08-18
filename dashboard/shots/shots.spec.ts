@@ -381,17 +381,21 @@ test("§889 finding [0]: the opened round-list dropdown is not clipped by the na
  * 3. The closed-pill's tint (`.round-nav-pill-closed`) resolves to a DIFFERENT real color between
  *    the two themes — the concrete, non-fakeable proof that `light-dark()` genuinely cascades here
  *    rather than a theme-invariant hardcoded value.
- * 4. `--sap` itself (the exact token `.transport-scrub`'s thumb/track rules consume) resolves to a
- *    different real color per theme at `:root` — AND the source declaration for the thumb rule
- *    references that same token by name. Together these are the closest available real-browser
- *    proof for the thumb specifically: `getComputedStyle(el, pseudo)` is NOT usable for vendor
- *    slider pseudo-elements — verified directly (a scratch probe against this exact page returned
- *    the BASE element's own box for `::-webkit-slider-thumb`, while a `::before` sanity probe on
- *    the same API resolved correctly), which is a documented Chromium limitation of the query API
- *    itself, not of the underlying paint. A single-pixel screenshot sample would be the only way to
- *    query the pseudo-element's actual paint color directly, and this file's own stated posture is
- *    "no pixel-diff gate" — the token-level computed proof plus the source-level rule binding is
- *    the honest ceiling here, not a shortcut around a harder check.
+ * 4. `--sap-fill` itself (#924: the filled-surface role split off `--sap`, the exact token
+ *    `.transport-scrub`'s thumb/track rules now consume) resolves to a real, non-empty color at
+ *    `:root` in both themes, AND — unlike `--sap-text` above, which still varies per theme — it
+ *    resolves to the SAME color in both, proving the split's own deliberate invariant (tokens.css:
+ *    `--sap-fill` is a flat amber in both themes, no longer `light-dark()`) rather than a stale
+ *    assumption every themed token must differ. The source declaration for the thumb rule is
+ *    cross-checked to reference that same token by name. Together these are the closest available
+ *    real-browser proof for the thumb specifically: `getComputedStyle(el, pseudo)` is NOT usable
+ *    for vendor slider pseudo-elements — verified directly (a scratch probe against this exact
+ *    page returned the BASE element's own box for `::-webkit-slider-thumb`, while a `::before`
+ *    sanity probe on the same API resolved correctly), which is a documented Chromium limitation
+ *    of the query API itself, not of the underlying paint. A single-pixel screenshot sample would
+ *    be the only way to query the pseudo-element's actual paint color directly, and this file's
+ *    own stated posture is "no pixel-diff gate" — the token-level computed proof plus the
+ *    source-level rule binding is the honest ceiling here, not a shortcut around a harder check.
  */
 test("§889 AC2: navigator/transport controls resolve real token-based styling in both themes, not native chrome", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -467,16 +471,21 @@ test("§889 AC2: navigator/transport controls resolve real token-based styling i
     expect(pillClosedColor, `${theme.key}: the closed-round pill's tint must resolve to a real color`).not.toBe("");
     pillClosedColorByTheme[theme.key] = pillClosedColor;
 
-    const sapToken = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--sap").trim());
-    expect(sapToken, `${theme.key}: --sap must resolve to a real color at :root`).not.toBe("");
-    sapTokenByTheme[theme.key] = sapToken;
+    const sapFillToken = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--sap-fill").trim());
+    expect(sapFillToken, `${theme.key}: --sap-fill must resolve to a real color at :root`).not.toBe("");
+    sapTokenByTheme[theme.key] = sapFillToken;
   }
 
   expect(
     pillClosedColorByTheme.light,
     "the closed-pill tint must actually differ between light and dark themes — proof light-dark() genuinely cascades, not a theme-invariant hardcoded value",
   ).not.toBe(pillClosedColorByTheme.dark);
-  expect(sapTokenByTheme.light, "--sap itself must differ between light and dark themes at :root").not.toBe(sapTokenByTheme.dark);
+  // #924: --sap-fill is deliberately FLAT (same value both themes, tokens.css) — the inverse of
+  // the light-dark() proofs above, on purpose.
+  expect(
+    sapTokenByTheme.light,
+    "--sap-fill must resolve to the SAME color in both themes — it is deliberately flat, not light-dark()",
+  ).toBe(sapTokenByTheme.dark);
   expect(
     buttonBackgroundByTheme.light,
     "the transport button background must actually differ between light and dark themes — proof light-dark() genuinely cascades onto it, not a theme-invariant hardcoded value",
@@ -485,8 +494,8 @@ test("§889 AC2: navigator/transport controls resolve real token-based styling i
   const panelsCss = readFileSync(fileURLToPath(new URL("../src/panels.css", import.meta.url)), "utf8");
   const thumbRule = panelsCss.match(/\.transport-scrub::-webkit-slider-thumb\s*\{([^}]*)\}/);
   expect(thumbRule, ".transport-scrub::-webkit-slider-thumb rule must exist").not.toBeNull();
-  expect(thumbRule?.[1], "the thumb rule must consume the SAME --sap token just proven to differ per theme above").toMatch(
-    /background:\s*var\(--sap\)/,
+  expect(thumbRule?.[1], "the thumb rule must consume the SAME --sap-fill token just proven above").toMatch(
+    /background:\s*var\(--sap-fill\)/,
   );
 });
 
@@ -721,6 +730,160 @@ test("#892 AC4: the operations confirm dialog traps focus (background inert) and
   await expect(pauseButton).toBeVisible();
   await expect(pauseButton).toBeEnabled();
 });
+
+/**
+ * #924 AC2 (simplest architecture that is correct — no runtime measurement needed): `CostBar.tsx`
+ * has no `viewBox`/`preserveAspectRatio` — the settled fill is a real
+ * rounded `<rect rx>`, whose rounding is carved INWARD from its own x/width box (unlike a stroked
+ * line's round linecap, which bulges OUTWARD past its own endpoint), so it's fully contained at
+ * every settled percentage with no runtime measurement or scale-compensation machinery needed.
+ * This is the real-pixel proof that holds in an actual browser, reusing the SAME fixtures the
+ * rest of this file already drives — never a bespoke harness: the mocked live lane board (w1: est-
+ * only, 0% settled; w3: costUsd $1.10 of a $10 soft budget ≈ 11% settled, `.lane-card-bar`) and
+ * the `?demo` fixture's cost panel (its "Lanes" by-stage bar self-scales to its own group's own
+ * max, i.e. 100% settled; "Goal & align" stays at 0%, the only spend this fixture records is in
+ * the "Lanes"/executing phase).
+ */
+test("#924 AC2: the pill's round caps stay inside the bar box at 0%/partial/100% settled, with the light outline present at both caps", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // 0% (est-only, no settled fill at all) and ~11% partial (lane w3: $1.10 of a $10 soft budget).
+  await mockLiveApi(page, liveLanesLoopState());
+  await page.goto("/");
+  await page.locator('section[aria-label="lanes"]').waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "sapwood"));
+
+  const w1Card = page.locator(".lane-card", { hasText: "w1" });
+  expect(await w1Card.locator(".cost-bar-fill").count(), "lane w1 (est-only, 0% settled) must render no fill rect at all").toBe(0);
+
+  const w3Card = page.locator(".lane-card", { hasText: "w3" });
+  await assertPillCapsContained(page, w3Card.locator("svg.lane-card-bar"), "lane w3 (~11% settled)", { left: true, right: false });
+
+  // 100%: the ?demo fixture's cost panel "Lanes" by-stage bar self-scales to its own group max.
+  await page.goto("/?demo");
+  await page.locator("#cost").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "sapwood"));
+
+  const lanesRow = page.locator("#cost .cost-bar-row", { hasText: "Lanes" }).first();
+  await assertPillCapsContained(page, lanesRow.locator("svg.cost-bar"), "Lanes stage (100% settled)", { left: true, right: true });
+
+  const zeroRow = page.locator("#cost .cost-bar-row", { hasText: "Goal & align" }).first();
+  expect(await zeroRow.locator(".cost-bar-fill").count(), "Goal & align stage (0% settled) must render no fill rect at all").toBe(0);
+});
+
+/**
+ * A genuine RENDERED-PIXEL sample at one page coordinate — not a geometry-box comparison (a
+ * `<rect>`'s `getBoundingClientRect()` is verified directly to report the geometry-only box,
+ * excluding its own stroke, so it can't itself prove whether a 1px CENTERED stroke's own 0.5px
+ * straddle past the box edge actually painted or got clipped) and not `elementFromPoint` (a DOM
+ * hit-test, not a paint fact). `page.screenshot({ clip })` captures the SAME rendering the user
+ * sees — real overflow/clip behaviour, real antialiasing — as a PNG; decoding happens back in the
+ * PAGE (via `Image` + `<canvas>`, both standard browser APIs — no new dependency) rather than in
+ * Node, which has no built-in image codec.
+ */
+async function samplePixel(page: Page, x: number, y: number): Promise<[number, number, number, number]> {
+  const crop = 8;
+  const buffer = await page.screenshot({ clip: { x: x - crop / 2, y: y - crop / 2, width: crop, height: crop } });
+  const base64 = buffer.toString("base64");
+  return page.evaluate(async (base64) => {
+    const img = new Image();
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error("failed to decode the cropped screenshot"));
+      img.src = `data:image/png;base64,${base64}`;
+    });
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(img, 0, 0);
+    const center = Math.floor(canvas.width / 2);
+    const d = ctx.getImageData(center, center, 1, 1).data;
+    return [d[0], d[1], d[2], d[3]] as [number, number, number, number];
+  }, base64);
+}
+
+/**
+ * Real-pixel proof for one `<CostBar>` instance's own `.cost-bar-fill` rect, checked at whichever
+ * end(s) actually sit at the bar's own box edge for that settled percentage (a cap mid-track has
+ * nothing edge-specific to prove — a large geometric clearance there is correct, not a defect).
+ * Three kinds of evidence: (1) the rect's own bounding box (geometry only, excludes the stroke)
+ * never extends past the bar's own box — the P2 regression's own containment half, at the fill
+ * geometry level; (2) `overflow: visible` on the containing `.cost-bar` svg (panels.css) — the
+ * fix for the STROKE's own 0.5px straddle at the box edge (a 1px stroke is centred on its own
+ * path, so it oversteps the box by half its own width; `overflow: hidden`, the SVG default, would
+ * clip that straddle away, thinning the light outline exactly where it matters); (3) a REAL pixel
+ * sample (`samplePixel`) right at the box edge — must differ from the background (paint reaches
+ * there, not clipped short — the P2 regression's own failure mode: the cap's outer curve clipped
+ * away entirely at 100% spend), and 2px further out — must equal the background (nothing bleeds
+ * past). `rx`'s own genuine roundedness (as opposed to a square end) is a declarative fact, not a
+ * pixel one — CostBar.test.tsx's own markup test and App.test.tsx's "AC2 (pill end caps)" STYLE
+ * test both pin the `rx` attribute directly.
+ */
+async function assertPillCapsContained(
+  page: Page,
+  svgLocator: Locator,
+  label: string,
+  ends: { left: boolean; right: boolean },
+): Promise<void> {
+  const fill = svgLocator.locator(".cost-bar-fill");
+  await expect(fill, `${label}: a real .cost-bar-fill must render`).toHaveCount(1);
+  // Pixel sampling reads the current viewport's own rendered output — a card scrolled below the
+  // fold (this fixture's third lane card, at 1440x900) would sample the wrong content entirely.
+  await fill.scrollIntoViewIfNeeded();
+
+  const geometry = await fill.evaluate((el: SVGRectElement) => {
+    const svgEl = el.closest("svg") as SVGSVGElement;
+    const rect = el.getBoundingClientRect();
+    const svgRect = svgEl.getBoundingClientRect();
+    return {
+      left: rect.left,
+      right: rect.right,
+      centerY: (rect.top + rect.bottom) / 2,
+      svgLeft: svgRect.left,
+      svgRight: svgRect.right,
+      overflow: getComputedStyle(svgEl).overflow,
+    };
+  });
+
+  const SLACK = 0.5;
+  expect(geometry.left, `${label}: the fill must never paint left of the bar's own box`).toBeGreaterThanOrEqual(geometry.svgLeft - SLACK);
+  expect(geometry.right, `${label}: the fill must never paint right of the bar's own box`).toBeLessThanOrEqual(geometry.svgRight + SLACK);
+  expect(geometry.overflow, `${label}: the bar's own svg must not clip its own 1px centred outline stroke at the edges`).toBe("visible");
+
+  if (ends.left) {
+    const atEdge = await samplePixel(page, geometry.left, geometry.centerY);
+    const outside = await samplePixel(page, geometry.left - 2, geometry.centerY);
+    expect(atEdge, `${label}: real paint (fill or its outline) must reach the box's own left edge — the cap's own tip`).not.toEqual(
+      outside,
+    );
+    const farOutside = await samplePixel(page, geometry.left - 4, geometry.centerY);
+    expect(outside, `${label}: nothing may paint left of the bar's own box`).toEqual(farOutside);
+  }
+  if (ends.right) {
+    const atEdge = await samplePixel(page, geometry.right, geometry.centerY);
+    const outside = await samplePixel(page, geometry.right + 2, geometry.centerY);
+    expect(atEdge, `${label}: real paint (fill or its outline) must reach the box's own right edge — the cap's own tip`).not.toEqual(
+      outside,
+    );
+    const farOutside = await samplePixel(page, geometry.right + 4, geometry.centerY);
+    expect(outside, `${label}: nothing may paint right of the bar's own box`).toEqual(farOutside);
+  }
+
+  // The light outline (AC3) — a plain stroke directly on this same rect (panels.css), so its own
+  // declaration is a computed-style fact, cross-checked against the pixel evidence above.
+  const strokeInfo = await fill.evaluate((el) => {
+    const computed = getComputedStyle(el);
+    return { stroke: computed.stroke, strokeWidth: computed.strokeWidth };
+  });
+  expect(strokeInfo.stroke, `${label}: the light-theme outline stroke must resolve to a real, non-transparent colour`).not.toBe("none");
+  expect(strokeInfo.stroke, `${label}: the light-theme outline stroke must resolve to a real, non-transparent colour`).not.toBe("");
+  expect(strokeInfo.strokeWidth, `${label}: the outline is a plain 1px stroke`).toBe("1px");
+}
 
 /** #882: the fixture-shaped `/api/loop/state` lanes payload fed to `captureLiveLanes` below —
  *  three active-lane variety (running/fixing/driving) plus one open idle slot (`lanesMax: 4`),
