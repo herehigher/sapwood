@@ -54,6 +54,13 @@ import type {
 } from "../state/state.js";
 import { observeBaseCi } from "./base-ci.js";
 import {
+  CAP_SPLIT_ORIGIN_MARKER,
+  type CapSplitWipPointer,
+  hasCapSplitWipComment,
+  renderCapSplitWipComment,
+  summarizeUnifiedDiffStat,
+} from "./cap-split.js";
+import {
   classifyEnvFailure,
   type EnvFailureSource,
   escalationChannel,
@@ -1578,7 +1585,11 @@ export type HumanMergeOnlyCloseOutOutcome =
 /** #172: one handoff-lane decision that changed durable state this tick. */
 export type ResumeOutcome =
   | { kind: "resumed"; worker: string; issue: number; attempt: number }
-  | { kind: "capped"; worker: string; issue: number; attempts: number };
+  | { kind: "capped"; worker: string; issue: number; attempts: number }
+  // #965: the resume cap converted to an engine-applied `labels.split` instead of needs-human —
+  // a DISTINCT kind from "capped" (not an added optional field on it) so every existing "capped"
+  // assertion stays byte-identical rather than needing a `split: false` update at every call site.
+  | { kind: "capped-split"; worker: string; issue: number; attempts: number };
 
 export interface TickResult {
   reclaimed: ReclaimOutcome[];
@@ -6008,6 +6019,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   const resumed: ResumeOutcome[] = [];
   let resumeLanesUsed = state.activeWorkers().length;
   const resumeSpendPaused = paused || ceilingBreached || parkActive || overBudget || runSpendStop;
+  // #965: how many CAPPED lanes THIS call has already converted to an engine-applied
+  // `labels.split` — see cfg.lanes.capSplitPerRound's own doc for the per-call (not
+  // cross-tick) scope this mirrors from roundDispatchCap.
+  let capSplitsAppliedThisCall = 0;
   for (const w of handoffsAtTickStart) {
     const attempts = w.resume_attempts ?? 0;
     const intentState = supervisor.resumeIntentState(w.name, w.issue);
@@ -6058,6 +6073,65 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       continue;
     }
     if (decision === "CAPPED") {
+      // #965: the resume cap used to be a one-way trip to needs-human — a human then did what
+      // the engine already knows how to do, decompose. So the FIRST question at CAPPED is now
+      // "may the engine split this instead", never assumed: a child of an earlier cap-split
+      // (origin marker in the body) never re-splits (AC2, bounds a split storm the same way
+      // #874's own per-round gate⓪-split cap bounds ITS source), and the per-call
+      // capSplitPerRound allowance must not be exhausted. `labels != []` here (CAPPED is
+      // unreachable with `intentState === "confirmed"`, the one case that would have skipped the
+      // labels read above), so a body read is the only extra forge call this path adds.
+      const capSplitEligible = capSplitsAppliedThisCall < cfg.lanes.capSplitPerRound;
+      const capSplitBody = capSplitEligible ? await forge.getIssueBody(w.issue) : "";
+      if (capSplitEligible && !capSplitBody.includes(CAP_SPLIT_ORIGIN_MARKER)) {
+        // Label-first/latch-second, same pattern as the needs-human arm below: a transient
+        // label failure leaves the row eligible so the next tick retries.
+        try {
+          await forge.addLabel(w.issue, cfg.labels.split);
+        } catch (e) {
+          state.appendEvent("resume-cap-split-label-failed", { worker: w.name, issue: w.issue, attempts, error: String(e) });
+          continue;
+        }
+        let pointer: CapSplitWipPointer = { issue: w.issue };
+        if (w.pr != null) {
+          try {
+            const [status, diff] = await Promise.all([forge.getPRStatus(w.pr), forge.getPRDiff(w.pr)]);
+            pointer = {
+              issue: w.issue,
+              pr: w.pr,
+              ...(status.headRefName !== undefined ? { branch: status.headRefName } : {}),
+              headSha: status.headOid,
+              diffstat: summarizeUnifiedDiffStat(diff),
+            };
+          } catch {
+            // Evidence-gathering failure never blocks the split itself — the PR/branch/diff read
+            // is advisory context for the decomposer, not a gate on the label write above (which
+            // already landed). A degraded pointer (issue + pr only) is still honest: absent
+            // fields render as absent in the digest (#965 AC3), never fabricated.
+            pointer = { issue: w.issue, pr: w.pr };
+          }
+        }
+        const existingComments = await forge.getIssueComments(w.issue);
+        if (!hasCapSplitWipComment(existingComments, w.issue)) {
+          await forge
+            .addIssueComment(
+              w.issue,
+              renderCapSplitWipComment({ splitLabel: cfg.labels.split, maxResumes: cfg.worker.maxResumes, attempts }, pointer),
+            )
+            .catch(() => {});
+        }
+        state.upsertWorker({ ...w, ended_at: iso(), resume_capped: 1 });
+        state.appendEvent("resume-capped", {
+          worker: w.name,
+          issue: w.issue,
+          attempts,
+          split: true,
+          ...(w.pr != null ? { pr: w.pr } : {}),
+        });
+        resumed.push({ kind: "capped-split", worker: w.name, issue: w.issue, attempts });
+        capSplitsAppliedThisCall++;
+        continue;
+      }
       // Gated-reentry's label-first/latch-second pattern: a transient label failure leaves the
       // row eligible so the next tick retries; never permanently hide an unlabeled handoff.
       try {
@@ -6081,7 +6155,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         .catch(() => {});
       state.upsertWorker({ ...w, ended_at: iso(), resume_capped: 1 });
       // #295 review round 4 (Codex P1): same as resume-undecidable — preserve the known PR.
-      state.appendEvent("resume-capped", { worker: w.name, issue: w.issue, attempts, ...(w.pr != null ? { pr: w.pr } : {}) });
+      // #965: `split: false` is explicit (not merely absent) so a payload consumer never has to
+      // treat "no split key" (every pre-#965 event) and "split key present but false" as two
+      // different shapes for the same fact.
+      state.appendEvent("resume-capped", { worker: w.name, issue: w.issue, attempts, split: false, ...(w.pr != null ? { pr: w.pr } : {}) });
       resumed.push({ kind: "capped", worker: w.name, issue: w.issue, attempts });
       continue;
     }

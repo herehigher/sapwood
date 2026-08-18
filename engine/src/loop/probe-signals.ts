@@ -155,7 +155,7 @@ export const PROBE_SIGNALS: readonly ProbeSignal[] = [
     read: "local",
     consumer: "conductor.ts resume scheduler — always live, no gate",
     terminal:
-      "state.ts handoffWorkers() ALREADY excludes `resume_capped = 1` rows — a one-way latch set once maxResumes is exhausted and the needs-human escalation lands, so a lane that keeps failing to resume stops counting permanently",
+      "state.ts handoffWorkers() ALREADY excludes `resume_capped = 1` rows — a one-way latch set once maxResumes is exhausted and the terminal label (needs-human, or an engine-applied `labels.split` since #965) lands, so a lane that keeps failing to resume stops counting permanently",
     probe: (ctx) => ctx.state.handoffWorkers().length > 0,
   },
   {

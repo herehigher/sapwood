@@ -7,6 +7,7 @@ import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.j
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import { buildBacklogDigest } from "./align.js";
+import { CAP_SPLIT_ORIGIN_MARKER, renderCapSplitWipComment } from "./cap-split.js";
 import {
   decomposeProposalId,
   defaultPoDecomposePromptPath,
@@ -468,6 +469,65 @@ test("mixed decomposition: fence and journal precede creates; children stay outs
     fake.order.filter((item) => item.startsWith("status:") && !item.endsWith(":backlog")),
     [],
   );
+});
+
+test("#965 AC3: a cap-split parent's WIP-pointer comment renders into the po-decompose digest, and its origin marker survives on every child", async () => {
+  const parent: Issue = { number: 20, title: "Cap-split oversize", body: "why", labels: [cfg.labels.split] };
+  const fake = fakeForge(parent);
+  const state = new State(":memory:");
+  fake.comments.set(20, [
+    {
+      login: "engine",
+      createdAt: "2026-01-01T00:00:00Z",
+      body: renderCapSplitWipComment(
+        { splitLabel: cfg.labels.split, maxResumes: 2, attempts: 2 },
+        {
+          issue: 20,
+          pr: 55,
+          branch: "sapwood/lane-x-20",
+          headSha: "cafef00d",
+          diffstat: "2 files changed, 10 insertions(+), 1 deletion(-)",
+        },
+      ),
+    },
+  ]);
+  const runner = new Runner(result(mixedMetadata, [readyBody, remainderBody]));
+  await runDecompositionPass({ now: realClock, forge: fake as unknown as IForge, state, cfg, runner }, 11, fake.issues);
+
+  const prompt = runner.calls[0]!.prompt;
+  assert.match(prompt, /## WIP branch \(resume-cap split, #965\)/);
+  assert.match(prompt, /sapwood\/lane-x-20/);
+  assert.match(prompt, /PR: #55/);
+  assert.match(prompt, /cafef00d/);
+  assert.match(prompt, /2 files changed, 10 insertions\(\+\), 1 deletion\(-\)/);
+
+  const readyChild = fake.issues.find((i) => i.number === 100);
+  const remainderChild = fake.issues.find((i) => i.number === 101);
+  assert.ok(readyChild?.body.includes(CAP_SPLIT_ORIGIN_MARKER), "ready child carries the origin marker");
+  assert.ok(remainderChild?.body.includes(CAP_SPLIT_ORIGIN_MARKER), "remainder child carries the origin marker too");
+});
+
+test("#965 AC3: an ordinary human-split parent (no WIP-pointer comment) renders nothing WIP-related, and children carry no origin marker", async () => {
+  const parent: Issue = { number: 21, title: "Ordinary split", body: "why", labels: [cfg.labels.split] };
+  const fake = fakeForge(parent);
+  const state = new State(":memory:");
+  const runner = new Runner(result(mixedMetadata, [readyBody, remainderBody]));
+  await runDecompositionPass({ now: realClock, forge: fake as unknown as IForge, state, cfg, runner }, 12, fake.issues);
+
+  const prompt = runner.calls[0]!.prompt;
+  // The STATIC "## When a WIP branch is present" instructional heading always ships (it's
+  // guidance for the case where one exists, same as any other conditional instruction) — what
+  // must be absent is the DYNAMIC per-parent section a real pointer renders.
+  assert.doesNotMatch(prompt, /## WIP branch \(resume-cap split, #965\)/);
+  assert.doesNotMatch(prompt, /- Branch:/);
+  assert.doesNotMatch(prompt, /- PR:/);
+  assert.doesNotMatch(prompt, /- Head:/);
+  assert.doesNotMatch(prompt, /- Diff vs base:/);
+
+  const readyChild = fake.issues.find((i) => i.number === 100);
+  const remainderChild = fake.issues.find((i) => i.number === 101);
+  assert.ok(!readyChild?.body.includes(CAP_SPLIT_ORIGIN_MARKER));
+  assert.ok(!remainderChild?.body.includes(CAP_SPLIT_ORIGIN_MARKER));
 });
 
 test("fence label failure creates zero children; attach failure is recorded and retries under the standing fence without recreating", async () => {

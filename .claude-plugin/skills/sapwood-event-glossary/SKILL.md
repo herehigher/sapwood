@@ -79,8 +79,9 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `handoff` — **routine** [retro, round-artifact]: a worker lane handed off gracefully (soft cost-limit reached): WIP committed+pushed, progress note left, `.handoff` sentinel written.
 - `resumed` — **routine** [lane-session-start]: a handed-off lane was resumed by a fresh worker session.
 - `resume-failed` — **expected-noise**: resuming a handed-off lane failed this attempt; eligible for a further retry.
-- `resume-capped` — **intervene** [escalation-source:always]: a handed-off lane exhausted its resume-attempt budget (#172); needs-human, always proven by presence. (see #172)
-- `resume-capped-label-failed` — **investigate**: the needs-human label write for a resume-capped lane failed; the lane may be escalated with no visible label.
+- `resume-capped` — **intervene** [escalation-source:always]: a handed-off lane exhausted its resume-attempt budget (#172). `split: false` (or absent, every pre-#965 event): needs-human, always proven by presence. `split: true` (#965): the engine applied `labels.split` instead — the WIP branch is evidence for po-decompose, not an attention item; escalation-reconcile.ts's resumeCappedNeedsAttention predicate narrows ESCALATION_SOURCES to the non-split occurrences only. (see #172, #965)
+- `resume-capped-label-failed` — **investigate**: the needs-human OR split label write for a resume-capped lane failed; the lane may be escalated with no visible label.
+- `resume-cap-split-label-failed` — **investigate**: the `labels.split` write for an engine-applied resume-cap split (#965) failed; retried next tick.
 - `resume-undecidable` — **intervene** [escalation-source:always]: a handoff lane's resume outcome could not be determined (#172); needs-human, always proven by presence. (see #172)
 - `resume-undecidable-label-failed` — **investigate**: the needs-human label write for a resume-undecidable lane failed; the lane may be escalated with no visible label.
 - `resume-held` — **routine**: a handoff lane's resume was skipped because the issue already carries a human hold label (#441) — an observation, not a new escalation. (see #441)

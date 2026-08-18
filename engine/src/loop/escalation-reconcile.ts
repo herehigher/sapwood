@@ -143,15 +143,22 @@ export interface PredicatedSource {
  *  visible row someone can close) rather than as a continuation (silently untracked — the F34
  *  class). Both emission sites have always written `next`, so this is a guard, not a live path. */
 const reclaimNeedsAttention = (payload: Record<string, unknown> | null): boolean => payload?.next !== "DRIVING";
-/** #404: the payload predicates, keyed by kind. Only the two reclaim kinds have one — the
- *  registry tag carries each source's PROOF MODE (the fact every consumer needs), and the
- *  predicate stays here with the reader that defines what "waiting on a person" means for a
- *  payload, since a function is not something a declaration table can hold. `attentionProof`
- *  below is still the ONE reader of both halves, so a kind can never end up registered in one
- *  place and predicated in another. */
+/** #965: a `resume-capped` occurrence with `split: true` applied `labels.split`, not
+ *  `labels.needsHuman` — the engine handed the issue to the decomposer instead of a person, so
+ *  it is not an attention item. `split !== true` (not `!== false`) is the fail-safe direction:
+ *  every pre-#965 `resume-capped` event has no `split` key at all, and those legacy rows ARE
+ *  genuine needs-human escalations that must stay counted — an absent key must read the same as
+ *  `false`, never the same as `true`. */
+const resumeCappedNeedsAttention = (payload: Record<string, unknown> | null): boolean => payload?.split !== true;
+/** #404: the payload predicates, keyed by kind. The registry tag carries each source's PROOF
+ *  MODE (the fact every consumer needs), and the predicate stays here with the reader that
+ *  defines what "waiting on a person" means for a payload, since a function is not something a
+ *  declaration table can hold. `attentionProof` below is still the ONE reader of both halves, so
+ *  a kind can never end up registered in one place and predicated in another. */
 const ATTENTION_PREDICATES: Partial<Record<EventKind, (payload: Record<string, unknown> | null) => boolean>> = {
   "reclaim-failed": reclaimNeedsAttention,
   "reclaim-done": reclaimNeedsAttention,
+  "resume-capped": resumeCappedNeedsAttention,
 };
 
 /** #425: DERIVED from the central registry's `escalation-source:*` tags instead of being a
