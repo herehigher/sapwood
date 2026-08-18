@@ -333,10 +333,13 @@
 }
 
 /* #879: the frozen baseline's spend meter is bold mono, not the ambient body weight — matches
- * the hero section headers' own weight bump (`.hero-phase`, hero.css), same doctrine. */
+ * the hero section headers' own weight bump (`.hero-phase`, hero.css), same doctrine.
+ * #923 AC1 (D16): the caption sits BELOW the capsule and reads centred under it, never left-jammed
+ * under the bar's own left edge. */
 .spend-meter-value {
   font-weight: 600;
   letter-spacing: 0.02em;
+  text-align: center;
 }
 
 .spend-meter-warm .spend-meter-value {
@@ -351,12 +354,22 @@
   gap: 4px;
 }
 
-/* #924 AC2: height is deliberately UNCHANGED from `.cost-bar`'s own 12px (no override here) —
- * `CostBar.tsx`'s own y-coordinates (track/fill/tick) are plain CSS px assuming that exact box
- * height; a different height here would misposition them, not merely rescale them. Only
- * width/shape (rounded, wider) differ per instance. */
+/* #923 AC1 (D16): the mockup's outlined ~400×20 capsule — width is a literal px (25% of the
+ * issue's own 1440 normalization width is 360px; 400px is the mockup's own figure and clears that
+ * floor), never a computed percentage happy-dom's STYLE tests can't resolve (no real layout
+ * engine — see this file's own AC1 comment on `.app-header`). Height/border make this instance a
+ * genuinely bordered capsule, distinct from the shared 12px internal bars (cost panels, lane
+ * cards) — `CostBar.tsx`'s own `height` prop (Header.tsx passes 20) scales the track/fill/tick
+ * geometry to match, so this isn't the old fixed 12px drawing floating in extra blank space.
+ * Border is longhand, not `var(--hairline)` — `.panel-head`'s own comment above documents happy-
+ * dom returning an EMPTY computed string for every longhand of a `color-mix()`-bearing border
+ * shorthand; longhands sidestep that without changing what a real browser renders. */
 .spend-meter-bar {
-  width: 140px;
+  width: 400px;
+  height: 20px;
+  border-width: 1px;
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--bark) 25%, transparent);
   border-radius: var(--radius-pill);
   overflow: hidden;
 }
@@ -391,11 +404,22 @@
   display: inline-flex;
 }
 
+/* #923 AC1 (D14): the mockup's joined ~300×49 THREE-CELL stepper — each cell (chevron | label |
+ * chevron) carries its own border now, not a shared group border plus two hand-picked dividers
+ * (the previous ~215×24 tinted-chip look). `min-height` is a literal px (not a real-layout-
+ * dependent value) so happy-dom's STYLE test can read it back directly. Border is longhand — see
+ * `.spend-meter-bar`'s own comment above (and `.panel-head`'s, the original source) for why: a
+ * `color-mix()`-bearing `border: var(--hairline)` shorthand computes an empty string for every
+ * longhand in happy-dom, so a STYLE test reading a non-shorthand `border-*-width` here needs the
+ * longhand form declared, not the shorthand. */
 .round-nav-stepper {
   display: inline-flex;
   align-items: stretch;
+  min-height: 40px;
   background: var(--panel);
-  border: var(--hairline);
+  border-width: 1px;
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--bark) 25%, transparent);
   border-radius: var(--radius-card);
   overflow: hidden;
 }
@@ -405,23 +429,30 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  min-height: 40px;
   background: none;
-  border: none;
+  border-width: 1px;
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--bark) 25%, transparent);
   color: inherit;
   cursor: pointer;
 }
 
-/* Among the three `<button>` slots, the left arrow is `:first-of-type` and the right arrow is
- * `:last-of-type` (by TAG, not class, so this survives `.round-nav-list-wrap`'s conditional
- * `<div>` sibling) — giving the divider to the left arrow and the middle pill leaves the right
- * arrow undivided at the group's own trailing edge, which is exactly the 3-slot shape. */
-.round-nav-arrow:first-of-type,
-.round-nav-pill {
-  border-right: var(--hairline);
+/* #923: a closed (replaying) round's stepper reads amber — the group border AND each cell's own
+ * dividing border, so the joined outline reads as one continuous amber frame, not a grey group
+ * with one amber cell. `var(--stepper-replay-outline)`, not `var(--sap-text)` directly —
+ * tokens.css's own comment on that token explains why: a STYLE test can't prove a
+ * light-dark()-sourced border-color resolved at all in this codebase's test harness, so this
+ * value is a literal-per-theme alias of --sap-text's own two branches, never a color-mix() blend
+ * or a hand-copied hex. */
+.round-nav-stepper-closed,
+.round-nav-stepper-closed .round-nav-arrow,
+.round-nav-stepper-closed .round-nav-pill {
+  border-color: var(--stepper-replay-outline);
 }
 
 .round-nav-arrow {
-  width: 24px;
+  width: 32px;
   padding: 0;
 }
 
@@ -434,10 +465,12 @@
   cursor: default;
 }
 
+/* #923 AC1: the mockup's 16px "ROUND 9 · CLOSED" label — `--text-1` (16px), not `--text-0`
+ * (13px, the previous chip's undersized figure). */
 .round-nav-pill {
-  padding: 2px var(--space-2);
+  padding: 2px var(--space-3);
   font-family: var(--font-data);
-  font-size: var(--text-0);
+  font-size: var(--text-1);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -525,7 +558,21 @@
   margin: 0 0 var(--space-1);
 }
 
-/* ---- replay transport (§3 A band 2, #889) ---------------------------------- */
+/* ---- replay transport (§3 A band 2, #889; #923 AC3: the header card's own second row) ------- */
+
+/* #923 AC3 (D17): rendered inside `.app-header` now (App.tsx), as the row directly under the
+ * engine-status/verbs row — `border-top` is the hairline separator the AC names, `margin-top`/
+ * `padding-top` the spacing either side of it. No longer its own `.panel` (App.tsx dropped that
+ * class): a bordered card nested inside the header's own bordered card would double the frame.
+ * Longhand `border-top-*`, not `var(--hairline)` — same happy-dom empty-longhand gap
+ * `.spend-meter-bar`'s own comment documents (originally `.panel-head`'s). */
+.transport {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top-width: 1px;
+  border-top-style: solid;
+  border-top-color: color-mix(in srgb, var(--bark) 25%, transparent);
+}
 
 .transport-controls {
   display: flex;
@@ -550,16 +597,13 @@
   cursor: pointer;
 }
 
-.transport-controls button[aria-pressed="true"] {
-  border-color: var(--sap-text);
-  color: var(--sap-text);
-}
-
-.transport-speeds {
-  display: flex;
-  gap: var(--space-1);
-  border: none;
-  padding: 0;
+/* #923 AC1/What (D17): "play/pause glyph ~30px" — its own rule since the shared
+ * `.transport-controls button` padding/font-size is sized for text labels ("×4", "retry"), too
+ * small for a glyph the mockup draws as the row's dominant mark. */
+.transport-play {
+  font-size: 22px;
+  line-height: 1;
+  padding: 2px var(--space-3);
 }
 
 /* engine-agent audit run 9aaabee8-5885-40d3-a15e-6fecb47b17f3 finding [0]: `accent-color` alone
@@ -617,8 +661,38 @@
   outline-offset: var(--focus-ring-offset);
 }
 
+/* #923 AC3 (D17): "event counter ... right-aligned" — same `margin-left: auto` push-to-end trick
+ * `.round-row-when` already uses, inside the row's own flex container (`.transport-controls`). */
 .transport-position {
+  margin-left: auto;
   white-space: nowrap;
+}
+
+/* ---- header: BACK TO LIVE (§3 Operations, #923 AC2/D15) -------------------- */
+
+/* #923 (D15): renders in the header ROW (App.tsx, in place of the hidden `Controls` fieldset)
+ * while a closed round is selected — never inside the transport row (AC2). Filled `--sap-fill`,
+ * uppercase, mono, `--heartwood`-adjacent ink: `--on-sap-fill` is the dedicated "ink on a filled
+ * --sap-fill surface" token (used on the SAME issue's other filled surfaces —
+ * `.hero-pool-num`/`.hero-pool-chip`, hero.css), always dark, unlike `--heartwood` itself, which
+ * flips pale in light theme and would read as light-on-amber there (tokens.css's own doc on
+ * `--on-sap-fill` explains why). The light-theme `--sap-fill-outline` boundary is the same
+ * compensation every other flat `--sap-fill` surface carries (invisible in dark theme). */
+.header-back-to-live {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 40px;
+  padding: 0 var(--space-3);
+  background: var(--sap-fill);
+  color: var(--on-sap-fill);
+  border: 1px solid var(--sap-fill-outline);
+  border-radius: var(--radius-card);
+  font-family: var(--font-data);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
 }
 
 /* ---- needs-attention strip (§3, #361) ------------------------------------- */

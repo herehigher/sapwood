@@ -3064,14 +3064,20 @@ test("AC2: .cost-bar-target stroke resolves to the real --sap-text colour, and .
  * distortion now (no scale transform exists to distort), but still a real positioning contract
  * every context sharing this primitive must hold. COVERAGE: every production bar context this
  * fixture renders — a cost-panel bar (multiple: by-stage/by-model, today AND round), the lane
- * card's own bar, and the header spend-meter's bar — never a hand-picked subset.
+ * card's own bar — never a hand-picked subset.
+ *
+ * #923 AC1 (D16): the header's `cost-bar spend-meter-bar` instance deliberately does NOT share
+ * this 12px default any more — `Header.tsx` passes `CostBar` a `height={20}` prop (the mockup's
+ * outlined ~400×20 capsule), and `CostBar.tsx`'s own geometry scales proportionally off it (see
+ * `CostBar.test.tsx`'s own `#923` tests), so it is asserted separately at its own 20px, not folded
+ * into this loop's single shared expectation.
  */
-test("AC2: every hairline-bar instance's own CSS height is exactly 12px, the box its track/fill/tick coordinates assume", async () => {
+test("AC2: every 12px-default hairline-bar instance's own CSS height is exactly 12px, the box its track/fill/tick coordinates assume", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   try {
-    const bars = [...container.querySelectorAll("svg.cost-bar")];
+    const bars = [...container.querySelectorAll("svg.cost-bar")].filter((b) => !b.classList.contains("spend-meter-bar"));
     const contexts = new Set(bars.map((b) => b.getAttribute("class")));
-    for (const required of ["cost-bar", "cost-bar lane-card-bar", "cost-bar spend-meter-bar"]) {
+    for (const required of ["cost-bar", "cost-bar lane-card-bar"]) {
       assert.ok(contexts.has(required), `expected a rendered "${required}" bar; got classes: ${[...contexts].join(", ")}`);
     }
     for (const bar of bars) {
@@ -3081,6 +3087,19 @@ test("AC2: every hairline-bar instance's own CSS height is exactly 12px, the box
         `"${bar.getAttribute("class")}" CSS height must be exactly 12px — the box CostBar.tsx's own y-coordinates assume`,
       );
     }
+  } finally {
+    await cleanup();
+  }
+});
+
+// #923 AC1 (D16): the header meter's own taller capsule — asserted separately from the 12px-shared
+// bars above, since it deliberately doesn't share their default.
+test("#923 AC1: the header's spend-meter-bar resolves its own 20px height, ≥ the AC's 16px floor", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const bar = container.querySelector("svg.cost-bar.spend-meter-bar");
+    assert.ok(bar, "the header's spend-meter-bar must render");
+    assert.equal(getComputedStyle(bar as Element).height, "20px");
   } finally {
     await cleanup();
   }
@@ -3129,8 +3148,11 @@ test("AC2 (pill end caps): the fill pill is a rect with rx=3 (half its own 6px h
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   const { light: lightTokens } = parseColorTokens(tokensCss924);
   try {
-    const fills = [...container.querySelectorAll(".cost-bar-fill")];
-    assert.ok(fills.length >= 3, `expected fill rects across cost panel/lane card/header meter contexts; found ${fills.length}`);
+    // #923 AC1 (D16): the header's own instance renders a proportionally BIGGER rx (its `height`
+    // prop is 20, not the 12px default) — real, expected, and asserted on its own two tests above;
+    // excluded here so this loop's single "rx=3" expectation stays about the shared 12px bars.
+    const fills = [...container.querySelectorAll(".cost-bar-fill")].filter((f) => !f.closest("svg.spend-meter-bar"));
+    assert.ok(fills.length >= 2, `expected fill rects across cost panel/lane card contexts; found ${fills.length}`);
     for (const fill of fills) {
       assert.equal(fill.tagName.toLowerCase(), "rect", ".cost-bar-fill must be a real <rect>, not a stroked line");
       assert.equal(fill.getAttribute("rx"), "3", ".cost-bar-fill rx — half of FILL_HEIGHT (CostBar.tsx), a true pill radius");
@@ -3297,6 +3319,193 @@ test("AC3: every named filled shape (.cost-bar pill, .lane-card-bar pill, .hero-
   }
 });
 
+// ── #923 (D14–D18): header card ≥100px, the three-cell navigator, the outlined spend capsule,
+// BACK TO LIVE in the header row, and the transport as the header card's own second row ─────────
+
+const CLOSED_ROUND = {
+  roundId: 42,
+  status: "done",
+  startedAt: "2026-01-01T00:00:00Z",
+  endedAt: "2026-01-01T01:00:00Z",
+  startEventId: 1,
+  startSpendId: 1,
+  eventCount: 10,
+  schemaVersion: null,
+  artifact: null,
+};
+
+// AC1 (STYLE, `registerRealDom()` + `getComputedStyle`, full cascade at 1440-wide `App` —
+// `mountAppWithCascade` above already forces that viewport before mounting).
+//
+// gate② finding [0] (ac1-style-oracles-incomplete): the first cut's border checks
+// (`assert.notEqual(computed.borderWidth, "0px")`) pass on an EMPTY computed string too — exactly
+// what happy-dom returns for a `color-mix()`-bearing `border: var(--hairline)` shorthand
+// (`.panel-head`'s own documented gap, panels.css) — so a border that failed to apply at all would
+// have slipped through undetected. panels.css now declares these three rules' borders as
+// longhands (`border-width`/`border-style`/`border-color`), which happy-dom DOES resolve (verified
+// directly); this test asserts the exact resolved value instead of merely "not zero". Font-family
+// now compares the FULL resolved stack against the real `--font-data` token (not a partial regex
+// match on one family name in it), and the caption-below-the-bar claim is backed by an explicit
+// `.spend-meter` `flex-direction: column` assertion, not DOM order alone.
+test("#923 AC1: .app-header ≥100px, the round-nav stepper's three cells ≥40px each with a resolved 1px border, the pill's font/case/size, and the spend capsule's width/height/border/centred caption", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  const fontDataStack = parseTokensLocal(tokensCss924)["--font-data"];
+  assert.ok(fontDataStack, "tokens.css must still declare --font-data for this test's own oracle");
+  try {
+    const header = container.querySelector(".app-header");
+    assert.ok(header, ".app-header must render");
+    assert.equal(getComputedStyle(header as Element).minHeight, "100px", ".app-header's declared min-height");
+
+    const stepper = container.querySelector(".round-nav-stepper");
+    assert.ok(stepper, ".round-nav-stepper must render");
+    assert.equal(getComputedStyle(stepper as Element).minHeight, "40px", ".round-nav-stepper's declared min-height");
+
+    const cells = [...container.querySelectorAll(".round-nav-stepper button")];
+    assert.equal(cells.length, 3, "the stepper must carry exactly three cells (chevron | label | chevron)");
+    for (const cell of cells) {
+      const computed = getComputedStyle(cell as Element);
+      assert.equal(computed.minHeight, "40px", `"${cell.className}" cell min-height`);
+      assert.equal(computed.borderWidth, "1px", `"${cell.className}" cell must resolve a real 1px border, not an unresolved empty value`);
+      assert.equal(computed.borderStyle, "solid", `"${cell.className}" cell border-style`);
+    }
+
+    const pill = container.querySelector(".round-nav-pill");
+    assert.ok(pill, ".round-nav-pill must render");
+    const pillComputed = getComputedStyle(pill as Element);
+    assert.equal(
+      pillComputed.fontFamily,
+      fontDataStack,
+      ".round-nav-pill font-family must resolve the COMPLETE --font-data stack, not just its first family",
+    );
+    assert.equal(pillComputed.textTransform, "uppercase");
+    assert.ok(Number.parseFloat(pillComputed.fontSize) >= 14, `.round-nav-pill font-size (${pillComputed.fontSize}) must be >= 14px`);
+
+    const bar = container.querySelector(".spend-meter-bar");
+    assert.ok(bar, ".spend-meter-bar must render");
+    const barComputed = getComputedStyle(bar as Element);
+    assert.ok(
+      Number.parseFloat(barComputed.width) >= 360,
+      `.spend-meter-bar's declared width (${barComputed.width}) must be >= 360px (25% of the issue's 1440 normalization width)`,
+    );
+    assert.ok(Number.parseFloat(barComputed.height) >= 16, `.spend-meter-bar's declared height (${barComputed.height}) must be >= 16px`);
+    assert.equal(barComputed.borderWidth, "1px", ".spend-meter-bar must resolve a real 1px border, not an unresolved empty value");
+    assert.equal(barComputed.borderStyle, "solid", ".spend-meter-bar border-style");
+
+    const caption = container.querySelector(".spend-meter-value");
+    assert.ok(caption, ".spend-meter-value caption must render");
+    assert.equal(getComputedStyle(caption as Element).textAlign, "center");
+    // The caption sits BELOW the bar — proven by BOTH the layout axis (`.spend-meter`'s own
+    // flex-direction: column, the mechanism that makes DOM order equal visual order here) AND DOM
+    // order itself (#890's "reference element first, annotation after" contract), not DOM order
+    // alone — a `flex-direction: row` (or no flex at all) would make "first in markup" mean
+    // nothing about "renders above".
+    const meter = bar!.closest(".spend-meter");
+    assert.ok(meter, ".spend-meter-bar must sit inside .spend-meter");
+    assert.equal(getComputedStyle(meter as Element).flexDirection, "column", ".spend-meter must lay its children out in a column");
+    const order = [...(meter as Element).querySelectorAll("svg.spend-meter-bar, .spend-meter-value")];
+    assert.deepEqual(
+      order.map((el) => el.className),
+      ["cost-bar spend-meter-bar", "data spend-meter-value"],
+      "the bar must precede the caption in DOM order",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+// AC2 (WIRING through App, closed round selected).
+test("#923 AC2: closed round selected — BACK TO LIVE is a descendant of .app-header (not the transport row), filled --sap-fill, ≥40px tall, uppercase; Controls is absent", async () => {
+  const data = { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "running" } };
+  const vm = minimalAppViewModel({ mode: "replay", loop: { data, isPending: false }, rounds: [CLOSED_ROUND], selectedRoundId: 42 });
+  const { container, cleanup } = await mountAppWithCascade(vm);
+  const { light: lightTokens } = parseColorTokens(tokensCss924);
+  try {
+    assert.equal(container.querySelectorAll('[aria-label="operations"]').length, 0, "the Controls fieldset must be absent while replaying");
+
+    const btn = container.querySelector(".header-back-to-live");
+    assert.ok(btn, "the BACK TO LIVE control must render");
+    assert.ok(btn?.closest(".app-header"), "BACK TO LIVE must be a descendant of .app-header");
+    assert.equal(btn?.closest("section.transport"), null, "BACK TO LIVE must NOT be a descendant of the transport row");
+
+    const computed = getComputedStyle(btn as Element);
+    // happy-dom echoes the resolved var() as the authored hex string, not an rgb() conversion
+    // (confirmed directly against this exact property) — compared against the real token, never a
+    // hand-copied hex literal that could silently drift from tokens.css.
+    assert.equal(computed.backgroundColor.toUpperCase(), lightTokens["--sap-fill"], "background must resolve to the real --sap-fill hex");
+    assert.equal(computed.height, "40px");
+    assert.equal(computed.textTransform, "uppercase");
+  } finally {
+    await cleanup();
+  }
+});
+
+// AC3 (WIRING) — the transport is a descendant of `.app-header`, after a hairline separator;
+// `.transport-position` is right-aligned; COVERAGE over both button sets (no engine-verb button
+// inside the transport, no media glyph among the verbs).
+//
+// gate② finding [1] (ac3-separator-oracle-vacuous): the first cut's `assert.notEqual(...,
+// "0px")` had the SAME empty-string hole AC1's border checks did (see that test's own updated
+// comment) — panels.css's `.transport` rule is longhand now, so this asserts the exact resolved
+// value. It also now asserts the transport actually follows `.app-header-row` in DOM order (the
+// "second row, AFTER the first" half of AC3/D14 — the earlier version proved ancestry and a
+// non-zero border, never ordering).
+test("#923 AC3: the transport is a descendant of .app-header, AFTER the header row, separated by a resolved 1px hairline; .transport-position is right-aligned; the transport and the verbs never share a button", async () => {
+  const data = { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "running" } };
+  const vm = minimalAppViewModel({ mode: "replay", loop: { data, isPending: false }, rounds: [CLOSED_ROUND], selectedRoundId: 42 });
+  const { container, cleanup } = await mountAppWithCascade(vm);
+  try {
+    const transport = container.querySelector('section[aria-label="replay transport"]');
+    assert.ok(transport, "the transport section must render");
+    const header = transport?.closest(".app-header");
+    assert.ok(header, "the transport must be a descendant of .app-header");
+    const transportComputed = getComputedStyle(transport as Element);
+    assert.equal(transportComputed.borderTopWidth, "1px", "the transport must resolve a real 1px separator, not an unresolved empty value");
+    assert.equal(transportComputed.borderTopStyle, "solid", "the transport's separator border-style");
+
+    const headerRow = header?.querySelector(".app-header-row");
+    assert.ok(headerRow, "the header row must render");
+    const rowIndex = [...header!.children].indexOf(headerRow as Element);
+    const transportIndex = [...header!.children].indexOf(transport as Element);
+    assert.ok(
+      rowIndex >= 0 && transportIndex > rowIndex,
+      `the transport (child ${transportIndex}) must render AFTER .app-header-row (child ${rowIndex}) — the second row, not the first`,
+    );
+
+    const position = transport?.querySelector(".transport-position");
+    assert.ok(position, ".transport-position must render");
+    assert.equal(getComputedStyle(position as Element).marginLeft, "auto", ".transport-position must be right-aligned");
+
+    // COVERAGE: every button the transport row renders vs. every button the verbs row renders —
+    // read off the rendered tree, never a hand-picked pair. Cross-checked against a SEPARATE live
+    // mount (verbs present, transport absent while nothing is selected) so this proves the two
+    // sets are genuinely disjoint, rather than one side being vacuously empty here.
+    const transportLabels = [...(transport as Element).querySelectorAll("button")].map((b) => b.textContent?.trim());
+    const verbGlyphs = ["▶", "⏸"];
+    const liveVm = minimalAppViewModel({ mode: "live", loop: { data, isPending: false }, rounds: [CLOSED_ROUND] });
+    const live = await mountAppWithCascade(liveVm);
+    try {
+      const liveVerbLabels = [...live.container.querySelectorAll('[aria-label="operations"] button')].map((b) => b.textContent?.trim());
+      assert.ok(liveVerbLabels.length > 0, "the verbs must render in live mode");
+      for (const verbLabel of liveVerbLabels) {
+        assert.ok(
+          verbLabel && !verbGlyphs.some((g) => verbLabel.includes(g)),
+          `verb "${verbLabel}" must never carry a media glyph (${verbGlyphs.join(", ")})`,
+        );
+      }
+      for (const transportLabel of transportLabels) {
+        assert.ok(
+          transportLabel && !liveVerbLabels.includes(transportLabel),
+          `transport control "${transportLabel}" must not also be one of the engine verbs`,
+        );
+      }
+    } finally {
+      await live.cleanup();
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
 /** Same raw-value read `contrast.ts`'s own `parseTokens` performs — duplicated locally (rather
  *  than importing `contrast.ts` into this already-large file) since only the ONE token this
  *  suite needs is read; `tokens.test.ts` is the file that actually exercises `contrast.ts` itself. */
@@ -3307,3 +3516,176 @@ function parseTokensLocal(css: string): Record<string, string> {
   }
   return out;
 }
+
+// ── #923: BACK TO LIVE/stepper glyphs, row-1 proportion, replay-tint, BTL position (MARKUP +
+// STYLE + WIRING, real DOM cascade). ────────────────────────────────────────────────────────
+
+// MARKUP: the mockup's "⏩" is a SHAPE (double chevron), not the blue colour-emoji codepoint the
+// earlier hand-typed `<span>⏩</span>` rendered — `lucide-react`'s `FastForward` draws the same
+// shape in `currentColor`, themeable, never a fixed-colour glyph. Same rule for the stepper's own
+// tiny filled ◂▸ characters, which read near-empty at the cell's 40px min-height —
+// `ChevronLeft`/`ChevronRight` stroked glyphs replace them.
+test("#923: BACK TO LIVE renders lucide-react's FastForward (no U+23E9 colour-emoji glyph); the stepper renders lucide ChevronLeft/ChevronRight (no ◂▸ characters)", async () => {
+  const data = { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "running" } };
+  const vm = minimalAppViewModel({ mode: "replay", loop: { data, isPending: false }, rounds: [CLOSED_ROUND], selectedRoundId: 42 });
+  const { container, cleanup } = await mountAppWithCascade(vm);
+  try {
+    const btn = container.querySelector(".header-back-to-live");
+    assert.ok(btn, "the BACK TO LIVE control must render");
+    assert.ok(btn?.querySelector("svg.lucide-fast-forward"), "BACK TO LIVE must render lucide-react's FastForward icon");
+    assert.doesNotMatch(btn?.textContent ?? "", /⏩/, "BACK TO LIVE must never render the U+23E9 colour-emoji glyph");
+
+    const stepper = container.querySelector(".round-nav-stepper");
+    assert.ok(stepper, ".round-nav-stepper must render");
+    assert.ok(stepper?.querySelector("svg.lucide-chevron-left"), "the previous-round cell must render lucide-react's ChevronLeft");
+    assert.ok(stepper?.querySelector("svg.lucide-chevron-right"), "the next-round cell must render lucide-react's ChevronRight");
+    assert.doesNotMatch(stepper?.textContent ?? "", /[◂▸]/, "the stepper must never render the tiny filled ◂▸ glyph characters");
+  } finally {
+    await cleanup();
+  }
+});
+
+// STYLE: `.app-header-row` — not `.app-header` (the card) — carries the ≥100px floor a LIVE
+// mount (no transport row beneath it) needs to keep its own content centred rather than
+// top-hugging leftover space the card's own min-height otherwise leaves below it.
+test("#923: .app-header-row itself is >= 100px (and <= the issue's own 130px upper bound) with align-items: center — the live state no longer top-hugs the card's min-height", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const row = container.querySelector(".app-header-row");
+    assert.ok(row, ".app-header-row must render");
+    const computed = getComputedStyle(row as Element);
+    const minHeight = Number.parseFloat(computed.minHeight);
+    assert.ok(minHeight >= 100, `.app-header-row's declared min-height (${computed.minHeight}) must be >= 100px`);
+    assert.ok(minHeight <= 130, `.app-header-row's declared min-height (${computed.minHeight}) must be <= 130px`);
+    assert.equal(computed.alignItems, "center", ".app-header-row must vertically centre its content");
+  } finally {
+    await cleanup();
+  }
+});
+
+// STYLE: replay = amber on the joined stepper's own group border AND each cell's dividing
+// border, on a mount with a CLOSED round actually selected (never asserted against the
+// live/default case) — the exact resolved `border-color`, in BOTH themes, via `getComputedStyle`
+// on the real mounted cascade (`registerRealDom()`, imported at this file's own top). `--sap-text`
+// itself is `light-dark(...)`, which happy-dom's CSS engine never evaluates for a colour-typed
+// property at all (confirmed directly: unlike `stroke`, which echoes the raw unresolved text
+// back, `border-color`/`color` return an EMPTY string the instant the winning declaration touches
+// a `light-dark()` chain) — `--stepper-replay-outline` (panels.css/tokens.css) is the literal-hex
+// alias that sidesteps this, pinned against `--sap-text`'s own two branches by tokens.test.ts, so
+// this test still proves the REAL resolved colour rather than falling back to source text.
+test("#923: with a closed round selected, .round-nav-stepper's own border AND each cell's border resolve to the real amber in both themes, never the neutral grey group border", async () => {
+  const data = { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "running" } };
+  const vm = minimalAppViewModel({ mode: "replay", loop: { data, isPending: false }, rounds: [CLOSED_ROUND], selectedRoundId: 42 });
+  const { container, cleanup } = await mountAppWithCascade(vm);
+  const { light, dark } = parseColorTokens(tokensCss924);
+  try {
+    const stepper = container.querySelector(".round-nav-stepper");
+    assert.ok(stepper, ".round-nav-stepper must render");
+    assert.match(stepper?.className ?? "", /round-nav-stepper-closed/, "a closed round must add the closed modifier class");
+
+    const pill = container.querySelector(".round-nav-pill-closed");
+    assert.ok(pill, "the closed pill's own pre-existing tint must still render, unchanged by this fix");
+
+    const cells = [...stepper!.querySelectorAll(".round-nav-arrow, .round-nav-pill")];
+    assert.equal(cells.length, 3, "the stepper must carry exactly three cells (chevron | label | chevron)");
+
+    const expectedByTheme = { heartwood: dark["--sap-text"], sapwood: light["--sap-text"] } as const;
+    for (const themeAttr of ["heartwood", "sapwood"] as const) {
+      document.documentElement.setAttribute("data-theme", themeAttr);
+      const expected = expectedByTheme[themeAttr];
+      assert.equal(
+        getComputedStyle(stepper as Element).borderColor.toUpperCase(),
+        expected,
+        `${themeAttr}: .round-nav-stepper's border-color must resolve to the real amber`,
+      );
+      for (const cell of cells) {
+        assert.equal(
+          getComputedStyle(cell as Element).borderColor.toUpperCase(),
+          expected,
+          `${themeAttr}: "${(cell as Element).className}" cell's border-color must resolve to the real amber`,
+        );
+      }
+    }
+  } finally {
+    document.documentElement.removeAttribute("data-theme");
+    await cleanup();
+  }
+});
+
+// A live (non-closed) mount is the CONTROL for the test above — proves the amber modifier is
+// genuinely conditional on replaying a closed round, never present by default.
+test("#923 (control): a live mount (no round selected) never adds .round-nav-stepper-closed", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const stepper = container.querySelector(".round-nav-stepper");
+    assert.ok(stepper, ".round-nav-stepper must render");
+    assert.doesNotMatch(stepper?.className ?? "", /round-nav-stepper-closed/, "live mode must never carry the closed-round amber modifier");
+  } finally {
+    await cleanup();
+  }
+});
+
+// WIRING: mockup band-2 order is status · stepper · BACK TO LIVE · meter · "?" — proven as DOM
+// order inside `.engine-status` (the header word/navigator/meter's own shared flex row), not just
+// AC2's existing ancestry/non-transport proof.
+test('#923: BACK TO LIVE sits between the round-nav stepper and the spend meter inside .engine-status ("status · stepper · BACK TO LIVE · meter"), still never a descendant of the transport row', async () => {
+  const data = { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "running" } };
+  const vm = minimalAppViewModel({ mode: "replay", loop: { data, isPending: false }, rounds: [CLOSED_ROUND], selectedRoundId: 42 });
+  const { container, cleanup } = await mountAppWithCascade(vm);
+  try {
+    const status = container.querySelector(".engine-status");
+    assert.ok(status, ".engine-status must render");
+    const nav = status?.querySelector(".round-nav");
+    const btn = status?.querySelector(".header-back-to-live");
+    const meter = status?.querySelector(".spend-meter");
+    assert.ok(nav && btn && meter, "the stepper, BACK TO LIVE, and spend meter must all render inside .engine-status");
+
+    const kids = [...(status as Element).children];
+    const navIndex = kids.indexOf(nav as Element);
+    const btnIndex = kids.indexOf(btn as Element);
+    const meterIndex = kids.indexOf(meter as Element);
+    assert.ok(
+      navIndex >= 0 && navIndex < btnIndex && btnIndex < meterIndex,
+      `BACK TO LIVE (child ${btnIndex}) must render between the stepper (child ${navIndex}) and the spend meter (child ${meterIndex})`,
+    );
+
+    assert.ok(btn?.closest(".app-header"), "BACK TO LIVE must still be a descendant of .app-header");
+    assert.equal(btn?.closest("section.transport"), null, "BACK TO LIVE must still NOT be a descendant of the transport row");
+  } finally {
+    await cleanup();
+  }
+});
+
+// WIRING: Header.tsx's `disconnected`/`isPending` early returns used to discard `replayAction`
+// entirely (returning a bare `<p>`, never rendering `{replayAction}` at all) — a replay viewer
+// who loses the connection, or is still loading, had no way back to live even though App.tsx was
+// still passing the button through. Both early-return branches now render it too.
+//
+// `minimalAppViewModel`'s own return is cast `as unknown as Parameters<typeof appContent>[0]`
+// (its own doc comment: the full TanStack `UseQueryResult` shape isn't worth hand-implementing) —
+// an override spread OUTSIDE that call loses the cast and gets structurally checked against the
+// real `AppViewModel`, which a bare `{ data, isPending }` stand-in can never satisfy. Re-applying
+// the SAME cast on the merged object is the established pattern this file already uses whenever a
+// test overrides a field after the fact (e.g. the #766 gate② finding [2] tests' own `{ ...vm, mode:
+// "live" } as unknown as Parameters<typeof appContent>[0]`).
+test("#923: with a closed round selected, BACK TO LIVE still renders inside .app-header while the engine status is disconnected, and while it is still connecting", async () => {
+  const data = { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "running" } };
+  const cases = [
+    { name: "disconnected", overrides: { disconnected: true } },
+    { name: "connecting", overrides: { loop: { data: undefined, isPending: true } } },
+  ] as const;
+  for (const { name, overrides } of cases) {
+    const vm = {
+      ...minimalAppViewModel({ mode: "replay", loop: { data, isPending: false }, rounds: [CLOSED_ROUND], selectedRoundId: 42 }),
+      ...overrides,
+    } as unknown as Parameters<typeof appContent>[0];
+    const { container, cleanup } = await mountAppWithCascade(vm);
+    try {
+      const btn = container.querySelector(".header-back-to-live");
+      assert.ok(btn, `${name}: the BACK TO LIVE control must still render`);
+      assert.ok(btn?.closest(".app-header"), `${name}: BACK TO LIVE must still be a descendant of .app-header`);
+    } finally {
+      await cleanup();
+    }
+  }
+});

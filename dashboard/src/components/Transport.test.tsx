@@ -4,7 +4,7 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Round } from "../api/types.ts";
 import { registerRealDom } from "../test-dom.ts";
-import { Transport } from "./Transport.tsx";
+import { nextSpeed, Transport } from "./Transport.tsx";
 
 registerRealDom();
 
@@ -41,87 +41,74 @@ function round(overrides: Partial<Round> = {}): Round {
 // ── #889: live mode renders nothing at all — the round list moved to the header navigator ──────
 
 test("live mode (nothing selected) renders nothing — no panel, no round list, no controls", () => {
-  const html = renderToStaticMarkup(<Transport rounds={[round()]} selectedRoundId={null} onSelectRound={() => {}} now={NOW} />);
+  const html = renderToStaticMarkup(<Transport rounds={[round()]} selectedRoundId={null} now={NOW} />);
   assert.equal(html, "");
 });
 
 test("disconnected renders nothing — the header's own navigator already carries that state", () => {
-  const html = renderToStaticMarkup(<Transport rounds={[]} selectedRoundId={null} onSelectRound={() => {}} disconnected now={NOW} />);
+  const html = renderToStaticMarkup(<Transport rounds={[]} selectedRoundId={null} disconnected now={NOW} />);
   assert.equal(html, "");
 });
 
 test("a selectedRoundId not (yet) present in `rounds` renders nothing rather than crashing", () => {
-  const html = renderToStaticMarkup(<Transport rounds={[]} selectedRoundId={5} onSelectRound={() => {}} now={NOW} />);
+  const html = renderToStaticMarkup(<Transport rounds={[]} selectedRoundId={5} now={NOW} />);
   assert.equal(html, "");
 });
 
 // ── transport controls: only render once a round is actually selected ──────────────────────────
 
-test("selecting a round reveals play/pause, speed, and scrub controls", () => {
-  const html = renderToStaticMarkup(
-    <Transport rounds={[round({ roundId: 1 })]} selectedRoundId={1} onSelectRound={() => {}} cursorId={100} now={NOW} />,
-  );
+test("selecting a round reveals play/pause, a single cycling speed box, and scrub controls", () => {
+  const html = renderToStaticMarkup(<Transport rounds={[round({ roundId: 1 })]} selectedRoundId={1} cursorId={100} now={NOW} />);
   assert.match(html, /aria-label="play"/);
   assert.match(html, /aria-label="scrub"/);
-  for (const label of ["×1", "×4", "×16"]) assert.match(html, new RegExp(label.replace("×", "×")));
+  assert.match(html, /class="transport-speed"[^>]*>×1</, "default speed (1) renders as a single ×1 box");
 });
 
 test("playing=true shows the pause glyph/label instead of play", () => {
-  const html = renderToStaticMarkup(
-    <Transport rounds={[round({ roundId: 1 })]} selectedRoundId={1} onSelectRound={() => {}} playing cursorId={100} now={NOW} />,
-  );
+  const html = renderToStaticMarkup(<Transport rounds={[round({ roundId: 1 })]} selectedRoundId={1} playing cursorId={100} now={NOW} />);
   assert.match(html, /aria-label="pause"/);
   assert.doesNotMatch(html, /aria-label="play"/);
 });
 
-test("the active speed carries aria-pressed=true, the others false", () => {
-  const html = renderToStaticMarkup(
-    <Transport rounds={[round({ roundId: 1 })]} selectedRoundId={1} onSelectRound={() => {}} speed={4} cursorId={100} now={NOW} />,
-  );
-  const pressedTrue = html.match(/aria-pressed="true">×4/);
-  assert.ok(pressedTrue, "×4 button carries aria-pressed=true");
-  assert.match(html, /aria-pressed="false">×1/);
-  assert.match(html, /aria-pressed="false">×16/);
+// #923 (D17): "speed as one bordered '× N' box (cycling ...), no three-chip row" — replaces the
+// old three separately-bordered ×1/×4/×16 buttons with a single button showing the CURRENT speed.
+test("nextSpeed cycles 1 -> 4 -> 16 -> 1, wrapping around", () => {
+  assert.equal(nextSpeed(1), 4);
+  assert.equal(nextSpeed(4), 16);
+  assert.equal(nextSpeed(16), 1);
+});
+
+test("the speed box renders only the current speed, not a three-chip row", () => {
+  const html = renderToStaticMarkup(<Transport rounds={[round({ roundId: 1 })]} selectedRoundId={1} speed={4} cursorId={100} now={NOW} />);
+  assert.match(html, /class="transport-speed"[^>]*>×4</);
+  assert.doesNotMatch(html, />×1</);
+  assert.doesNotMatch(html, />×16</);
+  assert.equal((html.match(/class="transport-speed"/g) ?? []).length, 1, "exactly one speed control, never a three-chip row");
 });
 
 test("the scrub bar spans the round's event window and shows the current 'event n/N' position", () => {
   const r = round({ roundId: 1, startEventId: 500, eventCount: 300 });
-  const html = renderToStaticMarkup(<Transport rounds={[r]} selectedRoundId={1} onSelectRound={() => {}} cursorId={650} now={NOW} />);
+  const html = renderToStaticMarkup(<Transport rounds={[r]} selectedRoundId={1} cursorId={650} now={NOW} />);
   assert.match(html, /min="500"/);
   assert.match(html, /max="800"/);
   assert.match(html, /value="650"/);
   assert.match(html, /event 150\/300/);
 });
 
-test("'back to live' is offered whenever a round is selected", () => {
-  const html = renderToStaticMarkup(
-    <Transport rounds={[round({ roundId: 1 })]} selectedRoundId={1} onSelectRound={() => {}} cursorId={100} now={NOW} />,
-  );
-  assert.match(html, /back to live/);
-});
-
 // ── #766 gate② finding [3] (round-log-load-rejection-sticks): loading / error / retry ──────────
 
+// #923 (D15): "back to live" moved to the header row (App.tsx) — a single control covering
+// loading/error/normal alike, so this component's own loading state no longer duplicates it.
 test("loading=true shows an honest 'loading round…' caption, no play/speed/scrub controls yet (nothing to control)", () => {
-  const html = renderToStaticMarkup(
-    <Transport rounds={[round({ roundId: 1 })]} selectedRoundId={1} onSelectRound={() => {}} loading now={NOW} />,
-  );
+  const html = renderToStaticMarkup(<Transport rounds={[round({ roundId: 1 })]} selectedRoundId={1} loading now={NOW} />);
   assert.match(html, /loading round…/);
   assert.doesNotMatch(html, /aria-label="play"/);
   assert.doesNotMatch(html, /aria-label="scrub"/);
-  assert.match(html, /back to live/, "back to live stays available even while loading");
 });
 
 test("loadError (not loading) shows an honest failure caption and a retry control, never a silently blank panel", () => {
   const html = renderToStaticMarkup(
-    <Transport
-      rounds={[round({ roundId: 1 })]}
-      selectedRoundId={1}
-      onSelectRound={() => {}}
-      loading={false}
-      loadError={new Error("network down")}
-      now={NOW}
-    />,
+    <Transport rounds={[round({ roundId: 1 })]} selectedRoundId={1} loading={false} loadError={new Error("network down")} now={NOW} />,
   );
   assert.match(html, /could not load this round/);
   assert.match(html, /<button[^>]*>retry<\/button>/);
@@ -130,7 +117,7 @@ test("loadError (not loading) shows an honest failure caption and a retry contro
 
 test("no loadError and not loading: the ordinary transport controls render, not the error state", () => {
   const html = renderToStaticMarkup(
-    <Transport rounds={[round({ roundId: 1 })]} selectedRoundId={1} onSelectRound={() => {}} loading={false} loadError={null} now={NOW} />,
+    <Transport rounds={[round({ roundId: 1 })]} selectedRoundId={1} loading={false} loadError={null} now={NOW} />,
   );
   assert.doesNotMatch(html, /could not load this round/);
   assert.match(html, /aria-label="scrub"/);
@@ -143,7 +130,7 @@ test("no loadError and not loading: the ordinary transport controls render, not 
 // computed-style AC needs `registerRealDom()` + a real `getComputedStyle` read against the FULL
 // production cascade, mounted in production order — never a regex match on declaration text, which
 // proves a rule exists but never that it wins the cascade onto the element.
-test("gate② finding: back-to-live/play/speed buttons resolve the SAME mono font-family as the sibling .transport-position readout, in both themes", () => {
+test("gate② finding: play/speed buttons resolve the SAME mono font-family as the sibling .transport-position readout, in both themes", () => {
   assert.ok(bodyFontFamilyRule, "app.css must still declare a body { ... } rule for the ambient (pre-fix) inherited font to extract");
   assert.ok(dataClassFontFamilyRule, "app.css must still declare the code, .data { ... } rule .transport-position's mono font depends on");
   const style = document.createElement("style");
@@ -155,15 +142,7 @@ test("gate② finding: back-to-live/play/speed buttons resolve the SAME mono fon
   document.head.appendChild(style);
   const container = document.createElement("div");
   container.innerHTML = renderToStaticMarkup(
-    <Transport
-      rounds={[round({ roundId: 1 })]}
-      selectedRoundId={1}
-      onSelectRound={() => {}}
-      loading={false}
-      loadError={null}
-      cursorId={100}
-      now={NOW}
-    />,
+    <Transport rounds={[round({ roundId: 1 })]} selectedRoundId={1} loading={false} loadError={null} cursorId={100} now={NOW} />,
   );
   document.body.appendChild(container);
   try {
@@ -184,19 +163,14 @@ test("gate② finding: back-to-live/play/speed buttons resolve the SAME mono fon
         `${themeAttr}: sanity check — .transport-position must actually BE mono, distinct from the ambient body font, or this oracle proves nothing`,
       );
 
-      const backToLive = Array.from(container.querySelectorAll(".transport-controls button")).find((b) => b.textContent === "back to live");
       const playButton = container.querySelector(
         '.transport-controls button[aria-label="play"], .transport-controls button[aria-label="pause"]',
       );
-      const speedButtons = Array.from(container.querySelectorAll(".transport-speeds button"));
-      assert.equal(speedButtons.length, 3, `${themeAttr}: ×1/×4/×16 speed buttons must all be present`);
+      const speedButton = container.querySelector(".transport-speed");
 
       const targets: [string, Element | null | undefined][] = [
-        ["back to live", backToLive],
         ["play", playButton],
-        ["×1 speed", speedButtons[0]],
-        ["×4 speed", speedButtons[1]],
-        ["×16 speed", speedButtons[2]],
+        ["speed", speedButton],
       ];
       for (const [label, el] of targets) {
         assert.ok(el, `${themeAttr}: the ${label} button must render`);
