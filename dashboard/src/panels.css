@@ -824,10 +824,21 @@
 
 /* The ONE styled label element — "PR #9202 — <title>" as a single string, one font-size, one
  * baseline (gate① round-3 finding [0]: no separate, differently-sized "PR " literal or title
- * span). `--text-1` (16px) comfortably clears the AC's ≥14px floor. */
+ * span). `--text-1` (16px) comfortably clears the AC's ≥14px floor.
+ *
+ * B2 (#925 AC4): an unstyled `<a>` (this element is a link when `repoUrl` is set) otherwise falls
+ * back to the UA's default blue/underline — the mockup reads this ref in the row's own cream
+ * ("primary text") ink, no underline. `--attention-emphasis-text` (tokens.css), not `--sapwood`
+ * directly — the SAME resolvable-literal alias this file's own `.attention-age-emphasis` already
+ * uses for the identical "primary-text role, STYLE-testable" reason (happy-dom never evaluates
+ * `light-dark()` for a colour-typed property); reusing it here is the no-new-token path. The
+ * keyboard focus ring stays: `:focus-visible` (app.css) is a global rule, not `.entity-ref`'s own
+ * hover-only underline, so dropping `text-decoration` here never removes it. */
 .attention-entity-ref {
   font-family: var(--font-data);
   font-size: var(--text-1);
+  color: var(--attention-emphasis-text);
+  text-decoration: none;
 }
 
 /* #925 gate① engine-agent finding [3]: the reason column's own grid cell — holds the sentence

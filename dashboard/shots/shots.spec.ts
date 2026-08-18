@@ -907,6 +907,45 @@ test("#925 AC5 (REAL measurement, the actual geometry proof — see NeedsAttenti
 });
 
 /**
+ * B1 (#925 AC4) — real-Chromium companion to `NeedsAttention.test.tsx`'s own regex
+ * guard (`/^\d+[smhd]$/`, which happy-dom's zeroed layout metrics can't itself prove FITS): the
+ * emphasis box's own bold ≥40px numeral must not overflow its box, and the box itself must not
+ * overflow the panel it sits in — the exact defect the finding named (a "8d ago" numeral 134px
+ * wide inside a 96px track, spilling past the panel's own right edge in the full-page capture).
+ */
+test("B1 (REAL measurement): the emphasis age box's text fits inside the box, and the box's own right edge sits inside the needs-attention panel's content box", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  const emphasis = page.locator(".attention-age-emphasis");
+  await expect(emphasis, "exactly one row must carry the emphasis box").toHaveCount(1);
+
+  const [scrollWidth, clientWidth] = await emphasis.evaluate((el) => [el.scrollWidth, el.clientWidth]);
+  expect(
+    scrollWidth,
+    `the emphasis numeral must fit its own box: scrollWidth (${scrollWidth}px) <= clientWidth (${clientWidth}px)`,
+  ).toBeLessThanOrEqual(clientWidth);
+
+  const panel = page.locator('section[aria-label="needs attention"]');
+  const [emphasisRight, panelContentRight] = await Promise.all([
+    emphasis.evaluate((el) => el.getBoundingClientRect().right),
+    panel.evaluate((el) => {
+      const rect = el.getBoundingClientRect();
+      const paddingRight = Number.parseFloat(getComputedStyle(el).paddingRight);
+      return rect.right - paddingRight;
+    }),
+  ]);
+  expect(
+    emphasisRight,
+    `the emphasis box's own right edge (${emphasisRight}px) must sit inside the panel's content box (${panelContentRight}px) — never spill past it`,
+  ).toBeLessThanOrEqual(panelContentRight + 1);
+});
+
+/**
  * A genuine RENDERED-PIXEL sample at one page coordinate — not a geometry-box comparison (a
  * `<rect>`'s `getBoundingClientRect()` is verified directly to report the geometry-only box,
  * excluding its own stroke, so it can't itself prove whether a 1px CENTERED stroke's own 0.5px

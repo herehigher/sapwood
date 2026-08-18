@@ -1,7 +1,7 @@
 import { attentionCategory, copyFor, type EntityToken, isReviewDissentCategory, type SentencePart } from "../copy.ts";
 import type { DomainEvent } from "../domain-event.ts";
 import { attentionSummary, type EntityTitles } from "../entities.ts";
-import { formatRelativeWithAbsoluteTitle } from "../format-time.ts";
+import { formatCompactAge, formatRelativeWithAbsoluteTitle } from "../format-time.ts";
 import { ATTENTION_KIND_TO_NODE, type StageNode } from "../inspector.ts";
 import { SentencePartView } from "./ActivityFeed.tsx";
 import { resolveEntityTitle } from "./EntityRef.tsx";
@@ -67,6 +67,9 @@ function AttentionRow({
   const payload = event.payload ?? {};
   const parts: SentencePart[] = event.known ? copyFor(event.kind)!.sentence(payload) : [`Unrecognized event: ${event.kind}`];
   const { text, title } = formatRelativeWithAbsoluteTitle(event.ts, "local", now);
+  // B1 (#925 AC4): the emphasis box's bold ≥40px numeral only ever fits the fixed 96px age track
+  // in its COMPACT form ("8d", never "8d ago") — the small boxes keep the full relative text.
+  const ageText = emphasize ? formatCompactAge(event.ts, now) : text;
   const node = event.known ? ATTENTION_KIND_TO_NODE[event.kind] : undefined;
   // #881: the mockup's category-chip taxonomy — absent for an unrecognized kind (no fallback
   // fabricated) rather than rendering an empty/misleading chip.
@@ -122,33 +125,40 @@ function AttentionRow({
           </span>
         )}
       </span>
-      {/* #925 AC4 gate① engine-agent finding [0]/[1]: the glyph renders FIRST (≥24px, to the
+      {/* #925 AC4: the glyph renders FIRST (≥24px, to the
        *  label's left — `.attention-entity svg`, panels.css), then ONE `--font-data` ≥14px element
        *  carrying the complete "PR #9202 — <title>" string on a single baseline — never a glyph
        *  wrapped mid-string or a title split into its own separately-sized span. `overflow: hidden`
        *  + `text-overflow: ellipsis` live on `.attention-entity` itself (panels.css): the title
        *  consumes whatever free space the grid's `1fr` entity track has and truncates exactly where
-       *  the reason column's own track begins — never earlier, never by JS string-slicing. */}
+       *  the reason column's own track begins — never earlier, never by JS string-slicing.
+       *  C1: the glyph lives INSIDE `.attention-entity-ref` (not a preceding sibling) so the WHOLE
+       *  composed trigger — glyph + label — is the one element `HintTooltip` clones via Radix's
+       *  `asChild` (a single-child contract); reusing `EntityRef`/the age box's own tooltip
+       *  mechanism, never a second hover/focus implementation. */}
       <span className="attention-entity">
-        {token &&
-          (repoUrl ? (
-            <>
-              {token.kind === "issue" ? <IssueGlyph /> : <PrGlyph />}
+        {token && (
+          <HintTooltip content={entityTitle ? entityLabel : undefined}>
+            {repoUrl ? (
               <a
                 className="attention-entity-ref data"
                 href={`${repoUrl}/${token.kind === "issue" ? "issues" : "pull"}/${token.number}`}
                 target="_blank"
                 rel="noreferrer"
               >
+                {token.kind === "issue" ? <IssueGlyph /> : <PrGlyph />}
                 {entityLabel}
               </a>
-            </>
-          ) : (
-            <>
-              {token.kind === "issue" ? <IssueGlyph /> : <PrGlyph />}
-              <span className="attention-entity-ref data">{entityLabel}</span>
-            </>
-          ))}
+            ) : (
+              // tabIndex: only when there's a tooltip to reveal — same rule EntityRef.tsx's own
+              // no-repoUrl branch uses (#892 AC1) — a titleless entity has nothing to Tab to.
+              <span className="attention-entity-ref data" tabIndex={entityTitle ? 0 : undefined}>
+                {token.kind === "issue" ? <IssueGlyph /> : <PrGlyph />}
+                {entityLabel}
+              </span>
+            )}
+          </HintTooltip>
+        )}
       </span>
       <span className="attention-reason">
         <span className="attention-sentence">
@@ -173,7 +183,7 @@ function AttentionRow({
          *  string here (never optional), so this trigger is always focusable, unlike EntityRef's
          *  conditional case — Tab must reach it (#892 AC1). */}
         <span className={ageClassName} tabIndex={0}>
-          {text}
+          {ageText}
         </span>
       </HintTooltip>
     </li>

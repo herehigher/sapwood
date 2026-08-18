@@ -61,10 +61,13 @@ test("#924 AC1: the populated strip's head carries .panel-head, with the summary
 test('gate① round-3 finding "ac4-entity-composition": the entity cell is exactly [glyph, ONE .attention-entity-ref element] — no sibling "PR " text or separate title span', () => {
   const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
   const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} />);
+  // C1: the glyph now lives INSIDE `.attention-entity-ref` (a Radix `HintTooltip` trigger clones
+  // exactly one child, so glyph+label share the one composed element) — still the ONLY styled
+  // element in the cell, no sibling "PR " text or separate title span.
   assert.match(
     html,
-    /<span class="attention-entity"><svg[^>]*>[\s\S]*?<\/svg><span class="attention-entity-ref data">PR #9202 — fix rounding<\/span><\/span>/,
-    "the glyph must be followed by exactly one .attention-entity-ref carrying the full composed string, nothing else",
+    /<span class="attention-entity"><span class="attention-entity-ref data"[^>]*><svg[^>]*>[\s\S]*?<\/svg>PR #9202 — fix rounding<\/span><\/span>/,
+    "the glyph must render INSIDE the one .attention-entity-ref element, nothing else in the cell",
   );
 });
 
@@ -75,7 +78,7 @@ test('gate① round-3 finding "ac4-entity-composition": with a repoUrl, the SAME
   );
   assert.match(
     html,
-    /<span class="attention-entity"><svg[^>]*>[\s\S]*?<\/svg><a class="attention-entity-ref data" href="https:\/\/github\.com\/o\/r\/pull\/9202"[^>]*>PR #9202 — fix rounding<\/a><\/span>/,
+    /<span class="attention-entity"><a class="attention-entity-ref data" href="https:\/\/github\.com\/o\/r\/pull\/9202"[^>]*><svg[^>]*>[\s\S]*?<\/svg>PR #9202 — fix rounding<\/a><\/span>/,
   );
 });
 
@@ -340,7 +343,9 @@ test("#925 AC2: the row with the greatest age (3d) renders its age box at >=2x t
     assert.equal(emphasized.length, 1, "exactly one row must carry the emphasis modifier");
     const others = ageBoxes.filter((el) => !el.classList.contains("attention-age-emphasis"));
     assert.equal(others.length, 2);
-    assert.equal(emphasized[0]?.textContent, "3d ago", "the emphasis must land on the 3d-ago event specifically");
+    // B1 (#925 AC4): the emphasis box renders the COMPACT age ("3d", no " ago") — the small
+    // boxes below keep the full form (asserted on `others` via their own age arithmetic already).
+    assert.equal(emphasized[0]?.textContent, "3d", "the emphasis must land on the 3d-ago event specifically, in compact form");
 
     const emphasizedHeight = Number.parseFloat(getComputedStyle(emphasized[0] as Element).minHeight);
     const emphasizedFontSize = Number.parseFloat(getComputedStyle(emphasized[0] as Element).fontSize);
@@ -386,7 +391,7 @@ test("#925 AC2: the emphasis follows the greatest age when the fixture reorders 
   try {
     const emphasized = container.querySelector(".attention-age-emphasis");
     assert.ok(emphasized, "one row must carry the emphasis modifier");
-    assert.equal(emphasized?.textContent, "3d ago", "emphasis must follow the 3d-ago event, wherever it renders");
+    assert.equal(emphasized?.textContent, "3d", "emphasis must follow the 3d-ago event (compact form), wherever it renders");
   } finally {
     await cleanup();
   }
@@ -657,6 +662,107 @@ test('gate① finding "ac4-age-box": the emphasis box resolves --attention-empha
     );
   } finally {
     await cleanup();
+  }
+});
+
+// ── #925 AC4: B1 compact emphasis age, B2 styled entity ref, C1 entity tooltip ───────────────
+
+test("B1: the emphasis box's text always matches /^\\d+[smhd]$/ — the bare compact age, never the small boxes' ' ago' full form", async () => {
+  const items = attentionRowsByAge([
+    { id: 3, ageMs: TWO_HOURS_MS },
+    { id: 2, ageMs: FORTY_FIVE_MIN_MS },
+    { id: 1, ageMs: THREE_DAYS_MS },
+  ]);
+  const { container, cleanup } = await mountWithCascade(<NeedsAttention items={items} titles={{}} now={NOW} />);
+  try {
+    const emphasized = container.querySelector(".attention-age-emphasis");
+    assert.ok(emphasized, "one row must carry the emphasis modifier");
+    assert.match(
+      emphasized?.textContent ?? "",
+      /^\d+[smhd]$/,
+      `the emphasis text must be a bare compact age (no " ago"), got: "${emphasized?.textContent}"`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("B2: .attention-entity-ref (both the <span> and <a> variants) resolves the SAME cream --attention-emphasis-text colour and is never underlined, in both themes", async () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
+  // `--attention-emphasis-text` itself is declared as 3 separate literal-hex overrides (never a
+  // single `light-dark()` call — same happy-dom-testability posture as --attention-tone-rust/
+  // -review/-reason-text above), so `parseColorTokensLocal` can't split IT into dark/light (it
+  // only splits genuine `light-dark(...)` values). `--sapwood` is the token it MIRRORS
+  // (tokens.css's own comment on `--attention-emphasis-text`, and `tokens.test.ts`'s "AC1/AC4"
+  // pin) — read the expected per-theme hexes from that source of truth instead.
+  const { light, dark } = parseColorTokensLocal(tokensCssRow);
+  const expectedDark = dark["--sapwood"]!;
+  const expectedLight = light["--sapwood"]!;
+
+  for (const repoUrl of [undefined, "https://github.com/o/r"] as const) {
+    const { container, cleanup } = await mountWithCascade(
+      <NeedsAttention items={[event]} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} repoUrl={repoUrl} />,
+    );
+    try {
+      const ref = container.querySelector(".attention-entity-ref") as HTMLElement;
+      assert.ok(ref, "the entity-ref element must render");
+      assert.equal(ref.tagName, repoUrl ? "A" : "SPAN", "element kind must match whether a repoUrl is present");
+
+      document.documentElement.setAttribute("data-theme", "heartwood");
+      let computed = getComputedStyle(ref);
+      assert.equal(
+        computed.color.toUpperCase(),
+        expectedDark,
+        `dark theme (${ref.tagName}): must resolve the row's own cream primary-text colour, not a UA link colour`,
+      );
+      assert.equal(computed.textDecoration, "none", `dark theme (${ref.tagName}): must never underline`);
+
+      document.documentElement.setAttribute("data-theme", "sapwood");
+      computed = getComputedStyle(ref);
+      assert.equal(
+        computed.color.toUpperCase(),
+        expectedLight,
+        `light theme (${ref.tagName}): must resolve the row's own cream primary-text colour, not a UA link colour`,
+      );
+      assert.equal(computed.textDecoration, "none", `light theme (${ref.tagName}): must never underline`);
+    } finally {
+      document.documentElement.removeAttribute("data-theme");
+      await cleanup();
+    }
+  }
+});
+
+test('C1: the composed entity trigger (glyph + label) is Tab-reachable and its tooltip reveals the FULL "PR #N — title" label', async () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<NeedsAttention items={[event]} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} />);
+    });
+    const trigger = container.querySelector(".attention-entity-ref") as HTMLElement;
+    assert.ok(trigger, "the entity trigger renders");
+    assert.equal(trigger.tabIndex, 0, "must be a real tab stop — a folded title needs a keyboard path, not hover-only");
+    assert.equal(container.querySelector('[role="tooltip"]'), null, "not open before any interaction");
+
+    await act(async () => {
+      trigger.focus();
+    });
+
+    const tooltip = container.querySelector('[role="tooltip"]');
+    assert.ok(tooltip, "focusing the trigger opens the tooltip");
+    assert.match(
+      tooltip?.textContent ?? "",
+      /PR #9202 — fix rounding/,
+      "the tooltip must carry the FULL composed label — replacing EntityRef dropped this reveal path, C1's own regression",
+    );
+    assert.equal(trigger.getAttribute("aria-describedby"), tooltip?.id);
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
   }
 });
 
