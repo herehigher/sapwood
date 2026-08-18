@@ -282,7 +282,7 @@ item becomes a routed page, that is a scope amendment to this section.
   pre-#207 history — simply shows no tooltip; that bounded blind spot is
   accepted, never patched with a live lookup.
 
-  Owner ruling Q3, 2026-08-17 (#729 design review; implementing issue #926): Ruled: lanes take
+  Owner ruling Q3, 2026-08-17 (#729 design review; implementing issue #926): lanes take
   one full-width row above the activity feed (`lanes-dark.png`'s 3-card composition), replacing
   this section's C|D half-split — the feed renders full-width below. Today's C|D half-split
   (`.lane-activity-row`, `App.tsx`) and the diagram above stand until #926 lands.
@@ -1457,7 +1457,7 @@ mutable snapshot or outside the engine's own DB is live-only.
   footer note alone is not acceptable — the badge belongs on the panel that
   would otherwise lie.
 
-Owner ruling Q4, 2026-08-17 (#729 design review; implementing issue #927): Ruled: the lane
+Owner ruling Q4, 2026-08-17 (#729 design review; implementing issue #927): the lane
 board reconstructs a replayed lane NARRATIVE from the event stream (`dispatched`/`handoff`/
 `reclaim-done`, incl. cost/est/merged) in replay and `?demo`, labelled **REPLAYED** — never a
 fake live snapshot. Today's `LiveOnly` wrap (`App.tsx`) and the boundary table row stand until
