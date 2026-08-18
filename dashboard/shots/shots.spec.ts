@@ -1144,6 +1144,82 @@ test("#925 AC4 (REAL measurement): the emphasis age box's text fits inside the b
 });
 
 /**
+ * #928 AC1: below the 720px floor, `.hero`'s own native 1200px width (hero.css, #895 item 5) must
+ * scroll INSIDE its own `.hero-scroll` container instead of widening the whole page — the exact
+ * defect this issue fixes (`document.documentElement.scrollWidth` used to read ~1216 at this
+ * viewport). `.icon-rail`'s own width matching the viewport is a DOWNSTREAM consequence, not a
+ * separate fix (this issue's own "What": "follows from the document no longer widening") — checked
+ * here as the AC's own proof that the consequence actually landed, not re-derived logic.
+ */
+test("#928 AC1: at 720px, the document never scrolls horizontally, the hero stage overflows INSIDE its own container, and the rail spans the viewport", async ({
+  page,
+}) => {
+  for (const theme of THEMES) {
+    await page.setViewportSize({ width: 720, height: 1024 });
+    await page.goto("/?demo");
+    await page.evaluate((attr) => document.documentElement.setAttribute("data-theme", attr), theme.attr);
+    await page.locator("#overview").waitFor({ state: "visible" });
+    await page.waitForLoadState("networkidle");
+
+    const docScrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+    expect(docScrollWidth, `${theme.key}: the document must never scroll horizontally at the 720px floor`).toBeLessThanOrEqual(720);
+
+    const heroScroll = page.locator(".hero-scroll");
+    await expect(heroScroll, `${theme.key}: a real .hero-scroll container must render`).toHaveCount(1);
+    const [scrollWidth, clientWidth] = await heroScroll.evaluate((el) => [el.scrollWidth, el.clientWidth]);
+    expect(
+      scrollWidth,
+      `${theme.key}: the hero's native-width stage must overflow INSIDE .hero-scroll (scrollWidth ${scrollWidth}px > clientWidth ${clientWidth}px)`,
+    ).toBeGreaterThan(clientWidth);
+
+    const railBox = await page.locator(".icon-rail").boundingBox();
+    expect(railBox, `${theme.key}: .icon-rail must render with a real bounding box`).not.toBeNull();
+    expect(
+      Math.round(railBox!.width),
+      `${theme.key}: .icon-rail must span the full viewport width once the document no longer widens`,
+    ).toBe(720);
+  }
+});
+
+/**
+ * #928 AC2: the lane board and activity feed (both full-width `.stack` rows since #926) must stack
+ * vertically at 720px, and no `.stack` child may spill past the viewport on the x-axis — the SAME
+ * "modules stack A→B→C→D→E" quality floor #926 AC1 already proves at 1440px, re-checked here at
+ * the floor width itself, where the pre-fix bug this issue closes (the page-level horizontal
+ * overflow) is what could have silently pushed a module's own box past [0, 720] on x.
+ */
+test("#928 AC2: at 720px, lanes and activity stack (no horizontal overlap), and every .stack child stays within [0, 720] on x", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 720, height: 1024 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  const laneSlot = (await firstMatch(page, MODULE_SELECTORS.lanes)) ?? page.locator("nonexistent-lanes-anchor");
+  const feedSlot = page.locator('section[aria-label="activity"]');
+  const laneBox = await laneSlot.boundingBox();
+  const feedBox = await feedSlot.boundingBox();
+  expect(laneBox, "the lane board slot must render with a real bounding box").not.toBeNull();
+  expect(feedBox, "the activity feed must render with a real bounding box").not.toBeNull();
+  expect(feedBox!.y, "activity must render BELOW the lane board, not beside it, at the 720px floor").toBeGreaterThanOrEqual(
+    laneBox!.y + laneBox!.height - 1,
+  );
+
+  const stackChildBoxes = await page.locator("main.stack > *").evaluateAll((els) =>
+    els.map((el) => {
+      const r = el.getBoundingClientRect();
+      return { left: r.left, right: r.right };
+    }),
+  );
+  expect(stackChildBoxes.length, "at least one .stack child must render").toBeGreaterThan(0);
+  for (const [i, box] of stackChildBoxes.entries()) {
+    expect(box.left, `.stack child #${i}'s left edge must not sit left of the viewport`).toBeGreaterThanOrEqual(-1);
+    expect(box.right, `.stack child #${i}'s right edge (${box.right}px) must not spill past the 720px viewport`).toBeLessThanOrEqual(721);
+  }
+});
+
+/**
  * A genuine RENDERED-PIXEL sample at one page coordinate — not a geometry-box comparison (a
  * `<rect>`'s `getBoundingClientRect()` is verified directly to report the geometry-only box,
  * excluding its own stroke, so it can't itself prove whether a 1px CENTERED stroke's own 0.5px

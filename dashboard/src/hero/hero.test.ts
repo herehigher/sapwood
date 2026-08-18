@@ -1082,6 +1082,56 @@ test("#895 item 5: at the 720px floor, the hero stage reflows (holds its native 
   }
 });
 
+// #928 AC3 (STYLE, registerRealDom() + full production cascade at a real simulated viewport
+// width, through the REAL `<Hero>` wrapper — `HeroStage` alone never renders `.hero-scroll`, the
+// same "wrapper, not the bare stage" posture #920 AC5/#891's wrapper tests above already take):
+// the hero's own scroll container resolves `overflow-x: auto` at the 720px floor, and the
+// caption's own authored font-size stays IDENTICAL to its 1440px value — proof #895 item 5's fix
+// (captions never shrink) survives this issue's new wrapper rather than being quietly reverted by
+// it.
+test("#928 AC3: at 720px, .hero-scroll resolves overflow-x: auto and the hero caption's font-size is unchanged from 1440", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+
+  const readAt = (viewportWidth: number): { scrollOverflowX: string; labelFontPx: number } => {
+    (window as unknown as { happyDOM: { setViewport: (v: { width: number }) => void } }).happyDOM.setViewport({
+      width: viewportWidth,
+    });
+    const container = document.createElement("div");
+    container.innerHTML = renderToStaticMarkup(
+      createElement(Hero, { heroState: initialHeroState(3), steps: [], lanesMax: 3, engine: "running", fixCap: 2 }),
+    );
+    document.body.appendChild(container);
+    try {
+      const scrollEl = container.querySelector(".hero-scroll");
+      assert.ok(scrollEl, "a real .hero-scroll wrapper must render around the stage");
+      const label = container.querySelector(".hero-label");
+      assert.ok(label, "a real .hero-label caption must render");
+      return {
+        scrollOverflowX: getComputedStyle(scrollEl as Element).overflowX,
+        labelFontPx: Number.parseFloat(getComputedStyle(label as Element).fontSize),
+      };
+    } finally {
+      document.body.removeChild(container);
+    }
+  };
+
+  try {
+    const at1440 = readAt(1440);
+    const at720 = readAt(720);
+    assert.equal(at720.scrollOverflowX, "auto", "the hero's own scroll container must resolve overflow-x: auto at the 720px floor");
+    assert.equal(
+      at720.labelFontPx,
+      at1440.labelFontPx,
+      "#895's fix must stay intact: the caption's authored font-size must not shrink at the 720px floor",
+    );
+  } finally {
+    document.head.removeChild(style);
+  }
+});
+
 // gate② finding [1] (ac3-height-self-reference): the old assertion interpolated
 // BACKLOG_CHIP_H — the SAME constant that renders the rect — into the matcher, so it stayed
 // green even if that constant regressed below the AC's own floor. The height is read off the
@@ -4877,12 +4927,14 @@ test("#920 AC5: the REAL <Hero> wrapper draws the stage inside an element carryi
     createElement(Hero, { heroState: initialHeroState(3), steps: [], lanesMax: 3, engine: "running", fixCap: 2 }),
   );
   // #924: the `.panel-head` title row (AC1) now sits between the `.panel` wrapper and the `<svg>`
-  // — still the SAME wrapper element, `<svg class="hero">` still its direct-child sibling of the
-  // head, never re-parented outside it.
+  // — still the SAME wrapper element, `<svg class="hero">` still nested inside it, after the head.
+  // #928: `<svg class="hero">` now sits one level deeper, inside its own `.hero-scroll` container
+  // (hero.css's scroll boundary for the stage's native 1200px floor) — still a descendant of the
+  // same `.panel`, never re-parented outside it.
   assert.match(
     html,
-    /<div class="[^"]*\bpanel\b[^"]*">\s*<div class="panel-head">[\s\S]*?<\/div>\s*<svg class="hero"/,
-    'the rendered <svg class="hero"> must sit inside the same element carrying the .panel class, after its panel-head',
+    /<div class="[^"]*\bpanel\b[^"]*">\s*<div class="panel-head">[\s\S]*?<\/div>\s*<div class="hero-scroll">\s*<svg class="hero"/,
+    'the rendered <svg class="hero"> must sit inside its own .hero-scroll container, inside the same element carrying the .panel class, after its panel-head',
   );
 });
 

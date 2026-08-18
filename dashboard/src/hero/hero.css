@@ -16,6 +16,17 @@
   transition: opacity var(--beat) ease;
 }
 
+/* #928: the stage's own scroll boundary — below the 720px floor `.hero` holds its native 1200px
+ * width (#895 item 5, right below), which would otherwise widen the WHOLE PAGE rather than just
+ * this card. `overflow-x: auto` catches that overflow right here, so it scrolls inside this box
+ * instead of bubbling up through `.hero-frame`/`.stack`/`.app-shell` to the document. `max-width:
+ * 100%` is what lets this box itself stay within its `.stack` cell above the floor too, where
+ * `.hero` is already `width: 100%` and nothing overflows. */
+.hero-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
 /* §6: ceiling breach / PAUSE / kill switch — the stage dims and all ambient stops. */
 .hero[data-dimmed="true"] {
   opacity: 0.45;
