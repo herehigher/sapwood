@@ -277,12 +277,17 @@ code,
   outline-offset: var(--focus-ring-offset);
 }
 
-/* §5 quality floor: modules stack at 720 px. */
+/* §5 quality floor: modules stack at 720 px. #928: `min-width: 0` (already carried by the more
+ * specific `.app-shell > .stack` rule above) plus `overflow-x: clip` here is the backstop that
+ * keeps ANY future fixed-width child from widening the document the way `.hero`'s own 1200px
+ * floor (hero.css, #895 item 5) used to — the hero's own `.hero-scroll` container is the primary
+ * fix for that specific case, this is the belt-and-suspenders ceiling on `.stack` itself. */
 .stack {
   display: grid;
   gap: var(--space-4);
   grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
   padding: var(--space-4);
+  overflow-x: clip;
 }
 
 /*
@@ -298,6 +303,14 @@ code,
  * pairing left no room for this issue's head/body card anatomy). `.live-only` is `LiveOnly`'s own
  * replay-mode placeholder for the lane board slot — it must span the same full width the real
  * `.lane-board` would, so a replay view's row layout never differs from live's.
+ * #928: `min-width: 0` overrides a grid item's default `min-width: auto` — WITHOUT it, a grid
+ * item's own "automatic minimum size" is its CONTENT's min-content width, which for `.hero-frame`
+ * bottoms out at `.hero`'s fixed 1200px floor (hero.css, #895 item 5) regardless of that
+ * descendant's own `.hero-scroll` overflow — the grid-item automatic-minimum-size exception only
+ * fires for the ITEM's OWN overflow, not a nested descendant's, so this track kept growing to fit
+ * 1200px even after `.hero-scroll` was added, verified directly by `shots.spec.ts`'s own real
+ * `boundingBox()`/`scrollWidth` AC1 check. `.stack`'s own `overflow-x: clip` (above) is a
+ * second-layer backstop; this is the fix for the actual defect.
  */
 .stack > .app-header,
 .stack > .hero-frame,
@@ -307,6 +320,7 @@ code,
 .stack > .activity-feed,
 .stack > .live-only {
   grid-column: 1 / -1;
+  min-width: 0;
 }
 
 /*

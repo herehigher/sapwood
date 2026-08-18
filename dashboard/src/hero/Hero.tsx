@@ -149,21 +149,26 @@ export function Hero({
       <div className="panel-head">
         <h2>loop</h2>
       </div>
-      <HeroStage
-        ref={svgRef}
-        state={state}
-        lanesMax={lanesMax}
-        fixCap={fixCap}
-        roundPhase={roundPhase}
-        dimmed={isStageDimmed(state, engine, isLiveOpenRound)}
-        reducedMotion={reducedMotion}
-        config={config}
-        liveLanes={lanes}
-        mergedPrs={mergedPrs}
-        onInspect={onInspect}
-        openAttention={openAttention}
-        now={now}
-      />
+      {/* #928: below the 720px floor `.hero` holds its native 1200px width (#895 item 5) — this
+       * wrapper is what CONTAINS that overflow to the stage's own box (hero.css's `.hero-scroll`)
+       * instead of letting it widen the whole page. */}
+      <div className="hero-scroll">
+        <HeroStage
+          ref={svgRef}
+          state={state}
+          lanesMax={lanesMax}
+          fixCap={fixCap}
+          roundPhase={roundPhase}
+          dimmed={isStageDimmed(state, engine, isLiveOpenRound)}
+          reducedMotion={reducedMotion}
+          config={config}
+          liveLanes={lanes}
+          mergedPrs={mergedPrs}
+          onInspect={onInspect}
+          openAttention={openAttention}
+          now={now}
+        />
+      </div>
     </div>
   );
 }
