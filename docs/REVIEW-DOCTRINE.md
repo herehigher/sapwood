@@ -85,19 +85,22 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   - **VALUE (model the real thing, not a convenient proxy).** Failure class: DRIFT RISK — a test
     constant that silently duplicates a value the repo already defines elsewhere (a CSS rule, a
     cap constant), with nothing tying the two together, so they can silently diverge while the
-    test stays green. Rule: read the value from its source, or pin the two together with an
-    assertion that fails the moment they disagree. This does NOT require asserting against real
-    rendered DOM in general — the default dashboard harness is DOM-free
+    test stays green. Rule: read the value from its source only to prevent drift, never as the
+    proof — identity with the constant that produced the render proves nothing about it (#936:
+    ZONE_DIVIDERS compared against itself "proved" a divider position drawn from ZONE_DIVIDERS).
+    Assert an independently derived bound when the AC states an invariant. This does NOT require
+    real rendered DOM in general — the default dashboard harness is DOM-free
     (docs/dev-guide/07-dashboard.md) — EXCEPT a computed-style claim itself; see STYLE below.
-    Worked example: `textBox()`/`CHAR_ADVANCE` in
-    `dashboard/src/hero/hero.test.ts` turns font-size and character count into a rendered extent
-    without a browser, tied to the same inputs the real draw path uses, plus a cascade/source-order
-    assertion pinning declaration order instead of hand-copying which rule wins. Two shapes seen
-    (#353, PR #738 (issue #728), PR #737): (1) the test computes its expected value outside the
-    thing it's testing instead of reading/pinning it against the real source; (2) the test
-    exercises only the easy/nominal instance while the AC's own wording names a combinatorial or
-    boundary case it never constructs. FINE: a literal that IS the specification — a golden value
-    nothing else in the codebase claims to own.
+    Worked example: `textBox()`/`CHAR_ADVANCE` (`dashboard/src/hero/hero.test.ts`) turns
+    font-size/char-count into a rendered extent without a browser, tied to the real draw path's
+    own inputs, plus a cascade/source-order assertion instead of hand-copying which rule wins.
+    Three shapes seen (#353, PR #738 (issue #728), PR #737): (1) the test computes its
+    expected value outside the thing it's testing instead of reading/pinning it against the real
+    source; (2) the test exercises only the easy/nominal instance while the AC's own wording
+    names a combinatorial or boundary case it never constructs; (3) the test asserts identity
+    with the very constant that produced the render, so it proves nothing about the render
+    (#936). FINE: a literal that IS the specification — a golden value nothing else in the
+    codebase claims to own.
   - **DECISION (fake-verdict rule, engine side).** Presetting a fake collaborator to already
     return the acceptance criterion's target decision, then asserting against the fake's own
     canned value, proves only that the fake echoes what it was told — the real policy function
@@ -119,31 +122,28 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     only a unit test of the extracted piece; ACs with no render path (server routes, pure modules)
     are outside this rule. Distinct from VALUE above: that sub-case governs which VALUE an
     assertion checks, this one governs which TREE produces it.
-    **Data-flow sub-shape (#866, #868), one level up the stack.** Rendering the real entry point
-    isn't enough if its props are still hand-assembled or its state hand-constructed into a
-    combination the real derivation could never itself produce — mount with real
-    prefetched/settled queries and a stubbed `fetch` instead, over a fixture that builds the AC's
-    named boundary/adversarial case, not just the nominal one. `docs/dev-guide/07-dashboard.md`'s
-    `registerRealDom()` solved this for CLICK wiring (retro #355); QUERY/data-flow wiring has no
-    equivalent shared helper yet.
+    **Data-flow sub-shape (#866, #868), one level up.** Real entry-point rendering isn't enough
+    if its props/state are hand-assembled into a combination the real derivation could never
+    produce — mount with real prefetched/settled queries and a stubbed `fetch`, over a fixture
+    building the AC's named boundary case, not just the nominal one. `registerRealDom()`
+    (`docs/dev-guide/07-dashboard.md`) solved this for CLICK wiring (retro #355); QUERY/data-flow
+    wiring has no equivalent shared helper yet.
   - **STYLE (computed-style ACs are VALUE's real-DOM exception).** "Authored" isn't "rendered" —
     a CSS/typography AC needs `registerRealDom()` plus a real `getComputedStyle` read, never a
-    stand-in. Same PR, one round apart (#879, PR #886 gate② rounds 1, 3): a regex match on
-    declaration TEXT proves a rule exists, never that it cascades onto the element or wins over a
-    later rule; and mounting only the ONE stylesheet under test still gets an `em` value wrong,
-    since it resolves off the *inherited* font-size a partial cascade misses. Mount every
-    stylesheet the element inherits, in production order, and assert the exact value — never
-    `notEqual`/existence, which any non-default value satisfies.
+    stand-in. Seen twice on #879 / PR #886: a regex on declaration TEXT proves a rule exists, not
+    that it cascades or wins over a later rule; mounting only the ONE stylesheet under test still
+    gets an inherited `em` wrong, since a partial cascade misses the font-size it resolves off.
+    Mount every stylesheet the element inherits, in production order, and assert the exact value —
+    never `notEqual`/existence, which any non-default value satisfies.
   - **COLLISION → COVERAGE (any AC/doc's "all/every named set" claim, not only neighbor
     boxes).** `assertNoOverlap`/`boxesOverlap` (`dashboard/src/hero/hero.test.ts`) is sound
     infra, but each PR hand-curates a partial box list, missing neighbors its author forgot —
     recurring (#728, #745, #891, #901, #902). Include every element sharing the new one's
     region, position read off rendered markup wherever filtering/compaction can diverge — a
-    constant is fine for genuinely static geometry. Same shape, #892: Playwright proved only
-    `PhaseInspectorDrawer`, not the AC's own `ConfigDrawer`/`Controls` confirm;
-    `.recipe-list-entry` proved only `NeedsAttention`, not the doc's own
-    `ActivityFeed`/`LaneBoard` rows. Derive the covered set from what the AC/doc names, never a
-    hand-typed list.
+    constant is fine for genuinely static geometry. Same shape, #892 (Playwright covered only
+    `PhaseInspectorDrawer`, not `ConfigDrawer`/`Controls`; `.recipe-list-entry` covered only
+    `NeedsAttention`, not `ActivityFeed`/`LaneBoard`). Derive the covered set from what the
+    AC/doc names, never a hand-typed list.
 
 ### Documentation claims
 
