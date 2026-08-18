@@ -70,33 +70,33 @@ export function CostBar({ settledUsd, estUsd, max, targetPct = null, label, clas
   const estPct = Math.max(0, totalPct - settledPct);
   const ariaLabel = est > 0 ? `${label}: $${settledUsd.toFixed(2)} + $${est.toFixed(2)} est` : `${label}: $${settledUsd.toFixed(2)}`;
   // #924 AC2: the hatch tail's own leading edge, extended `FILL_RADIUS` px BACKWARD under the
-  // pill (only when a pill actually exists there to cover it — at 0% settled there is no pill, so
-  // no extension, or the hatch would overshoot the bar's own left edge with nothing hiding it).
-  // The pill's `rx` corner recedes inward from the nominal seam by up to that same radius at its
-  // top/bottom edges (a rounded corner is never a flat vertical line) — without the extension, the
-  // hatch's own flat edge stayed at the nominal seam, leaving an unpainted cusp between the two
-  // curves at the top/bottom rows. `width` grows by the SAME amount so the hatch's own TRAILING
-  // edge (at `totalPct%`) is unaffected — only the leading edge moves. Percentage arithmetic mixed
-  // with a fixed px offset needs `calc()`, which SVG geometry properties only resolve via `style`,
-  // never as a plain attribute string.
-  const hatchInset = settledPct > 0 ? FILL_RADIUS : 0;
+  // pill — the pill's `rx` corner recedes inward from the nominal seam by up to that same radius
+  // at its top/bottom edges (a rounded corner is never a flat vertical line), so an unextended
+  // hatch edge left an unpainted cusp between the two curves there. `width` grows by the SAME
+  // amount so the hatch's own TRAILING edge (at `totalPct%`) is unaffected — only the leading edge
+  // moves. Percentage arithmetic mixed with a fixed px offset needs `calc()`, which SVG geometry
+  // properties only resolve via `style`, never as a plain attribute string.
+  //
+  // `max(0px, ...)` clamps the leading edge itself: a settled share narrower than `FILL_RADIUS`
+  // (a pill only a fraction of a px wide, or none at all at 0%) would otherwise push `calc(N% -
+  // FILL_RADIUS px)` negative — and `.cost-bar`'s own `overflow: visible` (the fix for the pill's
+  // 1px outline stroke straddling the box edge) means a negative x now actually PAINTS outside the
+  // bar's own box instead of quietly clipping. `min(FILL_RADIUS px, N%)` shrinks the matching
+  // width extension by the SAME amount the leading edge got clamped, so the trailing edge still
+  // lands exactly at `totalPct%` regardless — at 0% settled this reduces to zero extension either
+  // way (no pill exists yet to cover one).
+  const hatchX = `max(0px, calc(${settledPct}% - ${FILL_RADIUS}px))`;
+  const hatchWidth = `calc(${estPct}% + min(${FILL_RADIUS}px, ${settledPct}%))`;
   return (
     <svg width="100%" height="12" className={className ? `cost-bar ${className}` : "cost-bar"} role="img" aria-label={ariaLabel}>
       <HatchDef />
       {/* The bar's fixed full-width reference — a plain 1px stroke, no `rx`/round cap of its own,
        * so it never needs anything beyond its own coordinates to stay inside the box. */}
       <line className="cost-bar-track" x1="0" y1={TRACK_Y} x2="100%" y2={TRACK_Y} />
-      {/* #924 AC2: rendered BEFORE the pill (below), extended back under it (see `hatchInset`
-       * above) — the pill's own opaque fill, painted on top, covers the seam cleanly instead of a
-       * flat hatch edge cutting a visible notch into the pill's curved cap. */}
-      {estPct > 0 && (
-        <rect
-          style={{ x: `calc(${settledPct}% - ${hatchInset}px)`, width: `calc(${estPct}% + ${hatchInset}px)` }}
-          y={FILL_Y}
-          height={FILL_HEIGHT}
-          fill={`url(#${HATCH_PATTERN_ID})`}
-        />
-      )}
+      {/* #924 AC2: rendered BEFORE the pill (below), extended back under it (see `hatchX`/
+       * `hatchWidth` above) — the pill's own opaque fill, painted on top, covers the seam cleanly
+       * instead of a flat hatch edge cutting a visible notch into the pill's curved cap. */}
+      {estPct > 0 && <rect style={{ x: hatchX, width: hatchWidth }} y={FILL_Y} height={FILL_HEIGHT} fill={`url(#${HATCH_PATTERN_ID})`} />}
       {/* #924 AC2: the settled fill — never a phantom zero-width pill at 0% (same "never a
        * phantom segment" posture the est hatch tail above already follows). The light-theme
        * outline (panels.css: `stroke: var(--sap-fill-outline)`) lives on this SAME rect, not a

@@ -18,30 +18,67 @@ test("settled-only bar draws a solid fill sized to settledUsd/max, no hatch segm
 // test below) covers the seam cleanly, with no gap where the cap's `rx` corner recedes inward.
 // Extending backward only moves the LEADING edge; the trailing edge (at the settled+est total)
 // is exactly `width` further right, unaffected — `40% - 3px` to `40% - 3px + (20% + 3px)` = `60%`.
+// `max(0px, ...)`/`min(3px, N%)` are the general clamp form (see the sub-3px test below for why) —
+// at a settled share comfortably wider than 3px, they're inert: `max(0px, positive)` = the
+// positive value, `min(3px, wide%)` = 3px, exactly the unclamped arithmetic.
 test("settled + est draws the est tail immediately after the settled fill, hatched, extended 3px back under the pill's own cap", () => {
   const html = renderToStaticMarkup(<CostBar settledUsd={4} estUsd={2} max={10} label="lane" />);
   // settled: 0 -> 40%; est: 40% -> 60% (width 20%), tail's own leading edge pulled back 3px.
   assert.match(html, /class="cost-bar-fill" x="0"[^>]*width="40%"/);
-  assert.match(html, new RegExp(`style="x:calc\\(40% - 3px\\);width:calc\\(20% \\+ 3px\\)"[^>]*fill="url\\(#${HATCH_PATTERN_ID}\\)"`));
+  assert.match(
+    html,
+    new RegExp(
+      `style="x:max\\(0px, calc\\(40% - 3px\\)\\);width:calc\\(20% \\+ min\\(3px, 40%\\)\\)"[^>]*fill="url\\(#${HATCH_PATTERN_ID}\\)"`,
+    ),
+  );
 });
 
 test("est is clamped so the total never draws past 100% of the track", () => {
   const html = renderToStaticMarkup(<CostBar settledUsd={9} estUsd={5} max={10} label="lane" />);
   // settled: 90%; est would be 50% more (140% total) -> clamped tail is 10% wide, ending at 100%.
   assert.match(html, /class="cost-bar-fill" x="0"[^>]*width="90%"/);
-  assert.match(html, new RegExp(`style="x:calc\\(90% - 3px\\);width:calc\\(10% \\+ 3px\\)"[^>]*fill="url\\(#${HATCH_PATTERN_ID}\\)"`));
+  assert.match(
+    html,
+    new RegExp(
+      `style="x:max\\(0px, calc\\(90% - 3px\\)\\);width:calc\\(10% \\+ min\\(3px, 90%\\)\\)"[^>]*fill="url\\(#${HATCH_PATTERN_ID}\\)"`,
+    ),
+  );
 });
 
 // #924 AC2: at 0% settled (no pill exists to cover a backward extension), the hatch tail's own
-// leading edge stays exactly at 0% — extending it would overshoot the bar's own left edge with
-// nothing hiding the seam (the box is `overflow: visible` now, so an unhidden extension there
-// would be a real, visible defect, not just a harmless 0.5px stroke straddle).
-test("est-only (0% settled, no pill to cover a seam) renders the hatch tail unextended, starting exactly at 0%", () => {
+// leading edge clamps back to exactly 0% — the general `max(0px, calc(0% - 3px))` form always
+// resolves non-negative, so this is the SAME clamp mechanism as the sub-3px case below, not a
+// separate branch. Extending unclamped here would overshoot the bar's own left edge with nothing
+// hiding the seam (the box is `overflow: visible` now, so an unhidden extension there would be a
+// real, visible defect, not just a harmless 0.5px stroke straddle).
+test("est-only (0% settled, no pill to cover a seam) renders the hatch tail clamped to exactly 0%", () => {
   const html = renderToStaticMarkup(<CostBar settledUsd={0} estUsd={5} max={10} label="lane" />);
   assert.doesNotMatch(html, /class="cost-bar-fill"/, "no settled amount -> no pill at all");
-  assert.match(html, new RegExp(`style="x:calc\\(0% - 0px\\);width:calc\\(50% \\+ 0px\\)"[^>]*fill="url\\(#${HATCH_PATTERN_ID}\\)"`));
+  assert.match(
+    html,
+    new RegExp(
+      `style="x:max\\(0px, calc\\(0% - 3px\\)\\);width:calc\\(50% \\+ min\\(3px, 0%\\)\\)"[^>]*fill="url\\(#${HATCH_PATTERN_ID}\\)"`,
+    ),
+  );
 });
 
+// #924 AC2 (Codex re-read, ec33d5b): a settled share NARROWER than FILL_RADIUS (a pill under 3px
+// wide, not just absent) hits the SAME failure mode 0% did before the clamp existed — the raw
+// `calc(0.1% - 3px)` is still negative (0.1% of any real container width is nowhere near 3px), and
+// `.cost-bar`'s own `overflow: visible` means that negative x now actually PAINTS past the bar's
+// own left edge instead of quietly clipping there. `max(0px, ...)` pins the leading edge at 0
+// regardless of how narrow the settled share is; `min(3px, 0.1%)` shrinks the matching width
+// extension so the trailing edge (at the settled+est total) still lands unaffected.
+test("a sub-3px settled share (0.1%) still clamps the hatch tail's leading edge to 0px, never negative", () => {
+  const html = renderToStaticMarkup(<CostBar settledUsd={0.01} estUsd={5} max={10} label="lane" />);
+  assert.match(html, /class="cost-bar-fill" x="0"[^>]*width="0\.1%"/, "a real, if tiny, pill still renders");
+  assert.match(
+    html,
+    new RegExp(
+      `style="x:max\\(0px, calc\\(0\\.1% - 3px\\)\\);width:calc\\(50% \\+ min\\(3px, 0\\.1%\\)\\)"[^>]*fill="url\\(#${HATCH_PATTERN_ID}\\)"`,
+    ),
+  );
+});
 // #924 AC2: the hatch renders BEFORE the pill in DOM/paint order — SVG paints in document order,
 // so the pill's own opaque fill, painted second, sits ON TOP and covers the seam; the reverse
 // order would let the hatch's flat edge cut a visible notch into the pill's curved cap instead.
