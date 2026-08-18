@@ -51,7 +51,7 @@ export const DEMO_SOURCE: DemoBundle = {
       // first real row (id 1), not the first included row's own id.
       startEventId: 0,
       startSpendId: 0,
-      eventCount: 9,
+      eventCount: 10,
       schemaVersion: 1,
       // #880: `roundBudgetUsd` here (not just `loopState.config` above) — the ROUND N panel's own
       // target tick reads the round's OWN persisted artifact (`readSummary`), never today's live
@@ -60,6 +60,17 @@ export const DEMO_SOURCE: DemoBundle = {
     },
   ],
   events: [
+    // #922 AC5 gate② finding [5] (ac5-active-capture): the round's own real opening phase — every
+    // recorded round starts `aligning` before its dispatch loop begins (`round-phase`'s own real
+    // wire shape, `PLANNING_PHASE`, state.ts), but this fixture previously jumped straight to
+    // "executing" (below), so `?demo`'s replay cursor could never land on a moment with a RUNNING
+    // planning/reflection node — no capture could ever show the hero's own breathing-disc halo.
+    // `ts` matches `rounds[0].startedAt` exactly (the round's own first instant). `id: 1` (not
+    // `0`) deliberately — `state.ts`'s hero fold treats `id: 0` as its own "nothing folded yet"
+    // sentinel (the SAME guard `foldReplay`'s own id-idempotency doc references), so an event
+    // literally carrying `id: 0` silently never folds into `state.events` at all. Every OTHER
+    // event below shifts +1 for the same reason (ids 2-10, was 1-9).
+    { id: 1, ts: "2026-08-09T09:00:00Z", kind: "round-phase", payload: { round_id: 5001, phase: "aligning" } },
     // #886 gate② run 2e566ac9 finding [0]: 9103+ are deliberately never dispatched — with
     // `lanes.max: 2` above, a round selecting more issues into its pool while only 2 lanes work
     // concurrently is completely ordinary (the backlog buffer existing at all), not padding.
@@ -70,39 +81,39 @@ export const DEMO_SOURCE: DemoBundle = {
     // floor — >= 3 filled `.hero-pool-chip` + >= 3 outlined `.hero-pool-candidate` — once 9101/
     // 9102 leave the pool below.
     {
-      id: 1,
+      id: 2,
       ts: "2026-08-09T09:00:05Z",
       kind: "pool-selected",
       payload: { round_id: 5001, issues: [9101, 9102, 9103, 9104, 9105, 9106, 9107, 9108] },
     },
-    { id: 2, ts: "2026-08-09T09:00:10Z", kind: "round-phase", payload: { round_id: 5001, phase: "executing" } },
+    { id: 3, ts: "2026-08-09T09:00:10Z", kind: "round-phase", payload: { round_id: 5001, phase: "executing" } },
     {
-      id: 3,
+      id: 4,
       ts: "2026-08-09T09:01:00Z",
       kind: "dispatched",
       payload: { worker: "lane-a", issue: 9101, issueTitle: "Add scrub bar chapter marks" },
     },
     {
-      id: 4,
+      id: 5,
       ts: "2026-08-09T09:01:30Z",
       kind: "dispatched",
       payload: { worker: "lane-b", issue: 9102, issueTitle: "Fix header spend meter rounding" },
     },
     {
-      id: 5,
+      id: 6,
       ts: "2026-08-09T09:18:00Z",
       kind: "reclaim-done",
       payload: { worker: "lane-a", issue: 9101, next: "DRIVING", pr: 9201, prTitle: "feat(dashboard): scrub bar chapter marks" },
     },
     {
-      id: 6,
+      id: 7,
       ts: "2026-08-09T09:20:00Z",
       kind: "reclaim-done",
       payload: { worker: "lane-b", issue: 9102, next: "DRIVING", pr: 9202, prTitle: "fix(dashboard): header spend meter rounding" },
     },
-    { id: 7, ts: "2026-08-09T09:25:00Z", kind: "merged", payload: { issue: 9101, pr: 9201, worker: "lane-a" } },
-    { id: 8, ts: "2026-08-09T09:30:00Z", kind: "drive-needs-human", payload: { issue: 9102, pr: 9202 } },
-    { id: 9, ts: "2026-08-09T09:42:00Z", kind: "round-stop", payload: { detail: "issue cap reached" } },
+    { id: 8, ts: "2026-08-09T09:25:00Z", kind: "merged", payload: { issue: 9101, pr: 9201, worker: "lane-a" } },
+    { id: 9, ts: "2026-08-09T09:30:00Z", kind: "drive-needs-human", payload: { issue: 9102, pr: 9202 } },
+    { id: 10, ts: "2026-08-09T09:42:00Z", kind: "round-stop", payload: { detail: "issue cap reached" } },
   ],
   spend: [
     {
