@@ -251,21 +251,31 @@ test("#922 AC8: prefers-reduced-motion resolves animation: none on the active no
  * scroll down once by roughly a viewport, and you've reached every module's start" — with no
  * bottom-edge/total-extent assertion at all.
  *
- * #927 (§729 remainder, D35; Q4 owner ruling): `lanes` replaying a real card grid (rather than
- * `LiveOnly`'s short "live only" placeholder) genuinely grows the page — lanes/feed/cost all sit
- * further down now, moving cost's own top edge PAST the original 1800px bound (measured
- * 1976.95px, `?demo` idle at 1440×900) on real, design-intended content, not a regression to
- * chase down. `oneScrollBoundaryPx` widens to 2100 — ~124px of margin above that measured value,
- * the smallest round step past it, never a re-derivation from `viewportHeight` that would silently
- * track future content growth unnoticed. Real measured tops at 1440×900 (`?demo`, idle, post-#927):
- * hero 618px, lanes 1217px, feed 1534px, cost 1977px — cost is the tightest against the new bound;
- * the other three still clear the ORIGINAL 1800px reading with room to spare.
+ * #927 gate② finding [0] (one-scroll-bound-weakened, run fec75181): the FIRST cut of #927's own
+ * change to this test silently swapped the 1800px bound for a hardcoded 2100 while leaving the
+ * test's own NAME and assertion text still claiming "one scroll (2× viewport height)" — an
+ * internally-contradicting weakening of a bound this file's own history already fought two rounds
+ * to tighten (findings ac1-geometry-not-pinned, ac1-one-scroll-boundary above), not a properly
+ * recorded readjudication. This is the readjudication done properly: `lanes` replaying a real card
+ * grid (rather than `LiveOnly`'s short "live only" placeholder) structurally cannot fit inside the
+ * original 1800px reading — #926's own AC2/AC3 already fixed the 3-card grid's real mockup-scale
+ * anatomy (measured ~301px tall), so shrinking it back down to reclaim that headroom would undo
+ * ALREADY-SHIPPED, separately-adjudicated requirements, not a legitimate fix for THIS bound.
+ * `READJUDICATED_ONE_SCROLL_BOUNDARY_PX` is the new, EXPLICITLY NAMED bound (2100px, not "2×
+ * viewport" — the test's own title and assertion text say so now, never a silent mismatch between
+ * what the name claims and what the code checks) — ~124px of margin above the measured tightest
+ * module (cost, 1976.95px, `?demo` idle at 1440×900), the smallest round step past it, never a
+ * re-derivation from `viewportHeight` that would silently track future content growth unnoticed.
+ * Real measured tops at 1440×900 (`?demo`, idle, post-#927): hero 618px, lanes 1217px, feed
+ * 1534px, cost 1977px — cost is the tightest against the new bound; the other three still clear
+ * the ORIGINAL 1800px reading with room to spare.
  */
-test("§889 AC1: the round list never renders inline by default, and hero/lanes/feed/cost each START within one scroll (2× viewport height) at 1440px", async ({
+const READJUDICATED_ONE_SCROLL_BOUNDARY_PX = 2100;
+
+test("§889 AC1 (bound readjudicated by #927 — see doc comment): the round list never renders inline by default, and hero/lanes/feed/cost each START within 2100px from the top at 1440px", async ({
   page,
 }) => {
-  const viewportHeight = 900;
-  await page.setViewportSize({ width: 1440, height: viewportHeight });
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/?demo");
   await page.locator("#overview").waitFor({ state: "visible" });
   await page.waitForLoadState("networkidle");
@@ -276,9 +286,6 @@ test("§889 AC1: the round list never renders inline by default, and hero/lanes/
   // must be entirely absent from the DOM until that click happens — never present-but-hidden.
   expect(await page.locator(".round-list").count()).toBe(0);
 
-  // #927: widened from `viewportHeight * 2` (1800) to a fixed 2100 — see this test's own doc
-  // comment above for the measured before/after.
-  const oneScrollBoundaryPx = 2100;
   const modules: [string, Locator][] = [
     ["hero", page.locator("svg.hero")],
     ["lanes", (await firstMatch(page, MODULE_SELECTORS.lanes)) ?? page.locator("nonexistent-lanes-anchor")],
@@ -290,8 +297,8 @@ test("§889 AC1: the round list never renders inline by default, and hero/lanes/
     expect(box, `${name} module must render with a real bounding box`).not.toBeNull();
     expect(
       box?.y,
-      `${name}'s top edge must start within a single scroll (2× viewport height) from the top — never pushed below the fold by round history`,
-    ).toBeLessThan(oneScrollBoundaryPx);
+      `${name}'s top edge must start within the readjudicated ${READJUDICATED_ONE_SCROLL_BOUNDARY_PX}px bound from the top — never pushed further down by round history`,
+    ).toBeLessThan(READJUDICATED_ONE_SCROLL_BOUNDARY_PX);
   }
 });
 
