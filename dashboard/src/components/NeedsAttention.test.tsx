@@ -5,6 +5,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { LoopEvent } from "../api/types.ts";
+import { parseColorTokens as parseColorTokensLocal } from "../contrast.ts";
 import { toDomainEvent } from "../domain-event.ts";
 import { foldOpenAttention } from "../entities.ts";
 import { foldEvents, initialHeroState } from "../hero/state.ts";
@@ -107,8 +108,10 @@ test("row renders the mockup's shape — chip, reason + explicit ask, and a bord
   assert.match(html, /\(3\/3\)/);
   assert.match(html, /asks: adjudicate/);
   // #925 AC2: the only row in the fold is trivially the greatest-age one, so it carries the
-  // emphasis modifier alongside the base age classes.
-  assert.match(html, /class="muted data attention-ts attention-age attention-age-emphasis"/);
+  // emphasis modifier alongside the base age classes. gate① engine-agent finding [1]: no
+  // `.muted` here — it would silently lose the cascade to `.attention-age-emphasis`'s own colour
+  // override (equal specificity, `.muted` loads later), so the emphasis box drops it entirely.
+  assert.match(html, /class="data attention-ts attention-age attention-age-emphasis"/);
 });
 
 test("does not render, import, or re-implement the legend", () => {
@@ -492,6 +495,92 @@ test("#925 gate① finding [3]: a row rendered WITH onInspect (a real mapped kin
       (inspectRowAge as HTMLElement).parentElement,
       inspectRow,
       "the age box must be a direct child of .attention-row, not nested inside .attention-reason",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+// ── #925 gate① round 2 engine-agent finding "sentence-prefix-dropped": the reason cell must
+// never slice text out of the sentence — copy.ts's own shapes don't guarantee the entity token is
+// a leading prefix. ────────────────────────────────────────────────────────────────────────────
+
+test('gate① finding "sentence-prefix-dropped": gated-flag-unprovable (entity token mid-sentence) renders its FULL sentence in the reason cell, none of it dropped', () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "gated-flag-unprovable", { worker: "w1", issue: 42 }));
+  const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
+  assert.match(html, /class="attention-chip"[^>]*>FLAG</);
+  // The text BEFORE the entity token (the reason's own subject/verb) must survive — the exact
+  // defect the finding named: a prior version discarded this text along with the token itself.
+  // React HTML-escapes the apostrophe as `&#x27;`, so the raw text is split across those escapes.
+  assert.match(html, /Lane <\/span><span>w1<\/span><span>&#x27;s reentry flag couldn&#x27;t be found on either carrier/);
+  assert.match(html, /asks: check issue/);
+  assert.match(html, /&#x27;s labels by hand/);
+});
+
+// ── #925 gate① round 2 engine-agent finding "ac4-age-box": the emphasis box's numeral/border use
+// the primary-text role (not muted), stay single-line, and the row is tall enough that the box
+// itself is at most two-thirds of the row's own height. ──────────────────────────────────────
+
+test('gate① finding "ac4-age-box": the emphasis box resolves --attention-emphasis-text (not --bark-text) for both colour and border, never wraps, and its own height is at most 2/3 of the row height', async () => {
+  const items = attentionRowsByAge([{ id: 1, ageMs: THREE_DAYS_MS }]);
+  const { container, cleanup } = await mountWithCascade(<NeedsAttention items={items} titles={{}} now={NOW} />);
+  const expectedEmphasisText = parseColorTokensLocal(tokensCssRow).dark["--attention-emphasis-text"];
+  const expectedMuted = parseColorTokensLocal(tokensCssRow).dark["--bark-text"];
+  try {
+    const row = container.querySelector(".attention-row") as HTMLElement;
+    assert.ok(row, "the row must render");
+    assert.ok(row.classList.contains("attention-row-emphasis"), "the sole row must carry the emphasis row modifier");
+
+    const box = container.querySelector(".attention-age-emphasis") as HTMLElement;
+    assert.ok(box, "the emphasis box must render");
+    assert.ok(!box.classList.contains("muted"), ".muted would silently lose the cascade to the emphasis box's own colour override");
+
+    const boxComputed = getComputedStyle(box);
+    assert.equal(boxComputed.whiteSpace, "nowrap", "the age text must never wrap onto a second line");
+    assert.equal(
+      boxComputed.color.toUpperCase(),
+      expectedEmphasisText,
+      "the numeral must resolve the primary-text role, not muted --bark-text",
+    );
+    assert.notEqual(boxComputed.color.toUpperCase(), expectedMuted, "must NOT resolve to --bark-text");
+    assert.equal(boxComputed.borderColor.toUpperCase(), expectedEmphasisText, "the border must resolve the SAME primary-text role");
+
+    const rowMinHeight = Number.parseFloat(getComputedStyle(row).minHeight);
+    const boxMinHeight = Number.parseFloat(boxComputed.minHeight);
+    assert.ok(
+      boxMinHeight <= rowMinHeight * (2 / 3),
+      `the box's own height (${boxMinHeight}) must be at most 2/3 of the row's height (${rowMinHeight}, 2/3 = ${rowMinHeight * (2 / 3)})`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+// ── #925 gate① round 2 engine-agent finding "ac4-entity-clipping": the entity cell must not
+// hard-clip a long "PR #NNN — title" — it grows to fit, taking space from the reason column
+// instead of truncating. ────────────────────────────────────────────────────────────────────
+
+test('gate① finding "ac4-entity-clipping": the entity cell no longer clips/ellipsis-truncates, and its grid track can grow past the old fixed 280px', async () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
+  const longTitle = "a substantially long PR title meant to exceed the old fixed 280px entity column width by a wide margin";
+  const { container, cleanup } = await mountWithCascade(
+    <NeedsAttention items={[event]} titles={{ 9102: { prTitle: longTitle } }} now={NOW} />,
+  );
+  try {
+    const entity = container.querySelector(".attention-entity") as HTMLElement;
+    assert.ok(entity, "the entity cell must render");
+    assert.equal(entity.textContent, `PR #9202 — ${longTitle}`, "the full title must render, not truncated by JS");
+
+    const entityComputed = getComputedStyle(entity);
+    assert.notEqual(entityComputed.overflow, "hidden", "the entity cell must not hard-clip its own overflow");
+    assert.notEqual(entityComputed.textOverflow, "ellipsis", "the entity cell must not ellipsis-truncate");
+    assert.equal(entityComputed.whiteSpace, "nowrap", "still a single line — nowrap wraps, it never clips");
+
+    const row = container.querySelector(".attention-row") as HTMLElement;
+    assert.match(
+      getComputedStyle(row).gridTemplateColumns,
+      /max-content/,
+      "the entity track must be content-growable (max-content), not the old fixed 280px",
     );
   } finally {
     await cleanup();

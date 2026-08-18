@@ -173,17 +173,19 @@ test("AC3: --stepper-replay-outline's literal hexes are pinned to --sap-text's o
   );
 });
 
-// #925 gate① engine-agent finding [0] (ac1-style-oracle): the needs-attention row's severity
-// bar/chip tone and reason text need the SAME literal-hex workaround --stepper-replay-outline
-// already established (tokens.css's own comment on --attention-tone-rust/-review/
-// --attention-reason-text) — none of --rust/--sap-text/--bark-text resolve via getComputedStyle
-// in happy-dom, so their two-tone/text aliases are pinned here, not left to drift by hand.
-test("AC1: --attention-tone-rust/--attention-tone-review/--attention-reason-text are each pinned to --rust/--sap-text/--bark-text's own two branches — never a hand-copied duplicate that can drift", () => {
+// #925 gate① engine-agent findings [0]/[1] (ac1-style-oracle, ac4-age-box): the needs-attention
+// row's severity bar/chip tone, reason text, and oldest-age emphasis text/border all need the
+// SAME literal-hex workaround --stepper-replay-outline already established (tokens.css's own
+// comment on --attention-tone-rust/-review/--attention-reason-text/--attention-emphasis-text) —
+// none of --rust/--sap-text/--bark-text/--sapwood resolve via getComputedStyle in happy-dom, so
+// their aliases are pinned here, not left to drift by hand.
+test("AC1/AC4: --attention-tone-rust/--attention-tone-review/--attention-reason-text/--attention-emphasis-text are each pinned to --rust/--sap-text/--bark-text/--sapwood's own two branches — never a hand-copied duplicate that can drift", () => {
   const { light, dark } = parseColorTokens(css);
   const pairs: [string, string][] = [
     ["--attention-tone-rust", "--rust"],
     ["--attention-tone-review", "--sap-text"],
     ["--attention-reason-text", "--bark-text"],
+    ["--attention-emphasis-text", "--sapwood"],
   ];
   for (const [alias, source] of pairs) {
     const declarations = [...css.matchAll(new RegExp(`${alias}:\\s*(#[0-9A-Fa-f]{6})`, "g"))].map((m) => m[1]!.toUpperCase());

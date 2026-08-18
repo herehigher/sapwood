@@ -51,7 +51,7 @@ export const DEMO_SOURCE: DemoBundle = {
       // first real row (id 1), not the first included row's own id.
       startEventId: 0,
       startSpendId: 0,
-      eventCount: 9,
+      eventCount: 11,
       schemaVersion: 1,
       // #880: `roundBudgetUsd` here (not just `loopState.config` above) — the ROUND N panel's own
       // target tick reads the round's OWN persisted artifact (`readSummary`), never today's live
@@ -92,9 +92,27 @@ export const DEMO_SOURCE: DemoBundle = {
       kind: "reclaim-done",
       payload: { worker: "lane-b", issue: 9102, next: "DRIVING", pr: 9202, prTitle: "fix(dashboard): header spend meter rounding" },
     },
-    { id: 7, ts: "2026-08-09T09:25:00Z", kind: "merged", payload: { issue: 9101, pr: 9201, worker: "lane-a" } },
-    { id: 8, ts: "2026-08-09T09:30:00Z", kind: "drive-needs-human", payload: { issue: 9102, pr: 9202 } },
-    { id: 9, ts: "2026-08-09T09:42:00Z", kind: "round-stop", payload: { detail: "issue cap reached" } },
+    // #925 AC4: the needs-attention strip's own crop-pair oracle needs >= 3 open rows across
+    // >= 2 categories with distinct ages to demonstrate the fixed chip/entity/age tracks, the
+    // oldest-age emphasis box, and the rust/--sap-text tone split side by side — a single
+    // drive-needs-human row (the fixture's prior state) can show none of that. Two more issues
+    // this round also ran into trouble, told the same lean way #886's 9103 already is (an
+    // escalation-only event, no full dispatched/reclaim-done pair spelled out for it).
+    {
+      id: 7,
+      ts: "2026-08-09T09:22:00Z",
+      kind: "fix-rounds-capped",
+      payload: { issue: 9104, pr: 9204, fixRounds: 3, cap: 3 },
+    },
+    { id: 8, ts: "2026-08-09T09:25:00Z", kind: "merged", payload: { issue: 9101, pr: 9201, worker: "lane-a" } },
+    { id: 9, ts: "2026-08-09T09:30:00Z", kind: "drive-needs-human", payload: { issue: 9102, pr: 9202 } },
+    {
+      id: 10,
+      ts: "2026-08-09T09:33:00Z",
+      kind: "review-silence-escalated",
+      payload: { worker: "lane-a", issue: 9105, pr: 9205, silenceSec: 900 },
+    },
+    { id: 11, ts: "2026-08-09T09:42:00Z", kind: "round-stop", payload: { detail: "issue cap reached" } },
   ],
   spend: [
     {

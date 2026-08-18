@@ -7,17 +7,21 @@ import { SentencePartView } from "./ActivityFeed.tsx";
 import { EntityRef, resolveEntityTitle } from "./EntityRef.tsx";
 import { HintTooltip } from "./HintTooltip.tsx";
 
-/** #925: the entity token most attention sentences carry near their start (`prTok`/`issueTok` in
- *  copy.ts) — pulled into the row's own dedicated entity-ref cell so the reason cell renders just
- *  the reason, not "PR #212 needs a human decision" duplicated across two cells. Everything
- *  before the token (kind-prefix words like "PR "/"Merged PR ") is dropped; the entity cell
- *  derives its own "PR "/"" prefix from the token's `kind` instead of that dropped text. A
- *  sentence with no entity token (e.g. a run-level BREAKER row) keeps its whole sentence as the
- *  reason, exactly as it rendered before this issue. */
-function splitSentence(parts: SentencePart[]): { token: EntityToken | undefined; reason: SentencePart[] } {
-  const idx = parts.findIndex((part): part is EntityToken => typeof part === "object" && (part.kind === "issue" || part.kind === "pr"));
-  if (idx === -1) return { token: undefined, reason: parts };
-  return { token: parts[idx] as EntityToken, reason: parts.slice(idx + 1) };
+/** #925 gate① engine-agent finding [3] (sentence-prefix-dropped): the entity token drives the
+ *  row's dedicated entity-ref cell ("PR #212 — title"), but the FULL original sentence still
+ *  renders in the reason cell — never sliced. An earlier version dropped every `SentencePart`
+ *  before the token, assuming it was always a redundant "PR "/"Issue " prefix; `copy.ts`'s own
+ *  shapes disprove that (`gated-flag-unprovable`: `["Lane ", worker, "'s reentry flag couldn't be
+ *  found on either carrier · asks: check issue ", issueTok(...), "'s labels by hand"]` — the token
+ *  sits mid-sentence, and slicing everything up to and including it discarded the reason's own
+ *  subject and verb). `copy.ts` carries ~30 independently-authored sentence shapes with no
+ *  structural guarantee the token is a leading prefix; there is no reliable, non-text-guessing way
+ *  to know which leading words are safe to drop for a given kind (the "authoritative signals over
+ *  inferred ones" rule — text-shape sniffing is exactly the free-text-pattern guessing it warns
+ *  against). Showing the entity number twice (once in its own cell, once inline in the sentence's
+ *  own prose) is the accepted, honest trade-off — never losing the reason's own meaning. */
+function findEntityToken(parts: SentencePart[]): EntityToken | undefined {
+  return parts.find((part): part is EntityToken => typeof part === "object" && (part.kind === "issue" || part.kind === "pr"));
 }
 
 export interface NeedsAttentionProps {
@@ -75,9 +79,16 @@ function AttentionRow({
   // permanently unprovable against them. The two literal-hex aliases are pinned to --rust/
   // --sap-text's own per-theme values by tokens.test.ts, so they can never silently drift.
   const tone = category && isReviewDissentCategory(category) ? "var(--attention-tone-review)" : "var(--attention-tone-rust)";
-  const { token, reason } = splitSentence(parts);
+  const token = findEntityToken(parts);
   const entityTitle = token ? resolveEntityTitle(token, titles) : undefined;
-  const ageClassName = emphasize ? "muted data attention-ts attention-age attention-age-emphasis" : "muted data attention-ts attention-age";
+  // gate① engine-agent finding [1] (ac4-age-box): `.muted` (app.css) and `.attention-age-emphasis`
+  // (panels.css) carry EQUAL selector specificity, and `.muted` loads LATER in the production
+  // cascade (tokens.css -> panels.css -> hero.css -> app.css) — a `.muted`-carrying emphasis box
+  // would have its own colour override silently lose the cascade to `.muted`'s `--bark-text`. The
+  // emphasis box drops `.muted` entirely instead: it is no longer secondary/de-emphasised text —
+  // that is the whole point of the emphasis treatment.
+  const ageClassName = emphasize ? "data attention-ts attention-age attention-age-emphasis" : "muted data attention-ts attention-age";
+  const rowModifier = emphasize ? " attention-row-emphasis" : "";
   return (
     // #925 gate① engine-agent finding [3] (inspect-control-breaks-grid): `.attention-row` is a
     // 5-track CSS grid — exactly 5 direct children, ALWAYS, regardless of which optional content
@@ -87,7 +98,7 @@ function AttentionRow({
     // kind) or adds the inspect button (App's own onInspect wiring, real production rows like
     // plan-review-escalated) shifts every column after it, or auto-places the age box into a
     // second implicit grid row.
-    <li className="attention-row recipe-list-entry">
+    <li className={"attention-row" + rowModifier + " recipe-list-entry"}>
       {/* `backgroundColor` (the longhand), not `background` — a happy-dom quirk (this file's own
        *  #925 AC1 test comment) only echoes the raw inline value back for the longhand. */}
       <span className="attention-severity" aria-hidden="true" style={{ backgroundColor: tone }} />
@@ -109,7 +120,7 @@ function AttentionRow({
       </span>
       <span className="attention-reason">
         <span className="attention-sentence">
-          {reason.map((part, i) => (
+          {parts.map((part, i) => (
             // biome-ignore lint/suspicious/noArrayIndexKey: sentence parts are a fixed-order render list, not reorderable data
             <span key={i}>
               <SentencePartView part={part} titles={titles} repoUrl={repoUrl} />

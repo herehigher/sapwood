@@ -97,6 +97,11 @@
   --attention-tone-rust: #D9713F;
   --attention-tone-review: #E8A33D;
   --attention-reason-text: #A6957C;
+  /* #925 gate① engine-agent finding [1] (ac4-age-box): the oldest-age emphasis box's numeral/
+     border need the primary-text ("cream") role, not the muted `--bark-text` its `.muted` class
+     would otherwise carry — same resolvable-literal alias treatment as the three above, mirroring
+     --sapwood. */
+  --attention-emphasis-text: #F1E7D2;
 
   /* ---- Motion ------------------------------------------------------------ */
   --beat: 240ms; /* state flips */
@@ -152,6 +157,7 @@
   --attention-tone-rust: #A34620;
   --attention-tone-review: #8A5A14;
   --attention-reason-text: #57604A;
+  --attention-emphasis-text: #251B10;
 }
 
 /* The other light-theme trigger `light-dark()` used to cover for free: system preference, with NO
@@ -167,5 +173,6 @@
     --attention-tone-rust: #A34620;
     --attention-tone-review: #8A5A14;
     --attention-reason-text: #57604A;
+    --attention-emphasis-text: #251B10;
   }
 }
