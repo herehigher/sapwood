@@ -1288,7 +1288,9 @@ const Round = z
 // documented as such rather than piggy-backing on an architect-scoped name). `file` is left
 // `.optional()` (no `.default()`) for the same "must tell unset apart from default" reason as
 // `roles.architect.planMdPath` above — resolveGoalFile is the ONE place that applies the actual
-// default ("docs/PLAN.md") and reconciles the two keys; every other reader sees the resolved
+// default (DEFAULT_GOAL_FILE, "docs/GOAL.md" — deliberately NOT "docs/PLAN.md": that name
+// collides with sapwood's own docs/PLAN.md, a different file, and the two were being confused)
+// and reconciles the two keys; every other reader sees the resolved
 // `cfg.goal.file`, which is ALWAYS a string after parseConfig returns (see the SapwoodConfig
 // type override below the schema).
 const Goal = z
@@ -1649,7 +1651,7 @@ export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "goal" | "doct
   notify: { mentions: string[] };
 };
 
-export const DEFAULT_GOAL_FILE = "docs/PLAN.md";
+export const DEFAULT_GOAL_FILE = "docs/GOAL.md";
 
 /** #128: reconcile the top-level `goal.file` key with the deprecated
  *  `roles.architect.planMdPath` back-compat key into the single resolved `cfg.goal.file`.

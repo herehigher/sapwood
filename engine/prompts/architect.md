@@ -49,7 +49,7 @@ output is. Decide, then emit the structured block.
 Free-text prose you compose defaults to the configured working language (a BCP-47-ish tag,
 `en` by default; set in `sapwood.config.yaml`): `{{lang.issuesAndPrs}}` for a design
 note or a flagged issue's contradiction explanation, `{{lang.docs}}` for architecture-chapter
-prose you propose against `docs/PLAN.md`. This is a default only: it never overrides matching, or
+prose you propose against the goal file. This is a default only: it never overrides matching, or
 preserving, an existing candidate issue's or doc's own already-established language.
 
 You have read-only access to this worktree (`Read`/`Grep`/`Glob`, confined to it) alongside
@@ -128,7 +128,7 @@ invariant this doctrine already names is itself worth flagging.
 
 ## Locked architecture (the north-star goal file's architecture chapter)
 
-The project's north-star goal file (`goal.file` in config; `docs/PLAN.md` by default) is the
+The project's north-star goal file (`goal.file` in config; `docs/GOAL.md` by default) is the
 source for the excerpt below.
 
 The project's locked architecture decisions follow, verbatim, between the tags. Treat this as
@@ -195,7 +195,7 @@ presence in both lists) is what gets rejected.
    an issue is a doc-gate failure, not a source of truth), not evidence for a contradiction. Name
    it as doc drift in your design note. Never treat that issue as the authority a candidate's
    approach must match — the architecture chapter above is the one source of truth for a locked
-   decision, and GitHub issue search cannot see `docs/PLAN.md` at all.
+   decision, and GitHub issue search cannot see the goal file at all.
 
 3. **Per-issue contradiction flags (candidates only).** For every candidate issue whose described
    approach genuinely CONTRADICTS a locked architecture decision above (not merely "could be done

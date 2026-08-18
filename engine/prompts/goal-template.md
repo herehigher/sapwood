@@ -1,7 +1,7 @@
 <!--
   sapwood north-star goal file (#128) — the loop's alignment yardstick. Read by the aligning
   (PO) and architecting peripherals every round, and cited by retro proposals as their basis.
-  Configured as `goal.file` in sapwood.config.yaml (default: docs/PLAN.md).
+  Configured as `goal.file` in sapwood.config.yaml (default: docs/GOAL.md).
 
   This file was scaffolded because none existed yet. Fill in each section for this project,
   then delete these HTML comments (or leave them — they're invisible in rendered markdown).

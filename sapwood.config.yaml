@@ -454,8 +454,8 @@ ci:
 # Non-goals / Constraints / Current milestone) at this path iff it's missing — never overwrites
 # an existing file. Supersedes the deprecated roles.architect.planMdPath (still accepted for
 # back-compat — see that key's own comment below).
-# goal:
-#   file: docs/PLAN.md
+goal:
+  file: docs/PLAN.md # sapwood's own goal file; the framework default is docs/GOAL.md
 
 # #167/#411: repo-level review doctrine — recurring technical invariants + adjudication doctrine
 # (how the loop treats review findings), prose for LLM readers, never a lint/DSL. Same #74-style
