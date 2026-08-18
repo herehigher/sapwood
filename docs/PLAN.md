@@ -1672,8 +1672,8 @@ to when v0.2 implementation issues are cut, not locked here.
   re-entry) or a RESOLVED review thread; an open thread cannot land guidance. **Ruled: no
   prompt-side patch** — worker legs are deliberately denied GitHub-read tool access
   (Decision #11), so a real fix is engine-side (fold guidance into the body, or an
-  engine-computed prompt block); tracked through the batch-18 retro. Same accept-and-document
-  stance as the "Duplicate `Ready` issues" item above (Decision #9).
+  engine-computed prompt block). Same accept-and-document stance as the "Duplicate `Ready`
+  issues" item above (Decision #9).
 
 ## Verification (how we'll prove v1)
 
