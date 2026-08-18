@@ -67,7 +67,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 
 ### Lane lifecycle
 
-- `dispatched` — **routine** [round-artifact, escalation-clear]: a worker lane was dispatched for a Ready issue, in its own worktree.
+- `dispatched` — **routine** [round-artifact, escalation-clear, lane-session-start]: a worker lane was dispatched for a Ready issue, in its own worktree.
 - `dispatch-failed` — **investigate**: dispatching a lane for a Ready issue failed (worktree/spawn/write error).
 - `reclaim-done` — **investigate** [round-artifact, escalation-source:always]: a finished worker lane was reclaimed cleanly; whether it needs attention is a predicate over the payload (#404), not the kind alone. (see #404)
 - `reclaim-failed` — **investigate** [round-artifact, escalation-source:always]: reclaiming a finished worker lane failed; whether it needs attention is a predicate over the payload (#404), not the kind alone. (see #404)
@@ -77,7 +77,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `estop-lane-sweep-started` — **routine** [round-artifact]: the E-STOP durable-pid sweep (round.ts) decided a driving/handoff lane is confirmed alive and is about to signal it — written before the first signal, for crash-rerun safety. (see #293)
 - `estop-lane-sweep-incapable` — **intervene** [round-artifact]: a lane carries an open E-STOP sweep intent, but this run's Supervisor cannot verify or signal its durable pid (missing durablePidAlive/signalDurablePid) — left unsettled, never a fabricated outcome. (see #293)
 - `handoff` — **routine** [retro, round-artifact]: a worker lane handed off gracefully (soft cost-limit reached): WIP committed+pushed, progress note left, `.handoff` sentinel written.
-- `resumed` — **routine**: a handed-off lane was resumed by a fresh worker session.
+- `resumed` — **routine** [lane-session-start]: a handed-off lane was resumed by a fresh worker session.
 - `resume-failed` — **expected-noise**: resuming a handed-off lane failed this attempt; eligible for a further retry.
 - `resume-capped` — **intervene** [escalation-source:always]: a handed-off lane exhausted its resume-attempt budget (#172); needs-human, always proven by presence. (see #172)
 - `resume-capped-label-failed` — **investigate**: the needs-human label write for a resume-capped lane failed; the lane may be escalated with no visible label.
@@ -140,10 +140,10 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `gated-reentry-merged` — **routine** [merged-witness]: a gated-reentry lane's PR was found already merged; the lane was collected as done rather than reentered.
 - `gated-reentry-issue-closed` — **routine**: a gated-reentry lane's issue was found already closed; the lane was collected as done rather than reentered.
 - `gated-reentry-candidate-staged` — **routine**: a gated-reentry lane whose escalation never pinned a body-hash candidate (comment-cursor-stale) had one staged from the live body on this tick's first observation of the cleared hold; reentry itself waits for a later tick to reconfirm it. (see #685)
-- `fix-leg-started` — **routine** [fix-leg]: a fresh fix leg was dispatched against a PR's outstanding findings/verdict.
-- `fix-leg-resumed` — **routine** [fix-leg]: an in-flight fix leg was resumed by a fresh worker session after a handoff/restart.
+- `fix-leg-started` — **routine** [fix-leg, lane-session-start]: a fresh fix leg was dispatched against a PR's outstanding findings/verdict.
+- `fix-leg-resumed` — **routine** [fix-leg, lane-session-start]: an in-flight fix leg was resumed by a fresh worker session after a handoff/restart.
 - `fix-leg-adopted` — **routine** [fix-leg]: the engine adopted a fix-leg process it found already running at startup rather than treating it as orphaned.
-- `fix-leg-adopted-drained` — **routine**: an adopted fix-leg process was found already drained (finished) by the time the engine looked.
+- `fix-leg-adopted-drained` — **routine** [lane-session-start]: an adopted fix-leg process was found already drained (finished) by the time the engine looked.
 - `fix-leg-dispatch-blocked` — **expected-noise**: dispatching a fix leg was blocked by an admission check this tick (e.g. an open llm park episode); retried once the block clears.
 - `fix-leg-dispatch-failed` — **investigate**: starting a fix leg's process/session failed; the PR stays queued for a later retry.
 - `fix-leg-dispatch-unconfigured` — **intervene**: a fix leg was called for but the fix loop is not configured/attached this run (e.g. `prFixCap: 0` or no proxy) — escalates to needs-human.

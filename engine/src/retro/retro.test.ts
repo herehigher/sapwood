@@ -399,6 +399,35 @@ test("createRetroStub (#961 AC2): a dispatched lane alone (no retro/pr-touched e
   state.close();
 });
 
+// #961 P1 fix-leg regression: a round whose ONLY lane activity is a resume or fix leg (never a
+// fresh `dispatched` event) is still lane-session-start material — `dispatched` alone used to be
+// the third signal, silently missing every resume/fix-leg-continuation path.
+test("createRetroStub (#961): a round with zero `dispatched` events but one `fix-leg-started` is NOT quiet — the session runs, no skip event", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("fix-leg-started", { worker: "lane-a", issue: 1, pr: 30, fixRounds: 1, journalCursor: 0 });
+  assert.equal(isQuietRound(state, round), false);
+  const runner = new ScriptedRunner(doneResult("s1"));
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
+  await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
+  assert.equal(runner.calls.length, 1);
+  assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-quiet-skipped"]), []);
+  state.close();
+});
+
+test("createRetroStub (#961): a round with zero `dispatched` events but one `resumed` (a handed-off lane resumed, no fresh dispatch) is NOT quiet — the session runs, no skip event", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("resumed", { worker: "lane-a", issue: 1, attempt: 1 });
+  assert.equal(isQuietRound(state, round), false);
+  const runner = new ScriptedRunner(doneResult("s1"));
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
+  await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
+  assert.equal(runner.calls.length, 1);
+  assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-quiet-skipped"]), []);
+  state.close();
+});
+
 test("createRetroStub (#961): everyNRounds off-cadence skip still runs BEFORE the quiet check — an off-cadence round never even evaluates isQuietRound (marker set, no skip event)", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z"); // round_id 1
@@ -1054,17 +1083,20 @@ test("runRounds integration (#961): MinimalForge's board is empty — a genuinel
   const deps = baseIntegrationDeps(state, { retro: retroStub }); // MinimalForge.getReadyIssues() -> [] — zero lanes ever dispatch
   // Graceful stop mid-round (round.test.ts's pattern): the in-flight round still finishes
   // every phase — retro included — and only the NEXT round is withheld.
+  const phaseLog: string[] = [];
   let stop = () => {};
   deps.registerSignals = (requestStop) => {
     stop = requestStop;
     return () => {};
   };
   deps.onRoundPhase = (_roundId, phase) => {
+    phaseLog.push(phase);
     if (phase === "aligning") stop();
   };
   const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1);
+  assert.ok(phaseLog.includes("retro"), "the retro phase still closes for a quiet round"); // AC3
   // #961: pre-this-issue this round dispatched a full retro session every time (runner.calls.length
   // === 1) purely because it was on-cadence — nothing looked at whether the round had anything to
   // reflect on. An empty board leaves zero dispatched/retro/pr-touched events, so it is now QUIET.
@@ -1090,17 +1122,20 @@ test("runRounds integration (#961): a round that dispatched a lane is NOT quiet 
   // round test above does) would suppress this test's own dispatch before `executing` ever runs.
   // Requesting it once the round reaches `retro` instead lets `executing` dispatch normally first
   // and still stops the loop before round 2 opens.
+  const phaseLog: string[] = [];
   let stop = () => {};
   deps.registerSignals = (requestStop) => {
     stop = requestStop;
     return () => {};
   };
   deps.onRoundPhase = (_roundId, phase) => {
+    phaseLog.push(phase);
     if (phase === "retro") stop();
   };
   const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1);
+  assert.ok(phaseLog.includes("retro"), "the retro phase still closes for a dispatching round"); // AC3
   assert.equal(runner.calls.length, 1, "a dispatched lane is material — retro's session still runs");
   assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-quiet-skipped"]), []);
   state.close();

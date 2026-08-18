@@ -13,7 +13,7 @@ import { DISSENT_DECISION_KINDS, DISSENT_RECEIPT_KIND } from "../../loop/dissent
 import { CLEAR_KINDS, ESCALATION_SOURCES } from "../../loop/escalation-reconcile.js";
 import { FIX_LEG_CURSOR_KINDS } from "../../loop/fix-response.js";
 import { ROUND_ARTIFACT_EVENT_KINDS } from "../../loop/round-artifact.js";
-import { RETRO_EVENT_KINDS } from "../../retro/retro.js";
+import { LANE_SESSION_START_EVENT_KINDS, RETRO_EVENT_KINDS } from "../../retro/retro.js";
 import { PR_TOUCHED_EVENT_KINDS } from "../../retro/retro-digest.js";
 import { MERGED_WITNESS_KINDS } from "../state.js";
 import {
@@ -75,6 +75,10 @@ test("consumer list: RETRO_EVENT_KINDS is derived from the retro tag", () => {
 
 test("consumer list: PR_TOUCHED_EVENT_KINDS is derived from the pr-touched tag", () => {
   assertDerivedFromTag("PR_TOUCHED_EVENT_KINDS", "pr-touched", PR_TOUCHED_EVENT_KINDS);
+});
+
+test("consumer list (#961): LANE_SESSION_START_EVENT_KINDS is derived from the lane-session-start tag", () => {
+  assertDerivedFromTag("LANE_SESSION_START_EVENT_KINDS", "lane-session-start", LANE_SESSION_START_EVENT_KINDS);
 });
 
 test("consumer list: ROUND_ARTIFACT_EVENT_KINDS is derived from the round-artifact tag", () => {

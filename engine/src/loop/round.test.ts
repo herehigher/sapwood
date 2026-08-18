@@ -904,13 +904,7 @@ test("runRounds #211: opening peripheral spend can exhaust the round budget befo
   assert.deepEqual(sup.dispatchedIssues, []);
   assert.deepEqual(overBudgetSkips, [211], "the first executing tick saw the opening session's ledgered spend");
   assert.ok(hits.some((hit) => hit.name === "roundBudgetUsd" && hit.detail === "spent $6.00"));
-  // #961: this round dispatched ZERO lanes (`sup.dispatchedIssues` above), so with the real retro
-  // stub wired in it would now be QUIET (no session, one `retro-quiet-skipped` event) — but round.ts's
-  // OWN phase machinery is agnostic to that: it always calls the `retro` peripheral regardless of
-  // what that peripheral decides to do, so the phase log below is unaffected by #961 either way.
-  // `allPeripherals` (this file) is a generic fake that always "runs" when called — the real
-  // quiet-vs-dispatches distinction is exercised against `createRetroStub` itself, in
-  // retro.test.ts's own "runRounds integration (#961)" tests, not here.
+  // #961: idle round — the real stub's quiet skip is asserted in retro.test.ts "runRounds integration (#961)"; this fake peripheral logs "retro" either way.
   assert.deepEqual(
     log.map((entry) => entry.phase),
     ["aligning", "architecting", "plan_review", "harvesting", "retro"],
@@ -995,12 +989,7 @@ test("runRounds cost.roundBudgetUsd: recorded once this round's cumulative worke
   stopSafety();
   assert.ok(hits.some((h) => h.name === "roundBudgetUsd" && h.detail === "spent $999.00"));
   // Harvest + retro still ran (never skipped by a round-level cost condition — only KILL_SWITCH
-  // skips peripherals). #961: unlike the #211 test above, this round DID dispatch a lane
-  // (lane-1-1) — with the real retro stub wired in, that single `dispatched` event alone is
-  // enough for #961's quiet check to call it non-quiet, so the real stub would still dispatch a
-  // session here, not skip one. `allPeripherals` (this file) is a generic fake either way and
-  // doesn't distinguish the two cases — see retro.test.ts's own "runRounds integration (#961)"
-  // tests for the real stub exercised against both a genuinely idle round and this dispatching one.
+  // skips peripherals). #961: dispatching round (not quiet) — the real stub's non-quiet path is asserted in retro.test.ts "runRounds integration (#961)"; this fake peripheral logs "retro" either way.
   assert.deepEqual(
     log.map((l) => l.phase),
     ["aligning", "architecting", "plan_review", "harvesting", "retro"],
@@ -2701,13 +2690,7 @@ test("runRounds standby: a Ready issue appearing mid-backoff is caught by the NE
   assert.ok(exit, "a standby-exit event was recorded");
   assert.deepEqual(exit![1], { attempts: 1 });
   assert.deepEqual(sup.dispatchedIssues, [1], "the newly-Ready issue got dispatched once standby exited");
-  // #961: round 1 dispatches nothing (the board is empty until standby's mid-backoff probe sees
-  // the new issue) — with the real retro stub, that round is QUIET and the session never runs.
-  // Round 2 dispatches issue 1, so it is NOT quiet — the session still runs there. `allPeripherals`
-  // (this file) is a generic fake that logs a "retro" entry either way — round.ts's own phase
-  // machinery always calls the peripheral regardless of what it decides to do internally, so
-  // this phase-log shape is unaffected by #961. The quiet-vs-not distinction itself is exercised
-  // against the real `createRetroStub`, in retro.test.ts's "runRounds integration (#961)" tests.
+  // #961: idle round — the real stub's quiet skip is asserted in retro.test.ts "runRounds integration (#961)"; this fake peripheral logs "retro" either way.
   assert.deepEqual(
     log.map((l) => l.phase),
     [

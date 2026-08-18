@@ -264,31 +264,29 @@ export function gatherRetroFacts(state: State, round: RoundRow): RetroFacts {
   };
 }
 
+/** #961: every kind marking a worker lane genuinely starting/continuing work this process (a
+ *  FRESH `supervisor.dispatch`/`resume()` call — conductor.ts's own `spawnFactFrom` call sites)
+ *  — never a crash-adoption kind (`lane-adopted`, `fix-leg-adopted`) that only reconciles a
+ *  session an earlier, now-dead process already resumed. Backs `isQuietRound`'s third signal.
+ *
+ *  #425: DERIVED from the central registry's `lane-session-start` tag; event-kinds.test.ts
+ *  asserts this list and those tags agree. Exported for that test. */
+export const LANE_SESSION_START_EVENT_KINDS = kindsTagged("lane-session-start");
+
 /** #961: a QUIET round has no new material for retro to judge — zero events tagged `retro`
- *  (RETRO_EVENT_KINDS, `gatherRetroFacts`'s own raw-material set), zero events tagged
- *  `pr-touched` (retro-digest.ts's `PR_TOUCHED_EVENT_KINDS` — e.g. harvest merging a PREVIOUS
- *  round's PR with no fresh dispatch this round still counts as material), and zero `dispatched`
- *  lane events, ALL within this round's id-cursor window (the same `round.start_event_id`
- *  boundary `gatherRetroFacts`/`gatherTouchedPRs` already use — see their own comments for why
- *  the window is id-cursor- not clock-bounded). Re-running the session against the same input
- *  set the LAST retro already judged can only reproduce that verdict, at full session price —
- *  see this module's top-of-file doc for the fuller argument. Exported so tests assert on it
- *  directly, same convention as `gatherRetroFacts`/`gatherTouchedPRs`.
- *
- *  NOT the same "quiet" as `parseRetroScratch`'s `none` outcome (a session that ran and judged
- *  there was nothing to propose) — this is a STRUCTURAL pre-check that skips the session
- *  entirely, before it would ever be asked to judge anything.
- *
- *  WHY only these three: a hand-merge to `main` from outside the loop leaves none of them (no
- *  lane, no `pr-touched`, no `retro`-tagged event) — deliberately still quiet, since retro
- *  reflects on the LOOP's own work, never on out-of-band commits (#961 What ②). #964 is expected
- *  to add a FOURTH signal on top of these three (an outstanding, actionable own retro PR, which
- *  is round material even with zero fresh dispatch) — not to replace any of them. */
+ *  (`gatherRetroFacts`'s raw material), zero tagged `pr-touched` (retro-digest.ts's
+ *  `PR_TOUCHED_EVENT_KINDS`), and zero tagged `lane-session-start` (above), all within this
+ *  round's id-cursor window (same `round.start_event_id` boundary `gatherRetroFacts`/
+ *  `gatherTouchedPRs` use). NOT `parseRetroScratch`'s `none` outcome (a session that ran and
+ *  judged nothing to propose) — this skips the session entirely, before it judges anything. A
+ *  hand-merge to `main` from outside the loop trips none of these three — deliberately still
+ *  quiet, since retro reflects on the loop's own work. #964 adds a fourth signal (an actionable
+ *  own retro PR) on top of these three. Exported so tests assert on it directly. */
 export function isQuietRound(state: State, round: RoundRow): boolean {
   const since = round.start_event_id ?? 0;
   if (state.eventsAfterId(since, RETRO_EVENT_KINDS).length > 0) return false;
   if (state.eventsAfterId(since, PR_TOUCHED_EVENT_KINDS).length > 0) return false;
-  if (state.eventsAfterId(since, ["dispatched"]).length > 0) return false;
+  if (state.eventsAfterId(since, LANE_SESSION_START_EVENT_KINDS).length > 0) return false;
   return true;
 }
 
@@ -303,18 +301,13 @@ function factVars(facts: RetroFacts): Record<string, string> {
 
 /** Builds the `retro` phase's PeripheralStub. Idempotence (#77 decision 4): a non-null incoming
  *  marker means a prior attempt this round already ran this phase — returned UNCHANGED, no
- *  session re-dispatched. Skip checks run in order — marker, then cadence, then quiet — each one
- *  a cheaper, cruder filter than the next; only a round none of the three catch reaches the
- *  session. #104: the cadence knob is `roles.retro.everyNRounds` (default 1 = every round,
- *  unchanged from #91) — a round whose id isn't a multiple of N skips the session entirely
- *  (still sets the marker; the phase always closes, never wedges the round). #961: a round that
- *  IS on-cadence but structurally QUIET (`isQuietRound`, above — zero `retro`/`pr-touched`-
- *  tagged events and zero dispatched lanes in this round's window) skips too, same shape, plus
- *  one durable `retro-quiet-skipped` event so the skip is visible. Recurring-pattern detection
- *  over rounds that DID add material (prompts/retro.md rule 1) still needs the session's OWN
- *  judgment — that part of the "no structural test" reasoning stands; what changed is only the
- *  narrower claim that NOTHING can be tested structurally. A round with literally no new events
- *  hands retro the exact input set the last retro session already judged.
+ *  session re-dispatched. Skip checks run in order — marker, then cadence, then quiet. #104:
+ *  the cadence knob is `roles.retro.everyNRounds` (default 1 = every round, unchanged from #91)
+ *  — a round whose id isn't a multiple of N skips the session entirely (still sets the marker;
+ *  the phase always closes, never wedges the round).
+ *
+ *  #961: a round that IS on-cadence but structurally QUIET (`isQuietRound`, above) skips too,
+ *  same shape, plus one durable `retro-quiet-skipped` event so the skip is visible.
  *
  *  #428 (closes the gap this doc used to name): peripheral.ts's RoleRunner no longer deletes
  *  retro's worktree unconditionally. A session that times out or crashes after editing but

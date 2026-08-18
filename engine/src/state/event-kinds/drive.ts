@@ -180,12 +180,12 @@ export const DRIVE_EVENT_KINDS = defineKinds({
   // Fix legs. The three `fix-leg` tagged kinds carry the journal cursor fix-response.ts reads
   // back — that tag is ALSO what obliges them to a payload type (payloads.ts).
   "fix-leg-started": {
-    tags: ["fix-leg"],
+    tags: ["fix-leg", "lane-session-start"],
     meaning: "a fresh fix leg was dispatched against a PR's outstanding findings/verdict.",
     actionability: "routine",
   },
   "fix-leg-resumed": {
-    tags: ["fix-leg"],
+    tags: ["fix-leg", "lane-session-start"],
     meaning: "an in-flight fix leg was resumed by a fresh worker session after a handoff/restart.",
     actionability: "routine",
   },
@@ -195,7 +195,7 @@ export const DRIVE_EVENT_KINDS = defineKinds({
     actionability: "routine",
   },
   "fix-leg-adopted-drained": {
-    tags: [],
+    tags: ["lane-session-start"],
     meaning: "an adopted fix-leg process was found already drained (finished) by the time the engine looked.",
     actionability: "routine",
   },
