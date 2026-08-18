@@ -41,6 +41,39 @@ test("the lanes panel-head renders title-only (no stat cluster) when config is u
   assert.match(html, /<div class="panel-head"><h2>lanes<\/h2><\/div>/);
 });
 
+// #927 (§729 remainder, D35; Q4 owner ruling): the panel-head's REPLAYED chip — `source` defaults
+// to "live" so every pre-#927 caller (including the two tests above) keeps rendering unchanged.
+
+test("source defaults to live — no REPLAYED chip renders unless explicitly asked for", () => {
+  const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[]} titles={{}} />);
+  assert.doesNotMatch(html, /REPLAYED/);
+});
+
+test('source="replayed" renders the REPLAYED chip as the panel-head\'s own last child, no config stat present', () => {
+  const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[]} titles={{}} source="replayed" />);
+  assert.match(
+    html,
+    /<div class="panel-head"><h2>lanes<\/h2><span class="lane-board-replayed-chip panel-head-stat">REPLAYED<\/span><\/div>/,
+  );
+});
+
+test('source="replayed" alongside a real config stat cluster: both render, the chip following the stat', () => {
+  const html = renderToStaticMarkup(
+    <LaneBoard
+      lanesMax={1}
+      lanes={[]}
+      titles={{}}
+      source="replayed"
+      config={{ worker: { model: "opus", effort: "high" } }}
+      workerBudgetUsdSoft={10}
+    />,
+  );
+  assert.match(
+    html,
+    /<span class="data muted panel-head-stat">opus · high · soft budget \$10\.00<\/span><span class="lane-board-replayed-chip">REPLAYED<\/span>/,
+  );
+});
+
 const NOW = new Date("2026-08-06T12:00:00.000Z");
 
 const lane = (overrides: Partial<Lane> = {}): Lane => ({
@@ -97,6 +130,34 @@ test("a settled lane's real costUsd wins over any lingering estCostUsd — never
   const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ costUsd: 5.8, estCostUsd: 6.21 })]} titles={{}} now={NOW} />);
   assert.match(html, /\$5\.80/);
   assert.doesNotMatch(html, /6\.21/);
+});
+
+// #927 gate② finding [1] (ac2-calibration-dropped): a settled lane whose recorded estimate has a
+// KNOWN-REAL provenance (`costEstimated: false`) — the shape only `deriveReplayedLanes` (App.tsx)
+// populates today — renders the est→real calibration reading in its own cost TEXT, but never
+// leaks it into the live-est BAR segment (`CostBar`'s own hatch pattern), since `LaneCard`'s
+// `estUsd` prop is unconditionally `null` once `costUsd` is settled.
+test("a settled lane with a known-real recorded estimate (costEstimated: false) renders the est→real calibration reading in its cost text, never in the bar", () => {
+  const html = renderToStaticMarkup(
+    <LaneBoard lanesMax={1} lanes={[lane({ costUsd: 1.1, estCostUsd: 1.05, costEstimated: false })]} titles={{}} now={NOW} />,
+  );
+  assert.match(html, /\$1\.10 · est \$1\.05 → real \$1\.10/);
+  assert.doesNotMatch(html, /url\(#[^)]*cost-bar-est-hatch\)/, "the historical estimate must never draw the bar's live-est hatch segment");
+});
+
+// The provenance gate itself: `costEstimated: true` (the settled figure is ITSELF an estimate,
+// never labelled "real") and `costEstimated` absent (unknown provenance — today's live posture,
+// since no live overlay carries this field) both render no calibration clause at all.
+test("a settled lane's calibration clause renders ONLY when costEstimated is known-false — true or absent renders no clause", () => {
+  const estimatedHtml = renderToStaticMarkup(
+    <LaneBoard lanesMax={1} lanes={[lane({ costUsd: 1.1, estCostUsd: 1.05, costEstimated: true })]} titles={{}} now={NOW} />,
+  );
+  assert.doesNotMatch(estimatedHtml, /est \$1\.05/, "costEstimated: true must never render a fabricated 'real' clause");
+
+  const unknownHtml = renderToStaticMarkup(
+    <LaneBoard lanesMax={1} lanes={[lane({ costUsd: 1.1, estCostUsd: 1.05 })]} titles={{}} now={NOW} />,
+  );
+  assert.doesNotMatch(unknownHtml, /est \$1\.05/, "unset costEstimated (today's live posture) must never render a clause either");
 });
 
 test("a lane with a live estimate renders the shared hatched CostBar", () => {

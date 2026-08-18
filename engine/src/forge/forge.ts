@@ -146,6 +146,13 @@ export interface PRStatus {
    *  itself is empty (same "additive, pre-existing callers unaffected" convention as `ciRed`
    *  above — absent on any pre-#797 fixture/fake). */
   ciChecks?: { name: string; conclusion: string }[];
+  /** #965: the PR's head branch name (`gh pr view --json headRefName`), added to the SAME read
+   *  as every other additive field above — the resume-cap -> engine-`split` seam names the WIP
+   *  branch in its pointer comment and this is the one forge-sourced place to get it without a
+   *  local git read (see worker.ts's laneBranch doc for why the engine never execs git inside a
+   *  worker-controlled worktree). ADDITIVE and OPTIONAL, same convention as `title`/`baseOid`
+   *  above: absent on any pre-#965 fixture/fake. */
+  headRefName?: string;
 }
 
 /** #292: one rename-aware entry from GitHub's pull-request files API. The old path is retained
@@ -301,6 +308,25 @@ export interface IForge {
   removePRLabel(pr: number, label: string): Promise<void>;
   openPR(branch: string, title: string, body: string): Promise<number>;
   getPRStatus(pr: number): Promise<PRStatus>;
+  /** #964: a bounded, engine-fetched excerpt of WHY a `ciRed` PR's checks failed — failing check
+   *  names plus whatever GitHub's Checks API `output.summary`/`output.text` fields report for
+   *  them (test names/assertion messages, when the check writer populates them; many CI writers
+   *  don't, and that absence is stated in the returned text rather than silently blank). Read-
+   *  only, off the PR's OWN current head (re-derived here via `getPRStatus`, never a caller-
+   *  supplied SHA — this must describe the SAME head a `ciRed` decision was just made against,
+   *  and a caller-supplied stale SHA could silently describe an older failure). Deliberately the
+   *  CHECKS API (`GET .../commits/{ref}/check-runs`), never `gh run view --log-failed`: raw
+   *  Actions step logs are unbounded free text with no structure and no cross-provider
+   *  equivalent, while every check-run conclusion (any CI provider, not just Actions) carries
+   *  this same `output` shape. Returns a HARD-CAPPED string (deterministic truncation, same
+   *  marked-cut-never-silent-drop contract as retro-digest.ts's `capDigest`, kept local to this
+   *  module rather than imported — retro-digest.ts already imports `IForge` from here, so the
+   *  reverse import would cycle) — the retro digest's failure-excerpt source (#964 "Your
+   *  outstanding PRs" section). NOT paginated to exhaustion like `getPRChangedFiles`/
+   *  `getCommitsSince`: this is a best-effort excerpt for a prompt, never a completeness-critical
+   *  read that gates dispatch or merge, so a single `per_page=100` page is enough in practice and
+   *  a page-ceiling event would be noise for a read this advisory. */
+  getFailedCheckSummary(pr: number): Promise<string>;
   mergePR(pr: number, headOid: string): Promise<void>;
   /** Post a PR comment (e.g. the `@codex review` trigger). #13 reviewer.ts. */
   addPRComment(pr: number, body: string): Promise<void>;
@@ -984,9 +1010,17 @@ export class GithubForge implements IForge {
       // #287 (E4b): baseRefOid added — a real `gh pr view --json` field (verified against a live
       // `gh` binary), giving PRStatus.baseOid without switching this call to raw GraphQL.
       // #595: title added to this SAME read (not a new call) — see PRStatus.title's own doc.
-      "number,title,headRefOid,baseRefOid,state,mergeable,statusCheckRollup",
+      // #965: headRefName added to this SAME read — see PRStatus.headRefName's own doc.
+      "number,title,headRefOid,baseRefOid,headRefName,state,mergeable,statusCheckRollup",
     ]);
     return parsePRStatus(out);
+  }
+
+  async getFailedCheckSummary(pr: number): Promise<string> {
+    // Re-derive the head here (not caller-supplied) — see the interface doc's rationale.
+    const status = await this.getPRStatus(pr);
+    const out = await this.gh(["api", `repos/${this.cfg.board.owner}/${this.repo()}/commits/${status.headOid}/check-runs?per_page=100`]);
+    return parseFailedCheckSummary(out, FAILED_CHECK_SUMMARY_CAP);
   }
 
   async getPRDiff(pr: number): Promise<string> {
@@ -2937,6 +2971,8 @@ export function parsePRStatus(json: string): PRStatus {
     title?: string;
     // #287 (E4b): additive — absent on any pre-#287 fixture (see PRStatus.baseOid's own doc).
     baseRefOid?: string;
+    // #965: additive — absent on any pre-#965 fixture (see PRStatus.headRefName's own doc).
+    headRefName?: string;
     state: string;
     mergeable: string;
     // CheckRun entries carry `name`/`conclusion`; legacy commit StatusContext entries carry
@@ -3034,8 +3070,55 @@ export function parsePRStatus(json: string): PRStatus {
     ciInert,
     ...(d.baseRefOid !== undefined ? { baseOid: d.baseRefOid } : {}),
     ...(d.title !== undefined ? { title: d.title } : {}),
+    ...(d.headRefName !== undefined ? { headRefName: d.headRefName } : {}),
     ...(checks.length > 0 ? { ciChecks } : {}),
   };
+}
+
+// #964: getFailedCheckSummary's hard cap. Kept local (see the interface doc's cycle rationale) —
+// generous enough for a handful of failing checks' output text, small enough to stay a bounded
+// excerpt rather than a second unbounded log dump inside the retro digest's own cap.
+const FAILED_CHECK_SUMMARY_CAP = 4_000;
+
+/** Deterministic hard truncation for `getFailedCheckSummary` — same shape as retro-digest.ts's
+ *  `capDigest` (a marked cut, never a silent drop, same output for the same input+cap every
+ *  time), duplicated in miniature rather than imported: retro-digest.ts already imports `IForge`
+ *  from this module, so the reverse import would cycle. */
+function hardCapExcerpt(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const marker = `\n[... excerpt truncated: exceeded the ${maxChars}-char cap — ${text.length - maxChars} chars omitted ...]`;
+  if (marker.length >= maxChars) return marker.slice(0, maxChars);
+  return text.slice(0, maxChars - marker.length) + marker;
+}
+
+/** The REST Checks API's own failing-conclusion vocabulary (lowercase — a DIFFERENT transport
+ *  from `parsePRStatus`'s GraphQL `statusCheckRollup` read, whose conclusions are uppercase; the
+ *  two sets are conceptually the same FAILING class but never literally shared, since they parse
+ *  different `gh` responses). No `"error"` here — that conclusion name belongs to the legacy
+ *  commit-Status API, not a CheckRun. */
+const REST_FAILING_CONCLUSIONS = new Set(["failure", "timed_out", "startup_failure"]);
+
+/** Pure parse of `GET repos/{owner}/{repo}/commits/{ref}/check-runs` (#964). Exported for offline
+ *  testing. Only FAILING check runs are rendered — a caller already knows a PR is `ciRed` before
+ *  ever calling this (parsePRStatus's own rollup read), so this excerpt's whole job is "why", not
+ *  "whether". A check run whose `output.summary`/`output.text` are both empty (many CI writers
+ *  never populate them) says so explicitly rather than rendering a blank section — the same
+ *  never-a-silent-gap stance capDigest's own doc states. */
+export function parseFailedCheckSummary(json: string, maxChars: number): string {
+  const parsed = JSON.parse(json) as {
+    check_runs?: { name?: string; conclusion?: string | null; output?: { summary?: string | null; text?: string | null } | null }[];
+  };
+  const failing = (parsed.check_runs ?? []).filter((c) => typeof c.conclusion === "string" && REST_FAILING_CONCLUSIONS.has(c.conclusion));
+  if (failing.length === 0) return "(no failing check runs found via the checks API)";
+  const sections = failing.map((c) => {
+    const name = c.name && c.name.trim() !== "" ? c.name : "(unnamed check)";
+    const body = [c.output?.summary, c.output?.text]
+      .filter((s): s is string => typeof s === "string" && s.trim() !== "")
+      .join("\n")
+      .trim();
+    return `### ${name}\n${body === "" ? "(no output text reported by the checks API for this run)" : body}`;
+  });
+  return hardCapExcerpt(sections.join("\n\n"), maxChars);
 }
 
 /** #449 gate② P1 fix: shared per-entry validation between `parsePRChangedFiles` (a page-array of

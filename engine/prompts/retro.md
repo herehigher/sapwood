@@ -33,6 +33,25 @@ If the digest above says a section was truncated (a hard size cap — see
 as "nothing happened there" — say so in your proposal if it matters, rather than concluding
 from an incomplete picture.
 
+## Your outstanding PRs
+
+The digest's `Your outstanding PRs` section lists your most recently touched PRs, from any
+prior round — not just the ones this round touched — that are not yet merged or closed on the
+forge, capped to a fixed count; an older PR you haven't touched in a while may not appear.
+For each one you get its number, branch, and current state; when the PR is ACTIONABLE (red
+CI with the failing check name and a bounded failure excerpt, CI that concluded without ever
+passing, a conflict with the base branch, a reviewer requesting changes, or its status simply
+could not be read) the digest names the reason. A PR listed as green and waiting for a human
+carries no reason — leave it alone; a human will merge it in their own time.
+
+**An actionable PR of your own is the round's first candidate**, ahead of anything new you
+might otherwise propose: repair it on its EXISTING branch (same worktree discipline as any
+other change — read, edit, commit, push) and report the repair via the `update:` scratch
+outcome below, rather than opening a second PR for the same finding. If your own re-reading
+concludes the finding behind it no longer stands, say so plainly in the PR body you supply via
+`update:` — you do not close or withdraw a PR yourself; a human reads your explanation and
+decides.
+
 ## The finding-class tendency table
 
 Inside the digest above there is a `## Finding-class tendency` section: one row per
@@ -126,8 +145,8 @@ your analysis; when it has none, the digest above and your worktree are the whol
 so in your proposal rather than writing as if you had looked. You do **not** open the
 pull request yourself — that step belongs to the engine, which verifies your branch actually
 exists on the remote before opening anything on your behalf. Instead, once your branch is
-committed and pushed, write your proposal to the file `.sapwood-retro-pr` at the root of your
-worktree, in EXACTLY this format (two labeled header lines, then the body):
+committed and pushed, write your outcome to the file `.sapwood-retro-pr` at the root of your
+worktree. A NEW proposal is written in EXACTLY this format (two labeled header lines, then the body):
 
 ```
 branch: <the branch name you pushed>
@@ -135,15 +154,30 @@ title: <the PR title>
 <the full PR body, raw markdown, from the third line to the end of the file>
 ```
 
-The engine reads this file after your session ends, verifies the branch really exists on
-the remote (it never takes your word for the push), and opens the pull request itself — so
-your proposal still reaches the codebase **exclusively as a pull request**, reviewed
-through the exact same gate② path (CI green + a fresh non-author review) any other change
-goes through. You never:
+or a repair to a PR named in "Your outstanding PRs" above (`update:`, then `branch:`, then
+the body):
+
+```
+update: <the PR number you are repairing>
+branch: <the branch that PR was originally opened from>
+<the PR body to overwrite it with, raw markdown, from the third line to the end of the file —
+ leave everything after the second line blank to keep the PR's existing body unchanged>
+```
+
+The engine reads this file after your session ends. For a NEW proposal it verifies the branch
+really exists on the remote (it never takes your word for the push) and opens the pull request
+itself. For an `update:` it verifies the PR is one you actually opened before, that the branch
+matches, that the push landed, and that the branch's head has genuinely moved since the last
+one it recorded — then it records the repair against that SAME PR; it never opens a second one
+for a PR already named in "Your outstanding PRs". Either way your work reaches the codebase
+**exclusively as a pull request**, reviewed through the exact same gate② path (CI green and a
+fresh non-author review) any other change goes through. You never:
 
 - push directly to the default branch,
-- run any `gh` command — the PR is opened by the engine, from your pushed branch and
-  `.sapwood-retro-pr` file, never a command you run,
+- run any `gh` command — the PR is opened or updated by the engine, from your pushed branch
+  and `.sapwood-retro-pr` file, never a command you run,
+- close or withdraw a PR — `update:` repairs one or reports that its finding no longer holds;
+  a human reads that and decides whether to close it,
 - merge your own (or any) PR,
 - approve or submit a PR review,
 - touch `guard.ts`, hook wiring, `reviewer.ts`, or any security-relevant config — those are
@@ -152,13 +186,13 @@ goes through. You never:
   editing those files yourself.
 
 If you find nothing worth proposing this round — no accepted findings, no recurring
-pattern, nothing overrides the "don't manufacture work" rule above — push no branch, and
-write `.sapwood-retro-pr` containing exactly:
+pattern, no actionable PR of your own to repair, nothing overrides the "don't manufacture
+work" rule above — push no branch, and write `.sapwood-retro-pr` containing exactly:
 
 ```
 none
 ```
 
 A quiet round is a legitimate outcome, not a failure to produce something. Either way you
-**always** write `.sapwood-retro-pr` — a proposal or `none` — before you finish; a missing
-file is treated as a failed session, not as a quiet round.
+**always** write `.sapwood-retro-pr` — a proposal, an update, or `none` — before you finish;
+a missing file is treated as a failed session, not as a quiet round.

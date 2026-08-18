@@ -32,8 +32,12 @@
 // touched PR must not blank out the whole digest, or crash the retro phase) — same
 // fail-toward-more-work stance as the rest of this codebase (e.g. conductor.ts's
 // `addPRComment(...).catch(() => {})`). A failed item's section says so, in place of its data.
-import type { IForge, PRComment, PRReviewData } from "../forge/forge.js";
+import type { IForge, PRComment, PRReviewData, PRStatus } from "../forge/forge.js";
 import { findingKeyPath } from "../review/finding-key.js";
+// #964: import ONLY — reviewer.ts is human-merge-only, never edited from here. Reused so this
+// module's and retro.ts's own changes-requested checks can never independently drift from
+// gate②'s real predicate (see classifyOutstandingPR's own doc for the specific bug this closes).
+import { changesRequestedOnHead } from "../roles/reviewer.js";
 import { kindsTagged } from "../state/event-kinds/index.js";
 import type { RoundRow, State } from "../state/state.js";
 
@@ -79,6 +83,168 @@ export function gatherDigestIssues(state: State, round: RoundRow, kinds: string[
     if (typeof issue === "number") issues.add(issue);
   }
   return [...issues].sort((a, b) => a - b);
+}
+
+// ── #964: "your outstanding PRs" — retro's own PR lifecycle, across ALL history ──────────────
+//
+// Every OTHER gatherer in this module is scoped to ONE round's start_event_id window; this one
+// deliberately is not. A retro proposal PR outlives the round that opened it — a red PR opened
+// two rounds ago is still retro's own responsibility to notice and repair THIS round, not just
+// the round it was born in. So the source read here walks the WHOLE ledger.
+
+/** #425: DERIVED from the central registry's `retro-pr-lifecycle` tag — see that tag's own note
+ *  (event-kinds/types.ts) for why `retro-pr-degraded` is deliberately excluded (it never names a
+ *  PR that exists on the forge). */
+export const RETRO_PR_LIFECYCLE_EVENT_KINDS = kindsTagged("retro-pr-lifecycle");
+
+/** One PR retro has opened or updated, folded to its LATEST known (branch, head) — `head` is the
+ *  headOid the engine recorded at open/update time (#964 adds this field going forward; a
+ *  pre-#964 `retro-pr-opened` row simply has none, see `updateProposalPR`'s legacy fallback in
+ *  retro.ts). */
+export interface RetroPRRecord {
+  pr: number;
+  branch: string;
+  head?: string;
+}
+
+// ponytail: last 5 own PRs is the read bound; add a durable terminal event if retro PRs pile up past that
+export const RETRO_PR_LIFECYCLE_READ_BOUND = 5;
+
+/** Fold retro's WHOLE PR lifecycle (every `retro-pr-opened`/`retro-pr-updated` event ever
+ *  appended) down to one row per PR number, latest event wins, NEWEST-TOUCHED-FIRST, capped at
+ *  `RETRO_PR_LIFECYCLE_READ_BOUND` — `eventsAfterId` returns rows in ascending id order; each PR
+ *  is re-keyed (delete then set) on every touch so a `Map`'s insertion-order iteration reflects
+ *  RECENCY, not first-seen order, and reversing it puts the most recently touched PR first. This
+ *  is the read-cost bound for both consumers below (`gatherOutstandingRetroPRs` and retro.ts's
+ *  `hasActionableOwnPR`): at most `RETRO_PR_LIFECYCLE_READ_BOUND` `getPRStatus` calls per read,
+ *  regardless of how many PRs retro has EVER opened — a MERGED/CLOSED one is simply dropped by
+ *  its caller after a live read (unchanged), never specially remembered. A malformed payload
+ *  (missing `pr`/`branch`) contributes nothing rather than throwing — same "never fail the whole
+ *  digest over one bad row" stance the rest of this module takes. Shared by this module's own
+ *  outstanding-PR section AND retro.ts's `update` scratch-outcome verification
+ *  (`updateProposalPR`) — ONE fold, not two independently-maintained ones; an `update:` scratch
+ *  naming a PR that has aged out of this window degrades the same way as one retro never opened
+ *  — a deliberate, documented consequence of the bound, not a bug. */
+export function gatherRetroPRLifecycle(state: State): RetroPRRecord[] {
+  const events = state.eventsAfterId(0, RETRO_PR_LIFECYCLE_EVENT_KINDS);
+  const byPr = new Map<number, RetroPRRecord>();
+  for (const e of events) {
+    const p = e.payload as { pr?: unknown; branch?: unknown; head?: unknown };
+    if (typeof p.pr !== "number" || typeof p.branch !== "string") continue;
+    byPr.delete(p.pr); // re-touching an existing PR moves it to the "most recent" end
+    byPr.set(p.pr, { pr: p.pr, branch: p.branch, ...(typeof p.head === "string" ? { head: p.head } : {}) });
+  }
+  return [...byPr.values()].reverse().slice(0, RETRO_PR_LIFECYCLE_READ_BOUND);
+}
+
+/** One outstanding PR as the digest renders it. `actionable` names WHY a human (or retro itself,
+ *  via the `update` scratch outcome) needs to look — never omitted for an unreadable status: a
+ *  forge-read failure renders `reasons: ["status: unknown ..."]` and `actionable: true` (#964
+ *  AC1's fail-closed direction — an indeterminate status must never silently drop the row, and
+ *  must never read as "this PR is fine"). `excerpt` is present only for a `ciRed` row and is
+ *  ALREADY bounded by the forge-side hard cap (`getFailedCheckSummary`'s own `FAILED_CHECK_
+ *  SUMMARY_CAP`) before this module's own per-item cap is applied on top (belt and suspenders,
+ *  same layering the rest of this module already uses — a section cap on top of a per-item cap
+ *  on top of the final whole-digest safety net). */
+export interface OutstandingRetroPR {
+  pr: number;
+  branch: string;
+  /** `"unknown"` only when the forge status read itself threw — never a real PR state. */
+  state: "OPEN" | "CLOSED" | "MERGED" | "unknown";
+  actionable: boolean;
+  reasons: string[];
+  excerpt?: string;
+}
+
+/** The GraphQL-normalized `ciChecks` conclusion strings PRStatus.ciRed/ciChecks already treat as
+ *  FAILING (parsePRStatus's own `FAILING` set, forge.ts — not exported, so named again here
+ *  rather than reached into; both sets exist to answer the exact same question off the exact
+ *  same transport, so keeping them textually identical is a review-time discipline, not a shared
+ *  import worth the coupling). */
+const CI_CHECK_FAILING_CONCLUSIONS = new Set(["FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ERROR"]);
+
+/** Classify ONE outstanding PR against the forge's live status — the per-PR body of
+ *  `gatherOutstandingRetroPRs`, split out so each reason (red CI, inert CI, conflicting,
+ *  changes-requested) is independently testable. Never throws: every forge call it makes is
+ *  individually contained, same "one bad item never blanks the whole digest" stance as
+ *  `buildRetroDigest`'s per-PR/per-issue loops below. */
+async function classifyOutstandingPR(forge: IForge, rec: RetroPRRecord, status: PRStatus): Promise<OutstandingRetroPR> {
+  const reasons: string[] = [];
+  let excerpt: string | undefined;
+  if (status.ciRed) {
+    const failing = (status.ciChecks ?? []).filter((c) => CI_CHECK_FAILING_CONCLUSIONS.has(c.conclusion)).map((c) => c.name);
+    reasons.push(`red CI — failing check(s): ${failing.length > 0 ? failing.join(", ") : "(unnamed)"}`);
+    try {
+      excerpt = await forge.getFailedCheckSummary(rec.pr);
+    } catch (e) {
+      excerpt = `(failure excerpt fetch failed: ${String(e)})`;
+    }
+  }
+  if (status.ciInert) {
+    const inert = (status.ciChecks ?? [])
+      .filter((c) => c.conclusion !== "SUCCESS" && !CI_CHECK_FAILING_CONCLUSIONS.has(c.conclusion))
+      .map((c) => c.name);
+    reasons.push(`inert CI — check(s) concluded without ever passing: ${inert.length > 0 ? inert.join(", ") : "(unnamed)"}`);
+  }
+  if (status.mergeable === "CONFLICTING") reasons.push("conflicting with the base branch");
+  try {
+    const review = await forge.getPRReviewData(rec.pr);
+    // #964: NOT "the last review event is CHANGES_REQUESTED" — that ignores per-reviewer
+    // STANDING state (a later APPROVE from reviewer B would hide reviewer A's still-open
+    // request) and head-pinning (a request left on an OLD head must not read as actionable
+    // after a push superseded it). `changesRequestedOnHead` is reviewer.ts's own gate② predicate
+    // for exactly this question — reused here (import only; reviewer.ts is human-merge-only)
+    // rather than re-derived, so the two callers can never disagree.
+    if (changesRequestedOnHead(review.reviews, status.headOid, review.author)) {
+      reasons.push("changes requested — a standing CHANGES_REQUESTED review on the current head");
+    }
+  } catch (e) {
+    reasons.push(`review status: unknown — forge read failed (${String(e)})`);
+  }
+  return {
+    pr: rec.pr,
+    branch: rec.branch,
+    state: status.state,
+    actionable: reasons.length > 0,
+    reasons,
+    ...(excerpt !== undefined ? { excerpt } : {}),
+  };
+}
+
+/** Every PR retro currently has open on the forge, classified. NOT round-scoped (see this
+ *  section's own header comment) — reads `gatherRetroPRLifecycle`'s bounded (at most
+ *  `RETRO_PR_LIFECYCLE_READ_BOUND`) fold, then drops anything the forge now reports MERGED/CLOSED
+ *  (no longer outstanding at all) and a forge-read failure renders `state: "unknown"`,
+ *  `actionable: true` rather than being dropped (#964 AC1: never omit a PR whose status could
+ *  not be read). */
+export async function gatherOutstandingRetroPRs(forge: IForge, state: State): Promise<OutstandingRetroPR[]> {
+  const rows: OutstandingRetroPR[] = [];
+  for (const rec of gatherRetroPRLifecycle(state)) {
+    let status: PRStatus;
+    try {
+      status = await forge.getPRStatus(rec.pr);
+    } catch (e) {
+      rows.push({
+        pr: rec.pr,
+        branch: rec.branch,
+        state: "unknown",
+        actionable: true,
+        reasons: [`status: unknown — forge read failed (${String(e)})`],
+      });
+      continue;
+    }
+    if (status.state === "MERGED" || status.state === "CLOSED") continue;
+    rows.push(await classifyOutstandingPR(forge, rec, status));
+  }
+  return rows;
+}
+
+function formatOutstandingPRRow(row: OutstandingRetroPR): string {
+  const header = `### PR #${row.pr} (branch: ${row.branch}, state: ${row.state})`;
+  if (!row.actionable) return `${header}\nGreen and waiting for a human — no action needed from you.`;
+  const reasonsText = row.reasons.map((r) => `- ${r}`).join("\n");
+  const excerptText = row.excerpt !== undefined ? `\nFailure excerpt:\n${row.excerpt}` : "";
+  return `${header}\nACTIONABLE:\n${reasonsText}${excerptText}`;
 }
 
 // ── #453 (design #402 R5, §5): the finding-class tendency table ─────────────────────────────
@@ -304,14 +470,22 @@ export interface RetroDigestDeps {
 // FINAL capDigest call below remains as the absolute safety net (join overhead, a
 // pathologically small maxChars), but with per-item budgets in place it rarely does more than
 // trim a few trailing bytes.
-const ISSUES_SHARE = 0.25; // reserved fraction of maxChars for the whole issues section
-const COMMITS_SHARE = 0.1; // reserved fraction of maxChars for commit history
+// #964: adjusted downward (was 0.25/0.1/0.1) to make room for OUTSTANDING_SHARE below — no new
+// config key, per this repo's user-tunables-in-config convention (docs/configuration.md): the
+// digest still has exactly one cap, `roles.retro.digestMaxChars`, just one more section sharing it.
+const ISSUES_SHARE = 0.2; // reserved fraction of maxChars for the whole issues section
+const COMMITS_SHARE = 0.08; // reserved fraction of maxChars for commit history
 // #453: the tendency table is a compact fixed-width table plus a short header — it needs a
 // reserved share for the same starvation reason every other section has one (a couple of large
 // PR diffs must not push it out of the digest entirely), but a small one.
-const TENDENCY_SHARE = 0.1;
+const TENDENCY_SHARE = 0.07;
+// #964: "your outstanding PRs" — a small, usually-empty-or-short section most rounds, but the one
+// most likely to carry an actual failure excerpt (bounded again at the item level below), so it
+// gets a real reserved share rather than living entirely off the PR-touched leftover.
+const OUTSTANDING_SHARE = 0.15;
 const PR_ITEM_MAX = 20_000;
 const ISSUE_ITEM_MAX = 5_000;
+const OUTSTANDING_ITEM_MAX = 6_000;
 
 /** Assemble this round's read-only digest: PR diffs + review signals for every PR the round's
  *  ledger says was touched, comments/labels for every issue the ledger flagged as escalated,
@@ -330,13 +504,18 @@ export async function buildRetroDigest(
 ): Promise<string> {
   const prs = gatherTouchedPRs(deps.state, round);
   const issues = gatherDigestIssues(deps.state, round, issueEventKinds);
+  // #964: NOT round-scoped (see this section's own header comment above) — reads the whole
+  // ledger's retro-pr-lifecycle history, independent of `round`.
+  const outstanding = await gatherOutstandingRetroPRs(deps.forge, deps.state);
 
   const issuesBudget = Math.floor(maxChars * ISSUES_SHARE);
   const commitsBudget = Math.floor(maxChars * COMMITS_SHARE);
   const tendencyBudget = Math.floor(maxChars * TENDENCY_SHARE);
-  const prsBudget = Math.max(maxChars - issuesBudget - commitsBudget - tendencyBudget, 0);
+  const outstandingBudget = Math.floor(maxChars * OUTSTANDING_SHARE);
+  const prsBudget = Math.max(maxChars - issuesBudget - commitsBudget - tendencyBudget - outstandingBudget, 0);
   const perPrCap = fairShare(prsBudget, prs.length, PR_ITEM_MAX);
   const perIssueCap = fairShare(issuesBudget, issues.length, ISSUE_ITEM_MAX);
+  const perOutstandingCap = fairShare(outstandingBudget, outstanding.length, OUTSTANDING_ITEM_MAX);
 
   const prSections: string[] = [];
   for (const pr of prs) {
@@ -356,6 +535,10 @@ export async function buildRetroDigest(
       prSections.push(`### PR #${pr}\n(digest fetch failed: ${String(e)})`);
     }
   }
+
+  // #964: capped PER ROW, same fair-share-then-cap pattern as the PR/issue loops above — one
+  // huge failure excerpt must not push every other outstanding PR out of the digest.
+  const outstandingSections = outstanding.map((row) => capDigest(formatOutstandingPRRow(row), perOutstandingCap));
 
   const issueSections: string[] = [];
   for (const issue of issues) {
@@ -389,6 +572,8 @@ export async function buildRetroDigest(
 
   const full = [
     `# Round #${round.round_id} digest (since ${round.started_at})`,
+    `## Your outstanding PRs (${outstanding.length})`,
+    outstanding.length > 0 ? outstandingSections.join("\n\n") : "(none — no PR you opened is still open on the forge)",
     `## PRs touched this round (${prs.length})`,
     prs.length > 0 ? prSections.join("\n\n") : "(none)",
     `## Escalated issues this round (${issues.length})`,

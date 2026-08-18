@@ -34,14 +34,16 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
-import type { IForge } from "../forge/forge.js";
+import type { IForge, PRStatus } from "../forge/forge.js";
 import { renderFactsTemplate } from "../loop/harvest.js";
 import type { PeripheralStub } from "../loop/round.js";
 import { envFailureHook, type RoleRunner, runSessionWithRetry } from "../roles/peripheral.js";
 import { loadRolePromptTemplate } from "../roles/plan-review.js";
+// #964: import ONLY — reviewer.ts is human-merge-only, never edited from here.
+import { changesRequestedOnHead } from "../roles/reviewer.js";
 import { kindsTagged } from "../state/event-kinds/index.js";
 import type { RoundRow, State } from "../state/state.js";
-import { buildRetroDigest, PR_TOUCHED_EVENT_KINDS } from "./retro-digest.js";
+import { buildRetroDigest, gatherRetroPRLifecycle, PR_TOUCHED_EVENT_KINDS } from "./retro-digest.js";
 
 /** #91: retro's write scope — the FIRST role in this codebase whose job requires more than
  *  issues-only writes. Grants exactly what "propose via PR, never directly" needs: LOCAL git
@@ -128,13 +130,20 @@ export const RETRO_DISALLOWED_TOOLS =
  *  chosen by the engine (threaded to RoleRunner via RoleSessionOpts.scratchFile), never by the
  *  session, so the engine always knows exactly where it looks and a session cannot redirect it.
  *
- *  FORMAT (parseRetroScratch below): either the single word `none` (an explicit quiet round —
- *  the prompt REQUIRES the file to always be written, so a MISSING file is distinguishable
- *  from "nothing to propose" and fails closed), or:
+ *  FORMAT (parseRetroScratch below): the single word `none` (an explicit quiet round — the
+ *  prompt REQUIRES the file to always be written, so a MISSING file is distinguishable from
+ *  "nothing to propose" and fails closed); a NEW proposal —
  *
  *      branch: <the pushed branch name>
  *      title: <the PR title>
  *      <the full PR body, raw markdown, from line 3 to EOF>
+ *
+ *  — or (#964) an UPDATE to a PR retro already opened —
+ *
+ *      update: <the PR number>
+ *      branch: <the pushed branch name — must match that PR's RECORDED branch>
+ *      <the full PR body to overwrite it with, from line 3 to EOF — leave empty to keep the
+ *       existing body>
  *
  *  WHY a labeled-header file and not JSON or the structured-output sentinel block: the PR body
  *  is long markdown that routinely contains fenced code blocks and — for a role whose job is
@@ -149,6 +158,12 @@ export const RETRO_SCRATCH_FILE = ".sapwood-retro-pr";
 export type RetroScratch =
   | { kind: "none" }
   | { kind: "proposal"; branch: string; title: string; body: string }
+  // #964: the third outcome — repair a PR retro already opened (this round or a prior one)
+  // rather than proposing a duplicate. `body: null` means "keep the existing PR body" (the
+  // scratch's body lines were empty) — distinct from `body: ""`, which parseRetroScratch never
+  // produces (an all-whitespace body collapses to null via the same `.trim()` the proposal
+  // outcome uses for its OWN required-non-empty check, just without the requirement here).
+  | { kind: "update"; pr: number; branch: string; body: string | null }
   | { kind: "invalid"; reason: string };
 
 /** Branch-name sanity for a SESSION-authored string the engine will hand to forge reads/writes:
@@ -162,19 +177,37 @@ function invalidBranchReason(branch: string): string | null {
   return null;
 }
 
-/** Parse + validate retro's scratch file, FAIL-CLOSED: anything that isn't exactly `none` or a
+/** Parse + validate retro's scratch file, FAIL-CLOSED: anything that isn't exactly `none`, a
  *  well-formed proposal (both header lines present and labeled, sane branch name, non-empty
- *  title and body) is `invalid` with a named reason — fed to runSessionWithRetry's isValid
- *  hook (retry once, then retro's degrade path), never a best-guess partial parse. `undefined`
- *  (RoleRunner found no file) is invalid too: the prompt requires the file ALWAYS be written,
- *  so absence means the session broke its output contract, not a quiet round. */
+ *  title and body), or a well-formed `update:` (#964 — see RetroScratch's own doc) is `invalid`
+ *  with a named reason — fed to runSessionWithRetry's isValid hook (retry once, then retro's
+ *  degrade path), never a best-guess partial parse. `undefined` (RoleRunner found no file) is
+ *  invalid too: the prompt requires the file ALWAYS be written, so absence means the session
+ *  broke its output contract, not a quiet round.
+ *
+ *  #964: `update:` is checked BEFORE the proposal branch, since it is a DISTINCT first line
+ *  (`update:` vs `branch:`) — the two forms cannot collide, so trying `update:` first costs
+ *  nothing for a proposal/none file, which never matches it. */
 export function parseRetroScratch(text: string | undefined): RetroScratch {
   if (text === undefined) return { kind: "invalid", reason: `scratch file ${RETRO_SCRATCH_FILE} missing — the session never wrote it` };
   if (text.trim() === "none") return { kind: "none" };
   if (text.trim() === "") return { kind: "invalid", reason: "scratch file is empty" };
   const lines = text.split("\n");
+  const um = (lines[0] ?? "").match(/^update:[ \t]*(\S.*)$/);
+  if (um) {
+    const prText = um[1]!.trim();
+    if (!/^[1-9]\d*$/.test(prText))
+      return { kind: "invalid", reason: `"update:" line must give a positive PR number, got ${JSON.stringify(prText)}` };
+    const ubm = (lines[1] ?? "").match(/^branch:[ \t]*(\S.*)$/);
+    if (!ubm) return { kind: "invalid", reason: `second line must be "branch: <name>" for an "update:" outcome` };
+    const ubranch = ubm[1]!.trim();
+    const ubadBranch = invalidBranchReason(ubranch);
+    if (ubadBranch) return { kind: "invalid", reason: ubadBranch };
+    const ubody = lines.slice(2).join("\n").trim();
+    return { kind: "update", pr: Number(prText), branch: ubranch, body: ubody === "" ? null : ubody };
+  }
   const bm = (lines[0] ?? "").match(/^branch:[ \t]*(\S.*)$/);
-  if (!bm) return { kind: "invalid", reason: `first line must be "branch: <name>" (or the whole file exactly "none")` };
+  if (!bm) return { kind: "invalid", reason: `first line must be "branch: <name>" or "update: <pr>" (or the whole file exactly "none")` };
   const tm = (lines[1] ?? "").match(/^title:[ \t]*(\S.*)$/);
   if (!tm) return { kind: "invalid", reason: `second line must be "title: <text>"` };
   const branch = bm[1]!.trim();
@@ -280,14 +313,53 @@ export const LANE_SESSION_START_EVENT_KINDS = kindsTagged("lane-session-start");
  *  `gatherTouchedPRs` use). NOT `parseRetroScratch`'s `none` outcome (a session that ran and
  *  judged nothing to propose) — this skips the session entirely, before it judges anything. A
  *  hand-merge to `main` from outside the loop trips none of these three — deliberately still
- *  quiet, since retro reflects on the loop's own work. #964 adds a fourth signal (an actionable
- *  own retro PR) on top of these three. Exported so tests assert on it directly. */
-export function isQuietRound(state: State, round: RoundRow): boolean {
+ *  quiet, since retro reflects on the loop's own work.
+ *
+ *  #964's FOURTH signal, checked only when the three above are ALL silent (it is the only one
+ *  needing a live forge read, so it is never paid for on an otherwise-busy round): an own PR
+ *  retro previously opened, now sitting in an ACTIONABLE state (red/inert CI, conflicting,
+ *  changes-requested), is round material even with zero fresh dispatch this round — a red retro
+ *  PR does not stop being retro's job to notice just because nothing else happened. A
+ *  green-and-waiting own PR is NOT material — the quiet skip would otherwise be defeated for as
+ *  long as a human hasn't merged it. Fail-closed on the forge read itself: any
+ *  read failure (network, auth, a genuinely gone PR) reads as `true` (actionable) here — a wrong
+ *  "actionable" costs one session's worth of digest-building; a wrong "quiet" costs a missed
+ *  repair, and #964 explicitly takes the cheaper failure direction. Exported so tests assert on
+ *  it directly. */
+export async function isQuietRound(forge: IForge, state: State, round: RoundRow): Promise<boolean> {
   const since = round.start_event_id ?? 0;
   if (state.eventsAfterId(since, RETRO_EVENT_KINDS).length > 0) return false;
   if (state.eventsAfterId(since, PR_TOUCHED_EVENT_KINDS).length > 0) return false;
   if (state.eventsAfterId(since, LANE_SESSION_START_EVENT_KINDS).length > 0) return false;
-  return true;
+  return !(await hasActionableOwnPR(forge, state));
+}
+
+/** #964: the live-forge half of `isQuietRound`'s fourth signal — split out so it is independently
+ *  testable against a scripted forge without seeding a full round. Never throws: a per-PR forge
+ *  read failure reads as actionable (see `isQuietRound`'s own fail-closed-direction doc) rather
+ *  than propagating and wedging the round on a read this advisory. */
+async function hasActionableOwnPR(forge: IForge, state: State): Promise<boolean> {
+  for (const rec of gatherRetroPRLifecycle(state)) {
+    let status: PRStatus;
+    try {
+      status = await forge.getPRStatus(rec.pr);
+    } catch {
+      return true; // fail-closed: an unreadable status is actionable, never silently quiet
+    }
+    if (status.state === "MERGED" || status.state === "CLOSED") continue;
+    if (status.ciRed || status.ciInert || status.mergeable === "CONFLICTING") return true;
+    try {
+      const review = await forge.getPRReviewData(rec.pr);
+      // #964: `changesRequestedOnHead`, not "the last review event" — see retro-digest.ts's
+      // `classifyOutstandingPR` doc for the standing-state/head-pinning bug this closes; reused
+      // (import only, reviewer.ts is human-merge-only) so this signal and the digest's own can
+      // never independently drift.
+      if (changesRequestedOnHead(review.reviews, status.headOid, review.author)) return true;
+    } catch {
+      return true; // fail-closed, same direction as the status read above
+    }
+  }
+  return false;
 }
 
 function factVars(facts: RetroFacts): Record<string, string> {
@@ -327,7 +399,7 @@ export function createRetroStub(deps: RetroDeps): PeripheralStub {
       if (roundId % cadence !== 0) return { marker: retroMarker(roundId) }; // thinned round — no session, phase still closes
       const round = deps.state.getRound(roundId);
       if (!round) return { marker: retroMarker(roundId) }; // defensive; round.ts always supplies a real row
-      if (isQuietRound(deps.state, round)) {
+      if (await isQuietRound(deps.forge, deps.state, round)) {
         deps.state.appendEvent("retro-quiet-skipped", { round_id: roundId });
         return { marker: retroMarker(roundId) }; // quiet round — no session, phase still closes
       }
@@ -412,12 +484,13 @@ export function createRetroStub(deps: RetroDeps): PeripheralStub {
         // envFailureHook doc.
         envFailure: envFailureHook(deps.cfg, deps.state),
       });
-      // #111 PR-B: the engine-side write half. Only a validated PROPOSAL reaches the forge —
-      // `none` (a quiet round) and a degraded session (runSessionWithRetry already recorded it)
-      // both end here with the phase closed and nothing written.
+      // #111 PR-B / #964: the engine-side write half. Only a validated PROPOSAL or UPDATE reaches
+      // the forge — `none` (a quiet round) and a degraded session (runSessionWithRetry already
+      // recorded it) both end here with the phase closed and nothing written.
       if (result.outcome === "done") {
         const scratch = parseRetroScratch(result.scratchText);
         if (scratch.kind === "proposal") await openProposalPR(deps, roundId, scratch);
+        else if (scratch.kind === "update") await updateProposalPR(deps, roundId, scratch);
       }
       // #394 (F23): a session genuinely ran above — the off-cadence and no-round-row early
       // returns are the only skip paths (see PeripheralStub.ranSession's own doc).
@@ -482,8 +555,18 @@ async function openProposalPR(deps: RetroDeps, roundId: number, p: { branch: str
   }
   try {
     const pr = await deps.forge.openPR(p.branch, p.title, p.body);
+    // #964: record the head the NEW PR opened at — best-effort, off a SEPARATE read from openPR
+    // itself (openPR's own return is just the PR number). A failure here never fails the phase
+    // (the PR is already the externalized artifact) — it only means `updateProposalPR`'s later
+    // head-moved check falls back to the legacy (no recorded `head`) comparison for this PR.
+    let head: string | undefined;
     try {
-      deps.state.appendEvent("retro-pr-opened", { round_id: roundId, pr, branch: p.branch });
+      head = (await deps.forge.getPRStatus(pr)).headOid;
+    } catch {
+      /* best-effort — see comment above */
+    }
+    try {
+      deps.state.appendEvent("retro-pr-opened", { round_id: roundId, pr, branch: p.branch, ...(head !== undefined ? { head } : {}) });
     } catch {
       /* the PR itself is the externalized artifact — a state hiccup never fails the phase */
     }
@@ -492,5 +575,94 @@ async function openProposalPR(deps: RetroDeps, roundId: number, p: { branch: str
       `openPR failed for verified-pushed branch "${p.branch}" (${String(e)}) — the pushed branch ` +
         `is preserved evidence; open the PR manually or let a later round's retro re-propose`,
     );
+  }
+}
+
+/** #964 What ②: the "update" scratch outcome — retro repairs an ALREADY-open PR it opened
+ *  earlier (this round or a prior one) rather than proposing a duplicate. Verify-then-append,
+ *  entirely engine-side, same never-throw shape as `openProposalPR`:
+ *
+ *  1. The PR must be one retro genuinely opened before — a `retro-pr-opened`/`retro-pr-updated`
+ *     event naming it, ANYWHERE in history (`gatherRetroPRLifecycle` is NOT round-scoped, same
+ *     reason its own doc gives: a retro PR outlives the round that opened it). A session cannot
+ *     invent a PR number and have the engine touch it.
+ *  2. The scratch's branch must equal the RECORDED branch for that PR — a session cannot redirect
+ *     an update at a different branch than the one the PR actually opened from.
+ *  3. `forge.branchExists` — the push claim is never trusted as evidence, same as openProposalPR.
+ *  4. The branch's head must have MOVED since the last recorded event, read off the PR's own
+ *     current status (the PR's source branch IS the pushed branch, so its `headOid` already
+ *     reflects any new push — no separate branch-head read needed): compared against the
+ *     recorded `head` when one exists (#964 records this going forward, see `openProposalPR`); a
+ *     LEGACY record with no `head` (a pre-#964 `retro-pr-opened`) accepts once `branchExists` and
+ *     the PR's current head differs from its base — the issue's own stated fallback, rather than
+ *     refusing every pre-#964 PR an update forever.
+ *
+ *  Any mismatch degrades (`retro-pr-degraded`, `title` OMITTED — an update proposes no new title;
+ *  round-artifact.ts's reader coalesces the absence to `""`) — NEVER a close/withdraw, per #964's
+ *  explicit scope (a human closes). Success appends `retro-pr-updated`, then — only when the
+ *  scratch carried a non-empty body — best-effort overwrites the PR's body (`forge.
+ *  updateIssueBody`; PRs are issues under the hood, same endpoint retro-digest.ts's `getIssueBody`
+ *  already leans on for a PR number). A `body: null` scratch (empty body lines — "keep the
+ *  existing body") skips that call entirely; a body-write failure logs but does NOT degrade —
+ *  the push itself already landed and is the substantive repair, a stale body text is a lesser,
+ *  separately-visible gap. */
+async function updateProposalPR(deps: RetroDeps, roundId: number, u: { pr: number; branch: string; body: string | null }): Promise<void> {
+  const degrade = (reason: string): void => {
+    try {
+      deps.state.appendEvent("retro-pr-degraded", { round_id: roundId, pr: u.pr, branch: u.branch, reason });
+    } catch {
+      /* state write failed — the stderr line below still lands */
+    }
+    (deps.log ?? console.error)(`[sapwood:retro] round ${roundId}: ${reason} — PR #${u.pr} not updated; the retro phase still closes`);
+  };
+  const prior = gatherRetroPRLifecycle(deps.state).find((r) => r.pr === u.pr);
+  if (!prior) {
+    degrade(`scratch proposes "update: ${u.pr}" but retro never opened that PR — refusing to touch a PR it does not own`);
+    return;
+  }
+  if (prior.branch !== u.branch) {
+    degrade(`scratch's branch "${u.branch}" does not match PR #${u.pr}'s recorded branch "${prior.branch}"`);
+    return;
+  }
+  let pushed: boolean;
+  try {
+    pushed = await deps.forge.branchExists(u.branch);
+  } catch (e) {
+    degrade(`push verification errored (${String(e)})`); // defensive; GithubForge itself never throws here
+    return;
+  }
+  if (!pushed) {
+    degrade(`scratch proposes updating branch "${u.branch}" but no such branch exists on the forge`);
+    return;
+  }
+  let status: PRStatus;
+  try {
+    status = await deps.forge.getPRStatus(u.pr);
+  } catch (e) {
+    degrade(`could not read PR #${u.pr}'s status to verify the head moved (${String(e)})`);
+    return;
+  }
+  const moved = prior.head !== undefined ? status.headOid !== prior.head : status.headOid !== status.baseOid;
+  if (!moved) {
+    degrade(
+      prior.head !== undefined
+        ? `PR #${u.pr}'s head (${status.headOid}) has not moved since the last recorded push (${prior.head}) — nothing to update`
+        : `PR #${u.pr} has no recorded head to compare against (a pre-#964 PR) and its current head matches its base — nothing to update`,
+    );
+    return;
+  }
+  try {
+    deps.state.appendEvent("retro-pr-updated", { round_id: roundId, pr: u.pr, branch: u.branch, head: status.headOid });
+  } catch {
+    /* the push itself is the externalized artifact — a state hiccup never fails the phase */
+  }
+  if (u.body !== null) {
+    try {
+      await deps.forge.updateIssueBody(u.pr, u.body);
+    } catch (e) {
+      (deps.log ?? console.error)(
+        `[sapwood:retro] round ${roundId}: PR #${u.pr}'s push was recorded, but its body update failed (${String(e)}) — the body text is stale, not the repair itself`,
+      );
+    }
   }
 }

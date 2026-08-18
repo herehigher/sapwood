@@ -85,6 +85,26 @@ export type LaneView = {
    * `driving` for a long time is real, current information; array position never was.
    */
   touchedAt: number;
+  /** #927: the `dispatched` event's own `ts` — replay's honest elapsed-time source (no live
+   *  clock exists in replay/`?demo`). Set on `dispatched`, and re-stamped by `fix-leg-started`/
+   *  `-resumed` only when the lane was released since (a mid-fix handoff), matching the DB's own
+   *  `workers.started_at` semantics — a same-worker fix round never resets it. `null` once the
+   *  lane releases (`releaseLane`). */
+  startedAt: string | null;
+  /** #927: the lane's settled cost, learned ONLY from `reclaim-done`'s payload — the append-only
+   *  record of what the engine actually billed, never a live probe (§11: "est never replays").
+   *  `null` while running (no reclaim yet) or once the lane releases. */
+  costUsd: number | null;
+  /** #927: `reclaim-done`'s own `estCostUsd` — the lane's last live estimate AT THE MOMENT it
+   *  settled, carried for the reducer's own bookkeeping (AC2). Deliberately never fed into a
+   *  card's est bar (`App.tsx`'s `deriveReplayedLanes`) — §11 draws no live-telemetry overlay in
+   *  replay even once one was recorded; this is a historical fact about that reclaim, not a
+   *  live signal to render as one. */
+  estCostUsd: number | null;
+  /** `costUsd`'s own provenance flag from `reclaim-done` — `null` when the payload never named
+   *  it (unknown provenance), never coerced to a guessed boolean (same posture `copy.ts`'s
+   *  `calibrationClause` already takes for the identical field). */
+  costEstimated: boolean | null;
 };
 
 export type HeroState = {
@@ -194,6 +214,10 @@ export function initialHeroState(lanesMax: number | null): HeroState {
       fixRound: 0,
       reason: null,
       touchedAt: 0,
+      startedAt: null,
+      costUsd: null,
+      estCostUsd: null,
+      costEstimated: null,
     })),
     droplets: [],
     pool: [],
@@ -235,7 +259,19 @@ export function withLaneCount(state: HeroState, lanesMax: number | null): HeroSt
 
   const lanes = [...state.lanes];
   while (lanes.length < want)
-    lanes.push({ channel: lanes.length, worker: null, issue: null, phase: "idle", fixRound: 0, reason: null, touchedAt: 0 });
+    lanes.push({
+      channel: lanes.length,
+      worker: null,
+      issue: null,
+      phase: "idle",
+      fixRound: 0,
+      reason: null,
+      touchedAt: 0,
+      startedAt: null,
+      costUsd: null,
+      estCostUsd: null,
+      costEstimated: null,
+    });
   return { ...state, lanes, laneCountUnknown: unknown };
 }
 
@@ -417,7 +453,19 @@ function claimLane(draft: Draft, worker: string): LaneView {
     free.worker = worker;
     return free;
   }
-  const extra: LaneView = { channel: draft.lanes.length, worker, issue: null, phase: "idle", fixRound: 0, reason: null, touchedAt: 0 };
+  const extra: LaneView = {
+    channel: draft.lanes.length,
+    worker,
+    issue: null,
+    phase: "idle",
+    fixRound: 0,
+    reason: null,
+    touchedAt: 0,
+    startedAt: null,
+    costUsd: null,
+    estCostUsd: null,
+    costEstimated: null,
+  };
   draft.lanes.push(extra);
   return extra;
 }
@@ -432,6 +480,10 @@ function releaseLane(lane: LaneView | undefined): void {
   lane.phase = "idle";
   lane.fixRound = 0;
   lane.reason = null;
+  lane.startedAt = null;
+  lane.costUsd = null;
+  lane.estCostUsd = null;
+  lane.costEstimated = null;
 }
 
 /**
@@ -551,6 +603,12 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       lane.fixRound = 0;
       lane.reason = null;
       lane.touchedAt = id;
+      // #927: a fresh dispatch always starts a fresh narrative — never a stale prior
+      // occupant's cost/clock leaking into this one, even on a reused channel.
+      lane.startedAt = e.ts;
+      lane.costUsd = null;
+      lane.estCostUsd = null;
+      lane.costEstimated = null;
       moveDroplet(draft, issue, id, { lane: worker, at: "lane", failed: false, handedOff: false });
       draft.pool = draft.pool.filter((i) => i !== issue);
       return { kind: "dispatch", id, issue, lane: worker };
@@ -565,6 +623,17 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
         releaseLane(laneOf(draft, worker));
         draft.droplets.delete(issue);
         return null;
+      }
+      // #927: `reclaim-done` is the ONLY reclaim kind that carries settled cost in its own
+      // payload (`reclaim-failed`/`reclaim-dead`'s rescue paths — the other `toCheckpoint`
+      // callers below — settle spend into `spend_ledger` only, never the event itself) —
+      // stamped onto the lane BEFORE `toCheckpoint` flips it to `driving`, so the card can
+      // show the settled figure for as long as the PR sits at the checkpoint.
+      const lane = laneOf(draft, worker);
+      if (lane) {
+        lane.costUsd = num(p.costUsd);
+        lane.estCostUsd = num(p.estCostUsd);
+        lane.costEstimated = typeof p.costEstimated === "boolean" ? p.costEstimated : null;
       }
       return toCheckpoint(draft, id, issue, worker, pr);
     }
@@ -601,6 +670,10 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       lane.fixRound = round;
       lane.reason = reason;
       lane.touchedAt = id;
+      // #927: a same-worker fix round keeps the ORIGINAL dispatch clock (matches the DB's own
+      // `workers.started_at`, unchanged across `startFixLeg`); only a lane that released since
+      // (a mid-fix `handoff`, resumed on a fresh/reused channel) gets re-stamped.
+      if (lane.startedAt === null) lane.startedAt = e.ts;
       const d = moveDroplet(draft, issue, id, {
         lane: worker,
         at: "lane",

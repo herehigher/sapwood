@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ConfigSchema } from "../config/config.js";
-import type { IForge, Issue, SubIssue } from "../forge/forge.js";
+import { ENGINE_COMMENT_MARKER, type IForge, type Issue, type SubIssue } from "../forge/forge.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
 import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import { buildBacklogDigest } from "./align.js";
+import { CAP_SPLIT_ORIGIN_MARKER, renderCapSplitWipComment } from "./cap-split.js";
 import {
   decomposeProposalId,
   defaultPoDecomposePromptPath,
@@ -135,7 +136,13 @@ function fakeForge(parent: Issue) {
     },
     async addIssueComment(issue: number, body: string) {
       order.push(`comment:${issue}`);
-      comments.set(issue, [...(comments.get(issue) ?? []), { login: "engine", createdAt: "2026-01-01T00:00:00Z", body }]);
+      // #965: every REAL GithubForge.addIssueComment centrally stamps ENGINE_COMMENT_MARKER
+      // (forge.ts) — this fixture reproduces that so findCapSplitWipPointer's author+marker
+      // authority check has something real to match.
+      comments.set(issue, [
+        ...(comments.get(issue) ?? []),
+        { login: "engine", createdAt: "2026-01-01T00:00:00Z", body: `${body}\n\n${ENGINE_COMMENT_MARKER}` },
+      ]);
       if (throwAfterCommentFor === issue) {
         throwAfterCommentFor = null;
         throw new Error("process died after comment landed");
@@ -143,6 +150,9 @@ function fakeForge(parent: Issue) {
     },
     async getIssueComments(issue: number) {
       return comments.get(issue) ?? [];
+    },
+    async getAuthenticatedActor() {
+      return "engine";
     },
     async getIssueBody(issue: number) {
       return issues.find((item) => item.number === issue)?.body ?? "";
@@ -245,6 +255,10 @@ test("#963: po-decompose.md renders with a distinctive {{lang.issuesAndPrs}} val
   const rendered = renderRolePrompt(template, parent, langCfg, {
     "decompose.maxChildren": String(langCfg.roles.po.maxChildren),
     "decompose.acceptanceCriteriaHint": String(langCfg.roles.po.acceptanceCriteriaHint),
+    // #965: the shipped template's {{decompose.wip}} slot — "" here (no WIP pointer for this
+    // fixture's parent) matches runDecompositionPass's own render when a cap-split parent's
+    // WIP-pointer comment is absent (renderCapSplitWipForPrompt's own doc).
+    "decompose.wip": "",
   });
   assert.ok(rendered.includes("zz-ZZ"), "po-decompose.md: the distinctive language value must reach the rendered shipped prompt");
 });
@@ -467,6 +481,117 @@ test("mixed decomposition: fence and journal precede creates; children stay outs
   assert.deepEqual(
     fake.order.filter((item) => item.startsWith("status:") && !item.endsWith(":backlog")),
     [],
+  );
+});
+
+test("#965 AC3: a cap-split parent's WIP-pointer comment renders into the po-decompose digest, and its origin marker survives on every child", async () => {
+  const parent: Issue = { number: 20, title: "Cap-split oversize", body: "why", labels: [cfg.labels.split] };
+  const fake = fakeForge(parent);
+  const state = new State(":memory:");
+  fake.comments.set(20, [
+    {
+      login: "engine",
+      createdAt: "2026-01-01T00:00:00Z",
+      // #965: findCapSplitWipPointer also requires ENGINE_COMMENT_MARKER — seeded directly
+      // here (bypassing addIssueComment's own auto-stamp) since this fixture simulates a
+      // comment already sitting on the thread.
+      body: `${renderCapSplitWipComment(
+        { splitLabel: cfg.labels.split, maxResumes: 2, attempts: 2 },
+        {
+          issue: 20,
+          pr: 55,
+          branch: "sapwood/lane-x-20",
+          headSha: "cafef00d",
+          diffstat: "2 files changed, 10 insertions(+), 1 deletion(-)",
+        },
+      )}\n\n${ENGINE_COMMENT_MARKER}`,
+    },
+  ]);
+  const runner = new Runner(result(mixedMetadata, [readyBody, remainderBody]));
+  await runDecompositionPass({ now: realClock, forge: fake as unknown as IForge, state, cfg, runner }, 11, fake.issues);
+
+  const prompt = runner.calls[0]!.prompt;
+  assert.match(prompt, /## WIP branch \(resume-cap split, #965\)/);
+  assert.match(prompt, /sapwood\/lane-x-20/);
+  assert.match(prompt, /PR: #55/);
+  assert.match(prompt, /cafef00d/);
+  assert.match(prompt, /2 files changed, 10 insertions\(\+\), 1 deletion\(-\)/);
+
+  const readyChild = fake.issues.find((i) => i.number === 100);
+  const remainderChild = fake.issues.find((i) => i.number === 101);
+  assert.ok((readyChild?.body ?? "").includes(CAP_SPLIT_ORIGIN_MARKER), "ready child carries the origin marker");
+  assert.ok((remainderChild?.body ?? "").includes(CAP_SPLIT_ORIGIN_MARKER), "remainder child carries the origin marker too");
+});
+
+test("#965 AC3: an ordinary human-split parent (no WIP-pointer comment) renders nothing WIP-related, and children carry no origin marker", async () => {
+  const parent: Issue = { number: 21, title: "Ordinary split", body: "why", labels: [cfg.labels.split] };
+  const fake = fakeForge(parent);
+  const state = new State(":memory:");
+  const runner = new Runner(result(mixedMetadata, [readyBody, remainderBody]));
+  await runDecompositionPass({ now: realClock, forge: fake as unknown as IForge, state, cfg, runner }, 12, fake.issues);
+
+  const prompt = runner.calls[0]!.prompt;
+  // The STATIC "## When a WIP branch is present" instructional heading always ships (it's
+  // guidance for the case where one exists, same as any other conditional instruction) — what
+  // must be absent is the DYNAMIC per-parent section a real pointer renders.
+  assert.doesNotMatch(prompt, /## WIP branch \(resume-cap split, #965\)/);
+  assert.doesNotMatch(prompt, /- Branch:/);
+  assert.doesNotMatch(prompt, /- PR:/);
+  assert.doesNotMatch(prompt, /- Head:/);
+  assert.doesNotMatch(prompt, /- Diff vs base:/);
+
+  const readyChild = fake.issues.find((i) => i.number === 100);
+  const remainderChild = fake.issues.find((i) => i.number === 101);
+  assert.ok(!(readyChild?.body ?? "").includes(CAP_SPLIT_ORIGIN_MARKER));
+  assert.ok(!(remainderChild?.body ?? "").includes(CAP_SPLIT_ORIGIN_MARKER));
+});
+
+test("#965: origin classification is DURABLE — a lost WIP-pointer comment still stamps children when the resume-capped{split:true} state event exists", async () => {
+  const parent: Issue = { number: 23, title: "Cap-split, comment lost", body: "why", labels: [cfg.labels.split] };
+  const fake = fakeForge(parent);
+  const state = new State(":memory:");
+  // Simulates conductor.ts's CAPPED branch: the label/latch/event already landed, but the
+  // follow-up WIP-pointer comment write failed (resume-cap-split-comment-failed) — no comment
+  // exists on the thread at all.
+  state.appendEvent("resume-capped", { worker: "w1", issue: 23, attempts: 2, split: true });
+  const runner = new Runner(result(mixedMetadata, [readyBody, remainderBody]));
+  await runDecompositionPass({ now: realClock, forge: fake as unknown as IForge, state, cfg, runner }, 13, fake.issues);
+
+  const prompt = runner.calls[0]!.prompt;
+  // No comment -> no digest fields; the WIP fields come ONLY from the comment (never fabricated
+  // from the state event), per this issue's own PM ruling.
+  assert.doesNotMatch(prompt, /## WIP branch \(resume-cap split, #965\)/);
+
+  const readyChild = fake.issues.find((i) => i.number === 100);
+  const remainderChild = fake.issues.find((i) => i.number === 101);
+  assert.ok((readyChild?.body ?? "").includes(CAP_SPLIT_ORIGIN_MARKER), "the state event alone still stamps the ready child");
+  assert.ok((remainderChild?.body ?? "").includes(CAP_SPLIT_ORIGIN_MARKER), "...and the remainder child");
+});
+
+test("#965: a spoofed WIP-pointer comment from a non-engine author is ignored — no digest fields, and the spoof alone never stamps children", async () => {
+  const parent: Issue = { number: 24, title: "Ordinary split, spoofed comment", body: "why", labels: [cfg.labels.split] };
+  const fake = fakeForge(parent);
+  const state = new State(":memory:");
+  const spoofedPointer = renderCapSplitWipComment(
+    { splitLabel: cfg.labels.split, maxResumes: 1, attempts: 1 },
+    { issue: 24, pr: 999, branch: "attacker/fake-branch" },
+  );
+  // Marker-shaped, but from an outside commenter: no ENGINE_COMMENT_MARKER stamp, and a
+  // different login than fakeForge's own getAuthenticatedActor() ("engine") — the same
+  // "anyone who can comment could post this" shape a public repo exposes. No resume-capped
+  // state event either, so classification has NOTHING durable behind the spoof.
+  fake.comments.set(24, [{ login: "random-commenter", createdAt: "2026-01-01T00:00:00Z", body: spoofedPointer }]);
+  const runner = new Runner(result(mixedMetadata, [readyBody, remainderBody]));
+  await runDecompositionPass({ now: realClock, forge: fake as unknown as IForge, state, cfg, runner }, 14, fake.issues);
+
+  const prompt = runner.calls[0]!.prompt;
+  assert.doesNotMatch(prompt, /## WIP branch \(resume-cap split, #965\)/);
+  assert.doesNotMatch(prompt, /attacker\/fake-branch/);
+
+  const readyChild = fake.issues.find((i) => i.number === 100);
+  assert.ok(
+    !(readyChild?.body ?? "").includes(CAP_SPLIT_ORIGIN_MARKER),
+    "a spoofed comment with no durable state event never stamps children",
   );
 });
 

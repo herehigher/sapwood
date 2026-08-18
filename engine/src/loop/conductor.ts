@@ -53,6 +53,7 @@ import type {
   WorkerRow,
 } from "../state/state.js";
 import { observeBaseCi } from "./base-ci.js";
+import { CAP_SPLIT_ORIGIN_MARKER, type CapSplitWipPointer, renderCapSplitWipComment, summarizeUnifiedDiffStat } from "./cap-split.js";
 import {
   classifyEnvFailure,
   type EnvFailureSource,
@@ -1578,7 +1579,11 @@ export type HumanMergeOnlyCloseOutOutcome =
 /** #172: one handoff-lane decision that changed durable state this tick. */
 export type ResumeOutcome =
   | { kind: "resumed"; worker: string; issue: number; attempt: number }
-  | { kind: "capped"; worker: string; issue: number; attempts: number };
+  | { kind: "capped"; worker: string; issue: number; attempts: number }
+  // #965: the resume cap converted to an engine-applied `labels.split` instead of needs-human —
+  // a DISTINCT kind from "capped" (not an added optional field on it) so every existing "capped"
+  // assertion stays byte-identical rather than needing a `split: false` update at every call site.
+  | { kind: "capped-split"; worker: string; issue: number; attempts: number };
 
 export interface TickResult {
   reclaimed: ReclaimOutcome[];
@@ -6058,6 +6063,77 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       continue;
     }
     if (decision === "CAPPED") {
+      // #965: the resume cap used to be a one-way trip to needs-human — a human then did what
+      // the engine already knows how to do, decompose. So the FIRST question at CAPPED is now
+      // "may the engine split this instead", never assumed: a child of an earlier cap-split
+      // (origin marker in the body) never re-splits (AC2). No per-round allowance beyond that:
+      // cap-splits are already bounded by lane count (a cap-split needs a lane to exhaust
+      // maxResumes, and at most cfg.lanes.max exist), and the origin marker prevents chains — a
+      // flat per-tick allowance would only buy an ordering asymmetry (two lanes capping in the
+      // same tick getting different treatment) for no real protection. `labels != []` here
+      // (CAPPED is unreachable with `intentState === "confirmed"`, the one case that would have
+      // skipped the labels read above), so a body read is the only extra forge call this path adds.
+      const capSplitBody = await forge.getIssueBody(w.issue);
+      if (!capSplitBody.includes(CAP_SPLIT_ORIGIN_MARKER)) {
+        // Label-first/latch-second, same pattern as the needs-human arm below: a transient
+        // label failure leaves the row eligible so the next tick retries.
+        try {
+          await forge.addLabel(w.issue, cfg.labels.split);
+        } catch (e) {
+          state.appendEvent("resume-cap-split-label-failed", { worker: w.name, issue: w.issue, attempts, error: String(e) });
+          continue;
+        }
+        // #965: the latch + durable event land IMMEDIATELY once the label is provably applied,
+        // BEFORE any further forge call that can throw — a comment/PR/diff-read failure past
+        // this point must only ever degrade the WIP comment, never leave the split label live
+        // on the forge with the row still an un-latched handoff (re-entering CAPPED every tick,
+        // relabeling forever) or strand decompose.ts with neither a WIP comment nor a durable
+        // `resume-capped{split:true}` origin signal. `cap-split.ts`'s `wasCapSplitByState` reads
+        // exactly this event, so ordering it first is what makes that durable-origin backstop
+        // actually durable.
+        state.upsertWorker({ ...w, ended_at: iso(), resume_capped: 1 });
+        state.appendEvent("resume-capped", {
+          worker: w.name,
+          issue: w.issue,
+          attempts,
+          split: true,
+          ...(w.pr != null ? { pr: w.pr } : {}),
+        });
+        resumed.push({ kind: "capped-split", worker: w.name, issue: w.issue, attempts });
+        // Best-effort WIP-pointer evidence — the label/latch/event above are already durable and
+        // final; nothing past this point may affect them. A failure here (PR/diff read, or the
+        // comment write itself) only ever costs the decomposer's digest fields, never the split
+        // or the origin signal, and this row is never revisited (resume_capped now latches it
+        // out of handoffWorkers() permanently) — so a single named degrade event, not a retry, is
+        // the honest record.
+        try {
+          let pointer: CapSplitWipPointer = { issue: w.issue };
+          if (w.pr != null) {
+            try {
+              const [status, diff] = await Promise.all([forge.getPRStatus(w.pr), forge.getPRDiff(w.pr)]);
+              pointer = {
+                issue: w.issue,
+                pr: w.pr,
+                ...(status.headRefName !== undefined ? { branch: status.headRefName } : {}),
+                headSha: status.headOid,
+                diffstat: summarizeUnifiedDiffStat(diff),
+              };
+            } catch {
+              // PR/diff read failure specifically degrades to a partial (issue+pr only) pointer
+              // rather than aborting the whole comment — absent fields render as absent in the
+              // digest (#965 AC3), never fabricated.
+              pointer = { issue: w.issue, pr: w.pr };
+            }
+          }
+          await forge.addIssueComment(
+            w.issue,
+            renderCapSplitWipComment({ splitLabel: cfg.labels.split, maxResumes: cfg.worker.maxResumes, attempts }, pointer),
+          );
+        } catch (e) {
+          state.appendEvent("resume-cap-split-comment-failed", { worker: w.name, issue: w.issue, error: String(e) });
+        }
+        continue;
+      }
       // Gated-reentry's label-first/latch-second pattern: a transient label failure leaves the
       // row eligible so the next tick retries; never permanently hide an unlabeled handoff.
       try {
@@ -6081,7 +6157,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         .catch(() => {});
       state.upsertWorker({ ...w, ended_at: iso(), resume_capped: 1 });
       // #295 review round 4 (Codex P1): same as resume-undecidable — preserve the known PR.
-      state.appendEvent("resume-capped", { worker: w.name, issue: w.issue, attempts, ...(w.pr != null ? { pr: w.pr } : {}) });
+      // #965: `split: false` is explicit (not merely absent) so a payload consumer never has to
+      // treat "no split key" (every pre-#965 event) and "split key present but false" as two
+      // different shapes for the same fact.
+      state.appendEvent("resume-capped", { worker: w.name, issue: w.issue, attempts, split: false, ...(w.pr != null ? { pr: w.pr } : {}) });
       resumed.push({ kind: "capped", worker: w.name, issue: w.issue, attempts });
       continue;
     }

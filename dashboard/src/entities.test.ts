@@ -117,6 +117,19 @@ test("foldOpenAttention ignores routine (non-attention) events", () => {
   assert.deepEqual(open, {});
 });
 
+test("#965: foldOpenAttention never opens a resume-capped{split:true} row — the engine handed it to the decomposer, not a person; split:false and the pre-#965 legacy shape (no split key) still do", () => {
+  const split = foldOpenAttention([event(1, "resume-capped", { worker: "w1", issue: 5, attempts: 2, split: true })]);
+  assert.deepEqual(split, {}, "split:true is not an attention item — it must never reach the strip");
+
+  const notSplit = foldOpenAttention([event(2, "resume-capped", { worker: "w1", issue: 6, attempts: 2, split: false })]);
+  assert.equal(Object.keys(notSplit).length, 1);
+  assert.equal(Object.values(notSplit)[0]?.id, 2);
+
+  const legacy = foldOpenAttention([event(3, "resume-capped", { worker: "w1", issue: 7, attempts: 2 })]);
+  assert.equal(Object.keys(legacy).length, 1, "a pre-#965 event (no split key at all) is a genuine needs-human escalation");
+  assert.equal(Object.values(legacy)[0]?.id, 3);
+});
+
 test("foldOpenAttention closes an entry when a matching (source, issue) escalation-resolved arrives", () => {
   const open = foldOpenAttention([
     event(1, "drive-needs-human", { issue: 5, pr: 50 }),

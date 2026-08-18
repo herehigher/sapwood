@@ -36,11 +36,18 @@
  *    by a FRESH `supervisor.dispatch`/`resume()` call this process made (conductor.ts's own
  *    `spawnFactFrom` call sites) — a worker lane genuinely starting or continuing work this
  *    round, as opposed to a crash-adoption kind (`lane-adopted`, `fix-leg-adopted`) that only
- *    reconciles a session resumed by an earlier, now-dead process. */
+ *    reconciles a session resumed by an earlier, now-dead process.
+ *  - `retro-pr-lifecycle` — retro-digest.ts's `RETRO_PR_LIFECYCLE_EVENT_KINDS` (#964): every kind
+ *    that names a PR retro itself opened or later pushed to — `retro-pr-opened`/`retro-pr-updated`.
+ *    NOT `retro-pr-degraded` (that kind never names a PR that exists on the forge — see its own
+ *    doc). This is the ONLY tag whose consumers read the WHOLE ledger, never one round's window: a
+ *    retro PR outlives the round that opened it, so "every PR retro currently has outstanding"
+ *    needs full history, not a start_event_id cursor. */
 export type EventTag =
   | "retro"
   | "pr-touched"
   | "round-artifact"
+  | "retro-pr-lifecycle"
   | "escalation-source:always"
   | "escalation-source:payload"
   | "escalation-source:never"

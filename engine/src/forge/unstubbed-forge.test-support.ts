@@ -45,6 +45,7 @@ const IFORGE_MEMBERS = [
   "getAuthenticatedActor",
   "getCommitsSince",
   "getDefaultBranchChecks",
+  "getFailedCheckSummary",
   "getIssueBody",
   "getIssueComments",
   "getIssueLabels",
