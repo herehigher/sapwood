@@ -94,11 +94,13 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     Worked example: `textBox()`/`CHAR_ADVANCE` (`dashboard/src/hero/hero.test.ts`) turns
     font-size/char-count into a rendered extent without a browser, tied to the real draw path's
     own inputs, plus a cascade/source-order assertion instead of hand-copying which rule wins.
-    Two shapes seen (#353, PR #738 (issue #728), PR #737; #936): (1) the test computes its
+    Three shapes seen (#353, PR #738 (issue #728), PR #737): (1) the test computes its
     expected value outside the thing it's testing instead of reading/pinning it against the real
     source; (2) the test exercises only the easy/nominal instance while the AC's own wording
-    names a combinatorial or boundary case it never constructs. FINE: a literal that IS the
-    specification — a golden value nothing else in the codebase claims to own.
+    names a combinatorial or boundary case it never constructs; (3) the test asserts identity
+    with the very constant that produced the render, so it proves nothing about the render
+    (#936). FINE: a literal that IS the specification — a golden value nothing else in the
+    codebase claims to own.
   - **DECISION (fake-verdict rule, engine side).** Presetting a fake collaborator to already
     return the acceptance criterion's target decision, then asserting against the fake's own
     canned value, proves only that the fake echoes what it was told — the real policy function
@@ -128,12 +130,11 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     wiring has no equivalent shared helper yet.
   - **STYLE (computed-style ACs are VALUE's real-DOM exception).** "Authored" isn't "rendered" —
     a CSS/typography AC needs `registerRealDom()` plus a real `getComputedStyle` read, never a
-    stand-in. Same PR, one round apart (#879, #886 gate② rounds 1, 3): a regex on declaration TEXT
-    proves a rule exists, not that it cascades or wins over a later rule; mounting only the ONE
-    stylesheet under test still gets an inherited `em` wrong, since a partial cascade misses the
-    font-size it resolves off. Mount every stylesheet the element inherits, in production order,
-    and assert the exact value — never `notEqual`/existence, which any non-default value
-    satisfies.
+    stand-in. Seen twice on #879 / PR #886: a regex on declaration TEXT proves a rule exists, not
+    that it cascades or wins over a later rule; mounting only the ONE stylesheet under test still
+    gets an inherited `em` wrong, since a partial cascade misses the font-size it resolves off.
+    Mount every stylesheet the element inherits, in production order, and assert the exact value —
+    never `notEqual`/existence, which any non-default value satisfies.
   - **COLLISION → COVERAGE (any AC/doc's "all/every named set" claim, not only neighbor
     boxes).** `assertNoOverlap`/`boxesOverlap` (`dashboard/src/hero/hero.test.ts`) is sound
     infra, but each PR hand-curates a partial box list, missing neighbors its author forgot —
