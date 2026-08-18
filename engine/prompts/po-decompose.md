@@ -44,16 +44,44 @@ and do not stage intermediate output.
    This authority applies only to children you propose. Existing Ready issues are human-endorsed:
    raise dissent as an advisory concern elsewhere; never withhold, revise, or relitigate their
    why/what here.
-2. Cheap feasibility self-check. This is a filter, not an adjudicator. Omit an obviously
-   infeasible/oversized candidate, turn the unresolved part into an honest remainder, or abstain
-   with `unresolvedContext`. Do not estimate dollars, time, points, or scheduling priority.
+2. Cheap feasibility self-check. This is a filter, not an adjudicator. Size alone is never a
+   reason to discard or remainder a candidate — a candidate that is merely large becomes a
+   container child (see "Leaf, container, remainder" below), never a remainder. Omit a candidate
+   only when it is genuinely infeasible for a reason no split fixes — a missing fact or
+   decision — turn that unresolved part into an honest remainder, or abstain with
+   `unresolvedContext` when even a partition cannot be established. Do not estimate dollars,
+   time, points, or scheduling priority.
 3. Decompose into the smallest dispatchable children current information permits.
 
 At most {{decompose.maxChildren}} children may be returned, counting remainders.
 
-## Granularity
+## Leaf, container, remainder
 
-Hard target for every `ready` child:
+<!-- sapwood:floor:child-kinds -->
+A decomposition child is one of three kinds, chosen by what's missing, not by size: **leaf** —
+acceptance criteria closable inside one PR's own CI plus gate②; **container** — a coarse
+`"kind":"ready"` child whose acceptance section names an executable check-run on `main` instead
+of PR-scoped criteria, `too_large` by contract; **remainder** — reserved for a missing
+fact/decision, never for size alone. Every leaf's/container's `## Why` opens with
+`Cut: <dimension>, because <verification-seam reason>; considered: <alternative>`.
+<!-- /sapwood:floor:child-kinds -->
+
+A container is Ready-able by a human exactly like a leaf, and its acceptance section names an
+executable coarse acceptance check on `main` — a CI check-run to be installed/named, the same
+contract #912 requires of a decomposed parent's own acceptance plan — instead of PR-scoped
+criteria; there is no separate schema value for it. Its `## Why` MUST name which structural
+yardstick predictor (below) fires — that predictor is exactly why the child is a container and
+not a leaf; a coarse-sounding child that fires none of the predictors is not a container, write
+it as a leaf with real PR-scoped criteria instead. **Container ⇒ `too_large` by contract, never
+by reviewer luck**: gate⓪'s outcome 5 treats a container-shaped body as `too_large` on the
+strength of that named predictor alone, and the engine re-splits it (#874) as its own
+generation — a worker never receives a container. **Preferred over a remainder whenever the
+scope is merely large** — a remainder that exists only because nobody sized a coarse check is
+not an honest remainder, it is a container that was never written. A remainder stays reserved
+for scope where neither contract can be written because a fact or decision is missing, never
+because the scope is big — see the remainder rules below.
+
+Hard target for every leaf child:
 
 - Exactly one PR completes it: one issue, one implementation lane, one PR.
 - Its acceptance criteria are verifiable inside that PR's own CI plus gate②. Give it a real
@@ -63,6 +91,14 @@ Hard target for every `ready` child:
   line after their respective headings. Never write CI/suite/typecheck status itself as a criterion
   ("the test suite passes", "CI green") — CI enforces those unconditionally; execution steps
   belong in the child's verification-plan section.
+
+A container child's acceptance section instead names the coarse check: a checkbox item (or a
+small few) whose proof is "check-run `<name>` is green on `main`", with the verification-plan
+section describing how that check-run is installed or read. Never mix PR-scoped criteria into a
+container's acceptance section — a child that tries to be both shapes at once is not minimal in
+either sense; split it instead.
+
+## Granularity
 
 The same structural yardstick gate⓪ uses to trigger an early engine-applied split (#874) applies
 here too — judge every proposed child against it, not just the parent:
@@ -78,7 +114,9 @@ alone.
 <!-- /sapwood:floor:split-yardstick -->
 
 A `ready` child that still fires one of these predictors is not minimal yet — decompose it
-further or turn it into an honest remainder; a cap-split parent's body carrying
+further, or, when nothing about it is actually unresolved, leave it as a container instead of
+discarding it into a remainder (see "Leaf, container, remainder" above — size is never the
+reason a child becomes a remainder). A cap-split parent's body carrying
 `<!-- sapwood:origin:cap-split -->` (#965) is not itself a size argument either way — depth is
 judged fresh, one generation at a time.
 
@@ -93,15 +131,66 @@ Self-check heuristics only (never numeric scheduling claims and never hard gates
 - Minimize file overlap between siblings; when ordering is unavoidable, express it with
   `blockedBy` child indexes.
 - Do not create a catch-all "everything else" remainder.
+- Do not remainder scope that is only large — that is a container's job, not a remainder's.
 
-One-shot completeness is not required. Return every minimal child you can define now, plus
-coarse remainder children for unresolved scope. Partition remainders along every discernible
+One-shot completeness is not required. Return every minimal child you can define now, plus every
+container a merely-large piece of scope calls for, plus coarse remainder children for the scope
+that genuinely has nothing resolvable yet. Partition remainders along every discernible
 boundary, as finely as current information permits. Each remainder names its OWN unresolved
 fact and the information needed. A single remainder blob is legal only when no internal boundary
 is discernible; its unresolved reason must say why. Remainders intentionally carry no
 Verification/Acceptance section: the engine routes them through the existing planless
 `needs-human` path. No child enters Ready automatically; a human moving each card to Ready is
 the why/what endorsement.
+
+## Skeleton-first
+
+When a container's coarse acceptance check is not yet runnable on `main` — greenfield scope, or
+a cross-cutting concern with no existing entry point to hang a check on — make child 0 the
+check's own installation: a thin, real end-to-end slice that lands the check-run RED on `main`
+(asserting the actual target behavior, never a placeholder that always passes), so every later
+cut in this generation has concrete feedback to build against. Install it as a MAIN-ONLY or
+scheduled workflow (`on: push: branches: [main]`, or a cron) — never one that also reports on
+the PR itself — because sapwood's merge gate treats any red check-run reported on a PR's own
+head as CI-red and never merges that PR (`forge.ts`'s `ciRed`, `merge-driver.ts`'s FIXABLE
+routing). Every later child in the generation may then express `blockedBy: [0]`.
+
+Do NOT install a check red for its own sake when one vertical slice already IS the skeleton — a
+small feature landing inside a mature codebase where an existing check, or one leaf's own PR,
+already exercises the real path end to end. Skeleton-first exists for the case where nothing yet
+proves the shape works; it is not a mandatory first child on every decomposition.
+
+When `.github/workflows/**` is itself human-merge-only in the target repo, installing the coarse
+check's workflow file is a human-owned remainder (see "If a `ready` child's acceptance criterion
+would touch a human-merge-only path" below) — child 0 lands everything else the check needs and
+names the workflow file as the piece a human must add directly.
+
+## Cut dimension
+
+Choose the dimension a generation is cut along in this order: first, wherever a leaf's
+acceptance criteria can close inside one PR (a layer cut is legitimate only over layers that
+each carry their own independently verifiable contract — a UI layer with no check of its own is
+not a layer cut, it is prose pretending to be one); then dependency order and file-overlap
+minimization between siblings; then risk-first, giving the riskiest unknown its own child so it
+fails fast; vertical (user-journey) slices are the default cut for user-facing feature work when
+none of the above dominates.
+
+Name the chosen dimension so a human reviewing the set can veto the SHAPE, not just individual
+children, using the `Cut:` grammar pinned above (the "Leaf, container, remainder" floor). The
+engine's coverage comment is rendered entirely from `coverage.mappings[].parentIntent` and
+`coverage.remainders` — there is no free-text field there for this — which is why the `Cut:`
+line lives as the FIRST line of every leaf's and container's `## Why` section instead of the
+coverage comment. A remainder carries no `Cut:` line — it has no verification seam to name yet.
+
+## Constraints as binding cut guidance on re-split
+
+A human vetoes a proposed shape not by hand-editing individual children but by rewriting the
+issue body's own `## Constraints` section (the same optional section `feature.md`/`fix.md`'s
+issue templates already carry between What and Acceptance criteria) and re-applying `split`.
+When the issue you are decomposing already carries a `## Constraints` section — most often a
+container from an earlier generation whose shape a human corrected — read it as BINDING guidance
+for this generation's cut, not as advisory background: a dimension or boundary stated there
+overrides whatever the "Cut dimension" priority order above would otherwise have chosen.
 
 ## If a `ready` child's acceptance criterion would touch a human-merge-only path
 
@@ -151,14 +240,17 @@ End with exactly one sentinel block. Emit the sentinel block as PLAIN TEXT: neve
 Nothing follows the last sentinel. Child indexes are zero-based
 metadata-array indexes.
 
-Successful, possibly partial decomposition:
+Successful, possibly partial decomposition — leaf, container (still `"kind":"ready"` — no
+separate schema value), and remainder side by side:
 
 <<<SAPWOOD_RESULT>>>
-{"outcome":"decomposed","children":[{"title":"First unit","kind":"ready","blockedBy":[]},{"title":"Unresolved adapter boundary","kind":"remainder","blockedBy":[0],"unresolvedContext":{"reason":"The parent does not identify which adapter owns this behavior."},"informationNeeded":"Name the owning adapter and its compatibility contract."}],"coverage":{"mappings":[{"parentIntent":"Implement the independently verifiable core behavior","children":[0]},{"parentIntent":"Resolve and implement the adapter-specific behavior","children":[1]}],"remainders":[1]}}
+{"outcome":"decomposed","children":[{"title":"First unit","kind":"ready","blockedBy":[]},{"title":"Coarse module, re-splittable","kind":"ready","blockedBy":[]},{"title":"Unresolved adapter boundary","kind":"remainder","blockedBy":[0],"unresolvedContext":{"reason":"The parent does not identify which adapter owns this behavior."},"informationNeeded":"Name the owning adapter and its compatibility contract."}],"coverage":{"mappings":[{"parentIntent":"Implement the independently verifiable core behavior","children":[0]},{"parentIntent":"Cover the remaining module surface as one coarse, re-splittable unit","children":[1]},{"parentIntent":"Resolve and implement the adapter-specific behavior","children":[2]}],"remainders":[2]}}
 <<<END_SAPWOOD_RESULT>>>
 <<<BODY>>>
 <<<ISSUE>>>
 ## Why
+Cut: <dimension>, because <verification-seam reason>; considered: <alternative>
+
 ...
 
 ## What
@@ -173,6 +265,29 @@ Successful, possibly partial decomposition:
 <!-- sapwood:verification -->
 
 - Run the focused test and the repository verification commands.
+<<<END_ISSUE>>>
+<<<ISSUE>>>
+## Why
+Cut: <dimension>, because <verification-seam reason>; considered: <alternative>
+
+Container: fires the "<predictor name>" structural yardstick predictor — <one clause on which
+acceptance criteria/subsystems trigger it> — so it is not a leaf.
+
+## What
+A container, too large for one PR by the predictor named above, not blocked on any missing
+fact — gate⓪ judges it `too_large` by contract and the engine re-splits it into its own
+generation (#874).
+
+## Acceptance criteria
+<!-- sapwood:ac -->
+
+- [ ] Check-run `<name-to-install>` is green on `main`
+
+## Verification plan
+<!-- sapwood:verification -->
+
+- Install/confirm the named check-run (see "Skeleton-first" above if it does not exist yet on
+  `main`); the re-split generation closes it out.
 <<<END_ISSUE>>>
 <<<ISSUE>>>
 ## Why

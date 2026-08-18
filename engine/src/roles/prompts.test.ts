@@ -9,14 +9,15 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { defaultPoolPromptPath, defaultPoPromptPath } from "../loop/align.js";
-import { defaultPoDecomposePromptPath } from "../loop/decompose.js";
+import { defaultPoDecomposePromptPath, validateDecomposeOutput } from "../loop/decompose.js";
 import { defaultHarvestPromptPath } from "../loop/harvest.js";
 import { defaultDoctrineTemplatePath } from "../loop/init.js";
 import { allowedToolsForRole, PROXY_ROLE_TOOL_MATRIX } from "../proxy/access.js";
 import { defaultRetroPromptPath, RETRO_ALLOWED_TOOLS, RETRO_DISALLOWED_TOOLS } from "../retro/retro.js";
 import { defaultEngineReviewerPromptPath } from "../review/engine-agent.js";
-import { parseStructuredBlock, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
+import { BODY_BLOCK_END, parseStructuredBlock, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import { defaultArchitectPromptPath } from "./architect.js";
 import {
   ARCHITECT_ALLOWED_TOOLS,
@@ -36,6 +37,14 @@ import { defaultFixPromptPath, defaultPromptPath } from "./worker.js";
 
 function readPrompt(path: string): string {
   return readFileSync(path, "utf8");
+}
+
+// #913 AC4: docs/PLAN.md is a mirror carrier for the child-kinds floor below — same
+// HERE/REPO_ROOT resolution write-inventory.test.ts already uses to locate docs/PLAN.md from an
+// engine/src/** test file, so this doesn't invent a second convention for finding it.
+function defaultPlanDocPath(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return join(here, "..", "..", "..", "docs", "PLAN.md");
 }
 
 // ── #529 (AC-2): declared-session-contract drift — a role's prompt must never assert,
@@ -594,6 +603,70 @@ test("#874 (negative lint): the shipped reviewer prompt no longer recommends a h
   );
 });
 
+test("#913 AC4: po-decompose.md and docs/PLAN.md's #310 paragraph ship the sapwood:floor:child-kinds marker block, byte-equal (whitespace-normalized) — the leaf/container/remainder one-liners and the Cut: grammar are pinned once, mirrored between the prompt and the doc that describes it", () => {
+  assertFloorMirrored("child-kinds", CHILD_KINDS_CARRIERS);
+});
+
+// ── #913: leaf / container / remainder contracts — a container is asserted, not assumed, to be
+// a plain `"kind":"ready"` child under the REAL schema/validator (no schema change); a retired
+// sentence that conflated "oversized" with "hand it to a remainder" must not return. ───────────
+
+test('#913 AC1 (cross-artifact: real parser): a container-shaped child — a coarse, re-splittable acceptance section naming a main-branch check-run, not PR-scoped criteria — validates through the REAL DecomposeOutputMetadataSchema/validateDecomposeOutput as kind:"ready", exactly like a leaf; the shipped po-decompose.md example is what\'s checked, so a regression to a shape the validator rejects reddens here', () => {
+  const prompt = readPrompt(defaultPoDecomposePromptPath());
+  const start = prompt.indexOf(RESULT_BLOCK_START);
+  assert.ok(start >= 0, "po-decompose.md must ship at least one example sentinel block");
+  const bodyEnd = prompt.indexOf(BODY_BLOCK_END, start);
+  assert.ok(bodyEnd >= 0, "po-decompose.md's first (decomposed) example must carry a BODY block");
+  const span = prompt.slice(start, bodyEnd + BODY_BLOCK_END.length);
+
+  const result = validateDecomposeOutput(span, 8);
+  assert.equal(result.ok, true, `expected the shipped decompose example to validate${result.ok ? "" : `: ${result.reason}`}`);
+  if (!result.ok || result.outcome !== "decomposed") throw new Error("expected a decomposed outcome with children");
+
+  // index 0: leaf; index 1: container. Both come back "ready" — there is no separate "container"
+  // schema value, which is AC1's claim, checked here rather than assumed.
+  assert.equal(result.children[0]?.kind, "ready", 'the leaf child must validate as kind:"ready"');
+  assert.equal(result.children[1]?.kind, "ready", 'the container child must ALSO validate as kind:"ready" — no schema change');
+  assert.equal(result.children[2]?.kind, "remainder", "the third example child stays a remainder");
+});
+
+test("#913 (negative lint): po-decompose.md no longer treats 'oversized' as a reason to fall back to a remainder — a merely-large candidate becomes a container, never a discard", () => {
+  const body = readPrompt(defaultPoDecomposePromptPath());
+  assert.doesNotMatch(
+    body,
+    /infeasible\/oversized candidate, turn the unresolved part into an honest remainder/,
+    "the retired conflation of 'oversized' with 'hand it to a remainder' must not reappear",
+  );
+  assert.doesNotMatch(
+    body,
+    /decompose it\s+further or turn it into an honest remainder/,
+    "a child that merely fires the size yardstick must not be routed straight to a remainder — see the container contract",
+  );
+});
+
+test("#913 (negative lint): verification-plan-reviewer.md's needs_human outcome no longer reserves itself for a single narrow case — a second named reason (an undecided decision) now shares the outcome alongside the human-merge-only prerequisite", () => {
+  const body = readPrompt(defaultVerificationPlanReviewerPromptPath());
+  assert.doesNotMatch(
+    body,
+    /Reserve this for the narrow case above/,
+    "the retired single-reason framing for needs_human must not reappear",
+  );
+});
+
+test("#913: po-decompose.md's Constraints-as-cut-guidance claim matches the real issue templates (cross-artifact) — feature.md/fix.md actually carry an optional ## Constraints section between What and Acceptance criteria", () => {
+  const templatesDir = join(dirname(defaultPoDecomposePromptPath()), "issue-templates");
+  for (const file of ["feature.md", "fix.md"]) {
+    const text = readFileSync(join(templatesDir, file), "utf8");
+    const whatIdx = text.indexOf("## What");
+    const constraintsIdx = text.indexOf("## Constraints");
+    const acIdx = text.indexOf("## Acceptance criteria");
+    assert.ok(
+      whatIdx >= 0 && constraintsIdx > whatIdx && acIdx > constraintsIdx,
+      `${file}: expected an optional ## Constraints section between What and Acceptance criteria`,
+    );
+  }
+});
+
 // ── #653: gate⓪ contract-vs-discussion veto duty — both comment-reading judgment prompts ──────
 //
 // PR #651 round 1's incident: gate⓪ roles already hold issue-comment read tools (PROXY_ROLE_TOOL_
@@ -632,6 +705,16 @@ const EVIDENCE_TIER_CARRIERS: Readonly<Record<string, string>> = {
 const SPLIT_YARDSTICK_CARRIERS: Readonly<Record<string, string>> = {
   "verification-plan-reviewer.md": defaultVerificationPlanReviewerPromptPath(),
   "po-decompose.md": defaultPoDecomposePromptPath(),
+};
+
+// #913 AC4: the leaf/container/remainder one-line definitions and the `Cut:` grammar are pinned
+// in ONE marker block, mirrored between the AUTHOR (po-decompose.md) and docs/PLAN.md's own
+// #310 paragraph — durable knowledge and the prompt that implements it must never silently
+// diverge (docs/REVIEW-DOCTRINE.md PROSE-PIN). Note this carrier set spans a prompt AND a doc,
+// unlike every other floor here, which is why defaultPlanDocPath exists above.
+const CHILD_KINDS_CARRIERS: Readonly<Record<string, string>> = {
+  "po-decompose.md": defaultPoDecomposePromptPath(),
+  "docs/PLAN.md": defaultPlanDocPath(),
 };
 
 function extractFloor(body: string, floorName: string): string {

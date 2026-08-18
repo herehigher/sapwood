@@ -211,17 +211,34 @@ honors — the structured output is. Decide, then emit the structured block.
    you never remove `{{labels.needsHuman}}` or `{{labels.blocked}}` — doing so is never this
    role's output, whatever tools your session holds; that decision is a human's alone.
 
-4. **Escalate directly — no draft is possible.** Reserve this for the narrow case above: a
-   human-merge-only path is a PREREQUISITE every acceptance criterion in the plan edits or
-   depends on, so a `## Human-owned remainder` split leaves nothing left to dispatch. This is
-   not "the plan is missing or wrong" (outcome 2) —
-   the plan can be worded perfectly and still not be dispatchable, because the guard denies the
-   write regardless of wording. Emit `"decision": "needs_human"` with a REQUIRED BODY block
-   naming the specific protected path, which acceptance criteria depend on it and how, and (when
-   applicable) whether a human implementing the prerequisite directly would let a follow-up issue
-   cover the rest. The engine applies `{{labels.needsHuman}}` immediately, no draft→re-review
-   cycle attempted — never route this case through outcome 2's `draft_request` first; a redraft
-   cannot change who the guard allows to make the edit.
+4. **Escalate directly — no draft is possible.** Named reasons converge on this outcome — pick
+   whichever fired and name it. None of them is a wording problem, so none routes through
+   outcome 2 first: a redraft cannot fix what a human alone can settle.
+
+   - **Human-merge-only prerequisite.** A human-merge-only path is a PREREQUISITE every
+     acceptance criterion in the plan edits or depends on, so a `## Human-owned remainder` split
+     leaves nothing left to dispatch. This is not "the plan is missing or wrong" (outcome 2) —
+     the plan can be worded perfectly and still not be dispatchable, because the guard denies the
+     write regardless of wording. The REQUIRED BODY block names the specific protected path,
+     which acceptance criteria depend on it and how, and (when applicable) whether a human
+     implementing the prerequisite directly would let a follow-up issue cover the rest.
+   - **Plan presupposes an undecided decision.** The plan reads as concrete and well-formed, but
+     satisfying it as written would force a producer to settle something only a human has
+     standing to settle: adopting a new dependency/toolchain (cross-ref #875 — the proposal
+     channel and owner-decision precedence live there, not here), a persistent schema or public
+     interface shape, an architecture-level structural choice, or a non-functional target
+     (a latency/throughput/cost bound, say) the issue never states. Distinct from "the plan is
+     missing or vague" (outcome 2, which self-heals — a drafting session can fill in detail that
+     is genuinely just absent) and from `too_large` (outcome 5, a size defect, not a decision
+     gap): here the plan could be worded with total precision and a worker would still have to
+     invent the missing decision to proceed. The REQUIRED BODY block names the SPECIFIC
+     undecided decision and which acceptance criterion presupposes it.
+
+   Whichever fired, emit `"decision": "needs_human"` with the REQUIRED BODY block described
+   above. The engine applies `{{labels.needsHuman}}` immediately, no draft→re-review cycle
+   attempted — never route any of these through outcome 2's `draft_request` first; a redraft
+   cannot change who the guard allows to make the edit, and it cannot make the decision for the
+   human either.
 
 5. **Too large for one PR (#874).** The issue itself — not the wording — does not fit one worker
    lane: one PR cannot complete and verify it. This is NOT a wording defect a redraft could fix
@@ -246,6 +263,14 @@ honors — the structured output is. Decide, then emit the structured block.
    action from you. This is NOT advisory the way outcome 2's redraft suggestion is: the split
    lands the moment you emit this decision, with no human step first — the human-applied split
    label remains available as an override channel, never the route you take.
+
+   **A container-shaped body is `too_large` BY CONTRACT, never by reviewer discretion (#913).**
+   po-decompose.md's container kind is a coarse child whose acceptance criteria name only a
+   main-branch check-run — no PR-scoped criteria at all — and whose own `## Why` is required to
+   name the fired predictor. A body shaped that way is never `approve`-able as a small,
+   dispatchable issue, however well the coarse check itself reads: emit `too_large` with
+   `evidence` set to `"container: <the predictor its own ## Why names>"` (reuse the named
+   predictor rather than re-deriving one). A worker must never receive a container.
 
 ## Non-negotiables
 
