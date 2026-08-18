@@ -171,6 +171,12 @@ test("AC3: --sap-fill-outline's literal light-theme hex is pinned to --sap-text'
  * assertion) is enumerated here explicitly — adding a new one without updating this list fails
  * LOUDLY, forcing the same choice every existing site already made: give it
  * `--sap-fill-outline` or name why it's exempt.
+ *
+ * Keyed by the site's own CONTENT, not its line number — a `file:lineNumber` key breaks on any
+ * unrelated edit above the site (a comment, an added rule), which is churn this test must not
+ * generate. A CSS declaration alone can repeat verbatim across sibling rules (e.g. the two vendor
+ * thumb pseudo-selectors both declare `background: var(--sap-fill);`), so a CSS site's key
+ * prefixes its own enclosing selector; a TS/TSX site's own statement text is already unique.
  */
 test("AC3 COVERAGE: every production var(--sap-fill) paint site is on record", () => {
   const srcDir = new URL(".", import.meta.url).pathname;
@@ -180,30 +186,38 @@ test("AC3 COVERAGE: every production var(--sap-fill) paint site is on record", (
     if (!/\.(ts|tsx|css)$/.test(file)) continue;
     const text = readFileSync(file, "utf8");
     const rel = file.slice(srcDir.length);
-    text.split("\n").forEach((line, i) => {
-      if (line.includes("var(--sap-fill)")) sites.push(`${rel}:${i + 1}`);
-    });
+    const isCss = file.endsWith(".css");
+    let selector = "";
+    for (const rawLine of text.split("\n")) {
+      const line = rawLine.trim();
+      if (isCss) {
+        const opensRule = line.match(/^([^{}]+)\{$/);
+        if (opensRule) selector = opensRule[1]!.trim();
+        else if (line === "}") selector = "";
+      }
+      if (line.includes("var(--sap-fill)")) sites.push(isCss ? `${rel}:${selector}:${line}` : `${rel}:${line}`);
+    }
   }
   // Every known production consumer, each verified elsewhere to carry the --sap-fill-outline
-  // compensation (or, for `ActivityFeed.tsx:86`, being the very declaration OF that compensation):
+  // compensation (or, for the dotBorder line, being the very declaration OF that compensation):
   // - panels.css .cost-bar-fill (stroke) — App.test.tsx's "AC2" + "AC3" STYLE tests.
   // - panels.css ::-webkit-slider-thumb / ::-moz-range-thumb (background) — `border: 1px solid
   //   var(--sap-fill-outline)` on the SAME two rules; a real browser's
   //   `getComputedStyle(el, pseudo)` cannot query a vendor slider pseudo-element at all
   //   (`shots.spec.ts`'s own documented Chromium limitation) — this file's own source-text
   //   presence is the achievable ceiling, same posture as that file's own thumb-rule check.
-  // - ActivityFeed.tsx:82 (dotColor) + :86 (dotBorder — a companion string comparison, not a
-  //   second paint site) — ActivityFeed.test.tsx's own markup test.
+  // - ActivityFeed.tsx's dotColor + dotBorder (a companion string comparison, not a second paint
+  //   site) — ActivityFeed.test.tsx's own markup test.
   // - hero/stage.tsx dropletFill's "sap" role + the .hero-pool-chip inline style — hero.css's
   //   `.hero-droplet-shape`/`.hero-pool-chip rect` outline rules, App.test.tsx's AC3 STYLE test.
   const knownSites = [
-    "panels.css:301",
-    "panels.css:623",
-    "panels.css:631",
-    "components/ActivityFeed.tsx:82",
-    "components/ActivityFeed.tsx:86",
-    "hero/stage.tsx:719",
-    "hero/stage.tsx:1045",
+    "panels.css:.cost-bar-fill:stroke: var(--sap-fill);",
+    "panels.css:.transport-scrub::-webkit-slider-thumb:background: var(--sap-fill);",
+    "panels.css:.transport-scrub::-moz-range-thumb:background: var(--sap-fill);",
+    'components/ActivityFeed.tsx:const dotColor = attention ? "var(--rust)" : glyph === true ? "var(--moss)" : "var(--sap-fill)";',
+    'components/ActivityFeed.tsx:const dotBorder = dotColor === "var(--sap-fill)" ? "1px solid var(--sap-fill-outline)" : "none";',
+    'hero/stage.tsx:return "var(--sap-fill)";',
+    'hero/stage.tsx:style={{ fill: "var(--sap-fill)" }}',
   ];
   assert.deepEqual(
     sites.sort(),
