@@ -1,3 +1,4 @@
+import { Settings } from "lucide-react";
 import { useEffect, useState } from "react";
 import { restoreTheme, type ThemeOverride, toggleTheme } from "../theme.ts";
 
@@ -57,20 +58,6 @@ function ThemeGlyph() {
   );
 }
 
-function GearGlyph() {
-  return (
-    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-      <circle cx="8" cy="8" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.5" />
-      <path
-        d="M8 1.5 V3.3 M8 12.7 V14.5 M14.5 8 H12.7 M3.3 8 H1.5 M12.7 3.3 L11.4 4.6 M4.6 11.4 L3.3 12.7 M12.7 12.7 L11.4 11.4 M4.6 4.6 L3.3 3.3"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
 const THEME_LABEL: Record<"system" | "sapwood" | "heartwood", string> = {
   system: "theme: following system — click for light",
   sapwood: "theme: light (sapwood) — click for dark",
@@ -115,7 +102,7 @@ export function railContent(themeKey: "system" | "sapwood" | "heartwood", onTogg
         <ThemeGlyph />
       </button>
       <button type="button" className="icon-rail-item icon-rail-config" title="config" aria-label="open config" onClick={onOpenConfig}>
-        <GearGlyph />
+        <Settings size={16} aria-hidden="true" />
       </button>
     </nav>
   );
