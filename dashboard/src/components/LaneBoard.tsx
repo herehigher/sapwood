@@ -1,5 +1,5 @@
 import type { Lane } from "../api/types.ts";
-import { laneStateCaption } from "../copy.ts";
+import { calibrationClause, laneStateCaption } from "../copy.ts";
 import type { EntityTitles } from "../entities.ts";
 import { formatElapsed, formatUsd } from "../format.ts";
 import { modelEffortCaption } from "../hero/stage.tsx";
@@ -21,9 +21,15 @@ export function laneHeadStat(config: Record<string, unknown> | null | undefined,
  *  `estCostUsd` is never silently dropped (the pre-#890 behavior: any lane with `costUsd: null`
  *  read as "—, settles when the lane ends" even when the engine already had a live estimate).
  *  `costUsd` still wins once settled — an est figure is a placeholder for the not-yet-real
- *  number, never shown alongside its own settled replacement. */
+ *  number, never shown alongside its own settled replacement.
+ *
+ *  #927 gate② finding [1] (ac2-calibration-dropped): once settled, `calibrationClause`
+ *  (`copy.ts` — the SAME gate the reclaim-done feed sentence already uses, never a second
+ *  hand-copied implementation) appends the recorded est→real reading when `lane.estCostUsd`/
+ *  `costEstimated` name a known-real provenance — `costEstimated === false` exactly, absent for
+ *  a live card today (no live overlay carries it), so this is a no-op there. */
 export function laneCostText(lane: Lane): string {
-  if (lane.costUsd !== null) return formatUsd(lane.costUsd);
+  if (lane.costUsd !== null) return `${formatUsd(lane.costUsd)}${calibrationClause(lane)}`;
   if (lane.estCostUsd !== null) return `${formatUsd(lane.estCostUsd)} est`;
   return "—, settles when the lane ends";
 }
@@ -87,6 +93,11 @@ export interface LaneBoardProps {
    *  `resolveFixCap`'s (App.tsx) own unreadable-config fallback, so a caller that never wires this
    *  through still renders a sane cap rather than an undefined one. */
   fixCap?: number;
+  /** #927 (§729 remainder, D35; Q4 owner ruling): drives the panel-head's REPLAYED chip —
+   *  `"live"` (the default, so every pre-#927 caller keeps its existing markup unchanged) renders
+   *  nothing extra; `"replayed"` (App.tsx, while replaying/`?demo`) labels the board so a reader
+   *  never mistakes a reconstructed narrative for a live snapshot. */
+  source?: "live" | "replayed";
   now?: Date;
 }
 
@@ -173,6 +184,7 @@ export function LaneBoard({
   workerBudgetUsdSoft = null,
   config = null,
   fixCap = 2,
+  source = "live",
   now,
 }: LaneBoardProps) {
   const clock = now ?? new Date();
@@ -208,6 +220,7 @@ export function LaneBoard({
       <div className="panel-head">
         <h2>lanes</h2>
         {headStat && <span className="data muted panel-head-stat">{headStat}</span>}
+        {source === "replayed" && <span className={`lane-board-replayed-chip${headStat ? "" : " panel-head-stat"}`}>REPLAYED</span>}
       </div>
       <div className="lane-board-grid">
         {slots.map((lane, i) =>

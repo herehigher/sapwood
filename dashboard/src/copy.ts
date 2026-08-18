@@ -129,8 +129,13 @@ function ceilingReasonWord(reason: unknown): "wall-clock" | "daily-budget" | nul
  *  and `costUsd`'s OWN provenance flag, `costEstimated`. The clause labels `costUsd` "real",
  *  so it renders ONLY when that label is actually true — `costEstimated === false` (a
  *  provider-reported figure, known-real). Absent or `true` (unknown or itself an estimate)
- *  renders no clause at all — never a fabricated "real", and never an "est → est". */
-function calibrationClause(payload: Payload): string {
+ *  renders no clause at all — never a fabricated "real", and never an "est → est".
+ *
+ *  Exported for #927's `LaneBoard.tsx#laneCostText`, which appends the SAME clause to a
+ *  settled lane card's cost text — one calibration-reading rule for the feed sentence and the
+ *  card, never a second hand-copied implementation of this exact gate. `Payload` (`Record<string,
+ *  unknown>`) accepts a `Lane`-shaped object structurally; no adapter needed. */
+export function calibrationClause(payload: Payload): string {
   const est = payload.estCostUsd;
   const real = payload.costUsd;
   if (typeof est !== "number" || typeof real !== "number" || payload.costEstimated !== false) return "";

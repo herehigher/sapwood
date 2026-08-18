@@ -20,6 +20,7 @@ test.after(() => unregisterRealDomEager());
 import {
   App,
   appContent,
+  deriveReplayedLanes,
   loadInspectorRoundEvents,
   resolveActiveFold,
   resolveFixCap,
@@ -33,12 +34,15 @@ import { demoFixtureQuery, eventsQuery, loopStateQuery, MAX_EVENT_HISTORY, round
 import type { LoopEvent, Round, SpendRow } from "./api/types.ts";
 import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
+import { laneCostText, laneStateChipText } from "./components/LaneBoard.tsx";
 import { NeedsAttention } from "./components/NeedsAttention.tsx";
 import { parseColorTokens } from "./contrast.ts";
 import { buildClosedRoundCostPanel } from "./cost-panel.ts";
+import { DEMO_SOURCE } from "./demo/source.ts";
 import type { DemoBundle } from "./demo/types.ts";
 import { type DomainEvent, toDomainEvent } from "./domain-event.ts";
 import type { EntityTitles } from "./entities.ts";
+import { formatElapsed } from "./format.ts";
 import { Hero } from "./hero/Hero.tsx";
 import { foldEvents, type HeroState, initialHeroState } from "./hero/state.ts";
 import { foldReplay, initialReplayState } from "./replay/reducer.ts";
@@ -294,6 +298,90 @@ test("#890: resolveWorkerBudgetUsdSoft reads the nested worker.budgetUsdSoft pat
   assert.equal(resolveWorkerBudgetUsdSoft(undefined), null);
   assert.equal(resolveWorkerBudgetUsdSoft({ worker: {} }), null);
   assert.equal(resolveWorkerBudgetUsdSoft({ worker: { budgetUsdSoft: "12" } }), null, "a non-number value is never coerced");
+});
+
+// #927 AC2 (§729 remainder, D35; Q4 owner ruling): `deriveReplayedLanes`'s output fed through the
+// SAME rendering helpers `LaneBoard.tsx` itself calls (`laneStateChipText`/`laneCostText`/
+// `formatElapsed`) — proving the exact card fields {state, pr, cost text, elapsed} the fold
+// produces at each cursor, not just the raw `LaneView` fields `hero.test.ts`'s own reducer tests
+// already pin.
+test("#927 AC2: deriveReplayedLanes yields the card's state/pr/cost-text/elapsed fields exactly, at each cursor of dispatched -> reclaim-done(DRIVING) -> merged", () => {
+  const T0 = "2026-08-10T09:00:00.000Z";
+  const dispatchEv: DomainEvent = { known: false, id: 1, ts: T0, kind: "dispatched", payload: { worker: "w1", issue: 94 } };
+  const reclaimEv: DomainEvent = {
+    known: false,
+    id: 2,
+    ts: "2026-08-10T09:10:00.000Z",
+    kind: "reclaim-done",
+    payload: { worker: "w1", issue: 94, next: "DRIVING", costUsd: 1.1, estCostUsd: 1.05, costEstimated: false },
+  };
+  const mergedEv: DomainEvent = {
+    known: false,
+    id: 3,
+    ts: "2026-08-10T09:20:00.000Z",
+    kind: "merged",
+    payload: { worker: "w1", issue: 94, pr: 96 },
+  };
+
+  const afterDispatch = foldEvents(initialHeroState(1), [dispatchEv]).state;
+  const cardsAfterDispatch = deriveReplayedLanes(afterDispatch);
+  assert.equal(cardsAfterDispatch.length, 1, "the dispatched lane must occupy exactly one card");
+  const card1 = cardsAfterDispatch[0]!;
+  assert.equal(card1.pr, null, "no PR-bearing event has folded yet");
+  assert.equal(laneStateChipText(card1, 2), "writing", "a freshly-dispatched lane reads the plain 'writing' caption");
+  assert.equal(laneCostText(card1), "—, settles when the lane ends", "no reclaim yet — est never renders while the lane is running");
+  assert.equal(formatElapsed(card1.startedAt, new Date("2026-08-10T09:05:00.000Z")), "5m", "elapsed vs the given asOf");
+
+  const afterReclaim = foldEvents(initialHeroState(1), [dispatchEv, reclaimEv]).state;
+  const cardsAfterReclaim = deriveReplayedLanes(afterReclaim);
+  assert.equal(cardsAfterReclaim.length, 1);
+  const card2 = cardsAfterReclaim[0]!;
+  assert.equal(card2.pr, null, "reclaim-done here carries no pr field — still unknown at this cursor");
+  assert.equal(laneStateChipText(card2, 2), "PR under review", "the DRIVING transition reads the driving caption");
+  assert.equal(
+    laneCostText(card2),
+    "$1.10 · est $1.05 → real $1.10",
+    "the settled figure carries the recorded est→real calibration reading (gate② finding [1]) — the historical estimate never leaks into the card's live-est BAR though (asserted separately below)",
+  );
+  assert.equal(card2.estCostUsd, 1.05, "the recorded estimate reaches the card for text purposes");
+  assert.equal(card2.costEstimated, false, "the recorded provenance reaches the card too");
+  assert.equal(
+    formatElapsed(card2.startedAt, new Date("2026-08-10T09:15:00.000Z")),
+    "15m",
+    "elapsed still measures from the ORIGINAL dispatch clock, not reclaim-done's own ts",
+  );
+
+  // `merged` releases the lane (matches live's own `activeWorkers()` exclusion) — the card is
+  // gone, but the droplet's own PR is now known.
+  const afterMerged = foldEvents(initialHeroState(1), [dispatchEv, reclaimEv, mergedEv]).state;
+  assert.deepEqual(deriveReplayedLanes(afterMerged), [], "a handoff/merge frees the lane — no card left to show");
+  assert.equal(
+    afterMerged.droplets.find((d) => d.issue === 94)?.pr,
+    96,
+    "the PR itself is now known, even though the released lane no longer carries a card",
+  );
+});
+
+// #927 gate② finding [2] (replayed-pr-worker-alias): `Droplet.lane` is never cleared once set —
+// merged/handoff/trunk all leave it standing — so matching a card's PR by `d.lane === l.worker`
+// (the pre-fix behavior) could return a STALE droplet from a worker name reused for a later,
+// unrelated issue. `deriveReplayedLanes` now matches by `d.issue === l.issue` instead — exact,
+// since `hero.droplets` is keyed by issue (`hero/state.ts`'s own `Draft.droplets: Map<number,
+// Droplet>` doc) — immune to the alias regardless of how worker names get reused.
+test("#927 gate② finding [2]: a worker name reused for a later issue never shows the earlier, merged issue's stale PR on the new card", () => {
+  const events: DomainEvent[] = [
+    { known: false, id: 1, ts: "2026-08-10T09:00:00.000Z", kind: "dispatched", payload: { worker: "w1", issue: 94 } },
+    { known: false, id: 2, ts: "2026-08-10T09:10:00.000Z", kind: "reclaim-done", payload: { worker: "w1", issue: 94, next: "DRIVING" } },
+    { known: false, id: 3, ts: "2026-08-10T09:15:00.000Z", kind: "merged", payload: { worker: "w1", issue: 94, pr: 96 } },
+    // The SAME worker name, "w1", picks up a brand-new, unrelated issue — #94's own droplet
+    // (now `at: "trunk"`, `pr: 96`) still carries `lane: "w1"` from its own original dispatch.
+    { known: false, id: 4, ts: "2026-08-10T09:20:00.000Z", kind: "dispatched", payload: { worker: "w1", issue: 200 } },
+  ];
+  const state = foldEvents(initialHeroState(1), events).state;
+  const cards = deriveReplayedLanes(state);
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0]!.issue, 200);
+  assert.equal(cards[0]!.pr, null, "issue #200 has no PR-bearing event of its own — must never inherit #94's stale PR #96");
 });
 
 // ── PR #900 gate② finding [1] (attention-strip-wiring-proof): #893's newly-mapped attention
@@ -1656,6 +1744,22 @@ test("resolveActiveFold: replay mode with NO position yet (round still loading) 
 const DISTINGUISHABLE_LANE_ISSUE = 424242;
 const DISTINGUISHABLE_WORKER = "w-distinguishable-live-only";
 const DISTINGUISHABLE_CONFIG_OWNER = "distinguishable-live-only-owner";
+// #927: the replay fold's own distinguishable lane — separate identifiers from the LIVE snapshot
+// above, so a test can prove replay pulls from `activeHero` (the shared fold), never `loop.data`.
+const DISTINGUISHABLE_REPLAY_ISSUE = 434343;
+const DISTINGUISHABLE_REPLAY_WORKER = "w-distinguishable-replayed";
+
+function heroWithDistinguishableReplayedLane(): HeroState {
+  const base = initialHeroState(1);
+  const lane = {
+    ...base.lanes[0]!,
+    worker: DISTINGUISHABLE_REPLAY_WORKER,
+    issue: DISTINGUISHABLE_REPLAY_ISSUE,
+    phase: "writing" as const,
+    startedAt: "2026-08-10T10:00:00Z",
+  };
+  return { ...base, lanes: [lane] };
+}
 
 function loopDataWithDistinguishableLiveSnapshot() {
   return {
@@ -1681,27 +1785,56 @@ function loopDataWithDistinguishableLiveSnapshot() {
   };
 }
 
-test("#766 gate② finding [2]: LaneBoard's REAL App-wired distinguishable live lane never renders while replaying — the live-only panel replaces it", () => {
-  const vm = minimalAppViewModel({ mode: "replay", loop: { data: loopDataWithDistinguishableLiveSnapshot(), isPending: false } });
+// #927 (§729 remainder, D35; Q4 owner ruling) supersedes this test's original #766 shape: the
+// board is no longer wrapped in `<LiveOnly>` — it replays a lane NARRATIVE from the shared fold
+// instead. The regression this still guards is the same one #766 named: the LIVE snapshot
+// (`loop.data.lanes.items`) must never leak into a replayed view; only now the honest replacement
+// is the fold's OWN lane (`activeHero`, via `deriveReplayedLanes`), not a greyed placeholder.
+test("#927 (supersedes #766 finding [2]): while replaying, the REAL App-wired distinguishable LIVE lane never renders in the lane board — the fold's own REPLAYED lane and chip show instead", () => {
+  const vm = minimalAppViewModel({
+    mode: "replay",
+    loop: { data: loopDataWithDistinguishableLiveSnapshot(), isPending: false },
+    activeHero: heroWithDistinguishableReplayedLane(),
+  });
   const html = renderToStaticMarkup(appContent(vm));
+  // Scoped to the lane board's own subtree (same isolation pattern the #890 est-tail test above
+  // uses) — `activeHero` also drives the Hero STAGE unconditionally of mode (§6: real events
+  // always animate the loop), so a whole-page search would find the replay fold's droplet there
+  // regardless of whether LaneBoard itself is wired correctly.
+  const laneSectionHtml = html.slice(html.indexOf('aria-label="lanes"'), html.indexOf('id="cost"'));
 
   assert.doesNotMatch(
-    html,
+    laneSectionHtml,
     new RegExp(String(DISTINGUISHABLE_LANE_ISSUE)),
-    "the live lane's distinguishable issue number must never render in replay",
+    "the LIVE lane's distinguishable issue number must never render in the replayed lane board",
   );
-  assert.doesNotMatch(html, new RegExp(DISTINGUISHABLE_WORKER), "the live lane's distinguishable worker id must never render in replay");
-  assert.match(html, /live only/, "the LaneBoard slot must show the greyed live-only panel instead");
-
-  // Sanity: the SAME view model in LIVE mode DOES render the distinguishable lane — proves the
-  // fixture itself is real (a broken fixture that never renders anything would pass the assertions
-  // above for the wrong reason).
-  const liveHtml = renderToStaticMarkup(appContent({ ...vm, mode: "live" } as unknown as Parameters<typeof appContent>[0]));
+  assert.doesNotMatch(
+    laneSectionHtml,
+    new RegExp(DISTINGUISHABLE_WORKER),
+    "the LIVE lane's distinguishable worker id must never render in the replayed lane board",
+  );
   assert.match(
-    liveHtml,
-    new RegExp(String(DISTINGUISHABLE_LANE_ISSUE)),
-    "live mode must actually render the lane — proves this is a real regression guard",
+    laneSectionHtml,
+    new RegExp(String(DISTINGUISHABLE_REPLAY_ISSUE)),
+    "the replay fold's OWN lane must render — proving the board reads `activeHero`, not `loop.data`",
   );
+  assert.match(laneSectionHtml, /REPLAYED/, "the panel-head must carry the REPLAYED chip while replaying");
+
+  // Sanity: the SAME view model in LIVE mode's lane board renders the distinguishable LIVE lane,
+  // and never the replay fold's own — proves both fixtures are real, not a coincidence.
+  const liveHtml = renderToStaticMarkup(appContent({ ...vm, mode: "live" } as unknown as Parameters<typeof appContent>[0]));
+  const liveLaneSectionHtml = liveHtml.slice(liveHtml.indexOf('aria-label="lanes"'), liveHtml.indexOf('id="cost"'));
+  assert.match(
+    liveLaneSectionHtml,
+    new RegExp(String(DISTINGUISHABLE_LANE_ISSUE)),
+    "live mode must actually render the lane in the board — proves this is a real regression guard",
+  );
+  assert.doesNotMatch(
+    liveLaneSectionHtml,
+    new RegExp(String(DISTINGUISHABLE_REPLAY_ISSUE)),
+    "live mode's lane board must never render the replay fold's lane",
+  );
+  assert.doesNotMatch(liveLaneSectionHtml, /REPLAYED/, "live mode must never carry the REPLAYED chip");
 });
 
 test("#766 gate② finding [2]: ConfigDrawer's REAL App-wired distinguishable live config never renders while replaying — the live-only panel replaces it", () => {
@@ -1727,21 +1860,24 @@ test("#766 gate② finding [2]: ConfigDrawer's REAL App-wired distinguishable li
   );
 });
 
-// Markup-signature proof, complementing the distinguishable-value tests above: LaneBoard's own
-// `aria-label="lanes"` and ConfigDrawer's own `aria-label="config"` — each component's own
-// rendered signature, not just its data — are absent from the RENDERED replay markup too. (A
-// `findByType` walk of the pre-render JSX tree would find these elements regardless of mode,
-// since `<LiveOnly>`'s `children` prop is constructed by JSX before `LiveOnly` ever decides
-// whether to use it — `renderToStaticMarkup` is what actually reflects `LiveOnly`'s runtime
-// branching, same reasoning `LiveOnly.test.tsx` itself relies on.)
-test("#766 gate② finding [2]: neither LaneBoard's nor ConfigDrawer's own rendered signature (aria-label) appears anywhere in the replay markup", () => {
+// Markup-signature proof, complementing the distinguishable-value tests above: ConfigDrawer's own
+// `aria-label="config"` — its rendered signature, not just its data — is absent from the RENDERED
+// replay markup too. (A `findByType` walk of the pre-render JSX tree would find these elements
+// regardless of mode, since `<LiveOnly>`'s `children` prop is constructed by JSX before `LiveOnly`
+// ever decides whether to use it — `renderToStaticMarkup` is what actually reflects `LiveOnly`'s
+// runtime branching, same reasoning `LiveOnly.test.tsx` itself relies on.)
+//
+// #927 (§729 remainder, D35; Q4 owner ruling): LaneBoard's own `aria-label="lanes"` is no longer
+// part of this guard — the board itself replays now (`<LiveOnly>` only wraps ConfigDrawer), so its
+// aria-label legitimately DOES appear while replaying; asserted as a positive fact below instead.
+test("#766 gate② finding [2] (ConfigDrawer half — LaneBoard's now covered by #927 above): ConfigDrawer's own rendered signature never appears while replaying; LaneBoard's own now legitimately does", () => {
   const vm = minimalAppViewModel({
     mode: "replay",
     configOpen: true,
     loop: { data: loopDataWithDistinguishableLiveSnapshot(), isPending: false },
   });
   const html = renderToStaticMarkup(appContent(vm));
-  assert.doesNotMatch(html, /aria-label="lanes"/, "LaneBoard's own aria-label must not render while replaying");
+  assert.match(html, /aria-label="lanes"/, "LaneBoard's own aria-label DOES render while replaying (#927)");
   assert.doesNotMatch(html, /aria-label="config"/, "ConfigDrawer's own aria-label must not render while replaying");
 });
 
@@ -1998,6 +2134,124 @@ test("#880: LIVE mode's ROUND N panel is populated by the real useLastClosedRoun
   }
 });
 
+// #927 AC3 (§729 remainder, D35; Q4 owner ruling), WIRING: real `LiveApp` (never `?demo`), stubbed
+// `/api/*` fetch, actually clicking into a closed round and back — proving §11 mode purity holds
+// through the real production entry point, not a hand-built `appContent` view model. LIVE shows
+// the live overlay (est bar, the live lane's own PR); selecting the closed round swaps the WHOLE
+// board over — REPLAYED chip on, the LIVE snapshot's own distinguishable values gone; clicking
+// back to LIVE restores the live overlay — never a moment mixing the two. (Reconstructing the
+// replayed narrative's OWN content — settled cost, PR-once-folded — is AC1/AC2's job; this harness
+// has no working DOM `input`-event simulation to scrub a closed round's transport to a folded
+// cursor from a real click, so AC3 stays scoped to what a click-driven mount CAN prove: the mode
+// swap itself, both directions.)
+test("#927 AC3 (WIRING, replay of a closed round in LiveApp with stubbed fetch): the lanes head shows the REPLAYED chip; back at LIVE the chip is gone and the live overlay (est bar, /api/loop/state PR) applies again — no mixed moment", async () => {
+  const CLOSED_ROUND_ID = 77007;
+  const rounds = [
+    {
+      roundId: CLOSED_ROUND_ID,
+      status: "done",
+      startedAt: "2026-08-10T09:00:00Z",
+      endedAt: "2026-08-10T09:30:00Z",
+      startEventId: 0,
+      startSpendId: 0,
+      eventCount: 0,
+      schemaVersion: 1,
+      artifact: { spendUsd: 0, roundBudgetUsd: 30, prsMerged: 0 },
+    },
+  ];
+  const liveLoopState = {
+    ...LOOP_STATE_OK,
+    lanes: {
+      max: 1,
+      items: [
+        {
+          lane: "w-live",
+          issue: 555,
+          state: "running",
+          pr: 777,
+          startedAt: "2026-08-10T10:00:00Z",
+          endedAt: null,
+          costUsd: null,
+          estCostUsd: 2.2,
+          fixRound: 0,
+          contextTokens: null,
+          tokenComposition: null,
+        },
+      ],
+    },
+  };
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const parsed = new URL(url, "http://localhost");
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (parsed.pathname === "/api/loop/state") return json(liveLoopState);
+    if (parsed.pathname === "/api/rounds") return json({ rounds });
+    if (parsed.pathname === "/api/events") return json({ events: [], lastId: 0 });
+    if (parsed.pathname === "/api/spend") return json({ spend: [], lastId: 0 });
+    throw new Error(`unstubbed fetch: ${url}`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await Promise.allSettled([
+    client.prefetchQuery(loopStateQuery()),
+    client.prefetchQuery(eventsQuery(0)),
+    client.prefetchQuery(spendQuery(0)),
+    client.prefetchQuery(roundsQuery()),
+  ]);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+  });
+  const laneSection = () => {
+    const html = container.innerHTML;
+    return html.slice(html.indexOf('aria-label="lanes"'), html.indexOf('id="cost"'));
+  };
+  try {
+    assert.match(laneSection(), /\$2\.20 est/, "LIVE must show the live overlay's own est figure");
+    assert.doesNotMatch(laneSection(), /REPLAYED/, "LIVE must never carry the REPLAYED chip");
+
+    const pill = container.querySelector(".round-nav-pill");
+    assert.ok(pill, "the round navigator pill must render");
+    await act(async () => {
+      pill.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const row = container.querySelector(`li[data-round-id="${CLOSED_ROUND_ID}"] button`);
+    assert.ok(row, "the closed round's own row must render");
+    await act(async () => {
+      row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    // `useReplay`'s own round-log load is async — flush it before reading the settled markup
+    // (`mode`/the REPLAYED chip flip synchronously on selection either way, but the live-only
+    // leak check below wants a genuinely settled replay render, not the loading window).
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    assert.match(laneSection(), /REPLAYED/, "the lanes head must carry the REPLAYED chip while replaying");
+    assert.doesNotMatch(laneSection(), /555/, "the LIVE lane's distinguishable issue must never leak into the replayed board");
+    assert.doesNotMatch(laneSection(), /\$[\d.]+ est/, "no est reading may render in replay — settled only (§11)");
+
+    const backToLive = container.querySelector(".header-back-to-live");
+    assert.ok(backToLive, "the BACK TO LIVE control must render while replaying");
+    await act(async () => {
+      backToLive.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    assert.doesNotMatch(laneSection(), /REPLAYED/, "back at LIVE the REPLAYED chip must be gone");
+    assert.match(laneSection(), /\$2\.20 est/, "back at LIVE the live overlay's est figure must apply again");
+    assert.match(laneSection(), /777/, "back at LIVE the live overlay's own PR must apply again");
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+});
+
 // ── #742 (split 3/4 of #146): `?demo` static fixture bundle ────────────────────────────────────
 //
 // A fixture double (not the real committed `demo/source.ts` recording) — small, self-contained,
@@ -2077,6 +2331,91 @@ async function renderSettledDemoApp(bundle: DemoBundle): Promise<string> {
   );
 }
 
+/**
+ * #927 gate② finding [0] (ac1-midpoint-unwired): a raw DOM `dispatchEvent(new Event("input"))`
+ * never reaches React's root-delegated listener in this harness (confirmed directly: not even a
+ * plain controlled `<input type="text">` re-renders from one — no jsdom here, and happy-dom's
+ * dispatch doesn't trigger React 19's synthetic pickup), so scrubbing via a simulated DOM event is
+ * not available. The REAL `onChange` React attached to the DOM node during the actual render IS
+ * still reachable, though — every React-managed DOM node carries it under an internal
+ * `__reactProps$<random>` key. Reading that key and calling the handler directly invokes the
+ * EXACT closure `Transport.tsx` created (`onChange={(e) => onScrub?.(Number(e.target.value))}`),
+ * closing over the real, live `useDemoReplay`'s own `scrub` — not a hand-rolled substitute for it.
+ * This is strictly closer to the real wiring than a simulated `dispatchEvent` would even be: the
+ * DOM/bubbling layer was never the part of `Transport → useDemoReplay.scrub → resolveActiveFold`
+ * this AC needs proof of; the handler identity and its closure are.
+ */
+function realOnChange(input: HTMLInputElement): (e: { target: { value: string } }) => void {
+  const propsKey = Object.keys(input).find((k) => k.startsWith("__reactProps$"));
+  assert.ok(propsKey, "the real React internal props key must be present on a React-managed DOM node");
+  const props = (input as unknown as Record<string, { onChange?: (e: { target: { value: string } }) => void }>)[propsKey as string]!;
+  assert.equal(typeof props.onChange, "function", "the real onChange handler must be attached to the scrub input");
+  return props.onChange as (e: { target: { value: string } }) => void;
+}
+
+// #927 AC1 (§729 remainder, D35; Q4 owner ruling), WIRING/data-flow: `DemoApp` with the ACTUAL
+// shipped bundle (`demo/source.ts`'s `DEMO_SOURCE`, the real recorded dogfood fixture — never a
+// hand-trimmed test double), mounted for real (`createRoot`/`act`, never `renderToStaticMarkup`),
+// must render `section[aria-label="lanes"]` with a real card at the idle (end) position —
+// `useDemoReplay`'s own `endPosition` default, nothing driven yet — and, scrubbed via the REAL
+// Transport control (`realOnChange` above) to the round's own midpoint, a card for the lane the
+// fixture's own event log names in flight there (`lane-b` on `#9102`: dispatched at event 5, not
+// reclaimed until event 7, so it's still occupying its lane at the round's own midpoint, event 6).
+// `[aria-label="live only"]` must be absent throughout — the board itself replays now (#927),
+// never the greyed placeholder.
+test("#927 AC1 (WIRING/data-flow): DemoApp with the shipped bundle renders lane cards at idle and at the midpoint, driven through the REAL scrub wiring, never the live-only placeholder", async () => {
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const path = url.split("?")[0]!;
+    if (path === "/demo-fixture.json") {
+      return new Response(JSON.stringify(DEMO_SOURCE), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    throw new Error(`?demo must never call ${url} — it is not a static asset`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await client.prefetchQuery(demoFixtureQuery());
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={client}>
+        <App demo />
+      </QueryClientProvider>,
+    );
+  });
+  try {
+    const lanesIdle = container.querySelector('section[aria-label="lanes"]');
+    assert.ok(lanesIdle, "the lanes section must render (never the LiveOnly placeholder) at the idle end position");
+    assert.equal(container.querySelector('[aria-label="live only"]'), null, '"live only" must be absent at the idle position');
+    assert.ok(
+      lanesIdle.querySelectorAll(".lane-card.panel.recipe-list-entry").length >= 1,
+      "at least one real lane card must render at the idle (end) position",
+    );
+
+    const scrub = container.querySelector<HTMLInputElement>('[aria-label="scrub"]');
+    assert.ok(scrub, "the real Transport scrub bar must render");
+    const midEventId = Math.round((Number(scrub.min) + Number(scrub.max)) / 2);
+    await act(async () => {
+      realOnChange(scrub)({ target: { value: String(midEventId) } });
+    });
+
+    const lanesAtMid = container.querySelector('section[aria-label="lanes"]');
+    assert.ok(lanesAtMid, "the lanes section must still render at the midpoint");
+    assert.equal(container.querySelector('[aria-label="live only"]'), null, '"live only" must be absent at the midpoint too');
+    assert.match(
+      lanesAtMid.textContent ?? "",
+      /lane-b/,
+      "the lane the ledger names in flight at the midpoint (lane-b, #9102) must render its own card",
+    );
+    assert.match(lanesAtMid.textContent ?? "", /9102/, "issue #9102 must render on that card");
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+});
+
 test("#742: ?demo makes zero network calls to /api/loop/state or /api/events — fully static", async () => {
   const calledUrls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
@@ -2153,14 +2492,13 @@ test("#895: through the real ?demo/replay production entry point, clicking the r
         </QueryClientProvider>,
       );
     });
-    // `?demo` is always replay, so LaneBoard's own unconditional `<LiveOnly>` already renders
-    // one "live only" badge before the gear is ever touched — a bare presence check can't tell
-    // that apart from ConfigDrawer's. Counting occurrences isolates the one new badge the click
-    // adds (`configOpen`'s own `<LiveOnly>` wrapper renders nothing at all while `configOpen` is
-    // false, so this is the drawer's own instance, not a coincidence).
+    // #927: LaneBoard is no longer wrapped in `<LiveOnly>` — it replays its own lane narrative
+    // now, so no badge exists before the gear is ever touched. Counting occurrences isolates the
+    // one new badge the click adds (`configOpen`'s own `<LiveOnly>` wrapper renders nothing at
+    // all while `configOpen` is false, so this is the drawer's own instance, not a coincidence).
     const badgeCount = () => (container.innerHTML.match(/class="panel live-only"/g) ?? []).length;
     const before = badgeCount();
-    assert.equal(before, 1, "LaneBoard's own live-only badge is expected before any click — the drawer's own instance isn't rendered yet");
+    assert.equal(before, 0, "no live-only badge is expected before any click — LaneBoard replays its own content now (#927)");
 
     const gear = container.querySelector<HTMLButtonElement>('[aria-label="open config"]');
     assert.ok(gear, "the real config gear must render in the real ?demo tree");

@@ -307,6 +307,12 @@ item becomes a routed page, that is a scope amendment to this section.
   Owner ruling Q3, 2026-08-17 (#729 design review; implemented by #926): lanes take
   one full-width row above the activity feed (`lanes-dark.png`'s 3-card composition), replacing
   this section's earlier C|D half-split — the feed renders full-width below.
+
+  Owner ruling Q4, 2026-08-17 (#729 design review; implemented by #927): replay and `?demo`
+  reconstruct the lane narrative from the event stream too — the panel-head carries a **REPLAYED**
+  chip (mono, bordered) whenever `source: "replayed"`, so a reader never mistakes a reconstructed
+  card for a live snapshot; no est bar renders in replay (§11: est never replays). Live mode's own
+  head carries no chip.
 - **D — Activity feed.** Its own full-width row directly below C (Q3 owner
   ruling, same amendment as C above). The `events` stream through the copy
   map (§7), newest first, relative timestamps; kind-colored dot per entry.
@@ -863,9 +869,16 @@ O(distance), not O(log-length).
 What replays and what doesn't follows one rule — **append-only sources
 replay; mutable or external state is live-only** (§11). Hero, lane
 narrative, feed, and ring count (from `events`) *and* the spend meter + cost
-strip (from `spend_ledger`, equally append-only) all replay; est overlays,
-the config drawer, and backlog/board counts are live-only and dim with an
-on-panel "live only" badge — never merely a footnote.
+strip (from `spend_ledger`, equally append-only) all replay — including the
+lane board itself (#927): a lane card's state/PR/settled-cost/elapsed
+reconstructs from the fold, labelled **REPLAYED**, never a live snapshot.
+What remains genuinely live-only, narrowed by that same change: the est
+telemetry overlay (no live probe history exists to replay), the
+PR-open-early hint (`withLanePrs`'s live `/api/loop/state` lane-row overlay
+can tag a droplet's PR one beat before any event carries it — replay waits
+for that first PR-bearing event instead), the config drawer, and
+backlog/board counts. These dim with an on-panel "live only" badge — never
+merely a footnote.
 
 **Launch artifact** — two forms, both from the recorded dogfood run:
 (a) a screen capture of the replay for README/launch page, and (b) a **demo
@@ -1443,6 +1456,7 @@ mutable snapshot or outside the engine's own DB is live-only.
 | `events` | append-only, id-ordered | **Yes** — the replay stream itself |
 | `spend_ledger` | append-only, id-ordered | **Yes** — settled cost at any cursor is `SUM(usd)` up to it |
 | `rounds.phase` | in-place UPDATE, mirrored by an append-only `round-phase` event (#206) | **Yes** — fold the events, never read the mutable row |
+| lane narrative (state/PR/settled cost/elapsed — `dispatched`, `handoff`, `reclaim-done` incl. cost/est/merged, `fix-leg-started`/`-resumed`) | folded onto `hero/state.ts`'s `LaneView`, the SAME append-only `events` stream every other replayable panel reads | **Yes** (#927) — the lane card itself, labelled **REPLAYED**; superseded `workers`-as-mutable-snapshot reasoning, which never had its own row here |
 | live telemetry (`est_cost_usd`, `contextTokens`, token split) | overwritten per probe, cleared when the lane leaves `running` (#155) | **Never** — the history never existed. Est never replays; settled only (§3 E's settled/est grammar is the same line) |
 | resolved config | read at startup, snapshotted (allowlisted subset + hash) into `run-started` (#206) | **Yes**, for the allowlisted keys — anything outside that list stays live-only |
 | backlog / board | external GitHub state | Live-only |
@@ -1502,11 +1516,12 @@ mutable snapshot or outside the engine's own DB is live-only.
   footer note alone is not acceptable — the badge belongs on the panel that
   would otherwise lie.
 
-Owner ruling Q4, 2026-08-17 (#729 design review; implementing issue #927): the lane
+Owner ruling Q4, 2026-08-17 (#729 design review; implemented by #927): the lane
 board reconstructs a replayed lane NARRATIVE from the event stream (`dispatched`/`handoff`/
 `reclaim-done`, incl. cost/est/merged) in replay and `?demo`, labelled **REPLAYED** — never a
-fake live snapshot. Today's `LiveOnly` wrap (`App.tsx`) and the boundary table row stand until
-#927 lands.
+fake live snapshot. `LaneBoard`'s own `<LiveOnly>` wrap is gone (`App.tsx`) — only genuinely
+live-only surfaces (§6's narrowed list: est telemetry, the PR-open-early hint, the config drawer,
+backlog/board counts) keep it.
 
 ### Renderer contract
 

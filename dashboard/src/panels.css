@@ -51,6 +51,20 @@
   margin-left: auto;
 }
 
+/* #927 (§729 remainder, D35; Q4 owner ruling): the lanes panel-head's REPLAYED chip — mono,
+ * bordered, per the issue's own wording. Follows `.panel-head-stat` when present (both then sit
+ * together at the head's right edge); when there's no stat cluster to carry the push, `LaneBoard`
+ * itself adds `.panel-head-stat` alongside this class so the chip alone gets the auto margin. */
+.lane-board-replayed-chip {
+  font-family: var(--font-data);
+  font-size: var(--text-1);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px var(--space-2);
+  border: var(--hairline);
+  border-radius: var(--radius-pill);
+}
+
 /* #926 (§729 remainder, D25/D28): 3 cards at 1440px, 2 at 1024px, 1 at 720px — `auto-fit` (not
  * `auto-fill`) so a board with fewer lanes than fit a row stretches those cards wider rather than
  * leaving empty tracks; every slot (real or `EmptyLaneCard`) is always populated, so this never
