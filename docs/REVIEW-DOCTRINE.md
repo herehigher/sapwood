@@ -94,13 +94,15 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     Worked example: `textBox()`/`CHAR_ADVANCE` (`dashboard/src/hero/hero.test.ts`) turns
     font-size/char-count into a rendered extent without a browser, tied to the real draw path's
     own inputs.
-    Three shapes seen (#353, PR #738 (issue #728), PR #737): (1) the test computes its
+    Four shapes (#353, #728, #737): (1) the test computes its
     expected value outside the thing it's testing instead of reading/pinning it against the real
     source; (2) the test exercises only the easy/nominal instance while the AC's own wording
     names a combinatorial or boundary case it never constructs; (3) the test asserts identity
     with the very constant that produced the render, so it proves nothing about the render
-    (#936). FINE: a literal that IS the specification — a golden value nothing else in the
-    codebase claims to own.
+    (#936, #922); (4) proxy-shares-assumption: the test's own helper embeds the same
+    simplifying assumption as the code under test, so a wrong assumption in production can't
+    fail its own proxy (#922). FINE: a literal that IS the specification — a golden value
+    nothing else in the codebase claims to own.
   - **DECISION (fake-verdict rule, engine side).** Presetting a fake collaborator to already
     return the acceptance criterion's target decision, then asserting against the fake's own
     canned value, proves only that the fake echoes what it was told. Distinct from VALUE (a
