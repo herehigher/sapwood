@@ -27,9 +27,15 @@ import {
   PLANNING,
   PLANNING_NODE_R,
   REFLECTION,
+  RING_COUNT_FONT_PX,
+  RING_PITCH_MIN,
+  ringCountFontPx,
+  ringInnerRadius,
   ringOuterRadius,
+  ringRadii,
   STAGE,
   TRUNK,
+  TRUNK_DISC_R_MAX,
 } from "./stage.tsx";
 import {
   activePlanningNode,
@@ -847,7 +853,14 @@ test("the ring count and the PLAN/IMPLEMENT/OUTCOME phase captions render with -
   assert.match(html, /class="hero-phase" style="font-family:var\(--font-display\)"[^>]*>\s*PLAN/);
   assert.match(html, /class="hero-phase" style="font-family:var\(--font-display\)"[^>]*>\s*IMPLEMENT/);
   assert.match(html, /class="hero-phase" style="font-family:var\(--font-display\)"[^>]*>\s*OUTCOME/);
-  assert.match(html, /class="hero-ring-count" style="font-family:var\(--font-display\)"/);
+
+  // #921: `initialHeroState` is a fresh, 0-ring state — the sapling glyph draws there, not the
+  // numeral (AC1) — so this reads the font-family off a real post-merge state instead.
+  const { state } = run([ev("merged", { worker: "w1", issue: 1, pr: 1 })]);
+  assert.match(
+    markup(state),
+    new RegExp(`class="hero-ring-count" style="font-family:var\\(--font-display\\);font-size:${RING_COUNT_FONT_PX}px"`),
+  );
 });
 
 // ── #879: hero panel typography + chip/card/icon detailing (fidelity-ledger rows 1, 2, 7) ──
@@ -1491,10 +1504,17 @@ const CAPTION_SAFE_ASCENT = 1.0;
 
 /** Same shape as `textBox()`, refined per `CAPTION_SAFE_ASCENT` above; `anchor` matches the
  *  element's own `text-anchor` (default SVG behavior — no attribute — is "start", i.e. `x` is
- *  the left edge, not the center `textBox()` always assumes). */
-const captionSafeTextBox = (text: string, x: number, baselineY: number, fontPx: number, anchor: "start" | "middle" = "middle"): Box => {
+ *  the left edge, not the center `textBox()` always assumes; "end" — `x` is the RIGHT edge,
+ *  e.g. stage.tsx's right-anchored `.hero-label` ring/rings caption). */
+const captionSafeTextBox = (
+  text: string,
+  x: number,
+  baselineY: number,
+  fontPx: number,
+  anchor: "start" | "middle" | "end" = "middle",
+): Box => {
   const width = text.length * fontPx * CHAR_ADVANCE;
-  const left = anchor === "middle" ? x - width / 2 : x;
+  const left = anchor === "middle" ? x - width / 2 : anchor === "end" ? x - width : x;
   return { left, right: left + width, top: baselineY - fontPx * CAPTION_SAFE_ASCENT, bottom: baselineY + fontPx * DESCENT };
 };
 
@@ -1519,6 +1539,7 @@ function cssFontSizePx(selector: string): number {
 const CAPTION_FONT_PX = cssFontSizePx(".hero-node-caption");
 const DROPLET_LABEL_FONT_PX = cssFontSizePx(".hero-small");
 const GATE_NODE_LABEL_FONT_PX = cssFontSizePx(".hero-node-label");
+const RING_WORD_FONT_PX = cssFontSizePx(".hero-label");
 
 const boxesOverlap = (a: Box, b: Box): boolean => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
 
@@ -1961,7 +1982,9 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
     // always nested/touching each other (that's the trunk cross-section, not a collision); the
     // outermost one is simply the single furthest-reaching edge the escalation cluster/tally
     // could actually run into, and the only ring box worth checking against them.
-    { label: "outermost trunk ring", box: circleBox(TRUNK.x, TRUNK.y, Math.min(state.rings, TRUNK.max) * TRUNK.step) },
+    // #921: the real growth-rule radius (`ringOuterRadius`), not a re-derived formula — VALUE
+    // doctrine.
+    { label: "outermost trunk ring", box: circleBox(TRUNK.x, TRUNK.y, ringOuterRadius(state.rings)) },
   ];
   for (const d of escalated) {
     const { x, y } = dropletPoint(state, d);
@@ -2014,7 +2037,8 @@ test("#920 AC4: the reflection tree is a plain T — stem x equals the disc cent
   const countMatch = html.match(/class="hero-ring-count"[^>]*x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</);
   assert.ok(countMatch, "hero-ring-count must render");
   const [, cxRaw, cyRaw, countText] = countMatch as unknown as [string, string, string, string];
-  const countBox = textBox(countText, Number(cxRaw), Number(cyRaw), 33);
+  // #921: RING_COUNT_FONT_PX read from stage.tsx, never a hand-copied literal (VALUE doctrine).
+  const countBox = textBox(countText, Number(cxRaw), Number(cyRaw), RING_COUNT_FONT_PX);
 
   const tallyMatch = html.match(/class="hero-num hero-small hero-outcome-tally" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>([^<]*)</);
   assert.ok(tallyMatch, "outcome tally must render");
@@ -2204,7 +2228,8 @@ test("#886 gate② run 2e566ac9 finding [1]: the centered ring count never colli
   assert.ok(countMatch, "hero-ring-count must render");
   const [, cxRaw, cyRaw, countText] = countMatch as unknown as [string, string, string, string];
   assert.equal(countText, "999");
-  const countBox = textBox(countText, Number(cxRaw), Number(cyRaw), 33);
+  // #921: RING_COUNT_FONT_PX read from stage.tsx, never a hand-copied literal (VALUE doctrine).
+  const countBox = textBox(countText, Number(cxRaw), Number(cyRaw), RING_COUNT_FONT_PX);
 
   const trunkDroplet = state.droplets.find((d) => d.at === "trunk");
   assert.ok(trunkDroplet, "the newest merge must still park a droplet at the trunk");
@@ -2228,6 +2253,390 @@ test("#886 gate② run 2e566ac9 finding [1]: the centered ring count never colli
     !boxesOverlap(countBox, shapeBox),
     `ring count ${JSON.stringify(countBox)} overlaps the trunk droplet's shape ${JSON.stringify(shapeBox)}`,
   );
+});
+
+// ── #921: sapling at zero merges, one ring per merge, disc growth rule ──
+//
+// Owner ruling Q1 (2026-08-17): strictly one ring per merge — no decorative base grain; the
+// zero-merge state starts from a small sapling glyph; the count renders at mockup scale once
+// ≥ 1 ring exists.
+
+/** Extracts the `.hero-trunk` group's own inner markup, tolerant of the nested `.hero-sapling`
+ *  group's own `</g>` — stops only at the `</g>` immediately followed by the KNOWN next sibling
+ *  (`.hero-reflection`), the same non-greedy-anchored-on-the-next-sibling trick this file's other
+ *  nested-group extractions already use (e.g. the `.hero-reflection` capture below, anchored on
+ *  `<path class="hero-return"`). */
+const trunkGroupInner = (html: string): string | undefined =>
+  html.match(/<g class="hero-trunk"[^>]*>([\s\S]*?)<\/g>\s*<g class="hero-reflection"/)?.[1];
+
+test('#921 AC1: rings=0 renders the sapling glyph — data-rings="0", a .hero-sapling group wrapping lucide-react\'s Sprout (lucide-sprout class), coloured via --moss, no hand-drawn <path> — and no .hero-ring-count numeral', () => {
+  const state = initialHeroState(3);
+  assert.equal(state.rings, 0);
+  const html = markup(state);
+
+  assert.match(html, /<g class="hero-trunk" data-rings="0">/);
+  const trunk = trunkGroupInner(html);
+  assert.ok(trunk, "the .hero-trunk group must render");
+
+  assert.match(trunk as string, /<g class="hero-sapling" style="color:var\(--moss\)">/);
+  // lucide-react's own `createLucideIcon` class convention (`Icon.mjs`) — the package's real
+  // rendered class, not a hand-typed guess at what it might be.
+  assert.match(trunk as string, /class="lucide lucide-sprout"/);
+  // No hand-drawn sapling glyph — every `<path>` inside the sapling group belongs to the
+  // imported `Sprout` icon (three path segments, lucide-react's own `sprout.mjs`), not a
+  // bespoke shape this file drew itself the way `DROPLET_SHAPE`/`planningIcon`/`gateIcon` do.
+  assert.equal((trunk as string).match(/<path/g)?.length, 3, "exactly Sprout's own three path segments, nothing hand-drawn");
+
+  assert.doesNotMatch(trunk as string, /class="hero-ring-count"/);
+  assert.doesNotMatch(trunk as string, /class="hero-ring"/);
+  assert.doesNotMatch(trunk as string, /class="hero-label"/, "no 'ring'/'rings' unit word floats over an empty disc");
+});
+
+test('#921 AC1: rings=1 renders exactly one .hero-ring and the numeral "1", no sapling', () => {
+  const { state } = run([ev("merged", { worker: "w1", issue: 1, pr: 1 })]);
+  assert.equal(state.rings, 1);
+  const html = markup(state);
+  const trunk = trunkGroupInner(html);
+  assert.ok(trunk, "the .hero-trunk group must render");
+
+  assert.equal((trunk as string).match(/class="hero-ring"/g)?.length, 1);
+  assert.match(trunk as string, /class="hero-ring-count"[^>]*>1</);
+  assert.doesNotMatch(trunk as string, /hero-sapling/);
+});
+
+test("#921 AC1: rings=N renders exactly min(N, TRUNK.max) rings — one per real merge, no base grain, at N under and over the draw cap", () => {
+  for (const n of [2, 12, 24, TRUNK.max, TRUNK.max + 7]) {
+    const events: DomainEvent[] = [];
+    for (let i = 1; i <= n; i++) events.push(ev("merged", { worker: `m${i}`, issue: i, pr: i }));
+    const { state } = run(events, 3);
+    assert.equal(state.rings, n);
+    const html = markup(state);
+    const trunk = trunkGroupInner(html);
+    assert.ok(trunk, `n=${n}: the .hero-trunk group must render`);
+    assert.equal(
+      (trunk as string).match(/class="hero-ring"/g)?.length,
+      Math.min(n, TRUNK.max),
+      `n=${n}: exactly min(n, TRUNK.max) rings, never more (no decorative base grain) and never fewer`,
+    );
+    assert.match(trunk as string, new RegExp(`class="hero-ring-count"[^>]*>${n}<`));
+  }
+});
+
+test("#921 AC2 (STYLE, full production cascade): .hero-ring-count resolves Fraunces and a rendered size >= 56px at a 1440px-wide hero", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const container = document.createElement("div");
+  const { state } = run([ev("merged", { worker: "w1", issue: 1, pr: 1 })]);
+  container.innerHTML = markup(state);
+  document.body.appendChild(container);
+  try {
+    const countEl = container.querySelector(".hero-ring-count");
+    assert.ok(countEl, "a real .hero-ring-count element must render and match the injected stylesheet's cascade");
+    const computed = getComputedStyle(countEl as Element);
+    assert.match(computed.fontFamily, /Fraunces/, "font-family must resolve through --font-display to Fraunces");
+    assert.equal(computed.fontSize, `${RING_COUNT_FONT_PX}px`, "the exact winning cascaded (inline) font-size, not a stand-in");
+
+    // STYLE proves the authored/cascaded value; the 1440px-wide-hero claim is that authored
+    // SVG-unit value scaled by the SAME uniform ratio the #728 scale-invariance test established
+    // (`.hero`'s `width: 100%` over the fixed `STAGE` viewBox scales every element together at
+    // any rendered width) — not a browser layout measurement happy-dom's CSSOM-only
+    // `getComputedStyle` can't produce (#895's own test already established that gap for `.hero`
+    // itself: a percentage width never resolves to a real px layout value here).
+    const renderedAt1440 = Number.parseFloat(computed.fontSize) * (1440 / STAGE.w);
+    assert.ok(renderedAt1440 >= 56, `rendered size at 1440px must be >= 56px; got ${renderedAt1440}`);
+    // Exact expected value, not merely a floor check — ties this number to RING_COUNT_FONT_PX
+    // (48) rather than an independent magic constant that could silently drift from it.
+    assert.ok(Math.abs(renderedAt1440 - RING_COUNT_FONT_PX * (1440 / STAGE.w)) < 0.001);
+  } finally {
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+});
+
+// #921 gate② PO review thread: a live crop at rings = 1 caught the "ring" unit-word caption
+// drawn ON the ring's own lower-left stroke — text on stroke, in both themes. The caption's own Y
+// is now dynamic (`ringWordY`, stage.tsx), tracking the disc's real rendered edge — this is the
+// COLLISION regression guard: caption box × outermost ring circle box, at rings 1..3 (the low
+// counts where the disc is smallest relative to the caption's own fixed font size, so the
+// tightest margin).
+test("#921 gate② PO review thread: the 'ring'/'rings' unit-word caption never collides with the outermost ring's own circle, at rings 1..3", () => {
+  for (const n of [1, 2, 3]) {
+    const { state } = run(
+      Array.from({ length: n }, (_, i) => ev("merged", { worker: `m${i + 1}`, issue: i + 1, pr: i + 1 })),
+      3,
+    );
+    assert.equal(state.rings, n);
+    const html = markup(state);
+
+    const wordMatch = html.match(/class="hero-label" x="(-?[\d.]+)" y="(-?[\d.]+)" text-anchor="end">([^<]*)</);
+    assert.ok(wordMatch, `n=${n}: the ring/rings unit-word caption must render`);
+    const [, wordXRaw, wordYRaw, wordText] = wordMatch as unknown as [string, string, string, string];
+    const wordBox = captionSafeTextBox(wordText, Number(wordXRaw), Number(wordYRaw), RING_WORD_FONT_PX, "end");
+
+    const outer = ringOuterRadius(n);
+    const ringBox = circleBox(TRUNK.x, TRUNK.y, outer);
+
+    assert.ok(
+      !boxesOverlap(wordBox, ringBox),
+      `n=${n}: the unit-word caption ${JSON.stringify(wordBox)} overlaps the outermost ring's own circle ${JSON.stringify(ringBox)}`,
+    );
+  }
+});
+
+test("#921 AC3: the growth rule at N = 1, 12, 24, 42 — constant pitch under the footprint ceiling, saturating exactly at TRUNK_DISC_R_MAX, never exceeding 40% of STAGE.h, the numeral's box fits inside the inner clearance", () => {
+  let previousOuter = 0;
+  for (const n of [1, 12, 24, 42]) {
+    const { state } = run(
+      Array.from({ length: n }, (_, i) => ev("merged", { worker: `m${i + 1}`, issue: i + 1, pr: i + 1 })),
+      3,
+    );
+    assert.equal(state.rings, n);
+    const outer = ringOuterRadius(n);
+    const r0 = ringInnerRadius(n);
+
+    // Monotonic, non-decreasing growth — the disc never shrinks as merges accrue; once
+    // saturated (N >= 24, per the compression rule below) it holds flat at TRUNK_DISC_R_MAX
+    // rather than continuing to grow, so this is `>=`, not strict `>`.
+    assert.ok(outer >= previousOuter, `n=${n}: outer radius (${outer}) must not shrink below the previous count's (${previousOuter})`);
+    previousOuter = outer;
+
+    // The disc's footprint never exceeds ~40% of the hero band height (the issue's own ceiling).
+    assert.ok(2 * outer <= 0.4 * STAGE.h + 0.001, `n=${n}: disc diameter (${2 * outer}) must not exceed 40% of STAGE.h (${0.4 * STAGE.h})`);
+
+    // The numeral's own rendered box — real font-size + real digit count, VALUE doctrine — must
+    // fit entirely inside the inner clearance radius: every corner of its box sits within r0 of
+    // the disc centre.
+    const countBox = textBox(String(n), TRUNK.x, TRUNK.y + 11, RING_COUNT_FONT_PX);
+    const corners = [
+      [countBox.left, countBox.top],
+      [countBox.right, countBox.top],
+      [countBox.left, countBox.bottom],
+      [countBox.right, countBox.bottom],
+    ];
+    for (const [cx, cy] of corners) {
+      const dist = Math.hypot((cx as number) - TRUNK.x, (cy as number) - TRUNK.y);
+      assert.ok(dist <= r0 + 0.01, `n=${n}: numeral corner (${cx}, ${cy}) at distance ${dist} must fit inside r0 (${r0})`);
+    }
+
+    // #921 gate② round 4 finding [1] (ac3-growth-oracle): exact VALUE-derived radii, not just
+    // "monotonic and below the ceiling" (a badly wrong growth formula could still pass those).
+    // Read every input from its own source — TRUNK.step, TRUNK_DISC_R_MAX, r0 — never a
+    // hand-copied number, so this test can't silently drift from the production formula it's
+    // meant to police.
+    const actualRadii = ringRadii(n);
+    if (n === 1 || n === 12) {
+      // Nominal branch: pitch is the constant TRUNK.step (the compression threshold isn't
+      // reached yet at these counts, per the AC3's own math — verified by the loose "outer <
+      // TRUNK_DISC_R_MAX" branch below too).
+      const expectedRadii = Array.from({ length: n }, (_, i) => r0 + (i + 1) * TRUNK.step);
+      assert.deepEqual(
+        actualRadii.map((r) => Number(r.toFixed(6))),
+        expectedRadii.map((r) => Number(r.toFixed(6))),
+        `n=${n}: every ring radius must equal r0 + i*TRUNK.step exactly (nominal branch)`,
+      );
+      assert.ok(
+        Math.abs(outer - (r0 + n * TRUNK.step)) < 0.001,
+        `n=${n}: outer radius must equal r0 + N*TRUNK.step exactly (${r0 + n * TRUNK.step}), got ${outer}`,
+      );
+      // #921: pitch stays constant (nominal TRUNK.step) below the compression threshold — the
+      // outer radius must still be well short of the footprint ceiling.
+      assert.ok(outer < TRUNK_DISC_R_MAX, `n=${n}: outer radius (${outer}) must still be short of TRUNK_DISC_R_MAX (${TRUNK_DISC_R_MAX})`);
+    } else {
+      // Compressed branch (n === 24 || n === 42): the growth rule's own stated formula —
+      // pitch = (R_max - r0) / N — read from TRUNK_DISC_R_MAX/r0, both real sources, not copied.
+      const expectedPitch = (TRUNK_DISC_R_MAX - r0) / n;
+      const expectedRadii = Array.from({ length: n }, (_, i) => r0 + (i + 1) * expectedPitch);
+      assert.deepEqual(
+        actualRadii.map((r) => Number(r.toFixed(6))),
+        expectedRadii.map((r) => Number(r.toFixed(6))),
+        `n=${n}: every ring radius must equal r0 + i*((R_max-r0)/N) exactly (compressed branch)`,
+      );
+      // #921: "the outer radius at 24 ≈ R_max" — and, by this file's own compression formula
+      // (`ringRadii`'s doc: pitch compresses to land EXACTLY on the ceiling once active), every N
+      // past the compression threshold saturates at the SAME TRUNK_DISC_R_MAX, not just N=24.
+      assert.ok(
+        Math.abs(outer - TRUNK_DISC_R_MAX) < 0.01,
+        `n=${n}: outer radius (${outer}) must have reached TRUNK_DISC_R_MAX (${TRUNK_DISC_R_MAX})`,
+      );
+    }
+  }
+});
+
+// #921 gate② round 3 finding [0] (ac1-min-pitch-crossover): the growth rule's own THIRD limiting
+// term — how many rings the footprint fits at the hairline-resolvable minimum pitch
+// (`ringsThatFitFootprint`, stage.tsx) — is restored as a real cap on `drawn`, correcting round
+// 2's misreading of AC1's checklist wording as an unconditional override (that misreading is what
+// round 3's own finding calls out: "AC1's adjudicated footprint rule is not implemented"). Pinned
+// exactly at the FIRST N where it binds: every 1-2 digit total (through N = 99) still draws
+// exactly `min(N, TRUNK.max)`; N = 100, the smallest 3-digit total, is the first to draw fewer.
+test("#921 gate② round 3 finding [0]: the footprint-fit cap is inert through every 1-2 digit total (drawn = min(N, TRUNK.max) exactly up to N = 99), and binds for the FIRST time at N = 100", () => {
+  assert.equal(ringRadii(99).length, Math.min(99, TRUNK.max), "N=99 (2 digits): the footprint-fit cap must not bind yet");
+  assert.equal(ringRadii(TRUNK.max).length, TRUNK.max, "N=TRUNK.max (2 digits): still exactly TRUNK.max rings");
+  const drawnAt100 = ringRadii(100).length;
+  assert.ok(drawnAt100 < TRUNK.max, `N=100 (3 digits) must draw FEWER than TRUNK.max (${TRUNK.max}) — proof the cap actually engaged here`);
+  assert.equal(
+    drawnAt100,
+    36,
+    "the exact pinned value at the first binding N — VALUE doctrine: a real computed boundary, not a loose bound",
+  );
+});
+
+// #921 gate② round 3 findings [0]/[1] (ac1-min-pitch-crossover / ac3-extreme-footprint):
+// substantive boundary coverage at all three counts the reviewer named (100, 1000, 1000000) —
+// AC1's real, capped draw count (component-tested against the REAL production markup) and AC3's
+// footprint ceiling (now held EXACTLY, not merely approximated) at every one of them.
+for (const n of [100, 1000, 1_000_000]) {
+  test(`#921 gate② round 3: at rings=${n}, AC3's footprint ceiling holds exactly (outer pins at TRUNK_DISC_R_MAX, never past it) and AC1's real (footprint-capped) draw count renders`, () => {
+    const outer = ringOuterRadius(n);
+    assert.ok(2 * outer <= 0.4 * STAGE.h + 0.001, `disc diameter (${2 * outer}) must not exceed 40% of STAGE.h (${0.4 * STAGE.h})`);
+    assert.ok(
+      outer <= TRUNK_DISC_R_MAX + 0.01,
+      `outer radius (${outer}) must never exceed TRUNK_DISC_R_MAX (${TRUNK_DISC_R_MAX}) — AC3 holds unconditionally now, even at this scale`,
+    );
+
+    const drawn = ringRadii(n).length;
+    const html = markup({ ...initialHeroState(3), rings: n });
+    const trunk = trunkGroupInner(html);
+    assert.ok(trunk, `n=${n}: the .hero-trunk group must render`);
+    assert.equal(
+      (trunk as string).match(/class="hero-ring"/g)?.length ?? 0,
+      drawn,
+      `n=${n}: the REAL rendered ring count must match the production formula's own drawn count`,
+    );
+    // The numeral itself stays the honest, uncapped record regardless of how many (or how few)
+    // rings physically fit — asserted against the real rendered font-size too (#921 gate② round
+    // 3 finding [1]): AC2's floor holds at every count this loop realistically reaches (n=100,
+    // 1000), only easing at the true 7-digit extreme where the numeral's own box would otherwise
+    // blow the footprint ceiling before a single ring is even drawn.
+    assert.match(trunk as string, new RegExp(`class="hero-ring-count"[^>]*>${n}<`));
+    const expectedFont = n < 1_000_000 ? RING_COUNT_FONT_PX : ringCountFontPx(n);
+    assert.match(
+      trunk as string,
+      new RegExp(`class="hero-ring-count" style="font-family:var\\(--font-display\\);font-size:${expectedFont}px"`),
+    );
+  });
+}
+
+// #921 gate② round 3 finding [1] (ac3-extreme-footprint): AC3's footprint ceiling must hold at
+// EVERY count, including scales where the DEFAULT numeral font's own box would itself exceed
+// TRUNK_DISC_R_MAX (7+ digits — the reviewer's own rings=1,000,000 example). Rather than accept a
+// documented miss (round 2's resolution), the numeral itself now shrinks (`ringCountFontPx`) so
+// its own clearance box never exceeds the ceiling — AC3 holds unconditionally.
+//
+// #921 gate② round 4 finding [0] (ac3-extreme-clearance): searching against the bare
+// TRUNK_DISC_R_MAX let r0 pin RIGHT AT the ceiling, leaving zero room for even one ring's own
+// minimum pitch — `ringsThatFitFootprint` correctly computed zero drawn rings at this extreme,
+// which is the bug the AC names (a disc with a numeral but NO ring texture at all is not the
+// growth rule's "the count is the record" exception — that exception covers rings 42..N being
+// undrawn, never rings 1..N). `ringCountFontPx` now searches against TRUNK_DISC_R_MAX minus TWO
+// RING_PITCH_MIN slots, read directly from stage.tsx (VALUE doctrine) — this test asserts the
+// exact boundary AND that real ring texture survives even at this extreme.
+test("#921 gate② round 4 finding [0]: at the reviewer's own 7-digit extreme (rings=1,000,000), the numeral shrinks to leave TWO minimum-pitch ring slots — AC3's ceiling holds exactly AND at least one ring actually renders", () => {
+  const rings = 1_000_000;
+  const defaultBoxRadius = Math.hypot((String(rings).length * RING_COUNT_FONT_PX * 0.62) / 2, RING_COUNT_FONT_PX - 11);
+  assert.ok(
+    defaultBoxRadius > TRUNK_DISC_R_MAX,
+    `fixture sanity: the numeral's box AT THE DEFAULT FONT (${defaultBoxRadius}) must itself exceed TRUNK_DISC_R_MAX (${TRUNK_DISC_R_MAX}) — the exact scale this finding names`,
+  );
+
+  const shrunkFont = ringCountFontPx(rings);
+  assert.ok(
+    shrunkFont < RING_COUNT_FONT_PX,
+    `the numeral must actually shrink below the default (${RING_COUNT_FONT_PX}px) here — got ${shrunkFont}px`,
+  );
+
+  const r0 = ringInnerRadius(rings);
+  const reservedCeiling = TRUNK_DISC_R_MAX - 2 * RING_PITCH_MIN;
+  assert.ok(
+    r0 <= reservedCeiling + 0.01,
+    `the numeral's OWN clearance (r0 = ${r0}) must fit inside TRUNK_DISC_R_MAX minus two RING_PITCH_MIN slots (${reservedCeiling}) — round 4's own stricter boundary, not just the bare ceiling`,
+  );
+
+  const radii = ringRadii(rings);
+  assert.ok(
+    radii.length >= 1,
+    `at least one ring must actually render here — a numeral with NO ring texture at all is the exact bug this finding names, got ${radii.length}`,
+  );
+  for (const r of radii) {
+    assert.ok(r >= r0 - 0.01, `every ring radius (${r}) must stay at/outside r0 (${r0}) — pitch never goes negative/inward-crossing`);
+  }
+
+  const outer = ringOuterRadius(rings);
+  assert.ok(
+    outer <= TRUNK_DISC_R_MAX + 0.01,
+    `AC3 must hold EXACTLY here, not as a documented miss (outer ${outer} vs TRUNK_DISC_R_MAX ${TRUNK_DISC_R_MAX})`,
+  );
+
+  // Component-level proof (real render, not just the pure function) — the "at least one ring"
+  // requirement rendered against the REAL production markup.
+  const html = markup({ ...initialHeroState(3), rings });
+  const trunk = trunkGroupInner(html);
+  assert.ok(trunk, "the .hero-trunk group must render");
+  assert.equal(
+    (trunk as string).match(/class="hero-ring"/g)?.length ?? 0,
+    radii.length,
+    "the REAL rendered ring count must match the production formula's own drawn count",
+  );
+});
+
+// #921 AC3b (carried from #920 gate② r5 finding [0], PR #936 — the low-count remainder #920
+// could not close inside its fix cap): today at rings = 1, `ringOuterRadius(1) = 2` puts the
+// stem top at y ≈ 192 while the 33px numeral box spans ≈ 174–209 — the stem abuts/crosses the
+// numeral's foot. With this issue's disc geometry (`r0` sized to the numeral's own box) the stem
+// naturally starts below the count/sapling at every one of these low counts.
+test("#921 AC3b: the reflection stem starts at the disc's rendered bottom edge and never crosses the ring-count numeral or the sapling, at rings = 0, 1, 2, 12, 24", () => {
+  for (const n of [0, 1, 2, 12, 24]) {
+    const { state } =
+      n === 0
+        ? { state: initialHeroState(3) }
+        : run(
+            Array.from({ length: n }, (_, i) => ev("merged", { worker: `m${i + 1}`, issue: i + 1, pr: i + 1 })),
+            3,
+          );
+    assert.equal(state.rings, n);
+    const html = markup(state);
+
+    const reflectionGroupMatch = html.match(
+      /<g class="hero-reflection" data-node="reflection">([\s\S]*?)<\/g>\s*<path class="hero-return"/,
+    );
+    assert.ok(reflectionGroupMatch, `n=${n}: the hero-reflection group must render`);
+    const pathMatch = (reflectionGroupMatch![1] as string).match(/<path class="hero-arm" d="([^"]*)"/);
+    assert.ok(pathMatch, `n=${n}: the reflection tree's connector <path> must render`);
+    const points = [...(pathMatch![1] as string).matchAll(/([ML])\s*(-?[\d.]+)\s+(-?[\d.]+)/g)].map(([, , x, y]) => ({
+      x: Number(x),
+      y: Number(y),
+    }));
+    const stemTopY = Math.min(...points.map((p) => p.y));
+    const discBottomY = TRUNK.y + ringOuterRadius(n);
+    assert.ok(
+      stemTopY >= discBottomY - 0.01,
+      `n=${n}: stem top (${stemTopY}) must sit at/below the disc's rendered bottom edge (${discBottomY})`,
+    );
+
+    // The numeral's/sapling's own box must not intersect the reflection path's segments. At
+    // rings=0, the sapling's own square footprint is read back from its RENDERED <svg>
+    // width/height rather than a re-derived constant (VALUE doctrine).
+    const box =
+      n === 0
+        ? (() => {
+            const trunk = trunkGroupInner(html);
+            const saplingSize = Number(trunk?.match(/<svg[^>]*\swidth="([\d.]+)"/)?.[1]);
+            assert.ok(saplingSize > 0, "the sapling's own rendered width must be readable");
+            const half = saplingSize / 2;
+            return { left: TRUNK.x - half, right: TRUNK.x + half, top: TRUNK.y - half, bottom: TRUNK.y + half };
+          })()
+        : textBox(String(n), TRUNK.x, TRUNK.y + 11, RING_COUNT_FONT_PX);
+
+    const segments = pathSegmentBoxes(pathMatch![1] as string);
+    for (const seg of segments) {
+      assert.ok(
+        !boxesOverlap(seg, box),
+        `n=${n}: reflection path segment ${JSON.stringify(seg)} overlaps the ${n === 0 ? "sapling" : "ring-count"} box ${JSON.stringify(box)}`,
+      );
+    }
+  }
 });
 
 // ── #745: a droplet the fold can no longer vouch for must not be COUNTED as confident pending ──
