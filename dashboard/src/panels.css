@@ -360,11 +360,16 @@
  * engine — see this file's own AC1 comment on `.app-header`). Height/border make this instance a
  * genuinely bordered capsule, distinct from the shared 12px internal bars (cost panels, lane
  * cards) — `CostBar.tsx`'s own `height` prop (Header.tsx passes 20) scales the track/fill/tick
- * geometry to match, so this isn't the old fixed 12px drawing floating in extra blank space. */
+ * geometry to match, so this isn't the old fixed 12px drawing floating in extra blank space.
+ * Border is longhand, not `var(--hairline)` — `.panel-head`'s own comment above documents happy-
+ * dom returning an EMPTY computed string for every longhand of a `color-mix()`-bearing border
+ * shorthand; longhands sidestep that without changing what a real browser renders. */
 .spend-meter-bar {
   width: 400px;
   height: 20px;
-  border: var(--hairline);
+  border-width: 1px;
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--bark) 25%, transparent);
   border-radius: var(--radius-pill);
   overflow: hidden;
 }
@@ -402,13 +407,19 @@
 /* #923 AC1 (D14): the mockup's joined ~300×49 THREE-CELL stepper — each cell (chevron | label |
  * chevron) carries its own border now, not a shared group border plus two hand-picked dividers
  * (the previous ~215×24 tinted-chip look). `min-height` is a literal px (not a real-layout-
- * dependent value) so happy-dom's STYLE test can read it back directly. */
+ * dependent value) so happy-dom's STYLE test can read it back directly. Border is longhand — see
+ * `.spend-meter-bar`'s own comment above (and `.panel-head`'s, the original source) for why: a
+ * `color-mix()`-bearing `border: var(--hairline)` shorthand computes an empty string for every
+ * longhand in happy-dom, so a STYLE test reading a non-shorthand `border-*-width` here needs the
+ * longhand form declared, not the shorthand. */
 .round-nav-stepper {
   display: inline-flex;
   align-items: stretch;
   min-height: 40px;
   background: var(--panel);
-  border: var(--hairline);
+  border-width: 1px;
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--bark) 25%, transparent);
   border-radius: var(--radius-card);
   overflow: hidden;
 }
@@ -420,7 +431,9 @@
   justify-content: center;
   min-height: 40px;
   background: none;
-  border: var(--hairline);
+  border-width: 1px;
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--bark) 25%, transparent);
   color: inherit;
   cursor: pointer;
 }
@@ -537,11 +550,15 @@
 /* #923 AC3 (D17): rendered inside `.app-header` now (App.tsx), as the row directly under the
  * engine-status/verbs row — `border-top` is the hairline separator the AC names, `margin-top`/
  * `padding-top` the spacing either side of it. No longer its own `.panel` (App.tsx dropped that
- * class): a bordered card nested inside the header's own bordered card would double the frame. */
+ * class): a bordered card nested inside the header's own bordered card would double the frame.
+ * Longhand `border-top-*`, not `var(--hairline)` — same happy-dom empty-longhand gap
+ * `.spend-meter-bar`'s own comment documents (originally `.panel-head`'s). */
 .transport {
   margin-top: var(--space-3);
   padding-top: var(--space-3);
-  border-top: var(--hairline);
+  border-top-width: 1px;
+  border-top-style: solid;
+  border-top-color: color-mix(in srgb, var(--bark) 25%, transparent);
 }
 
 .transport-controls {

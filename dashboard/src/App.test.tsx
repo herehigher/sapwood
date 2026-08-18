@@ -3336,8 +3336,21 @@ const CLOSED_ROUND = {
 
 // AC1 (STYLE, `registerRealDom()` + `getComputedStyle`, full cascade at 1440-wide `App` —
 // `mountAppWithCascade` above already forces that viewport before mounting).
-test("#923 AC1: .app-header ≥100px, the round-nav stepper's three cells ≥40px each with a border, the pill's font/case/size, and the spend capsule's width/height/border/centred caption", async () => {
+//
+// gate② finding [0] (ac1-style-oracles-incomplete): the first cut's border checks
+// (`assert.notEqual(computed.borderWidth, "0px")`) pass on an EMPTY computed string too — exactly
+// what happy-dom returns for a `color-mix()`-bearing `border: var(--hairline)` shorthand
+// (`.panel-head`'s own documented gap, panels.css) — so a border that failed to apply at all would
+// have slipped through undetected. panels.css now declares these three rules' borders as
+// longhands (`border-width`/`border-style`/`border-color`), which happy-dom DOES resolve (verified
+// directly); this test asserts the exact resolved value instead of merely "not zero". Font-family
+// now compares the FULL resolved stack against the real `--font-data` token (not a partial regex
+// match on one family name in it), and the caption-below-the-bar claim is backed by an explicit
+// `.spend-meter` `flex-direction: column` assertion, not DOM order alone.
+test("#923 AC1: .app-header ≥100px, the round-nav stepper's three cells ≥40px each with a resolved 1px border, the pill's font/case/size, and the spend capsule's width/height/border/centred caption", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  const fontDataStack = parseTokensLocal(tokensCss924)["--font-data"];
+  assert.ok(fontDataStack, "tokens.css must still declare --font-data for this test's own oracle");
   try {
     const header = container.querySelector(".app-header");
     assert.ok(header, ".app-header must render");
@@ -3352,13 +3365,18 @@ test("#923 AC1: .app-header ≥100px, the round-nav stepper's three cells ≥40p
     for (const cell of cells) {
       const computed = getComputedStyle(cell as Element);
       assert.equal(computed.minHeight, "40px", `"${cell.className}" cell min-height`);
-      assert.notEqual(computed.borderWidth, "0px", `"${cell.className}" cell must carry its own border`);
+      assert.equal(computed.borderWidth, "1px", `"${cell.className}" cell must resolve a real 1px border, not an unresolved empty value`);
+      assert.equal(computed.borderStyle, "solid", `"${cell.className}" cell border-style`);
     }
 
     const pill = container.querySelector(".round-nav-pill");
     assert.ok(pill, ".round-nav-pill must render");
     const pillComputed = getComputedStyle(pill as Element);
-    assert.match(pillComputed.fontFamily, /JetBrains Mono/, ".round-nav-pill font-family must resolve the --font-data stack");
+    assert.equal(
+      pillComputed.fontFamily,
+      fontDataStack,
+      ".round-nav-pill font-family must resolve the COMPLETE --font-data stack, not just its first family",
+    );
     assert.equal(pillComputed.textTransform, "uppercase");
     assert.ok(Number.parseFloat(pillComputed.fontSize) >= 14, `.round-nav-pill font-size (${pillComputed.fontSize}) must be >= 14px`);
 
@@ -3370,16 +3388,20 @@ test("#923 AC1: .app-header ≥100px, the round-nav stepper's three cells ≥40p
       `.spend-meter-bar's declared width (${barComputed.width}) must be >= 360px (25% of the issue's 1440 normalization width)`,
     );
     assert.ok(Number.parseFloat(barComputed.height) >= 16, `.spend-meter-bar's declared height (${barComputed.height}) must be >= 16px`);
-    assert.notEqual(barComputed.borderWidth, "0px", ".spend-meter-bar must carry a visible border");
+    assert.equal(barComputed.borderWidth, "1px", ".spend-meter-bar must resolve a real 1px border, not an unresolved empty value");
+    assert.equal(barComputed.borderStyle, "solid", ".spend-meter-bar border-style");
 
     const caption = container.querySelector(".spend-meter-value");
     assert.ok(caption, ".spend-meter-value caption must render");
     assert.equal(getComputedStyle(caption as Element).textAlign, "center");
-    // The caption sits BELOW the bar in DOM order (panels.css's own `.spend-meter` flex-column,
-    // #890's doc) — same "reference element first, annotation after" contract this file's
-    // existing #890 tests already pin, re-confirmed here rather than re-derived.
+    // The caption sits BELOW the bar — proven by BOTH the layout axis (`.spend-meter`'s own
+    // flex-direction: column, the mechanism that makes DOM order equal visual order here) AND DOM
+    // order itself (#890's "reference element first, annotation after" contract), not DOM order
+    // alone — a `flex-direction: row` (or no flex at all) would make "first in markup" mean
+    // nothing about "renders above".
     const meter = bar!.closest(".spend-meter");
     assert.ok(meter, ".spend-meter-bar must sit inside .spend-meter");
+    assert.equal(getComputedStyle(meter as Element).flexDirection, "column", ".spend-meter must lay its children out in a column");
     const order = [...(meter as Element).querySelectorAll("svg.spend-meter-bar, .spend-meter-value")];
     assert.deepEqual(
       order.map((el) => el.className),
@@ -3420,15 +3442,34 @@ test("#923 AC2: closed round selected — BACK TO LIVE is a descendant of .app-h
 // AC3 (WIRING) — the transport is a descendant of `.app-header`, after a hairline separator;
 // `.transport-position` is right-aligned; COVERAGE over both button sets (no engine-verb button
 // inside the transport, no media glyph among the verbs).
-test("#923 AC3: the transport is a descendant of .app-header after a hairline separator; .transport-position is right-aligned; the transport and the verbs never share a button", async () => {
+//
+// gate② finding [1] (ac3-separator-oracle-vacuous): the first cut's `assert.notEqual(...,
+// "0px")` had the SAME empty-string hole AC1's border checks did (see that test's own updated
+// comment) — panels.css's `.transport` rule is longhand now, so this asserts the exact resolved
+// value. It also now asserts the transport actually follows `.app-header-row` in DOM order (the
+// "second row, AFTER the first" half of AC3/D14 — the earlier version proved ancestry and a
+// non-zero border, never ordering).
+test("#923 AC3: the transport is a descendant of .app-header, AFTER the header row, separated by a resolved 1px hairline; .transport-position is right-aligned; the transport and the verbs never share a button", async () => {
   const data = { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "running" } };
   const vm = minimalAppViewModel({ mode: "replay", loop: { data, isPending: false }, rounds: [CLOSED_ROUND], selectedRoundId: 42 });
   const { container, cleanup } = await mountAppWithCascade(vm);
   try {
     const transport = container.querySelector('section[aria-label="replay transport"]');
     assert.ok(transport, "the transport section must render");
-    assert.ok(transport?.closest(".app-header"), "the transport must be a descendant of .app-header");
-    assert.notEqual(getComputedStyle(transport as Element).borderTopWidth, "0px", "the transport must carry a hairline separator");
+    const header = transport?.closest(".app-header");
+    assert.ok(header, "the transport must be a descendant of .app-header");
+    const transportComputed = getComputedStyle(transport as Element);
+    assert.equal(transportComputed.borderTopWidth, "1px", "the transport must resolve a real 1px separator, not an unresolved empty value");
+    assert.equal(transportComputed.borderTopStyle, "solid", "the transport's separator border-style");
+
+    const headerRow = header?.querySelector(".app-header-row");
+    assert.ok(headerRow, "the header row must render");
+    const rowIndex = [...header!.children].indexOf(headerRow as Element);
+    const transportIndex = [...header!.children].indexOf(transport as Element);
+    assert.ok(
+      rowIndex >= 0 && transportIndex > rowIndex,
+      `the transport (child ${transportIndex}) must render AFTER .app-header-row (child ${rowIndex}) — the second row, not the first`,
+    );
 
     const position = transport?.querySelector(".transport-position");
     assert.ok(position, ".transport-position must render");
