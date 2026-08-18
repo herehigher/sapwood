@@ -181,6 +181,25 @@ test("AC3: --sap-fill-outline's literal light-theme hex is pinned to --sap-text'
   }
 });
 
+// #923: the closed-round stepper's own outline token takes the SAME literal-hex workaround
+// (tokens.css's own `--stepper-replay-outline` comment), but unlike --sap-fill-outline it is
+// never transparent — an outline, not a contrast compensation — so its `:root` default ALSO
+// pins against --sap-text's dark branch, on top of the two light-theme overrides
+// --sap-fill-outline already established the pattern for.
+test("AC3: --stepper-replay-outline's literal hexes are pinned to --sap-text's own two branches — the :root default to dark, both theme-trigger overrides to light — never a hand-copied duplicate that can drift", () => {
+  const { light, dark } = parseColorTokens(css);
+  const declarations = [...css.matchAll(/--stepper-replay-outline:\s*(#[0-9A-Fa-f]{6})/g)].map((m) => m[1]!.toUpperCase());
+  assert.equal(declarations.length, 3, "expected the :root default + the data-theme override + the prefers-color-scheme override");
+  const [rootDefault, sapwoodOverride, prefersLightOverride] = declarations;
+  assert.equal(rootDefault, dark["--sap-text"], "the :root default must equal --sap-text's own dark value");
+  assert.equal(sapwoodOverride, light["--sap-text"], 'the data-theme="sapwood" override must equal --sap-text\'s own light value');
+  assert.equal(
+    prefersLightOverride,
+    light["--sap-text"],
+    "the prefers-color-scheme:light override must equal --sap-text's own light value",
+  );
+});
+
 /**
  * #924 AC3 (coverage, not just resolution): "derive the AC3 outline test's covered set from the
  * production --sap-fill consumers (grep dashboard/src for --sap-fill fills) rather than a
@@ -239,8 +258,11 @@ test("AC3 COVERAGE: every production var(--sap-fill) paint site is on record", (
   //   `-floor`), so their own contrast guarantee comes from `contrast.ts`'s
   //   `checkFillFloorContrast` (AC8's own dedicated test, tokens.test.ts) checked at the WORST
   //   case (the floor alpha) instead — a different, already-covered mechanism, not a gap.
+  // - panels.css .header-back-to-live (background) — #923: its own `border: 1px solid
+  //   var(--sap-fill-outline)` on the SAME rule, same compensation shape as `.cost-bar-fill`.
   const knownSites = [
     "panels.css:.cost-bar-fill:fill: var(--sap-fill);",
+    "panels.css:.header-back-to-live:background: var(--sap-fill);",
     "panels.css:.transport-scrub::-webkit-slider-thumb:background: var(--sap-fill);",
     "panels.css:.transport-scrub::-moz-range-thumb:background: var(--sap-fill);",
     'components/ActivityFeed.tsx:const dotColor = attention ? "var(--rust)" : glyph === true ? "var(--moss)" : "var(--sap-fill)";',

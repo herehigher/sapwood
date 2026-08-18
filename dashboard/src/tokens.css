@@ -79,6 +79,13 @@
      preference with no override) are the two rules below `:root` — see their own doc for why this
      is NOT `light-dark(var(--sap-text), transparent)` despite being the same effective values. */
   --sap-fill-outline: transparent;
+  /* #923: the closed-round stepper's own border needs the SAME resolvable-literal treatment
+     --sap-fill-outline takes below, for the SAME reason (a STYLE test can't prove a
+     light-dark()-sourced border-color at all — see that token's own comment). Unlike
+     --sap-fill-outline this is never transparent in either theme (an outline, not a contrast
+     compensation) — dark's own value lives here as the default; the two light-theme trigger
+     rules below `:root` (this file's own established pattern) override it to light's value. */
+  --stepper-replay-outline: #E8A33D;
 
   /* #922 AC8: the breathing active-node disc's fill/glow alpha floor↔peak, dark-theme default —
      `--sap-fill` itself is flat (both themes, above), so it is the ANIMATED ALPHA that differs per
@@ -136,6 +143,10 @@
  * `--sap-text`'s own light-theme hex, duplicated deliberately — `tokens.test.ts` pins it against
  * `parseColorTokens(tokensCss).light["--sap-text"]` so the two can never silently drift apart, the
  * same VALUE-family guarantee `light-dark()` gave for free before this workaround.
+ *
+ * `--stepper-replay-outline` rides the SAME two trigger rules (this one plus the
+ * `prefers-color-scheme: light` block below) for the identical reason — see its own `:root`
+ * comment above.
  */
 :root[data-theme="sapwood"] {
   color-scheme: light;
@@ -144,6 +155,7 @@
   --sap-fill-halo-peak: 0.9;
   --sap-fill-glow-floor: 0.12;
   --sap-fill-glow-peak: 0.35;
+  --stepper-replay-outline: #8A5A14;
 }
 
 /* The other light-theme trigger `light-dark()` used to cover for free: system preference, with NO
@@ -159,5 +171,6 @@
     --sap-fill-halo-peak: 0.9;
     --sap-fill-glow-floor: 0.12;
     --sap-fill-glow-peak: 0.35;
+    --stepper-replay-outline: #8A5A14;
   }
 }

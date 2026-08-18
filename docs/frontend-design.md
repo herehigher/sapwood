@@ -476,11 +476,16 @@ design input, not an edge case).
 Two placement rules (2026-07-21): the verbs are **hidden entirely while
 viewing a closed round** — they act on the present engine while every other
 pixel shows an as-of-cursor past, so rendering them invites acting on stale
-evidence; the "back to live" jump is the way back to them. And the replay
-transport (§11) must **never share position or icon language** with these
-verbs: transport = media glyphs in its own strip, engine verbs = text
-buttons at the header's right — otherwise leaving replay swaps a media ⏸
-for an engine STOP under the same cursor position. While a verb is taking effect the header shows the engine's real
+evidence; the "back to live" jump is the way back to them, rendered in the
+header row itself in their place. And the replay transport (§11) must
+**never share position or icon language** with these verbs: transport =
+media glyphs in its own strip, engine verbs = text buttons at the header's
+right — otherwise leaving replay swaps a media ⏸ for an engine STOP under
+the same cursor position. **The strip is the header card's own second row**
+(2026-08-18 amendment, #923, `header-dark.png`): the transport renders
+inside `.app-header`, under a hairline separating it from the engine-status/
+verbs row above, rather than as a separate panel stacked below the header.
+While a verb is taking effect the header shows the engine's real
 transition state (`winding down`, `stopping` — §8 derivations, not an
 optimistic flip); controls disable during transitions. Buttons reflect
 validity (Resume only while paused, etc.). Server side this is **one**
