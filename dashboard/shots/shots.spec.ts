@@ -256,23 +256,29 @@ test("#922 AC8: prefers-reduced-motion resolves animation: none on the active no
  * test's own NAME and assertion text still claiming "one scroll (2× viewport height)" — an
  * internally-contradicting weakening of a bound this file's own history already fought two rounds
  * to tighten (findings ac1-geometry-not-pinned, ac1-one-scroll-boundary above), not a properly
- * recorded readjudication. This is the readjudication done properly: `lanes` replaying a real card
- * grid (rather than `LiveOnly`'s short "live only" placeholder) structurally cannot fit inside the
- * original 1800px reading — #926's own AC2/AC3 already fixed the 3-card grid's real mockup-scale
- * anatomy (measured ~301px tall), so shrinking it back down to reclaim that headroom would undo
- * ALREADY-SHIPPED, separately-adjudicated requirements, not a legitimate fix for THIS bound.
- * `READJUDICATED_ONE_SCROLL_BOUNDARY_PX` is the new, EXPLICITLY NAMED bound (2100px, not "2×
- * viewport" — the test's own title and assertion text say so now, never a silent mismatch between
- * what the name claims and what the code checks) — ~124px of margin above the measured tightest
- * module (cost, 1976.95px, `?demo` idle at 1440×900), the smallest round step past it, never a
- * re-derivation from `viewportHeight` that would silently track future content growth unnoticed.
- * Real measured tops at 1440×900 (`?demo`, idle, post-#927): hero 618px, lanes 1217px, feed
- * 1534px, cost 1977px — cost is the tightest against the new bound; the other three still clear
- * the ORIGINAL 1800px reading with room to spare.
+ * recorded readjudication.
+ *
+ * #927 gate② finding [0] round 2 (ac4b-per-module-bounds, run 5c6c523c): applying ONE widened
+ * bound to every module was itself still too loose — only `cost` (downstream of the now-taller
+ * `lanes` real card grid) needed the wider reading at all; `hero`/`lanes`/`feed` never crossed the
+ * ORIGINAL 1800px bound (measured 618px/1217px/1534px at 1440×900, `?demo` idle, post-#927 — see
+ * below) and a shared 2100px bound would silently let any of the three regress past 1800px without
+ * this test ever catching it. Split per module instead: `hero`/`lanes`/`feed` keep the ORIGINAL,
+ * tighter `ONE_SCROLL_BOUNDARY_PX` (1800 = 2× viewport height — the same reading round 2's own
+ * fix established); only `cost` gets the wider `COST_READJUDICATED_BOUNDARY_PX` (2100 — ~124px of
+ * margin above the measured 1976.95px, the smallest round step past it, never a re-derivation from
+ * `viewportHeight` that would silently track future growth unnoticed). `lanes` replaying a real
+ * card grid (rather than `LiveOnly`'s short "live only" placeholder) is what pushes `cost`'s own
+ * top edge past 1800px in the first place — #926's own AC2/AC3 already fixed that grid's real
+ * mockup-scale anatomy (measured ~301px tall), so shrinking it back down to reclaim that headroom
+ * would undo ALREADY-SHIPPED, separately-adjudicated requirements, not a legitimate fix for either
+ * bound. Real measured tops at 1440×900 (`?demo`, idle, post-#927): hero 618px, lanes 1217px, feed
+ * 1534px, cost 1977px.
  */
-const READJUDICATED_ONE_SCROLL_BOUNDARY_PX = 2100;
+const ONE_SCROLL_BOUNDARY_PX = 1800;
+const COST_READJUDICATED_BOUNDARY_PX = 2100;
 
-test("§889 AC1 (bound readjudicated by #927 — see doc comment): the round list never renders inline by default, and hero/lanes/feed/cost each START within 2100px from the top at 1440px", async ({
+test("§889 AC1 (cost's bound readjudicated by #927 — see doc comment): the round list never renders inline by default; hero/lanes/feed START within one scroll (1800px), cost within its readjudicated 2100px, all from the top at 1440px", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -286,19 +292,19 @@ test("§889 AC1 (bound readjudicated by #927 — see doc comment): the round lis
   // must be entirely absent from the DOM until that click happens — never present-but-hidden.
   expect(await page.locator(".round-list").count()).toBe(0);
 
-  const modules: [string, Locator][] = [
-    ["hero", page.locator("svg.hero")],
-    ["lanes", (await firstMatch(page, MODULE_SELECTORS.lanes)) ?? page.locator("nonexistent-lanes-anchor")],
-    ["feed", page.locator('section[aria-label="activity"]')],
-    ["cost", page.locator("#cost")],
+  const modules: [string, Locator, number][] = [
+    ["hero", page.locator("svg.hero"), ONE_SCROLL_BOUNDARY_PX],
+    ["lanes", (await firstMatch(page, MODULE_SELECTORS.lanes)) ?? page.locator("nonexistent-lanes-anchor"), ONE_SCROLL_BOUNDARY_PX],
+    ["feed", page.locator('section[aria-label="activity"]'), ONE_SCROLL_BOUNDARY_PX],
+    ["cost", page.locator("#cost"), COST_READJUDICATED_BOUNDARY_PX],
   ];
-  for (const [name, locator] of modules) {
+  for (const [name, locator, boundaryPx] of modules) {
     const box = await locator.boundingBox();
     expect(box, `${name} module must render with a real bounding box`).not.toBeNull();
     expect(
       box?.y,
-      `${name}'s top edge must start within the readjudicated ${READJUDICATED_ONE_SCROLL_BOUNDARY_PX}px bound from the top — never pushed further down by round history`,
-    ).toBeLessThan(READJUDICATED_ONE_SCROLL_BOUNDARY_PX);
+      `${name}'s top edge must start within its own ${boundaryPx}px bound from the top — never pushed further down by round history`,
+    ).toBeLessThan(boundaryPx);
   }
 });
 
