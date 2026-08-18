@@ -57,23 +57,29 @@ At most {{decompose.maxChildren}} children may be returned, counting remainders.
 
 ## Leaf, container, remainder
 
-Every child you propose is one of three kinds, chosen by what is actually missing, never by how
-long the prose reads:
+<!-- sapwood:floor:child-kinds -->
+A decomposition child is one of three kinds, chosen by what's missing, not by size: **leaf** —
+acceptance criteria closable inside one PR's own CI plus gate②; **container** — a coarse
+`"kind":"ready"` child whose acceptance section names an executable check-run on `main` instead
+of PR-scoped criteria, `too_large` by contract; **remainder** — reserved for a missing
+fact/decision, never for size alone. Every leaf's/container's `## Why` opens with
+`Cut: <dimension>, because <verification-seam reason>; considered: <alternative>`.
+<!-- /sapwood:floor:child-kinds -->
 
-- **leaf** — acceptance criteria closable inside one PR's own CI plus gate②. The default shape;
-  everything under "Granularity" below describes it.
-- **container** — a coarse child whose acceptance section names an executable coarse acceptance
-  check on `main` instead of PR-scoped criteria: a CI check-run to be installed/named — the same
-  contract #912 requires of a decomposed parent's own acceptance plan. A container is
-  `"kind":"ready"` in the structured output below; there is no separate schema value for it, and
-  it is Ready-able by a human exactly like a leaf. Gate⓪ judges a container against the identical
-  structural yardstick below; one that fires it is `too_large`, and the engine re-splits it
-  (#874) as its own generation. **A container is preferred over a remainder whenever the scope is
-  merely large** — a remainder that exists only because nobody sized a coarse check is not an
-  honest remainder, it is a container that was never written.
-- **remainder** — reserved for scope where neither a leaf's nor a container's contract can be
-  written because a fact or decision is missing, never because the scope is big. Unchanged
-  mechanics: see the remainder rules below.
+A container is Ready-able by a human exactly like a leaf, and its acceptance section names an
+executable coarse acceptance check on `main` — a CI check-run to be installed/named, the same
+contract #912 requires of a decomposed parent's own acceptance plan — instead of PR-scoped
+criteria; there is no separate schema value for it. Its `## Why` MUST name which structural
+yardstick predictor (below) fires — that predictor is exactly why the child is a container and
+not a leaf; a coarse-sounding child that fires none of the predictors is not a container, write
+it as a leaf with real PR-scoped criteria instead. **Container ⇒ `too_large` by contract, never
+by reviewer luck**: gate⓪'s outcome 5 treats a container-shaped body as `too_large` on the
+strength of that named predictor alone, and the engine re-splits it (#874) as its own
+generation — a worker never receives a container. **Preferred over a remainder whenever the
+scope is merely large** — a remainder that exists only because nobody sized a coarse check is
+not an honest remainder, it is a container that was never written. A remainder stays reserved
+for scope where neither contract can be written because a fact or decision is missing, never
+because the scope is big — see the remainder rules below.
 
 Hard target for every leaf child:
 
@@ -143,13 +149,21 @@ When a container's coarse acceptance check is not yet runnable on `main` — gre
 a cross-cutting concern with no existing entry point to hang a check on — make child 0 the
 check's own installation: a thin, real end-to-end slice that lands the check-run RED on `main`
 (asserting the actual target behavior, never a placeholder that always passes), so every later
-cut in this generation has concrete feedback to build against. Every later child in the
-generation may then express `blockedBy: [0]`.
+cut in this generation has concrete feedback to build against. Install it as a MAIN-ONLY or
+scheduled workflow (`on: push: branches: [main]`, or a cron) — never one that also reports on
+the PR itself — because sapwood's merge gate treats any red check-run reported on a PR's own
+head as CI-red and never merges that PR (`forge.ts`'s `ciRed`, `merge-driver.ts`'s FIXABLE
+routing). Every later child in the generation may then express `blockedBy: [0]`.
 
 Do NOT install a check red for its own sake when one vertical slice already IS the skeleton — a
 small feature landing inside a mature codebase where an existing check, or one leaf's own PR,
 already exercises the real path end to end. Skeleton-first exists for the case where nothing yet
 proves the shape works; it is not a mandatory first child on every decomposition.
+
+When `.github/workflows/**` is itself human-merge-only in the target repo, installing the coarse
+check's workflow file is a human-owned remainder (see "If a `ready` child's acceptance criterion
+would touch a human-merge-only path" below) — child 0 lands everything else the check needs and
+names the workflow file as the piece a human must add directly.
 
 ## Cut dimension
 
@@ -162,13 +176,11 @@ fails fast; vertical (user-journey) slices are the default cut for user-facing f
 none of the above dominates.
 
 Name the chosen dimension so a human reviewing the set can veto the SHAPE, not just individual
-children. The engine's coverage comment is rendered entirely from `coverage.mappings[].
-parentIntent` and `coverage.remainders` — there is no free-text field there for this — so put the
-cut statement as the FIRST line of every leaf's and container's `## Why` section instead:
-
-`Cut: <dimension>, because <verification-seam reason>; considered: <alternative>`
-
-A remainder carries no `Cut:` line — it has no verification seam to name yet.
+children, using the `Cut:` grammar pinned above (the "Leaf, container, remainder" floor). The
+engine's coverage comment is rendered entirely from `coverage.mappings[].parentIntent` and
+`coverage.remainders` — there is no free-text field there for this — which is why the `Cut:`
+line lives as the FIRST line of every leaf's and container's `## Why` section instead of the
+coverage comment. A remainder carries no `Cut:` line — it has no verification seam to name yet.
 
 ## Constraints as binding cut guidance on re-split
 
@@ -258,11 +270,13 @@ Cut: <dimension>, because <verification-seam reason>; considered: <alternative>
 ## Why
 Cut: <dimension>, because <verification-seam reason>; considered: <alternative>
 
-...
+Container: fires the "<predictor name>" structural yardstick predictor — <one clause on which
+acceptance criteria/subsystems trigger it> — so it is not a leaf.
 
 ## What
-A container: too large for one PR, not blocked on any missing fact — gate⓪ will judge it
-`too_large` and the engine re-splits it into its own generation (#874).
+A container, too large for one PR by the predictor named above, not blocked on any missing
+fact — gate⓪ judges it `too_large` by contract and the engine re-splits it into its own
+generation (#874).
 
 ## Acceptance criteria
 <!-- sapwood:ac -->

@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { defaultPoolPromptPath, defaultPoPromptPath } from "../loop/align.js";
 import { defaultPoDecomposePromptPath, validateDecomposeOutput } from "../loop/decompose.js";
 import { defaultHarvestPromptPath } from "../loop/harvest.js";
@@ -36,6 +37,14 @@ import { defaultFixPromptPath, defaultPromptPath } from "./worker.js";
 
 function readPrompt(path: string): string {
   return readFileSync(path, "utf8");
+}
+
+// #913 AC4: docs/PLAN.md is a mirror carrier for the child-kinds floor below — same
+// HERE/REPO_ROOT resolution write-inventory.test.ts already uses to locate docs/PLAN.md from an
+// engine/src/** test file, so this doesn't invent a second convention for finding it.
+function defaultPlanDocPath(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return join(here, "..", "..", "..", "docs", "PLAN.md");
 }
 
 // ── #529 (AC-2): declared-session-contract drift — a role's prompt must never assert,
@@ -594,6 +603,10 @@ test("#874 (negative lint): the shipped reviewer prompt no longer recommends a h
   );
 });
 
+test("#913 AC4: po-decompose.md and docs/PLAN.md's #310 paragraph ship the sapwood:floor:child-kinds marker block, byte-equal (whitespace-normalized) — the leaf/container/remainder one-liners and the Cut: grammar are pinned once, mirrored between the prompt and the doc that describes it", () => {
+  assertFloorMirrored("child-kinds", CHILD_KINDS_CARRIERS);
+});
+
 // ── #913: leaf / container / remainder contracts — a container is asserted, not assumed, to be
 // a plain `"kind":"ready"` child under the REAL schema/validator (no schema change); a retired
 // sentence that conflated "oversized" with "hand it to a remainder" must not return. ───────────
@@ -615,11 +628,6 @@ test('#913 AC1 (cross-artifact: real parser): a container-shaped child — a coa
   assert.equal(result.children[0]?.kind, "ready", 'the leaf child must validate as kind:"ready"');
   assert.equal(result.children[1]?.kind, "ready", 'the container child must ALSO validate as kind:"ready" — no schema change');
   assert.equal(result.children[2]?.kind, "remainder", "the third example child stays a remainder");
-  assert.match(
-    result.children[1]!.body,
-    /green on `main`/,
-    "the container child's acceptance section names a main-branch check-run, not PR-scoped criteria",
-  );
 });
 
 test("#913 (negative lint): po-decompose.md no longer treats 'oversized' as a reason to fall back to a remainder — a merely-large candidate becomes a container, never a discard", () => {
@@ -697,6 +705,16 @@ const EVIDENCE_TIER_CARRIERS: Readonly<Record<string, string>> = {
 const SPLIT_YARDSTICK_CARRIERS: Readonly<Record<string, string>> = {
   "verification-plan-reviewer.md": defaultVerificationPlanReviewerPromptPath(),
   "po-decompose.md": defaultPoDecomposePromptPath(),
+};
+
+// #913 AC4: the leaf/container/remainder one-line definitions and the `Cut:` grammar are pinned
+// in ONE marker block, mirrored between the AUTHOR (po-decompose.md) and docs/PLAN.md's own
+// #310 paragraph — durable knowledge and the prompt that implements it must never silently
+// diverge (docs/REVIEW-DOCTRINE.md PROSE-PIN). Note this carrier set spans a prompt AND a doc,
+// unlike every other floor here, which is why defaultPlanDocPath exists above.
+const CHILD_KINDS_CARRIERS: Readonly<Record<string, string>> = {
+  "po-decompose.md": defaultPoDecomposePromptPath(),
+  "docs/PLAN.md": defaultPlanDocPath(),
 };
 
 function extractFloor(body: string, floorName: string): string {

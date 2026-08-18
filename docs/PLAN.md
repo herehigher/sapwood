@@ -1527,27 +1527,39 @@ criteria are verifiable by that PR's CI plus gate②. The prompt additionally pr
 worker-soft-budget session, no more than the configurable AC-count hint, and minimal sibling
 file overlap; these remain heuristics rather than scheduling gates.
 
-**Leaf, container, remainder — contracts, not levels (#913, owner ruling 2026-08-17).** A
-Ready-able child is one of two contracts, both `"kind":"ready"` in the structured output — no
-typed schema distinction between them: a **leaf** whose acceptance criteria close inside one
-PR's own CI plus gate②, or a **container** whose acceptance section instead names an executable
-coarse acceptance check on `main` (a CI check-run to be installed/named — the same contract #912
-requires of a decomposed parent's own acceptance plan). A container is preferred over a
-remainder whenever scope is merely large: `too_large` (above) and a decision-missing remainder
-are different reasons a child cannot be a leaf, and only the second one is what a remainder is
-for. When a container's coarse check does not yet exist on `main` — greenfield or cross-cutting
-scope — its own child 0 installs that check RED via a thin, real end-to-end slice
-("skeleton-first"), so every later cut in that generation has concrete feedback; a mature
-codebase where one vertical slice already exercises the real path skips this. Each leaf's and
-container's `## Why` opens with a `Cut: <dimension>, because <verification-seam reason>;
-considered: <alternative>` line naming the dimension that generation was cut along (verification
-seam first, then dependency order/file-overlap, then risk-first, vertical user-journey slices
-default for user-facing work) — the coverage comment itself has no free-text field for this, so
-the child body carries it instead. A human vetoes the SHAPE of a generation, not just an
-individual child, by rewriting the parent issue's own optional `## Constraints` section (the
-same section `feature.md`/`fix.md`'s issue templates carry) and re-applying `split`; a
-`## Constraints` section already present on the issue being decomposed is binding cut guidance,
-not background.
+**Leaf, container, remainder — contracts, not levels (#913, owner ruling 2026-08-17).**
+
+<!-- sapwood:floor:child-kinds -->
+A decomposition child is one of three kinds, chosen by what's missing, not by size: **leaf** —
+acceptance criteria closable inside one PR's own CI plus gate②; **container** — a coarse
+`"kind":"ready"` child whose acceptance section names an executable check-run on `main` instead
+of PR-scoped criteria, `too_large` by contract; **remainder** — reserved for a missing
+fact/decision, never for size alone. Every leaf's/container's `## Why` opens with
+`Cut: <dimension>, because <verification-seam reason>; considered: <alternative>`.
+<!-- /sapwood:floor:child-kinds -->
+
+Leaf and container are both `"kind":"ready"` in the structured output — no typed schema
+distinction between them; a container's acceptance section names an executable coarse
+acceptance check on `main` instead of PR-scoped criteria (a CI check-run to be
+installed/named — the same contract #912 requires of a decomposed parent's own acceptance
+plan). Its `## Why` must additionally name which structural yardstick predictor fires — the
+SAME predictors #874's `too_large` decision judges by, below — which is exactly why it is not a
+leaf: gate⓪ treats a container-shaped body as `too_large` BY CONTRACT on the strength of that
+named predictor, and the engine re-splits it (#874); a worker never receives a container.
+`too_large` and a decision-missing remainder are different reasons a child cannot be a leaf, and
+only the second is what a remainder is for. When a container's coarse check does not yet exist
+on `main` — greenfield or cross-cutting scope — its own child 0 installs that check RED via a
+thin, real end-to-end slice ("skeleton-first"), as a MAIN-ONLY or scheduled workflow rather than
+one that also reports on the PR itself (the merge gate treats any red PR-head check-run as
+CI-red and never merges that PR), so every later cut in that generation has concrete feedback; a
+mature codebase where one vertical slice already exercises the real path skips this. The `Cut:`
+line (grammar pinned above) names the dimension that generation was cut along (verification seam
+first, then dependency order/file-overlap, then risk-first, vertical user-journey slices default
+for user-facing work) — the coverage comment itself has no free-text field for this, so the
+child body carries it instead. A human vetoes the SHAPE of a generation, not just an individual
+child, by rewriting the parent issue's own optional `## Constraints` section (the same section
+`feature.md`/`fix.md`'s issue templates carry) and re-applying `split`; a `## Constraints`
+section already present on the issue being decomposed is binding cut guidance, not background.
 
 Before any child creation, the validated proposal set is journaled, then the parent is moved
 to Todo, stripped only of the round-pool label, and fenced with `decomposed`. It then remains

@@ -211,8 +211,8 @@ honors — the structured output is. Decide, then emit the structured block.
    you never remove `{{labels.needsHuman}}` or `{{labels.blocked}}` — doing so is never this
    role's output, whatever tools your session holds; that decision is a human's alone.
 
-4. **Escalate directly — no draft is possible.** Two named reasons converge on this outcome;
-   pick whichever fired and name it. Neither is a wording problem, so neither routes through
+4. **Escalate directly — no draft is possible.** Named reasons converge on this outcome — pick
+   whichever fired and name it. None of them is a wording problem, so none routes through
    outcome 2 first: a redraft cannot fix what a human alone can settle.
 
    - **Human-merge-only prerequisite.** A human-merge-only path is a PREREQUISITE every
@@ -234,10 +234,11 @@ honors — the structured output is. Decide, then emit the structured block.
      invent the missing decision to proceed. The REQUIRED BODY block names the SPECIFIC
      undecided decision and which acceptance criterion presupposes it.
 
-   Either way, emit `"decision": "needs_human"` with the REQUIRED BODY block described above. The
-   engine applies `{{labels.needsHuman}}` immediately, no draft→re-review cycle attempted — never
-   route either case through outcome 2's `draft_request` first; a redraft cannot change who the
-   guard allows to make the edit, and it cannot make the decision for the human either.
+   Whichever fired, emit `"decision": "needs_human"` with the REQUIRED BODY block described
+   above. The engine applies `{{labels.needsHuman}}` immediately, no draft→re-review cycle
+   attempted — never route any of these through outcome 2's `draft_request` first; a redraft
+   cannot change who the guard allows to make the edit, and it cannot make the decision for the
+   human either.
 
 5. **Too large for one PR (#874).** The issue itself — not the wording — does not fit one worker
    lane: one PR cannot complete and verify it. This is NOT a wording defect a redraft could fix
@@ -262,6 +263,14 @@ honors — the structured output is. Decide, then emit the structured block.
    action from you. This is NOT advisory the way outcome 2's redraft suggestion is: the split
    lands the moment you emit this decision, with no human step first — the human-applied split
    label remains available as an override channel, never the route you take.
+
+   **A container-shaped body is `too_large` BY CONTRACT, never by reviewer discretion (#913).**
+   po-decompose.md's container kind is a coarse child whose acceptance criteria name only a
+   main-branch check-run — no PR-scoped criteria at all — and whose own `## Why` is required to
+   name the fired predictor. A body shaped that way is never `approve`-able as a small,
+   dispatchable issue, however well the coarse check itself reads: emit `too_large` with
+   `evidence` set to `"container: <the predictor its own ## Why names>"` (reuse the named
+   predictor rather than re-deriving one). A worker must never receive a container.
 
 ## Non-negotiables
 

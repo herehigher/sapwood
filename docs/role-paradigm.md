@@ -385,7 +385,7 @@ of five decisions: `approve` (write any body revision, apply `plan:approved`, do
 `verify_na` (apply `needs-human` THEN `verify:n/a`, ordering-invariant so a partial
 double-label failure fails closed non-dispatchable — `plan-review.ts::reviewOneIssue`),
 `draft_request` (brief the drafter), `needs_human` (retro round #365: apply `needs-human`
-directly, no draft cycle — reserved for either of two named reasons no redraft can fix: a
+directly, no draft cycle — reserved for named reasons no redraft can fix, including a
 human-merge-only path that is a PREREQUISITE every acceptance criterion depends on, where no
 redraft can make the plan dispatchable regardless of wording (escalating via `draft_request`
 first would only spend `maxDraftCycles` reaching the identical verdict, as issue #782 did); or,
