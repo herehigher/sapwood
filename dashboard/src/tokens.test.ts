@@ -8,13 +8,16 @@ import {
   checkFillFloorContrast,
   checkFillTextContrast,
   checkFillTrackContrast,
+  checkRustTextContrast,
   contrastRatio,
   FILL_TOKENS,
   GROUNDS,
   NON_TEXT_AA,
   ON_FILL_TOKEN,
+  ON_RUST_TOKEN,
   parseColorTokens,
   parseTokens,
+  RUST_FILL_TOKEN,
   readTokensCss,
   SAP_FILL_HALO_FLOOR,
   TEXT_TOKENS,
@@ -139,6 +142,18 @@ test("AC3 (re-baselined 2026-08-17): --sap-fill vs the real .cost-bar-track comp
     !light?.pass,
     "light theme is the documented, EXPECTED exception the --sap-text outline compensates for — not a bug to fix here",
   );
+});
+
+// #922 AC2 gate② finding [2] (ac2-rust-ink-contrast): the parked-PR/failed droplet's own number
+// draws --on-rust on --rust — a bare --on-sap-fill-on-rust pair (the old, unchecked state)
+// measured only ~2.74:1 in light theme. --on-rust flips per-theme (tokens.css's own doc); this
+// proves BOTH themes independently clear the real AA text floor (4.5:1 — droplet numerals are
+// text, not the 3:1 non-text boundary the fill-floor checks above use).
+test("AC2: --on-rust on --rust clears AA (4.5:1) in both themes", () => {
+  assert.equal(RUST_FILL_TOKEN, "--rust");
+  assert.equal(ON_RUST_TOKEN, "--on-rust");
+  const failures = checkRustTextContrast(css).filter((row) => !row.pass);
+  assert.deepEqual(failures, [], failures.map((f) => `${f.theme} ${f.text} on ${f.ground} = ${f.ratio}`).join("; "));
 });
 
 // #922 AC8: the breathing active-node disc's fill never drops below SAP_FILL_HALO_FLOOR — the

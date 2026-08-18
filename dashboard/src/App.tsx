@@ -37,7 +37,13 @@ import type { StageNode } from "./inspector.ts";
 import type { ReplayPosition } from "./replay/player.ts";
 import { initialReplayState } from "./replay/reducer.ts";
 import { loadRoundEvents, roundEventCeiling } from "./replay/round-log.ts";
-import { buildPhaseWindows, mergeRoundPhaseBuckets, type PhaseSpendBucket, type PhaseWindow } from "./replay/spend-replay.ts";
+import {
+  buildPhaseWindows,
+  mergeRoundPhaseBuckets,
+  type PhaseSpendBucket,
+  type PhaseWindow,
+  phaseAtCursor,
+} from "./replay/spend-replay.ts";
 import { loadRoundLog, type ReplayView, useReplay } from "./replay/useReplay.ts";
 
 /**
@@ -544,7 +550,12 @@ export function appContent(vm: AppViewModel) {
             lanes={mode === "live" ? loop.data.lanes.items : []}
             mergedPrs={mode === "live" ? loop.data.mergedPrs : []}
             fixCap={fixCap}
-            roundPhase={mode === "live" ? (loop.data.round?.phase ?? null) : null}
+            // #922 "What"/AC5 gate② finding [5]: replay highlights the CURSOR's own phase
+            // (`phaseAtCursor`, `replay.phaseWindows`/`replay.asOf` — the same replay data
+            // `now`'s own prop below already reads), never a hardcoded null — `live` (not
+            // `roundPhase`) is what keeps dimming live-only now (`Hero.tsx`'s own doc).
+            roundPhase={mode === "live" ? (loop.data.round?.phase ?? null) : phaseAtCursor(replay.phaseWindows, replay.asOf)}
+            live={mode === "live"}
             config={loop.data.config}
             onInspect={onInspect}
             openAttention={activeOpenAttention}

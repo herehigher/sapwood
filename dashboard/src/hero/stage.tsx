@@ -183,7 +183,8 @@ const LANE_TERMINAL_R = 4;
  *
  * #897: `r` shrank from an earlier 26 specifically to make room for the "CI"/"Review" word BELOW
  * the circle without reaching the needs-human cluster's own fixed ceiling (rank 5's droplet label top,
- * `ESCALATION.y - 30 - 2 * NEEDS_HUMAN_ROW_STEP - DROPLET_LABEL_FONT_PX` ≈ 198) — the cluster's
+ * `ESCALATION.y - NEEDS_HUMAN_BASE_OFFSET - 2 * NEEDS_HUMAN_ROW_STEP - DROPLET_LABEL_FONT_PX`,
+ * re-verified by this file's own stress tests whenever either constant moves) — the cluster's
  * own row cap (`NEEDS_HUMAN_DRAW_CAP`'s doc) was tuned against the OLD rect geometry, which drew
  * no text below itself at all; this stage's own below-circle label is what newly competes for
  * that space. The review-mode caption moved ABOVE the circle instead of stacking a second line
@@ -249,6 +250,15 @@ const NEEDS_HUMAN_COLS = 2;
  *  height at the worst-case DROPLET_MAX_R (2.571 × 20 ≈ 51.4), not the old (too-small) 2r guess. */
 const NEEDS_HUMAN_COL_STEP = 46;
 const NEEDS_HUMAN_ROW_STEP = 58;
+/**
+ * gate② finding [1] (ac2-escalation-overlap): the rank-0 droplet's own vertical offset from
+ * `ESCALATION.y` — was a bare inline `30`, which at the worst-case `DROPLET_MAX_R` (20) let the
+ * droplet's own bottom edge (`y + r * 9/7` ≈ +25.7) reach y=455.7, INSIDE the escalation circle
+ * (top edge `ESCALATION.y - ESCALATION_R` = 444) instead of clearing it. 56 keeps the same
+ * worst-case droplet's bottom edge (`ESCALATION.y - 56 + 25.7` ≈ 429.7) a real ~14px above the
+ * circle's own top edge.
+ */
+const NEEDS_HUMAN_BASE_OFFSET = 56;
 /** #891 AC1: never draw more than this many needs-human droplets at once — see the doc above
  *  this cluster's own geometry constants for why 6 (2 cols × 3 rows) is the verified ceiling. */
 const NEEDS_HUMAN_DRAW_CAP = NEEDS_HUMAN_COLS * 3;
@@ -349,6 +359,22 @@ export const TRUNK = { x: 1006, y: 190, step: 3, max: 42 } as const;
  * every other width through this same ratio.
  */
 const RENDER_SCALE_1440 = 1440 / STAGE.w;
+/**
+ * gate② finding [0] (ac2-real-render-scale): `RENDER_SCALE_1440` above assumes the hero SVG gets
+ * the FULL 1440px of a 1440px viewport — it never does. The icon rail (`app.css` `.icon-rail`:
+ * 56px width + 1px `border-right`), `.stack`'s own padding (`app.css`, 2 × `--space-4` = 32px),
+ * and `.hero-frame`'s own `.panel` padding + border (`app.css` `.panel`: 2 × `--space-4` = 32px +
+ * 2 × 1px hairline) all eat into it first — 1440 − (56 + 1 + 32 + 32 + 2) = 1317px is the SVG's
+ * own REAL rendered width at that viewport. Every size floor #922 introduces (the droplet's own
+ * height, the backlog numeral) is sized against THIS scale. `RENDER_SCALE_1440` above stays as
+ * originally defined — #921's own RING_COUNT_FONT_PX/TRUNK_DISC_R_MAX/RING_PITCH_MIN were sized
+ * and reviewed against it; reconciling those to the real scale too is a separate round, not
+ * #922's, since it risks silently re-tuning already-shipped geometry this issue never touched.
+ */
+const HERO_ICON_RAIL_PX = 56 + 1; // app.css .icon-rail: width 56px + border-right 1px hairline
+const HERO_STACK_PADDING_PX = 2 * 16; // app.css .stack: padding var(--space-4) (16px), both sides
+const HERO_PANEL_CHROME_PX = 2 * 16 + 2 * 1; // app.css .panel (.hero-frame): padding var(--space-4) + border hairline, both sides
+export const REAL_RENDER_SCALE_1440 = (1440 - HERO_ICON_RAIL_PX - HERO_STACK_PADDING_PX - HERO_PANEL_CHROME_PX) / STAGE.w;
 /**
  * #921 AC2: the outcome count's rendered size floor — the frozen mockup's own ~75px cap-height
  * serif "24" against the old `--text-4` (33px, only ~40px at 1440) sitting well under AC2's 56px
@@ -656,7 +682,7 @@ export function dropletPoint(state: HeroState, d: Droplet, at: DropletAt = d.at)
       );
       const col = rank % NEEDS_HUMAN_COLS;
       const row = Math.floor(rank / NEEDS_HUMAN_COLS);
-      return { x: ESCALATION.x + col * NEEDS_HUMAN_COL_STEP, y: ESCALATION.y - 30 - row * NEEDS_HUMAN_ROW_STEP };
+      return { x: ESCALATION.x + col * NEEDS_HUMAN_COL_STEP, y: ESCALATION.y - NEEDS_HUMAN_BASE_OFFSET - row * NEEDS_HUMAN_ROW_STEP };
     }
     // #886 gate② run 2e566ac9 finding [1]: the frozen baseline's outcome ring has NOTHING
     // else drawn near it — just a big centered number. `merged` (state.ts) always parks the
@@ -789,20 +815,24 @@ function dropletText(d: Droplet): string {
  * own display number — a droplet carrying a short issue number stays compact near the floor; one
  * carrying a longer PR number (or the trunk's "✓ ⤳ N" prefix) grows to fit it.
  *
- * `DROPLET_MIN_R` is the floor: the original ~18-unit-tall, r=7 teardrop scaled 1.4× (tip y=-9,
- * belly bottom y=+9 → 1.4× everything) so the rendered height clears AC2's own ≥ 28px-at-1440
- * floor even at the shortest text: 18 × 1.4 = 25.2 stage units × `RENDER_SCALE_1440` (1.2) =
- * 30.24px, comfortable margin. `dropletPath(r)` generalizes that SAME tip/belly-radius/
- * control-point ratio to any belly radius `r` — a droplet that grows for its text keeps the
- * identical teardrop silhouette, just bigger.
+ * `DROPLET_MIN_R` is the floor: sized so the rendered height clears AC2's own ≥ 28px floor at the
+ * REAL render scale (`REAL_RENDER_SCALE_1440`, gate② finding [0] — not the naive
+ * `RENDER_SCALE_1440`, which overstates how much of a 1440px viewport the SVG actually gets):
+ * height = (18/7) × r stage units (the tip/belly-bottom span at the r=7 baseline this ratio comes
+ * from) × `REAL_RENDER_SCALE_1440` (≈1.0975) ≥ 28 needs r ≳ 9.92; 10.5 clears it with real margin
+ * (≈29.6px). `dropletPath(r)` generalizes that SAME tip/belly-radius/control-point ratio to any
+ * belly radius `r` — a droplet that grows for its text keeps the identical teardrop silhouette,
+ * just bigger.
  */
-const DROPLET_MIN_R = 9.8;
-/** #922 AC2: the number's own NOMINAL font-size, now that it draws inside the shape — 10 stage
- *  units × `RENDER_SCALE_1440` (1.2) = 12px at 1440, clearing the AC's own ≥ 11px floor. Every
- *  droplet up to a realistic 1-3 digit issue/PR number renders at exactly this size; only past
- *  `DROPLET_MAX_R` does `dropletNumFontPx` shrink it, the same "floor holds until physically
- *  impossible" posture `ringCountFontPx` already uses for the trunk's own display number. */
-export const DROPLET_NUM_FONT_PX = 10;
+const DROPLET_MIN_R = 10.5;
+/** #922 AC2: the number's own NOMINAL font-size, now that it draws inside the shape — gate②
+ *  finding [0]: 11 stage units × `REAL_RENDER_SCALE_1440` (≈1.0975) ≈ 12.07px at 1440, clearing
+ *  the AC's own ≥ 11px floor at the REAL render scale (the old 10 cleared only the naive,
+ *  overstated scale). Every droplet up to a realistic 1-3 digit issue/PR number renders at
+ *  exactly this size; only past `DROPLET_MAX_R` does `dropletNumFontPx` shrink it, the same
+ *  "floor holds until physically impossible" posture `ringCountFontPx` already uses for the
+ *  trunk's own display number. */
+export const DROPLET_NUM_FONT_PX = 11;
 const DROPLET_CHAR_ADVANCE = 0.62;
 const DROPLET_TEXT_PAD = 4;
 /** #922 AC2: the belly radius ceiling — past this, a droplet stops growing the SHAPE and shrinks
@@ -1666,8 +1696,9 @@ export function HeroStage({
          * (`PLANNING.noteX`/`PLANNING.note` = 152, 300) with a long enough label to run straight
          * into it. Moved below the ESCALATION node instead — the one stretch of the stage
          * nothing else draws into at ANY zone's worst case: below the needs-human cluster's
-         * lowest row (`ESCALATION.y - 30`, itself well above this y), below the node's own
-         * label/circle, and above the dashed return path's horizontal leg (`STAGE.h - 20`).
+         * lowest row (`ESCALATION.y - NEEDS_HUMAN_BASE_OFFSET`, itself well above this y), below
+         * the node's own label/circle, and above the dashed return path's horizontal leg
+         * (`STAGE.h - 20`).
          * Shortened text, verified collision-free against every neighboring caption/tally by
          * `hero.test.ts`'s own worst-case stress test, the same discipline this file's other
          * geometry constants already cite.

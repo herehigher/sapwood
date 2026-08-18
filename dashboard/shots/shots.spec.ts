@@ -1,6 +1,8 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { expect, type Locator, type Page, test } from "@playwright/test";
+import { buildRoundLog } from "../src/demo/build-round-log.ts";
+import type { DemoBundle } from "../src/demo/types.ts";
 import { formatUsd } from "../src/format.ts";
 import { STAGE, ZONE_DIVIDERS } from "../src/hero/stage.tsx";
 
@@ -24,9 +26,11 @@ const THEMES = [
 
 // #729 fidelity ledger finding [0]: "idle" is `?demo`'s default position — the round's
 // fully-folded END state (`useDemoReplay.ts`'s `endPosition` doc), nothing left in flight.
-// "active" is that same round scrubbed back to its midpoint event — a real, work-in-flight fold,
-// not a fabricated state. `idle` is the CANONICAL pairing state against the frozen mockups below
-// (unchanged meaning from before this state split); `active` is additional live-only evidence.
+// "active" is that same round scrubbed back to its first planning/reflection phase window
+// (`scrubToActiveMoment`'s own doc, gate② finding [5]) — a real, work-in-flight fold, not a
+// fabricated state; falls back to the arithmetic midpoint when the round carries no such window.
+// `idle` is the CANONICAL pairing state against the frozen mockups below (unchanged meaning from
+// before this state split); `active` is additional live-only evidence.
 const STATES = ["idle", "active"] as const;
 
 // §3 module name → candidate DOM anchors, tried in order. `lanes`'s primary target is the real
@@ -109,12 +113,22 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
       await page.locator("#overview").waitFor({ state: "visible" });
       await page.waitForLoadState("networkidle");
 
-      // Second state: scrub the transport back to the round's midpoint — a real, work-in-flight
-      // fold (`scrubTo`'s own doc: a checkpointed re-fold to an earlier event, not a fabricated
-      // state), giving genuine "active" evidence alongside the idle default above.
-      const scrubbed = await scrubToMidpoint(page);
+      // Second state: scrub the transport to a genuine work-in-flight fold — the round's first
+      // planning/reflection phase window when one exists (`scrubToActiveMoment`'s own doc, AC5
+      // gate② finding [5]), giving genuine "active" evidence alongside the idle default above.
+      const scrubbed = await scrubToActiveMoment(page);
       if (scrubbed) {
         const activePrefix = `${width}-${theme.key}-active`;
+        // #922 AC5 gate② finding [5]: the hero-panel crop specifically must show the active
+        // node's own halo — asserted once (1440px is the AC's own named canonical width) rather
+        // than at every viewport, so a real fixture regression fails loudly instead of the crop
+        // quietly going back to showing nothing active.
+        if (width === CANONICAL_WIDTH) {
+          await expect(
+            page.locator(".hero-node-halo"),
+            "the active capture must render a RUNNING planning/reflection node's halo (AC5)",
+          ).toHaveCount(1);
+        }
         await page.screenshot({ path: `${CAPTURES_DIR}/${activePrefix}-full.png`, fullPage: true });
         for (const [moduleKey, selectors] of Object.entries(MODULE_SELECTORS)) {
           // #882: the live-mocked capture above has no rounds to scrub (mode never leaves
@@ -178,6 +192,43 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
 
   buildContactSheet();
   expect(existsSync(`${OUTPUT_DIR}/contact-sheet.html`)).toBe(true);
+});
+
+/**
+ * #922 AC8 gate② finding [7] (ac8-reduced-motion-animation-gap): happy-dom (`hero.test.ts`'s own
+ * harness) never resolves the `animation` shorthand's own longhands — it echoes `""` for
+ * `animationName` even under a matching `!important: none` rule (that file's own documented
+ * limitation), so the unit-level reduced-motion test can only prove the WINNING computed VALUES
+ * (fill-opacity at peak, etc), never that the animation itself is actually off. This is the real
+ * browser probe the finding asks for instead: a genuine Chromium `getComputedStyle`, which DOES
+ * resolve `animationName` correctly — removing `.hero[data-motion="reduced"] * { animation: none
+ * !important }` (or the `prefers-reduced-motion` media-query twin) would turn this red, where the
+ * happy-dom test's own fill-opacity assertions would stay green regardless.
+ */
+test("#922 AC8: prefers-reduced-motion resolves animation: none on the active node's disc AND halo, in a real browser", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.setViewportSize({ width: CANONICAL_WIDTH, height: 900 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+  const scrubbed = await scrubToActiveMoment(page);
+  expect(scrubbed, "the fixture must carry a real scrub control to reach an active moment").toBe(true);
+
+  const halo = page.locator(".hero-node-halo");
+  await expect(halo, "the active node's halo must render under reduced motion (present, not removed)").toHaveCount(1);
+  const disc = page.locator('[data-active="true"] .hero-planning-node');
+  await expect(disc).toHaveCount(1);
+
+  const [discAnimationName, haloAnimationName] = await Promise.all([
+    disc.evaluate((el) => getComputedStyle(el).animationName),
+    halo.evaluate((el) => getComputedStyle(el).animationName),
+  ]);
+  expect(discAnimationName, "the active disc's animation must actually resolve to none, not just a matching fill-opacity value").toBe(
+    "none",
+  );
+  expect(haloAnimationName, "the halo's animation must actually resolve to none, not just a matching fill-opacity value").toBe("none");
 });
 
 /**
@@ -1203,20 +1254,43 @@ async function firstMatch(page: Page, selectors: string[]): Promise<Locator | nu
   return null;
 }
 
-/** Drives the real `<input aria-label="scrub">` (`Transport.tsx`) to its midpoint event via
- *  React's own `onChange` — a native property-setter write + a dispatched `input` event, the
- *  standard way to drive a React-controlled input from outside React (`fill()` does not reliably
- *  reach range inputs' React handlers). Returns false when no scrub control is present (nothing to
- *  scrub — never treated as a failure, since not every module renders the transport). */
-async function scrubToMidpoint(page: Page): Promise<boolean> {
+/** #922 AC5 gate② finding [5] (ac5-active-capture): the round's own REAL first planning/reflection
+ *  phase window (aligning/architecting/plan_review/harvesting/retro — `PLANNING_PHASE`/
+ *  `REFLECTION_PHASE`, state.ts) — never an arithmetic "midpoint" of the whole event range, which
+ *  can just as easily land inside a driving/fixing phase that draws no active planning node at
+ *  all (the finding's own root cause: the fixture's `roundPhase` used to be hardcoded `null` in
+ *  replay regardless, but even after wiring it live an arithmetic midpoint is not guaranteed to
+ *  land inside a phase this stage actually renders as "active"). Reads the SAME `/demo-fixture.json`
+ *  the app itself fetches and folds it through the SAME production `buildRoundLog` (real
+ *  `phaseWindows`, never a hand-guessed event index), so this reuses the existing `?demo` machinery
+ *  rather than standing up a second data path. */
+const ACTIVE_PHASES = new Set(["aligning", "architecting", "plan_review", "harvesting", "retro"]);
+
+/** Drives the real `<input aria-label="scrub">` (`Transport.tsx`) to a genuine, real-fixture
+ *  moment via React's own `onChange` — a native property-setter write + a dispatched `input`
+ *  event, the standard way to drive a React-controlled input from outside React (`fill()` does
+ *  not reliably reach range inputs' React handlers). Scrubs to the FIRST planning/reflection
+ *  phase window's own start event (AC5's own ask: a capture with a RUNNING planning/reflection
+ *  node) when one exists; falls back to the arithmetic midpoint otherwise (a genuine, if less
+ *  targeted, work-in-flight fold — never a fabricated state). Returns false when no scrub control
+ *  is present (nothing to scrub — never treated as a failure, since not every module renders the
+ *  transport). */
+async function scrubToActiveMoment(page: Page): Promise<boolean> {
   const scrub = page.locator('input[aria-label="scrub"]');
   if ((await scrub.count()) === 0) return false;
-  await scrub.evaluate((el: HTMLInputElement) => {
-    const midpoint = Math.round((Number(el.min) + Number(el.max)) / 2);
+
+  const bundle = (await page.evaluate(() => fetch("/demo-fixture.json").then((r) => r.json()))) as DemoBundle;
+  const round = bundle.rounds[0];
+  const log = round ? buildRoundLog(bundle, round, null) : null;
+  const activeWindow = log?.phaseWindows.find((w) => ACTIVE_PHASES.has(w.phase));
+  const activeEvent = activeWindow ? log?.events.find((e) => e.kind === "round-phase" && e.ts === activeWindow.startTs) : undefined;
+
+  await scrub.evaluate((el: HTMLInputElement, targetEventId: number | null) => {
+    const target = targetEventId ?? Math.round((Number(el.min) + Number(el.max)) / 2);
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-    setter?.call(el, String(midpoint));
+    setter?.call(el, String(target));
     el.dispatchEvent(new Event("input", { bubbles: true }));
-  });
+  }, activeEvent?.id ?? null);
   await page.waitForTimeout(100);
   return true;
 }

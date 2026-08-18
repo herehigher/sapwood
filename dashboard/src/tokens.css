@@ -45,6 +45,18 @@
      Dark value lightened from the spec's #C05A2E (3.46:1 on --panel) to clear AA as
      text; §5's quality floor requires adjusting the failing side. */
   --rust: light-dark(#A34620, #D9713F);
+  /* #922 AC2 gate② finding [2] (ac2-rust-ink-contrast): the ink drawn ON a --rust-filled surface
+     (the parked-PR / failed droplet's own number, `hero.css`'s `.hero-droplet[data-at="needs-
+     human"] .hero-droplet-num`) — --rust flips DARKER in light theme / LIGHTER in dark theme
+     (unlike --sap-fill, which stays flat both themes), so a single fixed ink cannot clear 4.5:1
+     in both: #251B10 (--on-sap-fill's own value) on light --rust (#A34620) measures only ~2.74:1.
+     --on-rust follows --rust's OWN swap instead — literal per-theme, the SAME `light-dark()`-
+     unprovable-under-happy-dom workaround --sap-fill-outline documents above (this file's own
+     established pattern: a dark-theme default here, overridden in the two light-theme trigger
+     rules below `:root`). Both hexes are reused verbatim from --heartwood's own two theme values
+     (#251B10 dark, #F1F0E2 light) — "no new hex", `contrast.ts`'s `checkRustTextContrast` proves
+     each clears 4.5:1 against ITS OWN theme's --rust. */
+  --on-rust: #251B10;
 
   /* ---- Type -------------------------------------------------------------- */
   --font-display: "Fraunces", Georgia, "Times New Roman", serif;
@@ -156,6 +168,9 @@
   --sap-fill-glow-floor: 0.12;
   --sap-fill-glow-peak: 0.35;
   --stepper-replay-outline: #8A5A14;
+  /* #922 AC2 finding [2]: light theme's --rust is the DARK value — --on-rust flips to the light
+     ink (--heartwood's own light hex) here, same trigger-rule posture as every token above. */
+  --on-rust: #F1F0E2;
 }
 
 /* The other light-theme trigger `light-dark()` used to cover for free: system preference, with NO
@@ -172,5 +187,6 @@
     --sap-fill-glow-floor: 0.12;
     --sap-fill-glow-peak: 0.35;
     --stepper-replay-outline: #8A5A14;
+    --on-rust: #F1F0E2;
   }
 }

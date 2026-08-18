@@ -108,10 +108,13 @@
 }
 
 /* #922 AC3: both the filled and outlined backlog cards' own numeral — declared AFTER .hero-num
- * (11px) so its 12px (→ 14.4px at 1440, clearing the AC's own ≥ 14px floor) wins on equal
- * specificity, same later-wins discipline as `.hero-small`'s own doc above. */
+ * (11px) so its own size wins on equal specificity, same later-wins discipline as `.hero-small`'s
+ * own doc above. gate② finding [3] (ac3-real-render-scale): 14px stage units × the REAL render
+ * scale (`stage.tsx`'s `REAL_RENDER_SCALE_1440`, ≈1.0975 — the icon rail/stack/panel chrome the
+ * naive 1440/STAGE.w ratio never accounted for) ≈ 15.37px, clearing the AC's own ≥ 14px floor at
+ * the scale the hero ACTUALLY renders at (the old 12px cleared only the naive, overstated scale). */
 .hero-backlog-num {
-  font-size: 12px;
+  font-size: 14px;
 }
 
 /* #922 AC2: the droplet's own number, now inside the shape instead of floating above it.
@@ -121,6 +124,16 @@
 .hero-droplet-num {
   font-weight: 600;
   fill: var(--on-sap-fill);
+}
+
+/* #922 AC2 gate② finding [2] (ac2-rust-ink-contrast): needs-human/failed droplets fill --rust
+ * (`dropletFill`, stage.tsx), never --sap-fill — their own number needs --rust's own ink
+ * (--on-rust, tokens.css's own doc), not --on-sap-fill, which only clears AA against the flat
+ * --sap-fill surface. Two classes on `.hero-droplet-num` (specificity 0,2,0) beats the bare rule
+ * above (0,1,0) regardless of declaration order. */
+.hero-droplet[data-at="needs-human"] .hero-droplet-num,
+.hero-droplet[data-failed="true"] .hero-droplet-num {
+  fill: var(--on-rust);
 }
 
 /* AC3/Q5: light theme's flat --sap-fill only clears 1.88:1 against the page ground — every
@@ -222,11 +235,15 @@
 
 /* #920 AC3: the hollow-circle terminal drawn at both ends of a lane channel — never filled, so
  * it reads as an open joint rather than a droplet marker (`.hero-droplet-shape`, which IS
- * filled). */
+ * filled). #922 AC5 gate② finding [4] (ac5-waypoint-color): the idle floor now matches
+ * `.hero-channel`'s own idle floor (0.6, this issue's own "What") — a waypoint is part of ITS
+ * channel, not a separately-muted decoration; the phase-scoped overrides below (mirroring
+ * `.hero-channel`'s own per-phase rules verbatim) are what make it take the channel's own colour
+ * once a lane is writing/fixing/driving/failed, never a fixed --bark regardless of state. */
 .hero-lane-terminal {
   fill: none;
   stroke: var(--bark);
-  stroke-opacity: 0.5;
+  stroke-opacity: 0.6;
   stroke-width: 2;
 }
 
@@ -369,6 +386,24 @@
 }
 
 .hero-lane[data-phase="failed"] .hero-channel {
+  stroke: var(--rust);
+  stroke-opacity: 0.8;
+}
+
+/* #922 AC5 gate② finding [4]: the waypoint terminals take their OWN channel's state colour — the
+ * same phase-scoped selectors as `.hero-channel` above, just targeting `.hero-lane-terminal`
+ * instead. Never merged into one shared selector list with the channel rules above: a terminal
+ * is a `<circle>` (fill:none, stroke only) while a channel is a `<line>` with its own
+ * stroke-dasharray/animation — keeping them separate rule blocks is what lets each evolve (e.g.
+ * the channel's own shimmer animation) without a terminal accidentally inheriting it. */
+.hero-lane[data-phase="writing"] .hero-lane-terminal,
+.hero-lane[data-phase="fixing"] .hero-lane-terminal,
+.hero-lane[data-phase="driving"] .hero-lane-terminal {
+  stroke: var(--sap-text);
+  stroke-opacity: 1;
+}
+
+.hero-lane[data-phase="failed"] .hero-lane-terminal {
   stroke: var(--rust);
   stroke-opacity: 0.8;
 }

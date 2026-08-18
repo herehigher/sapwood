@@ -38,6 +38,7 @@ import {
   PHASE_X,
   PLANNING,
   PLANNING_NODE_R,
+  REAL_RENDER_SCALE_1440,
   REFLECTION,
   RING_COUNT_FONT_PX,
   RING_PITCH_MIN,
@@ -851,6 +852,63 @@ test("the escalation branch and NEEDS HUMAN node read their stroke from --rust, 
   assert.doesNotMatch(html, /#D9713F|#A34620|#C05A2E/i);
 });
 
+// gate② finding [2] (ac2-rust-ink-contrast): the CSS rule alone doesn't prove the cascade
+// actually WINS — `.hero-droplet-num`'s own bare rule (--on-sap-fill) has EQUAL specificity to
+// nothing; the `[data-at="needs-human"]`-scoped override needs a real `getComputedStyle` proof
+// that IT wins over the bare rule, not just that its own source text mentions --on-rust.
+//
+// `--on-rust` is a literal-per-theme-scope token (tokens.css's own doc, same reason
+// `--sap-fill-outline` is) — happy-dom never evaluates `light-dark()`/`prefers-color-scheme` the
+// way a real browser does, so this reads the SAME `data-theme` attribute + regex-over-source
+// approach `--sap-fill-outline`'s own tokens.test.ts case uses, rather than trusting
+// `parseTokens`'s flat "last declaration in the file wins" (which would silently pass by
+// COINCIDENCE of declaration order, not because the cascade genuinely resolved that theme).
+test("#922 AC2: a needs-human/failed droplet's number resolves --on-rust; every other droplet still resolves --on-sap-fill, under the real production cascade, in both themes", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 1 }),
+    ev("dispatched", { worker: "w2", issue: 2 }),
+    ev("reclaim-done", { worker: "w2", issue: 2, next: "DRIVING" }),
+    ev("drive-needs-human", { worker: "w2", issue: 2 }),
+  ]);
+  const container = document.createElement("div");
+  container.innerHTML = markup(state, { lanesMax: 2 });
+  document.body.appendChild(container);
+  const expectedOnSapFill = parseTokens(tokensCss)["--on-sap-fill"];
+  const [darkOnRust, lightOnRust] = [...tokensCss.matchAll(/--on-rust:\s*(#[0-9A-Fa-f]{6})/g)].map((m) => m[1]!.toUpperCase());
+  try {
+    for (const [themeAttr, expectedOnRust] of [
+      ["heartwood", darkOnRust],
+      ["sapwood", lightOnRust],
+    ] as const) {
+      document.documentElement.setAttribute("data-theme", themeAttr);
+
+      const needsHumanNum = container.querySelector('.hero-droplet[data-at="needs-human"] .hero-droplet-num') as Element;
+      assert.ok(needsHumanNum, `${themeAttr}: the needs-human droplet's own number must render`);
+      assert.equal(
+        getComputedStyle(needsHumanNum).fill,
+        expectedOnRust,
+        `${themeAttr}: a needs-human droplet's number must resolve --on-rust, not --on-sap-fill`,
+      );
+
+      const inMotionNum = container.querySelector('.hero-droplet[data-at="lane"] .hero-droplet-num') as Element;
+      assert.ok(inMotionNum, `${themeAttr}: the in-motion droplet's own number must render`);
+      assert.equal(
+        getComputedStyle(inMotionNum).fill,
+        expectedOnSapFill,
+        `${themeAttr}: an in-motion droplet's number must still resolve --on-sap-fill, unaffected by the rust override`,
+      );
+    }
+  } finally {
+    document.documentElement.removeAttribute("data-theme");
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+});
+
 test("the merged event's checkpoint flash and the new growth ring use --moss, never a hardcoded hex", () => {
   // The flash is an imperative anime.js class toggle (`.is-merged`), so its token binding is
   // asserted against the stylesheet that drives it, tied to the class the rendered gate carries.
@@ -1107,6 +1165,11 @@ test("#922 AC3: no .hero-well rect; >= 3 filled + >= 3 outlined candidate backlo
 // #922 AC3 (STYLE, registerRealDom() via the eager import + full production cascade): the
 // backlog chip numeral resolves >= 14px at 1440 — both the filled and outlined variant, since
 // the AC's wording ("chip numeral") doesn't single out only the filled ones.
+//
+// gate② finding [3] (ac3-real-render-scale): `1440 / STAGE.w` assumes the hero SVG gets the FULL
+// 1440px of a 1440px viewport — it never does (the icon rail + `.stack`/`.panel` chrome eat into
+// it first, `REAL_RENDER_SCALE_1440`'s own doc, stage.tsx). Using the naive ratio here would let
+// a production size that only clears the OVERSTATED scale slip back in unnoticed.
 test("#922 AC3: backlog chip numerals resolve >= 14px at 1440 under the real production cascade", () => {
   assert.ok(bodyFontSizeRule);
   const style = document.createElement("style");
@@ -1120,10 +1183,13 @@ test("#922 AC3: backlog chip numerals resolve >= 14px at 1440 under the real pro
     const filled = container.querySelector(".hero-pool-chip .hero-backlog-num") as Element;
     const candidate = container.querySelector(".hero-pool-candidate .hero-backlog-num") as Element;
     assert.ok(filled && candidate, "both a filled chip and an outlined candidate must render");
-    const scale = 1440 / STAGE.w;
     for (const el of [filled, candidate]) {
       const px = Number.parseFloat(getComputedStyle(el).fontSize);
-      assert.ok(px * scale >= 14, `chip numeral ${px}px * ${scale} = ${px * scale}px must clear the AC's >= 14px-at-1440 floor`);
+      const renderedAt1440 = px * REAL_RENDER_SCALE_1440;
+      assert.ok(
+        renderedAt1440 >= 14,
+        `chip numeral ${px}px * ${REAL_RENDER_SCALE_1440} = ${renderedAt1440}px must clear the AC's >= 14px-at-1440 floor at the REAL render scale`,
+      );
     }
   } finally {
     document.body.removeChild(container);
@@ -1436,6 +1502,10 @@ test("#922 AC7: REVIEW's caption sits at the same offset as the planning caption
   assert.ok(ciCaptionMatch, "the CI gate's own hero-node-caption must render");
   const [, ciCapX, ciCapY, ciCapText] = ciCaptionMatch as unknown as [string, string, string, string];
   assert.equal(ciCapText, CI_CAPTION, "CI's caption reads the CI_CAPTION constant, never a guessed/hand-copied word");
+  // gate② finding [6] (ac7-ci-caption-self-reference): the assertion above compares the render
+  // against the SAME `CI_CAPTION` import that produced it — changing that constant's value would
+  // leave it green. This pins the literal word independently, so a changed constant reddens here.
+  assert.equal(ciCapText, "github", 'CI\'s caption must literally read "github", independent of the CI_CAPTION import');
   assert.equal(Number(ciCapX), GATES.ci, "the CI caption is centred on the CI gate's own x");
   assert.equal(
     Number(ciCapY),
@@ -2093,6 +2163,11 @@ test("#920 gate② review thread (PRRT…gI/…GgJ) + finding [1]: idle planning
 // >= 60% alpha (--bark) and every active state (writing/fixing/driving) resolves --sap-text at
 // full opacity — the pre-fix 0.35 idle / 0.5 driving values never actually closed this issue's
 // own explicit floor, and nothing pinned the winning computed style to catch it staying muted.
+//
+// gate② finding [4] (ac5-waypoint-color): the lane's own `.hero-lane-terminal` waypoints must
+// take the SAME colour as their channel, at every phase this test already exercises — the
+// pre-fix terminal was a fixed --bark @ 0.5 regardless of phase, so an active lane's own start/
+// end circles stayed muted even while its channel read as fully active.
 test("#922: idle lane channel/connector strokes resolve --bark at >= 60% alpha; writing/fixing/driving resolve --sap-text at 100%, in both themes", () => {
   assert.ok(bodyFontSizeRule);
   const style = document.createElement("style");
@@ -2131,11 +2206,44 @@ test("#922: idle lane channel/connector strokes resolve --bark at >= 60% alpha; 
         `${themeAttr}: idle connector stroke-opacity must clear the AC's own >= 60% floor`,
       );
 
+      // gate② finding [4]: the idle lane's own waypoints match its channel — --bark at >= 60%.
+      const idleTerminals = container.querySelectorAll('.hero-lane[data-phase="idle"] .hero-lane-terminal');
+      assert.equal(idleTerminals.length, 2, `${themeAttr}: the idle lane must draw both its own waypoint terminals`);
+      for (const terminal of idleTerminals) {
+        const terminalComputed = getComputedStyle(terminal);
+        assert.equal(
+          terminalComputed.stroke,
+          expectedBark,
+          `${themeAttr}: idle waypoint stroke must resolve to --bark, the SAME colour as its channel`,
+        );
+        assert.ok(
+          Number.parseFloat(terminalComputed.strokeOpacity) >= 0.6,
+          `${themeAttr}: idle waypoint stroke-opacity ${terminalComputed.strokeOpacity} must clear the AC's own >= 60% floor`,
+        );
+      }
+
       const writingChannel = container.querySelector('.hero-lane[data-phase="writing"] .hero-channel') as Element;
       assert.ok(writingChannel, `${themeAttr}: a writing-phase lane must render`);
       const writingComputed = getComputedStyle(writingChannel);
       assert.equal(writingComputed.stroke, expectedSapText, `${themeAttr}: writing channel stroke must resolve to --sap-text`);
       assert.equal(writingComputed.strokeOpacity, "1", `${themeAttr}: writing channel must render at full (100%) opacity`);
+
+      // gate② finding [4]: the writing lane's own waypoints match its channel — --sap-text at 100%.
+      const writingTerminals = container.querySelectorAll('.hero-lane[data-phase="writing"] .hero-lane-terminal');
+      assert.equal(writingTerminals.length, 2, `${themeAttr}: the writing lane must draw both its own waypoint terminals`);
+      for (const terminal of writingTerminals) {
+        const terminalComputed = getComputedStyle(terminal);
+        assert.equal(
+          terminalComputed.stroke,
+          expectedSapText,
+          `${themeAttr}: writing waypoint stroke must resolve to --sap-text, the SAME colour as its channel`,
+        );
+        assert.equal(
+          terminalComputed.strokeOpacity,
+          "1",
+          `${themeAttr}: writing waypoint must render at full (100%) opacity, same as its channel`,
+        );
+      }
 
       const drivingChannel = container.querySelector('.hero-lane[data-phase="driving"] .hero-channel') as Element;
       assert.ok(drivingChannel, `${themeAttr}: a driving-phase lane must render`);
@@ -2145,6 +2253,40 @@ test("#922: idle lane channel/connector strokes resolve --bark at >= 60% alpha; 
     }
   } finally {
     document.documentElement.removeAttribute("data-theme");
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+});
+
+// gate② finding [4] (ac5-waypoint-color): a FAILED lane's own waypoints take --rust at 0.8, the
+// SAME colour its channel already resolves (`.hero-lane[data-phase="failed"] .hero-channel`) —
+// a separate fixture since neither existing failed-phase fixture in this file asserts channel
+// colour either, so this is new coverage for both, not just the waypoint half.
+test("#922: a FAILED lane's channel and waypoint terminals both resolve --rust at 0.8", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const { state } = run([ev("dispatched", { worker: "w1", issue: 1 }), ev("reclaim-failed", { worker: "w1", issue: 1 })]);
+  const container = document.createElement("div");
+  container.innerHTML = markup(state, { lanesMax: 1 });
+  document.body.appendChild(container);
+  const expectedRust = parseTokens(tokensCss)["--rust"];
+  try {
+    const failedChannel = container.querySelector('.hero-lane[data-phase="failed"] .hero-channel') as Element;
+    assert.ok(failedChannel, "the fixture must actually render a failed-phase lane");
+    const channelComputed = getComputedStyle(failedChannel);
+    assert.equal(channelComputed.stroke, expectedRust, "failed channel stroke must resolve to --rust");
+    assert.equal(channelComputed.strokeOpacity, "0.8", "failed channel stroke-opacity must be 0.8");
+
+    const failedTerminals = container.querySelectorAll('.hero-lane[data-phase="failed"] .hero-lane-terminal');
+    assert.equal(failedTerminals.length, 2, "the failed lane must draw both its own waypoint terminals");
+    for (const terminal of failedTerminals) {
+      const terminalComputed = getComputedStyle(terminal);
+      assert.equal(terminalComputed.stroke, expectedRust, "failed waypoint stroke must resolve to --rust, the SAME colour as its channel");
+      assert.equal(terminalComputed.strokeOpacity, "0.8", "failed waypoint stroke-opacity must be 0.8, the SAME as its channel");
+    }
+  } finally {
     document.body.removeChild(container);
     document.head.removeChild(style);
   }
@@ -3560,7 +3702,16 @@ function renderedDroplets(
 // ACTUAL rendered `d`/`<text>` (via `dropletPathBBox`/`renderedDroplets`), never recomputed
 // through `dropletRadius`/`dropletPath` — a text position or path-radius bug the two functions
 // still privately agree on would otherwise stay invisible to this test.
-test("#922 AC2: the rendered droplet is >= 28px tall at 1440, and its own number's rendered text box sits inside its own rendered path box", () => {
+//
+// gate② finding [0] (ac2-real-render-scale), second half: `1440 / STAGE.w` assumes the SVG gets
+// the full 1440px viewport width — at a REAL 1440px viewport the SVG's own content is ~1318px
+// wide (icon rail + `.stack`/`.panel` chrome, `REAL_RENDER_SCALE_1440`'s own doc in stage.tsx),
+// so the naive ratio overstates the render scale and lets a too-small production floor through.
+// This fixture's own PR number (12345) is a DELIBERATE shape-fit stress case — 5 digits shrinks
+// the number's own font past `DROPLET_MAX_R` by design (`dropletNumFontPx`'s own "floor holds
+// until physically impossible" doc), so the number's SIZE floor is proven separately below, on a
+// realistic 1-3 digit fixture the shrink never touches.
+test("#922 AC2: the rendered droplet is >= 28px tall at 1440, and its number's rendered text box sits inside its own rendered path box", () => {
   const { state } = run([
     ev("dispatched", { worker: "w1", issue: 1 }),
     ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 12345 }),
@@ -3568,11 +3719,13 @@ test("#922 AC2: the rendered droplet is >= 28px tall at 1440, and its own number
   const html = markup(state);
   const droplets = renderedDroplets(html);
   assert.ok(droplets.length > 0, "at least one droplet must render");
-  const scale = 1440 / STAGE.w;
   for (const d of droplets) {
     const pathBox = dropletPathBBox(d.path);
-    const heightPx = (pathBox.bottom - pathBox.top) * scale;
-    assert.ok(heightPx >= 28, `droplet #${d.issue}'s rendered path height ${heightPx}px must clear the AC's own >= 28px-at-1440 floor`);
+    const heightPx = (pathBox.bottom - pathBox.top) * REAL_RENDER_SCALE_1440;
+    assert.ok(
+      heightPx >= 28,
+      `droplet #${d.issue}'s rendered path height ${heightPx}px must clear the AC's own >= 28px-at-1440 floor at the REAL render scale`,
+    );
 
     const textBoxForDroplet = textBox(d.text, 0, d.textY, d.fontPx);
     assert.ok(
@@ -3581,6 +3734,28 @@ test("#922 AC2: the rendered droplet is >= 28px tall at 1440, and its own number
         textBoxForDroplet.top >= pathBox.top &&
         textBoxForDroplet.bottom <= pathBox.bottom,
       `droplet #${d.issue}'s number text box ${JSON.stringify(textBoxForDroplet)} must sit fully inside its own path box ${JSON.stringify(pathBox)}`,
+    );
+  }
+});
+
+// gate② finding [0] (ac2-real-render-scale): the number's own rendered font-size, at a realistic
+// 1-3 digit PR (never the shape-fit stress fixture above, whose 5-digit PR deliberately shrinks
+// past the nominal size by design) — proves DROPLET_NUM_FONT_PX itself clears the AC's >= 11px
+// floor at the REAL render scale, not the naive `1440 / STAGE.w` ratio the original oracle used.
+test("#922 AC2: a droplet's number resolves >= 11px at 1440 (the REAL render scale) for a realistic 1-3 digit PR", () => {
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 1 }),
+    ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 42 }),
+  ]);
+  const html = markup(state);
+  const droplets = renderedDroplets(html);
+  assert.ok(droplets.length > 0, "at least one droplet must render");
+  for (const d of droplets) {
+    assert.equal(d.fontPx, DROPLET_NUM_FONT_PX, "a realistic short PR number never triggers the shrink-to-fit path");
+    const numFontPxAt1440 = d.fontPx * REAL_RENDER_SCALE_1440;
+    assert.ok(
+      numFontPxAt1440 >= 11,
+      `droplet #${d.issue}'s number ${d.fontPx}px * ${REAL_RENDER_SCALE_1440} = ${numFontPxAt1440}px must clear the AC's own >= 11px-at-1440 floor at the REAL render scale`,
     );
   }
 });
@@ -3640,6 +3815,82 @@ test("#922 AC2: no droplet number overlaps a neighbouring droplet or a lane labe
     });
   }
   assertNoOverlap(boxes);
+});
+
+/** gate② finding [1] (ac2-escalation-overlap): every rendered NODE circle on the stage — planning/
+ *  reflection discs, the CI/Review gates, and the escalation circle — read straight off the
+ *  markup (COVERAGE), never a hand-picked subset. The prior collision tests compared droplets
+ *  against gates/rings/tallies/labels but NEVER the escalation circle itself — exactly how the
+ *  rank-0 needs-human droplet's overlap (the PO witness's own report) went unnoticed. */
+function renderedNodeCircles(html: string): { label: string; box: Box }[] {
+  const boxes: { label: string; box: Box }[] = [];
+  for (const [i, m] of [...html.matchAll(/<circle class="hero-planning-node" cx="([\d.]+)" cy="([\d.]+)" r="([\d.]+)"/g)].entries()) {
+    boxes.push({ label: `planning/reflection node #${i} circle`, box: circleBox(Number(m[1]), Number(m[2]), Number(m[3])) });
+  }
+  for (const [i, m] of [...html.matchAll(/<circle class="hero-gate-node" cx="([\d.]+)" cy="([\d.]+)" r="([\d.]+)"/g)].entries()) {
+    boxes.push({ label: `gate node #${i} circle`, box: circleBox(Number(m[1]), Number(m[2]), Number(m[3])) });
+  }
+  const escalationMatch = html.match(/<circle style="stroke:var\(--rust\)" cx="([\d.]+)" cy="([\d.]+)" r="([\d.]+)"/);
+  if (escalationMatch) {
+    boxes.push({
+      label: "escalation circle",
+      box: circleBox(Number(escalationMatch[1]), Number(escalationMatch[2]), Number(escalationMatch[3])),
+    });
+  }
+  return boxes;
+}
+
+// gate② finding [1] (ac2-escalation-overlap): the idle fixture — a SINGLE parked-PR droplet on
+// the escalation branch, the exact shape the PO witness reported overlapping the NEEDS HUMAN
+// glyph by ~16px — plus the AC's own named stress fixture ("4 lanes, 6 checkpoint droplets"),
+// cross-checked against EVERY rendered node circle (COVERAGE), not just the CI/Review gates the
+// earlier tests happened to check. The escalation circle specifically gets a real >= 12px
+// clearance assertion (the AC's own number), not just non-overlap — a 1px gap would still pass a
+// bare `!boxesOverlap` check but not the AC's own wording.
+test("#922 AC2 gate② finding [1]: every rendered droplet clears every rendered node circle (COVERAGE); the escalation circle by >= 12px — idle and stress fixtures", () => {
+  const idleEvents = [
+    ev("dispatched", { worker: "w1", issue: 1 }),
+    ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 10 }),
+    ev("drive-needs-human", { worker: "w1", issue: 1, pr: 10 }),
+  ];
+  const idleHtml = markup(run(idleEvents).state);
+  const idleEscalated = renderedDroplets(idleHtml).filter((d) => /^PR #/.test(d.text));
+  assert.equal(idleEscalated.length, 1, "the idle fixture must actually draw exactly one parked-PR droplet");
+
+  const stressEvents: DomainEvent[] = [];
+  const workers = ["w1", "w2", "w3", "w4"];
+  for (let i = 1; i <= 6; i++) {
+    const worker = workers[(i - 1) % 4] as string;
+    stressEvents.push(ev("dispatched", { worker, issue: i }));
+    stressEvents.push(ev("reclaim-done", { worker, issue: i, next: "DRIVING", pr: 100 + i }));
+  }
+  const stressHtml = markup(run(stressEvents, 4).state, { lanesMax: 4 });
+
+  for (const html of [idleHtml, stressHtml]) {
+    const nodeCircles = renderedNodeCircles(html);
+    assert.ok(nodeCircles.length > 0, "at least one node circle must render");
+    const escalationCircle = nodeCircles.find((n) => n.label === "escalation circle");
+    assert.ok(escalationCircle, "the escalation circle must be derivable from the rendered markup");
+
+    for (const d of renderedDroplets(html)) {
+      const pathBox = dropletPathBBox(d.path);
+      const box: Box = { left: d.x + pathBox.left, right: d.x + pathBox.right, top: d.y + pathBox.top, bottom: d.y + pathBox.bottom };
+      for (const node of nodeCircles) {
+        assert.ok(
+          !boxesOverlap(box, node.box),
+          `droplet #${d.issue} ${JSON.stringify(box)} overlaps ${node.label} ${JSON.stringify(node.box)}`,
+        );
+      }
+      // The escalation branch's own droplets sit ABOVE the circle by construction
+      // (`dropletPoint`'s needs-human case) — a real vertical clearance, not just non-overlap.
+      if (box.bottom <= escalationCircle!.box.top) {
+        assert.ok(
+          escalationCircle!.box.top - box.bottom >= 12,
+          `droplet #${d.issue}'s bottom edge must clear the escalation circle's top edge by >= 12px, got ${escalationCircle!.box.top - box.bottom}px`,
+        );
+      }
+    }
+  }
 });
 
 // #745 gate② round 5 PO pre-merge Tier-C probe (1700px, live DB): a drawn checkpoint chip's
