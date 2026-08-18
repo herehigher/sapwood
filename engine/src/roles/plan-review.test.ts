@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
-import { extractVerificationPlan } from "../forge/forge.js";
+import { extractVerificationPlan, selectReadyIssues } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 // #874 AC4: cross-checks resume-capped's `retro` registry tag lands in the derived consumer list
 // — the SAME import path retro.ts's own callers use, not a re-derivation of the tag logic here.
@@ -2177,6 +2177,41 @@ test("createPlanReviewStub (#874 AC2 idempotency): an issue that ALREADY carries
   state.close();
 });
 
+test("createPlanReviewStub (#874 P1 fix, same-round race): after too_large applies split, a manual/concurrent plan:approved landing on the SAME issue never makes it dispatchable — selectReadyIssues (forge.ts's real gate⓪ predicate, not a simulation) excludes any split-labeled issue regardless of plan:approved or plan quality", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-08-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 878, title: "oversized issue", labels: [ROUND_POOL_LABEL] }];
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-878", sapwoodResult({ decision: "too_large", issue: 878, evidence: "Too many deliverables." })) },
+  ]);
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+  assert.ok((forge.issueLabels[878] ?? []).includes(cfg.labels.split));
+
+  // The race: a human (or a stale/concurrent approval this issue carried before the split) adds
+  // plan:approved to the SAME issue AFTER the split already landed — the decompose session has
+  // not run yet, so `decomposed` is not present either.
+  forge.issueLabels[878] = [...(forge.issueLabels[878] ?? []), cfg.labels.planApproved];
+
+  const item = {
+    itemId: "I878",
+    number: 878,
+    title: "oversized issue",
+    state: "OPEN" as const,
+    body: PLAN_BODY,
+    repo: `${cfg.board.owner}/${cfg.board.repo}`,
+    labels: forge.issueLabels[878]!,
+    status: "Ready",
+    milestone: null,
+  };
+  const project = { projectId: "P", statusFieldId: "F", options: [], items: [item], placements: [] };
+  assert.deepEqual(selectReadyIssues(project, cfg), []);
+  state.close();
+});
+
 test("createPlanReviewStub (#874 AC3): a too_large verdict on a cap-split child (body carries the #965 origin marker) STILL applies split — this path never consults CAP_SPLIT_ORIGIN_MARKER", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg();
@@ -2216,6 +2251,24 @@ test("validateReviewerOutput (#874): 'too_large' with evidence and NO BODY block
   if (result.ok) {
     assert.equal(result.decision.decision, "too_large");
     assert.equal(result.decision.evidence, "One AC depends on another lane's concurrent output.");
+    assert.equal(result.decision.body, undefined);
+  }
+});
+
+test("validateReviewerOutput (#874, inverse): a 'too_large' verdict carrying a NON-empty BODY block is schema-invalid output, same failure mode as a missing body on 'draft_request' — evidence is the entire deliverable, never both channels at once", () => {
+  const text = sapwoodResult(
+    { decision: "too_large", issue: 1, evidence: "Four independent deliverables, no shared PR." },
+    "This is a BODY block the reviewer must never emit alongside too_large.",
+  );
+  const result = validateReviewerOutput(text, 1, PLAN_BODY);
+  assert.equal(result.ok, false);
+});
+
+test("validateReviewerOutput (#874, inverse): a whitespace-only BODY block on 'too_large' is accepted (nothing to reject) but never leaks into `body` — the decision carries evidence only", () => {
+  const text = sapwoodResult({ decision: "too_large", issue: 1, evidence: "Three distinct subsystems touched." }, "   \n  ");
+  const result = validateReviewerOutput(text, 1, PLAN_BODY);
+  assert.equal(result.ok, true);
+  if (result.ok) {
     assert.equal(result.decision.body, undefined);
   }
 });

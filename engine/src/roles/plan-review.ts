@@ -284,6 +284,15 @@ export function validateReviewerOutput(text: string, expectedIssue: number, curr
   if (decision !== "approve" && decision !== "too_large" && (block.body === undefined || block.body.trim() === "")) {
     return { ok: false, reason: `decision "${decision}" requires a non-empty BODY block` };
   }
+  // #874: the inverse of the check above — a "too_large" verdict carrying a non-empty BODY block
+  // is malformed output, not a harmless extra. The shipped prompt states plainly that `evidence`
+  // is the entire deliverable for this outcome (no BODY block); a session that emits one anyway
+  // is either confused about which decision it took or attempting to smuggle free-form prose past
+  // the schema's structural-evidence-only contract. Fail closed the same way a missing body on
+  // any OTHER non-approve decision already does, rather than silently accepting and discarding it.
+  if (decision === "too_large" && block.body !== undefined && block.body.trim() !== "") {
+    return { ok: false, reason: `decision "too_large" must not carry a BODY block — "evidence" is the entire deliverable` };
+  }
   if (decision === "approve") {
     const bodyToCheck = block.body ?? currentBody;
     if (extractVerificationPlan(bodyToCheck) == null || extractVerificationSection(bodyToCheck) == null) {
@@ -304,7 +313,11 @@ export function validateReviewerOutput(text: string, expectedIssue: number, curr
     decision: {
       decision,
       issue: parsed.data.issue,
-      ...(block.body !== undefined ? { body: block.body } : {}),
+      // #874: "too_large" never carries `body` — the check above already rejects a NON-empty
+      // one, but an EMPTY/whitespace-only BODY block would still pass that check (nothing to
+      // reject) and must not leak an empty string into the decision either; `evidence` is this
+      // outcome's entire deliverable.
+      ...(decision !== "too_large" && block.body !== undefined ? { body: block.body } : {}),
       ...(parsed.data.decision === "too_large" ? { evidence: parsed.data.evidence } : {}),
     },
   };

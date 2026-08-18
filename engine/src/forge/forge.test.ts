@@ -3406,6 +3406,32 @@ test("#310 blindness: decomposed parents are excluded from Ready dispatch, pool 
   assert.deepEqual(selectPlanTriageCandidates({ ...project, items: [{ ...item, body: "planless" }] }, decomposedCfg), []);
 });
 
+test("#874 P1 fix: a split-labeled issue is excluded from dispatch even with a genuine plan:approved + a fully-formed plan — split joins the composed unconditional-exclusion set alongside decomposed/needsHuman/blocked (isDispatchable), closing the race where a concurrent/stale plan:approved could otherwise dispatch a mid-decomposition issue", () => {
+  const splitCfg = {
+    ...cfg,
+    labels: { ...cfg.labels, split: "split" },
+  };
+  const item = {
+    itemId: "S874",
+    number: 874,
+    title: "mid-decomposition issue",
+    state: "OPEN",
+    body: "## Acceptance criteria\n- [ ] x\n\n## Verification plan\n- npm test",
+    repo: "herehigher/sapwood",
+    labels: ["split", "plan:approved"],
+    status: "Ready",
+    milestone: null,
+  };
+  const project = { projectId: "P", statusFieldId: "F", options: [], items: [item], placements: [] };
+  assert.deepEqual(selectReadyIssues(project, splitCfg), []);
+  // Reverse test: the SAME item minus the split label dispatches normally — proves the exclusion
+  // fires on `split` specifically, not on some other property of this fixture.
+  assert.deepEqual(
+    selectReadyIssues({ ...project, items: [{ ...item, labels: ["plan:approved"] }] }, splitCfg).map((i) => i.number),
+    [874],
+  );
+});
+
 test("selectPlanTriageCandidates: unlike selectPlanReviewCandidates, a NON-Ready-lane plan-less issue is still a candidate (triage runs before Ready, not after)", () => {
   const project = {
     projectId: "P",

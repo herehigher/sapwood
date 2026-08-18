@@ -291,11 +291,13 @@ dispatchable again) rather than risking duplicate sessions/writes on a resume.
 
 #### PO decompose sub-mode
 
-A human-applied `labels.split`, or an engine-applied one at the resume cap (#965 —
-`conductor.ts`'s RESUME phase, CAPPED branch — never for an issue already carrying the
-cap-split origin marker; no separate rate limit beyond that, since a cap-split needs a
-lane to exhaust `worker.maxResumes` and at most `lanes.max` lanes exist at all), admits
-one oversized issue,
+A human-applied `labels.split`, or an engine-applied one — from EITHER of two triggers: gate⓪'s
+early `too_large` structured decision (#874 — `plan-review.ts::reviewOneIssue`, judged post-Ready
+before a lane is ever spent), or the resume-cap late trigger (#965 — `conductor.ts`'s RESUME
+phase, CAPPED branch — never for an issue already carrying the cap-split origin marker; no
+separate rate limit on either trigger, since a cap-split needs a lane to exhaust
+`worker.maxResumes` and at most `lanes.max` lanes exist at all, and gate⓪'s trigger is bounded by
+the same Ready-lane pool every other gate⓪ pass already is), admits one oversized issue,
 including an `origin:agent` child, for one controlled generation. Agent-origin issues without
 that fresh signature are never candidates. The session performs goal alignment, a cheap
 feasibility self-check, and decomposition in one pass, returning either a bounded child set

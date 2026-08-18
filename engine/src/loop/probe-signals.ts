@@ -213,7 +213,7 @@ export const PROBE_SIGNALS: readonly ProbeSignal[] = [
     read: "forge",
     consumer: "conductor.ts tick() DISPATCH — always live, no role gate",
     terminal:
-      "forge.ts isDispatchable excludes `needsHuman`/`blocked`/`decomposed` and the #94 forbidden verifyNa+planApproved mixed state — every deterministic failure path an undispatchable-but-Ready issue can take ends in one of those labels, at which point it leaves this set; a successful dispatch claims it off the Ready lane instead",
+      "forge.ts isDispatchable excludes `needsHuman`/`blocked`/`decomposed`/`split` (#874) and the #94 forbidden verifyNa+planApproved mixed state — every deterministic failure path an undispatchable-but-Ready issue can take ends in one of those labels, at which point it leaves this set; a successful dispatch claims it off the Ready lane instead",
     probe: async (ctx) => (await ctx.forge.getReadyIssues()).length > 0,
   },
   // #127 gate② F2: each candidate signal below only counts as work when the role that CONSUMES

@@ -1550,7 +1550,11 @@ re-split chain, while a `too_large` verdict is structural evidence about size �
 child that is still structurally too large is exactly the re-split the container contract
 (#913) expects gate⓪ to apply. No WIP-pointer comment either (nothing was ever built). There
 is deliberately no per-round cap on either engine-applied `split` trigger — the decomposer
-judges every generation; a cap is not a control (owner ruling, #965).
+judges every generation; a cap is not a control (owner ruling, #965). `split` is itself a
+dispatch exclusion (`forge.ts`'s `isDispatchable`, the same composed unconditional set
+`decomposed`/`needsHuman`/`blocked` join) until the decomposer fences the parent with
+`decomposed` — closing the race where a concurrent or stale `plan:approved` could otherwise
+dispatch a mid-decomposition issue before that fence lands.
 
 **Resume-cap -> engine split, the late trigger (#965).** A worker lane that exhausts
 `worker.maxResumes` (#172's graceful-handoff cap) no longer goes straight to a human hold:
