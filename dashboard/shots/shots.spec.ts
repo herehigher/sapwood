@@ -116,24 +116,22 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
           const locator = await firstMatch(page, selectors);
           if (locator) await locator.screenshot({ path: `${CAPTURES_DIR}/${activePrefix}-${moduleKey}.png` });
         }
-        // #921 AC4/gate② finding [1]: the OUTCOME right-zone crop at rings=0 — the round's
-        // midpoint scrub lands before its one merge, the real (not fabricated) sapling moment.
-        if (width === CANONICAL_WIDTH) {
-          await page.locator('.hero-trunk[data-rings="0"]').waitFor({ state: "visible" });
-          await captureOutcomeZone(page, page.locator("svg.hero"), `${CAPTURES_DIR}/${activePrefix}-hero-panel-outcome-zone.png`);
-        }
       }
     }
   }
 
-  // #921 AC4: a real 24-merge fold, at the mockup's own canonical 1440px width, to judge the
-  // ring disc at mockup scale (`?demo`'s own bundle carries only 1 ring — nowhere near enough to
-  // show the footprint growing to the mockup's ~256px disc). One capture per theme, named for
-  // `buildContactSheet()`'s own dedicated pairing section below.
+  // #921 AC4: dedicated, on-demand real folds at the two moments `?demo`'s own single-round
+  // bundle can't show on request (rings=0 — gate② PO review thread (b), never the bundle's own
+  // "active" scrub, which only incidentally lands at rings=0 — and rings=24, nowhere near the
+  // bundle's own 1-ring end state), at the mockup's own canonical 1440px width. One capture per
+  // theme each, named for `buildContactSheet()`'s own dedicated `AC4_MOMENTS` pairing below.
   for (const theme of THEMES) {
-    await captureRings24Hero(page, theme);
-    const file = `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-rings24-hero-panel.png`;
-    expect(existsSync(file), `rings24 hero-panel capture must exist: ${file}`).toBe(true);
+    await captureRingsHero(page, theme, 0, "rings0");
+    await captureRingsHero(page, theme, 24, "rings24");
+    for (const slug of ["rings0", "rings24"]) {
+      const file = `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-${slug}-hero-panel.png`;
+      expect(existsSync(file), `${slug} hero-panel capture must exist: ${file}`).toBe(true);
+    }
   }
 
   // #921 AC4/gate② finding [1]: the mockup's OWN OUTCOME right-zone crop, one per theme — paired
@@ -147,18 +145,15 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
   // named in the contact sheet's own AC4 section (`buildContactSheet()`, `AC4_MOMENTS`) — a
   // missing crop here is a real regression (a selector/route change silently broke a capture),
   // not something the contact sheet should quietly render blank.
-  for (const prefix of [
-    `${CANONICAL_WIDTH}-light-idle`,
-    `${CANONICAL_WIDTH}-dark-idle`,
-    `${CANONICAL_WIDTH}-light-active`,
-    `${CANONICAL_WIDTH}-dark-active`,
-  ]) {
+  for (const prefix of [`${CANONICAL_WIDTH}-light-idle`, `${CANONICAL_WIDTH}-dark-idle`]) {
     const file = `${CAPTURES_DIR}/${prefix}-hero-panel-outcome-zone.png`;
     expect(existsSync(file), `OUTCOME right-zone capture must exist: ${file}`).toBe(true);
   }
   for (const theme of THEMES) {
-    const rings24Zone = `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-rings24-hero-panel-outcome-zone.png`;
-    expect(existsSync(rings24Zone), `rings24 OUTCOME right-zone capture must exist: ${rings24Zone}`).toBe(true);
+    for (const slug of ["rings0", "rings24"]) {
+      const zone = `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-${slug}-hero-panel-outcome-zone.png`;
+      expect(existsSync(zone), `${slug} OUTCOME right-zone capture must exist: ${zone}`).toBe(true);
+    }
     const mockupZone = `${MOCKUPS_OUT_DIR}/hero-panel-${theme.key}-outcome-zone.png`;
     expect(existsSync(mockupZone), `mockup OUTCOME right-zone crop must exist: ${mockupZone}`).toBe(true);
   }
@@ -845,35 +840,36 @@ async function captureLiveLanes(page: Page, theme: { key: string; attr: string }
   await page.unroute("**/api/**");
 }
 
-/** #921 AC4: 24 `merged` events, real `LoopEvent` shape (`api/types.ts`) — the moment needed to
- *  judge the ring disc at mockup scale, which `?demo`'s own demo bundle (1 merge) can't show. */
-function rings24Events(): { id: number; ts: string; kind: string; payload: Record<string, unknown> }[] {
+/** #921 AC4: `rings` real `merged` events, real `LoopEvent` shape (`api/types.ts`) — the moment
+ *  needed to judge the ring disc at a specific scale, which `?demo`'s own demo bundle (1 merge,
+ *  its own idle end-state) can't show for any OTHER count on demand. Empty at `rings === 0`. */
+function ringsMergedEvents(rings: number): { id: number; ts: string; kind: string; payload: Record<string, unknown> }[] {
   const now = Date.now();
-  return Array.from({ length: 24 }, (_, i) => {
+  return Array.from({ length: rings }, (_, i) => {
     const n = i + 1;
     return {
       id: n,
-      ts: new Date(now - (24 - n) * 60_000).toISOString(),
+      ts: new Date(now - (rings - n) * 60_000).toISOString(),
       kind: "merged",
       payload: { worker: `w${(n % 4) + 1}`, issue: 900 + n, pr: 9000 + n },
     };
   });
 }
 
-/** #921 AC4: mocks `/api/loop/state` (rings: 24) and `/api/events` (the same 24 merges) so the
- *  capture comes from the REAL production fold (`useEventHistory` -> `foldReplay`), never a prop
- *  override — same posture as `mockLiveApi`/`captureLiveLanes` above. `/api/events` respects its
- *  own `after` cursor (real API paging semantics): a poll past `after=24` returns nothing fresh,
- *  so a capture slower than `POLL_MS` (3s) can't re-fold the same 24 merges twice and double the
- *  ring count out from under the screenshot. */
-async function mockRings24Api(page: Page): Promise<void> {
-  const events = rings24Events();
+/** #921 AC4: mocks `/api/loop/state` (`rings`) and `/api/events` (the same `rings` real merges,
+ *  none at `rings === 0`) so the capture comes from the REAL production fold (`useEventHistory`
+ *  -> `foldReplay`), never a prop override — same posture as `mockLiveApi`/`captureLiveLanes`
+ *  above. `/api/events` respects its own `after` cursor (real API paging semantics): a poll past
+ *  `after=rings` returns nothing fresh, so a capture slower than `POLL_MS` (3s) can't re-fold the
+ *  same merges twice and change the ring count out from under the screenshot. */
+async function mockRingsApi(page: Page, rings: number): Promise<void> {
+  const events = ringsMergedEvents(rings);
   const loopState = {
     engine: { state: "running", reasons: [], lastTickAt: null, pauseActive: false, estopActive: false, standbyNextCheckSec: null },
     lanes: { max: 3, items: [] },
     round: null,
     spend: { todayUsd: 0, dailyBudgetUsd: null, runUsd: null, runBudgetUsd: null, byModel: [] },
-    rings: 24,
+    rings,
     mergedPrs: events.map((e) => (e.payload as { pr: number }).pr),
     logPath: null,
     config: { board: { owner: "herehigher", repo: "sapwood" } },
@@ -889,7 +885,7 @@ async function mockRings24Api(page: Page): Promise<void> {
     if (url.pathname === "/api/events") {
       const after = Number(url.searchParams.get("after") ?? "0");
       const fresh = events.filter((e) => e.id > after);
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ events: fresh, lastId: 24 }) });
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ events: fresh, lastId: rings }) });
       return;
     }
     const body = byPath[url.pathname];
@@ -902,26 +898,32 @@ async function mockRings24Api(page: Page): Promise<void> {
 }
 
 /** #921 AC4: navigates the real production `App` -> `LiveApp` tree (never `?demo`, and never a
- *  `HeroStage` prop override) with `/api/*` mocked to a real 24-merge fold, and crops the hero
- *  panel — the same "real fold, not a prop override" discipline `captureLiveLanes` already
- *  applies to the lanes module. Asserts the fold actually produced 24 real rings (not just that
- *  SOMETHING rendered) before the screenshot is evidence of anything. */
-async function captureRings24Hero(page: Page, theme: { key: string; attr: string }): Promise<void> {
-  await mockRings24Api(page);
+ *  `HeroStage` prop override) with `/api/*` mocked to a real `rings`-merge fold, and crops the
+ *  hero panel — the same "real fold, not a prop override" discipline `captureLiveLanes` already
+ *  applies to the lanes module. Asserts the fold actually produced the real, DEDICATED count (not
+ *  just that something rendered — at `rings === 0` that means the sapling, never a numeral or a
+ *  ring, same PO review-thread ask: a rings=0 state on demand, not one only incidentally reachable
+ *  by scrubbing `?demo`'s own single-merge round to a moment before its merge) before the
+ *  screenshot is evidence of anything. */
+async function captureRingsHero(page: Page, theme: { key: string; attr: string }, rings: number, slug: string): Promise<void> {
+  await mockRingsApi(page, rings);
   await page.setViewportSize({ width: CANONICAL_WIDTH, height: 900 });
   await page.goto("/");
   await page.evaluate((attr) => document.documentElement.setAttribute("data-theme", attr), theme.attr);
   const hero = page.locator("svg.hero");
   await hero.waitFor({ state: "visible" });
-  await page.locator('.hero-trunk[data-rings="24"]').waitFor({ state: "visible" });
+  await page.locator(`.hero-trunk[data-rings="${rings}"]`).waitFor({ state: "visible" });
   await page.waitForLoadState("networkidle");
 
-  await expect(page.locator(".hero-ring"), "the real fold must draw exactly 24 rings, one per merge").toHaveCount(24);
+  if (rings === 0) {
+    await expect(page.locator(".hero-sapling"), "rings=0 must render the real sapling glyph").toHaveCount(1);
+  }
+  await expect(page.locator(".hero-ring"), `the real fold must draw exactly ${rings} rings, one per merge`).toHaveCount(rings);
 
-  await hero.screenshot({ path: `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-rings24-hero-panel.png` });
+  await hero.screenshot({ path: `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-${slug}-hero-panel.png` });
   // #921 AC4/gate② finding [1]: the OUTCOME right-zone crop, so the disc footprint/count scale
   // can be judged against the mockup's own right zone directly, not the whole panel.
-  await captureOutcomeZone(page, hero, `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-rings24-hero-panel-outcome-zone.png`);
+  await captureOutcomeZone(page, hero, `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-${slug}-hero-panel-outcome-zone.png`);
   await page.unroute("**/api/**");
 }
 
@@ -1100,7 +1102,10 @@ function buildContactSheet(): void {
   // review doctrine is explicit that a producer can never self-attest a Tier-C record) directly
   // on issue #921.
   const AC4_MOMENTS = [
-    { rings: 0, label: "sapling", capturePrefix: (t: string) => `${CANONICAL_WIDTH}-${t}-active` },
+    // #921 gate② PO review thread (b): a DEDICATED, on-demand rings=0 capture — never the
+    // `?demo` bundle's own "active" scrub, which only INCIDENTALLY lands at rings=0 for as long
+    // as that bundle's one round happens to carry exactly one merge past its own midpoint.
+    { rings: 0, label: "sapling", capturePrefix: (t: string) => `${CANONICAL_WIDTH}-${t}-rings0` },
     { rings: 1, label: "single ring", capturePrefix: (t: string) => `${CANONICAL_WIDTH}-${t}-idle` },
     { rings: 24, label: "mockup-scale footprint", capturePrefix: (t: string) => `${CANONICAL_WIDTH}-${t}-rings24` },
   ] as const;

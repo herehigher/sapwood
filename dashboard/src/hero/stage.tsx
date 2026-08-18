@@ -323,19 +323,51 @@ const RING_COUNT_DESCENT = 0.25;
 /** The numeral's own baseline offset from `TRUNK`'s true centre — the `<text>` element's own
  *  `TRUNK.y + 11` cap-height centring nudge, below. */
 const RING_COUNT_BASELINE_DY = 11;
+/** The numeral's own rendered-box half-diagonal (from the disc centre) at a given font size and
+ *  digit count — the shared metric both `ringInnerRadius` and `ringCountFontPx` need, so the two
+ *  can never silently diverge on what "fits" means. */
+function ringCountBoxRadius(fontPx: number, digits: number): number {
+  const halfWidth = (digits * fontPx * RING_COUNT_CHAR_ADVANCE) / 2;
+  const above = fontPx * RING_COUNT_ASCENT - RING_COUNT_BASELINE_DY;
+  const below = fontPx * RING_COUNT_DESCENT + RING_COUNT_BASELINE_DY;
+  return Math.hypot(halfWidth, Math.max(above, below));
+}
+/**
+ * #921 gate② round 3 finding [1] (ac3-extreme-footprint): AC3's footprint ceiling must hold at
+ * EVERY count, including scales where the numeral's own box — at the default/AC2 floor
+ * `RING_COUNT_FONT_PX` — would itself exceed `TRUNK_DISC_R_MAX` (7+ digits; the reviewer's own
+ * rings=1,000,000 example: ~110.5 vs the 103-unit ceiling). Since `ringInnerRadius` sizes the
+ * disc's inner clearance directly off the numeral's box, the only way to keep that clearance
+ * inside the ceiling at extreme digit counts is to shrink the numeral itself — binary search
+ * (30 iterations, well past the precision this geometry needs) for the largest font size, never
+ * above `RING_COUNT_FONT_PX`, whose own box still fits inside `TRUNK_DISC_R_MAX`. A no-op for
+ * any realistic count (verified through 6 digits — under one million rings — `hero.test.ts`'s
+ * own AC2/AC3 tests): the numeral stays at exactly `RING_COUNT_FONT_PX`, AC2's own floor, until
+ * scale genuinely forces a trade-off no fixed font size can avoid.
+ */
+export function ringCountFontPx(rings: number): number {
+  const digits = String(rings).length;
+  if (ringCountBoxRadius(RING_COUNT_FONT_PX, digits) <= TRUNK_DISC_R_MAX) return RING_COUNT_FONT_PX;
+  let lo = 1;
+  let hi = RING_COUNT_FONT_PX;
+  for (let i = 0; i < 30; i++) {
+    const mid = (lo + hi) / 2;
+    if (ringCountBoxRadius(mid, digits) <= TRUNK_DISC_R_MAX) lo = mid;
+    else hi = mid;
+  }
+  return lo;
+}
 /**
  * #921 growth rule (issue anchors: `TRUNK`/`ringRadii`/`TRUNK_DROPLET_OFFSET`): the inner
  * clearance radius no ring may draw inside of — sized to the numeral's OWN rendered box
- * (half-diagonal from the disc centre, `RING_COUNT_FONT_PX` at `rings`' own digit count) rather
- * than a fixed guess, so a wider running total (more digits) automatically buys more clearance
- * instead of eventually colliding with a numeral a fixed radius never anticipated.
+ * (half-diagonal from the disc centre, `ringCountFontPx(rings)` at `rings`' own digit count)
+ * rather than a fixed guess, so a wider running total (more digits) automatically buys more
+ * clearance instead of eventually colliding with a numeral a fixed radius never anticipated —
+ * and, past the point a fixed font size can no longer fit at all, the numeral itself shrinks
+ * (`ringCountFontPx`) rather than let the disc's own inner clearance blow the footprint ceiling.
  */
 export function ringInnerRadius(rings: number): number {
-  const digits = String(rings).length;
-  const halfWidth = (digits * RING_COUNT_FONT_PX * RING_COUNT_CHAR_ADVANCE) / 2;
-  const above = RING_COUNT_FONT_PX * RING_COUNT_ASCENT - RING_COUNT_BASELINE_DY;
-  const below = RING_COUNT_FONT_PX * RING_COUNT_DESCENT + RING_COUNT_BASELINE_DY;
-  return Math.hypot(halfWidth, Math.max(above, below));
+  return ringCountBoxRadius(ringCountFontPx(rings), String(rings).length);
 }
 /**
  * #921: the mockup's own disc footprint — ~128px radius at 1440 (i.e. ~256px disc at 24 rings,
@@ -344,6 +376,10 @@ export function ringInnerRadius(rings: number): number {
  * whichever ceiling is tighter, rather than two independent, potentially-disagreeing caps.
  */
 export const TRUNK_DISC_R_MAX = Math.min(128 / RENDER_SCALE_1440, 0.2 * STAGE.h);
+/** #921: a ring pitch below this compresses past what a hairline stroke can actually resolve —
+ *  the issue's own "≥ 1.5px [at 1440]" floor, converted to this file's SVG-unit space —
+ *  `ringsThatFitFootprint`'s own floor on how many rings the footprint can still fit. */
+const RING_PITCH_MIN = 1.5 / RENDER_SCALE_1440;
 /**
  * #921: the sapling glyph's own footprint at zero rings — "≈ 40% of the disc footprint" (the
  * issue's own sizing), i.e. 40% of the max disc's DIAMETER (`2 * TRUNK_DISC_R_MAX`).
@@ -360,10 +396,10 @@ const SAPLING_STEM_CLEARANCE = 6;
  * (`TRUNK.y + ringOuterRadius(...)`), never at the `TRUNK.max * TRUNK.step` max envelope.
  * #921: at zero rings there is no ring to measure — the sapling glyph's own box
  * (`HERO_SAPLING_SIZE`, plus `SAPLING_STEM_CLEARANCE`) is what the stem must actually clear
- * instead. Past that, `radii[...] ?? ringInnerRadius(rings)` — `ringRadii`'s own drawn count is
- * always `min(rings, TRUNK.max)` for `rings > 0` (#921 gate② round 2's AC1 reconciliation), so
- * this array is never actually empty there; the numeral fallback stays as defensive-only, never
- * the real bottom edge in practice.
+ * instead. Past that, floored at `ringInnerRadius(rings)` (never a bare `TRUNK.step`) — the
+ * numeral's own clearance stays the real bottom edge to attach below whenever the footprint-fit
+ * cap (`ringsThatFitFootprint`) leaves zero rings drawn (extreme digit counts, #921 gate② round
+ * 3's AC3 fix).
  */
 export function ringOuterRadius(rings: number): number {
   if (rings === 0) return HERO_SAPLING_SIZE / 2 + SAPLING_STEM_CLEARANCE;
@@ -377,8 +413,17 @@ export function ringOuterRadius(rings: number): number {
  * caption without it landing inside the stem's (now much shorter) own path — the fix used for the
  * outcome tally in the SAME situation applies here too: offset OFF the stem's shared x column
  * (`RING_WORD_RIGHT_X`) rather than trying to out-race a shrinking Y gap.
+ *
+ * #921 gate② PO review thread (fixed y `TRUNK.y + 40` still sat ON the ring's lower-left arc at
+ * low counts — text on stroke, a live crop at rings = 1 caught it): `y` is now DYNAMIC, sized off
+ * the disc's own real rendered edge (`ringOuterRadius`, the same source the reflection stem's own
+ * start already reads from) rather than a fixed guess — the caption sits BELOW the disc, in the
+ * same real gap the stem's own top clears (`hero.test.ts`'s AC3b), never on top of a ring's
+ * stroke at any count.
  */
-const RING_WORD_Y = TRUNK.y + 40;
+function ringWordY(rings: number): number {
+  return TRUNK.y + ringOuterRadius(rings) + 14;
+}
 const RING_WORD_RIGHT_X = TRUNK.x - 10;
 /**
  * #886 gate② run 2e566ac9 finding [1]: where the newest-merge droplet parks, offset from
@@ -1270,20 +1315,25 @@ export function HeroStage({
              * count. +11 is a baseline-centering nudge for the display font's cap-height, not a
              * collision-avoidance number. #921 AC2: `fontSize` is now inline (`RING_COUNT_FONT_PX`,
              * ≥ 56px at 1440 — the frozen mockup's own cap-height "24") rather than `hero.css`'s old
-             * `--text-4` (33px, whose 1.25-ratio ladder tops out short of the floor). */}
+             * `--text-4` (33px, whose 1.25-ratio ladder tops out short of the floor). #921 gate②
+             * round 3 finding [1]: `ringCountFontPx` (not the bare constant) — a no-op at any
+             * realistic count (stays exactly `RING_COUNT_FONT_PX`), only shrinking the RENDERED
+             * numeral to match what `ringInnerRadius` actually solved for once digit width alone
+             * would otherwise blow the footprint ceiling. */}
             <text
               className="hero-ring-count"
-              style={{ fontFamily: "var(--font-display)", fontSize: RING_COUNT_FONT_PX }}
+              style={{ fontFamily: "var(--font-display)", fontSize: ringCountFontPx(state.rings) }}
               x={TRUNK.x}
               y={TRUNK.y + 11}
               textAnchor="middle"
             >
               {state.rings}
             </text>
-            {/* #920 gate② finding [0]: right-anchored (`RING_WORD_RIGHT_X`'s own doc) — the stem's
-             * own start now shrinks with the ring count, leaving no safe Y-gap to sit in at a low
-             * count, so this clears the stem's shared x column instead. */}
-            <text className="hero-label" x={RING_WORD_RIGHT_X} y={RING_WORD_Y} textAnchor="end">
+            {/* #920 gate② finding [0]: right-anchored (`RING_WORD_RIGHT_X`'s own doc) — off the
+             * stem's shared x column. #921 gate② PO review thread: `y` (`ringWordY`) now tracks
+             * the disc's own real rendered edge — below it at every count, never on a ring's own
+             * stroke. */}
+            <text className="hero-label" x={RING_WORD_RIGHT_X} y={ringWordY(state.rings)} textAnchor="end">
               {state.rings === 1 ? "ring" : "rings"}
             </text>
           </>
@@ -1439,47 +1489,56 @@ export function HeroStage({
   );
 }
 
+/** #921 gate② round 3 finding [0] (ac1-min-pitch-crossover): the growth rule's own THIRD limiting
+ *  term (issue's own "What", verbatim: "the pitch compresses … so every ring still draws down to
+ *  a hairline-resolvable pitch (≥ 1.5px), after which the existing TRUNK.max drawn-window cap
+ *  applies and the count is the record") — how many rings the footprint can still fit at the
+ *  hairline-resolvable minimum pitch, given the inner clearance `r0` already claims. Once this is
+ *  SMALLER than `TRUNK.max`, it — not `TRUNK.max` — is the binding cap on how many rings draw;
+ *  the numeral (the real, uncapped `rings` count) stays "the record" for the gap. */
+function ringsThatFitFootprint(r0: number): number {
+  return Math.max(0, Math.floor((TRUNK_DISC_R_MAX - r0) / RING_PITCH_MIN));
+}
 /**
  * Radii for the cross-section, outermost = newest — empty at zero rings (the sapling glyph
- * draws instead, `HeroStage`'s own trunk group).
+ * draws instead, `HeroStage`'s own trunk group) OR once the footprint-fit cap
+ * (`ringsThatFitFootprint`) itself lands at zero (extreme digit counts).
  *
  * ponytail: capped at TRUNK.max drawn rings — the count text is the real record, and a disc
  * of 400 hairlines is a grey blob. Lift the cap only if the disc ever needs to be exact.
  *
- * #921 growth rule: `drawn` is ALWAYS exactly `min(rings, TRUNK.max)` (AC1's own unqualified
- * rule — one ring per real merge, no base grain, never fewer). Pitch stays the nominal
+ * #921 growth rule: `drawn` is `min(rings, TRUNK.max)`, further capped by `ringsThatFitFootprint`
+ * — the growth rule's own third term (that function's own doc). Pitch stays the nominal
  * `TRUNK.step` while the whole drawn set still fits inside `TRUNK_DISC_R_MAX` past the inner
  * clearance (`ringInnerRadius`, sized to `rings`' own digit count — the REAL total, not the
  * capped `drawn` count, since the numeral shows the real total even once ring-drawing itself
- * saturates). Once it wouldn't fit, EVERY ring's pitch compresses together (never just the
- * newest ones) so the outermost ring lands exactly on the ceiling instead of overshooting it.
+ * saturates). Once it wouldn't fit at the nominal pitch, EVERY ring's pitch compresses together
+ * (never just the newest ones) so the outermost ring lands exactly on the ceiling instead of
+ * overshooting it — down to `RING_PITCH_MIN`, the hairline floor `ringsThatFitFootprint` itself
+ * enforces by construction (once `drawn` rings fit at that floor, this file never asks for fewer
+ * than the floor pitch to squeeze in more).
  *
- * #921 gate② round 2, findings [0]/[1] (ac1-secondary-ring-cap / ac3-wide-count-footprint):
- * round 1's fix capped `drawn` a second, tighter time whenever even a hairline-floored pitch
- * couldn't fit `TRUNK.max` rings inside the ceiling — closing AC3's footprint breach by
- * literally breaking AC1's own unqualified "exactly min(N, TRUNK.max)" rule at the SAME N=100
- * boundary. Reconciled by dropping the hairline pitch floor entirely (never a tested AC — only
- * the issue's own "What" prose) and letting `Math.max(0, …)` compress pitch as far as the
- * footprint genuinely allows: `drawn` is unconditionally `min(rings, TRUNK.max)` again (AC1
- * holds exactly, for every N), and the outer radius pins EXACTLY at `TRUNK_DISC_R_MAX` whenever
- * `r0 <= TRUNK_DISC_R_MAX` — true for any realistic running total (verified through 6-digit
- * counts, i.e. every N below one million, `hero.test.ts`'s own AC3/AC1 reconciliation test).
- *
- * Only past that point — `r0` itself (the numeral's OWN legibility floor, AC2's fixed
- * `RING_COUNT_FONT_PX`) exceeding `TRUNK_DISC_R_MAX` at 7+ digits — does the disc's footprint
- * genuinely exceed the ceiling: pitch floors at 0 (every ring stacks at radius `r0`, never
- * negative/inward-crossing), and the outer radius equals `r0`, past the ceiling. This is not a
- * layout bug a formula can fix: AC2's fixed legibility floor and AC3's fixed diameter ceiling are
- * mutually unsatisfiable once the numeral ALONE no longer fits inside the ceiling, independent of
- * how many (or few) rings draw around it — the numeral stays legible and accurate (never
- * shrunk/truncated) rather than sacrificing AC2 to chase AC3 at a scale (>= 1,000,000 merges)
- * this loop is nowhere near reaching.
+ * #921 gate② round 2 findings [0]/[1] (ac1-secondary-ring-cap / ac3-wide-count-footprint) vs.
+ * round 3 findings [0]/[1] (ac1-min-pitch-crossover / ac3-extreme-footprint): round 1 had this
+ * same footprint-fit cap; round 2 dropped it, reading AC1's checklist wording ("exactly
+ * min(N, TRUNK.max)") as an unconditional override of the growth rule's own third term — round 3
+ * corrected that misreading (the growth rule's own prose already names the exception: "the count
+ * is the record" once the footprint-fit cap binds, not "exactly min(N, TRUNK.max) always"). The
+ * cap is restored, and `ringInnerRadius` (via `ringCountFontPx`) now ALSO shrinks the numeral
+ * itself for the truly extreme scale (7+ digits, round 3 finding [1]) where even the DEFAULT
+ * font's own box would exceed `TRUNK_DISC_R_MAX` before any ring is drawn — so AC3's footprint
+ * ceiling now holds at every count the growth rule can reach, not just up to a digit-width
+ * boundary. First binding boundary pinned exactly (`hero.test.ts`'s own AC1 test): N = 100 (the
+ * smallest 3-digit total) is the first N where `ringsThatFitFootprint` draws fewer than
+ * `TRUNK.max` — every 1-2 digit N (up to N = 99) still draws exactly `min(N, TRUNK.max)`.
  */
 export function ringRadii(rings: number): number[] {
-  const drawn = Math.min(rings, TRUNK.max);
-  if (drawn === 0) return [];
+  const capped = Math.min(rings, TRUNK.max);
+  if (capped === 0) return [];
   const r0 = ringInnerRadius(rings);
+  const drawn = Math.min(capped, ringsThatFitFootprint(r0));
+  if (drawn === 0) return [];
   const nominalReach = r0 + drawn * TRUNK.step;
-  const pitch = nominalReach <= TRUNK_DISC_R_MAX ? TRUNK.step : Math.max(0, (TRUNK_DISC_R_MAX - r0) / drawn);
+  const pitch = nominalReach <= TRUNK_DISC_R_MAX ? TRUNK.step : (TRUNK_DISC_R_MAX - r0) / drawn;
   return Array.from({ length: drawn }, (_, i) => r0 + (i + 1) * pitch);
 }
