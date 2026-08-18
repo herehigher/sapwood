@@ -1663,19 +1663,17 @@ to when v0.2 implementation issues are cut, not locked here.
   the duplicate. Stated for users in
   [`getting-started.md`](getting-started.md#what-the-ready-gate-does-not-check-duplicates).
   Revisit only if a real run is actually bitten.
-- **Comment-carried design guidance has no worker carrier (watch, #925):** guidance left only
-  in an issue/PR comment — an architect design note, a PO/human review thread on an
-  engine-agent lane, any of it — never reaches a fix leg. `worker.md`'s dispatch prompt
-  substitutes the issue body plus doctrine/labels/title and has no comment channel, and a
-  resumed session keeps its original body regardless of what gets commented afterward. The
-  only carriers that do reach a worker are a body rebaseline (which trips drift detection and
-  forces re-approval/re-entry) or a RESOLVED review thread; an open thread cannot land
-  guidance. **Not fixed here** — worker legs are deliberately denied GitHub-read tool access
-  (Decision #11), so landing this needs an engine-side change (fold guidance into the body, or
-  a new engine-computed prompt block), not a blind retro edit. Same accept-and-document stance
-  as the "Duplicate `Ready` issues" item above (Decision #9) — but this item has already
-  crossed the sibling's "revisit if bitten" bar, so the follow-up issue should be filed now,
-  not deferred further.
+- **Comment-carried design guidance has no worker carrier (accepted-for-now, watch):**
+  guidance left only in an issue/PR comment — an architect design note, a PO/human review
+  thread on an engine-agent lane, any of it — never reaches a fix leg. `worker.md`'s dispatch
+  prompt substitutes the issue body plus doctrine/labels/title and has no comment channel, and
+  a resumed session keeps its original body regardless of what gets commented afterward.
+  Carriers that do reach a worker: a body rebaseline (trips drift detection → re-approval →
+  re-entry) or a RESOLVED review thread; an open thread cannot land guidance. **Ruled: no
+  prompt-side patch** — worker legs are deliberately denied GitHub-read tool access
+  (Decision #11), so a real fix is engine-side (fold guidance into the body, or an
+  engine-computed prompt block); tracked through the batch-18 retro. Same accept-and-document
+  stance as the "Duplicate `Ready` issues" item above (Decision #9).
 
 ## Verification (how we'll prove v1)
 
