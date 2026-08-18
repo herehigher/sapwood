@@ -17,8 +17,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
-import { extractVerificationPlan } from "../forge/forge.js";
+import { extractVerificationPlan, selectReadyIssues } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
+// #874 AC4: cross-checks resume-capped's `retro` registry tag lands in the derived consumer list
+// — the SAME import path retro.ts's own callers use, not a re-derivation of the tag logic here.
+import { RETRO_EVENT_KINDS } from "../retro/retro.js";
 import { extractOperatorOwnedFences, findStandaloneMarkerLines } from "../review/comment-cursor.js";
 import { checkCommentCursorFreshness } from "../review/comment-cursor-gate.js";
 import { State } from "../state/state.js";
@@ -1134,6 +1137,7 @@ test("#963: verification-plan-reviewer.md / verification-plan-reviewer-confirm.m
   const reviewerRendered = renderRolePrompt(reviewerTemplate, issue, cfg, {
     "comments.digest": "(no comments on this issue)",
     "comments.digestCap": "30",
+    "decompose.acceptanceCriteriaHint": "5",
   });
   assert.ok(
     reviewerRendered.includes("zz-ZZ"),
@@ -2115,6 +2119,193 @@ test("createPlanReviewStub (retro #365): a needs_human decision applies needs-hu
   state.close();
 });
 
+// ── #874: `too_large` — gate⓪'s EARLY structural split trigger, the same `labels.split` writer
+//    entry #965's resume-cap CAPPED branch uses, judged before the first lane is ever spent. ──
+
+test("createPlanReviewStub (#874): a too_large decision applies labels.split, appends exactly one plan-review-too-large-split event carrying the evidence, posts the evidence as a comment, and runs NO drafter session (a single-entry ScriptedRunner suffices)", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-08-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 874, title: "sprawling issue", labels: [ROUND_POOL_LABEL] }];
+  const runner = new ScriptedRunner([
+    {
+      result: doneResult(
+        "reviewer-874",
+        sapwoodResult({ decision: "too_large", issue: 874, evidence: "Four independent deliverables, no shared PR." }),
+      ),
+    },
+  ]);
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+
+  assert.ok((forge.issueLabels[874] ?? []).includes(cfg.labels.split));
+  assert.ok(!(forge.issueLabels[874] ?? []).includes(cfg.labels.needsHuman), "too_large is not a needs-human escalation");
+  assert.ok(!(forge.issueLabels[874] ?? []).includes(cfg.labels.planApproved));
+
+  const events = state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-too-large-split"]);
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0]!.payload, {
+    round_id: round.round_id,
+    issue: 874,
+    evidence: "Four independent deliverables, no shared PR.",
+  });
+
+  const comment = lastComment(forge, 874);
+  assert.ok(comment.includes("Four independent deliverables, no shared PR."), "the evidence lands as the audit-trail comment");
+  state.close();
+});
+
+test("createPlanReviewStub (#874 AC2 idempotency): an issue that ALREADY carries labels.split gets no second addLabel call and no second event on a too_large re-verdict", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-08-18T00:00:00.000Z");
+  forge.issueLabels[875] = [cfg.labels.split];
+  forge.poolEligibleIssues = [{ number: 875, title: "already split", labels: [ROUND_POOL_LABEL, cfg.labels.split] }];
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-875", sapwoodResult({ decision: "too_large", issue: 875, evidence: "Still oversized." })) },
+  ]);
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+
+  assert.equal(forge.labelsAdded.filter(([n, l]) => n === 875 && l === cfg.labels.split).length, 0);
+  assert.equal(state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-too-large-split"]).length, 0);
+  assert.equal(forge.issueCommentsPosted.filter(([n]) => n === 875).length, 0);
+  state.close();
+});
+
+test("createPlanReviewStub (#874 P1 fix, same-round race): after too_large applies split, a manual/concurrent plan:approved landing on the SAME issue never makes it dispatchable — selectReadyIssues (forge.ts's real gate⓪ predicate, not a simulation) excludes any split-labeled issue regardless of plan:approved or plan quality", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-08-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 878, title: "oversized issue", labels: [ROUND_POOL_LABEL] }];
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-878", sapwoodResult({ decision: "too_large", issue: 878, evidence: "Too many deliverables." })) },
+  ]);
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+  assert.ok((forge.issueLabels[878] ?? []).includes(cfg.labels.split));
+
+  // The race: a human (or a stale/concurrent approval this issue carried before the split) adds
+  // plan:approved to the SAME issue AFTER the split already landed — the decompose session has
+  // not run yet, so `decomposed` is not present either.
+  forge.issueLabels[878] = [...(forge.issueLabels[878] ?? []), cfg.labels.planApproved];
+
+  const item = {
+    itemId: "I878",
+    number: 878,
+    title: "oversized issue",
+    state: "OPEN" as const,
+    body: PLAN_BODY,
+    repo: `${cfg.board.owner}/${cfg.board.repo}`,
+    labels: forge.issueLabels[878]!,
+    status: "Ready",
+    milestone: null,
+  };
+  const project = { projectId: "P", statusFieldId: "F", options: [], items: [item], placements: [] };
+  assert.deepEqual(selectReadyIssues(project, cfg), []);
+  state.close();
+});
+
+test("createPlanReviewStub (#874 AC3): a too_large verdict on a cap-split child (body carries the #965 origin marker) STILL applies split — this path never consults CAP_SPLIT_ORIGIN_MARKER", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg();
+  const state = new State(":memory:");
+  const round = state.startRound("2026-08-18T00:00:00.000Z");
+  forge.issueBodies[876] = "<!-- sapwood:origin:cap-split -->\n\nStill too large after the first split.";
+  forge.poolEligibleIssues = [{ number: 876, title: "cap-split child, still oversized", labels: [ROUND_POOL_LABEL] }];
+  const runner = new ScriptedRunner([
+    {
+      result: doneResult(
+        "reviewer-876",
+        sapwoodResult({ decision: "too_large", issue: 876, evidence: "Still three architecturally distinct subsystems." }),
+      ),
+    },
+  ]);
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+
+  assert.ok(
+    (forge.issueLabels[876] ?? []).includes(cfg.labels.split),
+    "the origin marker never gates this path — it's structural evidence, not a budget re-split chain",
+  );
+  state.close();
+});
+
+test("validateReviewerOutput (#874): 'too_large' requires the schema-level evidence field — missing it is schema-invalid, not just missing a BODY block", () => {
+  const text = `${RESULT_BLOCK_START}\n${JSON.stringify({ decision: "too_large", issue: 1 })}\n${RESULT_BLOCK_END}`;
+  const result = validateReviewerOutput(text, 1, PLAN_BODY);
+  assert.equal(result.ok, false);
+});
+
+test("validateReviewerOutput (#874): 'too_large' with evidence and NO BODY block is valid — evidence is the entire deliverable for this outcome", () => {
+  const text = sapwoodResult({ decision: "too_large", issue: 1, evidence: "One AC depends on another lane's concurrent output." });
+  const result = validateReviewerOutput(text, 1, PLAN_BODY);
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.decision.decision, "too_large");
+    assert.equal(result.decision.evidence, "One AC depends on another lane's concurrent output.");
+    assert.equal(result.decision.body, undefined);
+  }
+});
+
+test("validateReviewerOutput (#874, inverse): a 'too_large' verdict carrying a NON-empty BODY block is schema-invalid output, same failure mode as a missing body on 'draft_request' — evidence is the entire deliverable, never both channels at once", () => {
+  const text = sapwoodResult(
+    { decision: "too_large", issue: 1, evidence: "Four independent deliverables, no shared PR." },
+    "This is a BODY block the reviewer must never emit alongside too_large.",
+  );
+  const result = validateReviewerOutput(text, 1, PLAN_BODY);
+  assert.equal(result.ok, false);
+});
+
+test("validateReviewerOutput (#874, inverse): a whitespace-only BODY block on 'too_large' is accepted (nothing to reject) but never leaks into `body` — the decision carries evidence only", () => {
+  const text = sapwoodResult({ decision: "too_large", issue: 1, evidence: "Three distinct subsystems touched." }, "   \n  ");
+  const result = validateReviewerOutput(text, 1, PLAN_BODY);
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.decision.body, undefined);
+  }
+});
+
+test("validateReviewerOutput (#874, strict schema): a smuggled 'evidence' field alongside a NON-too_large decision is rejected outright — proves the other four decisions structurally cannot carry evidence, not just that nothing reads it", () => {
+  const text = `${RESULT_BLOCK_START}\n${JSON.stringify({ decision: "approve", issue: 1, evidence: "should never be accepted here" })}\n${RESULT_BLOCK_END}`;
+  const result = validateReviewerOutput(text, 1, PLAN_BODY);
+  assert.equal(result.ok, false);
+});
+
+test("createPlanReviewStub (#874 AC3): a too_large verdict spends zero draft cycles — exactly ONE session runs (a single-entry ScriptedRunner would reveal a second cycle by re-running the same entry, which `runner.calls.length` catches), and maxDraftCycles exhaustion never fires", async () => {
+  const forge = new FakeForge();
+  const cfg = mkCfg({ roles: { verificationPlanReviewer: { maxDraftCycles: 1 } } });
+  const state = new State(":memory:");
+  const round = state.startRound("2026-08-18T00:00:00.000Z");
+  forge.poolEligibleIssues = [{ number: 877, title: "oversized issue", labels: [ROUND_POOL_LABEL] }];
+  const runner = new ScriptedRunner([
+    { result: doneResult("reviewer-877", sapwoodResult({ decision: "too_large", issue: 877, evidence: "Too many deliverables." })) },
+  ]);
+  const deps: PlanReviewDeps = { now: realClock, forge, state, cfg, runner };
+  const stub = createPlanReviewStub(deps);
+  await stub.run({ roundId: round.round_id, phase: "plan_review", marker: null });
+
+  assert.ok((forge.issueLabels[877] ?? []).includes(cfg.labels.split));
+  assert.equal(runner.calls.length, 1, "too_large returns immediately on cycle 0 — never loops back for a second reviewer/drafter session");
+  assert.equal(
+    state.eventsSince("2020-01-01T00:00:00.000Z", ["plan-review-escalated"]).length,
+    0,
+    "never escalated via the cycle-exhaustion path",
+  );
+  state.close();
+});
+
+test("createPlanReviewStub (#874 AC4): resume-capped carries the retro registry tag — RETRO_EVENT_KINDS includes it", () => {
+  assert.ok((RETRO_EVENT_KINDS as readonly string[]).includes("resume-capped"));
+});
+
 test("createPlanReviewStub (#296): a verify_na proposal appends verify-na-proposed exactly once, naming the round and issue", async () => {
   const forge = new FakeForge();
   const cfg = mkCfg();
@@ -2512,7 +2703,11 @@ test("renderCommentDigest (#672, adversarial): a comment body containing the clo
   const template = loadRolePromptTemplate(undefined, defaultVerificationPlanReviewerPromptPath());
   const cfg = mkCfg();
   const issue: Issue = { number: 9, title: "T", labels: [], body: PLAN_BODY };
-  const rendered = renderRolePrompt(template, issue, cfg, { "comments.digest": digest, "comments.digestCap": "30" });
+  const rendered = renderRolePrompt(template, issue, cfg, {
+    "comments.digest": digest,
+    "comments.digestCap": "30",
+    "decompose.acceptanceCriteriaHint": "5",
+  });
   const closingTagCount = (rendered.match(/<\/issue-comments>/g) ?? []).length;
   assert.equal(closingTagCount, 1, "exactly one real closing tag — the template's own, never one forged by comment content");
   // Structural-position check (not a count of every prose mention of the tag name in backticks

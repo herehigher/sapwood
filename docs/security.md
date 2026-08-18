@@ -1226,13 +1226,17 @@ issues/PRs, never a default or a template — and whether a label actually vetoe
 (substring match against `escalation.humanLabels`, the merge gate's own rule) or holds an issue
 out of dispatch is likewise rendered from real resolved config using the SAME predicates those
 gates call, never asserted as fixed prose. Dispatch hold is NOT
-`escalation.humanLabels` membership alone: `needs-human`/`blocked`/`reserve`/`decomposed` hold
-dispatch UNCONDITIONALLY in every config (forge.ts's `isDispatchable`, gate⓪; conductor.ts's
-`orderForDispatch`), regardless of `escalation.humanLabels`; every other label holds dispatch
-only if it is an EXACT member of that resolved list. The three escalation rows (`needs-human`/
-`blocked`/`reserve`) always show both facts, member/unconditional or not; `decomposed` always
-shows the Dispatch hold fact (unconditional), but — unlike those three — it is not in the
-ALWAYS_RENDER set, so its Merge veto fact follows the same rule as every other label: rendered
+`escalation.humanLabels` membership alone: `needs-human`/`blocked`/`reserve`/`decomposed`/
+`split` (#874) hold dispatch UNCONDITIONALLY in every config (forge.ts's `isDispatchable`,
+gate⓪; conductor.ts's `orderForDispatch`), regardless of `escalation.humanLabels`; every other
+label holds dispatch only if it is an EXACT member of that resolved list. `split` is a dispatch
+exclusion until the decomposer fences the parent with `decomposed` — the same composed set
+`decomposed` itself joins, closing the race where a concurrent or stale `plan:approved` could
+otherwise dispatch an issue the engine already split (or a human split as override) before that
+fence lands. The three escalation rows (`needs-human`/
+`blocked`/`reserve`) always show both facts, member/unconditional or not; `decomposed`/`split`
+always show the Dispatch hold fact (unconditional), but — unlike those three — neither is in the
+ALWAYS_RENDER set, so their Merge veto fact follows the same rule as every other label: rendered
 only when its resolved name actually matches `escalation.humanLabels`. Under default config
 `decomposed` is not a member, so no Merge veto line renders for it there, but a repo whose
 `escalation.humanLabels` explicitly includes `decomposed` does see its Merge veto MEMBER line,

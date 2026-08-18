@@ -579,6 +579,21 @@ test("#628: no carrier re-restates the tier A/B/C/D definitions themselves — d
   }
 });
 
+// ── #874: gate⓪'s too_large yardstick mirrors po-decompose's own child-sizing yardstick ────────
+
+test("#874: verification-plan-reviewer.md and po-decompose.md ship the sapwood:floor:split-yardstick marker block, byte-equal (whitespace-normalized) across carriers — the JUDGE and the AUTHOR apply the identical structural predictors", () => {
+  assertFloorMirrored("split-yardstick", SPLIT_YARDSTICK_CARRIERS);
+});
+
+test("#874 (negative lint): the shipped reviewer prompt no longer recommends a human apply the split label from inside a draft_request brief — that instruction is retired in favor of the too_large structured branch", () => {
+  const body = readPrompt(defaultVerificationPlanReviewerPromptPath());
+  assert.doesNotMatch(
+    body,
+    /recommend that a human apply the configured split label/i,
+    "the retired draft_request-routed split recommendation must not reappear",
+  );
+});
+
 // ── #653: gate⓪ contract-vs-discussion veto duty — both comment-reading judgment prompts ──────
 //
 // PR #651 round 1's incident: gate⓪ roles already hold issue-comment read tools (PROXY_ROLE_TOOL_
@@ -608,6 +623,15 @@ const EVIDENCE_TIER_CARRIERS: Readonly<Record<string, string>> = {
   "po.md": defaultPoPromptPath(),
   "po-decompose.md": defaultPoDecomposePromptPath(),
   "verification-plan-drafter.md": defaultVerificationPlanDrafterPromptPath(),
+};
+
+// #874: the too_large yardstick's carrier set — the JUDGE (verification-plan-reviewer.md, gate⓪'s
+// too_large branch) and the AUTHOR (po-decompose.md, sizing a proposed child) must apply the
+// IDENTICAL structural predictors, or a plan the reviewer calls oversized and a plan the
+// decomposer calls minimal could silently disagree with no test ever catching the drift.
+const SPLIT_YARDSTICK_CARRIERS: Readonly<Record<string, string>> = {
+  "verification-plan-reviewer.md": defaultVerificationPlanReviewerPromptPath(),
+  "po-decompose.md": defaultPoDecomposePromptPath(),
 };
 
 function extractFloor(body: string, floorName: string): string {

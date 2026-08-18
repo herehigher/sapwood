@@ -291,11 +291,13 @@ dispatchable again) rather than risking duplicate sessions/writes on a resume.
 
 #### PO decompose sub-mode
 
-A human-applied `labels.split`, or an engine-applied one at the resume cap (#965 —
-`conductor.ts`'s RESUME phase, CAPPED branch — never for an issue already carrying the
-cap-split origin marker; no separate rate limit beyond that, since a cap-split needs a
-lane to exhaust `worker.maxResumes` and at most `lanes.max` lanes exist at all), admits
-one oversized issue,
+A human-applied `labels.split`, or an engine-applied one — from EITHER of two triggers: gate⓪'s
+early `too_large` structured decision (#874 — `plan-review.ts::reviewOneIssue`, judged post-Ready
+before a lane is ever spent), or the resume-cap late trigger (#965 — `conductor.ts`'s RESUME
+phase, CAPPED branch — never for an issue already carrying the cap-split origin marker; no
+separate rate limit on either trigger, since a cap-split needs a lane to exhaust
+`worker.maxResumes` and at most `lanes.max` lanes exist at all, and gate⓪'s trigger is bounded by
+the same Ready-lane pool every other gate⓪ pass already is), admits one oversized issue,
 including an `origin:agent` child, for one controlled generation. Agent-origin issues without
 that fresh signature are never candidates. The session performs goal alignment, a cheap
 feasibility self-check, and decomposition in one pass, returning either a bounded child set
@@ -375,14 +377,19 @@ only ever runs from inside the plan_review phase (`engine/src/loop/round-default
 **The cycle** (`engine/src/roles/plan-review.ts::reviewOneIssue`, one per Ready-lane
 candidate issue): the reviewer session judges the issue's CURRENT body (refetched
 every cycle, never a phase-start snapshot — `plan-review.ts::reviewOneIssue`) and returns one
-of four decisions: `approve` (write any body revision, apply `plan:approved`, done),
+of five decisions: `approve` (write any body revision, apply `plan:approved`, done),
 `verify_na` (apply `needs-human` THEN `verify:n/a`, ordering-invariant so a partial
 double-label failure fails closed non-dispatchable — `plan-review.ts::reviewOneIssue`),
-`draft_request` (brief the drafter), or `needs_human` (retro round #365: apply `needs-human`
+`draft_request` (brief the drafter), `needs_human` (retro round #365: apply `needs-human`
 directly, no draft cycle — reserved for a human-merge-only path that is a PREREQUISITE every
 acceptance criterion depends on, where no redraft can make the plan dispatchable regardless of
 wording; escalating via `draft_request` first would only spend `maxDraftCycles` reaching the
-identical verdict, as issue #782 did). On `draft_request`, the drafter session drafts a
+identical verdict, as issue #782 did), or `too_large` (#874: apply `split` directly — the
+SAME write path #965's resume-cap CAPPED branch uses, idempotent on an issue already carrying
+`split`, zero draft cycles spent, the issue leaves the round's plan-review set for a later
+po-decompose session to pick up; this path does NOT consult the #965 cap-split origin marker,
+since a `too_large` verdict is structural evidence about size, not a budget signal). On
+`draft_request`, the drafter session drafts a
 revised body from the reviewer's brief; the engine writes it
 (`forge.updateIssueBody`) and loops back to a fresh reviewer cycle against the
 drafter's edit. `roles.verificationPlanReviewer.maxDraftCycles` (default 2, `engine/src/config/config.ts::Roles`)
@@ -392,10 +399,10 @@ bounds the loop — at the bound, the engine escalates rather than cycling forev
 | Element | Detail |
 |---|---|
 | Responsibility | Gate⓪: every Ready-lane issue must clear plan review (a verification plan the reviewer accepts) before it is dispatchable. The reviewer judges; the drafter repairs on a bounce. `plan-review.ts::createPlanReviewStub`. |
-| Write scope | Tier 1 (no engine-granted write channel) for WRITES on all three sessions (reviewer, drafter, and #214's confirm variant): `ROLE_ALLOWED_TOOLS = "Read,Grep,Glob"` (`engine/src/roles/peripheral.ts::ROLE_ALLOWED_TOOLS`) for the reviewer/drafter (the drafter's `PLAN_DRAFTER_DISALLOWED_TOOLS`, `peripheral.ts::PLAN_DRAFTER_DISALLOWED_TOOLS`, is a regression trip-wire only — it is byte-identical to the base `ROLE_DISALLOWED_TOOLS`, and the real boundary is that shared deny-list, `peripheral.ts::ROLE_DISALLOWED_TOOLS`); the confirm variant carries `CONFIRM_ALLOWED_TOOLS = ROLE_ALLOWED_TOOLS` (`peripheral.ts::CONFIRM_ALLOWED_TOOLS`) — the same real READ channel (repo inspection, so it can actually judge plan freshness against the current checkout) but still no `Bash`/`Write`/`Edit`/`MultiEdit` of any kind on any of the three, so tier 1 holds for every write path. Tier 3 choke point: `plan-review.ts::reviewOneIssue` is the sole caller of `forge.updateIssueBody`/`forge.addLabel(plan:approved\|needs-human\|verify:n/a)`/`forge.addIssueComment` for this phase; `confirmOneIssue` (`plan-review.ts::confirmOneIssue`) is the analogous choke point for the confirm variant — a `"confirm"` decision makes ZERO forge writes, an `"invalidate"` decision routes into the SAME `reviewOneIssue` machinery via its `seed` parameter. The drafter's write is structurally never self-approving: it has no label-write path at all — `plan-review.ts` never calls `forge.addLabel` on the drafter's behalf. |
+| Write scope | Tier 1 (no engine-granted write channel) for WRITES on all three sessions (reviewer, drafter, and #214's confirm variant): `ROLE_ALLOWED_TOOLS = "Read,Grep,Glob"` (`engine/src/roles/peripheral.ts::ROLE_ALLOWED_TOOLS`) for the reviewer/drafter (the drafter's `PLAN_DRAFTER_DISALLOWED_TOOLS`, `peripheral.ts::PLAN_DRAFTER_DISALLOWED_TOOLS`, is a regression trip-wire only — it is byte-identical to the base `ROLE_DISALLOWED_TOOLS`, and the real boundary is that shared deny-list, `peripheral.ts::ROLE_DISALLOWED_TOOLS`); the confirm variant carries `CONFIRM_ALLOWED_TOOLS = ROLE_ALLOWED_TOOLS` (`peripheral.ts::CONFIRM_ALLOWED_TOOLS`) — the same real READ channel (repo inspection, so it can actually judge plan freshness against the current checkout) but still no `Bash`/`Write`/`Edit`/`MultiEdit` of any kind on any of the three, so tier 1 holds for every write path. Tier 3 choke point: `plan-review.ts::reviewOneIssue` is the sole caller of `forge.updateIssueBody`/`forge.addLabel(plan:approved\|needs-human\|verify:n/a\|split)`/`forge.addIssueComment` for this phase; `confirmOneIssue` (`plan-review.ts::confirmOneIssue`) is the analogous choke point for the confirm variant — a `"confirm"` decision makes ZERO forge writes, an `"invalidate"` decision routes into the SAME `reviewOneIssue` machinery via its `seed` parameter. The drafter's write is structurally never self-approving: it has no label-write path at all — `plan-review.ts` never calls `forge.addLabel` on the drafter's behalf. |
 | Marker idempotency | `planReviewMarker(roundId)` (`plan-review.ts::planReviewMarker`), standard convention, round-phase granularity — the whole phase (every candidate issue) is one unit of idempotent work; a non-null marker skips the entire phase, not just completed issues. |
-| Output schema + validation | `VerificationPlanReviewerMetadataSchema` (`plan-review.ts::VerificationPlanReviewerMetadataSchema`, `decision ∈ {approve, draft_request, verify_na, needs_human}` + `issue`) validated by `validateReviewerOutput` (`plan-review.ts::validateReviewerOutput`) — schema AND a content invariant: an `approve` claim's body (revised or current) must actually have `extractVerificationPlan` find a plan section (schema-valid is not the same as truthful). `VerificationPlanDrafterMetadataSchema` (`plan-review.ts::VerificationPlanDrafterMetadataSchema`, `{issue}` + required body) validated by `validateDrafterOutput` (`plan-review.ts::validateDrafterOutput`) with the SAME content invariant applied to the drafted body. This is the **highest decision-weight** output in the codebase (`plan:approved` is the dispatch key) and carries the deepest validation — see `docs/PLAN.md`'s write-inventory table for the full field-by-field breakdown. |
-| Escalation path | Gate-blocking — the ONE role pair whose failure escalates rather than degrading silently. A reviewer session that fails twice, or never validates, applies `needs-human` + an attempt-trail comment (`plan-review.ts::escalateNeedsHuman`) and the `plan-review-escalated` state event; same for a drafter that never validates. Exhausting `maxDraftCycles` escalates the same way (`plan-review.ts::reviewOneIssue`). A human resolution (a real plan, or accepting `verify:n/a` by removing `needs-human`) is required to make the issue dispatchable again — see [`configuration.md`](configuration.md) and issue #147's re-entry path for how a human-resolved gated issue re-enters the loop. |
+| Output schema + validation | `VerificationPlanReviewerMetadataSchema` (`plan-review.ts::VerificationPlanReviewerMetadataSchema`, a discriminated union on `decision ∈ {approve, draft_request, verify_na, needs_human, too_large}` + `issue`, each branch `.strict()` — `too_large` alone requires a non-empty `evidence` field, every other branch rejects it) validated by `validateReviewerOutput` (`plan-review.ts::validateReviewerOutput`) — schema AND a content invariant: an `approve` claim's body (revised or current) must actually have `extractVerificationPlan` find a plan section (schema-valid is not the same as truthful). `VerificationPlanDrafterMetadataSchema` (`plan-review.ts::VerificationPlanDrafterMetadataSchema`, `{issue}` + required body) validated by `validateDrafterOutput` (`plan-review.ts::validateDrafterOutput`) with the SAME content invariant applied to the drafted body. This is the **highest decision-weight** output in the codebase (`plan:approved` is the dispatch key) and carries the deepest validation — see `docs/PLAN.md`'s write-inventory table for the full field-by-field breakdown. |
+| Escalation path | Gate-blocking — the ONE role pair whose failure escalates rather than degrading silently. A reviewer session that fails twice, or never validates, applies `needs-human` + an attempt-trail comment (`plan-review.ts::escalateNeedsHuman`) and the `plan-review-escalated` state event; same for a drafter that never validates. Exhausting `maxDraftCycles` escalates the same way (`plan-review.ts::reviewOneIssue`). A human resolution (a real plan, or accepting `verify:n/a` by removing `needs-human`) is required to make the issue dispatchable again — see [`configuration.md`](configuration.md) and issue #147's re-entry path for how a human-resolved gated issue re-enters the loop. `too_large` is NOT gate-blocking in this sense: it is a healthy, autonomous outcome — no human hold, no escalation event — that simply hands the issue to decompose. |
 
 ### harvest (harvesting)
 

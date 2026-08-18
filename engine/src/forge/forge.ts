@@ -2831,8 +2831,18 @@ function engineAuthoredPrBody(lane: string, issue: number, branch: string): stri
 type ReadyCfg = {
   board: { owner: string; repo: string; statusField: string; status: { ready: string } };
   // #397: `planless` is optional here for the same reason `decomposed` is — a hand-built ReadyCfg
-  // in a test predates it; a real cfg always resolves it.
-  labels: { verifyNa: string; planApproved: string; needsHuman: string; blocked: string; decomposed?: string; planless?: string };
+  // in a test predates it; a real cfg always resolves it. #874: `split` joins them the same way —
+  // isDispatchable's own exclusion below needs it, but a pre-#874 hand-built fixture must keep
+  // typechecking.
+  labels: {
+    verifyNa: string;
+    planApproved: string;
+    needsHuman: string;
+    blocked: string;
+    decomposed?: string;
+    planless?: string;
+    split?: string;
+  };
 };
 
 /** #397 class 6: the routing fence decompose's remainder path and align's no-plan path apply. It
@@ -2845,6 +2855,17 @@ function isPlanless(labels: string[], l: ReadyCfg["labels"]): boolean {
 
 function isDecomposed(labels: string[], l: ReadyCfg["labels"]): boolean {
   return l.decomposed !== undefined && labelsInclude(labels, l.decomposed);
+}
+
+/** #874 P1 fix: `split` was readable by decompose.ts (`decompose.ts:72`) but never excluded from
+ *  DISPATCH — an issue the engine just split (gate⓪'s `too_large`, or #965's resume-cap), or one
+ *  a human split as the override channel, could still race a concurrent/stale `plan:approved`
+ *  onto the SAME issue and get dispatched before `decomposed` ever lands (that fence is only
+ *  applied once the decompose session actually runs, a later round). `split` alone — independent
+ *  of whether `decomposed` has landed yet — is the honest fail-closed signal: an issue carrying
+ *  it is mid-decomposition, never a fresh dispatch target, regardless of what else it carries. */
+function isSplit(labels: string[], l: ReadyCfg["labels"]): boolean {
+  return l.split !== undefined && labelsInclude(labels, l.split);
 }
 
 /**
@@ -2876,6 +2897,9 @@ function isDecomposed(labels: string[], l: ReadyCfg["labels"]): boolean {
  */
 function isDispatchable(body: string, labels: string[], l: ReadyCfg["labels"]): boolean {
   if (isDecomposed(labels, l)) return false;
+  // #874: `split` alone (see isSplit's own doc) excludes dispatch — independent of, and checked
+  // regardless of, whether `decomposed` has landed yet.
+  if (isSplit(labels, l)) return false;
   if (labelsInclude(labels, l.needsHuman) || labelsInclude(labels, l.blocked)) return false;
   // #94 Codex retro-review P2: BOTH dispatch-path labels on one issue is a state the
   // verification-plan-reviewer prompt forbids ("never apply both") — it can only arise from a stale or

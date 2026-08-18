@@ -95,6 +95,7 @@ const DOC_TABLE_KINDS = [
   "align-summary",
   "triage-degraded",
   "plan-review-escalated",
+  "plan-review-too-large-split",
   "verify-na-proposed",
   "gated-reentry",
   "lane-revived",
@@ -721,6 +722,12 @@ const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expec
     "plan-review-escalated",
     { issue: 1, reason: "reviewer determined this issue is not dispatchable by any redraft" },
     "Issue #1's plan needs a human — reviewer determined this issue is not dispatchable by any redraft · asks: revise the plan or adjudicate",
+  ],
+  ["plan-review-too-large-split", { issue: 1 }, "Issue #1 was too large for one PR — the engine split it for decomposition"],
+  [
+    "plan-review-too-large-split",
+    { issue: 1, evidence: "Four independent deliverables, no shared PR." },
+    "Issue #1 was too large for one PR — the engine split it for decomposition: Four independent deliverables, no shared PR.",
   ],
   [
     "verify-na-proposed",

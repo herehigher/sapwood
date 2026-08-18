@@ -964,6 +964,7 @@ checklist item**):
 | `align-summary` | Planning pass: {n} issue(s) created, {m} plan(s) drafted |
 | `triage-degraded` | A planning session had trouble — some issues keep their old plans |
 | `plan-review-escalated` | Issue #{issue}'s plan needs a human — {payload.reason, falling back to "automated review couldn't approve it"} · asks: revise the plan or adjudicate |
+| `plan-review-too-large-split` | Issue #{issue} was too large for one PR — the engine split it for decomposition{: payload.evidence, when carried} (#874 — not an attention item, same stance as `resume-capped`'s `split: true` case: the engine applied `labels.split` itself, not a human hold) |
 | `verify-na-proposed` | Issue #{issue} proposed as not separately verifiable — reason not recorded · asks: approve or reject the proposal (#881 payload gap: no reason field exists upstream today) |
 | `gated-reentry` | Issue #{issue}'s PR was unblocked by a human — back through review |
 | `lane-revived` | Issue #{issue}'s PR picked back up after an environment failure — back under review |

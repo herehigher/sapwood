@@ -99,8 +99,10 @@ zero or more well-scoped issues. For EVERY issue you propose:
   absence like any other missing tool: say so in the issue body's rationale rather than writing
   as if you had searched. If overlap is uncertain either way, propose nothing for that gap.
 - Scope each issue to one coherent unit of work. Prefer several small, well-bounded issues over
-  one sprawling one. If nothing needs decomposing this round, propose zero issues — that is a
-  valid, complete outcome, not a failure to find something to do.
+  one sprawling one — gate⓪ can split an oversized issue automatically once it reaches `Ready`
+  (#874), but that is a structural backstop, not a substitute for scoping it well here. If
+  nothing needs decomposing this round, propose zero issues — that is a valid, complete outcome,
+  not a failure to find something to do.
 
 You do NOT decide the `origin:agent` label, and this session never moves anything to `Ready` —
 those are the engine's and a human's jobs respectively, entirely outside this session, whatever

@@ -214,12 +214,19 @@ export function renderCommentDigest(comments: readonly PRComment[]): string {
 // check is treated exactly like a schema-invalid one: an invalid attempt for runSessionWithRetry
 // purposes (retry once, then degrade), never silently honored and never silently dropped.
 
-const VerificationPlanReviewerMetadataSchema = z
-  .object({
-    decision: z.enum(["approve", "draft_request", "verify_na", "needs_human"]),
-    issue: z.number().int().positive(),
-  })
-  .strict();
+// #874: a discriminated union, not a flat object — `too_large` is the ONE decision that carries
+// a structural-evidence field, and the AC ("the other four decisions reject it") means a session
+// smuggling `evidence` alongside `"decision": "approve"` must fail schema validation outright,
+// not just be ignored. A single `.strict()` object with an optional `evidence` field would accept
+// that smuggled shape silently; five separate `.strict()` variants, discriminated on `decision`,
+// each reject any key their own branch doesn't declare.
+const VerificationPlanReviewerMetadataSchema = z.discriminatedUnion("decision", [
+  z.object({ decision: z.literal("approve"), issue: z.number().int().positive() }).strict(),
+  z.object({ decision: z.literal("draft_request"), issue: z.number().int().positive() }).strict(),
+  z.object({ decision: z.literal("verify_na"), issue: z.number().int().positive() }).strict(),
+  z.object({ decision: z.literal("needs_human"), issue: z.number().int().positive() }).strict(),
+  z.object({ decision: z.literal("too_large"), issue: z.number().int().positive(), evidence: z.string().min(1) }).strict(),
+]);
 
 const VerificationPlanDrafterMetadataSchema = z
   .object({
@@ -228,15 +235,22 @@ const VerificationPlanDrafterMetadataSchema = z
   .strict();
 
 export interface ReviewerDecision {
-  decision: "approve" | "draft_request" | "verify_na" | "needs_human";
+  decision: "approve" | "draft_request" | "verify_na" | "needs_human" | "too_large";
   issue: number;
   /** The BODY block's raw text, when present. Meaning depends on `decision`: a revised issue
    *  body for "approve" (optional — omitted means the reviewer made no corrections), the
    *  drafter's brief for "draft_request" (required), the human-facing explanation for
    *  "verify_na" (required), or the human-facing explanation for "needs_human" (required —
    *  a plan-fixable-by-redraft case never reaches this decision, see reviewOneIssue's
-   *  needs_human branch). */
+   *  needs_human branch). Never present for "too_large" — that decision's whole deliverable is
+   *  `evidence` below, not a BODY block. */
   body?: string;
+  /** #874: required for "too_large" only (schema-enforced — see the discriminated union above),
+   *  the structural reason one PR/lane cannot complete and verify this issue — which acceptance
+   *  criteria cannot share a PR, or which yardstick predictor fired. The driver posts this
+   *  verbatim as the split's audit-trail comment; never a BODY block, since it is metadata the
+   *  schema itself validates non-empty, not free-form drafting output. */
+  evidence?: string;
 }
 
 export type ReviewerValidation = { ok: true; decision: ReviewerDecision } | { ok: false; reason: string };
@@ -263,8 +277,21 @@ export function validateReviewerOutput(text: string, expectedIssue: number, curr
     return { ok: false, reason: `structured output issue number mismatch (expected #${expectedIssue}, got #${parsed.data.issue})` };
   }
   const { decision } = parsed.data;
-  if (decision !== "approve" && (block.body === undefined || block.body.trim() === "")) {
+  // #874: "too_large" carries its evidence in the schema-validated `evidence` field above, not a
+  // BODY block — the schema already guarantees `evidence` is a non-empty string for this branch,
+  // so this generic BODY-required check (every OTHER non-approve decision's whole deliverable) is
+  // deliberately not applied to it.
+  if (decision !== "approve" && decision !== "too_large" && (block.body === undefined || block.body.trim() === "")) {
     return { ok: false, reason: `decision "${decision}" requires a non-empty BODY block` };
+  }
+  // #874: the inverse of the check above — a "too_large" verdict carrying a non-empty BODY block
+  // is malformed output, not a harmless extra. The shipped prompt states plainly that `evidence`
+  // is the entire deliverable for this outcome (no BODY block); a session that emits one anyway
+  // is either confused about which decision it took or attempting to smuggle free-form prose past
+  // the schema's structural-evidence-only contract. Fail closed the same way a missing body on
+  // any OTHER non-approve decision already does, rather than silently accepting and discarding it.
+  if (decision === "too_large" && block.body !== undefined && block.body.trim() !== "") {
+    return { ok: false, reason: `decision "too_large" must not carry a BODY block — "evidence" is the entire deliverable` };
   }
   if (decision === "approve") {
     const bodyToCheck = block.body ?? currentBody;
@@ -283,7 +310,16 @@ export function validateReviewerOutput(text: string, expectedIssue: number, curr
   }
   return {
     ok: true,
-    decision: { decision, issue: parsed.data.issue, ...(block.body !== undefined ? { body: block.body } : {}) },
+    decision: {
+      decision,
+      issue: parsed.data.issue,
+      // #874: "too_large" never carries `body` — the check above already rejects a NON-empty
+      // one, but an EMPTY/whitespace-only BODY block would still pass that check (nothing to
+      // reject) and must not leak an empty string into the decision either; `evidence` is this
+      // outcome's entire deliverable.
+      ...(decision !== "too_large" && block.body !== undefined ? { body: block.body } : {}),
+      ...(parsed.data.decision === "too_large" ? { evidence: parsed.data.evidence } : {}),
+    },
   };
 }
 
@@ -719,6 +755,11 @@ async function reviewOneIssue(
       const reviewerPrompt = renderRolePrompt(reviewerTemplate, currentIssue, deps.cfg, {
         "comments.digest": renderCommentDigest(cursorCheck.comments),
         "comments.digestCap": String(COMMENT_DIGEST_COUNT_CAP),
+        // #874: the too_large yardstick's AC-count predictor reuses the SAME config number
+        // po-decompose.md renders as `{{decompose.acceptanceCriteriaHint}}` (decompose.ts's own
+        // render call) — one config key, one substitution path, never a second hardcoded number
+        // that could silently drift from the decomposer's own heuristic.
+        "decompose.acceptanceCriteriaHint": String(deps.cfg.roles.po.acceptanceCriteriaHint),
       });
       const reviewerRole = deps.cfg.roles.verificationPlanReviewer;
 
@@ -938,6 +979,50 @@ async function reviewOneIssue(
         /* contained — the label/comment already landed; the hold stands without its event */
       }
       return false; // outcome 4 — needs-human, no draft cycle attempted
+    }
+
+    if (decision.decision === "too_large") {
+      // #874: gate⓪'s EARLY split trigger — the SAME writer entry #965's resume-cap CAPPED
+      // branch uses (`forge.addLabel(labels.split)`), just judged BEFORE the first lane is ever
+      // spent instead of after `worker.maxResumes` is exhausted. Idempotent by construction: an
+      // issue that already carries `split` — from an earlier too_large pass (this issue can
+      // still match needsPlanReview next round, since `split` alone doesn't clear it), a
+      // cap-split, or a direct human override — gets no second write and no second event; the
+      // SAME decompose session (#965's writer, decompose.ts) picks the issue up regardless of
+      // which of the three applied the label. Unlike the CAPPED branch, this path does NOT
+      // consult `CAP_SPLIT_ORIGIN_MARKER`: that marker exists to stop a BUDGET-driven re-split
+      // chain (a cap-split child that itself exhausts its resume budget), but a `too_large`
+      // verdict is STRUCTURAL evidence about size — a cap-split child that is STILL structurally
+      // too large is exactly the re-split #913's container contract expects gate⓪ to apply.
+      const freshLabels = await deps.forge.getIssueLabels(issue.number);
+      if (!labelsInclude(freshLabels, l.split)) {
+        // Label-first: a transient failure here leaves the issue exactly as it was — still
+        // `needsPlanReview`-eligible — so the next round's pass simply re-derives the same
+        // verdict and retries, same fail-toward-a-retry stance every other write in this file
+        // takes.
+        await deps.forge.addLabel(issue.number, l.split);
+        try {
+          deps.state.appendEvent("plan-review-too-large-split", {
+            round_id: roundId,
+            issue: issue.number,
+            evidence: decision.evidence!,
+          });
+        } catch {
+          /* contained — the label write already landed; the split stands without its event,
+           * same fail-toward-more-work stance every other branch in this file takes */
+        }
+        // Best-effort audit-trail comment, AFTER the durable label+event above — never the
+        // reverse. No WIP pointer (unlike the CAPPED branch): nothing was ever built for this
+        // issue, so there is no worktree/branch/diff to point decompose at.
+        try {
+          await deps.forge.addIssueComment(issue.number, `${decision.evidence!}\n\n${marker}`);
+        } catch {
+          /* contained — the label + event above are already durable; the comment is bookkeeping */
+        }
+      }
+      // Zero draft cycles consumed (AC3) — this branch never reaches the drafter below, whether
+      // or not the label was already present.
+      return false; // outcome 5 — too_large, split applied (or already stood), no draft cycle spent
     }
 
     // Outcome 2: request-a-draft. At the cycle bound already -> self-heal exhausted, escalate.
