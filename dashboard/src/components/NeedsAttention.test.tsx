@@ -139,7 +139,7 @@ test("row renders the mockup's shape — chip, reason + explicit ask, and a bord
   // emphasis modifier alongside the base age classes. gate① engine-agent finding [1]: no
   // `.muted` here — it would silently lose the cascade to `.attention-age-emphasis`'s own colour
   // override (equal specificity, `.muted` loads later), so the emphasis box drops it entirely.
-  assert.match(html, /class="data attention-ts attention-age attention-age-emphasis"/);
+  assert.match(html, /class="data attention-age attention-age-emphasis"/);
 });
 
 test("does not render, import, or re-implement the legend", () => {
@@ -408,7 +408,12 @@ test("#925 AC3: a DECISION row (--rust tone) still names its category in the chi
   assert.match(html, /class="attention-severity" aria-hidden="true"/);
 });
 
-// ── #925 AC5: fixed chip/entity/age tracks — geometry oracle, COVERAGE over every rendered row ──
+// ── #925 AC5: fixed chip/entity/age tracks — FAST STRUCTURAL GUARD only; the actual geometry ──
+// proof is dashboard/shots/shots.spec.ts's Playwright spec (real Chromium layout, real
+// boundingBox()/scrollWidth/clientWidth reads at the ?demo fixture's real >=3 rows). This test
+// exists to fail FAST, on every `npm test`, before a PR ever reaches the slower `npm run shots`
+// run — it proves a structural invariant that's necessary for the real geometry to hold, not the
+// geometry itself. (PM 2026-08-18, in response to gate① round-3 finding [3].)
 
 /**
  * #925 gate① round-3 engine-agent finding [3] (ac5-layout-not-measured): happy-dom never runs a
@@ -416,13 +421,16 @@ test("#925 AC3: a DECISION row (--rust tone) still names its category in the chi
  * happy-dom 20.11.2): `getBoundingClientRect`/`offsetLeft`/`scrollWidth`/`clientWidth` all read
  * back hard-coded zero on every element, real DOM or not. There is no box-metric read this test
  * runner can perform — adding one would mean a second, browser-backed test harness (Playwright/a
- * real headless browser) for one file, which is new machinery this fix intentionally avoids.
+ * real headless browser) for one file, which is new machinery a vitest-only fix would want to
+ * avoid; `dashboard/shots/shots.spec.ts` already IS that browser-backed harness for this repo, so
+ * the real measurement lives there instead (its own "#925 AC5 (REAL measurement...)" test).
  *
  * What happy-dom DOES resolve faithfully is the CASCADE: which declaration wins, verbatim, on
- * every element. That is provably sufficient here, not a fallback: CSS Grid's column-sizing
- * algorithm is DETERMINISTIC — a track's start/end offset depends only on the tracks strictly
- * before it, never on that track's own or a later track's content. `.attention-row`'s template is
- * `4px | <chip, fixed> | <entity, 1fr> | <reason, minmax(auto,40%)> | <age, 96px fixed>`:
+ * every element. That is provably sufficient for a FAST guard, not a fallback for the real proof:
+ * CSS Grid's column-sizing algorithm is DETERMINISTIC — a track's start/end offset depends only on
+ * the tracks strictly before it, never on that track's own or a later track's content.
+ * `.attention-row`'s template is `4px | <chip, fixed> | <entity, 1fr> | <reason, minmax(auto,40%)>
+ * | <age, 96px fixed>`:
  *   - the entity cell's LEFT edge depends only on the severity (4px) and chip tracks, both fixed,
  *     literal, and — proven below — IDENTICAL across every row's own template string. Two rows
  *     sharing that identical prefix cannot start their entity cell at different x-offsets in any
@@ -433,11 +441,10 @@ test("#925 AC3: a DECISION row (--rust tone) still names its category in the chi
  *     right edge, identical for every row at the same container width.
  *   - the chip's own width is the SAME shared, non-`auto`, non-computed CSS custom property on
  *     every row (never sized off that row's own category word).
- * This is a stronger claim than a single pixel snapshot would be: it holds for every possible row
- * width, not just the one this test happens to mount at, and geometric equality across rows never
- * demanded anything about a single row's absolute pixel window in the first place.
+ * A regression that broke any of these would ALSO fail the real Playwright measurement, but this
+ * catches it on every `npm test` run, seconds instead of the shots suite's tens of seconds.
  */
-test("#925 AC5: geometry oracle — chip width, entity-cell left edge, and age-box right edge are all fixed-track invariants, plus the longest category word structurally fits its chip", async () => {
+test("#925 AC5 fast structural guard (see shots.spec.ts for the real geometry measurement): chip width, entity-cell left edge, and age-box right edge are all fixed-track invariants, plus the longest category word structurally fits its chip", async () => {
   // Three categories spanning ATTENTION_CATEGORY's own extremes: "REVIEW SILENCE" (the longest
   // word) and "CI" (the shortest) — read from the real fixture kinds, never a hand-picked pair
   // that happens to match today's longest/shortest.

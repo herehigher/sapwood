@@ -741,18 +741,19 @@
   font-family: var(--font-data);
 }
 
-/* #925 gate① engine-agent finding [1] (ac4-age-box): the emphasis box's own 100px min-height
- * otherwise BECOMES the whole row's rendered height (CSS Grid rows shrink-to-fit their tallest
- * cell) — a 1:1 ratio, not the required "box height at most two-thirds of its row". Applied to
- * the `<li>` only for the row NeedsAttention.tsx marks `emphasize` (never every row — that would
- * needlessly inflate the common case). 160px keeps the ratio comfortably under two-thirds
- * (100/160 = 0.625). */
+/* #925 gate① engine-agent finding [1] (ac4-age-box): the emphasis box's own min-height otherwise
+ * BECOMES the whole row's rendered height (CSS Grid rows shrink-to-fit their tallest cell) — a 1:1
+ * ratio, not the required "box height at most two-thirds of its row". Applied to the `<li>` only
+ * for the row NeedsAttention.tsx marks `emphasize` (never every row — that would needlessly
+ * inflate the common case).
+ *
+ * §889 AC1 (page-scroll budget, PM 2026-08-18): the mockup's ~100px row is a normalised TARGET,
+ * not AC1's own floor (`.attention-row`'s own ≥56px) — leg 2's demo fixture growing to ≥3 rows
+ * (AC4's own rebaseline) pushed `#cost`'s top edge past §889's 1800px one-scroll budget with the
+ * ORIGINAL 160px emphasis row. 90px keeps the box/row ratio (`.attention-age-emphasis`, below)
+ * comfortably under two-thirds while landing inside the target's own normalised range. */
 .attention-row-emphasis {
-  min-height: 160px;
-}
-
-.attention-ts {
-  margin-left: auto;
+  min-height: 90px;
 }
 
 /* #925: 4px, full row height, aria-hidden — colour ALWAYS mirrors the chip's own border colour
@@ -851,13 +852,40 @@
 
 /* #881/#925: the mockup's bordered age readout, distinguishing it from the plain muted timestamps
  * used elsewhere in the feed. gate① engine-agent finding [1]: `white-space: nowrap` so the age
- * text never wraps onto a second line inside its own box, at either size. */
+ * text never wraps onto a second line inside its own box, at either size.
+ *
+ * §889 AC1 (PM 2026-08-18): min-height trimmed 40px -> 28px alongside `.attention-age-emphasis`'s
+ * own trim below — both stay anchored to AC2's RATIO requirement (emphasis ≥ 2× this box), never
+ * to an absolute floor of their own; §889's one-scroll budget is what set the target, not a
+ * cosmetic preference. `line-height: 1` (not the inherited `--leading-body` 1.5, `app.css`'s
+ * `body` rule) — this is a single-line numeral readout, not paragraph copy, and at 1.5 the
+ * emphasis box's real rendered height (measured directly at 1440px) overshot its own min-height by
+ * ~13px, breaking AC4's box/row ratio in the actual browser even though the CSS-declared min-
+ * height values (the vitest STYLE oracle's own reach — happy-dom has no layout, `NeedsAttention.
+ * test.tsx`'s AC5 comment) still checked out. 28px + `line-height: 1` comfortably clears this box's
+ * own content (16px `--text-1` line + padding + hairline border, no inherited leading to inflate
+ * it further).
+ *
+ * §889 AC1 follow-up (found by `shots.spec.ts`'s own real AC5 measurement, not the vitest guard):
+ * this box used to also carry an `.attention-ts` class (`margin-left: auto`) — a leftover from
+ * before the row was a fixed-track CSS Grid. An `auto` margin on an auto-width box takes over its
+ * own sizing (shrink-to-fit) INSTEAD of the grid's default `justify-items: stretch`, and when
+ * content is narrower than the 96px age track that shrink-fit box still ends up flush against the
+ * track's right edge — indistinguishable from stretch by eye. But once the emphasis box's bold
+ * numeral (42px) made its content WIDER than the 96px track, the same auto margin resolved to 0
+ * (no free space to absorb) and the box overflowed the track by its own excess width entirely
+ * rightward (measured: 75px past the row's right edge at 1440px) — the exact defect the real
+ * Playwright AC5 spec exists to catch and the vitest structural guard, reading only CSS-declared
+ * values, structurally cannot. Removed; the grid's own default stretch now sizes this box (and the
+ * emphasis variant) to the full 96px track on every row, which is what AC5's "same right edge"
+ * actually requires. */
 .attention-age {
   border: var(--hairline);
   border-radius: var(--radius-card);
   padding: 2px var(--space-2);
-  min-height: 40px;
+  min-height: 28px;
   font-size: var(--text-1);
+  line-height: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -865,22 +893,30 @@
 }
 
 /* #925 AC2 / gate① engine-agent finding [1]: the row carrying the fold's greatest age — ≥2×
- * `.attention-age`'s own 40px/16px base (100px/48px, both comfortably over the 2× floor, matching
- * the mockup's bold ~48px numeral), a heavier border, and the primary-text ("cream") role instead
- * of the muted `--bark-text`/`--hairline` this element's `.muted` class would otherwise still
- * carry — the mockup's oldest-age box reads in the SAME bright ink as the row's own text, not a
- * dimmed one. `--attention-emphasis-text` (tokens.css), not `--sapwood` directly — the SAME
- * happy-dom light-dark()-never-resolves gap `--attention-tone-rust`/`-review`/
- * `--attention-reason-text` above already document, applied here so a STYLE test can assert the
- * exact winning colour instead of a `.muted`-inherited one. Literal min-height/font-size values,
- * not `calc(40px * 2.5)`/`calc(var(--text-1) * 3)` — happy-dom's `getComputedStyle` never resolves
- * a `calc()`, it echoes the unresolved expression text back (confirmed directly; same family as
- * this file's other documented happy-dom gaps), which would make the AC2 STYLE test's own
- * height/font-size floor unreadable. Keep both pairs (here and `.attention-age`'s own base rule)
- * in sync by hand if either changes. */
+ * `.attention-age`'s own base (ratio-anchored, not absolute — see that rule's own comment), a
+ * heavier border, and the primary-text ("cream") role instead of the muted `--bark-text`/
+ * `--hairline` this element's `.muted` class would otherwise still carry — the mockup's oldest-age
+ * box reads in the SAME bright ink as the row's own text, not a dimmed one.
+ *
+ * §889 AC1 (PM 2026-08-18): min-height 100px -> 58px, font-size 48px -> 42px — `.attention-row-
+ * emphasis`'s own 90px target (that rule's comment) needs this box at <= 60px (2/3 · 90) to clear
+ * AC4's "box ≤ 2/3 of row"; 58px leaves 2px of margin, MEASURED at 1440px (Playwright, not
+ * happy-dom's declared-value echo) with `.attention-age`'s own `line-height: 1` override in place
+ * — inheriting `app.css`'s body-wide `--leading-body` (1.5) here would have put this box's real
+ * content height at ~71px, past the 60px ceiling, even though the CSS-declared 58px alone reads
+ * fine. 42px stays comfortably over AC4's own ≥40px bold-numeral floor and over AC2's
+ * ≥2×-the-base-font-size ratio (2 × 16px = 32px). `--attention-
+ * emphasis-text` (tokens.css), not `--sapwood` directly — the SAME happy-dom light-dark()-never-
+ * resolves gap `--attention-tone-rust`/`-review`/`--attention-reason-text` above already document,
+ * applied here so a STYLE test can assert the exact winning colour instead of a `.muted`-inherited
+ * one. Literal min-height/font-size values, not `calc(28px * 2)`/`calc(var(--text-1) * 2.625)` —
+ * happy-dom's `getComputedStyle` never resolves a `calc()`, it echoes the unresolved expression
+ * text back (confirmed directly; same family as this file's other documented happy-dom gaps),
+ * which would make the AC2 STYLE test's own height/font-size floor unreadable. Keep both pairs
+ * (here and `.attention-age`'s own base rule) in sync by hand if either changes. */
 .attention-age-emphasis {
-  min-height: 100px;
-  font-size: 48px;
+  min-height: 58px;
+  font-size: 42px;
   font-weight: 700;
   color: var(--attention-emphasis-text);
   border-width: 2px;

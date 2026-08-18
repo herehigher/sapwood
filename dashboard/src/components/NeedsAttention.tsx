@@ -95,7 +95,12 @@ function AttentionRow({
   // would have its own colour override silently lose the cascade to `.muted`'s `--bark-text`. The
   // emphasis box drops `.muted` entirely instead: it is no longer secondary/de-emphasised text —
   // that is the whole point of the emphasis treatment.
-  const ageClassName = emphasize ? "data attention-ts attention-age attention-age-emphasis" : "muted data attention-ts attention-age";
+  // §889 AC1 follow-up (found by dashboard/shots/shots.spec.ts's real AC5 measurement): this used
+  // to also carry `.attention-ts` (`margin-left: auto`) — a pre-grid leftover whose shrink-to-fit
+  // sizing overflowed the age track's fixed 96px whenever a wide emphasis numeral made the box's
+  // own content wider than the track (panels.css's `.attention-age` comment has the full account).
+  // Dropped: the grid's own default stretch now sizes this box to the full track on every row.
+  const ageClassName = emphasize ? "data attention-age attention-age-emphasis" : "muted data attention-age";
   const rowModifier = emphasize ? " attention-row-emphasis" : "";
   return (
     // #925 gate① engine-agent finding [3] (inspect-control-breaks-grid): `.attention-row` is a
