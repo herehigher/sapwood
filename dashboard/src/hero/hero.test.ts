@@ -31,7 +31,6 @@ import {
   GATES,
   HeroStage,
   LANES,
-  laneY,
   NODE_CAPTION_OFFSET,
   NODE_LABEL_OFFSET,
   PHASE_X,
@@ -94,17 +93,15 @@ const droplet = (state: HeroState, issue: number) => state.droplets.find((d) => 
 const markup = (state: HeroState, extra: Partial<Parameters<typeof HeroStage>[0]> = {}) =>
   renderToStaticMarkup(createElement(HeroStage, { state, lanesMax: 3, fixCap: 2, ...extra }));
 
-/** Rescue #950 (#922 AC2, second pass): the bare number a droplet's belly is sized to fit —
- *  mirrors production's `dropletNumber` (stage.tsx): the PR once one exists, else the issue
- *  number. Never a prefix — the kind mark is a separate, secondary rendered element now. */
+/** #922 AC2: the bare number a droplet's belly is sized to fit — mirrors production's
+ *  `dropletNumber` (stage.tsx): the PR once one exists, else the issue number. Never a prefix —
+ *  the kind mark is a separate, secondary rendered element. */
 const dropletNumberText = (d: Droplet) => String(d.pr === null ? d.issue : d.pr);
 
-/** Rescue #950: a droplet's own rendered KIND mark + NUMBER, read straight off the `<g>` element
- *  carrying `data-issue={issue}` — the two are separate `<text>` elements now (the shrink-to-fit
- *  removal split what used to be one joined "⤳ 97"-style string). Returns `null` when no such
- *  droplet is drawn at all — the caller's own "must not draw" assertions use that directly, rather
- *  than a text-content regex that would trivially "pass" once the joined string stopped existing
- *  for ANY droplet. */
+/** #922 AC2: a droplet's own rendered KIND mark + NUMBER, read straight off the `<g>` element
+ *  carrying `data-issue={issue}` — the two are separate `<text>` elements. Returns `null` when no
+ *  such droplet is drawn at all — the caller's own "must not draw" assertions use that directly,
+ *  rather than a text-content regex that could trivially match nothing yet still "pass". */
 function dropletKindAndNumber(html: string, issue: number): { kind: string; number: string } | null {
   const g = html.match(new RegExp(`<g class="hero-droplet" data-issue="${issue}"[^>]*>([\\s\\S]*?)<\\/g>`));
   if (!g) return null;
@@ -170,7 +167,7 @@ test("§6 lane `running → driving`: droplet parks at the checkpoint pair", () 
 test("the PR tag comes from the live lane overlay, since `reclaim-done` carries no PR number", () => {
   const { state } = run([ev("dispatched", { worker: "w1", issue: 86 }), ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING" })]);
   assert.equal(droplet(state, 86)?.pr, null);
-  // Rescue #950: the kind mark (⊙) and the number (86) are two separate rendered elements now —
+  // #922 AC2: the kind mark (⊙) and the number (86) are two separate rendered elements —
   // `dropletKindAndNumber` reads both off the droplet's own `<g data-issue="86">`.
   assert.deepEqual(dropletKindAndNumber(markup(state), 86), { kind: "⊙", number: "86" });
 
@@ -1346,7 +1343,7 @@ test("#922 AC6 (mutation-kill): no hand-drawn <path> for a utility glyph remains
 test("#879/#922 AC2: issue tokens render as a droplet (teardrop path), never a bare circle", () => {
   const { state } = run([ev("dispatched", { worker: "w1", issue: 1 })]);
   const html = markup(state);
-  // Rescue #950 (#922 AC2): the belly radius (and so the path's own tip coordinate) is sized to
+  // #922 AC2: the belly radius (and so the path's own tip coordinate) is sized to
   // the droplet's own bare NUMBER ("1", an unstarted PR-less droplet's issue number — the kind
   // mark never counts toward the fit) — read from the SAME production function rather than a
   // hand-copied literal (VALUE doctrine).
@@ -2783,8 +2780,8 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
   ];
   for (const d of escalated) {
     const { x, y } = dropletPoint(state, d);
-    // Rescue #950 (#922 AC2): the number now renders INSIDE the shape, whose own belly radius is
-    // sized to fit it (`dropletRadius`) — never the old fixed r=9 with a label floating above at
+    // #922 AC2: the number renders INSIDE the shape, whose own belly radius is
+    // sized to fit it (`dropletRadius`) — never a fixed r=9 with a label floating above at
     // y-14. The shape fits the bare NUMBER only, never the kind mark (production's own
     // `dropletNumber`/`dropletKind`).
     const number = dropletNumberText(d);
@@ -3015,8 +3012,8 @@ test("#920 gate② finding [0]: at the demo's own 1-ring count, the stem attache
 // the NUMBER away to dodge it (first landing on top of it, then reading as "well outside" a low
 // ring count). This round moves the DROPLET instead (`TRUNK_DROPLET_OFFSET`, stage.tsx) so the
 // number can stay genuinely centered. Stressed at a 3-digit ring total and a 5-digit PR number —
-// Rescue #950's own named stress fixture (issue #922 AC2's "PR 12345"), the widest number this
-// file's own `DROPLET_MAX_R` still fits without clipping the number's text box.
+// #922 AC2's own "PR 12345" — the widest number this file's own `DROPLET_MAX_R` still fits
+// without clipping the number's text box.
 // `TRUNK_DROPLET_OFFSET`'s own doc argues the vertical component alone already clears the label
 // regardless of either string's width; this proves that against the ACTUAL rendered boxes rather
 // than trusting the doc's arithmetic, the same discipline #728's NEEDS_HUMAN_COL_STEP/ROW_STEP
@@ -3044,9 +3041,9 @@ test("#886 gate② run 2e566ac9 finding [1]: the centered ring count never colli
   const dropletRe = new RegExp(`<g class="hero-droplet"[^>]*transform="translate\\(${dropX} ${dropY}\\)">([\\s\\S]*?)</g>`);
   const dropletInner = html.match(dropletRe)?.[1];
   assert.ok(dropletInner, "the trunk droplet must render at its own offset transform");
-  // Rescue #950 (#922 AC2): the number now renders INSIDE the shape (`.hero-droplet-num`), at a y
+  // #922 AC2: the number now renders INSIDE the shape (`.hero-droplet-num`), at a y
   // derived from the shape's own (number-sized) belly radius — never a fixed y="-14" above it. The
-  // kind mark ("✓", trunk's own mark — Rescue #950) is a separate, smaller sibling element and
+  // kind mark ("✓", trunk's own mark) is a separate, smaller sibling element and
   // never counts toward the shape's fit.
   const kindMatch = dropletInner?.match(/<text class="hero-droplet-kind"[^>]*>([^<]*)<\/text>/);
   assert.equal(kindMatch?.[1], "✓", "the trunk droplet's own kind mark must still read '✓'");
@@ -3709,12 +3706,11 @@ test("#745 AC2: CHECKPOINT_DRAW_CAP simultaneous checkpoint droplets — CHECKPO
 });
 
 /** Every rendered `.hero-droplet` group's own `data-issue`, translate offset, path `d`, and
- *  KIND-mark + number-text `y`/font-size/content — read straight off the markup, never recomputed
- *  from `dropletRadius`/`dropletPath` (gate② finding [0]'s own "read what actually rendered"
- *  ask). Rescue #950: the kind mark and the number are two sibling `<text>` elements now (the
- *  `[\s\S]*?` between `</path>` and the number's own `<text>` skips over the kind mark without
- *  caring about its exact content — `dropletKindAndNumber` above reads that separately, when a
- *  test needs it). */
+ *  number-text `y`/font-size/content — read straight off the markup, never recomputed from
+ *  `dropletRadius`/`dropletPath` (gate② finding [0]'s own "read what actually rendered" ask).
+ *  The kind mark and the number are two sibling `<text>` elements — the `[\s\S]*?` between
+ *  `</path>` and the number's own `<text>` skips over the kind mark without caring about its
+ *  exact content; `dropletKindAndNumber` above reads that separately, when a test needs it. */
 function renderedDroplets(
   html: string,
 ): { issue: number; x: number; y: number; path: string; textY: number; fontPx: number; text: string }[] {
@@ -3732,11 +3728,10 @@ function renderedDroplets(
 }
 
 /**
- * Rescue #950 (#922 AC2, second pass — PO ruling): the shrink-to-fit path is GONE. Every
- * droplet's number now renders at the FIXED `DROPLET_NUM_FONT_PX`, never a digit-count-derived
- * smaller size — this is the mutation-kill guard: reintroducing any shrink (making `d.fontPx`
- * depend on the number's length again) reddens the first assertion below for every droplet this
- * helper checks, not just a hand-picked one.
+ * #922 AC2: every droplet's number renders at the FIXED `DROPLET_NUM_FONT_PX`, never a
+ * digit-count-derived smaller size — this is the mutation-kill guard: reintroducing any shrink
+ * (making `d.fontPx` depend on the number's length again) reddens the first assertion below for
+ * every droplet this helper checks, not just a hand-picked one.
  *
  * gate② finding [0] (ac2-geometry-oracle-assumes-fit): height/containment read from the ACTUAL
  * rendered `d`/`<text>` (via `dropletPathBBox`/`renderedDroplets`), never recomputed through
@@ -3777,18 +3772,18 @@ function assertDropletNumeralsHold(html: string, label: string) {
   }
 }
 
-// Rescue #950: neighbour-collision at the new (raised) radii is proven by the pre-existing "4
-// lanes, 6 checkpoint droplets" COLLISION test below (`renderedDroplets`'s own updated regex feeds
-// it the same real path boxes) — not duplicated here.
-test("#922 AC2 rescue: the droplet numeral never shrinks — >= 11px at 1440, fully contained, across the stress/idle/demo fixtures and hand-picked 4-/5-digit numbers", () => {
+// Neighbour-collision at the raised radii is proven by the "4 lanes, 6 checkpoint droplets"
+// COLLISION test below (`renderedDroplets`'s own regex feeds it the same real path boxes) and by
+// the dedicated max-radius COLLISION test further down — not duplicated here.
+test("#922 AC2: the droplet numeral never shrinks — >= 11px at 1440, fully contained, across the stress/idle/demo fixtures and hand-picked 4-/5-digit numbers", () => {
   // "demo": a plain steady-state single dispatch, realistic 1-3 digit PR.
   const demoHtml = markup(
     run([ev("dispatched", { worker: "w1", issue: 1 }), ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 42 })]).state,
   );
   assertDropletNumeralsHold(demoHtml, "demo fixture");
 
-  // "idle": a single parked-PR droplet on the escalation branch, at the PO witness's own reported
-  // issue/PR (#922 AC2's own report) — the exact shape that measured 5-6px before this rescue.
+  // "idle": a single parked-PR droplet on the escalation branch, at a realistic 4-digit issue/PR
+  // (#922 AC2's own report named a 4-digit parked-PR droplet measuring under the 11px floor).
   const idleHtml = markup(
     run([
       ev("dispatched", { worker: "w1", issue: 9202 }),
@@ -3799,10 +3794,10 @@ test("#922 AC2 rescue: the droplet numeral never shrinks — >= 11px at 1440, fu
   assert.deepEqual(dropletKindAndNumber(idleHtml, 9202), { kind: "PR", number: "9202" }, "the idle fixture must draw 'PR 9202'");
   assertDropletNumeralsHold(idleHtml, "idle fixture");
 
-  // Trunk witness reproduction: the PO witness's other reported value, "✓ ⤳ 9201".
+  // A merged (trunk) droplet at a realistic 4-digit PR — the AC's other named case, "✓ 9201".
   const trunkHtml = markup(run([ev("merged", { worker: "w1", issue: 1, pr: 9201 })]).state);
   assert.deepEqual(dropletKindAndNumber(trunkHtml, 1), { kind: "✓", number: "9201" }, "the merged fixture must draw '✓ 9201'");
-  assertDropletNumeralsHold(trunkHtml, "trunk witness fixture");
+  assertDropletNumeralsHold(trunkHtml, "trunk fixture");
 
   // "stress": the AC's own named fixture — 4 lanes, 6 checkpoint droplets.
   const stressEvents: DomainEvent[] = [];
@@ -3815,9 +3810,8 @@ test("#922 AC2 rescue: the droplet numeral never shrinks — >= 11px at 1440, fu
   const stressHtml = markup(run(stressEvents, 4).state, { lanesMax: 4 });
   assertDropletNumeralsHold(stressHtml, "stress fixture");
 
-  // Hand-picked 4-/5-digit numbers, verbatim from the rescue's own instructions: a bare 4-digit
-  // issue number and an in-flight 5-digit PR — both realistic within weeks for sapwood's own repo
-  // (already in the 900s at the time of this rescue).
+  // Hand-picked 4-/5-digit numbers: a bare 4-digit issue number and an in-flight 5-digit PR —
+  // both realistic within weeks for sapwood's own repo (already in the 900s).
   const issue9202Html = markup(run([ev("dispatched", { worker: "w1", issue: 9202 })]).state);
   assert.deepEqual(dropletKindAndNumber(issue9202Html, 9202), { kind: "⊙", number: "9202" });
   assertDropletNumeralsHold(issue9202Html, "hand-picked issue #9202");
@@ -3829,6 +3823,39 @@ test("#922 AC2 rescue: the droplet numeral never shrinks — >= 11px at 1440, fu
   assertDropletNumeralsHold(pr12345Html, "hand-picked PR #12345");
 });
 
+/** The checkpoint overflow badge's own rendered box — the `<g class="hero-checkpoint-overflow">`
+ *  wrapper's real transform PLUS its child `<text>`'s own real x/y and content, summed for the
+ *  absolute position; never a hand-recomputed offset. `.hero-small`'s 10px (hero.css) is the one
+ *  value still cited from the stylesheet rather than the markup — a `font-size` set only by a CSS
+ *  class (never inlined on this element) isn't readable from static markup alone. */
+function renderedCheckpointOverflowBadge(html: string): { label: string; box: Box } | null {
+  const m = html.match(
+    /<g class="hero-checkpoint-overflow" data-count="\d+" transform="translate\((-?[\d.]+) (-?[\d.]+)\)"><text class="hero-num hero-small hero-badge" x="0" y="(-?[\d.]+)" text-anchor="middle">([^<]*)<\/text><\/g>/,
+  );
+  if (!m) return null;
+  const [, gxRaw, gyRaw, textYRaw, text] = m;
+  return {
+    label: `checkpoint overflow badge ("${text}")`,
+    box: textBox(text as string, Number(gxRaw), Number(gyRaw) + Number(textYRaw), 10),
+  };
+}
+
+/** A lane's own rendered node-label box — the `<text class="hero-node-label">` inside that lane's
+ *  own `<g data-lane-index>`, real x/y read straight off the markup; never a hand-recomputed
+ *  `laneY(...) - 10` offset. `GATE_NODE_LABEL_FONT_PX` (12px, `.hero-node-label`'s own CSS rule)
+ *  is the one value still cited from the stylesheet, same reasoning as the badge helper above. */
+function renderedLaneLabel(html: string, channel: number): { label: string; box: Box } | null {
+  const laneBlock = html.match(new RegExp(`<g class="hero-lane" data-lane-index="${channel}"[^>]*>([\\s\\S]*?)<\\/g>`));
+  if (!laneBlock) return null;
+  const m = (laneBlock[1] as string).match(/<text class="hero-node-label" x="(-?[\d.]+)" y="(-?[\d.]+)">([^<]*)<\/text>/);
+  if (!m) return null;
+  const [, xRaw, yRaw, text] = m;
+  return {
+    label: `lane ${channel} label ("${text}")`,
+    box: captionSafeTextBox(text as string, Number(xRaw), Number(yRaw), GATE_NODE_LABEL_FONT_PX, "start"),
+  };
+}
+
 // #922 AC2's own named stress fixture, verbatim: "4 lanes, 6 checkpoint droplets" — 4 lane
 // workers cycle through 6 dispatches total (checkpoint droplets are tracked independently by
 // issue, so a lane cycling to a new dispatch doesn't remove an earlier issue's own still-parked
@@ -3839,7 +3866,8 @@ test("#922 AC2 rescue: the droplet numeral never shrinks — >= 11px at 1440, fu
 // The same finding cut CHECKPOINT_ROWS_MAX 3 -> 2 (CHECKPOINT_DRAW_CAP's own doc): 6 checkpoint
 // droplets still exist/fold at once (the AC's own named fixture), but only CHECKPOINT_DRAW_CAP
 // of them actually DRAW — the rest fold into the overflow badge, whose own box is checked here
-// too, alongside every drawn droplet and lane label.
+// too, alongside every drawn droplet and lane label — both read from the ACTUAL rendered markup
+// (`renderedCheckpointOverflowBadge`/`renderedLaneLabel` above), never a hand-recomputed offset.
 test("#922 AC2: no droplet number overlaps a neighbouring droplet or a lane label — the AC's own '4 lanes, 6 checkpoint droplets' stress fixture", () => {
   const events: DomainEvent[] = [];
   const workers = ["w1", "w2", "w3", "w4"];
@@ -3872,18 +3900,83 @@ test("#922 AC2: no droplet number overlaps a neighbouring droplet or a lane labe
       box: { left: d.x + pathBox.left, right: d.x + pathBox.right, top: d.y + pathBox.top, bottom: d.y + pathBox.bottom },
     });
   }
-  const overflowPoint = checkpointOverflowPoint();
-  boxes.push({
-    label: "checkpoint overflow badge",
-    box: textBox(`+${6 - CHECKPOINT_OVERFLOW_REAL_CAP} more`, overflowPoint.x, overflowPoint.y - 14, 10),
-  });
+  const overflowBadge = renderedCheckpointOverflowBadge(html);
+  assert.ok(overflowBadge, "the overflow badge must render");
+  boxes.push(overflowBadge as { label: string; box: Box });
   for (const lane of state.lanes) {
-    boxes.push({
-      label: `lane w${lane.channel + 1} label`,
-      box: captionSafeTextBox(`w${lane.channel + 1}`, LANES.x, laneY(lane.channel) - 10, GATE_NODE_LABEL_FONT_PX, "start"),
-    });
+    const laneLabel = renderedLaneLabel(html, lane.channel);
+    assert.ok(laneLabel, `lane ${lane.channel}'s own label must render`);
+    boxes.push(laneLabel as { label: string; box: Box });
   }
   assertNoOverlap(boxes);
+});
+
+// COLLISION at max radius: the fixture above only ever carries 3-digit PR numbers (101..106),
+// so the geometry constants sized against `DROPLET_MAX_R` (`NEEDS_HUMAN_COL_STEP`/`ROW_STEP`,
+// `CHECKPOINT_COL_STEP`/`ROW_STEP` — stage.tsx's own doc on each) are never actually exercised at
+// the radius they were sized for. This fixture forces every droplet's own PR to 5 digits — the
+// widest number `DROPLET_MAX_R` (22) still fits without clipping (`dropletRadius`'s own doc:
+// halfWidth("90001".length=5) ≈ 21.05) — across BOTH clusters the ceiling's own margin math
+// covers: checkpoint (the AC's own named fixture, same 4-lanes/6-droplets shape) and needs-human
+// (its own draw cap, 6).
+test("#922 AC2 COLLISION at max radius: adjacent checkpoint and needs-human droplets carrying realistic 5-digit numbers do not overlap", () => {
+  const events: DomainEvent[] = [];
+  const workers = ["w1", "w2", "w3", "w4"];
+  for (let i = 1; i <= 6; i++) {
+    const worker = workers[(i - 1) % 4] as string;
+    events.push(ev("dispatched", { worker, issue: i }));
+    events.push(ev("reclaim-done", { worker, issue: i, next: "DRIVING", pr: 90000 + i }));
+  }
+  for (let i = 201; i <= 206; i++) {
+    events.push(ev("dispatched", { worker: `h${i}`, issue: i }));
+    events.push(ev("reclaim-done", { worker: `h${i}`, issue: i, next: "DRIVING", pr: 90000 + i }));
+    events.push(ev("drive-needs-human", { worker: `h${i}`, issue: i, pr: 90000 + i }));
+  }
+  const { state } = run(events, 4);
+  const checkpointed = state.droplets.filter((d) => d.at === "checkpoint");
+  const escalated = state.droplets.filter((d) => d.at === "needs-human");
+  assert.equal(checkpointed.length, 6, "the fixture must actually fold 6 simultaneous checkpoint droplets");
+  assert.equal(escalated.length, 6, "the fixture must actually fold 6 simultaneous needs-human droplets, filling the draw cap");
+
+  const html = markup(state, { lanesMax: 4 });
+  const droplets = renderedDroplets(html);
+  assert.equal(
+    droplets.length,
+    CHECKPOINT_OVERFLOW_REAL_CAP + 6,
+    "the overflow-real-cap's worth of checkpoint droplets plus every needs-human droplet must render",
+  );
+  // Sanity on the fixture itself: every rendered droplet's own half-width must actually sit near
+  // the ceiling (`DROPLET_MAX_R`, 22) — proving this fixture exercises the radius the geometry
+  // constants above were sized for, not a smaller realistic one that would silently understate
+  // the collision risk.
+  for (const d of droplets) {
+    const pathBox = dropletPathBBox(d.path);
+    const halfWidthPx = (pathBox.right - pathBox.left) / 2;
+    assert.ok(
+      halfWidthPx >= 20,
+      `droplet #${d.issue}'s rendered half-width ${halfWidthPx} must sit near DROPLET_MAX_R (22) — this fixture's own 5-digit numbers`,
+    );
+  }
+
+  const boxes: { label: string; box: Box }[] = [];
+  for (const d of droplets) {
+    const pathBox = dropletPathBBox(d.path);
+    boxes.push({
+      label: `droplet #${d.issue} rendered path`,
+      box: { left: d.x + pathBox.left, right: d.x + pathBox.right, top: d.y + pathBox.top, bottom: d.y + pathBox.bottom },
+    });
+  }
+  const overflowBadge = renderedCheckpointOverflowBadge(html);
+  if (overflowBadge) boxes.push(overflowBadge);
+  for (const lane of state.lanes) {
+    const laneLabel = renderedLaneLabel(html, lane.channel);
+    if (laneLabel) boxes.push(laneLabel);
+  }
+  assertNoOverlap(boxes);
+  for (const { label, box } of boxes) {
+    assert.ok(box.left >= 0 && box.right <= STAGE.w, `${label} left=${box.left} right=${box.right} lies outside [0, ${STAGE.w}]`);
+    assert.ok(box.top >= 0 && box.bottom <= STAGE.h, `${label} top=${box.top} bottom=${box.bottom} lies outside [0, ${STAGE.h}]`);
+  }
 });
 
 /** gate② finding [1] (ac2-escalation-overlap): every rendered NODE circle on the stage — planning/
@@ -4118,8 +4211,8 @@ test("#897 AC2: no needs-human droplet, at any rank up to the cluster's draw cap
 
   for (const d of escalated) {
     const { x, y } = dropletPoint(state, d);
-    // Rescue #950 (#922 AC2): a needs-human droplet carrying a PR reads "PR N" — the "PR" mark
-    // is now a separate, smaller sibling element (production's own `dropletKind`); the shape
+    // #922 AC2: a needs-human droplet carrying a PR reads "PR N" — the "PR" mark
+    // is a separate, smaller sibling element (production's own `dropletKind`); the shape
     // still fits the bare NUMBER only.
     const number = dropletNumberText(d);
     const r = dropletRadius(number);
@@ -4244,8 +4337,8 @@ test("#808 AC1: every droplet chip label and every hero-node-caption element sta
     /<g class="hero-droplet" data-issue="(\d+)" data-at="([a-z-]+)"[^>]*transform="translate\((-?[\d.]+) (-?[\d.]+)\)">([\s\S]*?)<\/g>/g;
   const dropletBoxes: { label: string; box: Box }[] = [];
   for (const [, issue, at, xRaw, yRaw, inner] of html.matchAll(dropletRe)) {
-    // Rescue #950 (#922 AC2): the number now renders INSIDE the shape — a dynamic y and a FIXED
-    // inline font-size (`DROPLET_NUM_FONT_PX`, never shrunk), never the old fixed y="-14" above
+    // #922 AC2: the number now renders INSIDE the shape — a dynamic y and a FIXED
+    // inline font-size (`DROPLET_NUM_FONT_PX`, never shrunk), never a fixed y="-14" above
     // the shape at a fixed 10px.
     const labelMatch = (inner ?? "").match(
       /<text class="hero-num hero-droplet-num" x="0" y="(-?[\d.]+)" text-anchor="middle" style="font-size:([\d.]+)px">([^<]*)<\/text>/,
@@ -4440,8 +4533,8 @@ test("#744: on a fixing track, the lane status phrase and the droplet's PR chip 
   assert.match(statusText, /FIXING · round 2 of 4 · review findings/);
 
   const p = dropletPoint(state, d!);
-  // Rescue #950: the kind mark and the number are two sibling elements now — check the droplet's
-  // own number directly rather than the old joined "⤳ 739" string.
+  // #922 AC2: the kind mark and the number are two sibling elements — check the droplet's
+  // own number directly.
   assert.deepEqual(dropletKindAndNumber(html, 86), { kind: "⤳", number: "739" });
 
   // text-anchor="end" means the captured x is the RIGHT edge, not the center textBox expects.
@@ -4715,7 +4808,7 @@ test("#891 gate① engine-agent finding [0] (ac1-collapsed-chip-overlap): the co
   // assert against what production drew, not a recomputation that can silently diverge from it.
   for (const d of drawn) {
     const { x, y } = dropletTransform(html, d.issue);
-    // Rescue #950 (#922 AC2): a needs-human droplet carrying a PR reads "PR N" — the shape fits
+    // #922 AC2: a needs-human droplet carrying a PR reads "PR N" — the shape fits
     // the bare NUMBER only (production's own `dropletNumber`).
     const number = dropletNumberText(d);
     const r = dropletRadius(number);
@@ -4871,8 +4964,8 @@ test("#891 PO adjudication: historical classification is ONE round-identity pred
   const html = markup(state, { lanesMax: 20, openAttention: Object.values(open) });
 
   // None of the five round-1 droplets draw, in ANY zone — proving the SAME predicate, not a
-  // per-zone list, is what excludes them. Rescue #950: `dropletKindAndNumber` reads the droplet's
-  // own `<g data-issue>` directly, since the kind mark and number are two sibling elements now.
+  // per-zone list, is what excludes them. `dropletKindAndNumber` reads the droplet's
+  // own `<g data-issue>` directly, since the kind mark and number are two sibling elements.
   assert.equal(dropletKindAndNumber(html, 1), null, "historical needs-human droplet (issue 1) must not draw");
   assert.equal(dropletKindAndNumber(html, 2), null, "historical backlog droplet (issue 2) must not draw");
   assert.equal(dropletKindAndNumber(html, 3), null, "historical lane droplet (issue 3) must not draw");

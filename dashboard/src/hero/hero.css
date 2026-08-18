@@ -117,17 +117,16 @@
   font-size: 14px;
 }
 
-/* Rescue #950 (#922 AC2, second pass): the droplet's own NUMBER, inside the shape. `font-size` is
- * inline (`stage.tsx`'s `DROPLET_NUM_FONT_PX`) — a fixed 11px for every droplet regardless of
- * digit count; the shrink-to-fit path is gone (the PO ruling: the 11px floor is inviolable). No
- * redundant value declared here to drift from that (`.hero-ring-count`'s own doc, same
- * reasoning). */
+/* #922 AC2: the droplet's own NUMBER, inside the shape. `font-size` is inline (`stage.tsx`'s
+ * `DROPLET_NUM_FONT_PX`) — a fixed 11px for every droplet regardless of digit count; the 11px
+ * floor is inviolable, never shrunk. No redundant value declared here to drift from that
+ * (`.hero-ring-count`'s own doc, same reasoning). */
 .hero-droplet-num {
   font-weight: 600;
   fill: var(--on-sap-fill);
 }
 
-/* Rescue #950: the droplet's own secondary KIND mark (⊙ / ⤳ / ✓ / PR) — WHAT the number is, drawn
+/* #922 AC2: the droplet's own secondary KIND mark (⊙ / ⤳ / ✓ / PR) — WHAT the number is, drawn
  * smaller and above it (`stage.tsx`'s `DROPLET_MARK_FONT_PX`, inline). Never sized into the
  * shape's own fit — only the number does that (`dropletRadius`'s own doc). */
 .hero-droplet-kind {
