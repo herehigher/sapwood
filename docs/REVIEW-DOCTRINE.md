@@ -94,18 +94,21 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     Worked example: `textBox()`/`CHAR_ADVANCE` (`dashboard/src/hero/hero.test.ts`) turns
     font-size/char-count into a rendered extent without a browser, tied to the real draw path's
     own inputs, plus a cascade/source-order assertion instead of hand-copying which rule wins.
-    Three shapes seen (#353, PR #738 (issue #728), PR #737): (1) the test computes its
+    Four shapes seen (#353, PR #738 (issue #728), PR #737): (1) the test computes its
     expected value outside the thing it's testing instead of reading/pinning it against the real
     source; (2) the test exercises only the easy/nominal instance while the AC's own wording
     names a combinatorial or boundary case it never constructs; (3) the test asserts identity
     with the very constant that produced the render, so it proves nothing about the render
-    (#936). FINE: a literal that IS the specification — a golden value nothing else in the
-    codebase claims to own.
+    (#936, reproduced verbatim at #922 — same constant-vs-own-render shape); (4) the test's own
+    helper embeds the SAME simplifying assumption as the code under test, so a wrong assumption
+    in production can't fail its own proxy (#922: `circleBox()` stood in for the rendered path's
+    real, non-circular geometry). FINE: a literal that IS the specification — a golden value
+    nothing else in the codebase claims to own.
   - **DECISION (fake-verdict rule, engine side).** Presetting a fake collaborator to already
     return the acceptance criterion's target decision, then asserting against the fake's own
-    canned value, proves only that the fake echoes what it was told — the real policy function
-    that is supposed to decide that value never runs. Distinct from VALUE (a copied constant
-    drifting from its source): here the deciding code path never executes at all. Worked
+    canned value, proves only that the fake echoes what it was told. Distinct from VALUE (a
+    copied constant drifting from its source): here the deciding code path never executes at
+    all. Worked
     example: PR #835 (issue #824)'s `ac1`/`ac2` fixtures preset
     `FakeSupervisor.reclaimResults` straight to the AC's target `worktreeRetained` value with no
     baseline ever established, so `WorkerSupervisor.reclaim`'s real mtime/ctime policy never ran;
@@ -138,12 +141,10 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   - **COLLISION → COVERAGE (any AC/doc's "all/every named set" claim, not only neighbor
     boxes).** `assertNoOverlap`/`boxesOverlap` (`dashboard/src/hero/hero.test.ts`) is sound
     infra, but each PR hand-curates a partial box list, missing neighbors its author forgot —
-    recurring (#728, #745, #891, #901, #902). Include every element sharing the new one's
+    recurring (#728, #745, #891, #892, #901, #902). Include every element sharing the new one's
     region, position read off rendered markup wherever filtering/compaction can diverge — a
-    constant is fine for genuinely static geometry. Same shape, #892 (Playwright covered only
-    `PhaseInspectorDrawer`, not `ConfigDrawer`/`Controls`; `.recipe-list-entry` covered only
-    `NeedsAttention`, not `ActivityFeed`/`LaneBoard`). Derive the covered set from what the
-    AC/doc names, never a hand-typed list.
+    constant is fine for genuinely static geometry. Derive the covered set from what the AC/doc
+    names, never a hand-typed list.
 
 ### Documentation claims
 
