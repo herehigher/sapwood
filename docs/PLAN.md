@@ -1533,13 +1533,16 @@ Further generations always require a fresh human split act on one remainder; v1 
 automatic recursion.
 
 **Resume-cap -> engine split (#965).** A worker lane that exhausts `worker.maxResumes`
-(#172's graceful-handoff cap) no longer goes straight to a human hold: within
-`lanes.capSplitPerRound`'s per-call allowance, and never for a lane already carrying the
-cap-split origin marker, the engine applies `split` itself instead of `needsHuman`, posts one
-structured WIP-pointer comment (branch/PR/head/diffstat, whatever of those a PR's existence
-makes knowable) that po-decompose's digest renders when present, and stamps every resulting
-child's body with that origin marker so a child that itself hits the resume cap takes the
-ordinary needs-human path rather than cap-splitting again. The decomposer judges the WIP
+(#172's graceful-handoff cap) no longer goes straight to a human hold: unless the issue
+already carries the cap-split origin marker (a child of an earlier cap-split — the ONE
+gate, deliberately with no separate rate limit: cap-splits are already bounded by lane
+count per round, since a cap-split needs a lane to exhaust `maxResumes` in the first
+place, and the origin marker alone prevents a chain), the engine applies `split` itself
+instead of `needsHuman`, posts one structured WIP-pointer comment (branch/PR/head/diffstat,
+whatever of those a PR's existence makes knowable) that po-decompose's digest renders when
+present, and stamps every resulting child's body with that origin marker so a child that
+itself hits the resume cap takes the ordinary needs-human path rather than cap-splitting
+again. The decomposer judges the WIP
 branch on its own merits (land as child 0 when independently shippable, reference-only
 otherwise) — never a merge, never re-implemented sight unseen.
 

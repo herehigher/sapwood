@@ -92,17 +92,6 @@ const Lanes = z
     // nonnegative-int shape as prFixCap above — 0 disables automatic reentry outright (every
     // removal is immediately capped).
     gatedReentryCap: z.number().int().nonnegative().default(2),
-    // #965: bounds the RESUME phase's CAPPED branch — how many lanes the engine may convert
-    // from "resume cap exhausted" to an engine-applied `labels.split` (instead of needs-human)
-    // in one call. Same per-CALL scope as `roundDispatchCap` above (that key's own doc: "a flat
-    // PER-TICK rate limit, re-armed fresh every call, no cross-tick memory" — conductor.ts's
-    // tick() has no notion of "round," just "this call's allowance"; a caller wanting a true
-    // cross-tick round quota would thread it the same way round.ts's dispatchCapOverride does
-    // for roundDispatchCap, not required by this issue). Small default: cap-split is a rare
-    // escape valve, not a routine dispatch path, and #874's own per-round gate⓪-split cap is the
-    // sibling bound on the OTHER split source — the two are independent counters by design (a
-    // resume-cap split is never a gate⓪ split and vice versa).
-    capSplitPerRound: z.number().int().nonnegative().default(1),
   })
   .strict();
 

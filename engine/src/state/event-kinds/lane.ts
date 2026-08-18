@@ -142,6 +142,12 @@ export const LANE_EVENT_KINDS = defineKinds({
     meaning: "the `labels.split` write for an engine-applied resume-cap split (#965) failed; retried next tick.",
     actionability: "investigate",
   },
+  "resume-cap-split-comment-failed": {
+    tags: [],
+    meaning:
+      "the WIP-pointer evidence comment for an engine-applied resume-cap split (#965) failed (or the PR/diff read behind it did) — the split itself, its `resume-capped{split:true}` event, and the row's latch already landed and are unaffected; this row is never revisited (same 'the terminal is the row, this is bookkeeping-only retry noise' treatment as its `-label-failed` sibling, except this one never retries — the lane has already left handoffWorkers()).",
+    actionability: "investigate",
+  },
   "resume-undecidable": {
     tags: ["escalation-source:always"],
     meaning: "a handoff lane's resume outcome could not be determined (#172); needs-human, always proven by presence.",

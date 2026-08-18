@@ -77,6 +77,15 @@ export interface CopyEntry {
  *  a visible row is recoverable, a silently-dropped one is not. */
 const reclaimNeedsAttention = (payload: Payload): boolean => payload.next !== "DRIVING";
 
+/** #965: the dashboard-side twin of the engine's `escalation-reconcile.ts`
+ *  `resumeCappedNeedsAttention` predicate — same rule, same fail direction, restated here
+ *  because the dashboard folds `resume-capped` into the needs-attention strip independently
+ *  (never by importing engine runtime code, #893's own doc). `split: true` means the engine
+ *  handed the issue to the decomposer instead of a person; anything else (including every
+ *  pre-#965 event, which carries no `split` key at all) is the original needs-human occurrence
+ *  and must keep counting. */
+const resumeCappedNeedsAttention = (payload: Payload): boolean => payload.split !== true;
+
 /** `drive-fixup`'s reason word, derived from the raw merge-driver reason string (`merge-driver
  *  .ts`'s `gate:FIXABLE:*` values) — narrow, named patterns rather than a wildcard, since the
  *  three prescriptions are the only ones that exist today and an unrecognized reason should read
@@ -596,11 +605,21 @@ export const COPY: Partial<Record<EventKind, CopyEntry>> = {
     attention: true,
   },
   "resume-capped": {
-    // Payload confirmed at conductor.ts's emit site: {worker, issue, attempts, pr?}.
-    sentence: (p) => [
-      `Lane ${p.worker} exhausted its resume attempts${typeof p.attempts === "number" ? ` (${p.attempts})` : ""} after a handoff · asks: resume or reassign the lane by hand`,
-    ],
-    attention: true,
+    // Payload confirmed at conductor.ts's emit site: {worker, issue, attempts, split?, pr?}.
+    // #965: split:true means the engine applied `labels.split` instead of a human hold — the
+    // preserved worktree/branch became po-decompose's evidence, not a stuck lane a person must
+    // resume or reassign, so this branch carries no "asks:" clause and is NOT an attention item
+    // (see `resumeCappedNeedsAttention` below). split:false, or the key absent entirely (every
+    // pre-#965 event), is the ORIGINAL needs-human path, unchanged byte-for-byte.
+    sentence: (p) =>
+      p.split === true
+        ? [
+            `Lane ${p.worker} exhausted its resume attempts${typeof p.attempts === "number" ? ` (${p.attempts})` : ""} after a handoff — the engine handed the issue to the decomposer for a split`,
+          ]
+        : [
+            `Lane ${p.worker} exhausted its resume attempts${typeof p.attempts === "number" ? ` (${p.attempts})` : ""} after a handoff · asks: resume or reassign the lane by hand`,
+          ],
+    attention: resumeCappedNeedsAttention,
   },
   "resume-undecidable": {
     sentence: (p) => [
@@ -778,6 +797,14 @@ const TELEMETRY_KIND_NAMES: readonly EventKind[] = [
   "resumed",
   "resume-failed",
   "resume-capped-label-failed",
+  // #965: the `labels.split` write's own failure companion — same treatment as
+  // `resume-capped-label-failed` above (label-first-or-no-event doctrine: the terminal
+  // `resume-capped` event is the row, this is bookkeeping-only retry noise).
+  "resume-cap-split-label-failed",
+  // #965 (P1 fix leg, codex terra second review): the WIP-pointer comment's own failure
+  // companion — the split/latch/event already landed by the time this can fire, so it is
+  // bookkeeping-only, same as its `-label-failed` sibling above.
+  "resume-cap-split-comment-failed",
   "resume-undecidable-label-failed",
   "lane-adopted",
   "lane-pr-unknown",
