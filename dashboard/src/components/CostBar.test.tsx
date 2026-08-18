@@ -162,3 +162,32 @@ test("AC2: the target tick's own span (y1=1, y2=11 — height 10) is a fixed con
   const tickHeight = Math.abs(Number(tickMatch![2]) - Number(tickMatch![1]));
   assert.equal(tickHeight, 10, "the tick spans a fixed 10px, taller than the fill's own 6px height");
 });
+
+// ── #923 (D16): the header spend meter's own taller capsule ────────────────────────────────────
+
+// A caller with no `height` prop must render byte-identical geometry to before the prop
+// existed — every pre-#923 shared instance (cost panels, lane cards) omits it.
+test("#923: the default (no height prop) renders the exact same 12px geometry as before — height=12, fill=6/rx=3, tick 1..11", () => {
+  const html = renderToStaticMarkup(<CostBar settledUsd={4} max={10} targetPct={50} label="lane" />);
+  assert.match(html, /<svg width="100%" height="12"/);
+  assert.match(html, /<line class="cost-bar-track" x1="0" y1="5\.5" x2="100%" y2="5\.5">/);
+  assert.match(html, /class="cost-bar-fill"[^>]*height="6"[^>]*rx="3"/);
+  assert.match(html, /class="cost-bar-target"[^>]*y1="1"[^>]*y2="11"/);
+});
+
+// #923 AC1: the header spend meter passes `height={20}` (D16's "~400×20 outlined capsule") — the
+// track/fill/tick geometry scales proportionally (20/12 = 1.667×) rather than staying the 12px
+// drawing floating in extra blank space a bare CSS height override would leave.
+test("#923: a taller height scales every coordinate proportionally, not just the outer box", () => {
+  const html = renderToStaticMarkup(<CostBar settledUsd={5} estUsd={2} max={10} targetPct={50} label="lane" height={20} />);
+  assert.match(html, /<svg width="100%" height="20"/);
+  const trackMatch = html.match(/<line class="cost-bar-track" x1="0" y1="([\d.]+)"/);
+  assert.equal(Number(trackMatch?.[1]), 5.5 * (20 / 12));
+  const fillMatch = html.match(/class="cost-bar-fill"[^>]*y="([\d.]+)"[^>]*height="([\d.]+)"[^>]*rx="([\d.]+)"/);
+  assert.equal(Number(fillMatch?.[1]), 3 * (20 / 12), "fill y scales");
+  assert.equal(Number(fillMatch?.[2]), 6 * (20 / 12), "fill height scales");
+  assert.equal(Number(fillMatch?.[3]), Number(fillMatch?.[2]) / 2, "rx stays half the (now taller) fill height");
+  const tickMatch = html.match(/class="cost-bar-target"[^>]*y1="([\d.]+)"[^>]*y2="([\d.]+)"/);
+  assert.equal(Number(tickMatch?.[1]), 1 * (20 / 12));
+  assert.equal(Number(tickMatch?.[2]), 11 * (20 / 12));
+});

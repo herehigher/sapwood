@@ -314,6 +314,47 @@ test("#897 AC5: at 1440px, the lane board and activity feed together span the ro
 });
 
 /**
+ * #923 AC4: the two proportions this issue's own STYLE/WIRING tests can only pin as authored
+ * declarations (no real layout engine in `happy-dom` — `App.test.tsx`'s own AC1/AC3 comments) are
+ * checked here as scripted numeric facts against REAL rendered `boundingBox()`es, modeled on the
+ * `#897 AC5` pattern directly above: `.spend-meter-bar`'s live width vs `.app-header`'s live
+ * width, and `.transport-scrub`'s live width vs its own row's live width. `?demo` is always
+ * replay mode once its fixture loads (`App.tsx`'s `DemoApp` doc) — the transport row and its scrub
+ * bar are already on screen at `#overview`, no navigator click needed to reach them.
+ */
+test("#923 AC4: at 1440px, .spend-meter-bar's live width is >= 25% of .app-header's live width, and .transport-scrub's live width is >= 60% of its row's live width", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  const header = page.locator(".app-header");
+  const headerBox = await header.boundingBox();
+  expect(headerBox, "the .app-header must render with a real bounding box").not.toBeNull();
+
+  const meter = page.locator(".spend-meter-bar");
+  const meterBox = await meter.boundingBox();
+  expect(meterBox, "the .spend-meter-bar capsule must render with a real bounding box").not.toBeNull();
+  expect(
+    meterBox!.width,
+    `the spend meter (${meterBox!.width}px) must be >= 25% of the header's width (${(headerBox!.width * 0.25).toFixed(0)}px)`,
+  ).toBeGreaterThanOrEqual(headerBox!.width * 0.25);
+
+  const scrub = page.locator(".transport-scrub");
+  const scrubRow = scrub.locator("xpath=..");
+  const scrubBox = await scrub.boundingBox();
+  const rowBox = await scrubRow.boundingBox();
+  expect(scrubBox, "the .transport-scrub input must render with a real bounding box").not.toBeNull();
+  expect(rowBox, "the scrub bar's own row must render with a real bounding box").not.toBeNull();
+  expect(
+    scrubBox!.width,
+    `the scrubber (${scrubBox!.width}px) must be >= 60% of its row's width (${(rowBox!.width * 0.6).toFixed(0)}px)`,
+  ).toBeGreaterThanOrEqual(rowBox!.width * 0.6);
+});
+
+/**
  * engine-agent audit run fe112e01-e488-4d80-864a-9a490750cfb1 finding [0]
  * (dropdown-clipped-by-navigator): `.round-nav`'s `overflow: hidden` (added for the joined-stepper
  * look) used to clip `.round-nav-list-wrap` — its own absolutely positioned child — out of the
@@ -410,30 +451,34 @@ test("§889 AC2: navigator/transport controls resolve real token-based styling i
   const pillClosedColorByTheme: Record<string, string> = {};
   const sapTokenByTheme: Record<string, string> = {};
   const buttonBackgroundByTheme: Record<string, string> = {};
+  const backToLiveBackgroundByTheme: Record<string, string> = {};
 
   for (const theme of themes) {
     await page.evaluate((attr) => document.documentElement.setAttribute("data-theme", attr), theme.attr);
 
-    // The back-to-live/play/speed BUTTONS' own real computed style, not just the scrub input's
-    // native-chrome opt-out above — an operator probe against production (issue #889 comment)
-    // confirmed those buttons computed `font-family: Arial`, no mono rule reaching them, while the
-    // sibling `.transport-position` readout correctly resolved "JetBrains Mono Variable". Compares
-    // against `.transport-position`'s own real computed font-family (a fact, not a hand-copied
-    // token literal) rather than hardcoding the expected mono stack.
+    // The play/speed BUTTONS' own real computed style, not just the scrub input's native-chrome
+    // opt-out above — an operator probe against production (issue #889 comment) confirmed those
+    // buttons computed `font-family: Arial`, no mono rule reaching them, while the sibling
+    // `.transport-position` readout correctly resolved "JetBrains Mono Variable". Compares against
+    // `.transport-position`'s own real computed font-family (a fact, not a hand-copied token
+    // literal) rather than hardcoding the expected mono stack.
     const positionFontFamily = await page.locator(".transport-position").evaluate((el) => getComputedStyle(el).fontFamily);
     expect(positionFontFamily, `${theme.key}: the .transport-position readout must resolve a real font-family`).not.toBe("");
 
-    const backToLive = page.locator(".transport-controls button", { hasText: "back to live" });
+    // #923: "back to live" moved to the header row's own `.header-back-to-live` button — no longer
+    // inside `.transport-controls` (a single control now covers what three duplicate copies used
+    // to). Its mono font is checked alongside play/speed below; its background is checked
+    // separately further down (a DELIBERATELY flat `--sap-fill`, not the panel-themed background
+    // the play/speed buttons still carry — see that check's own comment).
+    const backToLive = page.locator(".header-back-to-live");
     const playButton = page.locator('.transport-controls button[aria-label="play"], .transport-controls button[aria-label="pause"]');
-    const speedButtons = page.locator(".transport-speeds button");
-    expect(await speedButtons.count(), `${theme.key}: ×1/×4/×16 speed buttons must all be present`).toBe(3);
+    const speedButton = page.locator(".transport-speed");
+    expect(await speedButton.count(), `${theme.key}: exactly one cycling speed box must be present, never a three-chip row`).toBe(1);
 
     const monoTargets: [string, Locator][] = [
       ["back to live", backToLive],
       ["play/pause", playButton],
-      ["×1 speed", speedButtons.nth(0)],
-      ["×4 speed", speedButtons.nth(1)],
-      ["×16 speed", speedButtons.nth(2)],
+      ["speed", speedButton],
     ];
     for (const [label, locator] of monoTargets) {
       const fontFamily = await locator.first().evaluate((el) => getComputedStyle(el).fontFamily);
@@ -444,13 +489,15 @@ test("§889 AC2: navigator/transport controls resolve real token-based styling i
     }
 
     // Background too, per the same STYLE rule — the "no native default chrome" half of AC2, not
-    // just the font.
-    const buttonBackground = await backToLive.first().evaluate((el) => getComputedStyle(el).backgroundColor);
-    expect(
-      buttonBackground,
-      `${theme.key}: back-to-live button must resolve a real token background, not native transparent chrome`,
-    ).not.toBe("rgba(0, 0, 0, 0)");
+    // just the font. `playButton` (still inside `.transport-controls`, `var(--panel)`) is the
+    // theme-varying proof; `.header-back-to-live` (D15's filled `--sap-fill` button) is checked
+    // separately below against the SAME flat-token proof #924 already establishes for `--sap-fill`.
+    const buttonBackground = await playButton.first().evaluate((el) => getComputedStyle(el).backgroundColor);
+    expect(buttonBackground, `${theme.key}: the play button must resolve a real token background, not native transparent chrome`).not.toBe(
+      "rgba(0, 0, 0, 0)",
+    );
     buttonBackgroundByTheme[theme.key] = buttonBackground;
+    backToLiveBackgroundByTheme[theme.key] = await backToLive.first().evaluate((el) => getComputedStyle(el).backgroundColor);
 
     const stepperRadius = await page.locator(".round-nav-stepper").evaluate((el) => getComputedStyle(el).borderRadius);
     expect(stepperRadius, `${theme.key}: the stepper group itself must be rounded`).not.toBe("0px");
@@ -490,6 +537,17 @@ test("§889 AC2: navigator/transport controls resolve real token-based styling i
     buttonBackgroundByTheme.light,
     "the transport button background must actually differ between light and dark themes — proof light-dark() genuinely cascades onto it, not a theme-invariant hardcoded value",
   ).not.toBe(buttonBackgroundByTheme.dark);
+  // #923 D15: the header's own BACK TO LIVE button is a filled `--sap-fill` surface — the
+  // deliberately FLAT token, same posture the `sapTokenByTheme` proof above already establishes —
+  // so its real computed background is the SAME real color in both themes, never light-dark().
+  expect(
+    backToLiveBackgroundByTheme.light,
+    "the header's BACK TO LIVE button must resolve the SAME background color in both themes — --sap-fill is deliberately flat",
+  ).toBe(backToLiveBackgroundByTheme.dark);
+  expect(
+    backToLiveBackgroundByTheme.light,
+    "back-to-live button must resolve a real token background, not native transparent chrome",
+  ).not.toBe("rgba(0, 0, 0, 0)");
 
   const panelsCss = readFileSync(fileURLToPath(new URL("../src/panels.css", import.meta.url)), "utf8");
   const thumbRule = panelsCss.match(/\.transport-scrub::-webkit-slider-thumb\s*\{([^}]*)\}/);

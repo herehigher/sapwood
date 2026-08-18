@@ -84,6 +84,9 @@ function SpendMeter({ spend, round, estUsd = 0 }: { spend: SpendFacts; round?: R
             estUsd={estUsd}
             max={spendBarMax(view)}
             label={`${view.tier} spend`}
+            // #923 AC1 (D16): the mockup's outlined ~400×20 capsule, vs the 12px default every
+            // other CostBar instance (cost panels, lane cards) keeps.
+            height={20}
           />
         )}
         <span className="data spend-meter-value">

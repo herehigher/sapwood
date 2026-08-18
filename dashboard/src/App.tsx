@@ -453,56 +453,68 @@ export function appContent(vm: AppViewModel) {
     <div className="app-shell">
       <IconRail onOpenConfig={() => setConfigOpen(toggleConfigOpen)} />
       <main className="stack">
+        {/* #923 AC1 (D14): the header card's own two rows — engine-status/verbs, then (under a
+            hairline) the replay transport — rather than the transport's previous life as a
+            separate `.panel` floating below the header. */}
         <header id="overview" className="panel app-header">
-          <Header
-            disconnected={disconnected}
-            isPending={loop.isPending}
-            engine={
-              loop.data
-                ? {
-                    state: loop.data.engine.state,
-                    pauseActive: loop.data.engine.pauseActive,
-                    standbyNextCheckSec: loop.data.engine.standbyNextCheckSec,
-                  }
-                : undefined
-            }
-            spend={spendFacts}
-            round={roundSpend}
-            estUsd={estUsd}
-            parked={parked}
+          <div className="app-header-row">
+            <Header
+              disconnected={disconnected}
+              isPending={loop.isPending}
+              engine={
+                loop.data
+                  ? {
+                      state: loop.data.engine.state,
+                      pauseActive: loop.data.engine.pauseActive,
+                      standbyNextCheckSec: loop.data.engine.standbyNextCheckSec,
+                    }
+                  : undefined
+              }
+              spend={spendFacts}
+              round={roundSpend}
+              estUsd={estUsd}
+              parked={parked}
+              rounds={rounds}
+              selectedRoundId={replay.selectedRoundId}
+              onSelectRound={replay.selectRound}
+              liveRoundId={liveRoundId}
+              now={clock}
+            />
+            {/* §3 Operations: the engine control verbs hide entirely while viewing a closed round
+                — they act on the PRESENT engine while every other pixel shows an as-of-cursor
+                past. #923 AC2 (D15): BACK TO LIVE takes their place in this SAME row, never inside
+                the transport row below. */}
+            {mode === "replay" ? (
+              <button type="button" className="header-back-to-live" onClick={() => replay.selectRound(null)}>
+                <span aria-hidden="true">⏩</span> back to live
+              </button>
+            ) : (
+              <Controls
+                enabled={(loop.data?.controlsEnabled ?? false) && mode === "live"}
+                running={loop.data?.engine.state === "running"}
+                estopActive={loop.data?.engine.estopActive ?? false}
+              />
+            )}
+            <Legend />
+          </div>
+
+          <Transport
             rounds={rounds}
             selectedRoundId={replay.selectedRoundId}
-            onSelectRound={replay.selectRound}
-            liveRoundId={liveRoundId}
+            cursorId={replay.position?.cursorId ?? 0}
+            playing={replay.playing}
+            speed={replay.speed}
+            onPlay={replay.play}
+            onPause={replay.pause}
+            onSpeed={replay.setSpeed}
+            onScrub={replay.scrub}
+            loading={replay.loading}
+            loadError={replay.loadError}
+            onRetry={replay.retryLoad}
+            disconnected={disconnected}
             now={clock}
           />
-          {/* §3 Operations: the engine control verbs hide entirely while viewing a closed round —
-              they act on the PRESENT engine while every other pixel shows an as-of-cursor past. */}
-          <Controls
-            enabled={(loop.data?.controlsEnabled ?? false) && mode === "live"}
-            running={loop.data?.engine.state === "running"}
-            estopActive={loop.data?.engine.estopActive ?? false}
-          />
-          <Legend />
         </header>
-
-        <Transport
-          rounds={rounds}
-          selectedRoundId={replay.selectedRoundId}
-          onSelectRound={replay.selectRound}
-          cursorId={replay.position?.cursorId ?? 0}
-          playing={replay.playing}
-          speed={replay.speed}
-          onPlay={replay.play}
-          onPause={replay.pause}
-          onSpeed={replay.setSpeed}
-          onScrub={replay.scrub}
-          loading={replay.loading}
-          loadError={replay.loadError}
-          onRetry={replay.retryLoad}
-          disconnected={disconnected}
-          now={clock}
-        />
 
         <NeedsAttention
           items={activeOpenAttention}

@@ -3064,14 +3064,20 @@ test("AC2: .cost-bar-target stroke resolves to the real --sap-text colour, and .
  * distortion now (no scale transform exists to distort), but still a real positioning contract
  * every context sharing this primitive must hold. COVERAGE: every production bar context this
  * fixture renders — a cost-panel bar (multiple: by-stage/by-model, today AND round), the lane
- * card's own bar, and the header spend-meter's bar — never a hand-picked subset.
+ * card's own bar — never a hand-picked subset.
+ *
+ * #923 AC1 (D16): the header's `cost-bar spend-meter-bar` instance deliberately does NOT share
+ * this 12px default any more — `Header.tsx` passes `CostBar` a `height={20}` prop (the mockup's
+ * outlined ~400×20 capsule), and `CostBar.tsx`'s own geometry scales proportionally off it (see
+ * `CostBar.test.tsx`'s own `#923` tests), so it is asserted separately at its own 20px, not folded
+ * into this loop's single shared expectation.
  */
-test("AC2: every hairline-bar instance's own CSS height is exactly 12px, the box its track/fill/tick coordinates assume", async () => {
+test("AC2: every 12px-default hairline-bar instance's own CSS height is exactly 12px, the box its track/fill/tick coordinates assume", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   try {
-    const bars = [...container.querySelectorAll("svg.cost-bar")];
+    const bars = [...container.querySelectorAll("svg.cost-bar")].filter((b) => !b.classList.contains("spend-meter-bar"));
     const contexts = new Set(bars.map((b) => b.getAttribute("class")));
-    for (const required of ["cost-bar", "cost-bar lane-card-bar", "cost-bar spend-meter-bar"]) {
+    for (const required of ["cost-bar", "cost-bar lane-card-bar"]) {
       assert.ok(contexts.has(required), `expected a rendered "${required}" bar; got classes: ${[...contexts].join(", ")}`);
     }
     for (const bar of bars) {
@@ -3081,6 +3087,19 @@ test("AC2: every hairline-bar instance's own CSS height is exactly 12px, the box
         `"${bar.getAttribute("class")}" CSS height must be exactly 12px — the box CostBar.tsx's own y-coordinates assume`,
       );
     }
+  } finally {
+    await cleanup();
+  }
+});
+
+// #923 AC1 (D16): the header meter's own taller capsule — asserted separately from the 12px-shared
+// bars above, since it deliberately doesn't share their default.
+test("#923 AC1: the header's spend-meter-bar resolves its own 20px height, ≥ the AC's 16px floor", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const bar = container.querySelector("svg.cost-bar.spend-meter-bar");
+    assert.ok(bar, "the header's spend-meter-bar must render");
+    assert.equal(getComputedStyle(bar as Element).height, "20px");
   } finally {
     await cleanup();
   }
@@ -3129,8 +3148,11 @@ test("AC2 (pill end caps): the fill pill is a rect with rx=3 (half its own 6px h
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   const { light: lightTokens } = parseColorTokens(tokensCss924);
   try {
-    const fills = [...container.querySelectorAll(".cost-bar-fill")];
-    assert.ok(fills.length >= 3, `expected fill rects across cost panel/lane card/header meter contexts; found ${fills.length}`);
+    // #923 AC1 (D16): the header's own instance renders a proportionally BIGGER rx (its `height`
+    // prop is 20, not the 12px default) — real, expected, and asserted on its own two tests above;
+    // excluded here so this loop's single "rx=3" expectation stays about the shared 12px bars.
+    const fills = [...container.querySelectorAll(".cost-bar-fill")].filter((f) => !f.closest("svg.spend-meter-bar"));
+    assert.ok(fills.length >= 2, `expected fill rects across cost panel/lane card contexts; found ${fills.length}`);
     for (const fill of fills) {
       assert.equal(fill.tagName.toLowerCase(), "rect", ".cost-bar-fill must be a real <rect>, not a stroked line");
       assert.equal(fill.getAttribute("rx"), "3", ".cost-bar-fill rx — half of FILL_HEIGHT (CostBar.tsx), a true pill radius");
@@ -3293,6 +3315,152 @@ test("AC3: every named filled shape (.cost-bar pill, .lane-card-bar pill, .hero-
     }
   } finally {
     document.documentElement.removeAttribute("data-theme");
+    await cleanup();
+  }
+});
+
+// ── #923 (D14–D18): header card ≥100px, the three-cell navigator, the outlined spend capsule,
+// BACK TO LIVE in the header row, and the transport as the header card's own second row ─────────
+
+const CLOSED_ROUND = {
+  roundId: 42,
+  status: "done",
+  startedAt: "2026-01-01T00:00:00Z",
+  endedAt: "2026-01-01T01:00:00Z",
+  startEventId: 1,
+  startSpendId: 1,
+  eventCount: 10,
+  schemaVersion: null,
+  artifact: null,
+};
+
+// AC1 (STYLE, `registerRealDom()` + `getComputedStyle`, full cascade at 1440-wide `App` —
+// `mountAppWithCascade` above already forces that viewport before mounting).
+test("#923 AC1: .app-header ≥100px, the round-nav stepper's three cells ≥40px each with a border, the pill's font/case/size, and the spend capsule's width/height/border/centred caption", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const header = container.querySelector(".app-header");
+    assert.ok(header, ".app-header must render");
+    assert.equal(getComputedStyle(header as Element).minHeight, "100px", ".app-header's declared min-height");
+
+    const stepper = container.querySelector(".round-nav-stepper");
+    assert.ok(stepper, ".round-nav-stepper must render");
+    assert.equal(getComputedStyle(stepper as Element).minHeight, "40px", ".round-nav-stepper's declared min-height");
+
+    const cells = [...container.querySelectorAll(".round-nav-stepper button")];
+    assert.equal(cells.length, 3, "the stepper must carry exactly three cells (chevron | label | chevron)");
+    for (const cell of cells) {
+      const computed = getComputedStyle(cell as Element);
+      assert.equal(computed.minHeight, "40px", `"${cell.className}" cell min-height`);
+      assert.notEqual(computed.borderWidth, "0px", `"${cell.className}" cell must carry its own border`);
+    }
+
+    const pill = container.querySelector(".round-nav-pill");
+    assert.ok(pill, ".round-nav-pill must render");
+    const pillComputed = getComputedStyle(pill as Element);
+    assert.match(pillComputed.fontFamily, /JetBrains Mono/, ".round-nav-pill font-family must resolve the --font-data stack");
+    assert.equal(pillComputed.textTransform, "uppercase");
+    assert.ok(Number.parseFloat(pillComputed.fontSize) >= 14, `.round-nav-pill font-size (${pillComputed.fontSize}) must be >= 14px`);
+
+    const bar = container.querySelector(".spend-meter-bar");
+    assert.ok(bar, ".spend-meter-bar must render");
+    const barComputed = getComputedStyle(bar as Element);
+    assert.ok(
+      Number.parseFloat(barComputed.width) >= 360,
+      `.spend-meter-bar's declared width (${barComputed.width}) must be >= 360px (25% of the issue's 1440 normalization width)`,
+    );
+    assert.ok(Number.parseFloat(barComputed.height) >= 16, `.spend-meter-bar's declared height (${barComputed.height}) must be >= 16px`);
+    assert.notEqual(barComputed.borderWidth, "0px", ".spend-meter-bar must carry a visible border");
+
+    const caption = container.querySelector(".spend-meter-value");
+    assert.ok(caption, ".spend-meter-value caption must render");
+    assert.equal(getComputedStyle(caption as Element).textAlign, "center");
+    // The caption sits BELOW the bar in DOM order (panels.css's own `.spend-meter` flex-column,
+    // #890's doc) — same "reference element first, annotation after" contract this file's
+    // existing #890 tests already pin, re-confirmed here rather than re-derived.
+    const meter = bar!.closest(".spend-meter");
+    assert.ok(meter, ".spend-meter-bar must sit inside .spend-meter");
+    const order = [...(meter as Element).querySelectorAll("svg.spend-meter-bar, .spend-meter-value")];
+    assert.deepEqual(
+      order.map((el) => el.className),
+      ["cost-bar spend-meter-bar", "data spend-meter-value"],
+      "the bar must precede the caption in DOM order",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+// AC2 (WIRING through App, closed round selected).
+test("#923 AC2: closed round selected — BACK TO LIVE is a descendant of .app-header (not the transport row), filled --sap-fill, ≥40px tall, uppercase; Controls is absent", async () => {
+  const data = { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "running" } };
+  const vm = minimalAppViewModel({ mode: "replay", loop: { data, isPending: false }, rounds: [CLOSED_ROUND], selectedRoundId: 42 });
+  const { container, cleanup } = await mountAppWithCascade(vm);
+  const { light: lightTokens } = parseColorTokens(tokensCss924);
+  try {
+    assert.equal(container.querySelectorAll('[aria-label="operations"]').length, 0, "the Controls fieldset must be absent while replaying");
+
+    const btn = container.querySelector(".header-back-to-live");
+    assert.ok(btn, "the BACK TO LIVE control must render");
+    assert.ok(btn?.closest(".app-header"), "BACK TO LIVE must be a descendant of .app-header");
+    assert.equal(btn?.closest("section.transport"), null, "BACK TO LIVE must NOT be a descendant of the transport row");
+
+    const computed = getComputedStyle(btn as Element);
+    // happy-dom echoes the resolved var() as the authored hex string, not an rgb() conversion
+    // (confirmed directly against this exact property) — compared against the real token, never a
+    // hand-copied hex literal that could silently drift from tokens.css.
+    assert.equal(computed.backgroundColor.toUpperCase(), lightTokens["--sap-fill"], "background must resolve to the real --sap-fill hex");
+    assert.equal(computed.height, "40px");
+    assert.equal(computed.textTransform, "uppercase");
+  } finally {
+    await cleanup();
+  }
+});
+
+// AC3 (WIRING) — the transport is a descendant of `.app-header`, after a hairline separator;
+// `.transport-position` is right-aligned; COVERAGE over both button sets (no engine-verb button
+// inside the transport, no media glyph among the verbs).
+test("#923 AC3: the transport is a descendant of .app-header after a hairline separator; .transport-position is right-aligned; the transport and the verbs never share a button", async () => {
+  const data = { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "running" } };
+  const vm = minimalAppViewModel({ mode: "replay", loop: { data, isPending: false }, rounds: [CLOSED_ROUND], selectedRoundId: 42 });
+  const { container, cleanup } = await mountAppWithCascade(vm);
+  try {
+    const transport = container.querySelector('section[aria-label="replay transport"]');
+    assert.ok(transport, "the transport section must render");
+    assert.ok(transport?.closest(".app-header"), "the transport must be a descendant of .app-header");
+    assert.notEqual(getComputedStyle(transport as Element).borderTopWidth, "0px", "the transport must carry a hairline separator");
+
+    const position = transport?.querySelector(".transport-position");
+    assert.ok(position, ".transport-position must render");
+    assert.equal(getComputedStyle(position as Element).marginLeft, "auto", ".transport-position must be right-aligned");
+
+    // COVERAGE: every button the transport row renders vs. every button the verbs row renders —
+    // read off the rendered tree, never a hand-picked pair. Cross-checked against a SEPARATE live
+    // mount (verbs present, transport absent while nothing is selected) so this proves the two
+    // sets are genuinely disjoint, rather than one side being vacuously empty here.
+    const transportLabels = [...(transport as Element).querySelectorAll("button")].map((b) => b.textContent?.trim());
+    const verbGlyphs = ["▶", "⏸"];
+    const liveVm = minimalAppViewModel({ mode: "live", loop: { data, isPending: false }, rounds: [CLOSED_ROUND] });
+    const live = await mountAppWithCascade(liveVm);
+    try {
+      const liveVerbLabels = [...live.container.querySelectorAll('[aria-label="operations"] button')].map((b) => b.textContent?.trim());
+      assert.ok(liveVerbLabels.length > 0, "the verbs must render in live mode");
+      for (const verbLabel of liveVerbLabels) {
+        assert.ok(
+          verbLabel && !verbGlyphs.some((g) => verbLabel.includes(g)),
+          `verb "${verbLabel}" must never carry a media glyph (${verbGlyphs.join(", ")})`,
+        );
+      }
+      for (const transportLabel of transportLabels) {
+        assert.ok(
+          transportLabel && !liveVerbLabels.includes(transportLabel),
+          `transport control "${transportLabel}" must not also be one of the engine verbs`,
+        );
+      }
+    } finally {
+      await live.cleanup();
+    }
+  } finally {
     await cleanup();
   }
 });

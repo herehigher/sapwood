@@ -10,12 +10,17 @@ import { PLAY_SPEEDS } from "../replay/player.ts";
  * contributes an always-present, ~9,000px "every round ever" block above the fold (#889's own why).
  * Only `done` rounds are selectable — the open round is the LIVE slot (§10: "the open round is not
  * scrubbable in v0.2"), never a replay target itself.
+ *
+ * #923 (D14/D15/D17): moved again — from a separate `.panel` sibling of `.app-header` to the
+ * header card's OWN second row, under a hairline (App.tsx, panels.css's `.transport`). The
+ * "back to live" affordance moved with it, but not INTO this row: App.tsx's header row now owns
+ * one styled BACK TO LIVE button covering every state below (loading/error/normal alike), so this
+ * component no longer takes an `onSelectRound` prop or renders its own copy of that control.
  */
 export interface TransportProps {
   rounds: Round[];
   /** `null` = live mode, nothing selected for replay — renders nothing. */
   selectedRoundId: number | null;
-  onSelectRound: (roundId: number | null) => void;
   /** The selected round's own replay position — omitted entirely while `selectedRoundId` is
    *  `null` (nothing to transport). */
   cursorId?: number;
@@ -42,10 +47,17 @@ export interface TransportProps {
 
 const SPEED_LABEL: Record<PlaySpeed, string> = { 1: "×1", 4: "×4", 16: "×16" };
 
+/** #923 (D17): "speed as one bordered '× N' box (cycling ...), no three-chip row" — replaces the
+ *  previous three separately-bordered ×1/×4/×16 buttons. Pure/exported so the wrap-around step is
+ *  directly testable without mounting the component. */
+export function nextSpeed(speed: PlaySpeed): PlaySpeed {
+  const i = PLAY_SPEEDS.indexOf(speed);
+  return PLAY_SPEEDS[(i + 1) % PLAY_SPEEDS.length] as PlaySpeed;
+}
+
 export function Transport({
   rounds,
   selectedRoundId,
-  onSelectRound,
   cursorId = 0,
   playing = false,
   speed = 1,
@@ -66,21 +78,20 @@ export function Transport({
   if (!selected) return null;
 
   return (
-    <section className="panel transport" aria-label="replay transport">
+    // #923 AC3 (D17): no longer its own `.panel` — rendered inside `.app-header` now (App.tsx),
+    // as the header card's own second row under a hairline (panels.css's `.transport`). The
+    // header row's own BACK TO LIVE button (App.tsx, AC2) is this row's only escape hatch now —
+    // every state below used to carry its own duplicate "back to live" text; a single header-level
+    // control covers loading/error/normal alike, so none of the three repeats it here.
+    <section className="transport" aria-label="replay transport">
       {loading && (
         <fieldset className="transport-controls" aria-label="transport controls">
-          <button type="button" onClick={() => onSelectRound(null)}>
-            back to live
-          </button>
           <p className="muted transport-loading">loading round…</p>
         </fieldset>
       )}
 
       {!loading && loadError !== undefined && loadError !== null && (
         <fieldset className="transport-controls" aria-label="transport controls">
-          <button type="button" onClick={() => onSelectRound(null)}>
-            back to live
-          </button>
           <p className="muted transport-load-error">could not load this round</p>
           <button type="button" onClick={onRetry}>
             retry
@@ -90,19 +101,17 @@ export function Transport({
 
       {!loading && (loadError === undefined || loadError === null) && (
         <fieldset className="transport-controls" aria-label="transport controls">
-          <button type="button" onClick={() => onSelectRound(null)}>
-            back to live
-          </button>
-          <button type="button" aria-label={playing ? "pause" : "play"} onClick={playing ? onPause : onPlay}>
+          <button type="button" className="transport-play" aria-label={playing ? "pause" : "play"} onClick={playing ? onPause : onPlay}>
             {playing ? "⏸" : "▶"}
           </button>
-          <fieldset className="transport-speeds" aria-label="playback speed">
-            {PLAY_SPEEDS.map((s) => (
-              <button key={s} type="button" aria-pressed={s === speed} onClick={() => onSpeed?.(s)}>
-                {SPEED_LABEL[s]}
-              </button>
-            ))}
-          </fieldset>
+          <button
+            type="button"
+            className="transport-speed"
+            aria-label={`playback speed: ${SPEED_LABEL[speed]}`}
+            onClick={() => onSpeed?.(nextSpeed(speed))}
+          >
+            {SPEED_LABEL[speed]}
+          </button>
           <input
             type="range"
             aria-label="scrub"

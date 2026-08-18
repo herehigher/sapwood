@@ -159,10 +159,25 @@ code,
   text-align: center;
 }
 
+/* #923 AC1 (D14): ≥100px tall, holding two rows — the engine-status/verbs row and, under a
+ * hairline, the replay transport (`.transport`, panels.css) — instead of the single flex row this
+ * was before Transport moved inside the header card. `min-height` is a literal px so happy-dom's
+ * STYLE test (no real layout engine) can read it back directly, same posture `.round-nav-stepper`
+ * (panels.css) already takes for its own ≥40px floor. */
 .app-header {
+  display: flex;
+  flex-direction: column;
+  min-height: 100px;
+}
+
+/* The row `.app-header` used to BE, before Transport moved in as a second row underneath it —
+ * engine word/navigator/meter, the verbs (or, in replay, BACK TO LIVE), and the "?" legend spread
+ * across the full width. */
+.app-header-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--space-2);
 }
 
 /* ---- §3 Operations control group ------------------------------------------ */
