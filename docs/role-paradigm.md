@@ -313,10 +313,14 @@ creation: reconcile it to Todo, remove only the engine-owned round-pool label if
 and apply `labels.decomposed`. Only then does the shared align/decompose create loop run. The
 parent becomes a human-visible tracking container and is excluded from backlog digests,
 triage, pool selection, and dispatch; it is never auto-closed and the engine never removes
-`decomposed`. Children receive `origin:agent` and remain outside Ready. Ready-able children
-are born with checkbox acceptance criteria plus a verification plan; coarse remainders are
-partitioned as finely as current information allows, carry their own unresolved fact and
-needed input, and follow the existing planless→`needs-human` path.
+`decomposed`. Children receive `origin:agent` and remain outside Ready. Ready-able children are
+born with checkbox acceptance criteria plus a verification plan — either a leaf's, closable
+inside one PR's own CI plus gate②, or a coarse container's, naming an executable acceptance
+check on `main` instead (#913; preferred over a remainder whenever scope is merely large, since
+a container is Ready-able and re-splits again via gate⓪'s `too_large` decision, #874); coarse
+remainders, reserved for scope where a fact or decision is actually missing, are partitioned as
+finely as current information allows, carry their own unresolved fact and needed input, and
+follow the existing planless→`needs-human` path.
 
 Native sub-issue attachment is same-repository and reconciled independently from creation.
 An attachment outage never lifts the fence or recreates a child. The parent receives one
@@ -381,10 +385,14 @@ of five decisions: `approve` (write any body revision, apply `plan:approved`, do
 `verify_na` (apply `needs-human` THEN `verify:n/a`, ordering-invariant so a partial
 double-label failure fails closed non-dispatchable — `plan-review.ts::reviewOneIssue`),
 `draft_request` (brief the drafter), `needs_human` (retro round #365: apply `needs-human`
-directly, no draft cycle — reserved for a human-merge-only path that is a PREREQUISITE every
-acceptance criterion depends on, where no redraft can make the plan dispatchable regardless of
-wording; escalating via `draft_request` first would only spend `maxDraftCycles` reaching the
-identical verdict, as issue #782 did), or `too_large` (#874: apply `split` directly — the
+directly, no draft cycle — reserved for either of two named reasons no redraft can fix: a
+human-merge-only path that is a PREREQUISITE every acceptance criterion depends on, where no
+redraft can make the plan dispatchable regardless of wording (escalating via `draft_request`
+first would only spend `maxDraftCycles` reaching the identical verdict, as issue #782 did); or,
+since #913, the plan presupposing an undecided decision — a dependency/toolchain adoption
+(cross-ref #875), a persistent schema/public-interface shape, an architecture-level choice, or
+an unstated non-functional target — where the plan could be worded perfectly and a worker would
+still have to invent the missing decision), or `too_large` (#874: apply `split` directly — the
 SAME write path #965's resume-cap CAPPED branch uses, idempotent on an issue already carrying
 `split`, zero draft cycles spent, the issue leaves the round's plan-review set for a later
 po-decompose session to pick up; this path does NOT consult the #965 cap-split origin marker,

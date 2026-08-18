@@ -570,6 +570,21 @@ behalf — should carry the configured `labels.originAgent` label (`sapwood:orig
 default); see
 [`security.md`](security.md#the-originagent-label-convention) for why.
 
+### The goal file is the project's spec
+
+sapwood treats the north-star goal file (`goal.file` in `sapwood.config.yaml`, default
+`docs/PLAN.md`) as the project's spec, not a second copy of one that lives somewhere else. Its
+five sections — Goal, Non-goals, Constraints, Architecture, Current milestone (see
+`engine/prompts/goal-template.md` for the scaffold every new project fills in) — are what an
+issue is checked against, not decoration: the architect peripheral flags an issue that
+contradicts the Architecture section, the PO's own dissent channel raises the same kind of
+concern about a Ready issue, and the aligning pass derives new issues directly from the gap
+between Current milestone and what the codebase already does. Nothing downstream points back at
+a spec section as its own proof of done, though — a decomposed parent's acceptance plan (see "PO
+decomposition and issue granularity" in [`PLAN.md`](PLAN.md)) names an executable CI check on
+`main`, never "matches the Architecture section" or similar: the goal file is what work is
+checked against, never what a passing check cites as its evidence.
+
 ### The `Origin:` line on agent-filed issues
 
 An issue the PO's align pass files ends its body with a one-line `Origin:` statement naming
