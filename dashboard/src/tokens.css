@@ -154,6 +154,22 @@
   --hatch-stroke-width: 1.5px;
   --hatch-gap: 4px;
   --hatch-angle: 45deg;
+  /* A lane card's own est hatch needs >= 3:1 against .cost-bar-track in dark theme — the shared
+   * --hatch-stroke above (--bark, full opacity) reads under 2:1 against the real track (--bark at
+   * the track's own reduced opacity) there, short of that floor for a LANE card's bar
+   * specifically. Scoped to `.lane-card-bar` only (panels.css) via a custom-property override, so
+   * the shared header/cost-panel hatch (still --hatch-stroke's own global --bark value) is
+   * untouched. Aliases --sap-fill directly (never a hand-duplicated hex) — the SAME hue
+   * tokens.test.ts's own checkFillTrackContrast already proves clears 3:1 against this exact track
+   * in dark theme (4.24:1). Light theme inherits the same documented 1.15:1 shortfall --sap-fill's
+   * own fill pill already carries there (tokens.test.ts) — a thin hatch line has no meaningful
+   * place for its own outline stroke, so this is accepted, not "fixed," in light.
+   *
+   * This token's own VALUE clearing 3:1 is necessary but not sufficient — a bar's fill only ever
+   * paints this colour if its `fill="url(#…)"` reference actually resolves to ITS OWN pattern
+   * (CostBar.tsx's per-instance `useId()` id; a shared id would resolve every bar to whichever
+   * pattern is first in the DOM instead, leaving this override unreachable). */
+  --hatch-stroke-lane: var(--sap-fill);
 }
 
 :root[data-theme="heartwood"] {

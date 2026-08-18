@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Lane } from "../api/types.ts";
-import { LaneBoard, laneHeadStat } from "./LaneBoard.tsx";
+import { LaneBoard, laneHeadStat, laneStateChipText } from "./LaneBoard.tsx";
 
 // ── #924: the lanes panel-head's own stat cluster ───────────────────────────────────────────────
 
@@ -52,6 +52,7 @@ const lane = (overrides: Partial<Lane> = {}): Lane => ({
   endedAt: null,
   costUsd: null,
   estCostUsd: null,
+  fixRound: 0,
   contextTokens: null,
   tokenComposition: null,
   ...overrides,
@@ -101,7 +102,7 @@ test("a settled lane's real costUsd wins over any lingering estCostUsd — never
 test("a lane with a live estimate renders the shared hatched CostBar", () => {
   const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ costUsd: null, estCostUsd: 6.21 })]} titles={{}} now={NOW} />);
   assert.match(html, /class="cost-bar lane-card-bar"/);
-  assert.match(html, /url\(#cost-bar-est-hatch\)/);
+  assert.match(html, /url\(#[^)]*cost-bar-est-hatch\)/);
 });
 
 test("a lane with neither a settled nor an est figure renders no bar at all — never a zero-width chart", () => {
@@ -207,4 +208,49 @@ test("issue numbers carry a type glyph and a folded-title tooltip trigger, same 
   );
   assert.match(html, /tabindex="0"/);
   assert.match(html, /<svg/);
+});
+
+// ── #926 AC4: the state chip never fabricates a field — fixing carries its own round/cap, ─────
+// driving shows the PR line, running shows the cost line and no PR line ─────────────────────────
+
+test("laneStateChipText: a fixing lane reads FIXING · ROUND n/cap from lane.fixRound and the configured cap", () => {
+  assert.equal(laneStateChipText(lane({ state: "fixing", fixRound: 1 }), 2), "FIXING · ROUND 1/2");
+  assert.equal(laneStateChipText(lane({ state: "fixing", fixRound: 2 }), 3), "FIXING · ROUND 2/3");
+});
+
+test("laneStateChipText: every other known state keeps its plain laneStateCaption word, never a round count", () => {
+  assert.equal(laneStateChipText(lane({ state: "running" }), 2), "writing");
+  assert.equal(laneStateChipText(lane({ state: "driving" }), 2), "PR under review");
+  assert.equal(laneStateChipText(lane({ state: "handoff" }), 2), "handed off");
+});
+
+test("#926 AC4: a fixing lane's rendered chip reads FIXING · ROUND n/cap, sourced from lanes.prFixCap", () => {
+  const html = renderToStaticMarkup(
+    <LaneBoard lanesMax={1} lanes={[lane({ state: "fixing", fixRound: 1, pr: 99 })]} titles={{}} fixCap={2} now={NOW} />,
+  );
+  assert.match(html, /FIXING · ROUND 1\/2/);
+});
+
+test("#926 AC4: a driving lane's chip is the plain caption (never a round count) and shows the PR line", () => {
+  const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ state: "driving", pr: 97 })]} titles={{}} now={NOW} />);
+  assert.doesNotMatch(html, /ROUND/);
+  assert.match(html, /lane-card-pr/);
+});
+
+test("#926 AC4: a running lane shows the est cost line and never a PR line", () => {
+  const html = renderToStaticMarkup(
+    <LaneBoard lanesMax={1} lanes={[lane({ state: "running", pr: null, estCostUsd: 0.53 })]} titles={{}} now={NOW} />,
+  );
+  assert.match(html, /\$0\.53 est/);
+  assert.doesNotMatch(html, /lane-card-pr/);
+});
+
+// ── #926 AC3: the state chip's own uppercase/font-data + the head's closing hairline ───────────
+
+test("#926 AC3: the state chip and the lane's body/foot markup carry the anatomy this card's CSS targets", () => {
+  const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ state: "running" })]} titles={{}} now={NOW} />);
+  assert.match(html, /class="lane-card-head"/);
+  assert.match(html, /class="data muted lane-card-state">/);
+  assert.match(html, /class="lane-card-state-dot"/);
+  assert.match(html, /class="lane-card-issue"/);
 });

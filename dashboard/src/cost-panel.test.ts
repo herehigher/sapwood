@@ -45,6 +45,7 @@ function lane(overrides: Partial<Lane> = {}): Lane {
     endedAt: null,
     costUsd: null,
     estCostUsd: null,
+    fixRound: 0,
     contextTokens: null,
     tokenComposition: null,
     ...overrides,

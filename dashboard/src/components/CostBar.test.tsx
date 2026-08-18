@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CostBar, HATCH_PATTERN_ID } from "./CostBar.tsx";
+import { CostBar, HATCH_PATTERN_ID_SUFFIX } from "./CostBar.tsx";
+
+// Each `<CostBar>` instance now mints its own pattern id (`useId()` + the shared suffix) so its
+// `fill="url(#…)"` resolves to ITS OWN `<pattern>`, never another instance's — see CostBar.tsx.
+// These helpers match by the shared SUFFIX rather than a single hardcoded id, since the exact
+// per-render prefix is a React implementation detail these tests must not pin.
+const HATCH_FILL_URL_RE = new RegExp(`url\\(#[^)]*${HATCH_PATTERN_ID_SUFFIX}\\)`);
 
 // #924 AC2: the settled fill is a `<rect width="{pct}%">`, a percentage length the browser
 // resolves against the SVG's own real rendered width (no `viewBox`) — never a hand-computed
@@ -9,7 +15,7 @@ import { CostBar, HATCH_PATTERN_ID } from "./CostBar.tsx";
 test("settled-only bar draws a solid fill sized to settledUsd/max, no hatch segment", () => {
   const html = renderToStaticMarkup(<CostBar settledUsd={5} max={10} label="lane" />);
   assert.match(html, /class="cost-bar-fill" x="0"[^>]*width="50%"/);
-  assert.doesNotMatch(html, new RegExp(`url\\(#${HATCH_PATTERN_ID}\\)`));
+  assert.doesNotMatch(html, HATCH_FILL_URL_RE);
 });
 
 // #924 AC2: the hatch tail's own `x`/`width` are CSS geometry properties (via `style`, not plain
@@ -28,7 +34,7 @@ test("settled + est draws the est tail immediately after the settled fill, hatch
   assert.match(
     html,
     new RegExp(
-      `style="x:max\\(0px, calc\\(40% - 3px\\)\\);width:calc\\(20% \\+ min\\(3px, 40%\\)\\)"[^>]*fill="url\\(#${HATCH_PATTERN_ID}\\)"`,
+      `style="x:max\\(0px, calc\\(40% - 3px\\)\\);width:calc\\(20% \\+ min\\(3px, 40%\\)\\)"[^>]*fill="url\\(#[^)]*${HATCH_PATTERN_ID_SUFFIX}\\)"`,
     ),
   );
 });
@@ -40,7 +46,7 @@ test("est is clamped so the total never draws past 100% of the track", () => {
   assert.match(
     html,
     new RegExp(
-      `style="x:max\\(0px, calc\\(90% - 3px\\)\\);width:calc\\(10% \\+ min\\(3px, 90%\\)\\)"[^>]*fill="url\\(#${HATCH_PATTERN_ID}\\)"`,
+      `style="x:max\\(0px, calc\\(90% - 3px\\)\\);width:calc\\(10% \\+ min\\(3px, 90%\\)\\)"[^>]*fill="url\\(#[^)]*${HATCH_PATTERN_ID_SUFFIX}\\)"`,
     ),
   );
 });
@@ -57,7 +63,7 @@ test("est-only (0% settled, no pill to cover a seam) renders the hatch tail clam
   assert.match(
     html,
     new RegExp(
-      `style="x:max\\(0px, calc\\(0% - 3px\\)\\);width:calc\\(50% \\+ min\\(3px, 0%\\)\\)"[^>]*fill="url\\(#${HATCH_PATTERN_ID}\\)"`,
+      `style="x:max\\(0px, calc\\(0% - 3px\\)\\);width:calc\\(50% \\+ min\\(3px, 0%\\)\\)"[^>]*fill="url\\(#[^)]*${HATCH_PATTERN_ID_SUFFIX}\\)"`,
     ),
   );
 });
@@ -75,7 +81,7 @@ test("a sub-3px settled share (0.1%) still clamps the hatch tail's leading edge 
   assert.match(
     html,
     new RegExp(
-      `style="x:max\\(0px, calc\\(0\\.1% - 3px\\)\\);width:calc\\(50% \\+ min\\(3px, 0\\.1%\\)\\)"[^>]*fill="url\\(#${HATCH_PATTERN_ID}\\)"`,
+      `style="x:max\\(0px, calc\\(0\\.1% - 3px\\)\\);width:calc\\(50% \\+ min\\(3px, 0\\.1%\\)\\)"[^>]*fill="url\\(#[^)]*${HATCH_PATTERN_ID_SUFFIX}\\)"`,
     ),
   );
 });
@@ -84,7 +90,7 @@ test("a sub-3px settled share (0.1%) still clamps the hatch tail's leading edge 
 // order would let the hatch's flat edge cut a visible notch into the pill's curved cap instead.
 test("AC2: the hatch tail renders before the pill in document order, so the pill's opaque fill paints on top of the seam", () => {
   const html = renderToStaticMarkup(<CostBar settledUsd={4} estUsd={2} max={10} label="lane" />);
-  const hatchIndex = html.indexOf(HATCH_PATTERN_ID, html.indexOf("</defs>"));
+  const hatchIndex = html.indexOf(HATCH_PATTERN_ID_SUFFIX, html.indexOf("</defs>"));
   const fillIndex = html.indexOf('class="cost-bar-fill"');
   assert.ok(hatchIndex > -1 && fillIndex > -1, "both the hatch tail and the pill must render");
   assert.ok(hatchIndex < fillIndex, "the hatch tail must appear before the pill in the rendered markup");
@@ -93,8 +99,8 @@ test("AC2: the hatch tail renders before the pill in document order, so the pill
 test("zero/absent est renders no hatch rect at all — never a phantom zero-width segment", () => {
   const zero = renderToStaticMarkup(<CostBar settledUsd={5} estUsd={0} max={10} label="lane" />);
   const absent = renderToStaticMarkup(<CostBar settledUsd={5} max={10} label="lane" />);
-  assert.doesNotMatch(zero, new RegExp(`url\\(#${HATCH_PATTERN_ID}\\)`));
-  assert.doesNotMatch(absent, new RegExp(`url\\(#${HATCH_PATTERN_ID}\\)`));
+  assert.doesNotMatch(zero, HATCH_FILL_URL_RE);
+  assert.doesNotMatch(absent, HATCH_FILL_URL_RE);
 });
 
 // #924 AC2: a zero (or negative-clamped-to-zero) settled share renders no fill rect at all — the
@@ -115,7 +121,7 @@ test("aria-label discloses both figures when an est is present, settled only oth
 
 test("the hatch pattern def is a real SVG <pattern>, not a decorative rect — the shared texture, never color alone", () => {
   const html = renderToStaticMarkup(<CostBar settledUsd={4} estUsd={2} max={10} label="lane" />);
-  assert.match(html, /<pattern[^>]*id="cost-bar-est-hatch"/);
+  assert.match(html, new RegExp(`<pattern[^>]*id="[^"]*${HATCH_PATTERN_ID_SUFFIX}"`));
   assert.match(html, /patternUnits="userSpaceOnUse"/);
 });
 

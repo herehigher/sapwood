@@ -46,6 +46,25 @@ export function PrGlyph({ className }: { className?: string }) {
   );
 }
 
+/** #926: the lane card body's own identity glyph (`docs/design/mockup/lanes-{dark,light}.png`) —
+ *  an outline teardrop, `currentColor` stroke so the card's own text color drives it, never a
+ *  hardcoded hex. Distinct from the hero stage's `Droplet` state objects (plain filled circles,
+ *  `stage.tsx`'s `dropletFill`) — this is the LaneCard's own static identity mark, not a moving
+ *  stage token. */
+export function DropletGlyph({ className, size = 32 }: { className?: string; size?: number }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" className={className}>
+      <path
+        d="M12 2C12 2 4.5 12 4.5 17a7.5 7.5 0 0015 0c0-5-7.5-15-7.5-15z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 /**
  * #922 owner ruling (2026-08-17): the CI gate's icon — standard resources first, hand-drawing a
  * gear was the thing to replace. Verbatim path data from the devicon/techicons GitHub Actions SVG

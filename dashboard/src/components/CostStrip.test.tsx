@@ -132,12 +132,13 @@ test("a bar carrying estUsd renders the hatch fill-url usage (the actual rect, n
   const withEst = renderToStaticMarkup(
     <CostStrip today={todayPanel({ stageBars: [{ label: "Lanes", usd: 8.9, estUsd: 2.2 }] })} round={null} />,
   );
-  assert.match(withEst, /url\(#cost-bar-est-hatch\)/);
+  assert.match(withEst, /url\(#[^)]*cost-bar-est-hatch\)/);
   const withoutEst = renderToStaticMarkup(<CostStrip today={todayPanel()} round={null} />);
   // Both cases mount the `<pattern>` def itself (every `<CostBar>` instance does) — proving the
-  // def's mere presence is NOT what distinguishes them; only the fill-url usage does.
-  assert.match(withoutEst, /id="cost-bar-est-hatch"/);
-  assert.doesNotMatch(withoutEst, /url\(#cost-bar-est-hatch\)/);
+  // def's mere presence is NOT what distinguishes them; only the fill-url usage does. Each
+  // instance's id is `useId()` + the shared suffix (CostBar.tsx), never a single global id.
+  assert.match(withoutEst, /id="[^"]*cost-bar-est-hatch"/);
+  assert.doesNotMatch(withoutEst, /url\(#[^)]*cost-bar-est-hatch\)/);
 });
 
 test("a CLOSED round panel's bars never carry a hatch — nothing is still running in a closed round", () => {
@@ -154,5 +155,5 @@ test("a CLOSED round panel's bars never carry a hatch — nothing is still runni
       }}
     />,
   );
-  assert.doesNotMatch(html, /url\(#cost-bar-est-hatch\)/);
+  assert.doesNotMatch(html, /url\(#[^)]*cost-bar-est-hatch\)/);
 });

@@ -228,7 +228,7 @@ test("the est tail renders hatched — the shared cost-bar-est-hatch pattern, ne
       parked={false}
     />,
   );
-  assert.match(html, /url\(#cost-bar-est-hatch\)/);
+  assert.match(html, /url\(#[^)]*cost-bar-est-hatch\)/);
 });
 
 test("no estUsd (replay/demo, or a live snapshot with no running lane): no ' + est' text, no hatch segment", () => {
@@ -236,7 +236,7 @@ test("no estUsd (replay/demo, or a live snapshot with no running lane): no ' + e
     <Header disconnected={false} isPending={false} engine={engine("running")} spend={SPEND_OK} parked={false} />,
   );
   assert.doesNotMatch(html, / est/);
-  assert.doesNotMatch(html, /url\(#cost-bar-est-hatch\)/);
+  assert.doesNotMatch(html, /url\(#[^)]*cost-bar-est-hatch\)/);
 });
 
 test("a null usedUsd (a run tier with runBudgetUsd set but runUsd not yet computed) renders no bar at all, never a bar with a fabricated 0", () => {

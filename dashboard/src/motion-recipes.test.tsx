@@ -147,6 +147,7 @@ const laneFixture: Lane = {
   endedAt: null,
   costUsd: null,
   estCostUsd: null,
+  fixRound: 0,
   contextTokens: null,
   tokenComposition: null,
 };

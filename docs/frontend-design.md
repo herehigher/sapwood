@@ -209,13 +209,22 @@ item becomes a routed page, that is a scope amendment to this section.
 │  Backlog ─▶ ┃lane┃lane┃lane┃ ─▶ CI ─ Review ─▶ ◎rings       │  (closed
 │                ╰◀╌ fix loop ╌╯     ╰▼ needs human            │   loop)
 │      ╰╌╌╌╌ dashed return ◀╌ Summary · Retro ╌╌╌╌╯            │
-├───────────────────────────────────┬──────────────────────────┤
-│ C lanes                           │ D activity               │
-│ ┌────────┐ ┌────────┐ ┌────────┐  │  Merged PR #94           │
-│ │ #86 ●  │ │ #88 ◐  │ │ (idle) │  │  Lane 2 handed off       │
-│ │ $1.20  │ │ PR #97 │ │        │  │  Started issue #90       │
-│ └────────┘ └────────┘ └────────┘  │  …                       │
-├───────────────────────────────────┴──────────────────────────┤
+├──────────────────────────────────────────────────────────────┤
+│ C lanes                                                       │
+│ ┌────────────┐  ┌────────────┐  ┌────────────┐                │
+│ │ w1  ●work  │  │ w2  ◐FIXING│  │ w3   ON HOLD│                │
+│ │────────────│  │  · ROUND 1/2│ │────────────│                │
+│ │ ◇ #86      │  │────────────│  │ ◇ #87      │                │
+│ │ $1.20      │  │ ◇ #88      │  │ $1.10      │                │
+│ └────────────┘  │ PR #97     │  └────────────┘                │
+│                  └────────────┘                                │
+├──────────────────────────────────────────────────────────────┤
+│ D activity                                                     │
+│  Merged PR #94                                                 │
+│  Lane 2 handed off                                              │
+│  Started issue #90                                              │
+│  …                                                               │
+├──────────────────────────────────────────────────────────────┤
 │ E cost · today / cost · round N (by stage, by model)  [Config ▸]│
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -264,13 +273,23 @@ item becomes a routed page, that is a scope amendment to this section.
   real events move tokens through it. The worker pipeline ends in the
   **trunk cross-section**: every merged PR accretes one growth ring (§5,
   signature). Stage nodes are clickable — the phase inspector (§6).
-- **C — Lane board.** One card per lane up to `lanes.max`; empty lanes render
-  as quiet outlines ("an empty lane is capacity, not absence"). Card: issue
-  number (linking to GitHub), state word, PR link when driving, elapsed time,
-  the lane's model·effort caption (mono, e.g. `opus · high` — the
-  **configured** value from the config allowlist, not live telemetry), and
-  cost — the engine's in-flight **estimate** (marked `est`, #33) while
-  running, settling to the `spend_ledger` real sum when the lane ends.
+- **C — Lane board.** A full-width row of its own, directly above D (2026-08-17
+  Q3 owner ruling — supersedes the earlier C | D side-by-side split, which
+  never fit this card's own anatomy in half the canvas). One card per lane up
+  to `lanes.max`, 3 across at 1440 px / 2 at 1024 px / 1 at 720 px
+  (`minmax(~400px, 1fr)`); empty lanes render as quiet outlines ("an empty
+  lane is capacity, not absence"). Card anatomy is head over body, split by a
+  hairline: **head** — lane id left, a state chip right (a dot + the
+  uppercase mono state word; a `fixing` lane reads `FIXING · ROUND n/cap`,
+  `n` from `workers.fix_rounds`, cap from `lanes.prFixCap`); **body** — a
+  droplet identity glyph + the issue number at the mockup's own bold/large
+  mono scale (linking to GitHub), a title line, a PR line when driving, a
+  cost line, a hairline spend bar, and elapsed time at the foot. Cost is the
+  engine's in-flight **estimate** (marked `est`, #33) while running, settling
+  to the `spend_ledger` real sum when the lane ends. The panel-head's own
+  right-aligned stat cluster reads the configured `worker.model`/`effort`/
+  soft-budget (allowlist, not live telemetry) — e.g. `opus · high · soft
+  budget $10` — once per board, not repeated per card.
 
   **Issue/PR numbers — everywhere they appear** (lane cards, feed, hero
   droplets, ring tags): (a) a **type glyph** distinguishes them at a glance —
@@ -285,14 +304,14 @@ item becomes a routed page, that is a scope amendment to this section.
   pre-#207 history — simply shows no tooltip; that bounded blind spot is
   accepted, never patched with a live lookup.
 
-  Owner ruling Q3, 2026-08-17 (#729 design review; implementing issue #926): lanes take
+  Owner ruling Q3, 2026-08-17 (#729 design review; implemented by #926): lanes take
   one full-width row above the activity feed (`lanes-dark.png`'s 3-card composition), replacing
-  this section's C|D half-split — the feed renders full-width below. Today's C|D half-split
-  (`.lane-activity-row`, `App.tsx`) and the diagram above stand until #926 lands.
-- **D — Activity feed.** The `events` stream through the copy map (§7),
-  newest first, relative timestamps; kind-colored dot per entry. Payload
-  details (worker, head, mode) collapse behind each entry — never in the
-  sentence.
+  this section's earlier C|D half-split — the feed renders full-width below.
+- **D — Activity feed.** Its own full-width row directly below C (Q3 owner
+  ruling, same amendment as C above). The `events` stream through the copy
+  map (§7), newest first, relative timestamps; kind-colored dot per entry.
+  Payload details (worker, head, mode) collapse behind each entry — never in
+  the sentence.
 - **E — Cost strip + Config drawer.** Two independently framed panels, stacked (#880,
   `cost-dark.png`; supersedes the single-strip by-model/by-lane first pass and §11's
   now-superseded "round tier" strip text below) — each its own bordered card, never one shared

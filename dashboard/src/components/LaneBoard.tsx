@@ -5,7 +5,7 @@ import { formatElapsed, formatUsd } from "../format.ts";
 import { modelEffortCaption } from "../hero/stage.tsx";
 import { CostBar } from "./CostBar.tsx";
 import { EntityRef } from "./EntityRef.tsx";
-import { StateGlyph } from "./icons.tsx";
+import { DropletGlyph, StateGlyph } from "./icons.tsx";
 
 /** #924: the lanes panel-head's own stat cluster ("model · effort · soft budget $N") —
  *  `modelEffortCaption` is the SAME `worker.*` config reader the hero's own lane captions use
@@ -47,6 +47,16 @@ function laneCostBarMax(lane: Lane, workerBudgetUsdSoft: number | null): number 
   return (lane.costUsd ?? 0) + (lane.costUsd === null ? (lane.estCostUsd ?? 0) : 0);
 }
 
+/** #926 AC4: the state chip's own text — a `fixing` lane reads "FIXING · ROUND n/cap" (`n` =
+ *  `lane.fixRound`, the cap = `lanes.prFixCap` config, same denominator the hero stage's own
+ *  fixing droplet label uses, `stage.tsx`'s `FIXING · round ${lane.fixRound} of ${fixCap}`) —
+ *  every other known state keeps its plain `laneStateCaption` word, never a fabricated round
+ *  count on a lane that was never fixing. */
+export function laneStateChipText(lane: Lane, fixCap: number): string {
+  if (lane.state === "fixing") return `FIXING · ROUND ${lane.fixRound}/${fixCap}`;
+  return laneStateCaption(lane.state);
+}
+
 /** The lane states `/api/loop/state` can actually serve (`state.activeWorkers()` reads
  *  `WHERE state IN ('running','driving','fixing')`; `handoff` is included since §7 captions it
  *  explicitly). #715 gate② [6]: §5's "failed lanes a static ✕" cannot literally apply to a lane
@@ -73,6 +83,10 @@ export interface LaneBoardProps {
   /** #924: allowlisted config, threaded straight to `laneHeadStat` for the panel-head's own
    *  "model · effort · soft budget $N" stat cluster. */
   config?: Record<string, unknown> | null;
+  /** #926 AC4: `lanes.prFixCap` — the "FIXING · ROUND n/cap" chip's own denominator. Defaults to
+   *  `resolveFixCap`'s (App.tsx) own unreadable-config fallback, so a caller that never wires this
+   *  through still renders a sane cap rather than an undefined one. */
+  fixCap?: number;
   now?: Date;
 }
 
@@ -82,41 +96,48 @@ function LaneCard({
   repoUrl,
   now,
   workerBudgetUsdSoft,
+  fixCap,
 }: {
   lane: Lane;
   titles: EntityTitles;
   repoUrl?: string | undefined;
   now: Date;
   workerBudgetUsdSoft: number | null;
+  fixCap: number;
 }) {
   return (
     // #892 AC5: `.recipe-list-entry` (panels.css) is the freshly-appended-row recipe — a real
     // lane card is exactly that (mounts when a slot fills). `EmptyLaneCard` stays untouched: an
     // outline slot isn't a row appearing, it's the quiet default already there.
     <div className="lane-card panel recipe-list-entry">
+      {/* #926: the head now carries ONLY the lane id + state chip (`docs/design/mockup/
+       *  lanes-{dark,light}.png`) — the issue number moved to the body below, at the mockup's own
+       *  display scale, rather than sharing this small header row with it. */}
       <div className="lane-card-head">
         {/* #882 (729 ledger row 13, "w1 lane row unnamed"): `lane.lane` (w1/w2/w3…) drove sorting
          *  and the React key only — never rendered anywhere on the board, so a reader had no way
          *  to cross-reference a card against the same lane's own mentions elsewhere (activity feed
          *  sentences, `docs/design/mockup/lanes-{dark,light}.png`'s own per-card header). */}
-        <span className="lane-card-head-left">
-          <span className="data lane-card-name">{lane.lane}</span>
-          <EntityRef token={{ kind: "issue", number: lane.issue }} titles={titles} repoUrl={repoUrl} />
-        </span>
+        <span className="data lane-card-name">{lane.lane}</span>
         <span className="data muted lane-card-state">
-          {!KNOWN_ACTIVE_LANE_STATES.has(lane.state) && <StateGlyph ok={false} className="glyph-fail" />}
-          {laneStateCaption(lane.state)}
+          {KNOWN_ACTIVE_LANE_STATES.has(lane.state) ? (
+            <span className="lane-card-state-dot" aria-hidden="true" />
+          ) : (
+            <StateGlyph ok={false} className="glyph-fail" />
+          )}
+          {laneStateChipText(lane, fixCap)}
         </span>
+      </div>
+      <div className="lane-card-issue">
+        <DropletGlyph className="lane-card-issue-glyph" />
+        <EntityRef token={{ kind: "issue", number: lane.issue }} titles={titles} repoUrl={repoUrl} />
       </div>
       {lane.pr !== null && (
         <div className="lane-card-pr">
           <EntityRef token={{ kind: "pr", number: lane.pr, issue: lane.issue }} titles={titles} repoUrl={repoUrl} />
         </div>
       )}
-      <div className="lane-card-foot muted data">
-        <span>{formatElapsed(lane.startedAt, now)}</span>
-        <span>{laneCostText(lane)}</span>
-      </div>
+      <div className="data muted lane-card-cost">{laneCostText(lane)}</div>
       {laneHasCostToShow(lane) && (
         <CostBar
           className="lane-card-bar"
@@ -128,6 +149,9 @@ function LaneCard({
           label="lane cost"
         />
       )}
+      <div className="lane-card-foot muted data">
+        <span>{formatElapsed(lane.startedAt, now)}</span>
+      </div>
     </div>
   );
 }
@@ -148,6 +172,7 @@ export function LaneBoard({
   disconnected,
   workerBudgetUsdSoft = null,
   config = null,
+  fixCap = 2,
   now,
 }: LaneBoardProps) {
   const clock = now ?? new Date();
@@ -187,7 +212,15 @@ export function LaneBoard({
       <div className="lane-board-grid">
         {slots.map((lane, i) =>
           lane ? (
-            <LaneCard key={lane.lane} lane={lane} titles={titles} repoUrl={repoUrl} now={clock} workerBudgetUsdSoft={workerBudgetUsdSoft} />
+            <LaneCard
+              key={lane.lane}
+              lane={lane}
+              titles={titles}
+              repoUrl={repoUrl}
+              now={clock}
+              workerBudgetUsdSoft={workerBudgetUsdSoft}
+              fixCap={fixCap}
+            />
           ) : (
             // biome-ignore lint/suspicious/noArrayIndexKey: empty slots have no identity to key on
             <EmptyLaneCard key={`empty-${i}`} />

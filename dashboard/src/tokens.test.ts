@@ -9,6 +9,7 @@ import {
   checkFillTextContrast,
   checkFillTrackContrast,
   checkRustTextContrast,
+  compositeOver,
   contrastRatio,
   FILL_TOKENS,
   GROUNDS,
@@ -18,7 +19,9 @@ import {
   parseColorTokens,
   parseTokens,
   RUST_FILL_TOKEN,
+  readPanelsCss,
   readTokensCss,
+  readTrackOpacity,
   SAP_FILL_HALO_FLOOR,
   TEXT_TOKENS,
 } from "./contrast.ts";
@@ -141,6 +144,48 @@ test("AC3 (re-baselined 2026-08-17): --sap-fill vs the real .cost-bar-track comp
   assert.ok(
     !light?.pass,
     "light theme is the documented, EXPECTED exception the --sap-text outline compensates for — not a bug to fix here",
+  );
+});
+
+// #926 AC3: a lane card's own est hatch (`.lane-card-bar`) needs a stroke that clears 3:1 against
+// the track in dark theme — the shared `--hatch-stroke` (--bark) other bars use does not (well
+// under 2:1) — so `--hatch-stroke-lane` (tokens.css) exists as a `.lane-card-bar`-scoped override
+// (panels.css), never a retint of the shared token other bars still use.
+//
+// TOKEN-VALUE PIN ONLY — this is source/declaration text and luminance arithmetic, not a render
+// claim: it never observes which `<pattern>` a bar's `fill="url(#…)"` actually resolves to, so it
+// cannot by itself catch a pattern-id collision leaving the override unreachable (that was a real,
+// shipped defect — CostBar.tsx used one fixed id per prior state, so every bar's fill resolved to
+// whichever `<pattern>` came first in the DOM, regardless of what any of this cascades to). The
+// render-level proof lives in App.test.tsx's real-DOM test (resolves the ACTUAL referenced
+// pattern's computed stroke) and shots.spec.ts's real-Chromium pixel test (samples the ACTUAL
+// painted colour) — this test only pins that the VALUES those two would resolve to, if the
+// reference is correct, clear the floor.
+test("#926 AC3 token pin: --hatch-stroke-lane is declared as a --sap-fill alias that would clear 3:1 against .cost-bar-track in dark theme, without touching the shared --hatch-stroke other bars use", () => {
+  // --hatch-stroke-lane aliases --sap-fill directly rather than duplicating its hex — reading
+  // --sap-fill's own already-parsed value below is reading the alias's SOURCE (VALUE doctrine),
+  // never a hand-copied duplicate that could silently drift from it.
+  assert.match(
+    css,
+    /--hatch-stroke-lane:\s*var\(--sap-fill\);/,
+    "tokens.css must declare --hatch-stroke-lane as a var(--sap-fill) alias, never a hand-duplicated hex",
+  );
+  assert.match(css, /--hatch-stroke:\s*var\(--bark\);/, "the shared --hatch-stroke token itself must remain var(--bark), unchanged");
+
+  const panelsCss = readPanelsCss();
+  assert.match(
+    panelsCss,
+    /\.lane-card-bar\s*\{[^}]*--hatch-stroke:\s*var\(--hatch-stroke-lane\)/,
+    ".lane-card-bar must override --hatch-stroke with the lane-scoped token, scoped to this one rule",
+  );
+
+  const { dark } = parseColorTokens(css);
+  const opacity = readTrackOpacity(panelsCss);
+  const trackComposite = compositeOver(dark["--bark"]!, opacity, dark["--panel"]!);
+  const hatchRatio = contrastRatio(dark["--sap-fill"]!, trackComposite);
+  assert.ok(
+    hatchRatio >= NON_TEXT_AA,
+    `dark theme's lane hatch stroke VALUE (--sap-fill, aliased via --hatch-stroke-lane) vs .cost-bar-track must clear ${NON_TEXT_AA}:1: ${hatchRatio}`,
   );
 });
 
@@ -307,9 +352,20 @@ test("AC3 COVERAGE: every production var(--sap-fill) paint site is on record", (
   //   case (the floor alpha) instead — a different, already-covered mechanism, not a gap.
   // - panels.css .header-back-to-live (background) — #923: its own `border: 1px solid
   //   var(--sap-fill-outline)` on the SAME rule, same compensation shape as `.cost-bar-fill`.
+  // - panels.css .lane-card-state-dot (background) — #926: its own `border: 1px solid
+  //   var(--sap-fill-outline)` on the SAME rule, same compensation shape as `.header-back-to-live`.
+  // - tokens.css :root's own --hatch-stroke-lane declaration — #926 gate② finding [0]
+  //   (ac3-lane-est-hatch): EXEMPT from the --sap-fill-outline pattern, same posture as the #922
+  //   AC8 halo entries above but for a different reason — a repeating 1.5px diagonal hatch <line>
+  //   has no meaningful place for its own outline stroke the way a solid chip/pill does. This
+  //   token exists to clear DARK theme's own separate >= 3:1-vs-track floor (checked directly
+  //   below, in this same test) — light theme inherits the fill pill's already-accepted 1.15:1
+  //   shortfall, unchanged.
   const knownSites = [
     "panels.css:.cost-bar-fill:fill: var(--sap-fill);",
     "panels.css:.header-back-to-live:background: var(--sap-fill);",
+    "tokens.css::root:--hatch-stroke-lane: var(--sap-fill);",
+    "panels.css:.lane-card-state-dot:background: var(--sap-fill);",
     "panels.css:.transport-scrub::-webkit-slider-thumb:background: var(--sap-fill);",
     "panels.css:.transport-scrub::-moz-range-thumb:background: var(--sap-fill);",
     'components/ActivityFeed.tsx:const dotColor = attention ? "var(--rust)" : glyph === true ? "var(--moss)" : "var(--sap-fill)";',

@@ -569,7 +569,7 @@ test("#890: a live lane's estCostUsd flows through the real fetch pipeline into 
   const costSectionHtml = html.slice(html.indexOf('id="cost"'));
   assert.match(
     costSectionHtml,
-    /url\(#cost-bar-est-hatch\)/,
+    /url\(#[^)]*cost-bar-est-hatch\)/,
     "the cost panel's own Lanes stage bar must render hatched, independent of the header's own bar",
   );
   // #890: the header/cost-panel assertions above prove `estCostUsd` reached THOSE two
@@ -581,9 +581,105 @@ test("#890: a live lane's estCostUsd flows through the real fetch pipeline into 
   assert.match(laneSectionHtml, /class="cost-bar lane-card-bar"/, "the lane card's own CostBar must render");
   assert.match(
     laneSectionHtml,
-    /url\(#cost-bar-est-hatch\)/,
+    /url\(#[^)]*cost-bar-est-hatch\)/,
     "the lane card's own bar must render hatched, independent of the header's/cost panel's own bars",
   );
+});
+
+/** The hatch rect's own `fill="url(#…)"` attribute, parsed down to the bare pattern id — the
+ *  SAME resolution a browser performs to pick which `<pattern>` a `fill` reference paints with. */
+function hatchPatternIdFromRect(rect: Element): string {
+  const fill = rect.getAttribute("fill") ?? "";
+  const match = fill.match(/^url\(#(.+)\)$/);
+  assert.ok(match, `rect fill must be a url(#id) reference, got: ${JSON.stringify(fill)}`);
+  return match![1]!;
+}
+
+/** Resolves a hatch rect's `fill` reference to the REAL `<pattern>` element it paints from
+ *  (`getElementById`, the same document-global lookup a browser's `url(#id)` performs — SVG ids
+ *  are NOT scoped to their own subtree), then reads that pattern's own `<line>`'s computed
+ *  `stroke` — the rendered colour, not the CSS source text. A shared/duplicate pattern id would
+ *  resolve every bar's `fill` to whichever `<pattern>` happens to be FIRST in document order, so
+ *  this is the oracle that actually distinguishes "some bar has a hatch pattern somewhere" from
+ *  "THIS bar's hatch resolves to ITS OWN scoped stroke". */
+function resolvedHatchStroke(rect: Element): string {
+  const patternId = hatchPatternIdFromRect(rect);
+  const pattern = document.getElementById(patternId);
+  assert.ok(pattern, `fill="url(#${patternId})" must resolve to a real element with that id`);
+  const line = pattern?.querySelector("line");
+  assert.ok(line, "the resolved pattern must contain its own hatch <line>");
+  return getComputedStyle(line as Element).stroke.toUpperCase();
+}
+
+// #926 AC3 (rendered oracle): a fixed, shared pattern id on every `<CostBar>` — every instance
+// mounting its own `<pattern id="cost-bar-est-hatch">`, referenced via
+// `fill="url(#cost-bar-est-hatch)"` — is a document-global reference, so it resolves every bar's
+// hatch to the FIRST such id in the DOM (the header spend meter's, which precedes the lane
+// board), leaving a lane's own `--hatch-stroke-lane` override unreachable; a CSS-source
+// regex/luminance check alone can't catch this, since it never observes which `<pattern>` a
+// `fill` reference actually resolves to. Mounted with the REAL fetch pipeline + REAL
+// tokens.css/panels.css cascade (`mountLiveAppWithCascade`), at 1440, dark theme (this suite's
+// default, no `data-theme` override) — proving per-instance (`useId()`) pattern ids actually work
+// by resolving each bar's `fill` reference to its OWN `<pattern>` and reading that pattern's own
+// rendered stroke, not the source token declaration.
+test("#926 AC3: the lane card's own est hatch resolves ITS OWN --hatch-stroke-lane (--sap-fill), independent of the header meter's own --hatch-stroke (--bark), because each bar's fill reference now resolves to its own pattern", async () => {
+  const { dark: darkTokens } = parseColorTokens(tokensCss924);
+  const { container, cleanup } = await mountLiveAppWithCascade({
+    "/api/loop/state": {
+      status: 200,
+      body: {
+        ...LOOP_STATE_OK,
+        spend: { todayUsd: 10.4, dailyBudgetUsd: 100, runUsd: null, runBudgetUsd: null, byModel: [] },
+        lanes: {
+          max: 1,
+          items: [
+            {
+              lane: "w1",
+              issue: 90,
+              state: "running",
+              pr: null,
+              startedAt: "2026-08-14T00:00:00Z",
+              endedAt: null,
+              costUsd: null,
+              estCostUsd: 2.2,
+              contextTokens: null,
+              tokenComposition: null,
+            },
+          ],
+        },
+      },
+    },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  try {
+    // The est rect is the only rect on either bar carrying an explicit `fill` attribute — the
+    // settled pill (`.cost-bar-fill`) is coloured entirely by its CSS class, never an inline fill.
+    const headerRect = container.querySelector("svg.spend-meter-bar rect[fill]");
+    assert.ok(headerRect, "the header meter's own hatch rect must render (spend estUsd > 0 in this fixture)");
+    const laneRect = container.querySelector("svg.lane-card-bar rect[fill]");
+    assert.ok(laneRect, "the lane card's own hatch rect must render (est-only lane in this fixture)");
+
+    const headerPatternId = hatchPatternIdFromRect(headerRect as Element);
+    const lanePatternId = hatchPatternIdFromRect(laneRect as Element);
+    assert.notEqual(
+      headerPatternId,
+      lanePatternId,
+      "each CostBar instance must mint its own pattern id — a shared id resolves both bars' fill references to the same first-in-DOM pattern",
+    );
+
+    assert.equal(
+      resolvedHatchStroke(headerRect as Element),
+      darkTokens["--bark"],
+      "the header meter's hatch must keep resolving the SHARED --hatch-stroke (--bark) — the lane override must never leak into it",
+    );
+    assert.equal(
+      resolvedHatchStroke(laneRect as Element),
+      darkTokens["--sap-fill"],
+      "the lane card's own hatch must resolve the LANE-SCOPED --hatch-stroke-lane (--sap-fill) — a stale shared id would read --bark here instead, exactly the defect this test catches",
+    );
+  } finally {
+    await cleanup();
+  }
 });
 
 // #890: a self-scaled `max` (settledUsd + estUsd) draws every positive lane spend as a
@@ -2890,42 +2986,88 @@ test("#897 AC3: the hero's ring count reaches the rendered stage through the rea
   assert.equal(html.match(/class="hero-ring"/g)?.length, 5, "one drawn ring per real merge, through the real fold");
 });
 
-// ── #897 AC5: the lane board / activity feed row uses the mockup's full-width split ─────────
+// ── #926 AC1: lanes and activity each claim their own full-width .stack row, lanes first ───────
+// (Q3 owner ruling — supersedes #897's shared two-column `.lane-activity-row` row.)
 
-test("#897 AC5: the lane board / activity feed pair renders inside its own full-row-spanning wrapper, not loose siblings sharing .stack's outer column template", () => {
+test("#926 AC1: the lane board and activity feed each render as .stack's direct children, lanes immediately before activity", () => {
   const html = renderToStaticMarkup(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       {appContent(minimalAppViewModel())}
     </QueryClientProvider>,
   );
-  const rowMatch = html.match(/<div class="lane-activity-row">([\s\S]*?)<\/div>\s*<section id="cost" class="cost-strip"/);
-  assert.ok(rowMatch, "LaneBoard/ActivityFeed must render inside a `.lane-activity-row` wrapper, immediately before the cost strip");
+  // No `.lane-activity-row` (or any other) wrapper between them and `.stack` any more — the lane
+  // board (or its `LiveOnly` replay placeholder) must be followed directly by the activity feed,
+  // which itself is followed directly by the cost strip.
   assert.match(
-    rowMatch![1] as string,
-    /class="panel live-only"|class="lane-board-grid"/,
-    "the wrapper carries the lane board (or its live-only placeholder)",
+    html,
+    /(?:class="panel lane-board"[^>]*|class="panel live-only")[\s\S]*?<section class="panel activity-feed"[\s\S]*?<section id="cost" class="cost-strip"/,
+    "lanes must render immediately before activity, immediately before the cost strip — no wrapper between them",
   );
-  assert.match(rowMatch![1] as string, /class="panel activity-feed"/, "the wrapper carries the activity feed");
 });
 
-test("#897 AC5: .lane-activity-row carries its own auto-fit column template and spans the full .stack row", () => {
-  const appCss = readFileSync(new URL("./app.css", import.meta.url), "utf8");
-  // The row must span every column of `.stack`'s own outer grid — same list every other
-  // full-width module (header, hero, cost strip, …) is already on.
-  const spanRule = appCss.match(/\.stack\s*>\s*\.app-header,[\s\S]*?\{([\s\S]*?)\}/);
-  assert.ok(spanRule, ".stack's full-width span rule must exist");
-  assert.match(spanRule![0] as string, /\.stack\s*>\s*\.lane-activity-row/, ".lane-activity-row must be on the full-width span list");
-  assert.match(spanRule![1] as string, /grid-column:\s*1\s*\/\s*-1/);
+test("AC1 (STYLE, registerRealDom() + getComputedStyle, App at 1440 with a real lane rendered): .lane-board and .activity-feed each declare grid-column: 1/-1, and lanes precedes activity in DOM order", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const laneBoard = container.querySelector("section.lane-board");
+    const activityFeed = container.querySelector("section.activity-feed");
+    assert.ok(laneBoard, ".lane-board must render — fullCoverageViewModel's fixture carries a real lane");
+    assert.ok(activityFeed, ".activity-feed must render");
+    assert.equal(getComputedStyle(laneBoard as Element).gridColumn, "1 / -1", ".lane-board's declared grid-column");
+    assert.equal(getComputedStyle(activityFeed as Element).gridColumn, "1 / -1", ".activity-feed's declared grid-column");
 
-  // Its OWN nested grid — a column template used by nothing else, so auto-fit's empty-track
-  // collapse actually applies (the App.tsx call-site comment explains why the outer `.stack`
-  // grid can't give this pair a correct collapse on its own).
-  // Anchored to a line START — never the `.stack > .lane-activity-row {` span-list selector
-  // matched just above, which shares the same trailing text but a different, unrelated rule body.
-  const ownRule = appCss.match(/\n\.lane-activity-row\s*\{([^}]*)\}/);
-  assert.ok(ownRule, ".lane-activity-row must declare its own grid");
-  assert.match(ownRule![1] as string, /display:\s*grid/);
-  assert.match(ownRule![1] as string, /grid-template-columns:\s*repeat\(auto-fit/);
+    // happy-dom has no layout engine (this AC's own scope note — per-viewport card count/width
+    // is AC2's job, proven with a real browser in shots.spec.ts), so DOM order is what stands in
+    // for "lanes above activity" here: both share `.stack`'s own document-order-driven grid flow.
+    const stackChildren = [...(container.querySelector("main.stack")?.children ?? [])];
+    const laneIndex = stackChildren.indexOf(laneBoard as Element);
+    const activityIndex = stackChildren.indexOf(activityFeed as Element);
+    assert.ok(laneIndex >= 0 && activityIndex >= 0, "both must be direct children of .stack");
+    assert.ok(laneIndex < activityIndex, "the lane board must precede the activity feed in .stack's DOM order");
+  } finally {
+    await cleanup();
+  }
+});
+
+// ── #926 AC4: fixCap reaches the rendered chip through the real API -> App -> LaneBoard wiring ──
+// gate② finding [1] (ac4-real-data-flow-uncovered): LaneBoard.test.tsx's own tests inject
+// `fixRound`/`fixCap` directly as props, which never proves App actually threads `resolveFixCap`'s
+// output down — removing `fixCap={fixCap}` from App.tsx's own <LaneBoard> call site would leave
+// those tests green (LaneBoard's own `fixCap = 2` default would silently mask the drop) while a
+// real, non-default `lanes.prFixCap` config rendered the wrong cap. This test settles a REAL
+// `/api/loop/state` fetch (renderSettledApp — the same real App -> LiveApp -> LaneBoard tree
+// #900's own wiring tests use) with a nested non-default cap (5, never the hardcoded default 2)
+// and a nonzero fixRound (3), so only the real config-to-render path can produce this exact text.
+
+test("#926 AC4: a configured non-default lanes.prFixCap and a nonzero fix round reach the rendered chip through the real /api/loop/state -> App -> LaneBoard wiring", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": {
+      status: 200,
+      body: {
+        ...LOOP_STATE_OK,
+        lanes: {
+          max: 1,
+          items: [
+            {
+              lane: "w1",
+              issue: 95,
+              state: "fixing",
+              pr: 97,
+              startedAt: "2026-01-01T00:00:00Z",
+              endedAt: null,
+              costUsd: null,
+              estCostUsd: null,
+              fixRound: 3,
+              contextTokens: null,
+              tokenComposition: null,
+            },
+          ],
+        },
+        config: { lanes: { prFixCap: 5 } },
+      },
+    },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  assert.match(html, /FIXING · ROUND 3\/5/, "the real config's non-default cap and the real lane's fixRound must both reach the chip");
 });
 
 // ── #924: one `.panel-head` recipe + one bar grammar + the --sap-text/--sap-fill split ─────────
@@ -2968,6 +3110,7 @@ function fullCoverageViewModel() {
               endedAt: null,
               costUsd: 2,
               estCostUsd: null,
+              fixRound: 0,
               contextTokens: null,
               tokenComposition: null,
             },
@@ -3267,6 +3410,52 @@ test("AC2 (pill end caps): the fill pill is a rect with rx=3 (half its own 6px h
         ".cost-bar-fill stroke-width — the light outline is a plain 1px stroke, no extra element needed",
       );
     }
+  } finally {
+    await cleanup();
+  }
+});
+
+// ── #926 AC3: the lane card's own head/body anatomy — border-bottom, chip casing, issue-number
+// scale — resolved on the real rendered cascade (STYLE doctrine), not the authored source text ──
+
+// gate② finding [0] (ac3-font-token-oracle): a partial regex match on one family name in the
+// stack (`/JetBrains Mono/`) passes even for an unrelated or misordered font-family list that
+// merely CONTAINS that substring — it never proves the resolved value IS `--font-data`'s own
+// stack. Same fix #923's own pill test already applies (`parseTokensLocal`, exact equality
+// against the real token) — read the value from its source only to prevent drift, per this
+// repo's VALUE doctrine, never re-derive it by hand.
+test("#926 AC3: .lane-card-head resolves a 1px border-bottom, and its state chip resolves uppercase --font-data", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  const fontDataStack = parseTokensLocal(tokensCss924)["--font-data"];
+  assert.ok(fontDataStack, "tokens.css must still declare --font-data for this test's own oracle");
+  try {
+    const head = container.querySelector(".lane-card-head");
+    assert.ok(head, "a real .lane-card-head must render — fullCoverageViewModel's fixture carries a real lane");
+    assert.equal(getComputedStyle(head as Element).borderBottomWidth, "1px", ".lane-card-head border-bottom-width");
+
+    const chip = container.querySelector(".lane-card-state");
+    assert.ok(chip, "a real .lane-card-state must render");
+    const chipComputed = getComputedStyle(chip as Element);
+    assert.equal(chipComputed.textTransform, "uppercase", ".lane-card-state text-transform");
+    assert.equal(
+      chipComputed.fontFamily,
+      fontDataStack,
+      ".lane-card-state font-family must resolve the COMPLETE --font-data stack, not just contain one family name",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("#926 AC3: the body's issue number resolves >= 24px, weight 600 (bold mono, EntityRef reused as-is)", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const issueNumber = container.querySelector(".lane-card-issue .entity-ref");
+    assert.ok(issueNumber, "a real .lane-card-issue .entity-ref must render");
+    const computed = getComputedStyle(issueNumber as Element);
+    const fontSizePx = Number.parseFloat(computed.fontSize);
+    assert.ok(fontSizePx >= 24, `.lane-card-issue's issue number font-size (${computed.fontSize}) must be >= 24px`);
+    assert.equal(computed.fontWeight, "600", ".lane-card-issue's issue number font-weight");
   } finally {
     await cleanup();
   }

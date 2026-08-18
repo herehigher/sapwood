@@ -19,6 +19,10 @@ export type Lane = {
   costUsd: number | null;
   /** #33 priced estimate while running; cleared to null the instant the lane stops. */
   estCostUsd: number | null;
+  /** #926: `workers.fix_rounds` — the "round n of cap" numerator for a `fixing` lane's chip
+   *  (`lanes.prFixCap` config is the denominator). 0 for a lane that has never entered a fix
+   *  round. */
+  fixRound: number;
   /** What the model saw last turn. Deliberately non-monotonic — a drop marks a compact. */
   contextTokens: number | null;
   tokenComposition: {
