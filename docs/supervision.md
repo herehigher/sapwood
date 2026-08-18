@@ -668,6 +668,13 @@ does not replay exact next-tick occupancy). This is pure supervisor-side bookkee
 no new engine machinery backs it, and none should: the per-lane reconciliation the
 engine already does is the authoritative number.
 
+The estimator itself (`parseAssistantUsageDeltas` + `estimateUsd`, #935) carries synthetic unit
+coverage in-repo; validating it against a REAL captured dogfood transcript is an operator step,
+not a repo test — real transcripts are one issue's dev-time artefacts and live in the deploy's
+own `data/fixtures/estimator/`, never this repo. Run `npx tsx scripts/estimator-replay.ts <dir>`
+from `engine/` against such a directory; it prints each file's estimate/real/signed error and
+exits non-zero if any file lands outside the adjudicated [-12%, +5%] band.
+
 ## UX dogfood harness: simulated-user supervision
 
 Everything above watches the **ENGINE** loop — dispatch, gates, budgets. This section is the

@@ -536,7 +536,11 @@ export function appContent(vm: AppViewModel) {
           items={activeOpenAttention}
           titles={activeTitles}
           repoUrl={repoUrl}
-          now={clock}
+          // #925 AC4: the SAME replay-cursor clock #895 item 1 already established for the Hero
+          // staleness caption below — never the live wall clock, which reads a `?demo` fixture
+          // recorded days/weeks ago as the SAME "Nd ago" on every row, regardless of how far apart
+          // the fixture's own events actually are, instead of the ages their spacing encodes.
+          now={mode === "replay" && replay.asOf ? new Date(replay.asOf) : clock}
           onInspect={onInspect}
           roundEscalated={activeHero.roundEscalated}
         />

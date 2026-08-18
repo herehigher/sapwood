@@ -885,6 +885,117 @@ test("#924 AC2: the pill's round caps stay inside the bar box at 0%/partial/100%
 });
 
 /**
+ * #925 AC5 — THE real measurement AC5 names ("every chip the SAME computed width, every entity
+ * ref cell the same left edge, every age box the same right edge... the longest word still fits").
+ * happy-dom (`NeedsAttention.test.tsx`'s own harness) never runs a real layout pass — confirmed
+ * directly against it: `getBoundingClientRect`/`scrollWidth`/`clientWidth` all read back
+ * hard-coded 0 on every element, real DOM or not. That suite's own "#925 AC5" test is the FAST
+ * structural guard (a CSS-Grid-determinism argument over `getComputedStyle`'s CASCADE reads, which
+ * happy-dom DOES resolve faithfully — that test's own comment makes the case for why the structural
+ * proof is sound) — it is not, and was never meant to be, a stand-in for measuring real boxes.
+ * THIS is the actual geometry oracle, run against Chromium's real layout engine at the `?demo`
+ * fixture's real rows: FIX CAP / DECISION / REVIEW SILENCE — three categories, including
+ * `ATTENTION_CATEGORY`'s own longest word, no fixture rebuild needed (leg 2's demo-fixture growth,
+ * #925 AC4, already put >=3 rows across >=3 categories on this exact page).
+ */
+test("#925 AC5 (REAL measurement, the actual geometry proof — see NeedsAttention.test.tsx's own AC5 test for the fast structural guard): every .attention-chip is the same rendered width, every entity cell shares the same left edge, every age box shares the same right edge, and REVIEW SILENCE fits inside its chip", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  const rows = page.locator(".attention-row");
+  expect(await rows.count(), "COVERAGE: the ?demo fixture must render >= 3 rows for this oracle to mean anything").toBeGreaterThanOrEqual(
+    3,
+  );
+
+  const categories = (await page.locator(".attention-chip").allTextContents()).map((t) => t.trim());
+  expect(new Set(categories).size, "COVERAGE: the rendered rows must span >= 3 distinct categories").toBeGreaterThanOrEqual(3);
+  expect(categories, "the fixture must include ATTENTION_CATEGORY's own longest word").toContain("REVIEW SILENCE");
+
+  const tolerancePx = 1;
+
+  const chipWidths = await page.locator(".attention-chip").evaluateAll((els) => els.map((el) => el.getBoundingClientRect().width));
+  const firstChipWidth = chipWidths[0]!;
+  for (const w of chipWidths) {
+    expect(
+      Math.abs(w - firstChipWidth),
+      `every .attention-chip must render at the SAME width (±${tolerancePx}px), got: ${chipWidths.join(", ")}`,
+    ).toBeLessThanOrEqual(tolerancePx);
+  }
+
+  const entityLefts = await page.locator(".attention-entity").evaluateAll((els) => els.map((el) => el.getBoundingClientRect().left));
+  const firstEntityLeft = entityLefts[0]!;
+  for (const l of entityLefts) {
+    expect(
+      Math.abs(l - firstEntityLeft),
+      `every entity cell must share the SAME left edge (±${tolerancePx}px), got: ${entityLefts.join(", ")}`,
+    ).toBeLessThanOrEqual(tolerancePx);
+  }
+
+  const ageRights = await page.locator(".attention-age").evaluateAll((els) => els.map((el) => el.getBoundingClientRect().right));
+  const firstAgeRight = ageRights[0]!;
+  for (const r of ageRights) {
+    expect(
+      Math.abs(r - firstAgeRight),
+      `every age box must share the SAME right edge (±${tolerancePx}px), got: ${ageRights.join(", ")}`,
+    ).toBeLessThanOrEqual(tolerancePx);
+  }
+
+  // The load-bearing "fit" claim: scrollWidth (the chip's own unclipped content) <= clientWidth
+  // (its rendered visible box) proves the longest real category word never overflows its
+  // fixed-width chip — a real-browser fact `white-space: nowrap` alone can't establish (nowrap
+  // only stops a SECOND line; it says nothing about whether the first one fits).
+  const longestChip = page.locator(".attention-chip", { hasText: "REVIEW SILENCE" });
+  await expect(longestChip, "the REVIEW SILENCE chip must render").toHaveCount(1);
+  const [scrollWidth, clientWidth] = await longestChip.evaluate((el) => [el.scrollWidth, el.clientWidth]);
+  expect(
+    scrollWidth,
+    `REVIEW SILENCE must fit inside its own chip: scrollWidth (${scrollWidth}px) <= clientWidth (${clientWidth}px)`,
+  ).toBeLessThanOrEqual(clientWidth);
+});
+
+/**
+ * #925 AC4 — real-Chromium companion to `NeedsAttention.test.tsx`'s own regex guard
+ * (`/^\d+[smhd]$/`, which happy-dom's zeroed layout metrics can't itself prove FITS): the
+ * emphasis box's own bold ≥40px numeral must fit inside its box, and the box itself must stay
+ * inside the panel it sits in — neither may overflow, under a real browser layout engine.
+ */
+test("#925 AC4 (REAL measurement): the emphasis age box's text fits inside the box, and the box's own right edge sits inside the needs-attention panel's content box", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  const emphasis = page.locator(".attention-age-emphasis");
+  await expect(emphasis, "exactly one row must carry the emphasis box").toHaveCount(1);
+
+  const [scrollWidth, clientWidth] = await emphasis.evaluate((el) => [el.scrollWidth, el.clientWidth]);
+  expect(
+    scrollWidth,
+    `the emphasis numeral must fit its own box: scrollWidth (${scrollWidth}px) <= clientWidth (${clientWidth}px)`,
+  ).toBeLessThanOrEqual(clientWidth);
+
+  const panel = page.locator('section[aria-label="needs attention"]');
+  const [emphasisRight, panelContentRight] = await Promise.all([
+    emphasis.evaluate((el) => el.getBoundingClientRect().right),
+    panel.evaluate((el) => {
+      const rect = el.getBoundingClientRect();
+      const paddingRight = Number.parseFloat(getComputedStyle(el).paddingRight);
+      return rect.right - paddingRight;
+    }),
+  ]);
+  expect(
+    emphasisRight,
+    `the emphasis box's own right edge (${emphasisRight}px) must sit inside the panel's content box (${panelContentRight}px) — never spill past it`,
+  ).toBeLessThanOrEqual(panelContentRight + 1);
+});
+
+/**
  * A genuine RENDERED-PIXEL sample at one page coordinate — not a geometry-box comparison (a
  * `<rect>`'s `getBoundingClientRect()` is verified directly to report the geometry-only box,
  * excluding its own stroke, so it can't itself prove whether a 1px CENTERED stroke's own 0.5px

@@ -976,6 +976,18 @@ export function attentionCategory(kind: string): string | undefined {
   return isKnownKind(kind) ? ATTENTION_CATEGORY[kind as EventKind] : undefined;
 }
 
+/** #925 (#729 owner walk, D21/D22): the three `ATTENTION_CATEGORY` values naming a review
+ *  process that couldn't reach a verdict — `NeedsAttention.tsx` colours these rows' severity bar
+ *  and chip `--sap-text` (amber) instead of the default `--rust`, mirroring
+ *  needs-attention-dark.png (REVIEW SILENCE/DISSENT chips render amber, not rust). The set lives
+ *  here, next to the taxonomy it's drawn from, so a future category addition/rename can't
+ *  silently desync the two. */
+const REVIEW_DISSENT_CHIP_CATEGORIES = new Set(["REVIEW", "REVIEW SILENCE", "DISSENT"]);
+
+export function isReviewDissentCategory(category: string): boolean {
+  return REVIEW_DISSENT_CHIP_CATEGORIES.has(category);
+}
+
 /** #891 gate① engine-agent finding [2] (ac3-dissent-counts-wrong-events): the strip's summary
  *  line ("N waiting · oldest Xd · M dissent") counts the SAME kinds this file's own
  *  `ATTENTION_CATEGORY` already classifies "DISSENT" (`review-disputed`, `review-non-convergent`

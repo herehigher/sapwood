@@ -695,52 +695,250 @@
   cursor: pointer;
 }
 
-/* ---- needs-attention strip (§3, #361) ------------------------------------- */
+/* ---- needs-attention strip (§3, #361, row anatomy #925) -------------------- */
 
+/* #925: severity bar | chip | entity ref (glyph+number+title) | reason · asks | age — every
+ * track but reason is a FIXED size so the columns line up down the whole strip (#729 owner walk:
+ * "the chip's word length currently drives the chip's width, so every column to its right shifts
+ * per row"). `--attention-chip-w` is sized to `copy.ts`'s `ATTENTION_CATEGORY`'s own longest
+ * word, "REVIEW SILENCE" (14 chars) — bump this value (and the comment) together if a longer
+ * category name is ever added; `text-transform: uppercase`/`letter-spacing` in `.attention-chip`
+ * below already only ever WIDEN a word, so shorter words always fit too. */
 .attention-list {
+  --attention-chip-w: calc(14ch + 26px);
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
 }
 
+/* #925 gate① round-3 engine-agent finding [1] (ac4-entity-clipping): the round-2 fix
+ * (`minmax(180px, max-content)` + `nowrap` + visible overflow) over-corrected — it grew the
+ * entity track to fit any title, however long, with no truncation mechanism at all, so a long
+ * title could paint across the reason column instead of stopping at its edge. The entity track is
+ * now the row's ONE flexible track (`1fr`): it consumes whatever space the reason column doesn't
+ * need, and `.attention-entity`'s own `overflow: hidden` + `text-overflow: ellipsis` (below)
+ * truncates the title exactly at that boundary — the AC's "truncated only when the reason column
+ * is actually reached, never while free space remains". The reason column keeps a non-zero floor
+ * of its own (`minmax(auto, 40%)` — `auto` = its own longest unbroken word, since `.attention-
+ * sentence` wraps rather than forcing one line) so it can never be squeezed to nothing. AC5's own
+ * "entity-ref cell same left edge" still holds regardless of either track's flex: that edge is
+ * determined entirely by the FIXED tracks before it (severity/chip), never by this column's own
+ * resolved width — see NeedsAttention.test.tsx's AC5 geometry oracle for the full argument. */
 .attention-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: var(--space-2);
+  display: grid;
+  grid-template-columns: 4px var(--attention-chip-w) 1fr minmax(auto, 40%) 96px;
+  align-items: center;
+  column-gap: var(--space-2);
+  min-height: 56px;
+  /* Longhands, not the `border-bottom: var(--hairline)` shorthand — happy-dom's CSS engine can't
+   * resolve a `color-mix()` that appears INSIDE a border shorthand (`.panel-head`'s own documented
+   * gap, above); longhands sidestep it without changing what renders. */
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+  border-bottom-color: color-mix(in srgb, var(--bark) 25%, transparent);
+  font-family: var(--font-data);
 }
 
-.attention-ts {
-  margin-left: auto;
+/* #925 gate① engine-agent finding [1] (ac4-age-box): the emphasis box's own min-height otherwise
+ * BECOMES the whole row's rendered height (CSS Grid rows shrink-to-fit their tallest cell) — a 1:1
+ * ratio, not the required "box height at most two-thirds of its row". Applied to the `<li>` only
+ * for the row NeedsAttention.tsx marks `emphasize` (never every row — that would needlessly
+ * inflate the common case).
+ *
+ * §889 AC1 (page-scroll budget, PM 2026-08-18): the mockup's ~100px row is a normalised TARGET,
+ * not AC1's own floor (`.attention-row`'s own ≥56px) — leg 2's demo fixture growing to ≥3 rows
+ * (AC4's own rebaseline) pushed `#cost`'s top edge past §889's 1800px one-scroll budget with the
+ * ORIGINAL 160px emphasis row. 90px keeps the box/row ratio (`.attention-age-emphasis`, below)
+ * comfortably under two-thirds while landing inside the target's own normalised range. */
+.attention-row-emphasis {
+  min-height: 90px;
 }
 
-/* #881: the mockup's category chip (FIX CAP/REVIEW SILENCE/CEILING/DISSENT) — one shared style
- * for every category; the taxonomy is in the label text, not a per-category color scheme. */
+/* #925: 4px, full row height, aria-hidden — colour ALWAYS mirrors the chip's own border colour
+ * (set inline, from the SAME `tone` value NeedsAttention.tsx derives once per row), never a
+ * second, independently-maintained colour so the two can't drift apart. Never the sole carrier of
+ * the category (§5) — the chip's own text is. */
+.attention-severity {
+  align-self: stretch;
+  width: 4px;
+}
+
+/* #881/#925: rust for the general escalation class, `--sap-text` for the review/dissent class
+ * (`copy.ts`'s `isReviewDissentCategory` — REVIEW/REVIEW SILENCE/DISSENT) — set inline per row
+ * from that same source, never a per-category colour hand-maintained here. The taxonomy itself
+ * still lives in the label text (§5: colour is never the sole carrier). */
 .attention-chip {
+  width: var(--attention-chip-w);
+  box-sizing: border-box;
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 2px var(--space-2);
-  border: 1px solid var(--rust);
+  /* --attention-tone-rust, not --rust — the base (never-JS-rendered) fallback stays consistent
+   * with the SAME literal token the inline per-row `tone` value (NeedsAttention.tsx) draws from. */
+  border: 1px solid var(--attention-tone-rust);
   border-radius: var(--radius-card);
-  color: var(--rust);
+  color: var(--attention-tone-rust);
   font-family: var(--font-data);
   font-size: var(--text-0);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 
-/* #881: the mockup's bordered age readout, distinguishing it from the plain muted timestamps
- * used elsewhere in the feed. */
+/* #925 gate① engine-agent finding [3]: a stable grid cell for the (optional) chip, so a row that
+ * skips it (an unrecognized event kind) still occupies column 2's fixed track — never collapses
+ * the columns after it. */
+.attention-category {
+  display: flex;
+  align-items: center;
+}
+
+/* #925 gate① round-3 engine-agent finding [1]: the truncation mechanism itself. The entity track
+ * is the row's flexible `1fr` (above) — this cell fills it, then clips its OWN overflow rather
+ * than letting a long title paint into the reason column. `min-width: 0` is required for a flex/
+ * grid *item* to shrink below its content's intrinsic width at all (the grid default is
+ * `min-width: auto`, which would defeat the ellipsis by never letting the cell get smaller than
+ * its unclipped content). */
+.attention-entity {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The glyph is a direct child now (not `EntityRef`'s own wrapper, gate① round-3 finding [0]) —
+ * ≥24px, sitting to the label's left by DOM order; `vertical-align`/`margin-right` keep it on the
+ * label's baseline with a visible gap without needing a flex container (which would break
+ * `text-overflow: ellipsis` on the cell as a whole — ellipsis only clips a block's own inline
+ * content, not separate flex-item boxes). */
+.attention-entity svg {
+  width: 24px;
+  height: 24px;
+  vertical-align: middle;
+  margin-right: var(--space-2);
+}
+
+/* The ONE styled label element — "PR #9202 — <title>" as a single string, one font-size, one
+ * baseline (gate① round-3 finding [0]: no separate, differently-sized "PR " literal or title
+ * span). `--text-1` (16px) comfortably clears the AC's ≥14px floor.
+ *
+ * #925 AC4: an unstyled `<a>` (this element is a link when `repoUrl` is set) otherwise falls
+ * back to the UA's default blue/underline — the mockup reads this ref in the row's own cream
+ * ("primary text") ink, no underline. `--attention-emphasis-text` (tokens.css), not `--sapwood`
+ * directly — the SAME resolvable-literal alias this file's own `.attention-age-emphasis` already
+ * uses for the identical "primary-text role, STYLE-testable" reason (happy-dom never evaluates
+ * `light-dark()` for a colour-typed property); reusing it here is the no-new-token path. The
+ * keyboard focus ring stays: `:focus-visible` (app.css) is a global rule, not `.entity-ref`'s own
+ * hover-only underline, so dropping `text-decoration` here never removes it. */
+.attention-entity-ref {
+  font-family: var(--font-data);
+  font-size: var(--text-1);
+  color: var(--attention-emphasis-text);
+  text-decoration: none;
+}
+
+/* #925 gate① engine-agent finding [3]: the reason column's own grid cell — holds the sentence
+ * AND the (optional) inspect button together, so App's real onInspect wiring never adds a 6th
+ * direct grid child that would auto-place the age box into a second implicit row. */
+.attention-reason {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* --attention-reason-text, not --bark-text directly — gate① engine-agent finding [0]: same
+ * light-dark()-never-evaluates-in-happy-dom gap as --attention-tone-rust/-review above, applied
+ * to this row's reason colour so an AC1 STYLE test can assert the exact winning computed value. */
+.attention-sentence {
+  min-width: 0;
+  color: var(--attention-reason-text);
+  font-family: var(--font-data);
+  font-size: var(--text-0);
+}
+
+/* #881/#925: the mockup's bordered age readout, distinguishing it from the plain muted timestamps
+ * used elsewhere in the feed. gate① engine-agent finding [1]: `white-space: nowrap` so the age
+ * text never wraps onto a second line inside its own box, at either size.
+ *
+ * §889 AC1 (PM 2026-08-18): min-height trimmed 40px -> 28px alongside `.attention-age-emphasis`'s
+ * own trim below — both stay anchored to AC2's RATIO requirement (emphasis ≥ 2× this box), never
+ * to an absolute floor of their own; §889's one-scroll budget is what set the target, not a
+ * cosmetic preference. `line-height: 1` (not the inherited `--leading-body` 1.5, `app.css`'s
+ * `body` rule) — this is a single-line numeral readout, not paragraph copy, and at 1.5 the
+ * emphasis box's real rendered height (measured directly at 1440px) overshot its own min-height by
+ * ~13px, breaking AC4's box/row ratio in the actual browser even though the CSS-declared min-
+ * height values (the vitest STYLE oracle's own reach — happy-dom has no layout, `NeedsAttention.
+ * test.tsx`'s AC5 comment) still checked out. 28px + `line-height: 1` comfortably clears this box's
+ * own content (16px `--text-1` line + padding + hairline border, no inherited leading to inflate
+ * it further).
+ *
+ * §889 AC1 follow-up (found by `shots.spec.ts`'s own real AC5 measurement, not the vitest guard):
+ * this box used to also carry an `.attention-ts` class (`margin-left: auto`) — a leftover from
+ * before the row was a fixed-track CSS Grid. An `auto` margin on an auto-width box takes over its
+ * own sizing (shrink-to-fit) INSTEAD of the grid's default `justify-items: stretch`, and when
+ * content is narrower than the 96px age track that shrink-fit box still ends up flush against the
+ * track's right edge — indistinguishable from stretch by eye. But once the emphasis box's bold
+ * numeral (42px) made its content WIDER than the 96px track, the same auto margin resolved to 0
+ * (no free space to absorb) and the box overflowed the track by its own excess width entirely
+ * rightward (measured: 75px past the row's right edge at 1440px) — the exact defect the real
+ * Playwright AC5 spec exists to catch and the vitest structural guard, reading only CSS-declared
+ * values, structurally cannot. Removed; the grid's own default stretch now sizes this box (and the
+ * emphasis variant) to the full 96px track on every row, which is what AC5's "same right edge"
+ * actually requires. */
 .attention-age {
   border: var(--hairline);
   border-radius: var(--radius-card);
   padding: 2px var(--space-2);
+  min-height: 28px;
+  font-size: var(--text-1);
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+
+/* #925 AC2 / gate① engine-agent finding [1]: the row carrying the fold's greatest age — ≥2×
+ * `.attention-age`'s own base (ratio-anchored, not absolute — see that rule's own comment), a
+ * heavier border, and the primary-text ("cream") role instead of the muted `--bark-text`/
+ * `--hairline` this element's `.muted` class would otherwise still carry — the mockup's oldest-age
+ * box reads in the SAME bright ink as the row's own text, not a dimmed one.
+ *
+ * §889 AC1 (PM 2026-08-18): min-height 100px -> 58px, font-size 48px -> 42px — `.attention-row-
+ * emphasis`'s own 90px target (that rule's comment) needs this box at <= 60px (2/3 · 90) to clear
+ * AC4's "box ≤ 2/3 of row"; 58px leaves 2px of margin, MEASURED at 1440px (Playwright, not
+ * happy-dom's declared-value echo) with `.attention-age`'s own `line-height: 1` override in place
+ * — inheriting `app.css`'s body-wide `--leading-body` (1.5) here would have put this box's real
+ * content height at ~71px, past the 60px ceiling, even though the CSS-declared 58px alone reads
+ * fine. 42px stays comfortably over AC4's own ≥40px bold-numeral floor and over AC2's
+ * ≥2×-the-base-font-size ratio (2 × 16px = 32px). `--attention-
+ * emphasis-text` (tokens.css), not `--sapwood` directly — the SAME happy-dom light-dark()-never-
+ * resolves gap `--attention-tone-rust`/`-review`/`--attention-reason-text` above already document,
+ * applied here so a STYLE test can assert the exact winning colour instead of a `.muted`-inherited
+ * one. Literal min-height/font-size values, not `calc(28px * 2)`/`calc(var(--text-1) * 2.625)` —
+ * happy-dom's `getComputedStyle` never resolves a `calc()`, it echoes the unresolved expression
+ * text back (confirmed directly; same family as this file's other documented happy-dom gaps),
+ * which would make the AC2 STYLE test's own height/font-size floor unreadable. Keep both pairs
+ * (here and `.attention-age`'s own base rule) in sync by hand if either changes. */
+.attention-age-emphasis {
+  min-height: 58px;
+  font-size: 42px;
+  font-weight: 700;
+  color: var(--attention-emphasis-text);
+  border-width: 2px;
+  border-style: solid;
+  border-color: var(--attention-emphasis-text);
 }
 
 /* AC7 (#861): a sibling control next to the sentence's own GitHub anchor, never nested inside
  * it — its own hit target and accessible name. */
 .attention-inspect {
+  flex-shrink: 0;
   background: var(--panel);
   border: var(--hairline);
   border-radius: var(--radius-card);

@@ -43,6 +43,13 @@ a selector miss. Rows 12–13 below are re-audited against these real captures; 
 audited structurally against the dark baseline's layout intent, never pixel colors. No phantom
 light baseline is invented, and the light column is not skipped.
 
+**Split-remainder disposition (#930).** A row dispositioned "fix, split" must name which
+visible-minimum item the umbrella issue landing this ledger update *itself* moved this round,
+distinct from the remainder handed to the split-off sub-issue(s) — "split" is not a synonym for
+"nothing here changed". Row 12 is the worked example: #882 itself closed the lane-board capture
+tooling gap (the visible-minimum item, enabling the real-capture re-audit this row records),
+while the ON HOLD chip and the title-text/RECENT-row/idle-strip remainder went to #906/#910.
+
 ## Deviation ledger
 
 | # | Module | Element | Baseline intent | Current state | Disposition |
