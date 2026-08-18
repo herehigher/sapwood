@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { LoopEvent } from "../api/types.ts";
 import { parseColorTokens as parseColorTokensLocal } from "../contrast.ts";
+import { ATTENTION_CATEGORY } from "../copy.ts";
 import { toDomainEvent } from "../domain-event.ts";
 import { foldOpenAttention } from "../entities.ts";
 import { foldEvents, initialHeroState } from "../hero/state.ts";
@@ -48,6 +49,33 @@ test("#924 AC1: the populated strip's head carries .panel-head, with the summary
   assert.match(
     html,
     /<div class="attention-header panel-head"><h2>needs attention<\/h2><span class="muted data attention-summary panel-head-stat">/,
+  );
+});
+
+// ── #925 gate① round-3 engine-agent finding [0] (ac4-entity-composition): the glyph precedes ONE
+// uniformly-styled element carrying the COMPLETE "PR #NNN — title" string — never a "PR " literal
+// or a title span composed as a separate sibling outside it (each would then escape the entity
+// style, the exact defect the finding named — `entity.textContent` equality alone can't detect it,
+// since text-content concatenation is identical either way; this asserts the actual markup shape).
+
+test('gate① round-3 finding "ac4-entity-composition": the entity cell is exactly [glyph, ONE .attention-entity-ref element] — no sibling "PR " text or separate title span', () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
+  const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} />);
+  assert.match(
+    html,
+    /<span class="attention-entity"><svg[^>]*>[\s\S]*?<\/svg><span class="attention-entity-ref data">PR #9202 — fix rounding<\/span><\/span>/,
+    "the glyph must be followed by exactly one .attention-entity-ref carrying the full composed string, nothing else",
+  );
+});
+
+test('gate① round-3 finding "ac4-entity-composition": with a repoUrl, the SAME single composed string renders inside the anchor, not split around it', () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
+  const html = renderToStaticMarkup(
+    <NeedsAttention items={[event]} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} repoUrl="https://github.com/o/r" />,
+  );
+  assert.match(
+    html,
+    /<span class="attention-entity"><svg[^>]*>[\s\S]*?<\/svg><a class="attention-entity-ref data" href="https:\/\/github\.com\/o\/r\/pull\/9202"[^>]*>PR #9202 — fix rounding<\/a><\/span>/,
   );
 });
 
@@ -247,12 +275,19 @@ test("real DOM: the attention-age trigger is Tab-reachable and its tooltip (the 
 
 const tokensCssRow = readFileSync(new URL("../tokens.css", import.meta.url), "utf8");
 const panelsCssRow = readFileSync(new URL("../panels.css", import.meta.url), "utf8");
+const heroCssRow = readFileSync(new URL("../hero/hero.css", import.meta.url), "utf8");
+// #925 gate① round-3 engine-agent finding [3] (ac5-layout-not-measured): mounting only
+// tokens.css+panels.css let an app.css rule this row also depends on go untested. Full production
+// order (tokens → panels → hero → app, app.css's own `@import` order — same posture App.test.tsx's
+// own `mountAppWithCascade` already takes); `@import` lines resolve under Vite's bundler only, so
+// they're stripped the same way that helper strips them for happy-dom's plain <style> injection.
+const appCssRow = readFileSync(new URL("../app.css", import.meta.url), "utf8").replace(/^@import.*$/gm, "");
 
-/** Real DOM, real tokens.css + panels.css cascade — every #925 assertion below is a computed-
- *  style claim (STYLE doctrine), never a stand-in read of the CSS source text. */
+/** Real DOM, FULL production cascade (tokens → panels → hero → app) — every #925 assertion below
+ *  is a computed-style claim (STYLE doctrine), never a stand-in read of the CSS source text. */
 async function mountWithCascade(element: React.ReactElement) {
   const style = document.createElement("style");
-  style.textContent = `${tokensCssRow}\n${panelsCssRow}`;
+  style.textContent = `${tokensCssRow}\n${panelsCssRow}\n${heroCssRow}\n${appCssRow}`;
   document.head.appendChild(style);
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -373,12 +408,39 @@ test("#925 AC3: a DECISION row (--rust tone) still names its category in the chi
   assert.match(html, /class="attention-severity" aria-hidden="true"/);
 });
 
-// ── #925 AC5: fixed chip/entity/age tracks — COVERAGE over every rendered row ────────────────
+// ── #925 AC5: fixed chip/entity/age tracks — geometry oracle, COVERAGE over every rendered row ──
 
-test("#925 AC5: every .attention-chip shares the SAME computed width, every entity-ref cell the same left edge, every age box the same right edge — across the longest and shortest category words", async () => {
+/**
+ * #925 gate① round-3 engine-agent finding [3] (ac5-layout-not-measured): happy-dom never runs a
+ * real layout pass — confirmed directly against this exact harness (`GlobalRegistrator`,
+ * happy-dom 20.11.2): `getBoundingClientRect`/`offsetLeft`/`scrollWidth`/`clientWidth` all read
+ * back hard-coded zero on every element, real DOM or not. There is no box-metric read this test
+ * runner can perform — adding one would mean a second, browser-backed test harness (Playwright/a
+ * real headless browser) for one file, which is new machinery this fix intentionally avoids.
+ *
+ * What happy-dom DOES resolve faithfully is the CASCADE: which declaration wins, verbatim, on
+ * every element. That is provably sufficient here, not a fallback: CSS Grid's column-sizing
+ * algorithm is DETERMINISTIC — a track's start/end offset depends only on the tracks strictly
+ * before it, never on that track's own or a later track's content. `.attention-row`'s template is
+ * `4px | <chip, fixed> | <entity, 1fr> | <reason, minmax(auto,40%)> | <age, 96px fixed>`:
+ *   - the entity cell's LEFT edge depends only on the severity (4px) and chip tracks, both fixed,
+ *     literal, and — proven below — IDENTICAL across every row's own template string. Two rows
+ *     sharing that identical prefix cannot start their entity cell at different x-offsets in any
+ *     real layout engine, regardless of how the entity/reason split resolves afterward.
+ *   - the age box's RIGHT edge is the row's own right edge, because age is the LAST track and a
+ *     fixed 96px (never `fr`/`%`/`auto`) — it never participates in free-space distribution, so
+ *     its right edge is always exactly 96px + the row's own padding/border in from the row's own
+ *     right edge, identical for every row at the same container width.
+ *   - the chip's own width is the SAME shared, non-`auto`, non-computed CSS custom property on
+ *     every row (never sized off that row's own category word).
+ * This is a stronger claim than a single pixel snapshot would be: it holds for every possible row
+ * width, not just the one this test happens to mount at, and geometric equality across rows never
+ * demanded anything about a single row's absolute pixel window in the first place.
+ */
+test("#925 AC5: geometry oracle — chip width, entity-cell left edge, and age-box right edge are all fixed-track invariants, plus the longest category word structurally fits its chip", async () => {
   // Three categories spanning ATTENTION_CATEGORY's own extremes: "REVIEW SILENCE" (the longest
-  // word, 14 chars) and "CI"/"ENV"-scale short words — read from the real fixture kinds, never a
-  // hand-picked pair that happens to match today's longest/shortest.
+  // word) and "CI" (the shortest) — read from the real fixture kinds, never a hand-picked pair
+  // that happens to match today's longest/shortest.
   const items = [
     toDomainEvent(wire(1, "2026-08-05T00:00:00.000Z", "review-silence-escalated", { pr: 100, issue: 1, silenceSec: 600 })),
     toDomainEvent(wire(2, "2026-08-08T00:00:00.000Z", "ci-inert-escalated", { pr: 200, issue: 2, checks: [] })),
@@ -389,26 +451,26 @@ test("#925 AC5: every .attention-chip shares the SAME computed width, every enti
     const rows = [...container.querySelectorAll(".attention-row")];
     assert.equal(rows.length, 3, "COVERAGE: every rendered row must be included, not a hand-picked subset");
 
-    // happy-dom never runs a real layout pass (`getBoundingClientRect`/`clientWidth`/`scrollWidth`
-    // are all hard-coded 0 on every element, confirmed directly — there is no box-metric read this
-    // harness can perform). What it DOES resolve reliably is the CASCADE — which declaration wins,
-    // verbatim — so this proves the thing that actually GUARANTEES alignment under CSS Grid's
-    // deterministic column algorithm: every row's `.attention-row` grid-template-columns is the
-    // SAME literal, content-independent declaration (no per-row branch sizes the chip/entity/age
-    // tracks off that row's own word/title length), and `.attention-chip`'s own width is likewise
-    // one shared, non-`auto` value. Two rows sharing the same fixed tracks CANNOT render at
-    // different x-offsets in any real layout engine — this is what a browser would compute from.
     const rowTemplates = new Set(rows.map((row) => getComputedStyle(row).gridTemplateColumns));
     assert.equal(
       rowTemplates.size,
       1,
       `every .attention-row must share the identical, content-independent grid-template-columns, got: ${[...rowTemplates].join(" | ")}`,
     );
-    assert.doesNotMatch(
-      [...rowTemplates][0]!,
-      /\bauto\b/,
-      "no track before the reason column may be `auto` (content-sized) — only `1fr` (the reason column itself) may flex",
-    );
+    const template = [...rowTemplates][0]!;
+    const tracks = template.trim().split(/\s+(?![^(]*\))/); // split on top-level whitespace only, not inside minmax()/calc()
+    assert.equal(tracks.length, 5, `expected exactly 5 tracks (severity/chip/entity/reason/age), got: ${template}`);
+    const [severityTrack, chipTrack, entityTrack, reasonTrack, ageTrack] = tracks;
+
+    // Severity + chip precede the entity cell — both fixed, neither `fr`/`%`/`auto` on their own,
+    // so the entity cell's left edge is pinned by construction (the argument above).
+    assert.equal(severityTrack, "4px", "the severity bar must be a literal fixed width");
+    assert.doesNotMatch(chipTrack!, /^(auto|.*fr$)/, "the chip track must be a fixed, non-flexible size");
+    // Entity is the row's ONE flexible track — it, and only it, may consume free space.
+    assert.equal(entityTrack, "1fr", "the entity cell must be the row's sole flexible track");
+    assert.match(reasonTrack!, /^minmax\(auto,/, "the reason column keeps a content-driven floor so it can never be squeezed to nothing");
+    // Age is the LAST track and fixed — its right edge is always the row's own right edge.
+    assert.equal(ageTrack, "96px", "the age box must be a literal fixed width, and the row's trailing track");
 
     const chips = rows.map((row) => row.querySelector(".attention-chip") as HTMLElement);
     assert.ok(
@@ -424,13 +486,48 @@ test("#925 AC5: every .attention-chip shares the SAME computed width, every enti
     assert.ok(longestChip, "the REVIEW SILENCE fixture row must render its chip");
     assert.equal(getComputedStyle(longestChip as HTMLElement).whiteSpace, "nowrap");
 
-    // Both the entity-ref cell (chip/glyph tracks precede it) and the age box (the age track
-    // itself is fixed) are governed by that SAME shared, content-independent template — proven
-    // above — so their start/end x-offsets are identical across rows by construction.
+    // "the fixture's longest word still fits on one line inside the chip" — happy-dom can't
+    // measure rendered text width (above), so this proves the load-bearing DESIGN invariant
+    // instead: the chip track's own `ch` coefficient (panels.css's `--attention-chip-w: calc(Nch +
+    // 26px)`) must be sized to at least as many characters as ATTENTION_CATEGORY's OWN longest
+    // real word — read from the taxonomy itself, never a hand-copied number that can drift out of
+    // sync with a future category addition.
+    const chCoefficient = Number(chipTrack!.match(/calc\((\d+)ch/)?.[1]);
+    assert.ok(
+      Number.isFinite(chCoefficient) && chCoefficient > 0,
+      `chip track must be a \`calc(Nch + ...)\` expression, got: ${chipTrack}`,
+    );
+    const longestCategoryWord = Math.max(...Object.values(ATTENTION_CATEGORY).map((word) => word.length));
+    assert.ok(
+      chCoefficient >= longestCategoryWord,
+      `the chip's ch-width (${chCoefficient}) must cover ATTENTION_CATEGORY's own longest word ("${
+        Object.values(ATTENTION_CATEGORY).sort((a, b) => b.length - a.length)[0]
+      }", ${longestCategoryWord} chars) — a future category addition longer than this must bump the CSS constant too`,
+    );
+
+    // Both the entity-ref cell (severity/chip tracks precede it) and the age box (the age track
+    // itself is fixed and trailing) are governed by that SAME shared, content-independent
+    // template — proven above — so their left/right x-offsets are identical across rows.
     for (const row of rows) {
       assert.ok(row.querySelector(".attention-entity"), "every row must render its entity-ref cell");
       assert.ok(row.querySelector(".attention-age"), "every row must render its age box");
     }
+  } finally {
+    await cleanup();
+  }
+});
+
+// #925 gate① round-3 engine-agent finding [3]: the reason track's own `auto` minimum must stay a
+// mutation-check anchor — a track sizing regression that DROPPED the flexible split (e.g. reverting
+// both entity and reason to fixed pixel tracks) would still pass a template-equality-only check.
+test("#925 AC5 mutation-anchor: the entity track is the row's ONLY `1fr` track — asserts the flex split is exactly one track wide, not zero or two", async () => {
+  const items = [toDomainEvent(wire(1, "2026-08-05T00:00:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }))];
+  const { container, cleanup } = await mountWithCascade(<NeedsAttention items={items} titles={{}} now={NOW} />);
+  try {
+    const row = container.querySelector(".attention-row") as HTMLElement;
+    const template = getComputedStyle(row).gridTemplateColumns;
+    const frTrackCount = (template.match(/(?:^|\s)1fr(?:\s|$)/g) ?? []).length;
+    assert.equal(frTrackCount, 1, `exactly one track may be \`1fr\` (the entity cell), got ${frTrackCount} in: ${template}`);
   } finally {
     await cleanup();
   }
@@ -556,32 +653,79 @@ test('gate① finding "ac4-age-box": the emphasis box resolves --attention-empha
   }
 });
 
-// ── #925 gate① round 2 engine-agent finding "ac4-entity-clipping": the entity cell must not
-// hard-clip a long "PR #NNN — title" — it grows to fit, taking space from the reason column
-// instead of truncating. ────────────────────────────────────────────────────────────────────
+// ── #925 gate① round-3 engine-agent finding [1] (ac4-entity-clipping): the round-2 fix
+// over-corrected — it grew the entity track without bound and disabled clipping entirely, so a
+// long title could paint across the reason column instead of stopping at its edge. The title must
+// consume free space while there is any, and truncate via CSS ellipsis exactly once the reason
+// column's own track is reached — never earlier (a short title), never by JS string-slicing. ────
 
-test('gate① finding "ac4-entity-clipping": the entity cell no longer clips/ellipsis-truncates, and its grid track can grow past the old fixed 280px', async () => {
+test('gate① round-3 finding "ac4-entity-clipping": a long title truncates via CSS ellipsis, the DOM always keeps the FULL text, and the reason column keeps its own non-zero floor', async () => {
   const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
-  const longTitle = "a substantially long PR title meant to exceed the old fixed 280px entity column width by a wide margin";
+  const longTitle = "a substantially long PR title meant to exceed the entity column's own available space by a wide margin";
   const { container, cleanup } = await mountWithCascade(
     <NeedsAttention items={[event]} titles={{ 9102: { prTitle: longTitle } }} now={NOW} />,
   );
   try {
     const entity = container.querySelector(".attention-entity") as HTMLElement;
     assert.ok(entity, "the entity cell must render");
-    assert.equal(entity.textContent, `PR #9202 — ${longTitle}`, "the full title must render, not truncated by JS");
+    assert.equal(
+      entity.textContent,
+      `PR #9202 — ${longTitle}`,
+      "the FULL title is always in the DOM — truncation is a CSS visual effect, never a JS string slice",
+    );
 
+    // The truncation mechanism itself: the entity cell clips its OWN overflow once its `1fr` track
+    // runs out of room, rather than letting a long title paint into or push out the reason column.
     const entityComputed = getComputedStyle(entity);
-    assert.notEqual(entityComputed.overflow, "hidden", "the entity cell must not hard-clip its own overflow");
-    assert.notEqual(entityComputed.textOverflow, "ellipsis", "the entity cell must not ellipsis-truncate");
-    assert.equal(entityComputed.whiteSpace, "nowrap", "still a single line — nowrap wraps, it never clips");
+    assert.equal(entityComputed.overflow, "hidden", "the entity cell must clip once its 1fr track's available space runs out");
+    assert.equal(entityComputed.textOverflow, "ellipsis", "clipped content must ellipsize, never just vanish mid-character");
+    assert.equal(entityComputed.whiteSpace, "nowrap", "still a single line — nowrap only wraps, it never itself clips");
+    assert.equal(
+      Number.parseFloat(entityComputed.minWidth),
+      0,
+      "a grid item's default min-width:auto would override the ellipsis and never let this cell shrink below its own content",
+    );
 
+    // The reason column's own `minmax(auto, 40%)` floor (panels.css) is a fixture of the row's
+    // shared, content-independent template — a long title can only consume the ENTITY track's own
+    // `1fr`, never the reason track's track FUNCTION itself, regardless of the title's length.
     const row = container.querySelector(".attention-row") as HTMLElement;
     assert.match(
       getComputedStyle(row).gridTemplateColumns,
-      /max-content/,
-      "the entity track must be content-growable (max-content), not the old fixed 280px",
+      /minmax\(auto, 40%\)/,
+      "the reason column keeps its own content-driven floor regardless of the entity title's length",
     );
+    const reason = container.querySelector(".attention-reason") as HTMLElement;
+    assert.ok(
+      reason?.textContent && reason.textContent.length > 0,
+      "the reason cell must still render its own content — never squeezed to nothing by a long title",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('gate① round-3 finding "ac4-entity-clipping": a short title renders in full under the SAME static CSS — never a JS length-conditional branch', async () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
+  const shortTitle = "fix typo";
+  const { container, cleanup } = await mountWithCascade(
+    <NeedsAttention items={[event]} titles={{ 9102: { prTitle: shortTitle } }} now={NOW} />,
+  );
+  try {
+    const entity = container.querySelector(".attention-entity") as HTMLElement;
+    assert.equal(
+      entity.textContent,
+      `PR #9202 — ${shortTitle}`,
+      "a short title renders in full — truncated only when the reason column is actually reached, never while free space remains",
+    );
+
+    // The SAME overflow/ellipsis/nowrap declarations as the long-title case above — the mechanism
+    // is passive CSS that only visually activates once content exceeds the resolved track width;
+    // NeedsAttention.tsx has no title-length branch that would need its own, separate coverage.
+    const entityComputed = getComputedStyle(entity);
+    assert.equal(entityComputed.overflow, "hidden");
+    assert.equal(entityComputed.textOverflow, "ellipsis");
+    assert.equal(entityComputed.whiteSpace, "nowrap");
   } finally {
     await cleanup();
   }

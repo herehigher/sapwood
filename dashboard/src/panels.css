@@ -713,15 +713,22 @@
   flex-direction: column;
 }
 
-/* #925 gate① engine-agent finding [2] (ac4-entity-clipping): the entity track is `minmax(180px,
- * max-content)`, not a fixed 280px — it grows to fit "PR #9202 — <title>" instead of clipping it,
- * taking space from the reason track's `1fr` share (reason keeps a 120px floor of its own so it
- * never fully vanishes). AC5's own "entity-ref cell same left edge" still holds regardless: that
- * edge is determined entirely by the FIXED tracks before it (severity/chip), never by this
- * column's own width. */
+/* #925 gate① round-3 engine-agent finding [1] (ac4-entity-clipping): the round-2 fix
+ * (`minmax(180px, max-content)` + `nowrap` + visible overflow) over-corrected — it grew the
+ * entity track to fit any title, however long, with no truncation mechanism at all, so a long
+ * title could paint across the reason column instead of stopping at its edge. The entity track is
+ * now the row's ONE flexible track (`1fr`): it consumes whatever space the reason column doesn't
+ * need, and `.attention-entity`'s own `overflow: hidden` + `text-overflow: ellipsis` (below)
+ * truncates the title exactly at that boundary — the AC's "truncated only when the reason column
+ * is actually reached, never while free space remains". The reason column keeps a non-zero floor
+ * of its own (`minmax(auto, 40%)` — `auto` = its own longest unbroken word, since `.attention-
+ * sentence` wraps rather than forcing one line) so it can never be squeezed to nothing. AC5's own
+ * "entity-ref cell same left edge" still holds regardless of either track's flex: that edge is
+ * determined entirely by the FIXED tracks before it (severity/chip), never by this column's own
+ * resolved width — see NeedsAttention.test.tsx's AC5 geometry oracle for the full argument. */
 .attention-row {
   display: grid;
-  grid-template-columns: 4px var(--attention-chip-w) minmax(180px, max-content) minmax(120px, 1fr) 96px;
+  grid-template-columns: 4px var(--attention-chip-w) 1fr minmax(auto, 40%) 96px;
   align-items: center;
   column-gap: var(--space-2);
   min-height: 56px;
@@ -789,27 +796,37 @@
   align-items: center;
 }
 
-/* gate① engine-agent finding [2]: no `overflow: hidden`/`text-overflow: ellipsis` here any more —
- * the grid track itself (above) now grows to fit the content instead of clipping it. Still a
- * single line: `nowrap` only wraps to a second line, it never clips. */
+/* #925 gate① round-3 engine-agent finding [1]: the truncation mechanism itself. The entity track
+ * is the row's flexible `1fr` (above) — this cell fills it, then clips its OWN overflow rather
+ * than letting a long title paint into the reason column. `min-width: 0` is required for a flex/
+ * grid *item* to shrink below its content's intrinsic width at all (the grid default is
+ * `min-width: auto`, which would defeat the ellipsis by never letting the cell get smaller than
+ * its unclipped content). */
 .attention-entity {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* Scoped override, not a change to `.entity-ref` itself — that class also renders at the feed's
- * small inline scale elsewhere (lane cards, activity feed); only this row's own cell needs the
- * mockup's ≥24px glyph / ≥14px mono number. */
-.attention-entity .entity-ref {
-  font-size: var(--text-1);
-}
-
-.attention-entity .entity-ref svg {
+/* The glyph is a direct child now (not `EntityRef`'s own wrapper, gate① round-3 finding [0]) —
+ * ≥24px, sitting to the label's left by DOM order; `vertical-align`/`margin-right` keep it on the
+ * label's baseline with a visible gap without needing a flex container (which would break
+ * `text-overflow: ellipsis` on the cell as a whole — ellipsis only clips a block's own inline
+ * content, not separate flex-item boxes). */
+.attention-entity svg {
   width: 24px;
   height: 24px;
+  vertical-align: middle;
+  margin-right: var(--space-2);
 }
 
-.attention-entity-title {
-  color: var(--sapwood);
+/* The ONE styled label element — "PR #9202 — <title>" as a single string, one font-size, one
+ * baseline (gate① round-3 finding [0]: no separate, differently-sized "PR " literal or title
+ * span). `--text-1` (16px) comfortably clears the AC's ≥14px floor. */
+.attention-entity-ref {
+  font-family: var(--font-data);
+  font-size: var(--text-1);
 }
 
 /* #925 gate① engine-agent finding [3]: the reason column's own grid cell — holds the sentence

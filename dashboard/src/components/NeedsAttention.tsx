@@ -4,8 +4,9 @@ import { attentionSummary, type EntityTitles } from "../entities.ts";
 import { formatRelativeWithAbsoluteTitle } from "../format-time.ts";
 import { ATTENTION_KIND_TO_NODE, type StageNode } from "../inspector.ts";
 import { SentencePartView } from "./ActivityFeed.tsx";
-import { EntityRef, resolveEntityTitle } from "./EntityRef.tsx";
+import { resolveEntityTitle } from "./EntityRef.tsx";
 import { HintTooltip } from "./HintTooltip.tsx";
+import { IssueGlyph, PrGlyph } from "./icons.tsx";
 
 /** #925 gate① engine-agent finding [3] (sentence-prefix-dropped): the entity token drives the
  *  row's dedicated entity-ref cell ("PR #212 — title"), but the FULL original sentence still
@@ -81,6 +82,13 @@ function AttentionRow({
   const tone = category && isReviewDissentCategory(category) ? "var(--attention-tone-review)" : "var(--attention-tone-rust)";
   const token = findEntityToken(parts);
   const entityTitle = token ? resolveEntityTitle(token, titles) : undefined;
+  // #925 AC4 gate① engine-agent finding [0] (ac4-entity-composition): ONE string, "PR #9202 —
+  // <title>" (or "#9202 — <title>" for an issue token) — never a "PR " literal composed outside
+  // the styled element the way `EntityRef` alone would leave it. `EntityRef` itself stays
+  // untouched (it also renders at the feed/lane-card inline scale elsewhere, #892) — this row's
+  // own entity cell builds its own single label instead of reusing that component's narrower
+  // glyph+number-only contract.
+  const entityLabel = token ? `${token.kind === "pr" ? "PR " : ""}#${token.number}${entityTitle ? ` — ${entityTitle}` : ""}` : undefined;
   // gate① engine-agent finding [1] (ac4-age-box): `.muted` (app.css) and `.attention-age-emphasis`
   // (panels.css) carry EQUAL selector specificity, and `.muted` loads LATER in the production
   // cascade (tokens.css -> panels.css -> hero.css -> app.css) — a `.muted`-carrying emphasis box
@@ -109,14 +117,33 @@ function AttentionRow({
           </span>
         )}
       </span>
+      {/* #925 AC4 gate① engine-agent finding [0]/[1]: the glyph renders FIRST (≥24px, to the
+       *  label's left — `.attention-entity svg`, panels.css), then ONE `--font-data` ≥14px element
+       *  carrying the complete "PR #9202 — <title>" string on a single baseline — never a glyph
+       *  wrapped mid-string or a title split into its own separately-sized span. `overflow: hidden`
+       *  + `text-overflow: ellipsis` live on `.attention-entity` itself (panels.css): the title
+       *  consumes whatever free space the grid's `1fr` entity track has and truncates exactly where
+       *  the reason column's own track begins — never earlier, never by JS string-slicing. */}
       <span className="attention-entity">
-        {token && (
-          <>
-            {token.kind === "pr" ? "PR " : ""}
-            <EntityRef token={token} titles={titles} repoUrl={repoUrl} />
-            {entityTitle && <span className="attention-entity-title"> — {entityTitle}</span>}
-          </>
-        )}
+        {token &&
+          (repoUrl ? (
+            <>
+              {token.kind === "issue" ? <IssueGlyph /> : <PrGlyph />}
+              <a
+                className="attention-entity-ref data"
+                href={`${repoUrl}/${token.kind === "issue" ? "issues" : "pull"}/${token.number}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {entityLabel}
+              </a>
+            </>
+          ) : (
+            <>
+              {token.kind === "issue" ? <IssueGlyph /> : <PrGlyph />}
+              <span className="attention-entity-ref data">{entityLabel}</span>
+            </>
+          ))}
       </span>
       <span className="attention-reason">
         <span className="attention-sentence">

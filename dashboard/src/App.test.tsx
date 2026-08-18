@@ -3801,7 +3801,7 @@ test("#925 AC1: every .attention-row is >=56px with a hairline separator, its se
           `${themeAttr}: the chip's border-colour must resolve to the SAME real hex as the severity bar`,
         );
 
-        const entityRef = row.querySelector(".attention-entity .entity-ref") as HTMLElement | null;
+        const entityRef = row.querySelector(".attention-entity-ref") as HTMLElement | null;
         if (entityRef) {
           const entityComputed = getComputedStyle(entityRef);
           assert.ok(Number.parseFloat(entityComputed.fontSize) >= 14, `entity ref font-size (${entityComputed.fontSize}) must be >= 14px`);
@@ -3821,7 +3821,7 @@ test("#925 AC1: every .attention-row is >=56px with a hairline separator, its se
     }
     // Both fixture kinds carry a PR token — the `if (entityRef)` guard above would otherwise
     // silently skip its own assertion if wiring ever dropped the token through to the row.
-    assert.equal(container.querySelectorAll(".attention-entity .entity-ref").length, 2, "both rows must render an entity ref");
+    assert.equal(container.querySelectorAll(".attention-entity-ref").length, 2, "both rows must render an entity ref");
   } finally {
     document.documentElement.removeAttribute("data-theme");
     await cleanup();
