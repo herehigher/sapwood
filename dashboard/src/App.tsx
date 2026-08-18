@@ -3,7 +3,7 @@ import type { Dispatch, SetStateAction } from "react";
 import { useEffect, useRef, useState } from "react";
 import { fetchEvents } from "./api/client.ts";
 import { useDemoFixture, useEventHistory, useLoopState, useRounds, useSpendHistory } from "./api/queries.ts";
-import type { EventsPage, Round, SpendRow } from "./api/types.ts";
+import type { EventsPage, Lane, Round, SpendRow } from "./api/types.ts";
 import { BUILD_SHA, BUILD_TIME } from "./build-info.ts";
 import { ActivityFeed } from "./components/ActivityFeed.tsx";
 import { ConfigDrawer } from "./components/ConfigDrawer.tsx";
@@ -67,6 +67,57 @@ export function resolveFixCap(config: Record<string, unknown> | null | undefined
 export function resolveWorkerBudgetUsdSoft(config: Record<string, unknown> | null | undefined): number | null {
   const raw = config ? readConfigPath(config, "worker.budgetUsdSoft") : undefined;
   return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+}
+
+/** #927 (§729 remainder, D35; Q4 owner ruling): a `LaneView` phase word to the live `Lane.state`
+ *  word the SAME `laneStateChipText`/`KNOWN_ACTIVE_LANE_STATES` (`LaneBoard.tsx`) already key
+ *  off — `"writing"` is the replay fold's own word for what the live DB spells `"running"`; the
+ *  rest already agree. `"idle"`/`"failed"` map to nothing: an idle channel isn't occupied at
+ *  all, and live's own `Lane[]` never carries a `failed` row either (`activeWorkers()` excludes
+ *  it — `KNOWN_ACTIVE_LANE_STATES`'s own doc) — a replayed failed lane collapses to the same
+ *  quiet empty slot a live one would render as, until something re-occupies the channel. */
+const REPLAY_LANE_STATE: Partial<Record<HeroState["lanes"][number]["phase"], string>> = {
+  writing: "running",
+  driving: "driving",
+  fixing: "fixing",
+};
+
+/**
+ * #927 (§729 remainder, D35; Q4 owner ruling): replay/`?demo` has no live `/api/loop/state`
+ * lane snapshot — this derives the SAME `Lane[]` shape `LaneBoard` already renders straight from
+ * the shared fold's own state (`hero/state.ts`'s `LaneView`/`Droplet`), one code path for live
+ * and replay (§11 renderer contract, this issue's amendment to the boundary table). The PR ref
+ * comes from the droplet riding this lane (`Droplet.pr`, learned the moment ANY event names both
+ * issue+pr — `hero/state.ts`'s own doc), never a second source. `estCostUsd` is always `null`:
+ * §11 draws no live-telemetry overlay in replay even once `reclaim-done` recorded one
+ * (`LaneView.estCostUsd` exists for the reducer's own bookkeeping, not this card's est bar) — so
+ * `laneHasCostToShow`/`CostBar` (`LaneBoard.tsx`) never draw an est segment here, only ever the
+ * settled one once `reclaim-done` has folded.
+ */
+export function deriveReplayedLanes(hero: HeroState): Lane[] {
+  const lanes: Lane[] = [];
+  for (const l of hero.lanes) {
+    if (l.worker === null || l.issue === null) continue;
+    const state = REPLAY_LANE_STATE[l.phase];
+    if (!state) continue;
+    lanes.push({
+      lane: l.worker,
+      issue: l.issue,
+      state,
+      pr: hero.droplets.find((d) => d.lane === l.worker)?.pr ?? null,
+      // `l.startedAt` is always set once a lane is occupied — every claim path (`dispatched`,
+      // a released lane's `fix-leg-started`/`-resumed`) stamps it before this filter admits the
+      // lane at all (`hero/state.ts`'s own doc).
+      startedAt: l.startedAt ?? "",
+      endedAt: null,
+      costUsd: l.costUsd,
+      estCostUsd: null,
+      fixRound: l.fixRound,
+      contextTokens: null,
+      tokenComposition: null,
+    });
+  }
+  return lanes;
 }
 
 /**
@@ -578,23 +629,25 @@ export function appContent(vm: AppViewModel) {
          * (app.css) carry `grid-column: 1/-1` directly, same list every other full-width module is
          * already on — no nested row wrapper needed now that each module claims a whole row itself.
          *
-         * §11 boundary rule: `workers` is a mutable snapshot, not an append-only source — a lane
-         * card's state/PR/elapsed/settled-cost has no replay-reconstructed equivalent today, so
-         * the whole board is live-only rather than risk rendering a stale live snapshot under a
-         * replay cursor.
+         * #927 (§729 remainder, D35; Q4 owner ruling): the lane NARRATIVE (state/PR/settled
+         * cost/elapsed) replays from the shared fold, same as the hero and feed — only the est
+         * telemetry overlay and the live `/api/loop/state` PR-open-early hint are genuinely
+         * live-only (§11's amended boundary table), so the board itself is no longer wrapped in
+         * `<LiveOnly>` — `deriveReplayedLanes` feeds it cards straight from `activeHero` while
+         * replaying/`?demo`, and `source` drives the panel-head's REPLAYED chip.
          */}
-        <LiveOnly mode={mode}>
-          <LaneBoard
-            lanesMax={loop.data?.lanes.max ?? null}
-            lanes={loop.data?.lanes.items ?? []}
-            titles={activeTitles}
-            repoUrl={repoUrl}
-            disconnected={disconnected}
-            workerBudgetUsdSoft={resolveWorkerBudgetUsdSoft(loop.data?.config)}
-            config={loop.data?.config ?? null}
-            fixCap={fixCap}
-          />
-        </LiveOnly>
+        <LaneBoard
+          lanesMax={loop.data?.lanes.max ?? null}
+          lanes={mode === "live" ? (loop.data?.lanes.items ?? []) : deriveReplayedLanes(activeHero)}
+          titles={activeTitles}
+          repoUrl={repoUrl}
+          disconnected={disconnected}
+          workerBudgetUsdSoft={resolveWorkerBudgetUsdSoft(loop.data?.config)}
+          config={loop.data?.config ?? null}
+          fixCap={fixCap}
+          source={mode === "live" ? "live" : "replayed"}
+          now={mode === "replay" && replay.asOf ? new Date(replay.asOf) : clock}
+        />
 
         <ActivityFeed
           events={activeEvents}

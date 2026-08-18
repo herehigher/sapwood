@@ -87,6 +87,11 @@ export interface LaneBoardProps {
    *  `resolveFixCap`'s (App.tsx) own unreadable-config fallback, so a caller that never wires this
    *  through still renders a sane cap rather than an undefined one. */
   fixCap?: number;
+  /** #927 (§729 remainder, D35; Q4 owner ruling): drives the panel-head's REPLAYED chip —
+   *  `"live"` (the default, so every pre-#927 caller keeps its existing markup unchanged) renders
+   *  nothing extra; `"replayed"` (App.tsx, while replaying/`?demo`) labels the board so a reader
+   *  never mistakes a reconstructed narrative for a live snapshot. */
+  source?: "live" | "replayed";
   now?: Date;
 }
 
@@ -173,6 +178,7 @@ export function LaneBoard({
   workerBudgetUsdSoft = null,
   config = null,
   fixCap = 2,
+  source = "live",
   now,
 }: LaneBoardProps) {
   const clock = now ?? new Date();
@@ -208,6 +214,7 @@ export function LaneBoard({
       <div className="panel-head">
         <h2>lanes</h2>
         {headStat && <span className="data muted panel-head-stat">{headStat}</span>}
+        {source === "replayed" && <span className={`lane-board-replayed-chip${headStat ? "" : " panel-head-stat"}`}>REPLAYED</span>}
       </div>
       <div className="lane-board-grid">
         {slots.map((lane, i) =>

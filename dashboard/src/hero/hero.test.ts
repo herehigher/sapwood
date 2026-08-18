@@ -191,6 +191,68 @@ test("in replay the PR tag arrives with the first PR-bearing event", () => {
   assert.equal(droplet(state, 86)?.at, "checkpoint");
 });
 
+// ── #927 AC2 (§729 remainder, D35; Q4 owner ruling): the lane-narrative fields replay needs —
+// `startedAt`, settled `costUsd`/`estCostUsd`/`costEstimated` — learned ONLY from `dispatched`'s
+// own `ts` and `reclaim-done`'s own payload, never a live probe. ─────────────────────────────
+
+test("#927 AC2: dispatched stamps startedAt and clears any prior cost; reclaim-done(DRIVING) settles cost onto the SAME lane, keeping the original dispatch clock", () => {
+  const dispatchEv = ev("dispatched", { worker: "w1", issue: 94 });
+  const { state: afterDispatch } = run([dispatchEv], 1);
+  assert.equal(afterDispatch.lanes[0]?.phase, "writing");
+  assert.equal(afterDispatch.lanes[0]?.startedAt, dispatchEv.ts);
+  assert.equal(afterDispatch.lanes[0]?.costUsd, null);
+  assert.equal(afterDispatch.lanes[0]?.estCostUsd, null);
+
+  const reclaimEv = ev("reclaim-done", { worker: "w1", issue: 94, next: "DRIVING", costUsd: 1.1, estCostUsd: 1.05, costEstimated: false });
+  const { state: afterReclaim } = run([dispatchEv, reclaimEv], 1);
+  assert.equal(afterReclaim.lanes[0]?.phase, "driving");
+  assert.equal(
+    afterReclaim.lanes[0]?.startedAt,
+    dispatchEv.ts,
+    "a settled leg on the same worker keeps the ORIGINAL dispatch clock, not reclaim-done's own ts",
+  );
+  assert.equal(afterReclaim.lanes[0]?.costUsd, 1.1);
+  assert.equal(afterReclaim.lanes[0]?.estCostUsd, 1.05);
+  assert.equal(afterReclaim.lanes[0]?.costEstimated, false);
+  // `reclaim-done` here carries no `pr` field — the PR tag is still unknown at this cursor.
+  assert.equal(droplet(afterReclaim, 94)?.pr, null);
+
+  // `merged` frees the lane (matches live's own `activeWorkers()` exclusion of a lane no
+  // longer occupied) — the story continues on the droplet, not the released channel.
+  const mergedEv = ev("merged", { worker: "w1", issue: 94, pr: 96 });
+  const { state: afterMerged } = run([dispatchEv, reclaimEv, mergedEv], 1);
+  assert.equal(afterMerged.lanes[0]?.worker, null);
+  assert.equal(afterMerged.lanes[0]?.startedAt, null);
+  assert.equal(afterMerged.lanes[0]?.costUsd, null);
+  assert.equal(droplet(afterMerged, 94)?.pr, 96);
+});
+
+test("#927: a handoff frees the lane — startedAt/settled cost reset, ready for a fresh occupant", () => {
+  const { state } = run([ev("dispatched", { worker: "w1", issue: 90 }), ev("handoff", { worker: "w1", issue: 90 })], 1);
+  assert.equal(state.lanes[0]?.worker, null);
+  assert.equal(state.lanes[0]?.startedAt, null);
+  assert.equal(state.lanes[0]?.costUsd, null);
+});
+
+test("#927: est never renders while the lane is running — no reclaim-done yet means no fabricated cost figure", () => {
+  const { state } = run([ev("dispatched", { worker: "w1", issue: 90 })], 1);
+  assert.equal(state.lanes[0]?.costUsd, null);
+  assert.equal(state.lanes[0]?.estCostUsd, null);
+});
+
+test("#927: a mid-fix handoff releases the lane's clock; fix-leg-resumed on a fresh claim re-stamps it, a same-worker fix round never resets it", () => {
+  const dispatchEv = ev("dispatched", { worker: "w1", issue: 90 });
+  const reclaimEv = ev("reclaim-done", { worker: "w1", issue: 90, next: "DRIVING", costUsd: 2, estCostUsd: 1.8, costEstimated: false });
+  const fixStartEv = ev("fix-leg-started", { worker: "w1", issue: 90, fixRounds: 1 });
+  const { state: sameWorker } = run([dispatchEv, reclaimEv, fixStartEv], 1);
+  assert.equal(sameWorker.lanes[0]?.startedAt, dispatchEv.ts, "same worker, never released — original clock stands");
+
+  const handoffEv = ev("handoff", { worker: "w1", issue: 90 });
+  const resumeEv = ev("fix-leg-resumed", { worker: "w2", issue: 90, fixRounds: 1 });
+  const { state: resumed } = run([dispatchEv, reclaimEv, handoffEv, resumeEv], 1);
+  assert.equal(resumed.lanes[0]?.startedAt, resumeEv.ts, "released by the handoff — fix-leg-resumed re-stamps a fresh clock");
+});
+
 test("§6: the checkpoint pair is one waiting state — CI / Review, never gate①/gate②, never per-gate progress", () => {
   const { state } = run([
     ev("dispatched", { worker: "w1", issue: 86 }),
@@ -1666,6 +1728,10 @@ const laneAt = (channel: number, phase: LaneView["phase"] = "idle", worker: stri
   fixRound: 0,
   reason: null,
   touchedAt,
+  startedAt: null,
+  costUsd: null,
+  estCostUsd: null,
+  costEstimated: null,
 });
 
 test("#716 gate② P1-9: visibleLanes caps at lanesMax, prioritizing active lanes over idle overflow", () => {

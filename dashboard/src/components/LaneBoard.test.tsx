@@ -41,6 +41,39 @@ test("the lanes panel-head renders title-only (no stat cluster) when config is u
   assert.match(html, /<div class="panel-head"><h2>lanes<\/h2><\/div>/);
 });
 
+// #927 (§729 remainder, D35; Q4 owner ruling): the panel-head's REPLAYED chip — `source` defaults
+// to "live" so every pre-#927 caller (including the two tests above) keeps rendering unchanged.
+
+test("source defaults to live — no REPLAYED chip renders unless explicitly asked for", () => {
+  const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[]} titles={{}} />);
+  assert.doesNotMatch(html, /REPLAYED/);
+});
+
+test('source="replayed" renders the REPLAYED chip as the panel-head\'s own last child, no config stat present', () => {
+  const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[]} titles={{}} source="replayed" />);
+  assert.match(
+    html,
+    /<div class="panel-head"><h2>lanes<\/h2><span class="lane-board-replayed-chip panel-head-stat">REPLAYED<\/span><\/div>/,
+  );
+});
+
+test('source="replayed" alongside a real config stat cluster: both render, the chip following the stat', () => {
+  const html = renderToStaticMarkup(
+    <LaneBoard
+      lanesMax={1}
+      lanes={[]}
+      titles={{}}
+      source="replayed"
+      config={{ worker: { model: "opus", effort: "high" } }}
+      workerBudgetUsdSoft={10}
+    />,
+  );
+  assert.match(
+    html,
+    /<span class="data muted panel-head-stat">opus · high · soft budget \$10\.00<\/span><span class="lane-board-replayed-chip">REPLAYED<\/span>/,
+  );
+});
+
 const NOW = new Date("2026-08-06T12:00:00.000Z");
 
 const lane = (overrides: Partial<Lane> = {}): Lane => ({

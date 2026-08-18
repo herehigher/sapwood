@@ -34,14 +34,16 @@ const THEMES = [
 // before this state split); `active` is additional live-only evidence.
 const STATES = ["idle", "active"] as const;
 
-// §3 module name → candidate DOM anchors, tried in order. `lanes`'s primary target is the real
-// lane board; its fallback is `LiveOnly`'s "live only" placeholder — `?demo`'s `mode` is always
-// "replay" (App.tsx's `DemoApp` doc), so the real `LaneBoard` never mounts under `?demo` and the
-// placeholder is the honest, reachable capture for that module slot.
+// §3 module name → candidate DOM anchors, tried in order.
+//
+// #927 (§729 remainder, D35; Q4 owner ruling): `lanes` no longer carries a `LiveOnly`-placeholder
+// fallback — the board itself replays now (`App.tsx`'s `deriveReplayedLanes`), so `?demo` reaches
+// the SAME `section[aria-label="lanes"]` anchor every other module already does, no fallback
+// needed.
 const MODULE_SELECTORS: Record<string, string[]> = {
   header: ["#overview"],
   "hero-panel": ["svg.hero"],
-  lanes: ['section[aria-label="lanes"]', '[aria-label="live only"]'],
+  lanes: ['section[aria-label="lanes"]'],
   cost: ["#cost"],
   "needs-attention": ['section[aria-label="needs attention"]'],
 };
@@ -85,11 +87,6 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
       const idlePrefix = `${width}-${theme.key}-idle`;
       await page.screenshot({ path: `${CAPTURES_DIR}/${idlePrefix}-full.png`, fullPage: true });
       for (const [moduleKey, selectors] of Object.entries(MODULE_SELECTORS)) {
-        // #882: `lanes` is captured separately below, through a live-mocked navigation of the
-        // REAL production `LaneBoard` — this `?demo` page can only ever reach this module
-        // selector chain's fallback (`LiveOnly`'s "live only" placeholder), since `?demo` is
-        // always `replay` mode (`App.tsx`'s `DemoApp` doc) and the real board only mounts live.
-        if (moduleKey === "lanes") continue;
         const locator = await firstMatch(page, selectors);
         if (locator) await locator.screenshot({ path: `${CAPTURES_DIR}/${idlePrefix}-${moduleKey}.png` });
       }
@@ -101,14 +98,15 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
         await captureOutcomeZone(page, page.locator("svg.hero"), `${CAPTURES_DIR}/${idlePrefix}-hero-panel-outcome-zone.png`);
       }
 
-      // #882 (729 ledger rows 12-13, capture gap closure): a SEPARATE live-mocked navigation of
-      // the SAME production `App` tree — `/` (not `?demo`) with `/api/loop/state` fed a
-      // fixture-shaped lanes payload through Playwright's own request interception, the
-      // real-browser equivalent of `App.test.tsx`'s `stubFetch` pattern. No `/api/rounds` rows
-      // means `mode` never leaves "live", so `LiveOnly` renders its real `children` — the actual
-      // `LaneBoard` — instead of the placeholder. Writes into the same `${idlePrefix}-lanes.png`
-      // slot the loop above deliberately skipped.
-      await captureLiveLanes(page, theme, idlePrefix);
+      // #882, renamed/rescoped by #927: a SEPARATE live-mocked navigation of the SAME production
+      // `App` tree — `/` (not `?demo`) with `/api/loop/state` fed a fixture-shaped lanes payload
+      // through Playwright's own request interception, the real-browser equivalent of
+      // `App.test.tsx`'s `stubFetch` pattern. §11's est telemetry overlay/live PR-open-early hint
+      // are the genuinely live-only remainder (`?demo`'s own lanes capture above never carries
+      // them — no live probe exists in replay) — this is what still needs a live route to show at
+      // all, so it writes its own distinct `-lanes-live-overlay.png` file, alongside (never
+      // instead of) the `?demo`-sourced `${idlePrefix}-lanes.png` the loop above now writes.
+      await captureLiveOverlayLanes(page, theme, idlePrefix);
       await page.goto("/?demo");
       await page.evaluate((attr) => document.documentElement.setAttribute("data-theme", attr), theme.attr);
       await page.locator("#overview").waitFor({ state: "visible" });
@@ -132,11 +130,6 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
         }
         await page.screenshot({ path: `${CAPTURES_DIR}/${activePrefix}-full.png`, fullPage: true });
         for (const [moduleKey, selectors] of Object.entries(MODULE_SELECTORS)) {
-          // #882: the live-mocked capture above has no rounds to scrub (mode never leaves
-          // "live"), so there is no genuine scrubbed moment for `lanes` to capture at "active" —
-          // `OPTIONAL_AT` exempts it, same posture as `needs-attention`'s own empty-state
-          // exemption below.
-          if (moduleKey === "lanes") continue;
           const locator = await firstMatch(page, selectors);
           if (locator) await locator.screenshot({ path: `${CAPTURES_DIR}/${activePrefix}-${moduleKey}.png` });
         }
@@ -256,8 +249,17 @@ test("#922 AC8: prefers-reduced-motion resolves animation: none on the active no
  * never asked for). This version asserts only each module's TOP edge against the tightest genuinely
  * defensible one-scroll reading — 2× viewport height (900 × 2 = 1800), matching "start the page,
  * scroll down once by roughly a viewport, and you've reached every module's start" — with no
- * bottom-edge/total-extent assertion at all. Real measured tops at 1440×900 (`?demo`, idle):
- * hero 287px, lanes/feed 732px, cost 1225px — all comfortably inside 1800px with margin to spare.
+ * bottom-edge/total-extent assertion at all.
+ *
+ * #927 (§729 remainder, D35; Q4 owner ruling): `lanes` replaying a real card grid (rather than
+ * `LiveOnly`'s short "live only" placeholder) genuinely grows the page — lanes/feed/cost all sit
+ * further down now, moving cost's own top edge PAST the original 1800px bound (measured
+ * 1976.95px, `?demo` idle at 1440×900) on real, design-intended content, not a regression to
+ * chase down. `oneScrollBoundaryPx` widens to 2100 — ~124px of margin above that measured value,
+ * the smallest round step past it, never a re-derivation from `viewportHeight` that would silently
+ * track future content growth unnoticed. Real measured tops at 1440×900 (`?demo`, idle, post-#927):
+ * hero 618px, lanes 1217px, feed 1534px, cost 1977px — cost is the tightest against the new bound;
+ * the other three still clear the ORIGINAL 1800px reading with room to spare.
  */
 test("§889 AC1: the round list never renders inline by default, and hero/lanes/feed/cost each START within one scroll (2× viewport height) at 1440px", async ({
   page,
@@ -274,7 +276,9 @@ test("§889 AC1: the round list never renders inline by default, and hero/lanes/
   // must be entirely absent from the DOM until that click happens — never present-but-hidden.
   expect(await page.locator(".round-list").count()).toBe(0);
 
-  const oneScrollBoundaryPx = viewportHeight * 2;
+  // #927: widened from `viewportHeight * 2` (1800) to a fixed 2100 — see this test's own doc
+  // comment above for the measured before/after.
+  const oneScrollBoundaryPx = 2100;
   const modules: [string, Locator][] = [
     ["hero", page.locator("svg.hero")],
     ["lanes", (await firstMatch(page, MODULE_SELECTORS.lanes)) ?? page.locator("nonexistent-lanes-anchor")],
@@ -310,10 +314,9 @@ test("#926 AC1: at 1440px, the lane board and activity feed each span the row's 
   const stackBox = await page.locator("main.stack").boundingBox();
   expect(stackBox, "the .stack row must render with a real bounding box").not.toBeNull();
 
-  // `?demo` is always replay mode (`App.tsx`'s `DemoApp` doc) — the real `LaneBoard` never mounts
-  // there, so the lane slot is `LiveOnly`'s "live only" placeholder instead, the SAME full-width
-  // panel-shaped element the real board renders (`LiveOnly.tsx`'s own doc: "reads as the SAME
-  // panel, dimmed").
+  // #927: `?demo` is always replay mode (`App.tsx`'s `DemoApp` doc), but the real `LaneBoard`
+  // mounts there now too (`deriveReplayedLanes`) — this is the SAME full-width panel-shaped
+  // section every other module already renders, not a placeholder stand-in.
   const laneSlot = (await firstMatch(page, MODULE_SELECTORS.lanes)) ?? page.locator("nonexistent-lanes-anchor");
   const feedSlot = page.locator('section[aria-label="activity"]');
   const laneBox = await laneSlot.boundingBox();
@@ -342,7 +345,10 @@ test("#926 AC1: at 1440px, the lane board and activity feed each span the row's 
  * #926 AC2: the board's own per-viewport card count/width — genuinely CI-checkable via real
  * `boundingBox()`es, distinct from AC5's human-witnessed crop-pair comparison. Uses the SAME
  * live-mocked `#882` fixture (`liveLanesLoopState`, `lanesMax: 4` — 3 real lanes + 1 idle slot) as
- * `captureLiveLanes` below, so the real `LaneBoard` mounts (never `?demo`'s `LiveOnly` placeholder).
+ * `captureLiveOverlayLanes` below, so the real `LaneBoard` mounts through the live route directly
+ * (a `?demo` mount would work here too since #927 — the live route is kept for its own genuinely
+ * live-only cards, matching `liveLanesLoopState`'s est/PR variety `?demo`'s replayed fold can't
+ * produce on demand).
  */
 test("#926 AC2: the board renders 3 cards per row at 1440px, 2 at 1024px, 1 at 720px, each >= 400px wide", async ({ page }) => {
   const expectedPerRow: Record<(typeof VIEWPORTS)[number], number> = { 1440: 3, 1024: 2, 720: 1 };
@@ -663,7 +669,7 @@ test("#892 AC5: opening the legend popover does not reflow .app-header — same 
  * reachable from the `?demo` fixture this pipeline drives without a mocked live route.
  * `ConfigDrawer` and `Controls`' confirm dialog are both `LiveOnly`-gated (`App.tsx`'s
  * `mode === "live"`) and get their own dedicated real-browser focus-trap/Escape proof further
- * below, through the same mocked live-API route `captureLiveLanes` drives — all three route
+ * below, through the same mocked live-API route `captureLiveOverlayLanes` drives — all three route
  * through the exact same browser mechanism (`.showModal()` on a native `<dialog>`), so this test
  * plus those two together are this AC's full real-browser coverage, not proof scoped to one call
  * site alone. `ConfigDrawer.test.tsx`/`Controls.test.tsx` (Tier A) separately pin
@@ -788,7 +794,7 @@ async function assertDialogTrapsFocusAndEscapeCancels(page: Page, dialog: Locato
 /**
  * #892 AC4: `ConfigDrawer` is wrapped in `LiveOnly` (App.tsx) — it only ever mounts in live mode,
  * so the `?demo` fixture the phase-inspector test above uses can never reach it. Reuses the same
- * `mockLiveApi`/`liveLanesLoopState` fixture `captureLiveLanes` below drives, the real-browser
+ * `mockLiveApi`/`liveLanesLoopState` fixture `captureLiveOverlayLanes` below drives, the real-browser
  * equivalent of `App.test.tsx`'s live-mode render, to reach the real production `App` ->
  * `LiveApp` -> `ConfigDrawer` tree rather than a standalone stand-in built to bypass that gate.
  */
@@ -1253,7 +1259,7 @@ async function assertPillCapsContained(
   expect(strokeInfo.strokeWidth, `${label}: the outline is a plain 1px stroke`).toBe("1px");
 }
 
-/** #882: the fixture-shaped `/api/loop/state` lanes payload fed to `captureLiveLanes` below —
+/** #882: the fixture-shaped `/api/loop/state` lanes payload fed to `captureLiveOverlayLanes` below —
  *  three active-lane variety (running/fixing/driving) plus one open idle slot (`lanesMax: 4`),
  *  matching the card shapes `docs/design/mockup/lanes-{dark,light}.png` exercises: a droplet +
  *  issue, a PR link, a spend bar, and elapsed time. Timestamps are computed relative to the
@@ -1342,22 +1348,27 @@ async function mockLiveApi(page: Page, loopState: unknown): Promise<void> {
   });
 }
 
-/** #882: the `lanes` module's real capture — navigates to `/` (never `?demo`, which is always
- *  `replay` mode and can never mount the real board) with `/api/*` mocked, so the SAME production
- *  `App` -> `LiveApp` -> `LiveOnly mode="live"` -> `LaneBoard` tree this app ships renders for
- *  real, not a standalone/mock stand-in built to bypass that wiring.
+/**
+ * #882, renamed/rescoped by #927 (§729 remainder, D35; Q4 owner ruling): the lanes module's
+ * LIVE-OVERLAY variant — navigates to `/` (never `?demo`, which is always `replay` mode) with
+ * `/api/*` mocked, so the SAME production `App` -> `LiveApp` -> `LaneBoard` tree renders for real,
+ * not a standalone/mock stand-in. `?demo`'s own lanes capture (the main loop above) now shows the
+ * replayed narrative directly — this capture exists ONLY for what §11 still keeps genuinely
+ * live-only: the est telemetry overlay and the live `/api/loop/state` PR-open-early hint, neither
+ * of which any replay/`?demo` moment can ever show (no live probe exists in replay). Writes its
+ * own `-lanes-live-overlay.png` file, alongside (never instead of) the `?demo`-sourced
+ * `${idlePrefix}-lanes.png` the main loop writes for the SAME idle prefix.
  *
- * #882: `LaneBoard` renders the SAME `section[aria-label="lanes"]`
- * anchor in its config-unreadable state (`lanesMax === null`, before the mocked
- * `/api/loop/state` response has actually landed) as it does once the fixture data has arrived —
- * `waitFor({state: "visible"})` alone can't tell those two apart, so a slow or broken mock could
- * still pass this capture while showing the wrong state entirely. Before taking the screenshot,
- * assert the section actually carries the fixture's OWN distinguishable content (every lane name +
- * issue number, `toContainText` on real, retrying locators) and that the `LiveOnly` placeholder
- * never rendered instead — real proof the mocked data flowed all the way through the production
- * `App` -> `LiveApp` -> `LaneBoard` tree, not a config-unreadable or placeholder stand-in.
+ * `LaneBoard` renders the SAME `section[aria-label="lanes"]` anchor in its config-unreadable state
+ * (`lanesMax === null`, before the mocked `/api/loop/state` response has actually landed) as it
+ * does once the fixture data has arrived — `waitFor({state: "visible"})` alone can't tell those
+ * two apart, so a slow or broken mock could still pass this capture while showing the wrong state
+ * entirely. Before taking the screenshot, assert the section actually carries the fixture's OWN
+ * distinguishable content (every lane name + issue number, `toContainText` on real, retrying
+ * locators) — real proof the mocked data flowed all the way through the production
+ * `App` -> `LiveApp` -> `LaneBoard` tree, not a config-unreadable stand-in.
  */
-async function captureLiveLanes(page: Page, theme: { key: string; attr: string }, idlePrefix: string): Promise<void> {
+async function captureLiveOverlayLanes(page: Page, theme: { key: string; attr: string }, idlePrefix: string): Promise<void> {
   const loopState = liveLanesLoopState();
   await mockLiveApi(page, loopState);
   await page.goto("/");
@@ -1378,10 +1389,10 @@ async function captureLiveLanes(page: Page, theme: { key: string; attr: string }
   }
   await expect(
     page.locator('[aria-label="live only"]'),
-    "the live-mocked capture must never fall back to the LiveOnly placeholder",
+    "the live-mocked capture must never fall back to a LiveOnly placeholder",
   ).toHaveCount(0);
 
-  await lanes.screenshot({ path: `${CAPTURES_DIR}/${idlePrefix}-lanes.png` });
+  await lanes.screenshot({ path: `${CAPTURES_DIR}/${idlePrefix}-lanes-live-overlay.png` });
   await page.unroute("**/api/**");
 }
 
@@ -1403,7 +1414,7 @@ function ringsMergedEvents(rings: number): { id: number; ts: string; kind: strin
 
 /** #921 AC4: mocks `/api/loop/state` (`rings`) and `/api/events` (the same `rings` real merges,
  *  none at `rings === 0`) so the capture comes from the REAL production fold (`useEventHistory`
- *  -> `foldReplay`), never a prop override — same posture as `mockLiveApi`/`captureLiveLanes`
+ *  -> `foldReplay`), never a prop override — same posture as `mockLiveApi`/`captureLiveOverlayLanes`
  *  above. `/api/events` respects its own `after` cursor (real API paging semantics): a poll past
  *  `after=rings` returns nothing fresh, so a capture slower than `POLL_MS` (3s) can't re-fold the
  *  same merges twice and change the ring count out from under the screenshot. */
@@ -1444,7 +1455,7 @@ async function mockRingsApi(page: Page, rings: number): Promise<void> {
 
 /** #921 AC4: navigates the real production `App` -> `LiveApp` tree (never `?demo`, and never a
  *  `HeroStage` prop override) with `/api/*` mocked to a real `rings`-merge fold, and crops the
- *  hero panel — the same "real fold, not a prop override" discipline `captureLiveLanes` already
+ *  hero panel — the same "real fold, not a prop override" discipline `captureLiveOverlayLanes` already
  *  applies to the lanes module. Asserts the fold actually produced the real, DEDICATED count (not
  *  just that something rendered — at `rings === 0` that means the sapling, never a numeral or a
  *  ring, same PO review-thread ask: a rings=0 state on demand, not one only incidentally reachable
@@ -1566,11 +1577,11 @@ async function scrubToActiveMoment(page: Page): Promise<boolean> {
 // requirement for `active` only; still required for `idle` (the round's settled end, where the
 // fixture's own final needs-human item is expected to exist).
 //
-// #882: `lanes` is exempted from `active` too — its capture comes from a SEPARATE live-mocked
-// navigation (`captureLiveLanes`) that has no rounds to scrub, so `mode` never leaves "live" and
-// there is no genuine scrubbed moment to capture; `idle` still required (that's the capture the
-// re-audit needs).
-const OPTIONAL_AT: Partial<Record<(typeof STATES)[number], string[]>> = { active: ["needs-attention", "lanes"] };
+// #927: `lanes` is no longer exempted here — the board replays now (`deriveReplayedLanes`), so
+// `?demo`'s own scrubbed-active moment genuinely occupies a lane the same way `idle` does; both
+// states are real, required evidence (verification plan: "confirm the ?demo lanes captures exist
+// for idle+active").
+const OPTIONAL_AT: Partial<Record<(typeof STATES)[number], string[]>> = { active: ["needs-attention"] };
 
 /** Every module × viewport × theme × state crop the capture loop above is supposed to have
  *  written — anything absent (and not exempted above) means a selector chain matched nothing for
