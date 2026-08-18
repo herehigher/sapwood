@@ -191,6 +191,29 @@ export function findLastClosedRound(rounds: readonly Round[]): Round | null {
 }
 
 /**
+ * #934: the activity feed's LIVE round-in-view — the open round, or (idle/standby, nothing open)
+ * the last CLOSED round, matching whatever the header's round navigator's own LIVE slot already
+ * falls back to (`RoundNavigator.tsx`'s `roundNavLabel`) rather than a second, independently
+ * decided round pick. `null` only once no round exists at all (fresh DB).
+ */
+export function resolveLiveFeedRound(rounds: readonly Round[], liveRoundId: number | null): Round | null {
+  if (liveRoundId !== null) return rounds.find((r) => r.roundId === liveRoundId) ?? null;
+  return findLastClosedRound(rounds);
+}
+
+/**
+ * #934: REPLAY/`?demo`'s as-of-cursor filter over a round's own FULL log (`replay.roundEvents`/
+ * `useDemoReplay`'s `roundEvents` — never the bounded `state.events` fold that `reducer.ts`'s
+ * `foldReplay` caps at `DEFAULT_EVENT_WINDOW`, exactly the "bounded live tail" the issue's own
+ * "What" bans reading the feed from, since it could silently truncate a round longer than that
+ * window). `cursorId` is `player.ts`'s own "last folded event's id, 0 before anything has folded"
+ * — 0 means nothing is visible yet, not "no ceiling".
+ */
+export function eventsUpToCursor(events: readonly DomainEvent[], cursorId: number): DomainEvent[] {
+  return cursorId <= 0 ? [] : events.filter((e) => e.id <= cursorId);
+}
+
+/**
  * #880: the async body behind `useLastClosedRoundCost` below, factored out the same way
  * `loadInspectorRoundEvents` already is — a plain function a test can call directly, never inline
  * `.then` logic inside an effect. Reuses `loadRoundLog` (`replay/useReplay.ts`) — the SAME
@@ -383,8 +406,8 @@ type AppViewModel = {
   setInspectorNode: Dispatch<SetStateAction<StageNode | null>>;
   inspectorArtifact: unknown;
   /** #868 gate② finding [1]: the round-scoped source for the drawer's Arch review/Verify
-   *  event-derived counts — NEVER `activeEvents` (the shared display tail: process-wide,
-   *  window-bounded, and in live mode not filtered to the open round at all). Live mode reads
+   *  event-derived counts — NEVER `resolveActiveFold`'s own `events` (the shared display tail:
+   *  process-wide, window-bounded, and in live mode not filtered to the open round at all). Live mode reads
    *  `useInspectorRoundEvents`'s own round-scoped fetch; replay/demo read `replay.roundEvents`
    *  (the selected round's already-loaded, uncapped full log) — see those two hooks' own docs. */
   inspectorEvents: DomainEvent[];
@@ -399,9 +422,18 @@ type AppViewModel = {
   replay: ReplayView;
   activeHero: HeroState;
   activeSteps: FoldStep[];
-  activeEvents: DomainEvent[];
   activeTitles: EntityTitles;
   activeOpenAttention: DomainEvent[];
+  /** #934: the activity feed's round-in-view — LIVE the open round (or the last closed one while
+   *  idle/standby, `resolveLiveFeedRound`), REPLAY/`?demo` the selected round. `null` only before
+   *  any round exists at all. */
+  feedRound: Round | null;
+  /** #934: that round's own events — LIVE the per-round fetch (`useInspectorRoundEvents`), REPLAY/
+   *  `?demo` that round's full log filtered to the replay cursor (`eventsUpToCursor`). NEVER
+   *  `resolveActiveFold`'s own `events` (the shared, process-wide, window-bounded display tail —
+   *  no other panel this function renders needs raw events at all, so that field never reaches
+   *  `appContent`). */
+  feedEvents: DomainEvent[];
   /** The header meter's LIVE spend snapshot — used only in live mode; in replay `roundSpend`
    *  below always wins (Header.tsx's own `RoundSpend`-overrides-`SpendFacts` contract). */
   spendFacts: SpendFacts | undefined;
@@ -448,9 +480,10 @@ export function appContent(vm: AppViewModel) {
     replay,
     activeHero,
     activeSteps,
-    activeEvents,
     activeTitles,
     activeOpenAttention,
+    feedRound,
+    feedEvents,
     spendFacts,
     roundSpend,
     estUsd,
@@ -597,11 +630,16 @@ export function appContent(vm: AppViewModel) {
         </LiveOnly>
 
         <ActivityFeed
-          events={activeEvents}
-          pinnedAttention={activeOpenAttention}
+          events={feedEvents}
+          round={feedRound}
           titles={activeTitles}
           repoUrl={repoUrl}
           disconnected={disconnected}
+          // #934 AC3: the SAME replay-cursor clock the needs-attention strip/Hero staleness
+          // caption already use (#925 AC4/#895 item 1) — never the live wall clock, which used to
+          // read a `?demo`/replay fixture recorded days ago as "8d ago" while the strip (bound to
+          // `replay.asOf`) read a sane "1h ago" for the same moment (PO witness 2026-08-18).
+          now={mode === "replay" && replay.asOf ? new Date(replay.asOf) : clock}
         />
 
         <CostStrip today={costToday} round={costRound} />
@@ -623,7 +661,7 @@ export function appContent(vm: AppViewModel) {
         {/* §6 phase inspector (#861) — unlike ConfigDrawer, this is NOT live-only: §6's own mode
          *  purity rule binds it to whichever round (live open, or replay cursor) is active.
          *  #868 gate② finding [1]: `events` is `inspectorEvents` (the round-scoped source), NEVER
-         *  `activeEvents` — the shared display tail, process-wide and window-bounded. */}
+         *  the shared display tail — process-wide and window-bounded. */}
         <PhaseInspectorDrawer
           node={inspectorNode}
           onClose={() => setInspectorNode(null)}
@@ -678,7 +716,6 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
   const {
     hero: activeHero,
     steps: activeSteps,
-    events: activeEvents,
     titles: activeTitles,
     openAttention: activeOpenAttention,
   } = resolveActiveFold(mode, replay.position, events, initialReplayState(lanesMax));
@@ -769,6 +806,17 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
   const inspectorLiveEvents = useInspectorRoundEvents(mode === "live" && inspectorNode !== null ? inspectorRound : null);
   const inspectorEvents = mode === "live" ? inspectorLiveEvents : replay.roundEvents;
 
+  // #934: the activity feed's round-in-view + its own events — LIVE the open round (or the last
+  // closed one while idle/standby, `resolveLiveFeedRound`) fetched fresh via the SAME per-round
+  // mechanism the inspector drawer uses (`useInspectorRoundEvents`, generic over which round —
+  // this is a second, independent call, not gated on `inspectorNode`, so the feed's divider count
+  // stays live even with the drawer closed); REPLAY/`?demo` that round's already-loaded full log
+  // filtered to the replay cursor (`eventsUpToCursor`) — never `resolveActiveFold`'s own `events`,
+  // the shared process-wide, window-bounded display tail (`ActivityFeed.tsx`'s own doc).
+  const feedRound = mode === "live" ? resolveLiveFeedRound(allRounds, loop.data?.round?.id ?? null) : selectedRound;
+  const feedLiveEvents = useInspectorRoundEvents(mode === "live" ? feedRound : null);
+  const feedEvents = mode === "live" ? feedLiveEvents : eventsUpToCursor(replay.roundEvents, replay.position?.cursorId ?? 0);
+
   return appContent({
     clock,
     loop,
@@ -791,9 +839,10 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
     replay,
     activeHero,
     activeSteps,
-    activeEvents,
     activeTitles,
     activeOpenAttention,
+    feedRound,
+    feedEvents,
     spendFacts: loop.data?.spend,
     roundSpend,
     estUsd: mode === "live" ? lanesEstUsd : undefined,
@@ -839,7 +888,6 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
   const {
     hero: activeHero,
     steps: activeSteps,
-    events: activeEvents,
     titles: activeTitles,
     openAttention: activeOpenAttention,
   } = resolveActiveFold(mode, replay.position, emptyLive, initialReplayState(lanesMax));
@@ -888,6 +936,10 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
       : undefined;
   // #861: demo mode has no live open round at all — see this function's own doc.
   const inspectorArtifact = resolveInspectorArtifact(mode, rounds, null, replay.selectedRoundId);
+  // #934: same as `LiveApp` — the round-in-view is the selected round, its events the round's own
+  // log filtered to the replay cursor (`eventsUpToCursor`), never the shared display tail.
+  const feedRound = selectedRound;
+  const feedEvents = eventsUpToCursor(replay.roundEvents, replay.position?.cursorId ?? 0);
 
   return appContent({
     clock,
@@ -915,9 +967,10 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
     replay,
     activeHero,
     activeSteps,
-    activeEvents,
     activeTitles,
     activeOpenAttention,
+    feedRound,
+    feedEvents,
     spendFacts: bundle?.loopState.spend,
     roundSpend,
     // #890: demo mode is always "replay" (this function's own doc) — no live lane exists to sum

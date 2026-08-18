@@ -311,7 +311,11 @@ item becomes a routed page, that is a scope amendment to this section.
   ruling, same amendment as C above). The `events` stream through the copy
   map (§7), newest first, relative timestamps; kind-colored dot per entry.
   Payload details (worker, head, mode) collapse behind each entry — never in
-  the sentence.
+  the sentence. Scoped to the round in view (the header's round navigator —
+  §3 A, #889 — is the pager; the feed renders no pager of its own): LIVE the
+  open round, or the last closed one while idle/standby; REPLAY/`?demo` the
+  navigator's selection. No pinned rows (#934) — the strip below is the
+  single surface for open items.
 - **E — Cost strip + Config drawer.** Two independently framed panels, stacked (#880,
   `cost-dark.png`; supersedes the single-strip by-model/by-lane first pass and §11's
   now-superseded "round tier" strip text below) — each its own bordered card, never one shared
@@ -367,9 +371,8 @@ item becomes a routed page, that is a scope amendment to this section.
 **Needs attention strip** (design-director round 2 — the target-user
 review's strongest ask): a conditional strip between header and hero,
 rendered **only** when something needs a person — zero height otherwise, so
-the calm default stays calm. It is the promoted form of the old
-"`needs-human` pins to the top of the feed" rule, upgraded from a feed
-convention to a first-class surface. One row per open item, each showing:
+the calm default stays calm. It is the single surface for open items (#934)
+— a first-class strip, not a feed convention. One row per open item, each showing:
 a **category chip** (#881 — `ATTENTION_CATEGORY` in `copy.ts`: one of
 DECISION / LANE END / FIX CAP / CEILING / ROLLBACK / INSPECT / ENV / REVIEW /
 LABEL / CI, one entry per attention kind, no fallback for an unmapped one),

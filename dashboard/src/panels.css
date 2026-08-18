@@ -168,6 +168,12 @@
   fill: var(--panel);
 }
 
+/* #934: the round-in-view divider — "ROUND N · started · n events", `--font-data` (`.data`,
+ * app.css) per the issue's own spec. */
+.feed-round-divider {
+  margin-bottom: var(--space-2);
+}
+
 /* #722: the feed's own scroll container — bounds the panel's contribution to page height so the
  * cost strip/config below it stay reachable without scrolling past thousands of feed rows. */
 .feed-scroll {
