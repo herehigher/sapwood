@@ -1529,14 +1529,11 @@ file overlap; these remain heuristics rather than scheduling gates.
 
 **Leaf, container, remainder — contracts, not levels (#913, owner ruling 2026-08-17).**
 
-<!-- sapwood:floor:child-kinds -->
-A decomposition child is one of three kinds, chosen by what's missing, not by size: **leaf** —
-acceptance criteria closable inside one PR's own CI plus gate②; **container** — a coarse
-`"kind":"ready"` child whose acceptance section names an executable check-run on `main` instead
-of PR-scoped criteria, `too_large` by contract; **remainder** — reserved for a missing
-fact/decision, never for size alone. Every leaf's/container's `## Why` opens with
-`Cut: <dimension>, because <verification-seam reason>; considered: <alternative>`.
-<!-- /sapwood:floor:child-kinds -->
+The three child kinds (leaf / container / remainder) and the `Cut:` grammar every leaf's and
+container's `## Why` opens with are defined once, in the shipped decompose prompt —
+[`engine/prompts/po-decompose.md`](../engine/prompts/po-decompose.md), "Leaf, container,
+remainder" — which is the text a decompose session actually reads; this paragraph describes,
+and never restates, that definition.
 
 Leaf and container are both `"kind":"ready"` in the structured output — no typed schema
 distinction between them; a container's acceptance section names an executable coarse

@@ -57,14 +57,12 @@ At most {{decompose.maxChildren}} children may be returned, counting remainders.
 
 ## Leaf, container, remainder
 
-<!-- sapwood:floor:child-kinds -->
 A decomposition child is one of three kinds, chosen by what's missing, not by size: **leaf** —
 acceptance criteria closable inside one PR's own CI plus gate②; **container** — a coarse
 `"kind":"ready"` child whose acceptance section names an executable check-run on `main` instead
 of PR-scoped criteria, `too_large` by contract; **remainder** — reserved for a missing
 fact/decision, never for size alone. Every leaf's/container's `## Why` opens with
 `Cut: <dimension>, because <verification-seam reason>; considered: <alternative>`.
-<!-- /sapwood:floor:child-kinds -->
 
 A container is Ready-able by a human exactly like a leaf, and its acceptance section names an
 executable coarse acceptance check on `main` — a CI check-run to be installed/named, the same
