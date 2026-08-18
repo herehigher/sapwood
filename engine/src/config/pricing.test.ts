@@ -23,9 +23,9 @@ test("defaultPricingPath: resolves to the shipped pricing.yaml, which exists", (
 
 test("loadPricingTable: unset pricingFile -> the shipped default, matching the current expected rates", () => {
   const table = loadPricingTable(baseCfg());
-  assert.deepEqual(table.opus, { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5, contextWindow: 200_000 });
-  assert.deepEqual(table.sonnet, { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3, contextWindow: 200_000 });
-  assert.deepEqual(table.haiku, { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.1, contextWindow: 200_000 });
+  assert.deepEqual(table.opus, { input: 5, output: 25, cacheWrite: 6.25, cacheWrite1h: 10, cacheRead: 0.5, contextWindow: 200_000 });
+  assert.deepEqual(table.sonnet, { input: 3, output: 15, cacheWrite: 3.75, cacheWrite1h: 6, cacheRead: 0.3, contextWindow: 200_000 });
+  assert.deepEqual(table.haiku, { input: 1, output: 5, cacheWrite: 1.25, cacheWrite1h: 2, cacheRead: 0.1, contextWindow: 200_000 });
 });
 
 test("loadPricingTable: a configured worker.pricingFile WINS over the shipped default, and user-added aliases are allowed", () => {
@@ -222,4 +222,32 @@ test("estimateUsd: zero usage -> zero cost; unrecognized model still prices (mos
   assert.equal(estimateUsd(zero, table), 0);
   const weird = { model: "some-future-model", inputTokens: 1000, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 };
   assert.ok(estimateUsd(weird, table) > 0);
+});
+
+// ── #935: cacheCreation1hTokens splits a message's cache-creation total between the pricier
+// 1-hour TTL and the cheaper 5-minute default ──
+test("estimateUsd (#935): cacheCreation1hTokens prices its subset at cacheWrite1h, the remainder at cacheWrite", () => {
+  const rate = resolveRate("opus", table);
+  const entry = {
+    model: "claude-opus-4-8",
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationTokens: 1_000_000,
+    cacheCreation1hTokens: 400_000, // remainder (600_000) stays at the 5m rate
+    cacheReadTokens: 0,
+  };
+  const expected = 0.4 * rate.cacheWrite1h! + 0.6 * rate.cacheWrite;
+  assert.ok(Math.abs(estimateUsd(entry, table) - expected) < 1e-9, `expected ${expected}, got ${estimateUsd(entry, table)}`);
+});
+
+test("estimateUsd (#935): an entry with no cacheCreation1hTokens field prices the WHOLE cache-creation total at cacheWrite — byte-identical to pre-#935 behavior", () => {
+  const rate = resolveRate("opus", table);
+  const entry = { model: "claude-opus-4-8", inputTokens: 0, outputTokens: 0, cacheCreationTokens: 1_000_000, cacheReadTokens: 0 };
+  assert.ok(Math.abs(estimateUsd(entry, table) - rate.cacheWrite) < 1e-9);
+});
+
+test("estimateUsd (#935): a model with no cacheWrite1h row falls back to cacheWrite for the 1h portion too", () => {
+  const noSplitTable = { m: { input: 1, output: 1, cacheWrite: 2, cacheRead: 0.1, contextWindow: 1000 } };
+  const entry = { model: "m", inputTokens: 0, outputTokens: 0, cacheCreationTokens: 100, cacheCreation1hTokens: 100, cacheReadTokens: 0 };
+  assert.ok(Math.abs(estimateUsd(entry, noSplitTable) - (100 / 1_000_000) * 2) < 1e-12);
 });

@@ -17,8 +17,10 @@
 #     the moment Anthropic reprices a model — that's exactly why this is a user-editable file.
 #   - Real billing may apply batch/priority-tier discounts, promotional intro pricing, or
 #     per-org negotiated rates this table knows nothing about.
-#   - cacheWrite assumes the CLI's default 5-minute ephemeral cache (~1.25x input); a 1-hour
-#     cache bills at 2x input and is not modeled here.
+#   - cacheWrite prices the 5-minute ephemeral cache (~1.25x input); cacheWrite1h (#935, OPTIONAL
+#     — a model with no row falls back to cacheWrite) prices the pricier 1-hour tier (~2x input).
+#     parseAssistantUsageDeltas reads `usage.cache_creation.ephemeral_1h_input_tokens` to split a
+#     message's cache-creation tokens between the two tiers before estimateUsd prices them.
 #   - The estimate accumulates per-message usage as it streams; the real total_cost_usd is
 #     billed once, server-side, at the end of the whole session.
 # The engine logs (estimate - real) every time a worker finishes, so drift is visible.
@@ -41,23 +43,27 @@ models:
     input: 10
     output: 50
     cacheWrite: 12.5
+    cacheWrite1h: 20 # 1-hour ephemeral cache write premium (~2x input, #935)
     cacheRead: 1
     contextWindow: 1000000
   opus:
     input: 5 # USD per million input tokens
     output: 25 # USD per million output tokens
     cacheWrite: 6.25 # 5-minute ephemeral cache write premium (~1.25x input)
+    cacheWrite1h: 10 # 1-hour ephemeral cache write premium (~2x input, #935)
     cacheRead: 0.5 # cache READS are ~10x cheaper than input — never price them as input
     contextWindow: 200000
   sonnet:
     input: 3
     output: 15
     cacheWrite: 3.75
+    cacheWrite1h: 6 # 1-hour ephemeral cache write premium (~2x input, #935)
     cacheRead: 0.3
     contextWindow: 200000
   haiku:
     input: 1
     output: 5
     cacheWrite: 1.25
+    cacheWrite1h: 2 # 1-hour ephemeral cache write premium (~2x input, #935)
     cacheRead: 0.1
     contextWindow: 200000

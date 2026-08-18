@@ -697,9 +697,11 @@ test("parseAssistantUsageDeltas: extracts per-message usage from streamed `assis
     // a terminal result line must NOT be double-counted as an assistant delta
     JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 9.99, usage: { input_tokens: 99999 } }),
   ].join("\n");
+  // outputTokens is chars/4-derived (#935) — 0 here since neither line carries `content`; see
+  // the dedicated #935 AC1/AC2 tests below for output-token coverage.
   assert.deepEqual(parseAssistantUsageDeltas(jsonl), [
-    { model: "claude-opus-4-8", inputTokens: 100, outputTokens: 50, cacheCreationTokens: 0, cacheReadTokens: 0 },
-    { model: "claude-opus-4-8", inputTokens: 10, outputTokens: 5, cacheCreationTokens: 0, cacheReadTokens: 2000 },
+    { model: "claude-opus-4-8", inputTokens: 100, outputTokens: 0, cacheCreationTokens: 0, cacheCreation1hTokens: 0, cacheReadTokens: 0 },
+    { model: "claude-opus-4-8", inputTokens: 10, outputTokens: 0, cacheCreationTokens: 0, cacheCreation1hTokens: 0, cacheReadTokens: 2000 },
   ]);
 });
 
@@ -709,8 +711,159 @@ test("parseAssistantUsageDeltas: no assistant lines / malformed message / missin
   assert.deepEqual(parseAssistantUsageDeltas(`{"type":"assistant","message":"not-an-object"}`), []);
   assert.deepEqual(parseAssistantUsageDeltas(`{"type":"assistant"}`), []); // no message field at all
   assert.deepEqual(parseAssistantUsageDeltas(JSON.stringify({ type: "assistant", message: { model: "m", usage: {} } })), [
-    { model: "m", inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 },
+    { model: "m", inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheCreation1hTokens: 0, cacheReadTokens: 0 },
   ]);
+});
+
+// ── #935: one API message spans several stream-json `assistant` lines (one per content block),
+// all sharing the same `message.id` — parseAssistantUsageDeltas must price input/cache-write/
+// cache-read ONCE per message, not once per line, or the live soft-budget estimate over-counts
+// real spend. Output is a SEPARATE computation (chars/4 over streamed text + tool_use.input,
+// accumulated across a message's lines) — see the PO-adjudicated AC1/AC2 spec, PR #939 review
+// thread PRRT_kwDOTFpSsc6ZyTZR.
+test("parseAssistantUsageDeltas (#935 AC1): one message.id emitted as three lines (thinking+text+tool_use, identical usage, NON-ZERO cache fields) prices input/cache ONCE", () => {
+  // Non-zero cache_creation/cache_read (gate② finding [0] ac1-cache-dedup-vacuous, run
+  // 9256967e): a zero-valued cache field can't distinguish de-duplication from a bug that still
+  // sums a repeated cache value 3x — 3*0 is still 0. Every field below is non-zero and distinct,
+  // so tripling ANY of them (not just input) would fail this assertion.
+  const usage = {
+    input_tokens: 100,
+    output_tokens: 999, // the placeholder start-of-generation snapshot — must be IGNORED
+    cache_creation_input_tokens: 30,
+    cache_read_input_tokens: 7000,
+  };
+  const line = (content: unknown) =>
+    JSON.stringify({ type: "assistant", message: { id: "msg_1", model: "claude-sonnet-4-6", usage, content } });
+  const text = "0123456789012345"; // 16 chars
+  const toolInput = { cmd: "echo" }; // JSON.stringify -> 14 chars
+  const jsonl = [
+    line([{ type: "thinking", thinking: "" }]),
+    line([{ type: "text", text }]),
+    line([{ type: "tool_use", id: "t1", name: "Bash", input: toolInput }]),
+  ].join("\n");
+  const expectedOutputTokens = Math.ceil((text.length + JSON.stringify(toolInput).length) / 4);
+  assert.deepEqual(parseAssistantUsageDeltas(jsonl), [
+    {
+      model: "claude-sonnet-4-6",
+      inputTokens: 100,
+      outputTokens: expectedOutputTokens,
+      cacheCreationTokens: 30,
+      cacheCreation1hTokens: 0,
+      cacheReadTokens: 7000,
+    },
+  ]);
+});
+
+test("parseAssistantUsageDeltas (#935 AC1): two distinct message.id values price as two messages", () => {
+  const usage = (n: number, text: string) => ({
+    message: {
+      id: `msg_${n}`,
+      model: "claude-sonnet-4-6",
+      usage: { input_tokens: n, output_tokens: 999, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      content: [{ type: "text", text }],
+    },
+  });
+  const text1 = "AAAAAAAABBBBBBBB"; // 16 chars -> ceil(16/4) = 4
+  const text2 = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"; // 32 chars -> ceil(32/4) = 8
+  const jsonl = [JSON.stringify({ type: "assistant", ...usage(1, text1) }), JSON.stringify({ type: "assistant", ...usage(2, text2) })].join(
+    "\n",
+  );
+  assert.deepEqual(parseAssistantUsageDeltas(jsonl), [
+    {
+      model: "claude-sonnet-4-6",
+      inputTokens: 1,
+      outputTokens: Math.ceil(text1.length / 4),
+      cacheCreationTokens: 0,
+      cacheCreation1hTokens: 0,
+      cacheReadTokens: 0,
+    },
+    {
+      model: "claude-sonnet-4-6",
+      inputTokens: 2,
+      outputTokens: Math.ceil(text2.length / 4),
+      cacheCreationTokens: 0,
+      cacheCreation1hTokens: 0,
+      cacheReadTokens: 0,
+    },
+  ]);
+});
+
+test("parseAssistantUsageDeltas (#935 AC1): a line whose message has no `id` still counts per-line (tolerance kept)", () => {
+  const usage = (n: number, text: string) => ({
+    model: "claude-sonnet-4-6",
+    usage: { input_tokens: n, output_tokens: 999, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    content: [{ type: "text", text }],
+  });
+  const textA = "DDDDDDDDDDDDDDDDDDDD"; // 20 chars -> ceil(20/4) = 5
+  const textB = "EEEEEEEE"; // 8 chars -> ceil(8/4) = 2
+  const jsonl = [
+    JSON.stringify({ type: "assistant", message: usage(100, textA) }),
+    JSON.stringify({ type: "assistant", message: usage(100, textB) }),
+  ].join("\n");
+  assert.deepEqual(parseAssistantUsageDeltas(jsonl), [
+    {
+      model: "claude-sonnet-4-6",
+      inputTokens: 100,
+      outputTokens: Math.ceil(textA.length / 4),
+      cacheCreationTokens: 0,
+      cacheCreation1hTokens: 0,
+      cacheReadTokens: 0,
+    },
+    {
+      model: "claude-sonnet-4-6",
+      inputTokens: 100,
+      outputTokens: Math.ceil(textB.length / 4),
+      cacheCreationTokens: 0,
+      cacheCreation1hTokens: 0,
+      cacheReadTokens: 0,
+    },
+  ]);
+});
+
+// ── #935 AC2 (PO adjudication, PR #939 review thread PRRT_kwDOTFpSsc6ZyTZR): the two estimator
+// components beyond plain message-id dedup — 1-hour cache-write tier pricing, and chars/4 output.
+test("parseAssistantUsageDeltas + estimateUsd (#935 AC2): a non-zero ephemeral_1h_input_tokens is priced at the 1h rate, not the 5m rate — reddens if the tier is ignored", () => {
+  const pricing = loadPricingTable(cfg);
+  const jsonl = JSON.stringify({
+    type: "assistant",
+    message: {
+      id: "msg_1h",
+      model: "claude-sonnet-4-6",
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 100_000,
+        cache_read_input_tokens: 0,
+        cache_creation: { ephemeral_1h_input_tokens: 100_000, ephemeral_5m_input_tokens: 0 },
+      },
+    },
+  });
+  const [entry] = parseAssistantUsageDeltas(jsonl);
+  assert.equal(entry!.cacheCreationTokens, 100_000);
+  assert.equal(entry!.cacheCreation1hTokens, 100_000, "the whole cache-creation total is 1h-tier, none left at 5m");
+  const priced = estimateUsd(entry!, pricing);
+  // Sonnet: cacheWrite1h $6/M, cacheWrite (5m) $3.75/M (engine/pricing.yaml). All-1h pricing:
+  // 100_000/1e6*6 = $0.6. If the tier were ignored (priced at the 5m rate like pre-#935),
+  // it would be 100_000/1e6*3.75 = $0.375 instead — a real, detectable divergence.
+  const allAt5mRate = (100_000 / 1_000_000) * 3.75;
+  assert.ok(Math.abs(priced - 0.6) < 1e-9, `expected 1h-tier pricing $0.6, got $${priced}`);
+  assert.notEqual(priced, allAt5mRate, "must NOT match the pre-#935 all-5m-rate price");
+});
+
+test("parseAssistantUsageDeltas (#935 AC2): 4,000 chars of streamed text with placeholder output_tokens:6 estimates >=1,000 output tokens (chars/4), not 6", () => {
+  const text = "x".repeat(4000);
+  const jsonl = JSON.stringify({
+    type: "assistant",
+    message: {
+      id: "msg_long",
+      model: "claude-sonnet-4-6",
+      usage: { input_tokens: 0, output_tokens: 6, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      content: [{ type: "text", text }],
+    },
+  });
+  const [entry] = parseAssistantUsageDeltas(jsonl);
+  assert.ok(entry!.outputTokens >= 1000, `expected >=1000 output tokens (chars/4 of 4000), got ${entry!.outputTokens}`);
+  assert.notEqual(entry!.outputTokens, 6, "must not fall back to the placeholder usage.output_tokens");
 });
 
 // ── #235 PR-B: parseToolUsage — which tools/paths a session's stream actually invoked ──
@@ -3369,17 +3522,20 @@ test("#33: crossing worker.budgetUsdSoft mid-run triggers requestHandoff exactly
     // Emits one streamed assistant usage line big enough to cross a tiny budget, then sleeps
     // with no TERM trap (the empirically-confirmed real CLI shape, #60) so the SIGTERM the
     // budget check fires actually ends the process and lets onExit write the sentinel.
-    const bin = mkStub(
-      dir,
-      [
-        `#!/usr/bin/env bash`,
-        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
-        `for _ in $(seq 1 600); do sleep 1; done`,
-        ``,
-      ].join("\n"),
-    );
-    // opus: $5/MTok input + $25/MTok output -> 1000 in + 1000 out = $0.005 + $0.025 = $0.03,
-    // comfortably over a $0.01 soft budget.
+    // output_tokens:1000 is the placeholder start-of-generation snapshot (#935, ignored); real
+    // output comes from chars/4 over `content` — 4000 chars of streamed text -> 1000 output
+    // tokens, matching the pre-#935 fixture's own numbers exactly.
+    const usageLine = JSON.stringify({
+      type: "assistant",
+      message: {
+        model: "claude-opus-4-8",
+        usage: { input_tokens: 1000, output_tokens: 1000, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        content: [{ type: "text", text: "x".repeat(4000) }],
+      },
+    });
+    const bin = mkStub(dir, [`#!/usr/bin/env bash`, `echo '${usageLine}'`, `for _ in $(seq 1 600); do sleep 1; done`, ``].join("\n"));
+    // opus: $5/MTok input + $25/MTok output -> 1000 in + 1000 (chars/4) out = $0.005 + $0.025 =
+    // $0.03, comfortably over a $0.01 soft budget.
     const tcfg = ConfigSchema.parse({
       board: { owner: "o", repo: "r", projectNumber: 4 },
       worker: { budgetUsdSoft: 0.01 },
@@ -3467,13 +3623,14 @@ test("#33 (PR #85 review): a broken worker.pricingFile fails at SUPERVISOR CONST
     // shipped defaults make a tiny usage line cross a budget the default table wouldn't.
     const ratesPath = join(dir, "expensive.yaml");
     writeFileSync(ratesPath, "models: { opus: { input: 500, output: 2500, cacheWrite: 625, cacheRead: 50, contextWindow: 200000 } }\n");
-    // 1000 in + 1000 out at 100x rates = $3.00; the shipped table would price it $0.03 —
-    // under this $1 budget. A handoff proves the CUSTOM table is in effect.
+    // 3000 input at 100x rates = $1.50; the shipped table would price it $0.015 — under this $1
+    // budget. A handoff proves the CUSTOM table is in effect. (input alone, so this doesn't
+    // depend on #935's chars/4 output estimate, which needs `content` this fixture omits.)
     const bin = mkStub(
       dir,
       [
         `#!/usr/bin/env bash`,
-        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
+        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":3000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
         `for _ in $(seq 1 600); do sleep 1; done`,
         ``,
       ].join("\n"),
@@ -3507,14 +3664,16 @@ test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NO
   try {
     const name = "lane-33-resume";
     // Fabricate a budget-triggered handed-off lane: a .handoff sentinel + a preserved jsonl
-    // whose PRE-EXISTING assistant lines already exceed the $0.01 budget (1000 in + 1000 out
-    // on opus ≈ $0.03). resume() appends to this same file — without a baseline, the first
-    // heartbeat tick after resume would read ≥ budget and hand off again, forever.
+    // whose PRE-EXISTING assistant lines already exceed the $0.01 budget (3000 input on opus =
+    // $0.015; #935 makes output_tokens a placeholder, so this fixture crosses the budget on
+    // input alone rather than depending on `content`). resume() appends to this same file —
+    // without a baseline, the first heartbeat tick after resume would read ≥ budget and hand off
+    // again, forever.
     writeFileSync(
       join(dir, `${name}.handoff.json`),
       JSON.stringify({ name, issue: 33, session_id: "11111111-1111-1111-1111-111111111111", total_cost_usd: 0 }),
     );
-    const preExisting = `{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}\n`;
+    const preExisting = `{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":3000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}\n`;
     writeFileSync(join(dir, `${name}.jsonl`), preExisting);
     // The resumed stub waits for the test to prove a heartbeat checked the pre-existing spend,
     // then emits NEW usage that crosses the budget again.
@@ -3526,7 +3685,7 @@ test("#33 (gate② P1): resume() over a jsonl already past budgetUsdSoft does NO
         `#!/usr/bin/env bash`,
         `touch "${ready}"`,
         `while [ ! -f "${emitNewUsage}" ]; do sleep 0.02; done`,
-        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
+        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":3000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
         `for _ in $(seq 1 600); do sleep 1; done`,
         ``,
       ].join("\n"),
@@ -3566,15 +3725,28 @@ test("#155: probe() persists the live telemetry trio (estCostUsd, contextTokens,
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let s: WorkerSupervisor | undefined;
   try {
+    // output_tokens is the placeholder start-of-generation snapshot (#935, ignored) — `content`
+    // carries text sized so chars/4 reproduces the SAME 50/5 output-token figures the original
+    // fixture used: 200 chars -> ceil(200/4)=50; 20 chars -> ceil(20/4)=5.
+    const line1 = JSON.stringify({
+      type: "assistant",
+      message: {
+        model: "claude-opus-4-8",
+        usage: { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        content: [{ type: "text", text: "a".repeat(200) }],
+      },
+    });
+    const line2 = JSON.stringify({
+      type: "assistant",
+      message: {
+        model: "claude-opus-4-8",
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 2000 },
+        content: [{ type: "text", text: "b".repeat(20) }],
+      },
+    });
     const bin = mkStub(
       dir,
-      [
-        `#!/usr/bin/env bash`,
-        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'`,
-        `echo '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":2000}}}'`,
-        `for _ in $(seq 1 600); do sleep 1; done`,
-        ``,
-      ].join("\n"),
+      [`#!/usr/bin/env bash`, `echo '${line1}'`, `echo '${line2}'`, `for _ in $(seq 1 600); do sleep 1; done`, ``].join("\n"),
     );
     s = sup(dir, bin);
     const { name } = await s.dispatch({ number: 155, title: "t", labels: [] });
@@ -3587,8 +3759,8 @@ test("#155: probe() persists the live telemetry trio (estCostUsd, contextTokens,
     }
     assert.ok(p.liveTelemetry, "a still-running in-memory lane carries live telemetry");
     // opus: input $5/MTok, output $25/MTok, cacheRead $0.5/MTok (shipped pricing.yaml).
-    // Line 1: 100in+50out -> 0.0005 + 0.00125 = 0.00175
-    // Line 2: 10in+5out+2000cacheRead -> 0.00005 + 0.000125 + 0.001 = 0.001175
+    // Line 1: 100in+50out(chars/4) -> 0.0005 + 0.00125 = 0.00175
+    // Line 2: 10in+5out(chars/4)+2000cacheRead -> 0.00005 + 0.000125 + 0.001 = 0.001175
     const expectedCost = 0.00175 + 0.001175;
     assert.ok(Math.abs(p.liveTelemetry!.estCostUsd - expectedCost) < 1e-9, `estCostUsd ${p.liveTelemetry!.estCostUsd} ~= ${expectedCost}`);
     // contextTokens: the NEWEST assistant message's input + cache_read + cache_creation only.
@@ -3706,11 +3878,20 @@ test("#155: a resumed lane's persisted estCostUsd covers only the CURRENT leg (r
       join(dir, `${name}.handoff.json`),
       JSON.stringify({ name, issue: 157, session_id: "22222222-2222-2222-2222-222222222222", total_cost_usd: 0 }),
     );
-    // Pre-existing (pre-handoff) usage: opus 1000in+1000out ≈ $0.03 — would show as live cost
-    // if the baseline weren't subtracted.
+    // Pre-existing (pre-handoff) usage: opus 1000in+1000out(chars/4 of 4000 chars) ≈ $0.03 —
+    // would show as live cost if the baseline weren't subtracted. output_tokens:1000 in `usage`
+    // is the placeholder start-of-generation snapshot (#935, ignored); `content` supplies the
+    // real chars/4 source.
     writeFileSync(
       join(dir, `${name}.jsonl`),
-      `{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}\n`,
+      `${JSON.stringify({
+        type: "assistant",
+        message: {
+          model: "claude-opus-4-8",
+          usage: { input_tokens: 1000, output_tokens: 1000, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+          content: [{ type: "text", text: "x".repeat(4000) }],
+        },
+      })}\n`,
     );
     const marker = join(dir, "emit-new-usage");
     const bin = mkStub(
@@ -3760,6 +3941,184 @@ test("#155: a resumed lane's persisted estCostUsd covers only the CURRENT leg (r
     s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── #935 AC2: estimateBaselineUsd (the #33 baseline) is computed through parseAssistantUsageDeltas
+// too, so a pre-handoff message split across several stream-json lines must not over-count either.
+test("#935 AC2: a resumed lane's pre-handoff usage split across THREE lines for one message.id prices as ONE message in both the baseline and the whole-file total", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const name = "lane-935-resume";
+    writeFileSync(
+      join(dir, `${name}.handoff.json`),
+      JSON.stringify({ name, issue: 935, session_id: "33333333-3333-3333-3333-333333333333", total_cost_usd: 0 }),
+    );
+    // Pre-handoff usage: ONE message (id msg_pre) emitted as three content-block lines
+    // (thinking/text/tool_use), all carrying the identical `usage` snapshot — opus
+    // 1000in ≈ $0.005 input for the message, NOT $0.015 for three lines. output_tokens:1000 is
+    // the placeholder start-of-generation snapshot (#935: ignored) — the real output estimate
+    // comes from chars/4 over text+tool_use.input, ACCUMULATED across the message's 3 lines:
+    // text "a"x16 (16 chars) + tool_use input {} (2 chars) = 18 chars -> ceil(18/4) = 5.
+    const preUsage = { input_tokens: 1000, output_tokens: 1000, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+    const preLineOf = (content: unknown) =>
+      JSON.stringify({ type: "assistant", message: { id: "msg_pre", model: "claude-opus-4-8", usage: preUsage, content } });
+    const preLines = [
+      preLineOf([{ type: "thinking", thinking: "" }]),
+      preLineOf([{ type: "text", text: "a".repeat(16) }]),
+      preLineOf([{ type: "tool_use", id: "t1", name: "Bash", input: {} }]),
+    ];
+    writeFileSync(join(dir, `${name}.jsonl`), `${preLines.join("\n")}\n`);
+    const marker = join(dir, "emit-new-usage");
+    const bin = mkStub(
+      dir,
+      [
+        `#!/usr/bin/env bash`,
+        `while [ ! -f "${marker}" ]; do sleep 0.02; done`,
+        // New post-resume message (a distinct id): opus 200in, text "b"x8 (8 chars) -> ceil(8/4) = 2.
+        `echo '{"type":"assistant","message":{"id":"msg_post","model":"claude-opus-4-8","usage":{"input_tokens":200,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[{"type":"text","text":"bbbbbbbb"}]}}'`,
+        `for _ in $(seq 1 600); do sleep 1; done`,
+        ``,
+      ].join("\n"),
+    );
+    s = sup(dir, bin);
+    await s.resume({ number: 935, title: "t", labels: [] }, name);
+    // Right after resume: baseline == whole-file total (both dedup the same 3 pre-handoff
+    // lines to one message) -> still cancels to ~0, same behavior as the single-line #155 case.
+    const p1 = await s.probe(name);
+    assert.ok(p1.liveTelemetry, "resumed lane is tracked in-memory too");
+    assert.ok(
+      Math.abs(p1.liveTelemetry!.estCostUsd) < 1e-9,
+      `deduped pre-handoff spend must not leak into the resumed leg's live cost (got ${p1.liveTelemetry!.estCostUsd})`,
+    );
+    writeFileSync(marker, "");
+    let p2 = await s.probe(name);
+    for (let i = 0; i < 200 && !(p2.liveTelemetry && p2.liveTelemetry.estCostUsd > 0); i++) {
+      await sleep(20);
+      p2 = await s.probe(name);
+    }
+    const expectedNewLegCost = (200 / 1_000_000) * 5 + (2 / 1_000_000) * 25; // opus input + chars/4 output (8 chars -> 2 tokens)
+    assert.ok(
+      Math.abs(p2.liveTelemetry!.estCostUsd - expectedNewLegCost) < 1e-9,
+      `new-leg estCostUsd ${p2.liveTelemetry!.estCostUsd} ~= ${expectedNewLegCost} (must not carry the pre-handoff over-count)`,
+    );
+    // The discriminating assertion: tokenComposition reads the WHOLE jsonl-so-far (not
+    // baseline-adjusted), so it directly proves the multi-line pre-handoff message was priced
+    // once (1000 input, 5 chars/4-output-tokens), not three times, once the new single-line
+    // message (200 input, 2 output) is added: 1000+200=1200 input, 5+2=7 output.
+    assert.deepEqual(p2.liveTelemetry!.tokenComposition, {
+      inputTokens: 1200,
+      outputTokens: 7,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+    });
+    await s.reclaim(name);
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #935 AC3 (PO adjudication, PR #939 review thread PRRT_kwDOTFpSsc6ZyTZR, superseding the
+// disputed-scope reasoning from the prior round): two REAL redacted stream-json excerpts captured
+// from the actual dogfood lane #920 this issue's own table cites —
+// engine/src/roles/fixtures/lane-920-leg{2,5}.redacted.jsonl. Tool inputs/text/thinking are
+// scrubbed to same-length filler and session_id reads the literal string "redacted"; `usage`,
+// `message.id`, `model`, block types, and the terminal `result.usage`/`total_cost_usd` are
+// untouched real data. Reference figures (PO adjudication): -1.7% (leg2) / -1.3% (leg5).
+function runAc3Replay(name: string, jsonl: string): void {
+  const lines = jsonl
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("{"));
+  const parsed = lines.map((l) => JSON.parse(l) as Record<string, unknown>);
+  const assistantLines = parsed.filter((o) => o.type === "assistant");
+  assert.ok(assistantLines.length >= 20, `${name}: expected >=20 assistant lines, got ${assistantLines.length}`);
+
+  const idCounts = new Map<string, number>();
+  for (const o of assistantLines) {
+    const id = (o.message as Record<string, unknown> | undefined)?.id as string | undefined;
+    if (id) idCounts.set(id, (idCounts.get(id) ?? 0) + 1);
+  }
+  const multiLineIds = [...idCounts.values()].filter((c) => c > 1).length;
+  assert.ok(multiLineIds >= 5, `${name}: expected >=5 message ids with >1 line, got ${multiLineIds}`);
+
+  const result = parsed.find((o) => o.type === "result") as { total_cost_usd: number; usage: Record<string, number> } | undefined;
+  assert.ok(result, `${name}: fixture must carry a terminal result line`);
+  const real = result!;
+
+  const pricing = loadPricingTable(cfg);
+  const deduped = parseAssistantUsageDeltas(jsonl);
+
+  // Exact equality (not a tolerance band): #935's fix should recover every real input/cache
+  // token exactly once — see the file header note above for why this holds on real data.
+  const summed = deduped.reduce(
+    (acc, d) => ({
+      input: acc.input + d.inputTokens,
+      cacheCreate: acc.cacheCreate + d.cacheCreationTokens,
+      cacheRead: acc.cacheRead + d.cacheReadTokens,
+    }),
+    { input: 0, cacheCreate: 0, cacheRead: 0 },
+  );
+  assert.equal(summed.input, real.usage.input_tokens, `${name}: deduped input_tokens must equal the terminal total exactly`);
+  assert.equal(
+    summed.cacheCreate,
+    real.usage.cache_creation_input_tokens,
+    `${name}: deduped cache_creation_input_tokens must equal the terminal total exactly`,
+  );
+  assert.equal(
+    summed.cacheRead,
+    real.usage.cache_read_input_tokens,
+    `${name}: deduped cache_read_input_tokens must equal the terminal total exactly`,
+  );
+
+  const dedupedUsd = deduped.reduce((sum, d) => sum + estimateUsd(d, pricing), 0);
+  // Pre-#935 behavior, reimplemented locally (never re-exported from worker.ts) purely to prove
+  // the class of bug this AC pins: sum every `assistant` line's usage with no de-duplication.
+  const naiveUsd = assistantLines.reduce((sum, o) => {
+    const m = (o.message ?? {}) as Record<string, unknown>;
+    const u = (m.usage ?? {}) as Record<string, number>;
+    return (
+      sum +
+      estimateUsd(
+        {
+          model: typeof m.model === "string" ? m.model : "unknown",
+          inputTokens: u.input_tokens ?? 0,
+          outputTokens: u.output_tokens ?? 0,
+          cacheCreationTokens: u.cache_creation_input_tokens ?? 0,
+          cacheReadTokens: u.cache_read_input_tokens ?? 0,
+        },
+        pricing,
+      )
+    );
+  }, 0);
+
+  // Signed relative error, per the PO adjudication: the tier-aware + chars/4 estimate must land
+  // in [-12%, 0%] of the real terminal total_cost_usd (reference: -1.7% leg2, -1.3% leg5) — an
+  // UNDER-estimate only, never over, matching the chars/4 estimator's documented under-bias.
+  const dedupedSigned = (dedupedUsd - real.total_cost_usd) / real.total_cost_usd;
+  assert.ok(
+    dedupedSigned >= -0.12 && dedupedSigned <= 0,
+    `${name}: deduped estimate ${dedupedUsd} signed error ${dedupedSigned} should be within [-12%, 0%] of real ${real.total_cost_usd}`,
+  );
+  // The naive (pre-#935) per-line sum must fall OUTSIDE that same signed band — pins the +50%
+  // overcount class so it cannot silently come back.
+  const naiveSigned = (naiveUsd - real.total_cost_usd) / real.total_cost_usd;
+  assert.ok(
+    naiveSigned < -0.12 || naiveSigned > 0,
+    `${name}: naive per-line sum ${naiveUsd} signed error ${naiveSigned} should NOT be within [-12%, 0%] of real ${real.total_cost_usd}`,
+  );
+}
+
+test("#935 AC3 (replay, lane-920-leg2.redacted.jsonl)", () => {
+  const jsonl = readFileSync(fileURLToPath(new URL("./fixtures/lane-920-leg2.redacted.jsonl", import.meta.url)), "utf8");
+  runAc3Replay("lane-920-leg2.redacted.jsonl", jsonl);
+});
+
+test("#935 AC3 (replay, lane-920-leg5.redacted.jsonl)", () => {
+  const jsonl = readFileSync(fileURLToPath(new URL("./fixtures/lane-920-leg5.redacted.jsonl", import.meta.url)), "utf8");
+  runAc3Replay("lane-920-leg5.redacted.jsonl", jsonl);
 });
 
 test("#155: a DETACHED lane (no in-memory handle) carries no live telemetry — never invents a second baseline", async () => {
