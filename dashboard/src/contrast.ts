@@ -176,6 +176,74 @@ export function checkFillTrackContrast(tokensCss: string = readTokensCss(), pane
   return rows;
 }
 
+/**
+ * #922 AC2 gate② finding [2] (ac2-rust-ink-contrast): the parked-PR / failed droplet's own
+ * number draws `--on-rust` on the `--rust` surface (`dropletFill`/`.hero-droplet[data-at="needs-
+ * human"] .hero-droplet-num`, stage.tsx/hero.css) — a DIFFERENT fill/ink pair than
+ * `checkFillTextContrast`'s `FILL_TOKENS`/`ON_FILL_TOKEN` (which is `--sap-fill`/`--on-sap-fill`
+ * only), so it needs its own check rather than a `FILL_TOKENS` entry that would wrongly pair
+ * `--rust` with `--on-sap-fill`. `--rust` is a real `light-dark()` token (`parseColorTokens`
+ * handles it directly); `--on-rust` is NOT — like `--sap-fill-outline`/`--stepper-replay-outline`
+ * above, it is a literal-per-theme-scope workaround (tokens.css's own doc: happy-dom never
+ * evaluates `light-dark()`), so `parseTokens`'s flat "last declaration in the file wins" would
+ * silently collapse it to whichever theme's override happens to sit LAST in source order — wrong
+ * for exactly half of this check. Read straight off source instead, in declaration order: the
+ * `:root` default (dark) first, the light-theme trigger rule's override second — the same
+ * regex-over-source approach `--sap-fill-outline`'s own test (tokens.test.ts) already uses.
+ */
+export const RUST_FILL_TOKEN = "--rust";
+export const ON_RUST_TOKEN = "--on-rust";
+
+export function checkRustTextContrast(css: string = readTokensCss()): ContrastRow[] {
+  const { dark, light } = parseColorTokens(css);
+  const [darkInk, lightInk] = [...css.matchAll(/--on-rust:\s*(#[0-9A-Fa-f]{6})/g)].map((m) => m[1]!.toUpperCase());
+  const rows: ContrastRow[] = [];
+  if (darkInk) {
+    const ratio = contrastRatio(darkInk, dark[RUST_FILL_TOKEN]!);
+    rows.push({ theme: "heartwood", text: ON_RUST_TOKEN, ground: RUST_FILL_TOKEN, ratio, pass: ratio >= AA });
+  }
+  if (lightInk) {
+    const ratio = contrastRatio(lightInk, light[RUST_FILL_TOKEN]!);
+    rows.push({ theme: "sapwood", text: ON_RUST_TOKEN, ground: RUST_FILL_TOKEN, ratio, pass: ratio >= AA });
+  }
+  return rows;
+}
+
+/**
+ * #922 AC8: the breathing active-node disc's fill oscillates between this FLOOR alpha and a
+ * higher peak — the floor is the worst-case point `--on-sap-fill`'s glyph (which never animates,
+ * §6) must still clear against, composited over `--panel` (every hero node sits inside a panel
+ * card). Exported so `hero.css`'s own `@keyframes` and this check can never silently diverge on
+ * what "floor" means.
+ *
+ * AC8's own text names 0.45 for dark — measured at 2.85:1 here, short of the AC's own 3:1 floor
+ * (`checkFillFloorContrast`'s own test run). Per the AC's own instruction ("raise the floor if it
+ * falls short, never repoint the ink token off --on-sap-fill"), dark is raised to 0.50 (3.15:1,
+ * real margin) — still >= the AC's 0.45 lower bound and well under the "amplitude <= ~1.9x floor"
+ * ceiling that keeps the animation reading as breathing rather than blinking.
+ */
+export const SAP_FILL_HALO_FLOOR = { sapwood: 0.55, heartwood: 0.5 } as const;
+
+/** AC8: `--on-sap-fill` on the breathing disc's floor-alpha `--sap-fill`, composited over
+ *  `--panel` — the WCAG 3:1 non-text boundary (a filled shape's edge/ink against its
+ *  surroundings), same threshold `checkFillTrackContrast` already uses for the same reason. */
+export function checkFillFloorContrast(css: string = readTokensCss()): ContrastRow[] {
+  const themes = parseColorTokens(css);
+  const rows: ContrastRow[] = [];
+  for (const [theme, tokens] of [
+    ["heartwood", themes.dark],
+    ["sapwood", themes.light],
+  ] as const) {
+    const floor = SAP_FILL_HALO_FLOOR[theme];
+    for (const fill of FILL_TOKENS) {
+      const composite = compositeOver(tokens[fill]!, floor, tokens["--panel"]!);
+      const ratio = contrastRatio(tokens[ON_FILL_TOKEN]!, composite);
+      rows.push({ theme, text: ON_FILL_TOKEN, ground: `${fill}@floor(${floor}) over --panel`, ratio, pass: ratio >= NON_TEXT_AA });
+    }
+  }
+  return rows;
+}
+
 if (import.meta.filename === process.argv[1]) {
   const rows = checkContrast();
   const colors = parseColorTokens(readTokensCss());
@@ -197,5 +265,16 @@ if (import.meta.filename === process.argv[1]) {
       `${r.pass ? "PASS" : "FAIL (compensated by a --sap-text outline)"}  ${r.theme.padEnd(9)} ${r.text} on ${r.ground}  ${r.ratio.toFixed(2)}:1 (non-text ${NON_TEXT_AA}:1)`,
     );
   }
-  if (failed || fillTextRows.some((r) => !r.pass)) process.exitCode = 1;
+  const fillFloorRows = checkFillFloorContrast();
+  for (const r of fillFloorRows) {
+    console.log(
+      `${r.pass ? "PASS" : "FAIL"}  ${r.theme.padEnd(9)} ${r.text} on ${r.ground}  ${r.ratio.toFixed(2)}:1 (non-text ${NON_TEXT_AA}:1)`,
+    );
+  }
+  const rustTextRows = checkRustTextContrast();
+  for (const r of rustTextRows) {
+    console.log(`${r.pass ? "PASS" : "FAIL"}  ${r.theme.padEnd(9)} ${r.text} on ${r.ground}  ${r.ratio.toFixed(2)}:1`);
+  }
+  if (failed || fillTextRows.some((r) => !r.pass) || fillFloorRows.some((r) => !r.pass) || rustTextRows.some((r) => !r.pass))
+    process.exitCode = 1;
 }

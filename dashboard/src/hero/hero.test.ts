@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { LoopEvent } from "../api/types.ts";
 import { parseTokens } from "../contrast.ts";
+import { CI_CAPTION } from "../copy.ts";
 import type { DomainEvent } from "../domain-event.ts";
 import { toDomainEvent } from "../domain-event.ts";
 import { foldOpenAttention } from "../entities.ts";
@@ -18,15 +19,24 @@ import { Hero } from "./Hero.tsx";
 import { LEGEND_ITEMS, Legend } from "./Legend.tsx";
 import {
   BACKLOG,
+  CHECKPOINT_DRAW_CAP,
+  CHECKPOINT_OVERFLOW_REAL_CAP,
   checkpointOverflowPoint,
+  DROPLET_NUM_FONT_PX,
+  dropletPath,
   dropletPoint,
+  dropletRadius,
   ESCALATION,
+  ESCALATION_R,
   GATES,
   HeroStage,
   LANES,
+  NODE_CAPTION_OFFSET,
+  NODE_LABEL_OFFSET,
   PHASE_X,
   PLANNING,
   PLANNING_NODE_R,
+  REAL_RENDER_SCALE_1440,
   REFLECTION,
   RING_COUNT_FONT_PX,
   RING_PITCH_MIN,
@@ -82,6 +92,24 @@ const droplet = (state: HeroState, issue: number) => state.droplets.find((d) => 
 // above, so a state with fewer lanes than the default is unaffected either way).
 const markup = (state: HeroState, extra: Partial<Parameters<typeof HeroStage>[0]> = {}) =>
   renderToStaticMarkup(createElement(HeroStage, { state, lanesMax: 3, fixCap: 2, ...extra }));
+
+/** #922 AC2: the bare number a droplet's belly is sized to fit — mirrors production's
+ *  `dropletNumber` (stage.tsx): the PR once one exists, else the issue number. Never a prefix —
+ *  the kind mark is a separate, secondary rendered element. */
+const dropletNumberText = (d: Droplet) => String(d.pr === null ? d.issue : d.pr);
+
+/** #922 AC2: a droplet's own rendered KIND mark + NUMBER, read straight off the `<g>` element
+ *  carrying `data-issue={issue}` — the two are separate `<text>` elements. Returns `null` when no
+ *  such droplet is drawn at all — the caller's own "must not draw" assertions use that directly,
+ *  rather than a text-content regex that could trivially match nothing yet still "pass". */
+function dropletKindAndNumber(html: string, issue: number): { kind: string; number: string } | null {
+  const g = html.match(new RegExp(`<g class="hero-droplet" data-issue="${issue}"[^>]*>([\\s\\S]*?)<\\/g>`));
+  if (!g) return null;
+  const inner = g[1] as string;
+  const kind = inner.match(/class="hero-droplet-kind"[^>]*>([^<]*)<\/text>/)?.[1] ?? "";
+  const number = inner.match(/class="hero-num hero-droplet-num"[^>]*>([^<]*)<\/text>/)?.[1] ?? "";
+  return { kind, number };
+}
 const heroCss = readFileSync(new URL("./hero.css", import.meta.url), "utf8");
 // #886 final gate②: the computed-style test below used to inject ONLY `heroCss` — production
 // actually cascades tokens.css → panels.css → hero.css, then app.css's own `body { ... }` rule
@@ -139,11 +167,13 @@ test("§6 lane `running → driving`: droplet parks at the checkpoint pair", () 
 test("the PR tag comes from the live lane overlay, since `reclaim-done` carries no PR number", () => {
   const { state } = run([ev("dispatched", { worker: "w1", issue: 86 }), ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING" })]);
   assert.equal(droplet(state, 86)?.pr, null);
-  assert.match(markup(state), /data-issue="86"[^>]*>.*?⊙ 86/s);
+  // #922 AC2: the kind mark (⊙) and the number (86) are two separate rendered elements —
+  // `dropletKindAndNumber` reads both off the droplet's own `<g data-issue="86">`.
+  assert.deepEqual(dropletKindAndNumber(markup(state), 86), { kind: "⊙", number: "86" });
 
   const tagged = withLanePrs(state, [{ lane: "w1", pr: 97 }]);
   assert.equal(droplet(tagged, 86)?.pr, 97);
-  assert.match(markup(tagged), /⤳ 97/);
+  assert.deepEqual(dropletKindAndNumber(markup(tagged), 86), { kind: "⤳", number: "97" });
 
   assert.equal(droplet(withLanePrs(state, [{ lane: "w1", pr: null }]), 86)?.pr, null);
   assert.equal(droplet(withLanePrs(tagged, [{ lane: "w1", pr: 12 }]), 86)?.pr, 97);
@@ -393,7 +423,10 @@ test("#897 AC2: CI and Review render as circular gate nodes carrying a hand-draw
   // `.hero-hit-target` (a real, deliberate fix for a Playwright click regression) — the check
   // narrows to "no VISIBLE rect" instead of "no rect at all".
   assert.doesNotMatch(ciGate![1] as string, /<rect(?! class="hero-hit-target")/, "no visible <rect> left inside the CI gate");
-  assert.match(ciGate![1] as string, /data-icon="gear"/, "CI carries its icon marker via the existing data-icon convention");
+  // #922 AC7: CI's icon swaps to the standard GitHub Actions asset — the old hand-drawn gear is
+  // gone entirely, nowhere in the hero.
+  assert.match(ciGate![1] as string, /data-icon="github-actions"/, "CI carries the GitHub Actions icon marker");
+  assert.doesNotMatch(html, /data-icon="gear"/, 'no data-icon="gear" anywhere in the hero');
 
   const reviewGate = html.match(/<g class="hero-gate" data-gate="review"[^>]*>([\s\S]*?)<\/g>\s*<line/);
   assert.ok(reviewGate, "the Review gate group must render");
@@ -831,9 +864,67 @@ test("a lane droplet in motion reads its fill from --sap-fill; escalated/failed 
 test("the escalation branch and NEEDS HUMAN node read their stroke from --rust, never a hardcoded hex", () => {
   const html = markup(initialHeroState(3));
   assert.match(html, /style="stroke:var\(--rust\)" class="hero-branch"/);
-  assert.match(html, /<circle style="stroke:var\(--rust\)"[^>]*><\/circle><text[^>]*>Needs human/);
+  // #922 AC4: a person-glyph <g> now sits between the circle and the label.
+  assert.match(html, /<circle style="stroke:var\(--rust\)"[^>]*><\/circle>[\s\S]*?<text[^>]*>Needs human/);
   // No hardcoded rust hex sneaks in either theme's failure colour.
   assert.doesNotMatch(html, /#D9713F|#A34620|#C05A2E/i);
+});
+
+// gate② finding [2] (ac2-rust-ink-contrast): the CSS rule alone doesn't prove the cascade
+// actually WINS — `.hero-droplet-num`'s own bare rule (--on-sap-fill) has EQUAL specificity to
+// nothing; the `[data-at="needs-human"]`-scoped override needs a real `getComputedStyle` proof
+// that IT wins over the bare rule, not just that its own source text mentions --on-rust.
+//
+// `--on-rust` is a literal-per-theme-scope token (tokens.css's own doc, same reason
+// `--sap-fill-outline` is) — happy-dom never evaluates `light-dark()`/`prefers-color-scheme` the
+// way a real browser does, so this reads the SAME `data-theme` attribute + regex-over-source
+// approach `--sap-fill-outline`'s own tokens.test.ts case uses, rather than trusting
+// `parseTokens`'s flat "last declaration in the file wins" (which would silently pass by
+// COINCIDENCE of declaration order, not because the cascade genuinely resolved that theme).
+test("#922 AC2: a needs-human/failed droplet's number resolves --on-rust; every other droplet still resolves --on-sap-fill, under the real production cascade, in both themes", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 1 }),
+    ev("dispatched", { worker: "w2", issue: 2 }),
+    ev("reclaim-done", { worker: "w2", issue: 2, next: "DRIVING" }),
+    ev("drive-needs-human", { worker: "w2", issue: 2 }),
+  ]);
+  const container = document.createElement("div");
+  container.innerHTML = markup(state, { lanesMax: 2 });
+  document.body.appendChild(container);
+  const expectedOnSapFill = parseTokens(tokensCss)["--on-sap-fill"];
+  const [darkOnRust, lightOnRust] = [...tokensCss.matchAll(/--on-rust:\s*(#[0-9A-Fa-f]{6})/g)].map((m) => m[1]!.toUpperCase());
+  try {
+    for (const [themeAttr, expectedOnRust] of [
+      ["heartwood", darkOnRust],
+      ["sapwood", lightOnRust],
+    ] as const) {
+      document.documentElement.setAttribute("data-theme", themeAttr);
+
+      const needsHumanNum = container.querySelector('.hero-droplet[data-at="needs-human"] .hero-droplet-num') as Element;
+      assert.ok(needsHumanNum, `${themeAttr}: the needs-human droplet's own number must render`);
+      assert.equal(
+        getComputedStyle(needsHumanNum).fill,
+        expectedOnRust,
+        `${themeAttr}: a needs-human droplet's number must resolve --on-rust, not --on-sap-fill`,
+      );
+
+      const inMotionNum = container.querySelector('.hero-droplet[data-at="lane"] .hero-droplet-num') as Element;
+      assert.ok(inMotionNum, `${themeAttr}: the in-motion droplet's own number must render`);
+      assert.equal(
+        getComputedStyle(inMotionNum).fill,
+        expectedOnSapFill,
+        `${themeAttr}: an in-motion droplet's number must still resolve --on-sap-fill, unaffected by the rust override`,
+      );
+    }
+  } finally {
+    document.documentElement.removeAttribute("data-theme");
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
 });
 
 test("the merged event's checkpoint flash and the new growth ring use --moss, never a hardcoded hex", () => {
@@ -991,33 +1082,273 @@ test("#895 item 5: at the 720px floor, the hero stage reflows (holds its native 
   }
 });
 
-test("#879: the backlog's READY cards render as taller filled cards with bold, contrasting card text", () => {
+// gate② finding [1] (ac3-height-self-reference): the old assertion interpolated
+// BACKLOG_CHIP_H — the SAME constant that renders the rect — into the matcher, so it stayed
+// green even if that constant regressed below the AC's own floor. The height is read off the
+// rendered markup with no reference to the production constant, then checked against the AC's
+// own independent 32px-equivalent literal.
+test("#879/#922 AC3: the backlog's READY cards render as taller filled cards with bold, contrasting card text", () => {
   const { state } = run([ev("pool-selected", { issues: [94] })]);
   const html = markup(state);
-  assert.match(html, /class="hero-pool-chip"[\s\S]*?<rect style="fill:var\(--sap-fill\)"[^>]*height="24"[^>]*rx="8"/);
-  assert.match(html, /class="hero-num hero-pool-num"[^>]*>⊙ 94</);
+  const chipMatch = html.match(/class="hero-pool-chip"[\s\S]*?<rect style="fill:var\(--sap-fill\)"[^>]*height="([\d.]+)"[^>]*rx="8"/);
+  assert.ok(chipMatch, "a filled .hero-pool-chip rect must render");
+  assert.ok(
+    Number(chipMatch?.[1]) >= 32,
+    `rendered chip height ${chipMatch?.[1]} must independently clear AC3's own >= 32 stage-px-equivalent floor`,
+  );
+  assert.match(html, /class="hero-num hero-pool-num hero-backlog-num"[^>]*>⊙ 94</);
   const poolNumRule = heroCss.match(/\.hero-pool-num\s*\{([^}]*)\}/);
   assert.ok(poolNumRule, ".hero-pool-num rule must exist");
   assert.match(poolNumRule?.[1] as string, /font-weight:\s*600/);
   assert.match(poolNumRule?.[1] as string, /fill:\s*var\(--on-sap-fill\)/);
 });
 
-test("#879: each PLAN circle (goal-align/arch-review/verify) draws its own distinct icon", () => {
+// #922 AC1 (STYLE, registerRealDom() via the eager import + full production cascade, COVERAGE):
+// every centred-below-circle node label (planning trio, CI, REVIEW, SUMMARY, RETRO, NEEDS HUMAN)
+// resolves --font-data uppercase with >= 0.08em-equivalent letter-spacing, and its y sits below
+// its own circle's bottom edge (cy + r) at text-anchor middle, cx. `text-anchor="middle"` is a
+// markup-DERIVED filter, not a hand-typed zone list — lane labels (excluded from AC1's own
+// enumeration) render with no text-anchor override at all, so this filter naturally excludes
+// exactly the set AC1 doesn't name, and includes exactly the set it does.
+test("#922 AC1: every centred-below-circle .hero-node-label resolves --font-data uppercase, >= 0.08em letter-spacing, below its own circle, text-anchor middle", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 1 }),
+    ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 10 }),
+    ev("drive-needs-human", { worker: "w1", issue: 1, pr: 10 }),
+  ]);
+  const container = document.createElement("div");
+  container.innerHTML = markup(state, { roundPhase: "aligning", config: { reviewer: { agent: { model: "fable", effort: "high" } } } });
+  document.body.appendChild(container);
+  try {
+    const labels = [...container.querySelectorAll('.hero-node-label[text-anchor="middle"]')];
+    // planning×3 + CI + Review + Summary + Retro + Needs human = 8 — every node AC1 names, none
+    // hand-picked: this count falls out of the text-anchor="middle" filter itself.
+    assert.equal(labels.length, 8, `expected 8 centred-below-circle labels, got ${labels.length}`);
+
+    const computed = getComputedStyle(labels[0] as Element);
+    assert.match(computed.fontFamily, /JetBrains Mono|monospace/, "font-family resolves through --font-data");
+    assert.equal(computed.textTransform, "uppercase");
+    const fontPx = Number.parseFloat(computed.fontSize);
+    const letterSpacingPx = Number.parseFloat(computed.letterSpacing);
+    assert.ok(
+      letterSpacingPx >= 0.08 * fontPx,
+      `letter-spacing ${letterSpacingPx}px must be >= 0.08em (${0.08 * fontPx}px) at ${fontPx}px`,
+    );
+
+    for (const label of labels) {
+      const cx = Number(label.getAttribute("x"));
+      const cy = Number(label.getAttribute("y"));
+      // The label's own governing circle shares its x as the circle's cx (both centred on the
+      // node's own centre) — found by scanning every drawn circle for that cx and taking the one
+      // whose cy is closest to this label's own y (the node the label actually belongs to).
+      const circles = [...container.querySelectorAll(`circle[cx="${cx}"]`)];
+      assert.ok(circles.length > 0, `no circle found at cx=${cx} for label at (${cx},${cy})`);
+      const owner = circles.reduce((closest, c) => {
+        const cCy = Number(c.getAttribute("cy"));
+        const closestCy = Number(closest.getAttribute("cy"));
+        return Math.abs(cCy - cy) < Math.abs(closestCy - cy) ? c : closest;
+      });
+      const ownerCy = Number(owner.getAttribute("cy"));
+      const ownerR = Number(owner.getAttribute("r"));
+      assert.ok(cy > ownerCy + ownerR, `label y=${cy} must sit below its circle's bottom edge (cy + r = ${ownerCy + ownerR})`);
+    }
+  } finally {
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+});
+
+// #922 AC3: no well rect, >= 3 filled + >= 3 outlined candidate cards, and an overflow "…" chip
+// once the pool exceeds the drawn cap — asserted over a fixture large enough to exercise all
+// three (COVERAGE: the drawn set is derived from the rendered markup, not a hand list).
+test("#922 AC3: no .hero-well rect; >= 3 filled + >= 3 outlined candidate backlog cards; an overflow chip past the drawn cap", () => {
+  const { state } = run([ev("pool-selected", { issues: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] })]);
+  const html = markup(state);
+  assert.doesNotMatch(html, /hero-well/, "no .hero-well rect anywhere in the hero markup");
+
+  const filledChips = [...html.matchAll(/class="hero-pool-chip" data-issue="(\d+)"/g)];
+  const candidates = [...html.matchAll(/class="hero-pool-candidate" data-issue="(\d+)"/g)];
+  assert.ok(filledChips.length >= 3, `expected >= 3 filled chips, got ${filledChips.length}`);
+  assert.ok(candidates.length >= 3, `expected >= 3 outlined candidates, got ${candidates.length}`);
+
+  // BACKLOG_CANDIDATE_DRAW_CAP (5) + BACKLOG_FILLED_CAP (3) = 8 drawn; the 10-issue fixture
+  // above has 2 left over, which must collapse into a single "…" overflow chip.
+  assert.match(html, /class="hero-pool-candidate hero-pool-overflow" data-count="2"[^>]*>[\s\S]*?>…</);
+});
+
+// #922 AC3 (STYLE, registerRealDom() via the eager import + full production cascade): the
+// backlog chip numeral resolves >= 14px at 1440 — both the filled and outlined variant, since
+// the AC's wording ("chip numeral") doesn't single out only the filled ones.
+//
+// gate② finding [3] (ac3-real-render-scale): `1440 / STAGE.w` assumes the hero SVG gets the FULL
+// 1440px of a 1440px viewport — it never does (the icon rail + `.stack`/`.panel` chrome eat into
+// it first, `REAL_RENDER_SCALE_1440`'s own doc, stage.tsx). Using the naive ratio here would let
+// a production size that only clears the OVERSTATED scale slip back in unnoticed.
+test("#922 AC3: backlog chip numerals resolve >= 14px at 1440 under the real production cascade", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const { state } = run([ev("pool-selected", { issues: [1, 2, 3, 4, 5, 6, 7] })]);
+  const container = document.createElement("div");
+  container.innerHTML = markup(state);
+  document.body.appendChild(container);
+  try {
+    const filled = container.querySelector(".hero-pool-chip .hero-backlog-num") as Element;
+    const candidate = container.querySelector(".hero-pool-candidate .hero-backlog-num") as Element;
+    assert.ok(filled && candidate, "both a filled chip and an outlined candidate must render");
+    for (const el of [filled, candidate]) {
+      const px = Number.parseFloat(getComputedStyle(el).fontSize);
+      const renderedAt1440 = px * REAL_RENDER_SCALE_1440;
+      assert.ok(
+        renderedAt1440 >= 14,
+        `chip numeral ${px}px * ${REAL_RENDER_SCALE_1440} = ${renderedAt1440}px must clear the AC's >= 14px-at-1440 floor at the REAL render scale`,
+      );
+    }
+  } finally {
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+});
+
+// #922 AC4: the escalation node carries a person-glyph path (lucide's `UserRound`) inside the
+// rust circle, and its label — the existing §7 copy string "Needs human", never a second one —
+// sits below the circle, reading NEEDS HUMAN once CSS uppercases it.
+test("#922 AC4: the escalation node group contains a person glyph and its label sits below the circle, reading NEEDS HUMAN via CSS uppercase", () => {
   const html = markup(initialHeroState(3));
-  for (const icon of ["target", "tree", "check"]) {
+  const escalationGroup = html.match(/<g class="hero-escalation"[^>]*>([\s\S]*?)<\/g>\s*<g class="hero-trunk"/)?.[1] as string;
+  assert.ok(escalationGroup, "the escalation group must render");
+  assert.match(escalationGroup, /class="lucide lucide-user-round"/, "a real lucide UserRound glyph, not a hand-drawn shape");
+  assert.match(escalationGroup, /<path/, "lucide's own generated <path> inside the person glyph — not a hand-drawn identity shape");
+
+  const labelMatch = escalationGroup.match(
+    /<text class="hero-node-label" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">Needs human<\/text>/,
+  );
+  assert.ok(labelMatch, 'the label must be the existing §7 copy string "Needs human", never a second copy string');
+  const [, xRaw, yRaw] = labelMatch as unknown as [string, string, string];
+  assert.equal(Number(xRaw), ESCALATION.x, "centred at the node's own x");
+  assert.ok(Number(yRaw) > ESCALATION.y + ESCALATION_R, "the label's y sits below the circle's own bottom edge (cy + r)");
+
+  // #922 AC1 (uppercase via CSS, never a second copy string): the SAME .hero-node-label rule
+  // every other node label uses (asserted globally by the dedicated AC1 test below) resolves
+  // this text visually to "NEEDS HUMAN" — this test only pins that no second literal exists.
+  assert.doesNotMatch(html, /NEEDS HUMAN</, "no separate uppercase copy string — CSS text-transform does the casing");
+});
+
+// #922 AC6: goal-align/arch-review/verify swap their hand-drawn glyphs for lucide's own
+// Target/GitFork/Check — Summary/Retro (reflection zone) now ALSO carry a `hero-planning-icon`
+// (bar-chart/trend-arrow), so the coverage count grows from 3 (planning only) to 5.
+test("#922 AC6: each PLAN circle (goal-align/arch-review/verify) draws its own distinct lucide icon", () => {
+  const html = markup(initialHeroState(3));
+  for (const icon of ["target", "git-fork", "check"]) {
     assert.equal(
       (html.match(new RegExp(`data-icon="${icon}"`, "g")) ?? []).length,
       1,
       `exactly one ${icon} icon (goal-align/arch-review/verify each draw their own)`,
     );
   }
-  assert.equal((html.match(/class="hero-planning-icon"/g) ?? []).length, 3, "one icon per PLAN node, never zero or duplicated");
+  const planningGroup = html.match(/<g class="hero-planning" data-node="planning">([\s\S]*?)<g class="hero-lanes">/)?.[1] as string;
+  assert.equal((planningGroup.match(/class="hero-planning-icon"/g) ?? []).length, 3, "one icon per PLAN node, never zero or duplicated");
+  for (const icon of ["target", "git-fork", "check"]) {
+    assert.match(planningGroup, new RegExp(`class="lucide lucide-${icon}"`), `${icon} is a real lucide-stamped icon`);
+  }
 });
 
-test("#879: issue tokens render as a droplet (teardrop path), never a bare circle", () => {
+// gate② finding [4] (ac6-node-set-handlisted): the earlier version extracted two broad container
+// strings and hand-asserted three expected class names ANYWHERE inside them — an added or
+// duplicated reflection/escalation node with a missing/wrong icon could slip past that flat
+// check. This derives the covered node SET from the rendered markup itself (circle count in the
+// reflection zone, never a hand-typed "there are 2 nodes"), then proves a strict 1:1 icon-per-
+// node mapping and ties each icon's own `data-icon` marker to its OWN rendered lucide-stamped
+// class, not just "present somewhere in the zone".
+test("#922 AC6 (COVERAGE): every rendered reflection + escalation node group carries exactly one lucide icon of its own", () => {
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 1 }),
+    ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 10 }),
+    ev("drive-needs-human", { worker: "w1", issue: 1, pr: 10 }),
+  ]);
+  const html = markup(state);
+
+  const reflectionGroup = html.match(
+    /<g class="hero-reflection" data-node="reflection">([\s\S]*)<\/g>\s*<path\s+class="hero-return"/,
+  )?.[1] as string;
+  assert.ok(reflectionGroup, "the reflection group must render");
+  const reflectionNodeCount = (reflectionGroup.match(/class="hero-planning-node"/g) ?? []).length;
+  assert.ok(reflectionNodeCount >= 2, "the reflection zone must render at least Summary and Retro");
+  const reflectionIcons = [...reflectionGroup.matchAll(/data-icon="([^"]+)"/g)].map((m) => m[1] as string);
+  assert.equal(
+    reflectionIcons.length,
+    reflectionNodeCount,
+    "every reflection node must carry exactly one icon marker — never zero or duplicated",
+  );
+  assert.equal(new Set(reflectionIcons).size, reflectionIcons.length, "no two reflection nodes may share the same icon");
+  assert.ok(reflectionIcons.includes("chart-no-axes-column"), "Summary must carry ChartNoAxesColumn");
+  assert.ok(reflectionIcons.includes("trending-up"), "Retro must carry TrendingUp");
+  for (const icon of reflectionIcons) {
+    const iconBlock = reflectionGroup.match(new RegExp(`data-icon="${icon}">([\\s\\S]*?)</g>`));
+    assert.ok(iconBlock, `data-icon="${icon}" group must render`);
+    assert.match(
+      iconBlock?.[1] as string,
+      new RegExp(`class="lucide lucide-${icon}"`),
+      `${icon}'s own icon group must carry the real lucide-stamped class, not just be present elsewhere in the zone`,
+    );
+  }
+
+  const escalationGroup = html.match(/<g class="hero-escalation"[^>]*>([\s\S]*?)<\/g>\s*<g class="hero-trunk"/)?.[1] as string;
+  assert.ok(escalationGroup, "the escalation group must render");
+  const escalationIcons = [...escalationGroup.matchAll(/data-icon="([^"]+)"/g)].map((m) => m[1] as string);
+  assert.deepEqual(escalationIcons, ["user-round"], "the escalation node must carry exactly one icon marker: UserRound");
+  const escalationIconBlock = escalationGroup.match(/data-icon="user-round">([\s\S]*?)<\/g>/);
+  assert.ok(escalationIconBlock, "the user-round icon group must render");
+  assert.match(escalationIconBlock?.[1] as string, /class="lucide lucide-user-round"/);
+});
+
+// #922 AC6 (mutation-kill, source-level): every hand-authored <path> in stage.tsx must be one of
+// the IDENTITY shapes (the droplet) or a structural connector (arrowhead/lane-connector/fix-loop/
+// escalation-branch/reflection-arm/return-path) — never a utility glyph. Re-adding a hand-drawn
+// glyph <path> (e.g. reverting the planning trio's icons) introduces a className outside this
+// allowlist and reddens this test.
+test("#922 AC6 (mutation-kill): no hand-drawn <path> for a utility glyph remains in stage.tsx", () => {
+  const rawStageTsx = readFileSync(new URL("./stage.tsx", import.meta.url), "utf8");
+  // Strip comments first — a prose mention of `<path>` inside a /** ... */ doc comment (this
+  // file has several, explaining WHY a glyph is no longer hand-drawn) would otherwise let the
+  // path-block regex below run away from a real tag into the next REAL <path>'s own closing
+  // `/>`, silently mis-attributing that real path's className to the comment's own dead span.
+  const stageTsx = rawStageTsx.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  const pathBlocks = [...stageTsx.matchAll(/<path\b([\s\S]*?)\/>/g)].map((m) => m[1] as string);
+  assert.ok(pathBlocks.length > 0, "sanity: stage.tsx must still draw at least one <path>");
+  const allowed = new Set([
+    "hero-arrowhead", // the return path's arrowhead marker
+    "hero-lane-connector", // a lane channel's curve into the CI node
+    "hero-fixloop", // the fix-return arc
+    "hero-branch", // the escalation branch's stem
+    "hero-arm", // the reflection tree's stem/crossbar
+    "hero-return", // the dashed return path
+    "hero-droplet-shape", // IDENTITY: the sap droplet
+  ]);
+  for (const block of pathBlocks) {
+    const cls = block.match(/className="([^"]+)"/)?.[1];
+    assert.ok(cls, `a <path> with no className at all: ${block.slice(0, 80)}`);
+    assert.ok(
+      allowed.has(cls as string),
+      `<path className="${cls}"> is not a known structural/identity path — a utility glyph must use lucide-react instead`,
+    );
+  }
+});
+
+test("#879/#922 AC2: issue tokens render as a droplet (teardrop path), never a bare circle", () => {
   const { state } = run([ev("dispatched", { worker: "w1", issue: 1 })]);
   const html = markup(state);
-  assert.match(html, /class="hero-droplet-shape" d="M0,-9/);
+  // #922 AC2: the belly radius (and so the path's own tip coordinate) is sized to
+  // the droplet's own bare NUMBER ("1", an unstarted PR-less droplet's issue number — the kind
+  // mark never counts toward the fit) — read from the SAME production function rather than a
+  // hand-copied literal (VALUE doctrine).
+  const expectedPath = dropletPath(dropletRadius("1"));
+  assert.match(html, new RegExp(`class="hero-droplet-shape" d="${expectedPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`));
   assert.doesNotMatch(html, /class="hero-droplet"[\s\S]{0,40}<circle r="9"/, "no droplet may still draw the old bare circle");
 });
 
@@ -1124,21 +1455,97 @@ test("P2-8: the round outcome tally is THIS round's merges, never the all-time r
   assert.doesNotMatch(html, /class="hero-outcome-tally"[^>]*>2 merged/);
 });
 
-test("P2-8: LLM-backed stage nodes render their configured model·effort caption; REVIEW shows the review mode word", () => {
+test("P2-8: LLM-backed stage nodes render their configured model·effort caption", () => {
   const config = {
     roles: { po: { model: "opus", effort: "high" }, harvest: { model: "sonnet", effort: "low" } },
     worker: { model: "sonnet", effort: "medium" },
-    reviewer: { mode: "engine-agent" },
   };
   const html = markup(initialHeroState(3), { config });
   assert.match(html, /opus · high/); // Goal & align (roles.po)
   assert.match(html, /sonnet · low/); // Summary (roles.harvest)
   assert.match(html, /sonnet · medium/); // lanes (worker.*)
-  assert.match(html, /engine-agent/); // REVIEW's mode word, not a model·effort pair
 
   // No config, no caption — an honest gap, never a guessed model name.
   const bare = markup(initialHeroState(3));
-  assert.doesNotMatch(bare, /opus|sonnet|engine-agent/);
+  assert.doesNotMatch(bare, /opus|sonnet/);
+});
+
+// #922 AC7: REVIEW is a model-backed node like every other — its caption comes from
+// reviewer.agent.model/.effort, never the internal reviewer.mode word (§7).
+test("#922 AC7: REVIEW's caption prefers reviewer.agent.model·effort; falls back to a hosted-bot's plain mode word; never the internal 'engine-agent' mode string", () => {
+  const withAgent = markup(initialHeroState(3), {
+    config: { reviewer: { mode: "engine-agent", agent: { model: "fable", effort: "high" } } },
+  });
+  assert.match(withAgent, /fable · high/);
+  assert.doesNotMatch(withAgent, /engine-agent/, "the internal mode string never appears in the hero markup");
+
+  const hostedBot = markup(initialHeroState(3), { config: { reviewer: { mode: "codex" } } });
+  assert.match(hostedBot, /class="hero-node-caption"[^>]*>codex</);
+
+  const noReviewerConfig = markup(initialHeroState(3), { config: { worker: { model: "sonnet", effort: "medium" } } });
+  const reviewGroup = noReviewerConfig.match(/<g class="hero-gate" data-gate="review"[^>]*>([\s\S]*?)<\/g>\s*<line/)?.[1] as string;
+  assert.doesNotMatch(reviewGroup, /hero-node-caption/, "no reviewer config at all draws no caption — an honest gap");
+
+  // engine-agent mode with no agent model configured: still never shows the internal term.
+  const engineAgentNoModel = markup(initialHeroState(3), { config: { reviewer: { mode: "engine-agent" } } });
+  assert.doesNotMatch(engineAgentNoModel, /engine-agent/);
+});
+
+// gate② finding [5] (ac7-wiring-coverage-incomplete): the test above covers REVIEW's caption
+// TEXT only — this proves the remaining AC7 wiring/asset requirements: REVIEW's caption sits at
+// the SAME offset (GATES.r + NODE_CAPTION_OFFSET) planning captions use, the CI caption reads the
+// CI_CAPTION constant at that same slot, and GithubActionsGlyph's own rendered markup is the real
+// devicon asset (128x128 viewBox, no legacy #2088ff/#79b8ff literal, every fill currentColor).
+test("#922 AC7: REVIEW's caption sits at the same offset as the planning captions; CI's caption+asset render the required constant/markup", () => {
+  const html = markup(initialHeroState(3), { config: { reviewer: { agent: { model: "fable", effort: "high" } } } });
+
+  const reviewCaptionMatch = html.match(
+    /<text class="hero-node-caption" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">fable · high<\/text>/,
+  );
+  assert.ok(reviewCaptionMatch, "the Review caption must render");
+  const [, reviewCapX, reviewCapY] = reviewCaptionMatch as unknown as [string, string, string];
+  assert.equal(Number(reviewCapX), GATES.review, "the Review caption is centred on the Review gate's own x");
+  assert.equal(
+    Number(reviewCapY),
+    GATES.y + GATES.r + NODE_CAPTION_OFFSET,
+    "the Review caption sits at GATES.r + NODE_CAPTION_OFFSET below the gate — the SAME offset formula the planning nodes' own captions use",
+  );
+
+  // Scoped to the CI gate's own group — never a blanket html.match, which would silently grab
+  // whichever `.hero-node-caption` happens to be FIRST in DOM order instead of proving it's CI's.
+  const ciGate = html.match(
+    /<g class="hero-gate" data-gate="ci"[^>]*>([\s\S]*?)<\/g>\s*<g class="hero-gate" data-gate="review"/,
+  )?.[1] as string;
+  assert.ok(ciGate, "the CI gate group must render");
+  const ciCaptionMatch = ciGate.match(/<text class="hero-node-caption" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">([^<]*)<\/text>/);
+  assert.ok(ciCaptionMatch, "the CI gate's own hero-node-caption must render");
+  const [, ciCapX, ciCapY, ciCapText] = ciCaptionMatch as unknown as [string, string, string, string];
+  assert.equal(ciCapText, CI_CAPTION, "CI's caption reads the CI_CAPTION constant, never a guessed/hand-copied word");
+  // gate② finding [6] (ac7-ci-caption-self-reference): the assertion above compares the render
+  // against the SAME `CI_CAPTION` import that produced it — changing that constant's value would
+  // leave it green. This pins the literal word independently, so a changed constant reddens here.
+  assert.equal(ciCapText, "github", 'CI\'s caption must literally read "github", independent of the CI_CAPTION import');
+  assert.equal(Number(ciCapX), GATES.ci, "the CI caption is centred on the CI gate's own x");
+  assert.equal(
+    Number(ciCapY),
+    GATES.y + GATES.r + NODE_CAPTION_OFFSET,
+    "the CI caption sits in the SAME below-label slot every other node caption uses",
+  );
+
+  // GithubActionsGlyph's own rendered asset markup — the standard devicon path data, recoloured
+  // to currentColor, never the original literal hex fills.
+  const glyphMatch = ciGate.match(/<svg viewBox="([^"]*)"[^>]*>([\s\S]*?)<\/svg>/);
+  assert.ok(glyphMatch, "the GithubActionsGlyph's own nested <svg> must render inside the CI gate");
+  const [, glyphViewBox, glyphInner] = glyphMatch as unknown as [string, string, string];
+  assert.equal(glyphViewBox, "0 0 128 128", "the standard devicon GitHub Actions asset's own viewBox");
+  const glyphFills = [...glyphInner.matchAll(/fill="([^"]*)"/g)].map((m) => m[1] as string);
+  assert.ok(glyphFills.length >= 2, "the asset's two <path>s must each carry their own fill");
+  assert.ok(
+    glyphFills.every((f) => f === "currentColor"),
+    `every fill must resolve to currentColor, never a literal hex: ${JSON.stringify(glyphFills)}`,
+  );
+  assert.doesNotMatch(glyphInner, /#2088ff|#79b8ff/i, "no legacy literal hex from the original asset remains");
+  assert.doesNotMatch(html, /#2088ff|#79b8ff/i, "no legacy literal hex anywhere in the hero markup");
 });
 
 // ── "?" legend toggle ──────────────────────────────────────────────────────────
@@ -1494,6 +1901,44 @@ const circleBox = (centerX: number, centerY: number, r: number): Box => ({
 });
 
 /**
+ * gate② finding [0] (ac2-geometry-oracle-assumes-fit): the droplet's true rendered footprint,
+ * parsed from its OWN `d` attribute's literal numbers — never by re-calling `dropletRadius`/
+ * `dropletPath` (that would just prove the two functions agree with each other, not that the
+ * markup they produced together is actually the shape/size claimed). `dropletPath`'s own grammar
+ * is `M0,tip C c1x,c1y c2x,c2y c2x,beltY A r,r 0 1 1 -c2x,beltY C ...` — a teardrop whose tip and
+ * the arc's own two (explicit, on-path) endpoints are read directly; the arc's own DEEPEST point
+ * (never a literal number in the string) is computed from real circular-arc geometry: two points
+ * that share a y and sit exactly 2r apart are a semicircle's diameter, and sweep-flag=1/large-
+ * arc-flag=1 (checked, not assumed) draws the branch bulging AWAY from the tip.
+ */
+function dropletPathBBox(d: string): Box {
+  const mMove = d.match(/^M0,(-?[\d.]+)/);
+  assert.ok(mMove, `droplet path "${d}" must open with an M0,<tip> move`);
+  const tip = Number(mMove?.[1]);
+
+  // The first C command's THREE point pairs — the arc's own start point is this curve's own
+  // endpoint (the third pair), never the earlier control points.
+  const mCurve1 = d.match(/C(-?[\d.]+),(-?[\d.]+) (-?[\d.]+),(-?[\d.]+) (-?[\d.]+),(-?[\d.]+)/);
+  assert.ok(mCurve1, `droplet path "${d}" must have a C command with 3 point pairs before the arc`);
+  const [, , , , , curveEndXRaw, curveEndYRaw] = mCurve1 as unknown as string[];
+  const arcStartX = Number(curveEndXRaw);
+  const beltY = Number(curveEndYRaw);
+
+  const mArc = d.match(/A(-?[\d.]+),(-?[\d.]+) 0 (\d) (\d) (-?[\d.]+),(-?[\d.]+)/);
+  assert.ok(mArc, `droplet path "${d}" must have an A (arc) command`);
+  const [, rxRaw, ryRaw, largeArcRaw, sweepRaw, arcEndXRaw, arcEndYRaw] = mArc as unknown as string[];
+  const rx = Number(rxRaw);
+  assert.equal(rx, Number(ryRaw), "the arc must be circular (rx === ry)");
+  assert.equal(Number(arcEndYRaw), beltY, "the arc's end point must sit at the SAME y as its start (a diameter-separated semicircle)");
+  const arcEndX = Number(arcEndXRaw);
+  assert.ok(Math.abs(arcStartX + arcEndX) < 1e-6, "the arc's two endpoints must be symmetric about x=0");
+  assert.ok(Math.abs(Math.abs(arcStartX - arcEndX) - 2 * rx) < 1e-6, "the arc's endpoints must be exactly 2r apart (a true diameter)");
+  assert.equal(largeArcRaw, "1", "large-arc-flag must be 1");
+  assert.equal(sweepRaw, "1", "sweep-flag must be 1 — the branch this bbox math assumes bulges AWAY from the tip");
+  return { left: -rx, right: rx, top: tip, bottom: beltY + rx };
+}
+
+/**
  * #808: `textBox()`'s 0.8 ASCENT undershoots real rendered ink — measured by rendering this
  * file's own `HeroStage` markup + `hero.css`/`tokens.css` in a real Chromium tab (chrome-devtools
  * MCP), 1700px container width over the 1200×380 viewBox (1.417× scale, converted back to
@@ -1733,6 +2178,139 @@ test("#920 gate② review thread (PRRT…gI/…GgJ) + finding [1]: idle planning
   }
 });
 
+// #922 "What" / gate② finding [2] (ac5-lane-stroke-still-muted): idle lane strokes must clear
+// >= 60% alpha (--bark) and every active state (writing/fixing/driving) resolves --sap-text at
+// full opacity — the pre-fix 0.35 idle / 0.5 driving values never actually closed this issue's
+// own explicit floor, and nothing pinned the winning computed style to catch it staying muted.
+//
+// gate② finding [4] (ac5-waypoint-color): the lane's own `.hero-lane-terminal` waypoints must
+// take the SAME colour as their channel, at every phase this test already exercises — the
+// pre-fix terminal was a fixed --bark @ 0.5 regardless of phase, so an active lane's own start/
+// end circles stayed muted even while its channel read as fully active.
+test("#922: idle lane channel/connector strokes resolve --bark at >= 60% alpha; writing/fixing/driving resolve --sap-text at 100%, in both themes", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  // 3 lanes, only 2 dispatched — the 3rd stays genuinely `data-phase="idle"` (state.ts's own
+  // default), so the idle CSS rule is proven against a REAL idle lane, not just the first
+  // `.hero-channel` element happening to be a different, non-idle phase.
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 1 }),
+    ev("dispatched", { worker: "w2", issue: 2 }),
+    ev("reclaim-done", { worker: "w2", issue: 2, next: "DRIVING", pr: 20 }),
+  ]);
+  const container = document.createElement("div");
+  container.innerHTML = markup(state, { lanesMax: 3 });
+  document.body.appendChild(container);
+  const expectedBark = parseTokens(tokensCss)["--bark"];
+  const expectedSapText = parseTokens(tokensCss)["--sap-text"];
+  try {
+    for (const themeAttr of ["heartwood", "sapwood"] as const) {
+      document.documentElement.setAttribute("data-theme", themeAttr);
+
+      const idleChannel = container.querySelector('.hero-lane[data-phase="idle"] .hero-channel') as Element;
+      assert.ok(idleChannel, `${themeAttr}: a genuinely idle (undispatched) lane must render`);
+      const idleComputed = getComputedStyle(idleChannel);
+      assert.equal(idleComputed.stroke, expectedBark, `${themeAttr}: idle channel stroke must resolve to --bark`);
+      assert.ok(
+        Number.parseFloat(idleComputed.strokeOpacity) >= 0.6,
+        `${themeAttr}: idle channel stroke-opacity ${idleComputed.strokeOpacity} must clear the AC's own >= 60% floor`,
+      );
+
+      const idleConnector = container.querySelector('.hero-lane[data-phase="idle"] .hero-lane-connector') as Element;
+      assert.ok(idleConnector, `${themeAttr}: the idle lane's own connector must render`);
+      assert.ok(
+        Number.parseFloat(getComputedStyle(idleConnector).strokeOpacity) >= 0.6,
+        `${themeAttr}: idle connector stroke-opacity must clear the AC's own >= 60% floor`,
+      );
+
+      // gate② finding [4]: the idle lane's own waypoints match its channel — --bark at >= 60%.
+      const idleTerminals = container.querySelectorAll('.hero-lane[data-phase="idle"] .hero-lane-terminal');
+      assert.equal(idleTerminals.length, 2, `${themeAttr}: the idle lane must draw both its own waypoint terminals`);
+      for (const terminal of idleTerminals) {
+        const terminalComputed = getComputedStyle(terminal);
+        assert.equal(
+          terminalComputed.stroke,
+          expectedBark,
+          `${themeAttr}: idle waypoint stroke must resolve to --bark, the SAME colour as its channel`,
+        );
+        assert.ok(
+          Number.parseFloat(terminalComputed.strokeOpacity) >= 0.6,
+          `${themeAttr}: idle waypoint stroke-opacity ${terminalComputed.strokeOpacity} must clear the AC's own >= 60% floor`,
+        );
+      }
+
+      const writingChannel = container.querySelector('.hero-lane[data-phase="writing"] .hero-channel') as Element;
+      assert.ok(writingChannel, `${themeAttr}: a writing-phase lane must render`);
+      const writingComputed = getComputedStyle(writingChannel);
+      assert.equal(writingComputed.stroke, expectedSapText, `${themeAttr}: writing channel stroke must resolve to --sap-text`);
+      assert.equal(writingComputed.strokeOpacity, "1", `${themeAttr}: writing channel must render at full (100%) opacity`);
+
+      // gate② finding [4]: the writing lane's own waypoints match its channel — --sap-text at 100%.
+      const writingTerminals = container.querySelectorAll('.hero-lane[data-phase="writing"] .hero-lane-terminal');
+      assert.equal(writingTerminals.length, 2, `${themeAttr}: the writing lane must draw both its own waypoint terminals`);
+      for (const terminal of writingTerminals) {
+        const terminalComputed = getComputedStyle(terminal);
+        assert.equal(
+          terminalComputed.stroke,
+          expectedSapText,
+          `${themeAttr}: writing waypoint stroke must resolve to --sap-text, the SAME colour as its channel`,
+        );
+        assert.equal(
+          terminalComputed.strokeOpacity,
+          "1",
+          `${themeAttr}: writing waypoint must render at full (100%) opacity, same as its channel`,
+        );
+      }
+
+      const drivingChannel = container.querySelector('.hero-lane[data-phase="driving"] .hero-channel') as Element;
+      assert.ok(drivingChannel, `${themeAttr}: a driving-phase lane must render`);
+      const drivingComputed = getComputedStyle(drivingChannel);
+      assert.equal(drivingComputed.stroke, expectedSapText, `${themeAttr}: driving channel stroke must resolve to --sap-text`);
+      assert.equal(drivingComputed.strokeOpacity, "1", `${themeAttr}: driving channel must render at full (100%) opacity, same as active`);
+    }
+  } finally {
+    document.documentElement.removeAttribute("data-theme");
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+});
+
+// gate② finding [4] (ac5-waypoint-color): a FAILED lane's own waypoints take --rust at 0.8, the
+// SAME colour its channel already resolves (`.hero-lane[data-phase="failed"] .hero-channel`) —
+// a separate fixture since neither existing failed-phase fixture in this file asserts channel
+// colour either, so this is new coverage for both, not just the waypoint half.
+test("#922: a FAILED lane's channel and waypoint terminals both resolve --rust at 0.8", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const { state } = run([ev("dispatched", { worker: "w1", issue: 1 }), ev("reclaim-failed", { worker: "w1", issue: 1 })]);
+  const container = document.createElement("div");
+  container.innerHTML = markup(state, { lanesMax: 1 });
+  document.body.appendChild(container);
+  const expectedRust = parseTokens(tokensCss)["--rust"];
+  try {
+    const failedChannel = container.querySelector('.hero-lane[data-phase="failed"] .hero-channel') as Element;
+    assert.ok(failedChannel, "the fixture must actually render a failed-phase lane");
+    const channelComputed = getComputedStyle(failedChannel);
+    assert.equal(channelComputed.stroke, expectedRust, "failed channel stroke must resolve to --rust");
+    assert.equal(channelComputed.strokeOpacity, "0.8", "failed channel stroke-opacity must be 0.8");
+
+    const failedTerminals = container.querySelectorAll('.hero-lane[data-phase="failed"] .hero-lane-terminal');
+    assert.equal(failedTerminals.length, 2, "the failed lane must draw both its own waypoint terminals");
+    for (const terminal of failedTerminals) {
+      const terminalComputed = getComputedStyle(terminal);
+      assert.equal(terminalComputed.stroke, expectedRust, "failed waypoint stroke must resolve to --rust, the SAME colour as its channel");
+      assert.equal(terminalComputed.strokeOpacity, "0.8", "failed waypoint stroke-opacity must be 0.8, the SAME as its channel");
+    }
+  } finally {
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+});
+
 // #920 gate② finding [1] (ac7-style-coverage-incomplete): "Keep the ACTIVE amber treatment as
 // is" (the review thread's own instruction) had no regression guard at all — a future edit could
 // silently drop `[data-active="true"] .hero-planning-node`'s own `--sap-text` override (collapsing
@@ -1744,7 +2322,10 @@ test("#920 gate② review thread (PRRT…gI/…GgJ) + finding [1]: idle planning
 // #924: no longer the SAME token as `.hero-pool-chip rect`'s own fill — that one is now
 // `--sap-fill`, a flat amber that no longer darkens for light theme the way `--sap-text` still
 // does.
-test("#920 gate② finding [1]: an ACTIVE planning node keeps the amber --sap-text stroke, distinct from the idle primary-ink treatment, in BOTH themes", () => {
+// #922 AC8 (STYLE + a11y, registerRealDom() via the eager import at the top of this file): the
+// RUNNING role breathes as a filled disc + halo, never just an animated edge — supersedes the
+// #920 test this replaces (that one asserted the OLD animated-stroke-only treatment AC8 retires).
+test("#922 AC8: the active node's disc fills --sap-fill with a running 2.8s fill animation and a halo; its glyph ink is static --on-sap-fill; inactive nodes have no halo and a transparent disc", () => {
   assert.ok(bodyFontSizeRule);
   const style = document.createElement("style");
   style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
@@ -1755,37 +2336,225 @@ test("#920 gate② finding [1]: an ACTIVE planning node keeps the amber --sap-te
   // the SAME live-cursor mechanism production drives this from, never a hand-set `data-active`.
   container.innerHTML = markup(state, { roundPhase: "aligning" });
   document.body.appendChild(container);
-  const expectedSapText = parseTokens(tokensCss)["--sap-text"];
-  assert.ok(expectedSapText, "--sap-text must be declared in tokens.css");
+  const expectedSapFill = parseTokens(tokensCss)["--sap-fill"];
+  const expectedOnSapFill = parseTokens(tokensCss)["--on-sap-fill"];
+  assert.ok(expectedSapFill && expectedOnSapFill, "--sap-fill/--on-sap-fill must be declared in tokens.css");
   try {
-    for (const themeAttr of ["heartwood", "sapwood"] as const) {
-      document.documentElement.setAttribute("data-theme", themeAttr);
+    const activeGroup = container.querySelector('[data-active="true"]') as Element;
+    assert.ok(activeGroup, "the active planning node's group must render");
 
-      const activeNode = container.querySelector('[data-active="true"] .hero-planning-node');
-      assert.ok(activeNode, `${themeAttr}: the active planning node must render`);
-      const activeComputed = getComputedStyle(activeNode as Element);
-      assert.equal(
-        activeComputed.stroke,
-        expectedSapText,
-        `${themeAttr}: the ACTIVE node's stroke must resolve to the exact --sap-text declaration`,
-      );
-      assert.equal(
-        activeComputed.strokeOpacity,
-        "0.9",
-        `${themeAttr}: the active node keeps its own 0.9 opacity, unchanged by this round's idle fix`,
-      );
+    const halo = activeGroup.querySelector(".hero-node-halo");
+    assert.ok(halo, "the active node renders a .hero-node-halo glow circle");
+    assert.equal(halo?.getAttribute("r"), String(PLANNING_NODE_R + 6), "the halo is r + 6, per the AC");
 
-      const idleNode = container.querySelector('[data-active="false"] .hero-planning-node');
-      assert.ok(idleNode, `${themeAttr}: an idle (inactive) planning node must also render, for contrast`);
-      const idleComputed = getComputedStyle(idleNode as Element);
-      assert.notEqual(
-        activeComputed.stroke,
-        idleComputed.stroke,
-        `${themeAttr}: the active node's amber stroke must be visually distinct from an idle node's primary-ink stroke`,
-      );
-    }
+    const disc = activeGroup.querySelector(".hero-planning-node") as Element;
+    const discComputed = getComputedStyle(disc);
+    assert.equal(discComputed.fill, expectedSapFill, "the active disc's fill resolves to --sap-fill (flat, both themes)");
+
+    const icon = activeGroup.querySelector(".hero-planning-icon") as Element;
+    const iconComputed = getComputedStyle(icon);
+    assert.equal(iconComputed.color, expectedOnSapFill, "the glyph's own ink resolves to --on-sap-fill, fixed (never animated)");
+
+    const idleGroup = container.querySelector('[data-active="false"]') as Element;
+    assert.ok(idleGroup, "an idle (inactive) planning node must also render, for contrast");
+    assert.equal(idleGroup.querySelector(".hero-node-halo"), null, "an inactive node has no halo element at all");
+    const idleDisc = idleGroup.querySelector(".hero-planning-node") as Element;
+    assert.equal(getComputedStyle(idleDisc).fill, "none", "an inactive node's disc stays transparent");
   } finally {
-    document.documentElement.removeAttribute("data-theme");
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+
+  // happy-dom's getComputedStyle never resolves the `animation` shorthand (no precedent anywhere
+  // else in this codebase relies on it) — the duration/easing/no-glyph-animation half of the AC
+  // is pinned at the source level instead, against the exact rule this markup's class resolves.
+  const activeRule = heroCss.match(/\[data-active="true"\] \.hero-planning-node \{([^}]*)\}/)?.[1] as string;
+  assert.ok(activeRule, '[data-active="true"] .hero-planning-node rule must exist');
+  assert.match(activeRule, /animation:\s*hero-breathe-fill\s+2\.8s\s+cubic-bezier\(0\.45,\s*0,\s*0\.55,\s*1\)/);
+  const activeIconRule = heroCss.match(/\[data-active="true"\] \.hero-planning-icon \{([^}]*)\}/)?.[1] as string;
+  assert.ok(activeIconRule, '[data-active="true"] .hero-planning-icon rule must exist');
+  assert.doesNotMatch(activeIconRule, /animation/, "the glyph itself carries no animation — only the disc under it moves");
+});
+
+test("#922 AC8: a waiting gate breathes its STROKE only (--sap-text) at 3.6s, never the fill channel", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const { state } = run([ev("dispatched", { worker: "w1", issue: 1 }), ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING" })]);
+  const container = document.createElement("div");
+  container.innerHTML = markup(state);
+  document.body.appendChild(container);
+  const expectedSapText = parseTokens(tokensCss)["--sap-text"];
+  try {
+    const waitingNode = container.querySelector('.hero-gate[data-state="waiting"] .hero-gate-node') as Element;
+    assert.ok(waitingNode, "a waiting gate must render");
+    assert.equal(getComputedStyle(waitingNode).stroke, expectedSapText);
+  } finally {
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+  // Source-level (getComputedStyle never resolves the `animation` shorthand, see the sibling
+  // active-node test's own note): duration, AND that the keyframe this rule names never declares
+  // fill-opacity — the STROKE-only half of the AC.
+  const waitingRule = heroCss.match(/\.hero-gate\[data-state="waiting"\] \.hero-gate-node \{([^}]*)\}/)?.[1] as string;
+  assert.ok(waitingRule, "the waiting-gate rule must exist");
+  assert.match(waitingRule, /animation:\s*hero-breathe-wait\s+3\.6s/);
+  const waitKeyframe = heroCss.match(/@keyframes hero-breathe-wait\s*\{([\s\S]*?)\n\}/)?.[1] as string;
+  assert.ok(waitKeyframe, "hero-breathe-wait keyframe must exist");
+  assert.doesNotMatch(waitKeyframe, /fill-opacity/);
+});
+
+test("#922 AC8: the current ring breathes at 4.4s — no two hero animation periods coincide", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  // Two workers: w1 merges (produces the ring to assert on), w2 stays writing so
+  // `data-running="true"` still holds once w1's own lane returns to idle after its merge.
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 1 }),
+    ev("merged", { worker: "w1", issue: 1, pr: 1 }),
+    ev("dispatched", { worker: "w2", issue: 2 }),
+  ]);
+  const container = document.createElement("div");
+  container.innerHTML = markup(state, { roundPhase: "aligning" });
+  document.body.appendChild(container);
+  try {
+    const currentRing = container.querySelector('[data-running="true"].hero .hero-ring[data-current="true"]') as Element;
+    assert.ok(currentRing, "the current ring must render while any lane runs");
+  } finally {
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+  const runningRingRule = heroCss.match(/\.hero\[data-running="true"\] \.hero-ring\[data-current="true"\] \{([^}]*)\}/)?.[1] as string;
+  assert.ok(runningRingRule, "the running-ring rule must exist");
+  assert.match(runningRingRule, /animation:\s*hero-breathe\s+4\.4s/);
+
+  // COVERAGE: derive every hero animation's (name, duration) pair from source, never a
+  // hand-picked subset. The AC's own "never beat" requirement is about independent breathing
+  // CHANNELS — hero-breathe-fill and hero-breathe-glow are ONE channel by design (the halo
+  // deliberately breathes IN SYNC with its own disc, same 2.8s), so channels are grouped by their
+  // shared period before checking that no two DIFFERENT channels coincide.
+  const animations = [...heroCss.matchAll(/animation:\s*([\w-]+)\s+([\d.]+)s/g)].map((m) => ({
+    name: m[1] as string,
+    duration: m[2] as string,
+  }));
+  assert.ok(animations.length >= 5, "expected at least the fill/glow/wait/ring/shimmer animations");
+  const channelsByDuration = new Map<string, Set<string>>();
+  for (const { name, duration } of animations) {
+    const channel = name === "hero-breathe-glow" ? "hero-breathe-fill" : name; // synced with the disc, not an independent channel
+    if (!channelsByDuration.has(duration)) channelsByDuration.set(duration, new Set());
+    channelsByDuration.get(duration)!.add(channel);
+  }
+  for (const [duration, channels] of channelsByDuration) {
+    assert.equal(
+      channels.size,
+      1,
+      `period ${duration}s must belong to exactly one independent channel, found: ${[...channels].join(", ")}`,
+    );
+  }
+  assert.equal(
+    channelsByDuration.size,
+    4,
+    `expected 4 distinct periods (fill+glow, wait, ring, shimmer): ${[...channelsByDuration.keys()].join(", ")}`,
+  );
+});
+
+// gate② finding [6] (ac8-reflection-reduced-motion-unverified), first half: the earlier test only
+// exercised a PLANNING node — removing the REFLECTION node's own halo/fill-animation rule would
+// stay green. `roundPhase: "harvesting"` lights Summary via `activeReflectionNode` (state.ts), the
+// SAME live-cursor mechanism production drives this from.
+test("#922 AC8: an active REFLECTION node (Summary) also renders a halo and a --sap-fill disc, same as a planning node", () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const { state } = run([ev("merged", { worker: "w1", issue: 1, pr: 1 })]);
+  const container = document.createElement("div");
+  container.innerHTML = markup(state, { roundPhase: "harvesting" });
+  document.body.appendChild(container);
+  const expectedSapFill = parseTokens(tokensCss)["--sap-fill"];
+  try {
+    const reflectionGroup = container.querySelector('.hero-reflection [data-active="true"]') as Element;
+    assert.ok(reflectionGroup, "the active reflection node's own group must render");
+    const halo = reflectionGroup.querySelector(".hero-node-halo");
+    assert.ok(halo, "the active reflection node renders a .hero-node-halo glow circle");
+    assert.equal(
+      halo?.getAttribute("r"),
+      String(REFLECTION.r + 6),
+      "the halo is r + 6, per the AC — REFLECTION.r, not the planning node's radius",
+    );
+    const disc = reflectionGroup.querySelector(".hero-planning-node") as Element;
+    assert.equal(
+      getComputedStyle(disc).fill,
+      expectedSapFill,
+      "the active reflection disc's fill resolves to --sap-fill, same as a planning node",
+    );
+
+    const idleReflectionGroup = container.querySelector('.hero-reflection [data-active="false"]') as Element;
+    assert.ok(idleReflectionGroup, "the idle reflection node (Retro) must also render, for contrast");
+    assert.equal(idleReflectionGroup.querySelector(".hero-node-halo"), null, "the idle reflection node has no halo at all");
+  } finally {
+    document.body.removeChild(container);
+    document.head.removeChild(style);
+  }
+});
+
+// gate② finding [6], second half: the earlier reduced-motion test only regex-matched CSS SOURCE
+// text — it never rendered the `data-motion="reduced"` path to prove the cascade actually WINS in
+// production, and never checked the lucide icon's OWN descendant ink (only the wrapper's `color`).
+// This renders both the media-query path (`window.matchMedia` isn't wired in happy-dom, so the
+// `[data-motion="reduced"]` attribute selector — the SAME one the manual/replay path uses,
+// `stage.tsx`'s own `reducedMotion` prop — is the one this harness can actually drive) and reads
+// real computed values off the active node's disc, halo, AND the lucide glyph's own nested <svg>.
+test('#922 AC8: data-motion="reduced" renders the active halo/disc statically at peak alpha in the REAL production cascade, including the lucide glyph\'s own descendant ink', () => {
+  assert.ok(bodyFontSizeRule);
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${bodyFontSizeRule}`;
+  document.head.appendChild(style);
+  const { state } = run([ev("pool-selected", { issues: [1] })]);
+  const container = document.createElement("div");
+  container.innerHTML = markup(state, { roundPhase: "aligning", reducedMotion: true });
+  document.body.appendChild(container);
+  const expectedPeak = parseTokens(tokensCss)["--sap-fill-halo-peak"];
+  const expectedOnSapFill = parseTokens(tokensCss)["--on-sap-fill"];
+  try {
+    const svgRoot = container.querySelector("svg.hero") as Element;
+    assert.equal(svgRoot.getAttribute("data-motion"), "reduced", "the fixture must actually render the reduced-motion path");
+
+    const activeGroup = container.querySelector('[data-active="true"]') as Element;
+    assert.ok(activeGroup, "the active planning node's group must render");
+    const disc = activeGroup.querySelector(".hero-planning-node") as Element;
+    const discComputed = getComputedStyle(disc);
+    // happy-dom never resolves the `animation` shorthand's own longhands (echoes "" for
+    // `animationName` even under a matching `!important: none` rule — the sibling active-node
+    // test's own note); the VALUE that actually matters under reduced motion — the winning
+    // fill-opacity is the peak, not the animation's own floor — is what happy-dom DOES resolve
+    // correctly, and is the real proof this half of the AC needs.
+    assert.equal(
+      discComputed.fillOpacity,
+      expectedPeak,
+      `the disc's fill-opacity must resolve to the theme's own peak (${expectedPeak}), never the animation's floor`,
+    );
+
+    const halo = activeGroup.querySelector(".hero-node-halo") as Element;
+    assert.ok(halo, "the halo must still render (present, not removed) under reduced motion");
+    const haloComputed = getComputedStyle(halo);
+    assert.equal(haloComputed.fillOpacity, "0.24", "the halo resolves to the AC's own fixed ~0.24 under reduced motion");
+
+    // The lucide glyph's own nested <svg> — its `stroke="currentColor"` attribute must resolve
+    // through the SAME `color` inheritance the wrapper's own computed `color` proves, not just
+    // assert the wrapper's property and assume the descendant picks it up.
+    const iconSvg = activeGroup.querySelector(".hero-planning-icon svg") as Element;
+    assert.ok(iconSvg, "the lucide icon's own nested <svg> must render inside the active node");
+    const iconSvgComputed = getComputedStyle(iconSvg);
+    assert.equal(
+      iconSvgComputed.color,
+      expectedOnSapFill,
+      "the lucide glyph's OWN <svg> element resolves --on-sap-fill via inherited color, not just its wrapper",
+    );
+  } finally {
     document.body.removeChild(container);
     document.head.removeChild(style);
   }
@@ -1905,11 +2674,17 @@ test("#920 gate② review thread (PRRT…JE9): the planning trio's own labels ne
     const html = markup(initialHeroState(lanesMax), { lanesMax });
     const planningGroupMatch = html.match(/<g class="hero-planning" data-node="planning">([\s\S]*?)<g class="hero-lanes">/);
     assert.ok(planningGroupMatch, `lanesMax=${lanesMax}: the planning group must render`);
+    // #922 AC1: planning labels moved centred-below their circle (text-anchor="middle"), no
+    // longer right-anchored beside it — the geometry this test's own name once guarded against
+    // (a label running into the lane column) no longer applies the same way, but the coverage
+    // discipline (derive the set from rendered markup) stays.
     const planningLabels = [
-      ...(planningGroupMatch![1] as string).matchAll(/<text class="hero-node-label" x="(-?[\d.]+)" y="(-?[\d.]+)">([^<]*)</g),
+      ...(planningGroupMatch![1] as string).matchAll(
+        /<text class="hero-node-label" x="(-?[\d.]+)" y="(-?[\d.]+)" text-anchor="middle">([^<]*)</g,
+      ),
     ].map(([, x, y, text]) => ({
       label: `planning label "${text}"`,
-      box: captionSafeTextBox((text as string).replace(/&amp;/g, "&"), Number(x), Number(y), GATE_NODE_LABEL_FONT_PX, "start"),
+      box: captionSafeTextBox((text as string).replace(/&amp;/g, "&"), Number(x), Number(y), GATE_NODE_LABEL_FONT_PX, "middle"),
     }));
     assert.equal(planningLabels.length, 3, `lanesMax=${lanesMax}: all three planning labels must render`);
 
@@ -2005,9 +2780,16 @@ test("#728 gate② [0]: the needs-human cluster's real circle/label extents neve
   ];
   for (const d of escalated) {
     const { x, y } = dropletPoint(state, d);
-    const label = d.pr === null ? `⊙ ${d.issue}` : `⤳ ${d.pr}`;
-    boxes.push({ label: `needs-human #${d.issue} circle`, box: circleBox(x, y, 9) });
-    boxes.push({ label: `needs-human #${d.issue} label`, box: textBox(label, x, y - 14, 10) });
+    // #922 AC2: the number renders INSIDE the shape, whose own belly radius is
+    // sized to fit it (`dropletRadius`) — never a fixed r=9 with a label floating above at
+    // y-14. The shape fits the bare NUMBER only, never the kind mark (production's own
+    // `dropletNumber`/`dropletKind`).
+    const number = dropletNumberText(d);
+    const r = dropletRadius(number);
+    // #922 AC2: the number renders INSIDE the shape (`r` is sized to fit it exactly), so the
+    // shape's own circle box already subsumes the label — no separate label box is needed, and
+    // pushing one would spuriously "collide" with its own circle.
+    boxes.push({ label: `needs-human #${d.issue} circle`, box: circleBox(x, y, r) });
   }
   assertNoOverlap(boxes);
 
@@ -2229,14 +3011,16 @@ test("#920 gate② finding [0]: at the demo's own 1-ring count, the stem attache
 // #886 gate② run 2e566ac9 finding [1]: the earlier fix kept the droplet dead-center and moved
 // the NUMBER away to dodge it (first landing on top of it, then reading as "well outside" a low
 // ring count). This round moves the DROPLET instead (`TRUNK_DROPLET_OFFSET`, stage.tsx) so the
-// number can stay genuinely centered. Stressed at a 3-digit ring total and a 6-digit PR number —
+// number can stay genuinely centered. Stressed at a 3-digit ring total and a 5-digit PR number —
+// #922 AC2's own "PR 12345" — the widest number this file's own `DROPLET_MAX_R` still fits
+// without clipping the number's text box.
 // `TRUNK_DROPLET_OFFSET`'s own doc argues the vertical component alone already clears the label
 // regardless of either string's width; this proves that against the ACTUAL rendered boxes rather
 // than trusting the doc's arithmetic, the same discipline #728's NEEDS_HUMAN_COL_STEP/ROW_STEP
 // doc cites for its own cluster.
 test("#886 gate② run 2e566ac9 finding [1]: the centered ring count never collides with the newest-merge droplet, now offset away from the trunk center — stressed at multi-digit ring/PR counts", () => {
   const events: DomainEvent[] = [];
-  for (let i = 1; i <= 999; i++) events.push(ev("merged", { worker: `m${i}`, issue: i, pr: 999999 }));
+  for (let i = 1; i <= 999; i++) events.push(ev("merged", { worker: `m${i}`, issue: i, pr: 12345 }));
   const { state } = run(events, 3);
   assert.equal(state.rings, 999, "stress case: a 3-digit ring total, the widest realistic .hero-ring-count string");
   const html = markup(state);
@@ -2257,10 +3041,22 @@ test("#886 gate② run 2e566ac9 finding [1]: the centered ring count never colli
   const dropletRe = new RegExp(`<g class="hero-droplet"[^>]*transform="translate\\(${dropX} ${dropY}\\)">([\\s\\S]*?)</g>`);
   const dropletInner = html.match(dropletRe)?.[1];
   assert.ok(dropletInner, "the trunk droplet must render at its own offset transform");
-  const labelMatch = dropletInner?.match(/<text class="hero-num hero-small" x="0" y="-14" text-anchor="middle">([^<]*)<\/text>/);
-  assert.ok(labelMatch, "the newest-merge droplet must still carry its own PR chip label");
-  const labelBox = textBox(labelMatch?.[1] as string, dropX, dropY - 14, 10);
-  const shapeBox = circleBox(dropX, dropY, 9);
+  // #922 AC2: the number now renders INSIDE the shape (`.hero-droplet-num`), at a y
+  // derived from the shape's own (number-sized) belly radius — never a fixed y="-14" above it. The
+  // kind mark ("✓", trunk's own mark) is a separate, smaller sibling element and
+  // never counts toward the shape's fit.
+  const kindMatch = dropletInner?.match(/<text class="hero-droplet-kind"[^>]*>([^<]*)<\/text>/);
+  assert.equal(kindMatch?.[1], "✓", "the trunk droplet's own kind mark must still read '✓'");
+  const labelMatch = dropletInner?.match(
+    /<text class="hero-num hero-droplet-num" x="0" y="(-?[\d.]+)" text-anchor="middle" style="font-size:([\d.]+)px">([^<]*)<\/text>/,
+  );
+  assert.ok(labelMatch, "the newest-merge droplet must still carry its own PR number");
+  const [, labelYRaw, fontPxRaw, labelText] = labelMatch as unknown as [string, string, string, string];
+  assert.equal(labelText, String(trunkDroplet?.pr));
+  const r = dropletRadius(labelText);
+  assert.equal(Number(fontPxRaw), DROPLET_NUM_FONT_PX, "the number's font-size never shrinks — the 11px floor is inviolable");
+  const labelBox = textBox(labelText, dropX, dropY + Number(labelYRaw), Number(fontPxRaw));
+  const shapeBox = circleBox(dropX, dropY, r);
 
   assert.ok(
     !boxesOverlap(countBox, labelBox),
@@ -2859,11 +3655,14 @@ test("#745 AC2: two PRs simultaneously out for review render at distinct stage p
   const p2 = dropletPoint(state, d2);
   assert.notDeepEqual(p1, p2, "two simultaneously-checkpointed droplets must not share a stage position");
 
+  const r1 = dropletRadius("11");
+  const r2 = dropletRadius("12");
+  // #922 AC2: the number renders INSIDE the shape (`r` fits it exactly) — the circle box alone
+  // is the real footprint; no separate label box (which would spuriously self-overlap its own
+  // circle now that it's drawn inside, not floating above it).
   const boxes: { label: string; box: Box }[] = [
-    { label: "checkpoint #1 circle", box: circleBox(p1.x, p1.y, 9) },
-    { label: "checkpoint #1 label", box: textBox("⤳ 11", p1.x, p1.y - 14, 10) },
-    { label: "checkpoint #2 circle", box: circleBox(p2.x, p2.y, 9) },
-    { label: "checkpoint #2 label", box: textBox("⤳ 12", p2.x, p2.y - 14, 10) },
+    { label: "checkpoint #1 circle", box: circleBox(p1.x, p1.y, r1) },
+    { label: "checkpoint #2 circle", box: circleBox(p2.x, p2.y, r2) },
   ];
   assertNoOverlap(boxes);
   for (const { label, box } of boxes) {
@@ -2872,26 +3671,400 @@ test("#745 AC2: two PRs simultaneously out for review render at distinct stage p
   }
 });
 
-test("#745 AC2: six simultaneous checkpoint droplets — CHECKPOINT_COLS/STEP's own documented verified-safe ceiling — stay collision-free and within stage bounds", () => {
+// gate② finding [0]: reads CHECKPOINT_DRAW_CAP from source (never a hand-copied "6") and checks
+// each droplet's REAL rendered path bbox (`dropletPathBBox`), not a circleBox derived by
+// re-calling `dropletRadius` — CHECKPOINT_ROWS_MAX was cut 3 -> 2 by this same finding, once the
+// real (taller-than-a-circle) teardrop geometry showed the old 3-row cap was never actually
+// collision-safe.
+test("#745 AC2: CHECKPOINT_DRAW_CAP simultaneous checkpoint droplets — CHECKPOINT_COLS/STEP's own documented verified-safe ceiling — stay collision-free and within stage bounds", () => {
   const events: DomainEvent[] = [];
-  for (let i = 1; i <= 6; i++) {
+  for (let i = 1; i <= CHECKPOINT_DRAW_CAP; i++) {
     events.push(ev("dispatched", { worker: `w${i}`, issue: i }));
     events.push(ev("reclaim-done", { worker: `w${i}`, issue: i, next: "DRIVING", pr: 100 + i }));
   }
-  const { state } = run(events, 6);
+  const { state } = run(events, CHECKPOINT_DRAW_CAP);
   const checkpointed = state.droplets.filter((d) => d.at === "checkpoint");
-  assert.equal(checkpointed.length, 6);
+  assert.equal(checkpointed.length, CHECKPOINT_DRAW_CAP);
+
+  const html = markup(state, { lanesMax: CHECKPOINT_DRAW_CAP });
+  const droplets = renderedDroplets(html);
+  assert.equal(droplets.length, CHECKPOINT_DRAW_CAP, "every checkpoint droplet up to the draw cap must actually render");
 
   const boxes: { label: string; box: Box }[] = [];
-  for (const d of checkpointed) {
-    const { x, y } = dropletPoint(state, d);
-    boxes.push({ label: `checkpoint #${d.issue} circle`, box: circleBox(x, y, 9) });
-    boxes.push({ label: `checkpoint #${d.issue} label`, box: textBox(`⤳ ${d.pr}`, x, y - 14, 10) });
+  for (const d of droplets) {
+    const pathBox = dropletPathBBox(d.path);
+    boxes.push({
+      label: `checkpoint #${d.issue} circle`,
+      box: { left: d.x + pathBox.left, right: d.x + pathBox.right, top: d.y + pathBox.top, bottom: d.y + pathBox.bottom },
+    });
   }
   assertNoOverlap(boxes);
   for (const { label, box } of boxes) {
     assert.ok(box.left >= 0 && box.right <= STAGE.w, `${label} left=${box.left} right=${box.right} lies outside [0, ${STAGE.w}]`);
     assert.ok(box.top >= 0 && box.bottom <= STAGE.h, `${label} top=${box.top} bottom=${box.bottom} lies outside [0, ${STAGE.h}]`);
+  }
+});
+
+/** Every rendered `.hero-droplet` group's own `data-issue`, translate offset, path `d`, and
+ *  number-text `y`/font-size/content — read straight off the markup, never recomputed from
+ *  `dropletRadius`/`dropletPath` (gate② finding [0]'s own "read what actually rendered" ask).
+ *  The kind mark and the number are two sibling `<text>` elements — the `[\s\S]*?` between
+ *  `</path>` and the number's own `<text>` skips over the kind mark without caring about its
+ *  exact content; `dropletKindAndNumber` above reads that separately, when a test needs it. */
+function renderedDroplets(
+  html: string,
+): { issue: number; x: number; y: number; path: string; textY: number; fontPx: number; text: string }[] {
+  const re =
+    /<g class="hero-droplet" data-issue="(\d+)"[^>]*transform="translate\((-?[\d.]+) (-?[\d.]+)\)">[\s\S]*?<path class="hero-droplet-shape" d="([^"]*)"[^>]*><\/path>[\s\S]*?<text class="hero-num hero-droplet-num" x="0" y="(-?[\d.]+)" text-anchor="middle" style="font-size:([\d.]+)px">([^<]*)<\/text>/g;
+  return [...html.matchAll(re)].map(([, issue, x, y, path, textY, fontPx, text]) => ({
+    issue: Number(issue),
+    x: Number(x),
+    y: Number(y),
+    path: path as string,
+    textY: Number(textY),
+    fontPx: Number(fontPx),
+    text: text as string,
+  }));
+}
+
+/**
+ * #922 AC2: every droplet's number renders at the FIXED `DROPLET_NUM_FONT_PX`, never a
+ * digit-count-derived smaller size — this is the mutation-kill guard: reintroducing any shrink
+ * (making `d.fontPx` depend on the number's length again) reddens the first assertion below for
+ * every droplet this helper checks, not just a hand-picked one.
+ *
+ * gate② finding [0] (ac2-geometry-oracle-assumes-fit): height/containment read from the ACTUAL
+ * rendered `d`/`<text>` (via `dropletPathBBox`/`renderedDroplets`), never recomputed through
+ * `dropletRadius`/`dropletPath` — a text position or path-radius bug the two functions still
+ * privately agree on would otherwise stay invisible.
+ *
+ * gate② finding [0] (ac2-real-render-scale): `1440 / STAGE.w` assumes the SVG gets the full
+ * 1440px viewport width — at a REAL 1440px viewport the SVG's own content is ~1318px wide (icon
+ * rail + `.stack`/`.panel` chrome, `REAL_RENDER_SCALE_1440`'s own doc in stage.tsx), so the naive
+ * ratio overstates the render scale and lets a too-small production floor through; every check
+ * here goes through `REAL_RENDER_SCALE_1440`, never the naive ratio.
+ */
+function assertDropletNumeralsHold(html: string, label: string) {
+  const droplets = renderedDroplets(html);
+  assert.ok(droplets.length > 0, `${label}: at least one droplet must render`);
+  for (const d of droplets) {
+    assert.equal(d.fontPx, DROPLET_NUM_FONT_PX, `${label}: droplet #${d.issue}'s number must render at the fixed floor, never shrunk`);
+    const numFontPxAt1440 = d.fontPx * REAL_RENDER_SCALE_1440;
+    assert.ok(
+      numFontPxAt1440 >= 11,
+      `${label}: droplet #${d.issue}'s number ${d.fontPx}px * ${REAL_RENDER_SCALE_1440} = ${numFontPxAt1440}px must clear the AC's own >= 11px-at-1440 floor at the REAL render scale`,
+    );
+
+    const pathBox = dropletPathBBox(d.path);
+    const heightPx = (pathBox.bottom - pathBox.top) * REAL_RENDER_SCALE_1440;
+    assert.ok(
+      heightPx >= 28,
+      `${label}: droplet #${d.issue}'s rendered path height ${heightPx}px must clear the AC's own >= 28px-at-1440 floor at the REAL render scale`,
+    );
+    const textBoxForDroplet = textBox(d.text, 0, d.textY, d.fontPx);
+    assert.ok(
+      textBoxForDroplet.left >= pathBox.left &&
+        textBoxForDroplet.right <= pathBox.right &&
+        textBoxForDroplet.top >= pathBox.top &&
+        textBoxForDroplet.bottom <= pathBox.bottom,
+      `${label}: droplet #${d.issue}'s number text box ${JSON.stringify(textBoxForDroplet)} must sit fully inside its own path box ${JSON.stringify(pathBox)}`,
+    );
+  }
+}
+
+// Neighbour-collision at the raised radii is proven by the "4 lanes, 6 checkpoint droplets"
+// COLLISION test below (`renderedDroplets`'s own regex feeds it the same real path boxes) and by
+// the dedicated max-radius COLLISION test further down — not duplicated here.
+test("#922 AC2: the droplet numeral never shrinks — >= 11px at 1440, fully contained, across the stress/idle/demo fixtures and hand-picked 4-/5-digit numbers", () => {
+  // "demo": a plain steady-state single dispatch, realistic 1-3 digit PR.
+  const demoHtml = markup(
+    run([ev("dispatched", { worker: "w1", issue: 1 }), ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 42 })]).state,
+  );
+  assertDropletNumeralsHold(demoHtml, "demo fixture");
+
+  // "idle": a single parked-PR droplet on the escalation branch, at a realistic 4-digit issue/PR
+  // (#922 AC2's own report named a 4-digit parked-PR droplet measuring under the 11px floor).
+  const idleHtml = markup(
+    run([
+      ev("dispatched", { worker: "w1", issue: 9202 }),
+      ev("reclaim-done", { worker: "w1", issue: 9202, next: "DRIVING", pr: 9202 }),
+      ev("drive-needs-human", { worker: "w1", issue: 9202, pr: 9202 }),
+    ]).state,
+  );
+  assert.deepEqual(dropletKindAndNumber(idleHtml, 9202), { kind: "PR", number: "9202" }, "the idle fixture must draw 'PR 9202'");
+  assertDropletNumeralsHold(idleHtml, "idle fixture");
+
+  // A merged (trunk) droplet at a realistic 4-digit PR — the AC's other named case, "✓ 9201".
+  const trunkHtml = markup(run([ev("merged", { worker: "w1", issue: 1, pr: 9201 })]).state);
+  assert.deepEqual(dropletKindAndNumber(trunkHtml, 1), { kind: "✓", number: "9201" }, "the merged fixture must draw '✓ 9201'");
+  assertDropletNumeralsHold(trunkHtml, "trunk fixture");
+
+  // "stress": the AC's own named fixture — 4 lanes, 6 checkpoint droplets.
+  const stressEvents: DomainEvent[] = [];
+  const workers = ["w1", "w2", "w3", "w4"];
+  for (let i = 1; i <= 6; i++) {
+    const worker = workers[(i - 1) % 4] as string;
+    stressEvents.push(ev("dispatched", { worker, issue: i }));
+    stressEvents.push(ev("reclaim-done", { worker, issue: i, next: "DRIVING", pr: 100 + i }));
+  }
+  const stressHtml = markup(run(stressEvents, 4).state, { lanesMax: 4 });
+  assertDropletNumeralsHold(stressHtml, "stress fixture");
+
+  // Hand-picked 4-/5-digit numbers: a bare 4-digit issue number and an in-flight 5-digit PR —
+  // both realistic within weeks for sapwood's own repo (already in the 900s).
+  const issue9202Html = markup(run([ev("dispatched", { worker: "w1", issue: 9202 })]).state);
+  assert.deepEqual(dropletKindAndNumber(issue9202Html, 9202), { kind: "⊙", number: "9202" });
+  assertDropletNumeralsHold(issue9202Html, "hand-picked issue #9202");
+
+  const pr12345Html = markup(
+    run([ev("dispatched", { worker: "w1", issue: 1 }), ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 12345 })]).state,
+  );
+  assert.deepEqual(dropletKindAndNumber(pr12345Html, 1), { kind: "⤳", number: "12345" });
+  assertDropletNumeralsHold(pr12345Html, "hand-picked PR #12345");
+});
+
+/** The checkpoint overflow badge's own rendered box — the `<g class="hero-checkpoint-overflow">`
+ *  wrapper's real transform PLUS its child `<text>`'s own real x/y and content, summed for the
+ *  absolute position; never a hand-recomputed offset. `.hero-small`'s 10px (hero.css) is the one
+ *  value still cited from the stylesheet rather than the markup — a `font-size` set only by a CSS
+ *  class (never inlined on this element) isn't readable from static markup alone. */
+function renderedCheckpointOverflowBadge(html: string): { label: string; box: Box } | null {
+  const m = html.match(
+    /<g class="hero-checkpoint-overflow" data-count="\d+" transform="translate\((-?[\d.]+) (-?[\d.]+)\)"><text class="hero-num hero-small hero-badge" x="0" y="(-?[\d.]+)" text-anchor="middle">([^<]*)<\/text><\/g>/,
+  );
+  if (!m) return null;
+  const [, gxRaw, gyRaw, textYRaw, text] = m;
+  return {
+    label: `checkpoint overflow badge ("${text}")`,
+    box: textBox(text as string, Number(gxRaw), Number(gyRaw) + Number(textYRaw), 10),
+  };
+}
+
+/** A lane's own rendered node-label box — the `<text class="hero-node-label">` inside that lane's
+ *  own `<g data-lane-index>`, real x/y read straight off the markup; never a hand-recomputed
+ *  `laneY(...) - 10` offset. `GATE_NODE_LABEL_FONT_PX` (12px, `.hero-node-label`'s own CSS rule)
+ *  is the one value still cited from the stylesheet, same reasoning as the badge helper above. */
+function renderedLaneLabel(html: string, channel: number): { label: string; box: Box } | null {
+  const laneBlock = html.match(new RegExp(`<g class="hero-lane" data-lane-index="${channel}"[^>]*>([\\s\\S]*?)<\\/g>`));
+  if (!laneBlock) return null;
+  const m = (laneBlock[1] as string).match(/<text class="hero-node-label" x="(-?[\d.]+)" y="(-?[\d.]+)">([^<]*)<\/text>/);
+  if (!m) return null;
+  const [, xRaw, yRaw, text] = m;
+  return {
+    label: `lane ${channel} label ("${text}")`,
+    box: captionSafeTextBox(text as string, Number(xRaw), Number(yRaw), GATE_NODE_LABEL_FONT_PX, "start"),
+  };
+}
+
+// #922 AC2's own named stress fixture, verbatim: "4 lanes, 6 checkpoint droplets" — 4 lane
+// workers cycle through 6 dispatches total (checkpoint droplets are tracked independently by
+// issue, so a lane cycling to a new dispatch doesn't remove an earlier issue's own still-parked
+// checkpoint droplet), keeping every lane label AND every checkpoint droplet on stage at once.
+// gate② finding [0]: uses each droplet's OWN rendered path bbox (`dropletPathBBox`, parsed from
+// the actual `d` attribute) as its collision footprint — not a `circleBox` derived by re-calling
+// `dropletRadius`, which would only prove the two production functions agree with each other.
+// The same finding cut CHECKPOINT_ROWS_MAX 3 -> 2 (CHECKPOINT_DRAW_CAP's own doc): 6 checkpoint
+// droplets still exist/fold at once (the AC's own named fixture), but only CHECKPOINT_DRAW_CAP
+// of them actually DRAW — the rest fold into the overflow badge, whose own box is checked here
+// too, alongside every drawn droplet and lane label — both read from the ACTUAL rendered markup
+// (`renderedCheckpointOverflowBadge`/`renderedLaneLabel` above), never a hand-recomputed offset.
+test("#922 AC2: no droplet number overlaps a neighbouring droplet or a lane label — the AC's own '4 lanes, 6 checkpoint droplets' stress fixture", () => {
+  const events: DomainEvent[] = [];
+  const workers = ["w1", "w2", "w3", "w4"];
+  for (let i = 1; i <= 6; i++) {
+    const worker = workers[(i - 1) % 4] as string;
+    events.push(ev("dispatched", { worker, issue: i }));
+    events.push(ev("reclaim-done", { worker, issue: i, next: "DRIVING", pr: 100 + i }));
+  }
+  const { state } = run(events, 4);
+  assert.equal(state.lanes.length, 4, "the fixture must actually render 4 lanes");
+  const checkpointed = state.droplets.filter((d) => d.at === "checkpoint");
+  assert.equal(checkpointed.length, 6, "the fixture must actually fold 6 simultaneous checkpoint droplets");
+
+  const html = markup(state, { lanesMax: 4 });
+  const droplets = renderedDroplets(html);
+  // 6 folded checkpoint droplets exceed CHECKPOINT_DRAW_CAP, so overflow triggers — only
+  // CHECKPOINT_OVERFLOW_REAL_CAP (one row short of the full grid) actually draw.
+  assert.equal(droplets.length, CHECKPOINT_OVERFLOW_REAL_CAP, "exactly the overflow-real-cap's worth of checkpoint droplets must render");
+  assert.match(html, new RegExp(`class="hero-checkpoint-overflow" data-count="${6 - CHECKPOINT_OVERFLOW_REAL_CAP}"`));
+
+  // Only the rendered PATH box per droplet — the dedicated containment test above already proves
+  // each droplet's own number sits inside its own path, so pushing both here would spuriously
+  // self-overlap (a droplet's own number is INSIDE its own path by design); the path box alone is
+  // the more conservative (strictly larger) footprint for the cross-droplet/lane collision check.
+  const boxes: { label: string; box: Box }[] = [];
+  for (const d of droplets) {
+    const pathBox = dropletPathBBox(d.path);
+    boxes.push({
+      label: `checkpoint #${d.issue} rendered path`,
+      box: { left: d.x + pathBox.left, right: d.x + pathBox.right, top: d.y + pathBox.top, bottom: d.y + pathBox.bottom },
+    });
+  }
+  const overflowBadge = renderedCheckpointOverflowBadge(html);
+  assert.ok(overflowBadge, "the overflow badge must render");
+  boxes.push(overflowBadge as { label: string; box: Box });
+  for (const lane of state.lanes) {
+    const laneLabel = renderedLaneLabel(html, lane.channel);
+    assert.ok(laneLabel, `lane ${lane.channel}'s own label must render`);
+    boxes.push(laneLabel as { label: string; box: Box });
+  }
+  assertNoOverlap(boxes);
+});
+
+// COLLISION at max radius: the fixture above only ever carries 3-digit PR numbers (101..106),
+// so the geometry constants sized against `DROPLET_MAX_R` (`NEEDS_HUMAN_COL_STEP`/`ROW_STEP`,
+// `CHECKPOINT_COL_STEP`/`ROW_STEP` — stage.tsx's own doc on each) are never actually exercised at
+// the radius they were sized for. This fixture forces every droplet's own PR to 5 digits — the
+// widest number `DROPLET_MAX_R` (22) still fits without clipping (`dropletRadius`'s own doc:
+// halfWidth("90001".length=5) ≈ 21.05) — across BOTH clusters the ceiling's own margin math
+// covers: checkpoint (the AC's own named fixture, same 4-lanes/6-droplets shape) and needs-human
+// (its own draw cap, 6).
+test("#922 AC2 COLLISION at max radius: adjacent checkpoint and needs-human droplets carrying realistic 5-digit numbers do not overlap", () => {
+  const events: DomainEvent[] = [];
+  const workers = ["w1", "w2", "w3", "w4"];
+  for (let i = 1; i <= 6; i++) {
+    const worker = workers[(i - 1) % 4] as string;
+    events.push(ev("dispatched", { worker, issue: i }));
+    events.push(ev("reclaim-done", { worker, issue: i, next: "DRIVING", pr: 90000 + i }));
+  }
+  for (let i = 201; i <= 206; i++) {
+    events.push(ev("dispatched", { worker: `h${i}`, issue: i }));
+    events.push(ev("reclaim-done", { worker: `h${i}`, issue: i, next: "DRIVING", pr: 90000 + i }));
+    events.push(ev("drive-needs-human", { worker: `h${i}`, issue: i, pr: 90000 + i }));
+  }
+  const { state } = run(events, 4);
+  const checkpointed = state.droplets.filter((d) => d.at === "checkpoint");
+  const escalated = state.droplets.filter((d) => d.at === "needs-human");
+  assert.equal(checkpointed.length, 6, "the fixture must actually fold 6 simultaneous checkpoint droplets");
+  assert.equal(escalated.length, 6, "the fixture must actually fold 6 simultaneous needs-human droplets, filling the draw cap");
+
+  const html = markup(state, { lanesMax: 4 });
+  const droplets = renderedDroplets(html);
+  assert.equal(
+    droplets.length,
+    CHECKPOINT_OVERFLOW_REAL_CAP + 6,
+    "the overflow-real-cap's worth of checkpoint droplets plus every needs-human droplet must render",
+  );
+  // Sanity on the fixture itself: every rendered droplet's own half-width must actually sit near
+  // the ceiling (`DROPLET_MAX_R`, 22) — proving this fixture exercises the radius the geometry
+  // constants above were sized for, not a smaller realistic one that would silently understate
+  // the collision risk.
+  for (const d of droplets) {
+    const pathBox = dropletPathBBox(d.path);
+    const halfWidthPx = (pathBox.right - pathBox.left) / 2;
+    assert.ok(
+      halfWidthPx >= 20,
+      `droplet #${d.issue}'s rendered half-width ${halfWidthPx} must sit near DROPLET_MAX_R (22) — this fixture's own 5-digit numbers`,
+    );
+  }
+
+  const boxes: { label: string; box: Box }[] = [];
+  for (const d of droplets) {
+    const pathBox = dropletPathBBox(d.path);
+    boxes.push({
+      label: `droplet #${d.issue} rendered path`,
+      box: { left: d.x + pathBox.left, right: d.x + pathBox.right, top: d.y + pathBox.top, bottom: d.y + pathBox.bottom },
+    });
+  }
+  // 6 checkpoint droplets > CHECKPOINT_OVERFLOW_REAL_CAP, so the overflow badge must render at
+  // this fixture too (same trigger as the base "4 lanes, 6 checkpoint droplets" test above) —
+  // required, not optional: a parse miss here must fail the test, not silently drop the check.
+  const overflowBadge = renderedCheckpointOverflowBadge(html);
+  assert.ok(overflowBadge, "the checkpoint overflow badge must render at this fixture (6 checkpoints > CHECKPOINT_OVERFLOW_REAL_CAP)");
+  boxes.push(overflowBadge as { label: string; box: Box });
+  // This fixture's own `state.lanes` carries 10 distinct workers (4 checkpoint + 6 needs-human)
+  // — `lanesMax: 4` at render time caps that down to the 4 most-recently-touched (`markup`'s own
+  // `withVisibleLanes`), so only SOME of `state.lanes` actually draws. Iterate the channels the
+  // markup itself actually rendered, never the raw (uncapped) fold state — every channel found
+  // this way is guaranteed to have its own label, so `renderedLaneLabel` returning null here is a
+  // real parse bug, not a fixture mismatch.
+  const renderedLaneChannels = [...html.matchAll(/<g class="hero-lane" data-lane-index="(\d+)"/g)].map((m) => Number(m[1]));
+  assert.ok(renderedLaneChannels.length > 0, "at least one lane must actually render at this fixture");
+  for (const channel of renderedLaneChannels) {
+    const laneLabel = renderedLaneLabel(html, channel);
+    assert.ok(laneLabel, `lane ${channel}'s own label must render`);
+    boxes.push(laneLabel as { label: string; box: Box });
+  }
+  assertNoOverlap(boxes);
+  for (const { label, box } of boxes) {
+    assert.ok(box.left >= 0 && box.right <= STAGE.w, `${label} left=${box.left} right=${box.right} lies outside [0, ${STAGE.w}]`);
+    assert.ok(box.top >= 0 && box.bottom <= STAGE.h, `${label} top=${box.top} bottom=${box.bottom} lies outside [0, ${STAGE.h}]`);
+  }
+});
+
+/** gate② finding [1] (ac2-escalation-overlap): every rendered NODE circle on the stage — planning/
+ *  reflection discs, the CI/Review gates, and the escalation circle — read straight off the
+ *  markup (COVERAGE), never a hand-picked subset. The prior collision tests compared droplets
+ *  against gates/rings/tallies/labels but NEVER the escalation circle itself — exactly how the
+ *  rank-0 needs-human droplet's overlap (the PO witness's own report) went unnoticed. */
+function renderedNodeCircles(html: string): { label: string; box: Box }[] {
+  const boxes: { label: string; box: Box }[] = [];
+  for (const [i, m] of [...html.matchAll(/<circle class="hero-planning-node" cx="([\d.]+)" cy="([\d.]+)" r="([\d.]+)"/g)].entries()) {
+    boxes.push({ label: `planning/reflection node #${i} circle`, box: circleBox(Number(m[1]), Number(m[2]), Number(m[3])) });
+  }
+  for (const [i, m] of [...html.matchAll(/<circle class="hero-gate-node" cx="([\d.]+)" cy="([\d.]+)" r="([\d.]+)"/g)].entries()) {
+    boxes.push({ label: `gate node #${i} circle`, box: circleBox(Number(m[1]), Number(m[2]), Number(m[3])) });
+  }
+  const escalationMatch = html.match(/<circle style="stroke:var\(--rust\)" cx="([\d.]+)" cy="([\d.]+)" r="([\d.]+)"/);
+  if (escalationMatch) {
+    boxes.push({
+      label: "escalation circle",
+      box: circleBox(Number(escalationMatch[1]), Number(escalationMatch[2]), Number(escalationMatch[3])),
+    });
+  }
+  return boxes;
+}
+
+// gate② finding [1] (ac2-escalation-overlap): the idle fixture — a SINGLE parked-PR droplet on
+// the escalation branch, the exact shape the PO witness reported overlapping the NEEDS HUMAN
+// glyph by ~16px — plus the AC's own named stress fixture ("4 lanes, 6 checkpoint droplets"),
+// cross-checked against EVERY rendered node circle (COVERAGE), not just the CI/Review gates the
+// earlier tests happened to check. The escalation circle specifically gets a real >= 12px
+// clearance assertion (the AC's own number), not just non-overlap — a 1px gap would still pass a
+// bare `!boxesOverlap` check but not the AC's own wording.
+test("#922 AC2 gate② finding [1]: every rendered droplet clears every rendered node circle (COVERAGE); the escalation circle by >= 12px — idle and stress fixtures", () => {
+  const idleEvents = [
+    ev("dispatched", { worker: "w1", issue: 1 }),
+    ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 10 }),
+    ev("drive-needs-human", { worker: "w1", issue: 1, pr: 10 }),
+  ];
+  const idleHtml = markup(run(idleEvents).state);
+  assert.equal(renderedDroplets(idleHtml).length, 1, "the idle fixture must actually draw exactly one droplet");
+  assert.equal(dropletKindAndNumber(idleHtml, 1)?.kind, "PR", "the idle fixture's droplet must be a parked-PR droplet");
+
+  const stressEvents: DomainEvent[] = [];
+  const workers = ["w1", "w2", "w3", "w4"];
+  for (let i = 1; i <= 6; i++) {
+    const worker = workers[(i - 1) % 4] as string;
+    stressEvents.push(ev("dispatched", { worker, issue: i }));
+    stressEvents.push(ev("reclaim-done", { worker, issue: i, next: "DRIVING", pr: 100 + i }));
+  }
+  const stressHtml = markup(run(stressEvents, 4).state, { lanesMax: 4 });
+
+  for (const html of [idleHtml, stressHtml]) {
+    const nodeCircles = renderedNodeCircles(html);
+    assert.ok(nodeCircles.length > 0, "at least one node circle must render");
+    const escalationCircle = nodeCircles.find((n) => n.label === "escalation circle");
+    assert.ok(escalationCircle, "the escalation circle must be derivable from the rendered markup");
+
+    for (const d of renderedDroplets(html)) {
+      const pathBox = dropletPathBBox(d.path);
+      const box: Box = { left: d.x + pathBox.left, right: d.x + pathBox.right, top: d.y + pathBox.top, bottom: d.y + pathBox.bottom };
+      for (const node of nodeCircles) {
+        assert.ok(
+          !boxesOverlap(box, node.box),
+          `droplet #${d.issue} ${JSON.stringify(box)} overlaps ${node.label} ${JSON.stringify(node.box)}`,
+        );
+      }
+      // The escalation branch's own droplets sit ABOVE the circle by construction
+      // (`dropletPoint`'s needs-human case) — a real vertical clearance, not just non-overlap.
+      if (box.bottom <= escalationCircle!.box.top) {
+        assert.ok(
+          escalationCircle!.box.top - box.bottom >= 12,
+          `droplet #${d.issue}'s bottom edge must clear the escalation circle's top edge by >= 12px, got ${escalationCircle!.box.top - box.bottom}px`,
+        );
+      }
+    }
   }
 });
 
@@ -2918,9 +4091,12 @@ test("#745 gate②: no checkpoint chip, at any rank up to the grid's capacity, i
   const checkpointed = state.droplets.filter((d) => d.at === "checkpoint");
   assert.equal(checkpointed.length, 6, "exercise every rank up to CHECKPOINT_DRAW_CAP - 1 (0..5)");
 
-  const html = markup(state, { config: { reviewer: { mode: "engine-agent" } } });
-  const captionMatch = html.match(/class="hero-node-caption" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">engine-agent</);
-  assert.ok(captionMatch, "the fixture must actually mount the Review gate's mode caption (the live shape under test)");
+  // #922 AC7: REVIEW's caption is now a model·effort pair — "fable · high" is 12 characters,
+  // the same width `textBox()` modeled for the old "engine-agent" mode word this fixture used to
+  // mount, so the collision geometry this test proves stays the same live shape.
+  const html = markup(state, { config: { reviewer: { agent: { model: "fable", effort: "high" } } } });
+  const captionMatch = html.match(/class="hero-node-caption" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">fable · high</);
+  assert.ok(captionMatch, "the fixture must actually mount the Review gate's caption (the live shape under test)");
   const [, capXRaw, capYRaw] = captionMatch as unknown as [string, string, string];
 
   const ciLabelMatch = html.match(/<text class="hero-node-label" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">CI<\/text>/);
@@ -2936,14 +4112,19 @@ test("#745 gate②: no checkpoint chip, at any rank up to the grid's capacity, i
     { label: "CI gate label", box: textBox("CI", Number(ciLabelXRaw), Number(ciLabelYRaw), 12) },
     { label: "Review gate circle", box: circleBox(GATES.review, GATES.y, GATES.r) },
     { label: "Review gate label", box: textBox("Review", Number(reviewLabelXRaw), Number(reviewLabelYRaw), 12) },
-    { label: "Review gate mode caption (engine-agent)", box: textBox("engine-agent", Number(capXRaw), Number(capYRaw), 9) },
+    { label: "Review gate caption (fable · high)", box: textBox("fable · high", Number(capXRaw), Number(capYRaw), 9) },
   ];
 
   const checkpointBoxes: { label: string; box: Box }[] = [];
   for (const d of checkpointed) {
     const { x, y } = dropletPoint(state, d);
-    checkpointBoxes.push({ label: `checkpoint #${d.issue} circle`, box: circleBox(x, y, 9) });
-    checkpointBoxes.push({ label: `checkpoint #${d.issue} label`, box: textBox(`⤳ ${d.pr}`, x, y - 14, 10) });
+    const number = dropletNumberText(d);
+    const r = dropletRadius(number);
+    checkpointBoxes.push({ label: `checkpoint #${d.issue} circle`, box: circleBox(x, y, r) });
+    checkpointBoxes.push({
+      label: `checkpoint #${d.issue} number`,
+      box: textBox(number, x, y + ((r * 9) / 7) * 0.35, DROPLET_NUM_FONT_PX),
+    });
   }
 
   // Cross-product only — gate circle/label/caption overlapping EACH OTHER is by design (the
@@ -2976,13 +4157,18 @@ test("#745 gate②: no checkpoint chip, at any rank up to the grid's capacity, i
       box: captionSafeTextBox("Review", Number(reviewLabelXRaw), Number(reviewLabelYRaw), GATE_NODE_LABEL_FONT_PX),
     },
     {
-      label: "Review gate mode caption (engine-agent)",
-      box: captionSafeTextBox("engine-agent", Number(capXRaw), Number(capYRaw), CAPTION_FONT_PX, "middle"),
+      label: "Review gate caption (fable · high)",
+      box: captionSafeTextBox("fable · high", Number(capXRaw), Number(capYRaw), CAPTION_FONT_PX, "middle"),
     },
   ];
   const checkpointBoxesRefined: { label: string; box: Box }[] = checkpointed.map((d) => {
     const { x, y } = dropletPoint(state, d);
-    return { label: `checkpoint #${d.issue} label (refined)`, box: captionSafeTextBox(`⤳ ${d.pr}`, x, y - 14, DROPLET_LABEL_FONT_PX) };
+    const number = dropletNumberText(d);
+    const r = dropletRadius(number);
+    return {
+      label: `checkpoint #${d.issue} number (refined)`,
+      box: captionSafeTextBox(number, x, y + ((r * 9) / 7) * 0.35, DROPLET_NUM_FONT_PX),
+    };
   });
   for (const chip of checkpointBoxesRefined) {
     for (const gate of gateBoxesRefined) {
@@ -3011,9 +4197,9 @@ test("#897 AC2: no needs-human droplet, at any rank up to the cluster's draw cap
   const escalated = state.droplets.filter((d) => d.at === "needs-human");
   assert.equal(escalated.length, 6, "exercise every rank up to NEEDS_HUMAN_DRAW_CAP (0..5), including the finding's own rank 5");
 
-  const html = markup(state, { lanesMax: 43, config: { reviewer: { mode: "engine-agent" } } });
-  const captionMatch = html.match(/class="hero-node-caption" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">engine-agent</);
-  assert.ok(captionMatch, "the fixture must actually mount the Review gate's mode caption (the live shape the finding computed against)");
+  const html = markup(state, { lanesMax: 43, config: { reviewer: { agent: { model: "fable", effort: "high" } } } });
+  const captionMatch = html.match(/class="hero-node-caption" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">fable · high</);
+  assert.ok(captionMatch, "the fixture must actually mount the Review gate's caption (the live shape the finding computed against)");
   const [, capXRaw, capYRaw] = captionMatch as unknown as [string, string, string];
   const ciLabelMatch = html.match(/<text class="hero-node-label" x="([\d.]+)" y="([\d.]+)" text-anchor="middle">CI<\/text>/);
   assert.ok(ciLabelMatch);
@@ -3031,17 +4217,21 @@ test("#897 AC2: no needs-human droplet, at any rank up to the cluster's draw cap
       box: captionSafeTextBox("Review", Number(reviewLabelXRaw), Number(reviewLabelYRaw), GATE_NODE_LABEL_FONT_PX),
     },
     {
-      label: "Review gate mode caption (engine-agent)",
-      box: captionSafeTextBox("engine-agent", Number(capXRaw), Number(capYRaw), CAPTION_FONT_PX, "middle"),
+      label: "Review gate caption (fable · high)",
+      box: captionSafeTextBox("fable · high", Number(capXRaw), Number(capYRaw), CAPTION_FONT_PX, "middle"),
     },
   ];
 
   for (const d of escalated) {
     const { x, y } = dropletPoint(state, d);
-    const label = d.pr === null ? `⊙ ${d.issue}` : `⤳ ${d.pr}`;
+    // #922 AC2: a needs-human droplet carrying a PR reads "PR N" — the "PR" mark
+    // is a separate, smaller sibling element (production's own `dropletKind`); the shape
+    // still fits the bare NUMBER only.
+    const number = dropletNumberText(d);
+    const r = dropletRadius(number);
     const needsHumanBoxes: { label: string; box: Box }[] = [
-      { label: `needs-human #${d.issue} circle`, box: circleBox(x, y, 9) },
-      { label: `needs-human #${d.issue} label`, box: captionSafeTextBox(label, x, y - 14, DROPLET_LABEL_FONT_PX) },
+      { label: `needs-human #${d.issue} circle`, box: circleBox(x, y, r) },
+      { label: `needs-human #${d.issue} number`, box: captionSafeTextBox(number, x, y + ((r * 9) / 7) * 0.35, DROPLET_NUM_FONT_PX) },
     ];
     for (const nh of needsHumanBoxes) {
       for (const gate of gateBoxesRefined) {
@@ -3073,11 +4263,14 @@ test("#808 AC1: every droplet chip label and every hero-node-caption element sta
       retro: { model: "sonnet", effort: "low" },
     },
     worker: { model: "sonnet", effort: "medium" },
-    reviewer: { mode: "engine-agent" },
+    // #922 AC7: REVIEW's caption is now a model·effort pair (reviewer.agent.*), never the
+    // internal reviewer.mode word — this fixture must mount a real caption to exercise the
+    // Review-gate-caption collision surface this test's own name promises.
+    reviewer: { agent: { model: "fable", effort: "high" } },
   };
 
   const events: DomainEvent[] = [ev("pool-selected", { round_id: 1, issues: [90, 91] })];
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < CHECKPOINT_DRAW_CAP; i++) {
     // fills CHECKPOINT_DRAW_CAP — every rank the grid draws
     events.push(ev("dispatched", { worker: `c${i}`, issue: 10 + i }));
     events.push(ev("reclaim-done", { worker: `c${i}`, issue: 10 + i, next: "DRIVING", pr: 700 + i }));
@@ -3092,12 +4285,13 @@ test("#808 AC1: every droplet chip label and every hero-node-caption element sta
   events.push(ev("handoff", { worker: "w11", issue: 70 })); // handed-off backlog droplet (3-row chip)
   // #808 gate② finding [0] (run a343c343): the plain/fixing lane droplets are dispatched LAST,
   // deliberately — `withVisibleLanes` caps `state.lanes` at `lanesMax` and (same-tier) keeps the
-  // MOST recently touched (`state.ts`'s `visibleLanes` tie-break); with 8 active-tier lane
-  // workers open (`c0`..`c5` + these two) against `lanesMax: 6` below, whichever 2 were touched
-  // LEAST recently lose their slot — and #716 gate② round 2 P1-1's rule then DROPS any droplet
-  // still `at: "lane"` whose lane lost that slot, never drawing it at all. Dispatching `w1`/`w2`
-  // last makes THEM the most-recently-touched pair instead, so both survive and actually render
-  // (the earlier ordering silently evicted them, the exact gap the finding caught below).
+  // MOST recently touched (`state.ts`'s `visibleLanes` tie-break); with CHECKPOINT_DRAW_CAP + 2
+  // active-tier lane workers open (`c0`..`c(CHECKPOINT_DRAW_CAP - 1)` + these two) against
+  // `lanesMax: CHECKPOINT_DRAW_CAP + 1` below, whichever ONE was touched LEAST recently loses its
+  // slot — and #716 gate② round 2 P1-1's rule then DROPS any droplet still `at: "lane"` whose lane
+  // lost that slot, never drawing it at all. Dispatching `w1`/`w2` last makes THEM the most-
+  // recently-touched pair instead, so both survive and actually render (the earlier ordering
+  // silently evicted them, the exact gap the finding caught below).
   events.push(ev("dispatched", { worker: "w1", issue: 1 })); // plain lane droplet
   events.push(ev("dispatched", { worker: "w2", issue: 2 }));
   events.push(ev("reclaim-done", { worker: "w2", issue: 2, next: "DRIVING", pr: 200 }));
@@ -3117,8 +4311,9 @@ test("#808 AC1: every droplet chip label and every hero-node-caption element sta
   // as one unit" test above): SVG percentage-width scaling is uniform, so this file's SVG-UNIT
   // boxes are the same at 1600px, 1700px (the value `CAPTION_SAFE_ASCENT` was measured against),
   // or any other width — there is no separate "render at 1600px" step to simulate here.
-  const { state } = run(events, 6);
-  const html = markup(state, { config, lanesMax: 6 });
+  const lanesMax = CHECKPOINT_DRAW_CAP + 1;
+  const { state } = run(events, lanesMax);
+  const html = markup(state, { config, lanesMax });
 
   // Same regex-based extraction the round 5 gate-cluster test above already uses for the
   // Review caption, generalized to every `hero-node-caption` element the stage draws (planning
@@ -3137,8 +4332,14 @@ test("#808 AC1: every droplet chip label and every hero-node-caption element sta
     });
   }
   // Sanity: the fixture must actually exercise every caption zone, or this test silently checks
-  // fewer pairs than it claims to (planning×3 + lanes×6 + Review×1 + reflection×2 = 12).
-  assert.equal(captionBoxes.length, 12, "fixture must mount every hero-node-caption zone (planning×3, lanes×6, Review×1, reflection×2)");
+  // fewer pairs than it claims to (planning×3 + lanes×lanesMax + CI×1 + Review×1 + reflection×2).
+  // #922 AC7: CI now always carries a caption too (the constant "github" word), unlike before
+  // where it had no caption slot at all.
+  assert.equal(
+    captionBoxes.length,
+    3 + lanesMax + 1 + 1 + 2,
+    `fixture must mount every hero-node-caption zone (planning×3, lanes×${lanesMax}, CI×1, Review×1, reflection×2)`,
+  );
 
   // #808 gate② finding [0] (run a343c343): parse every RENDERED `hero-droplet` group's own
   // transform + label text straight from `html`, never reconstruct from `state.droplets` —
@@ -3149,19 +4350,29 @@ test("#808 AC1: every droplet chip label and every hero-node-caption element sta
     /<g class="hero-droplet" data-issue="(\d+)" data-at="([a-z-]+)"[^>]*transform="translate\((-?[\d.]+) (-?[\d.]+)\)">([\s\S]*?)<\/g>/g;
   const dropletBoxes: { label: string; box: Box }[] = [];
   for (const [, issue, at, xRaw, yRaw, inner] of html.matchAll(dropletRe)) {
-    const labelMatch = (inner ?? "").match(/<text class="hero-num hero-small" x="0" y="-14" text-anchor="middle">([^<]*)<\/text>/);
+    // #922 AC2: the number now renders INSIDE the shape — a dynamic y and a FIXED
+    // inline font-size (`DROPLET_NUM_FONT_PX`, never shrunk), never a fixed y="-14" above
+    // the shape at a fixed 10px.
+    const labelMatch = (inner ?? "").match(
+      /<text class="hero-num hero-droplet-num" x="0" y="(-?[\d.]+)" text-anchor="middle" style="font-size:([\d.]+)px">([^<]*)<\/text>/,
+    );
     assert.ok(labelMatch, `droplet #${issue} (at=${at}) must render its own chip label`);
-    const text = labelMatch?.[1] as string;
+    const [, labelYRaw, fontPxRaw, text] = labelMatch as unknown as [string, string, string, string];
     dropletBoxes.push({
       label: `droplet #${issue} ("${text}", at=${at}) @ (${xRaw},${yRaw})`,
-      box: captionSafeTextBox(text, Number(xRaw), Number(yRaw) - 14, DROPLET_LABEL_FONT_PX),
+      box: captionSafeTextBox(text, Number(xRaw), Number(yRaw) + Number(labelYRaw), Number(fontPxRaw)),
     });
   }
-  // Sanity: the fixture must actually RENDER every droplet state under test — checkpoint×6 +
-  // needs-human + trunk + handed-off backlog + plain lane + fixing lane — or this test silently
-  // checks fewer pairs than it claims to (the exact failure mode the finding caught: 11 states
-  // folded, only 9 actually drawn, under the ORIGINAL event order above).
-  assert.equal(dropletBoxes.length, 11, "fixture must RENDER every droplet state under test, not just fold it into state.droplets");
+  // Sanity: the fixture must actually RENDER every droplet state under test —
+  // checkpoint×CHECKPOINT_DRAW_CAP + needs-human + trunk + handed-off backlog + plain lane +
+  // fixing lane — or this test silently checks fewer pairs than it claims to (the exact failure
+  // mode the finding caught: more states folded than actually drawn, under the ORIGINAL event
+  // order above).
+  assert.equal(
+    dropletBoxes.length,
+    CHECKPOINT_DRAW_CAP + 5,
+    "fixture must RENDER every droplet state under test, not just fold it into state.droplets",
+  );
 
   // Cross-product only, same as the round 5 test above — captions/droplets overlapping their
   // OWN zone furniture is out of #808's scope (#745/#728/#744 already cover those pairs); what
@@ -3228,29 +4439,41 @@ test("#745 gate② round 4 finding [0]: 39 simultaneous checkpoint droplets — 
 
   const html = markup(state);
   const drawnChips = [...html.matchAll(/class="hero-droplet" data-issue="(\d+)" data-at="checkpoint"/g)].map((m) => Number(m[1]));
-  // One row short of the grid's 3-row capacity (4, not 6) — the badge takes the whole last row
-  // to itself rather than sharing it with a real chip (label-width collision; see stage.tsx's
-  // `CHECKPOINT_OVERFLOW_REAL_CAP` doc).
-  assert.equal(drawnChips.length, 4, `expected 4 real chips drawn (one row reserved for the badge), got ${drawnChips.length}`);
+  // One row short of the grid's own row capacity — the badge takes the whole last row to itself
+  // rather than sharing it with a real chip (label-width collision; see stage.tsx's
+  // `CHECKPOINT_OVERFLOW_REAL_CAP` doc). Read from source, not a hand-copied literal.
+  assert.equal(
+    drawnChips.length,
+    CHECKPOINT_OVERFLOW_REAL_CAP,
+    `expected ${CHECKPOINT_OVERFLOW_REAL_CAP} real chips drawn (one row reserved for the badge), got ${drawnChips.length}`,
+  );
 
+  const expectedOverflow = 39 - CHECKPOINT_OVERFLOW_REAL_CAP;
   const badgeMatch = html.match(/class="hero-checkpoint-overflow" data-count="(\d+)"/);
   assert.ok(badgeMatch, "the overflow badge must render");
-  assert.equal(Number(badgeMatch?.[1]), 35, "the badge must read the true remainder: 39 total - 4 drawn = 35");
-  assert.match(html, /\+35 more/);
+  assert.equal(
+    Number(badgeMatch?.[1]),
+    expectedOverflow,
+    `the badge must read the true remainder: 39 total - ${CHECKPOINT_OVERFLOW_REAL_CAP} drawn`,
+  );
+  assert.match(html, new RegExp(`\\+${expectedOverflow} more`));
 
-  // Every DRAWN element — the 4 real chips AND the badge — must have its real rendered bbox
-  // fully inside the viewBox, AND none may collide with each other (the badge sharing no row
-  // with a real chip's label is exactly what this checks).
+  // Every DRAWN element — the real chips AND the badge — must have its real rendered bbox fully
+  // inside the viewBox, AND none may collide with each other (the badge sharing no row with a
+  // real chip's label is exactly what this checks). gate② finding [0]: each chip's REAL rendered
+  // path bbox (`dropletPathBBox`), not a circleBox derived by re-calling `dropletRadius`.
+  const droplets = renderedDroplets(html);
+  assert.equal(droplets.length, CHECKPOINT_OVERFLOW_REAL_CAP, "every drawn checkpoint chip must actually render with its own path/number");
   const boxes: { label: string; box: Box }[] = [];
-  for (const issue of drawnChips) {
-    const d = checkpointed.find((o) => o.issue === issue);
-    assert.ok(d, `drawn issue #${issue} must be one of the real checkpoint droplets`);
-    const { x, y } = dropletPoint(state, d as Droplet);
-    boxes.push({ label: `checkpoint #${issue} circle`, box: circleBox(x, y, 9) });
-    boxes.push({ label: `checkpoint #${issue} label`, box: textBox(`⤳ ${d?.pr}`, x, y - 14, 10) });
+  for (const d of droplets) {
+    const pathBox = dropletPathBBox(d.path);
+    boxes.push({
+      label: `checkpoint #${d.issue} circle`,
+      box: { left: d.x + pathBox.left, right: d.x + pathBox.right, top: d.y + pathBox.top, bottom: d.y + pathBox.bottom },
+    });
   }
   const badgePoint = checkpointOverflowPoint();
-  boxes.push({ label: "overflow badge", box: textBox("+35 more", badgePoint.x, badgePoint.y - 14, 10) });
+  boxes.push({ label: "overflow badge", box: textBox(`+${expectedOverflow} more`, badgePoint.x, badgePoint.y - 14, 10) });
   assertNoOverlap(boxes);
   for (const { label, box } of boxes) {
     assert.ok(box.left >= 0 && box.right <= STAGE.w, `${label} left=${box.left} right=${box.right} lies outside [0, ${STAGE.w}]`);
@@ -3323,7 +4546,9 @@ test("#744: on a fixing track, the lane status phrase and the droplet's PR chip 
   assert.match(statusText, /FIXING · round 2 of 4 · review findings/);
 
   const p = dropletPoint(state, d!);
-  assert.match(html, /⤳ 739/);
+  // #922 AC2: the kind mark and the number are two sibling elements — check the droplet's
+  // own number directly.
+  assert.deepEqual(dropletKindAndNumber(html, 86), { kind: "⤳", number: "739" });
 
   // text-anchor="end" means the captured x is the RIGHT edge, not the center textBox expects.
   const statusWidth = statusText.length * 10 * CHAR_ADVANCE;
@@ -3419,7 +4644,7 @@ test("#891 AC1: needs-human droplets bound to the open round + a draw cap; histo
   // Only 6 (the verified-safe draw cap) of the 7 CURRENT-round escalations draw — the round-1
   // one (issue 1) never draws at all, it's historical from the first render.
   assert.match(html, /data-node="needs-human" data-count="6"/);
-  assert.doesNotMatch(html, /⤳ 1</, "the round-1 (historical) escalated droplet must not draw");
+  assert.equal(dropletKindAndNumber(html, 1), null, "the round-1 (historical) escalated droplet must not draw");
   assert.doesNotMatch(html, /saved for a successor/, "the round-1 (historical) handoff badge must not draw");
 
   // Collapsed = 1 historical needs-human (issue 1) + 1 current-round overflow (issue 107, the
@@ -3485,8 +4710,8 @@ test("#891 gate① engine-agent finding [0] (ac1-hidden-ranks-not-compacted): a 
   const pos101 = dropletTransform(html, 101);
   const pos102 = dropletTransform(html, 102);
   assertNoOverlap([
-    { label: "needs-human #101", box: circleBox(pos101.x, pos101.y, 9) },
-    { label: "needs-human #102", box: circleBox(pos102.x, pos102.y, 9) },
+    { label: "needs-human #101", box: circleBox(pos101.x, pos101.y, dropletRadius("101")) },
+    { label: "needs-human #102", box: circleBox(pos102.x, pos102.y, dropletRadius("102")) },
   ]);
 });
 
@@ -3509,7 +4734,7 @@ test("#891 gate① engine-agent finding [0]: a drawn backlog droplet's slot COMP
   const expected60 = dropletPoint(compacted, droplet(compacted, 60)!);
 
   const html = markup(state);
-  assert.doesNotMatch(html, /⊙ 50/, "the round-1 (historical) handoff droplet must not draw");
+  assert.equal(dropletKindAndNumber(html, 50), null, "the round-1 (historical) handoff droplet must not draw");
   assert.deepEqual(
     dropletTransform(html, 60),
     expected60,
@@ -3573,11 +4798,17 @@ test("#891 gate① engine-agent finding [0] (ac1-collapsed-chip-overlap): the co
     // #920 gate② review thread (PRRT…JE5): centered again — the tally now sits below the whole
     // Summary/Retro row.
     { label: "outcome tally", box: textBox(tallyText, Number(tallyXRaw), Number(tallyYRaw), 9) },
-    // The escalation node's own "Needs human" label — the chip's closest neighbor above it —
-    // `text-anchor="start"` (no override in stage.tsx), so `x` is the LEFT edge, not the center.
+    // #922 AC1: the escalation node's own "Needs human" label moved centred BELOW the circle
+    // (was to the right) — the chip's closest neighbor is now below it instead of beside it.
     {
       label: "needs-human node label",
-      box: captionSafeTextBox("Needs human", ESCALATION.x + 24, ESCALATION.y + 4, GATE_NODE_LABEL_FONT_PX, "start"),
+      box: captionSafeTextBox(
+        "Needs human",
+        ESCALATION.x,
+        ESCALATION.y + ESCALATION_R + NODE_LABEL_OFFSET,
+        GATE_NODE_LABEL_FONT_PX,
+        "middle",
+      ),
     },
   ];
   const drawn = state.droplets.filter((d) => d.at === "needs-human" && d.issue >= 101);
@@ -3590,9 +4821,12 @@ test("#891 gate① engine-agent finding [0] (ac1-collapsed-chip-overlap): the co
   // assert against what production drew, not a recomputation that can silently diverge from it.
   for (const d of drawn) {
     const { x, y } = dropletTransform(html, d.issue);
-    const label = d.pr === null ? `⊙ ${d.issue}` : `⤳ ${d.pr}`;
-    boxes.push({ label: `needs-human #${d.issue} circle`, box: circleBox(x, y, 9) });
-    boxes.push({ label: `needs-human #${d.issue} label`, box: textBox(label, x, y - 14, 10) });
+    // #922 AC2: a needs-human droplet carrying a PR reads "PR N" — the shape fits
+    // the bare NUMBER only (production's own `dropletNumber`).
+    const number = dropletNumberText(d);
+    const r = dropletRadius(number);
+    // #922 AC2: no separate label box — it's drawn inside the circle, which would self-overlap.
+    boxes.push({ label: `needs-human #${d.issue} circle`, box: circleBox(x, y, r) });
   }
   assertNoOverlap(boxes);
 });
@@ -3676,9 +4910,9 @@ test("#891 gate① engine-agent finding [0] (ac1-null-round-never-collapses): a 
   assert.equal(Object.keys(open).length, 1, "issue 1's escalation is still open — nothing has resolved it");
 
   const html = markup(state, { openAttention: Object.values(open) });
-  assert.doesNotMatch(
-    html,
-    /⤳ 1</,
+  assert.equal(
+    dropletKindAndNumber(html, 1),
+    null,
     "a null-stamped droplet from before the first round boundary must NOT draw once a later round is known",
   );
   assert.match(
@@ -3743,22 +4977,24 @@ test("#891 PO adjudication: historical classification is ONE round-identity pred
   const html = markup(state, { lanesMax: 20, openAttention: Object.values(open) });
 
   // None of the five round-1 droplets draw, in ANY zone — proving the SAME predicate, not a
-  // per-zone list, is what excludes them.
-  assert.doesNotMatch(html, /⤳ 1</, "historical needs-human droplet (issue 1) must not draw");
-  assert.doesNotMatch(html, /⊙ 2</, "historical backlog droplet (issue 2) must not draw");
-  assert.doesNotMatch(html, /⊙ 3</, "historical lane droplet (issue 3) must not draw");
-  assert.doesNotMatch(
-    html,
-    /⤳ 4</,
+  // per-zone list, is what excludes them. `dropletKindAndNumber` reads the droplet's
+  // own `<g data-issue>` directly, since the kind mark and number are two sibling elements.
+  assert.equal(dropletKindAndNumber(html, 1), null, "historical needs-human droplet (issue 1) must not draw");
+  assert.equal(dropletKindAndNumber(html, 2), null, "historical backlog droplet (issue 2) must not draw");
+  assert.equal(dropletKindAndNumber(html, 3), null, "historical lane droplet (issue 3) must not draw");
+  assert.equal(
+    dropletKindAndNumber(html, 4),
+    null,
     "historical checkpoint droplet (issue 4, the reviewer's own dispatched→reclaim-done→rollback-escalated example) must not draw",
   );
-  assert.doesNotMatch(html, /⤳ 5</, "historical trunk droplet (issue 5) must not draw");
+  assert.equal(dropletKindAndNumber(html, 5), null, "historical trunk droplet (issue 5) must not draw");
 
-  // Every current-round droplet, in the same four zones, keeps drawing.
-  assert.match(html, /⤳ 101</, "current-round needs-human droplet must draw");
-  assert.match(html, /⊙ 102</, "current-round backlog droplet must draw");
-  assert.match(html, /⊙ 103</, "current-round lane droplet must draw");
-  assert.match(html, /⤳ 104</, "current-round checkpoint droplet must draw");
+  // Every current-round droplet, in the same four zones, keeps drawing — #922 AC2: needs-human +
+  // PR reads "PR N".
+  assert.deepEqual(dropletKindAndNumber(html, 101), { kind: "PR", number: "101" }, "current-round needs-human droplet must draw");
+  assert.deepEqual(dropletKindAndNumber(html, 102), { kind: "⊙", number: "102" }, "current-round backlog droplet must draw");
+  assert.deepEqual(dropletKindAndNumber(html, 103), { kind: "⊙", number: "103" }, "current-round lane droplet must draw");
+  assert.deepEqual(dropletKindAndNumber(html, 104), { kind: "⤳", number: "104" }, "current-round checkpoint droplet must draw");
 
   // Collapsed accounting: all 5 historical droplets, from all 5 zones, land in ONE chip — never
   // scattered per-zone, never silently dropped without being counted anywhere.
@@ -3815,8 +5051,8 @@ test("#891: a genuine CURRENT-round checkpoint overflow still renders its own zo
     events.push(ev("reclaim-done", { worker: `h${i}`, issue: i, next: "DRIVING", pr: i }));
   }
   events.push(ev("pool-selected", { round_id: 2 }));
-  // 8 CURRENT-round (round 2) checkpoint droplets — a genuine overflow on their own (past the
-  // CHECKPOINT_DRAW_CAP of 6), independent of the 50 historical ones above.
+  // 8 CURRENT-round (round 2) checkpoint droplets — a genuine overflow on their own (past
+  // CHECKPOINT_DRAW_CAP), independent of the 50 historical ones above.
   for (let i = 101; i <= 108; i++) {
     events.push(ev("dispatched", { worker: `c${i}`, issue: i }));
     events.push(ev("reclaim-done", { worker: `c${i}`, issue: i, next: "DRIVING", pr: i }));
@@ -3837,17 +5073,18 @@ test("#891: a genuine CURRENT-round checkpoint overflow still renders its own zo
     `no historical (issue <= 50) checkpoint droplet may draw individually, got ${JSON.stringify(drawnChips)}`,
   );
 
-  // The zone's own badge reports ONLY the 8 current-round droplets' own remainder (8 total - 4
-  // drawn = 4) — never inflated by the 50 historical droplets the collapsed chip already
-  // accounts for.
+  // The zone's own badge reports ONLY the 8 current-round droplets' own remainder (8 total -
+  // CHECKPOINT_OVERFLOW_REAL_CAP drawn) — never inflated by the 50 historical droplets the
+  // collapsed chip already accounts for.
+  const expectedBadge = 8 - CHECKPOINT_OVERFLOW_REAL_CAP;
   const badgeMatch = html.match(/class="hero-checkpoint-overflow" data-count="(\d+)"/);
   assert.ok(badgeMatch, "a genuine CURRENT-round overflow must still render its own badge");
   assert.equal(
     Number(badgeMatch?.[1]),
-    4,
+    expectedBadge,
     "the badge must count only the 8 current-round droplets' own remainder, never the 50 historical ones too",
   );
-  assert.match(html, /\+4 more/);
+  assert.match(html, new RegExp(`\\+${expectedBadge} more`));
 
   // The single collapsed chip is the ONLY place the 50 historical droplets are counted.
   assert.match(html, /class="hero-num hero-small hero-badge hero-attention-collapsed" data-count="50"/);

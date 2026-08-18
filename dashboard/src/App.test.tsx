@@ -100,6 +100,10 @@ function minimalAppViewModel(
     // sets this explicitly, same self-consistency posture `rounds`/`selectedRoundId` above
     // already documents for #733 engine-agent finding [2].
     replayPosition?: unknown;
+    // #922 AC5 gate② finding [5]: replay's own phase windows (`replay.phaseWindows`) — defaults
+    // to `[]` (no windows), same "nothing selected" posture every other replay field starts in; a
+    // test proving `roundPhase={mode === "live" ? ... : phaseAtCursor(...)}` sets this explicitly.
+    phaseWindows?: { phase: string; startTs: string; endTs: string | null }[];
   } = {},
 ) {
   return {
@@ -140,7 +144,7 @@ function minimalAppViewModel(
       setSpeed: () => {},
       scrub: () => {},
       spendThroughCursor: [],
-      phaseWindows: [],
+      phaseWindows: overrides.phaseWindows ?? [],
       roundEvents: overrides.roundEvents ?? [],
       roundSpend: [],
       asOf: overrides.asOf ?? null,
@@ -301,7 +305,9 @@ test("#900 finding [1]: review-silence-escalated reaches the needs-attention str
     },
   });
   assert.match(html, /aria-label="needs attention"/, "the strip section must actually render, not be skipped as empty");
-  assert.match(html, /class="attention-chip">REVIEW SILENCE</);
+  // #925: the chip now also carries an inline `style` (its per-category tone) between the class
+  // attribute and its text — matched loosely rather than the exact adjacent-attribute string.
+  assert.match(html, /class="attention-chip"[^>]*>REVIEW SILENCE</);
   assert.match(html, /went unanswered/);
 });
 
@@ -319,7 +325,7 @@ test("#900 finding [1]: review-disputed and review-non-convergent BOTH reach the
       },
     },
   });
-  const dissentChips = html.match(/class="attention-chip">DISSENT</g)?.length ?? 0;
+  const dissentChips = html.match(/class="attention-chip"[^>]*>DISSENT</g)?.length ?? 0;
   assert.equal(dissentChips, 2, "both review-disputed and review-non-convergent must independently reach the strip");
 });
 
@@ -451,6 +457,56 @@ test("#733 AC5: a selected closed round hides the control group entirely and sho
   assert.match(liveHtml, /aria-label="operations"/, "same rounds list, nothing selected -> the control group DOES render");
   assert.match(liveHtml, /EMERGENCY STOP/, "engine.state running -> EMERGENCY STOP renders too");
   assert.doesNotMatch(liveHtml, /back to live/, "no round selected -> no 'back to live' jump either");
+});
+
+// #922 AC5 gate② finding [5] (ac5-active-capture): "replay highlights the cursor's phase" —
+// `roundPhase` is now derived from `phaseAtCursor(replay.phaseWindows, replay.asOf)` in replay
+// mode, never a hardcoded `null` (`App.tsx`'s own call site). Proves BOTH halves at once: (1) the
+// active planning node genuinely renders during replay (the whole point — without this wiring no
+// `?demo` capture could ever show one, AC5's own bug); (2) dimming stays a LIVE-only concept even
+// though `roundPhase` is non-null now — a dimming engine state (`stopped`) + the SAME asOf/
+// phaseWindows fixture must NOT dim in replay, only in live (`Hero.tsx`'s `live` prop, not
+// `roundPhase !== null`, is what gates it post-#922).
+test("#922 AC5: replay derives an active planning node from the cursor's own phase window, and never dims from it (live-only dimming stays intact)", () => {
+  const data = { ...LOOP_STATE_OK, engine: { ...LOOP_STATE_OK.engine, state: "stopped" } };
+  const phaseWindows = [{ phase: "aligning", startTs: "2026-01-01T00:00:00Z", endTs: null }];
+  const closedRound = {
+    roundId: 42,
+    status: "done",
+    startedAt: "2026-01-01T00:00:00Z",
+    endedAt: null,
+    startEventId: 1,
+    startSpendId: 1,
+    eventCount: 10,
+    schemaVersion: null,
+    artifact: null,
+  };
+
+  const replayVm = minimalAppViewModel({
+    mode: "replay",
+    loop: { data, isPending: false },
+    rounds: [closedRound],
+    selectedRoundId: 42,
+    asOf: "2026-01-01T00:05:00Z",
+    phaseWindows,
+    activeHero: initialHeroState(1),
+  });
+  const replayHtml = renderToStaticMarkup(appContent(replayVm));
+  assert.match(replayHtml, /data-active="true"/, "the replay cursor's own phase (aligning) must render an active planning node");
+  assert.doesNotMatch(
+    replayHtml,
+    /data-dimmed="true"/,
+    "a dimming engine state must NOT dim the stage in replay — dimming is live-only, even with a non-null roundPhase",
+  );
+
+  // Sanity: the SAME phase/asOf fixture in LIVE mode (round.phase set instead of derived from the
+  // replay cursor) DOES dim under the same dimming engine state — proves the assertion above is a
+  // real regression guard tied to `live`, not a fixture that never dims regardless of it.
+  const liveData = { ...data, round: { phase: "aligning" } };
+  const liveVm = minimalAppViewModel({ mode: "live", loop: { data: liveData, isPending: false }, activeHero: initialHeroState(1) });
+  const liveHtml = renderToStaticMarkup(appContent(liveVm));
+  assert.match(liveHtml, /data-active="true"/, "live mode with the same phase also renders the active planning node");
+  assert.match(liveHtml, /data-dimmed="true"/, "live mode with a dimming engine state DOES dim — the same fixture, only `live` differs");
 });
 
 test("both queries succeeding renders the normal header, not disconnected", async () => {
@@ -1604,6 +1660,37 @@ test("#895 item 1: while replaying, the hero's staleness caption reads the repla
     "staleness must rebase against the replay cursor's own 'as of' timestamp, not appContent's own wall-clock `clock` (2026-01-01, years later)",
   );
   assert.doesNotMatch(html, /last event \d+d ago/, "the live wall clock must never leak into a replayed staleness reading");
+});
+
+// ── #925 AC4: NeedsAttention's own age reads the SAME replay cursor #895 item 1 established for
+// the hero staleness caption — WIRING sub-case: NeedsAttention.test.tsx proves the component's
+// own `now` prop drives its row ages in isolation, this proves App's REAL tree threads the
+// replay cursor's own timestamp into it while replaying, rather than falling back to
+// appContent's own `clock`. ──────────────────────────────────────────────────────────────────
+
+test("#925 AC4: while replaying/demo, NeedsAttention's row age reads the replay cursor's own 'as of' timestamp, not appContent's live wall clock", () => {
+  // The fold's only item is trivially the greatest-age one, so it renders the emphasis box's
+  // COMPACT form ("10m", no " ago" — NeedsAttention.tsx's own `formatCompactAge` branch).
+  const item = { ...domainEvent(1, "drive-needs-human"), ts: "2026-08-10T11:50:00.000Z" };
+  const vm = minimalAppViewModel({
+    mode: "replay",
+    activeOpenAttention: [item],
+    asOf: "2026-08-10T12:00:00.000Z",
+  });
+  const html = renderToStaticMarkup(appContent(vm));
+  assert.match(
+    html,
+    /class="data attention-age attention-age-emphasis"[^>]*>10m</,
+    "the row's age must rebase against the replay cursor's own 'as of' timestamp (10 minutes before asOf), not appContent's own wall-clock `clock` (2026-01-01, months before this replayed event)",
+  );
+  // `clock` (2026-01-01) sits BEFORE this replayed event's own ts (2026-08-10) — falling back to
+  // it would produce a NEGATIVE delta, clamped to zero, so a `now: clock` regression here reads
+  // "0s" instead of "10m"; this assertion reddens on exactly that regression.
+  assert.doesNotMatch(
+    html,
+    /class="data attention-age attention-age-emphasis"[^>]*>0s</,
+    "the live wall clock must never leak into a replayed row's age",
+  );
 });
 
 // ── #803: App's REAL wiring of `/api/loop/state`'s `mergedPrs` into the hero tally ────────────
@@ -3780,5 +3867,141 @@ test("#923: with a closed round selected, BACK TO LIVE still renders inside .app
     } finally {
       await cleanup();
     }
+  }
+});
+
+// ── #925 AC1: row anatomy — height/severity/chip/entity/reason/hairline, through the REAL query
+// wiring (registerRealDom() + the full production CSS cascade + a stubbed /api/events), not a
+// hand-assembled view-model — docs/dev-guide/07-dashboard.md's still-open "query/data-flow wiring
+// has no shared helper yet" gap: this local helper combines `mountAppWithCascade`'s CSS injection
+// with `mountSettledApp`'s real fetch stubbing, the same combination that gap names as unmet.
+
+async function mountLiveAppWithCascade(byPath: Record<string, { status: number; body: unknown }>) {
+  (window as unknown as { happyDOM: { setViewport: (v: { width: number }) => void } }).happyDOM.setViewport({ width: 1440 });
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss924}\n${panelsCss924}\n${heroCss924}\n${appCss924}`;
+  document.head.appendChild(style);
+  stubFetch({ ...SPEND_EMPTY, ...ROUNDS_EMPTY, ...byPath });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await Promise.allSettled([
+    client.prefetchQuery(loopStateQuery()),
+    client.prefetchQuery(eventsQuery(0)),
+    client.prefetchQuery(spendQuery(0)),
+    client.prefetchQuery(roundsQuery()),
+  ]);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+  });
+  return {
+    container,
+    cleanup: async () => {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+      document.head.removeChild(style);
+    },
+  };
+}
+
+// gate① engine-agent finding [0] (ac1-style-oracle): round 1 compared `severity.style.
+// backgroundColor` against `chip.style.borderColor` (raw, uncascaded inline reads) and checked
+// the reason colour via a regex over CSS source — neither is a computed-style proof. Fixed the
+// doctrine-established way (tokens.css's `--sap-fill-outline`/`--stepper-replay-outline`
+// precedent): `--attention-tone-rust`/`--attention-tone-review`/`--attention-reason-text`
+// (tokens.css) are literal-hex aliases of `--rust`/`--sap-text`/`--bark-text` — pinned against
+// those source tokens by tokens.test.ts so they can't drift — that DO resolve via
+// `getComputedStyle` in happy-dom (unlike the light-dark()-fed originals). Looped over both
+// themes (COVERAGE), same posture the #923 closed-round-stepper STYLE test already takes for the
+// identical happy-dom gap.
+test("#925 AC1: every .attention-row is >=56px with a hairline separator, its severity bar and chip resolve the REAL rust/--sap-text tone in both themes, the chip is >=30px/uppercase/mono, the entity ref is >=14px mono, and the reason resolves the REAL --bark-text colour and is mono", async () => {
+  const fontDataStack = parseTokensLocal(tokensCss924)["--font-data"];
+  assert.ok(fontDataStack, "tokens.css must still declare --font-data for this test's own oracle");
+  const { light: lightTokens, dark: darkTokens } = parseColorTokens(tokensCss924);
+  // Two distinct categories (DECISION/rust, DISSENT/--sap-text) — COVERAGE over both severity
+  // tones, not just the default one, and both carry a PR token so the entity-ref cell renders.
+  const { container, cleanup } = await mountLiveAppWithCascade({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/events": {
+      status: 200,
+      body: {
+        events: [
+          { id: 1, ts: "2026-08-14T00:00:00Z", kind: "drive-needs-human", payload: { pr: 42, issue: 7 } },
+          { id: 2, ts: "2026-08-14T00:01:00Z", kind: "review-disputed", payload: { pr: 43, issue: 8, worker: "w1" } },
+        ],
+        lastId: 2,
+      },
+    },
+  });
+  try {
+    const rows = [...container.querySelectorAll(".attention-row")];
+    assert.ok(rows.length >= 2, "at least two attention rows must render");
+
+    for (const themeAttr of ["heartwood", "sapwood"] as const) {
+      document.documentElement.setAttribute("data-theme", themeAttr);
+      const tokens = themeAttr === "heartwood" ? darkTokens : lightTokens;
+
+      for (const row of rows) {
+        const rowComputed = getComputedStyle(row as Element);
+        assert.ok(Number.parseFloat(rowComputed.minHeight) >= 56, `each row's min-height (${rowComputed.minHeight}) must be >= 56px`);
+        assert.equal(rowComputed.borderBottomWidth, "1px", "each row must resolve a real 1px hairline, not an unresolved empty value");
+        assert.equal(rowComputed.borderBottomStyle, "solid");
+
+        const severity = row.querySelector(".attention-severity") as HTMLElement | null;
+        assert.ok(severity, "each row must render its severity element");
+        assert.equal(getComputedStyle(severity as Element).width, "4px");
+        assert.equal(severity?.getAttribute("aria-hidden"), "true");
+
+        const chip = row.querySelector(".attention-chip") as HTMLElement | null;
+        assert.ok(chip, "each row must render its category chip");
+        const chipComputed = getComputedStyle(chip as Element);
+        assert.ok(Number.parseFloat(chipComputed.minHeight) >= 30, `chip min-height (${chipComputed.minHeight}) must be >= 30px`);
+        assert.equal(chipComputed.textTransform, "uppercase");
+        assert.equal(chipComputed.fontFamily, fontDataStack);
+
+        const expectedTone = chip?.textContent === "DISSENT" ? tokens["--sap-text"] : tokens["--rust"];
+        const severityComputed = getComputedStyle(severity as Element);
+        assert.equal(
+          severityComputed.backgroundColor.toUpperCase(),
+          expectedTone,
+          `${themeAttr}: the severity bar's background must resolve to the real ${chip?.textContent === "DISSENT" ? "--sap-text" : "--rust"} hex`,
+        );
+        assert.equal(
+          chipComputed.borderColor.toUpperCase(),
+          expectedTone,
+          `${themeAttr}: the chip's border-colour must resolve to the SAME real hex as the severity bar`,
+        );
+
+        const entityRef = row.querySelector(".attention-entity-ref") as HTMLElement | null;
+        if (entityRef) {
+          const entityComputed = getComputedStyle(entityRef);
+          assert.ok(Number.parseFloat(entityComputed.fontSize) >= 14, `entity ref font-size (${entityComputed.fontSize}) must be >= 14px`);
+          assert.equal(entityComputed.fontFamily, fontDataStack);
+        }
+
+        const reason = row.querySelector(".attention-sentence") as HTMLElement | null;
+        assert.ok(reason, "each row must render its reason cell");
+        const reasonComputed = getComputedStyle(reason as Element);
+        assert.equal(reasonComputed.fontFamily, fontDataStack);
+        assert.equal(
+          reasonComputed.color.toUpperCase(),
+          tokens["--bark-text"],
+          `${themeAttr}: the reason cell's colour must resolve to the real --bark-text hex`,
+        );
+      }
+    }
+    // Both fixture kinds carry a PR token — the `if (entityRef)` guard above would otherwise
+    // silently skip its own assertion if wiring ever dropped the token through to the row.
+    assert.equal(container.querySelectorAll(".attention-entity-ref").length, 2, "both rows must render an entity ref");
+  } finally {
+    document.documentElement.removeAttribute("data-theme");
+    await cleanup();
   }
 });

@@ -45,6 +45,18 @@
      Dark value lightened from the spec's #C05A2E (3.46:1 on --panel) to clear AA as
      text; §5's quality floor requires adjusting the failing side. */
   --rust: light-dark(#A34620, #D9713F);
+  /* #922 AC2 gate② finding [2] (ac2-rust-ink-contrast): the ink drawn ON a --rust-filled surface
+     (the parked-PR / failed droplet's own number, `hero.css`'s `.hero-droplet[data-at="needs-
+     human"] .hero-droplet-num`) — --rust flips DARKER in light theme / LIGHTER in dark theme
+     (unlike --sap-fill, which stays flat both themes), so a single fixed ink cannot clear 4.5:1
+     in both: #251B10 (--on-sap-fill's own value) on light --rust (#A34620) measures only ~2.74:1.
+     --on-rust follows --rust's OWN swap instead — literal per-theme, the SAME `light-dark()`-
+     unprovable-under-happy-dom workaround --sap-fill-outline documents above (this file's own
+     established pattern: a dark-theme default here, overridden in the two light-theme trigger
+     rules below `:root`). Both hexes are reused verbatim from --heartwood's own two theme values
+     (#251B10 dark, #F1F0E2 light) — "no new hex", `contrast.ts`'s `checkRustTextContrast` proves
+     each clears 4.5:1 against ITS OWN theme's --rust. */
+  --on-rust: #251B10;
 
   /* ---- Type -------------------------------------------------------------- */
   --font-display: "Fraunces", Georgia, "Times New Roman", serif;
@@ -86,6 +98,36 @@
      compensation) — dark's own value lives here as the default; the two light-theme trigger
      rules below `:root` (this file's own established pattern) override it to light's value. */
   --stepper-replay-outline: #E8A33D;
+  /* #925 gate① engine-agent finding [0] (ac1-style-oracle): the needs-attention row's severity
+     bar/chip tone and reason text all need the SAME resolvable-literal treatment
+     --stepper-replay-outline takes above — --rust/--sap-text/--bark-text are all light-dark(),
+     which happy-dom's getComputedStyle never evaluates for a colour-typed property (confirmed
+     directly, same gap that token's own comment documents). Real browsers render these
+     identically to --rust/--sap-text/--bark-text either way; these three exist solely so a STYLE
+     test can assert the exact winning colour. Dark's own value lives here as the default; the two
+     light-theme trigger rules below `:root` override to light's value, same as every token above. */
+  --attention-tone-rust: #D9713F;
+  --attention-tone-review: #E8A33D;
+  --attention-reason-text: #A6957C;
+  /* #925 gate① engine-agent finding [1] (ac4-age-box): the oldest-age emphasis box's numeral/
+     border need the primary-text ("cream") role, not the muted `--bark-text` its `.muted` class
+     would otherwise carry — same resolvable-literal alias treatment as the three above, mirroring
+     --sapwood. */
+  --attention-emphasis-text: #F1E7D2;
+
+  /* #922 AC8: the breathing active-node disc's fill/glow alpha floor↔peak, dark-theme default —
+     `--sap-fill` itself is flat (both themes, above), so it is the ANIMATED ALPHA that differs per
+     theme, not the colour. Same reasoning as `--sap-fill-outline` above for why these are literal
+     numbers overridden per theme-scope rather than something resolved through `light-dark()`: a
+     plain opacity has no `light-dark()` form to begin with (that function is colour-only), and
+     hero.css's own `@keyframes` needs a single animatable value either way. `contrast.ts`'s
+     `SAP_FILL_HALO_FLOOR.heartwood` is this exact floor — kept in sync by `tokens.test.ts`'s AC8
+     case (VALUE doctrine: the floor a contrast check reads must be the SAME floor production
+     animates to, never two independently-tuned numbers). */
+  --sap-fill-halo-floor: 0.5;
+  --sap-fill-halo-peak: 0.85;
+  --sap-fill-glow-floor: 0.15;
+  --sap-fill-glow-peak: 0.4;
 
   /* ---- Motion ------------------------------------------------------------ */
   --beat: 240ms; /* state flips */
@@ -137,7 +179,18 @@
 :root[data-theme="sapwood"] {
   color-scheme: light;
   --sap-fill-outline: #8A5A14;
+  --sap-fill-halo-floor: 0.55;
+  --sap-fill-halo-peak: 0.9;
+  --sap-fill-glow-floor: 0.12;
+  --sap-fill-glow-peak: 0.35;
   --stepper-replay-outline: #8A5A14;
+  /* #922 AC2 finding [2]: light theme's --rust is the DARK value — --on-rust flips to the light
+     ink (--heartwood's own light hex) here, same trigger-rule posture as every token above. */
+  --on-rust: #F1F0E2;
+  --attention-tone-rust: #A34620;
+  --attention-tone-review: #8A5A14;
+  --attention-reason-text: #57604A;
+  --attention-emphasis-text: #251B10;
 }
 
 /* The other light-theme trigger `light-dark()` used to cover for free: system preference, with NO
@@ -149,6 +202,15 @@
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
     --sap-fill-outline: #8A5A14;
+    --sap-fill-halo-floor: 0.55;
+    --sap-fill-halo-peak: 0.9;
+    --sap-fill-glow-floor: 0.12;
+    --sap-fill-glow-peak: 0.35;
     --stepper-replay-outline: #8A5A14;
+    --on-rust: #F1F0E2;
+    --attention-tone-rust: #A34620;
+    --attention-tone-review: #8A5A14;
+    --attention-reason-text: #57604A;
+    --attention-emphasis-text: #251B10;
   }
 }

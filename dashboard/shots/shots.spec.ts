@@ -1,6 +1,8 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { expect, type Locator, type Page, test } from "@playwright/test";
+import { buildRoundLog } from "../src/demo/build-round-log.ts";
+import type { DemoBundle } from "../src/demo/types.ts";
 import { formatUsd } from "../src/format.ts";
 import { STAGE, ZONE_DIVIDERS } from "../src/hero/stage.tsx";
 
@@ -24,9 +26,11 @@ const THEMES = [
 
 // #729 fidelity ledger finding [0]: "idle" is `?demo`'s default position — the round's
 // fully-folded END state (`useDemoReplay.ts`'s `endPosition` doc), nothing left in flight.
-// "active" is that same round scrubbed back to its midpoint event — a real, work-in-flight fold,
-// not a fabricated state. `idle` is the CANONICAL pairing state against the frozen mockups below
-// (unchanged meaning from before this state split); `active` is additional live-only evidence.
+// "active" is that same round scrubbed back to its first planning/reflection phase window
+// (`scrubToActiveMoment`'s own doc, gate② finding [5]) — a real, work-in-flight fold, not a
+// fabricated state; falls back to the arithmetic midpoint when the round carries no such window.
+// `idle` is the CANONICAL pairing state against the frozen mockups below (unchanged meaning from
+// before this state split); `active` is additional live-only evidence.
 const STATES = ["idle", "active"] as const;
 
 // §3 module name → candidate DOM anchors, tried in order. `lanes`'s primary target is the real
@@ -109,12 +113,22 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
       await page.locator("#overview").waitFor({ state: "visible" });
       await page.waitForLoadState("networkidle");
 
-      // Second state: scrub the transport back to the round's midpoint — a real, work-in-flight
-      // fold (`scrubTo`'s own doc: a checkpointed re-fold to an earlier event, not a fabricated
-      // state), giving genuine "active" evidence alongside the idle default above.
-      const scrubbed = await scrubToMidpoint(page);
+      // Second state: scrub the transport to a genuine work-in-flight fold — the round's first
+      // planning/reflection phase window when one exists (`scrubToActiveMoment`'s own doc, AC5
+      // gate② finding [5]), giving genuine "active" evidence alongside the idle default above.
+      const scrubbed = await scrubToActiveMoment(page);
       if (scrubbed) {
         const activePrefix = `${width}-${theme.key}-active`;
+        // #922 AC5 gate② finding [5]: the hero-panel crop specifically must show the active
+        // node's own halo — asserted once (1440px is the AC's own named canonical width) rather
+        // than at every viewport, so a real fixture regression fails loudly instead of the crop
+        // quietly going back to showing nothing active.
+        if (width === CANONICAL_WIDTH) {
+          await expect(
+            page.locator(".hero-node-halo"),
+            "the active capture must render a RUNNING planning/reflection node's halo (AC5)",
+          ).toHaveCount(1);
+        }
         await page.screenshot({ path: `${CAPTURES_DIR}/${activePrefix}-full.png`, fullPage: true });
         for (const [moduleKey, selectors] of Object.entries(MODULE_SELECTORS)) {
           // #882: the live-mocked capture above has no rounds to scrub (mode never leaves
@@ -178,6 +192,43 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
 
   buildContactSheet();
   expect(existsSync(`${OUTPUT_DIR}/contact-sheet.html`)).toBe(true);
+});
+
+/**
+ * #922 AC8 gate② finding [7] (ac8-reduced-motion-animation-gap): happy-dom (`hero.test.ts`'s own
+ * harness) never resolves the `animation` shorthand's own longhands — it echoes `""` for
+ * `animationName` even under a matching `!important: none` rule (that file's own documented
+ * limitation), so the unit-level reduced-motion test can only prove the WINNING computed VALUES
+ * (fill-opacity at peak, etc), never that the animation itself is actually off. This is the real
+ * browser probe the finding asks for instead: a genuine Chromium `getComputedStyle`, which DOES
+ * resolve `animationName` correctly — removing `.hero[data-motion="reduced"] * { animation: none
+ * !important }` (or the `prefers-reduced-motion` media-query twin) would turn this red, where the
+ * happy-dom test's own fill-opacity assertions would stay green regardless.
+ */
+test("#922 AC8: prefers-reduced-motion resolves animation: none on the active node's disc AND halo, in a real browser", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.setViewportSize({ width: CANONICAL_WIDTH, height: 900 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+  const scrubbed = await scrubToActiveMoment(page);
+  expect(scrubbed, "the fixture must carry a real scrub control to reach an active moment").toBe(true);
+
+  const halo = page.locator(".hero-node-halo");
+  await expect(halo, "the active node's halo must render under reduced motion (present, not removed)").toHaveCount(1);
+  const disc = page.locator('[data-active="true"] .hero-planning-node');
+  await expect(disc).toHaveCount(1);
+
+  const [discAnimationName, haloAnimationName] = await Promise.all([
+    disc.evaluate((el) => getComputedStyle(el).animationName),
+    halo.evaluate((el) => getComputedStyle(el).animationName),
+  ]);
+  expect(discAnimationName, "the active disc's animation must actually resolve to none, not just a matching fill-opacity value").toBe(
+    "none",
+  );
+  expect(haloAnimationName, "the halo's animation must actually resolve to none, not just a matching fill-opacity value").toBe("none");
 });
 
 /**
@@ -848,6 +899,117 @@ test("#924 AC2: the pill's round caps stay inside the bar box at 0%/partial/100%
 });
 
 /**
+ * #925 AC5 — THE real measurement AC5 names ("every chip the SAME computed width, every entity
+ * ref cell the same left edge, every age box the same right edge... the longest word still fits").
+ * happy-dom (`NeedsAttention.test.tsx`'s own harness) never runs a real layout pass — confirmed
+ * directly against it: `getBoundingClientRect`/`scrollWidth`/`clientWidth` all read back
+ * hard-coded 0 on every element, real DOM or not. That suite's own "#925 AC5" test is the FAST
+ * structural guard (a CSS-Grid-determinism argument over `getComputedStyle`'s CASCADE reads, which
+ * happy-dom DOES resolve faithfully — that test's own comment makes the case for why the structural
+ * proof is sound) — it is not, and was never meant to be, a stand-in for measuring real boxes.
+ * THIS is the actual geometry oracle, run against Chromium's real layout engine at the `?demo`
+ * fixture's real rows: FIX CAP / DECISION / REVIEW SILENCE — three categories, including
+ * `ATTENTION_CATEGORY`'s own longest word, no fixture rebuild needed (leg 2's demo-fixture growth,
+ * #925 AC4, already put >=3 rows across >=3 categories on this exact page).
+ */
+test("#925 AC5 (REAL measurement, the actual geometry proof — see NeedsAttention.test.tsx's own AC5 test for the fast structural guard): every .attention-chip is the same rendered width, every entity cell shares the same left edge, every age box shares the same right edge, and REVIEW SILENCE fits inside its chip", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  const rows = page.locator(".attention-row");
+  expect(await rows.count(), "COVERAGE: the ?demo fixture must render >= 3 rows for this oracle to mean anything").toBeGreaterThanOrEqual(
+    3,
+  );
+
+  const categories = (await page.locator(".attention-chip").allTextContents()).map((t) => t.trim());
+  expect(new Set(categories).size, "COVERAGE: the rendered rows must span >= 3 distinct categories").toBeGreaterThanOrEqual(3);
+  expect(categories, "the fixture must include ATTENTION_CATEGORY's own longest word").toContain("REVIEW SILENCE");
+
+  const tolerancePx = 1;
+
+  const chipWidths = await page.locator(".attention-chip").evaluateAll((els) => els.map((el) => el.getBoundingClientRect().width));
+  const firstChipWidth = chipWidths[0]!;
+  for (const w of chipWidths) {
+    expect(
+      Math.abs(w - firstChipWidth),
+      `every .attention-chip must render at the SAME width (±${tolerancePx}px), got: ${chipWidths.join(", ")}`,
+    ).toBeLessThanOrEqual(tolerancePx);
+  }
+
+  const entityLefts = await page.locator(".attention-entity").evaluateAll((els) => els.map((el) => el.getBoundingClientRect().left));
+  const firstEntityLeft = entityLefts[0]!;
+  for (const l of entityLefts) {
+    expect(
+      Math.abs(l - firstEntityLeft),
+      `every entity cell must share the SAME left edge (±${tolerancePx}px), got: ${entityLefts.join(", ")}`,
+    ).toBeLessThanOrEqual(tolerancePx);
+  }
+
+  const ageRights = await page.locator(".attention-age").evaluateAll((els) => els.map((el) => el.getBoundingClientRect().right));
+  const firstAgeRight = ageRights[0]!;
+  for (const r of ageRights) {
+    expect(
+      Math.abs(r - firstAgeRight),
+      `every age box must share the SAME right edge (±${tolerancePx}px), got: ${ageRights.join(", ")}`,
+    ).toBeLessThanOrEqual(tolerancePx);
+  }
+
+  // The load-bearing "fit" claim: scrollWidth (the chip's own unclipped content) <= clientWidth
+  // (its rendered visible box) proves the longest real category word never overflows its
+  // fixed-width chip — a real-browser fact `white-space: nowrap` alone can't establish (nowrap
+  // only stops a SECOND line; it says nothing about whether the first one fits).
+  const longestChip = page.locator(".attention-chip", { hasText: "REVIEW SILENCE" });
+  await expect(longestChip, "the REVIEW SILENCE chip must render").toHaveCount(1);
+  const [scrollWidth, clientWidth] = await longestChip.evaluate((el) => [el.scrollWidth, el.clientWidth]);
+  expect(
+    scrollWidth,
+    `REVIEW SILENCE must fit inside its own chip: scrollWidth (${scrollWidth}px) <= clientWidth (${clientWidth}px)`,
+  ).toBeLessThanOrEqual(clientWidth);
+});
+
+/**
+ * #925 AC4 — real-Chromium companion to `NeedsAttention.test.tsx`'s own regex guard
+ * (`/^\d+[smhd]$/`, which happy-dom's zeroed layout metrics can't itself prove FITS): the
+ * emphasis box's own bold ≥40px numeral must fit inside its box, and the box itself must stay
+ * inside the panel it sits in — neither may overflow, under a real browser layout engine.
+ */
+test("#925 AC4 (REAL measurement): the emphasis age box's text fits inside the box, and the box's own right edge sits inside the needs-attention panel's content box", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  const emphasis = page.locator(".attention-age-emphasis");
+  await expect(emphasis, "exactly one row must carry the emphasis box").toHaveCount(1);
+
+  const [scrollWidth, clientWidth] = await emphasis.evaluate((el) => [el.scrollWidth, el.clientWidth]);
+  expect(
+    scrollWidth,
+    `the emphasis numeral must fit its own box: scrollWidth (${scrollWidth}px) <= clientWidth (${clientWidth}px)`,
+  ).toBeLessThanOrEqual(clientWidth);
+
+  const panel = page.locator('section[aria-label="needs attention"]');
+  const [emphasisRight, panelContentRight] = await Promise.all([
+    emphasis.evaluate((el) => el.getBoundingClientRect().right),
+    panel.evaluate((el) => {
+      const rect = el.getBoundingClientRect();
+      const paddingRight = Number.parseFloat(getComputedStyle(el).paddingRight);
+      return rect.right - paddingRight;
+    }),
+  ]);
+  expect(
+    emphasisRight,
+    `the emphasis box's own right edge (${emphasisRight}px) must sit inside the panel's content box (${panelContentRight}px) — never spill past it`,
+  ).toBeLessThanOrEqual(panelContentRight + 1);
+});
+
+/**
  * A genuine RENDERED-PIXEL sample at one page coordinate — not a geometry-box comparison (a
  * `<rect>`'s `getBoundingClientRect()` is verified directly to report the geometry-only box,
  * excluding its own stroke, so it can't itself prove whether a 1px CENTERED stroke's own 0.5px
@@ -1222,20 +1384,43 @@ async function firstMatch(page: Page, selectors: string[]): Promise<Locator | nu
   return null;
 }
 
-/** Drives the real `<input aria-label="scrub">` (`Transport.tsx`) to its midpoint event via
- *  React's own `onChange` — a native property-setter write + a dispatched `input` event, the
- *  standard way to drive a React-controlled input from outside React (`fill()` does not reliably
- *  reach range inputs' React handlers). Returns false when no scrub control is present (nothing to
- *  scrub — never treated as a failure, since not every module renders the transport). */
-async function scrubToMidpoint(page: Page): Promise<boolean> {
+/** #922 AC5 gate② finding [5] (ac5-active-capture): the round's own REAL first planning/reflection
+ *  phase window (aligning/architecting/plan_review/harvesting/retro — `PLANNING_PHASE`/
+ *  `REFLECTION_PHASE`, state.ts) — never an arithmetic "midpoint" of the whole event range, which
+ *  can just as easily land inside a driving/fixing phase that draws no active planning node at
+ *  all (the finding's own root cause: the fixture's `roundPhase` used to be hardcoded `null` in
+ *  replay regardless, but even after wiring it live an arithmetic midpoint is not guaranteed to
+ *  land inside a phase this stage actually renders as "active"). Reads the SAME `/demo-fixture.json`
+ *  the app itself fetches and folds it through the SAME production `buildRoundLog` (real
+ *  `phaseWindows`, never a hand-guessed event index), so this reuses the existing `?demo` machinery
+ *  rather than standing up a second data path. */
+const ACTIVE_PHASES = new Set(["aligning", "architecting", "plan_review", "harvesting", "retro"]);
+
+/** Drives the real `<input aria-label="scrub">` (`Transport.tsx`) to a genuine, real-fixture
+ *  moment via React's own `onChange` — a native property-setter write + a dispatched `input`
+ *  event, the standard way to drive a React-controlled input from outside React (`fill()` does
+ *  not reliably reach range inputs' React handlers). Scrubs to the FIRST planning/reflection
+ *  phase window's own start event (AC5's own ask: a capture with a RUNNING planning/reflection
+ *  node) when one exists; falls back to the arithmetic midpoint otherwise (a genuine, if less
+ *  targeted, work-in-flight fold — never a fabricated state). Returns false when no scrub control
+ *  is present (nothing to scrub — never treated as a failure, since not every module renders the
+ *  transport). */
+async function scrubToActiveMoment(page: Page): Promise<boolean> {
   const scrub = page.locator('input[aria-label="scrub"]');
   if ((await scrub.count()) === 0) return false;
-  await scrub.evaluate((el: HTMLInputElement) => {
-    const midpoint = Math.round((Number(el.min) + Number(el.max)) / 2);
+
+  const bundle = (await page.evaluate(() => fetch("/demo-fixture.json").then((r) => r.json()))) as DemoBundle;
+  const round = bundle.rounds[0];
+  const log = round ? buildRoundLog(bundle, round, null) : null;
+  const activeWindow = log?.phaseWindows.find((w) => ACTIVE_PHASES.has(w.phase));
+  const activeEvent = activeWindow ? log?.events.find((e) => e.kind === "round-phase" && e.ts === activeWindow.startTs) : undefined;
+
+  await scrub.evaluate((el: HTMLInputElement, targetEventId: number | null) => {
+    const target = targetEventId ?? Math.round((Number(el.min) + Number(el.max)) / 2);
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-    setter?.call(el, String(midpoint));
+    setter?.call(el, String(target));
     el.dispatchEvent(new Event("input", { bubbles: true }));
-  });
+  }, activeEvent?.id ?? null);
   await page.waitForTimeout(100);
   return true;
 }

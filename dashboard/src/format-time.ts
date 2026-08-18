@@ -32,21 +32,38 @@ export function formatAbsoluteTime(iso: string, mode: TimeMode = "local"): strin
   return `${clock} ${formatOffsetLabel(offsetMinutes(date, mode))}`;
 }
 
+const RELATIVE_UNITS: [string, number][] = [
+  ["y", 365 * 24 * 3600],
+  ["mo", 30 * 24 * 3600],
+  ["d", 24 * 3600],
+  ["h", 3600],
+  ["m", 60],
+  ["s", 1],
+];
+
+function relativeDeltaSec(iso: string, now: Date): number {
+  return Math.max(0, Math.round((now.getTime() - new Date(iso).getTime()) / 1000));
+}
+
 /** Compact relative form used by the feed and needs-attention age chips (e.g. "14s ago"). */
 export function formatRelativeTime(iso: string, now: Date = new Date()): string {
-  const deltaSec = Math.max(0, Math.round((now.getTime() - new Date(iso).getTime()) / 1000));
-  const units: [string, number][] = [
-    ["y", 365 * 24 * 3600],
-    ["mo", 30 * 24 * 3600],
-    ["d", 24 * 3600],
-    ["h", 3600],
-    ["m", 60],
-    ["s", 1],
-  ];
-  for (const [suffix, secs] of units) {
+  const deltaSec = relativeDeltaSec(iso, now);
+  for (const [suffix, secs] of RELATIVE_UNITS) {
     if (deltaSec >= secs) return `${Math.floor(deltaSec / secs)}${suffix} ago`;
   }
   return "just now";
+}
+
+/** #925 AC4: the needs-attention strip's OLDEST-age emphasis box needs the bare numeral — no
+ *  " ago" — so its bold, oversized text fits the fixed 96px age track; every other (small) age
+ *  box keeps the full `formatRelativeTime` form. Same magnitude/suffix table as that function,
+ *  just without the suffix word — not a second, independently-maintained unit ladder. */
+export function formatCompactAge(iso: string, now: Date = new Date()): string {
+  const deltaSec = relativeDeltaSec(iso, now);
+  for (const [suffix, secs] of RELATIVE_UNITS) {
+    if (deltaSec >= secs) return `${Math.floor(deltaSec / secs)}${suffix}`;
+  }
+  return "0s";
 }
 
 /** Rule 2: pairs a relative string with its hover-absolute title via `formatAbsoluteTime`. */

@@ -54,8 +54,20 @@ export type HeroProps = {
   mergedPrs?: readonly number[];
   /** `lanes.prFixCap` — the "round n of cap" denominator. */
   fixCap?: number;
-  /** Live round-phase cursor (`/api/loop/state`'s `round.phase`); null when no round is open. */
+  /** #922 "What": the round-phase cursor — LIVE `round.phase` while `mode === "live"`, OR the
+   *  REPLAY cursor's own phase (`phaseAtCursor(replay.phaseWindows, replay.asOf)`, `App.tsx`'s
+   *  own call site) while replaying/`?demo` ("replay highlights the cursor's phase", the owner's
+   *  own wording); null when no round is open / the cursor sits outside any known phase window. */
   roundPhase?: string | null;
+  /** #922 AC5 gate② finding [5] (ac5-active-capture): whether this render is the LIVE mode, never
+   *  derived from `roundPhase` itself — `roundPhase` is now non-null in BOTH live and replay (see
+   *  its own doc above), so `isLiveOpenRound` below needs an independent signal to keep dimming
+   *  (§6: "ceiling breach / PAUSE / kill switch") a live-only concept, never triggered by a
+   *  replayed/`?demo` round's own cursor phase. Defaults `true` — every existing call site that
+   *  never passed `roundPhase` either (this prop's own prior default) already got `false` from
+   *  the old `roundPhase !== null` formula, and still does here, since `roundPhase` still
+   *  defaults `null` below. */
+  live?: boolean;
   /** Replay transport speed; ≥ ×4 collapses animation per the §6 coalescing policy. */
   speed?: number;
   /** Allowlisted config (§3 E) — threaded straight to `HeroStage` for the model·effort /
@@ -85,6 +97,7 @@ export function Hero({
   mergedPrs = [],
   fixCap = 2,
   roundPhase = null,
+  live = true,
   speed = 1,
   config = null,
   onInspect,
@@ -119,11 +132,12 @@ export function Hero({
     return () => controller.current.cancel();
   }, [steps, heroState, lanesMax, reducedMotion, speed]);
 
-  // #920 owner ruling Q6: dimming is a LIVE-open-round-only concept — `roundPhase` is already
-  // `null` in both replay and `?demo` (`App.tsx`'s own call site: `mode === "live" ? round.phase
-  // : null`), so this is the same signal `App.tsx` already computes `roundPhase` from, not a new
-  // one invented here.
-  const isLiveOpenRound = roundPhase !== null;
+  // #920 owner ruling Q6: dimming is a LIVE-open-round-only concept. #922 AC5 gate② finding [5]:
+  // `roundPhase` alone no longer distinguishes live from replay (both can be non-null now that
+  // replay highlights the cursor's own phase, `roundPhase`'s own doc above) — `live` is the
+  // independent signal `App.tsx` already knows (`mode === "live"`) that keeps this gated to an
+  // actually-live open round, never a replayed/`?demo` cursor sitting inside a phase window.
+  const isLiveOpenRound = live && roundPhase !== null;
 
   return (
     // #920: the hero draws inside a `.panel` card, matching the mockup band rather than floating
