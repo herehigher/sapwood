@@ -261,8 +261,13 @@
   align-items: center;
 }
 
+/* #953: the alias (format.ts's modelDisplayName) fixes the common case; this is the invariant
+ * guarantee for whatever it can't reduce — an unknown-shape id renders verbatim (format.ts) and
+ * must still never wrap the row. */
 .cost-bar-label {
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* `CostBar.tsx` has no `viewBox` — its own coordinates are already real CSS px (or SVG

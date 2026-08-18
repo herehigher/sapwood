@@ -5,6 +5,18 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
+// #953: must resolve before "./App.tsx" (transitively imports Radix, via Header.tsx's
+// HintTooltip.tsx and CostStrip.tsx's own new by-model tooltip) — see test-dom-eager.ts's own doc
+// for why: Radix's useLayoutEffect shim decides whether happy-dom exists at MODULE EVALUATION
+// time, and registerRealDom()'s test.before()-based registration used to run too late for it (no
+// prior test in this file opened a Radix tooltip via real focus, so the gap went unnoticed). The
+// `test.after` call right below (not just a comment) is load-bearing too — it breaks contiguity
+// with the import group after it, which stops biome's `organizeImports` from merging the two
+// groups back into one alphabetically-sorted block that would undo this ordering.
+import { unregisterRealDomEager } from "./test-dom-eager.ts";
+
+test.after(() => unregisterRealDomEager());
+
 import {
   App,
   appContent,
@@ -30,9 +42,6 @@ import type { EntityTitles } from "./entities.ts";
 import { Hero } from "./hero/Hero.tsx";
 import { foldEvents, type HeroState, initialHeroState } from "./hero/state.ts";
 import { foldReplay, initialReplayState } from "./replay/reducer.ts";
-import { registerRealDom } from "./test-dom.ts";
-
-registerRealDom();
 
 /** Same tree-walk IconRail.test.tsx uses — finds a node in a REAL React element tree (never a
  *  `renderToStaticMarkup` string, which strips function props) by exact `className`. */
@@ -2982,7 +2991,9 @@ function fullCoverageViewModel() {
       stageBars,
       targetUsd: 5,
       // #924 gate② PO item 2's own observed boundary case: a by-model label longer than the
-      // 7em floor ("claude-sonnet-5") — the exact shape that wrapped under the fixed-width column.
+      // 7em floor — the exact shape that wrapped under the fixed-width column. #953: the raw id
+      // itself now renders aliased ("sonnet"), so the wrap risk this fixture exercises moved to
+      // the CSS invariant (overflow/ellipsis) rather than the label column's own max-content grow.
       modelBars: [{ label: "claude-sonnet-5", usd: 7.8 }],
       footer: null,
     },
@@ -3322,25 +3333,30 @@ test("AC2: the winning grid-template-columns on a REAL rendered .cost-bar-list i
   }
 });
 
-// #924 gate② finding [1] / PO item 2: a rendered CASCADE fact, not just source text — proves
-// `white-space: nowrap` actually resolves onto a REAL rendered label (including the fixture's own
-// longer-than-7em "claude-sonnet-5" model name), not merely that the source declares it. happy-dom
-// has no real layout engine (`getBoundingClientRect()` on any element returns an all-zero box,
-// verified directly — matching this harness's documented "DOM-free by default" posture,
-// docs/dev-guide/07-dashboard.md) — so an actual "does this box span one line or two" pixel
-// measurement isn't achievable here; `white-space: nowrap` resolving onto the real element is the
-// STYLE-provable half of "never wrapped," and the label column's own `minmax(7em, max-content)`
-// sizing (VALUE-checked above, from source) is what gives that nowrap text room to exist without
-// being clipped instead.
-test("AC2: every rendered cost-bar label, including one longer than the 7em floor, resolves white-space: nowrap", async () => {
+// #924 gate② finding [1] / PO item 2, extended by #953 AC3: a rendered CASCADE fact, not just
+// source text — proves `white-space: nowrap` (plus, #953, `overflow: hidden`/`text-overflow:
+// ellipsis`) actually resolves onto every REAL rendered label, not merely that the source declares
+// it. happy-dom has no real layout engine (`getBoundingClientRect()` on any element returns an
+// all-zero box, verified directly — matching this harness's documented "DOM-free by default"
+// posture, docs/dev-guide/07-dashboard.md) — so an actual "does this box span one line or two"
+// pixel measurement isn't achievable here; these three computed properties are the STYLE-provable
+// half of "never wrapped," and the label column's own `minmax(7em, max-content)` sizing
+// (VALUE-checked above, from source) is what gives the nowrap by-stage text room to exist without
+// being clipped instead. #953: the fixture's by-model "claude-sonnet-5" now renders aliased down
+// to its family word ("sonnet", `format.ts`'s `modelDisplayName`) — the by-stage "Goal & align"
+// row is this test's own longer-than-7em case now.
+test("AC2/AC3: every rendered cost-bar label resolves white-space: nowrap, overflow: hidden, text-overflow: ellipsis — including a by-model row's aliased family word", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   try {
     const labels = [...container.querySelectorAll(".cost-bar-label")];
     assert.ok(labels.length > 0, "at least one cost-bar-label must render (the fixture's by-stage/by-model bars)");
-    const longLabel = labels.find((l) => l.textContent === "claude-sonnet-5");
-    assert.ok(longLabel, "the fixture's own longer-than-7em label (claude-sonnet-5) must actually render");
+    const modelLabel = labels.find((l) => l.textContent === "sonnet");
+    assert.ok(modelLabel, "the fixture's by-model row must render the aliased family word, not the raw id");
     for (const label of labels) {
-      assert.equal(getComputedStyle(label as Element).whiteSpace, "nowrap", `"${label.textContent}" label must never wrap`);
+      const computed = getComputedStyle(label as Element);
+      assert.equal(computed.whiteSpace, "nowrap", `"${label.textContent}" label must never wrap`);
+      assert.equal(computed.overflow, "hidden", `"${label.textContent}" label must clip overflow`);
+      assert.equal(computed.textOverflow, "ellipsis", `"${label.textContent}" label must ellipsize`);
     }
   } finally {
     await cleanup();
@@ -3817,6 +3833,62 @@ async function mountLiveAppWithCascade(byPath: Record<string, { status: number; 
     },
   };
 }
+
+// ── #953 AC2 (WIRING): the real `App` → `LiveApp` → `CostStrip` tree, `/api/loop/state` mocked
+// with a real `spend.byModel` payload (the actual production data source `App.tsx`'s own
+// `todayModelBars` reads, per `App.tsx`'s own comment on that field — never a hand-assembled
+// `CostPanelData`) — proves the alias, the tooltip, and the full-id preservation all survive the
+// real wiring, not just the `CostStrip`/`Bar` component in isolation. ──────────────────────────
+
+test("#953 AC2: a by-model row's .cost-bar-label renders the aliased family word, wrapped in a HintTooltip carrying the full raw id, through the real App -> LiveApp -> CostStrip wiring", async () => {
+  const { container, cleanup } = await mountLiveAppWithCascade({
+    "/api/loop/state": {
+      status: 200,
+      body: {
+        ...LOOP_STATE_OK,
+        spend: {
+          todayUsd: 12.7,
+          dailyBudgetUsd: null,
+          runUsd: null,
+          runBudgetUsd: null,
+          byModel: [
+            { model: "claude-sonnet-5", usd: 7.8, inputTokens: 0, outputTokens: 0 },
+            { model: "claude-opus-4-1", usd: 4.9, inputTokens: 0, outputTokens: 0 },
+          ],
+        },
+      },
+    },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  try {
+    const labels = [...container.querySelectorAll(".cost-bar-label")];
+    for (const label of labels) {
+      assert.equal(label.hasAttribute("title"), false, `"${label.textContent}" .cost-bar-label must carry no bare title= attribute`);
+    }
+
+    for (const [alias, fullId] of [
+      ["sonnet", "claude-sonnet-5"],
+      ["opus", "claude-opus-4-1"],
+    ] as const) {
+      const label = labels.find((l) => l.textContent === alias);
+      assert.ok(label, `a .cost-bar-label reading "${alias}" must render`);
+      assert.ok(!labels.some((l) => l.textContent === fullId), `the raw id "${fullId}" must never appear as the visible label text`);
+      const trigger = label as HTMLElement;
+      assert.equal(trigger.tabIndex, 0, `"${alias}" label must be a real tab stop — a <span> isn't focusable by default`);
+      await act(async () => {
+        trigger.focus();
+      });
+      const tooltip = container.querySelector('[role="tooltip"]');
+      assert.ok(tooltip, `focusing the "${alias}" label must open its tooltip`);
+      assert.equal(tooltip?.textContent, fullId, `the "${alias}" label's tooltip must carry the full id "${fullId}"`);
+      await act(async () => {
+        trigger.blur();
+      });
+    }
+  } finally {
+    await cleanup();
+  }
+});
 
 // gate① engine-agent finding [0] (ac1-style-oracle): round 1 compared `severity.style.
 // backgroundColor` against `chip.style.borderColor` (raw, uncascaded inline reads) and checked
