@@ -28,6 +28,7 @@ import {
   PLANNING_NODE_R,
   REFLECTION,
   RING_COUNT_FONT_PX,
+  RING_PITCH_MIN,
   ringCountFontPx,
   ringInnerRadius,
   ringOuterRadius,
@@ -2419,7 +2420,39 @@ test("#921 AC3: the growth rule at N = 1, 12, 24, 42 — constant pitch under th
       assert.ok(dist <= r0 + 0.01, `n=${n}: numeral corner (${cx}, ${cy}) at distance ${dist} must fit inside r0 (${r0})`);
     }
 
-    if (n === 24 || n === 42) {
+    // #921 gate② round 4 finding [1] (ac3-growth-oracle): exact VALUE-derived radii, not just
+    // "monotonic and below the ceiling" (a badly wrong growth formula could still pass those).
+    // Read every input from its own source — TRUNK.step, TRUNK_DISC_R_MAX, r0 — never a
+    // hand-copied number, so this test can't silently drift from the production formula it's
+    // meant to police.
+    const actualRadii = ringRadii(n);
+    if (n === 1 || n === 12) {
+      // Nominal branch: pitch is the constant TRUNK.step (the compression threshold isn't
+      // reached yet at these counts, per the AC3's own math — verified by the loose "outer <
+      // TRUNK_DISC_R_MAX" branch below too).
+      const expectedRadii = Array.from({ length: n }, (_, i) => r0 + (i + 1) * TRUNK.step);
+      assert.deepEqual(
+        actualRadii.map((r) => Number(r.toFixed(6))),
+        expectedRadii.map((r) => Number(r.toFixed(6))),
+        `n=${n}: every ring radius must equal r0 + i*TRUNK.step exactly (nominal branch)`,
+      );
+      assert.ok(
+        Math.abs(outer - (r0 + n * TRUNK.step)) < 0.001,
+        `n=${n}: outer radius must equal r0 + N*TRUNK.step exactly (${r0 + n * TRUNK.step}), got ${outer}`,
+      );
+      // #921: pitch stays constant (nominal TRUNK.step) below the compression threshold — the
+      // outer radius must still be well short of the footprint ceiling.
+      assert.ok(outer < TRUNK_DISC_R_MAX, `n=${n}: outer radius (${outer}) must still be short of TRUNK_DISC_R_MAX (${TRUNK_DISC_R_MAX})`);
+    } else {
+      // Compressed branch (n === 24 || n === 42): the growth rule's own stated formula —
+      // pitch = (R_max - r0) / N — read from TRUNK_DISC_R_MAX/r0, both real sources, not copied.
+      const expectedPitch = (TRUNK_DISC_R_MAX - r0) / n;
+      const expectedRadii = Array.from({ length: n }, (_, i) => r0 + (i + 1) * expectedPitch);
+      assert.deepEqual(
+        actualRadii.map((r) => Number(r.toFixed(6))),
+        expectedRadii.map((r) => Number(r.toFixed(6))),
+        `n=${n}: every ring radius must equal r0 + i*((R_max-r0)/N) exactly (compressed branch)`,
+      );
       // #921: "the outer radius at 24 ≈ R_max" — and, by this file's own compression formula
       // (`ringRadii`'s doc: pitch compresses to land EXACTLY on the ceiling once active), every N
       // past the compression threshold saturates at the SAME TRUNK_DISC_R_MAX, not just N=24.
@@ -2427,10 +2460,6 @@ test("#921 AC3: the growth rule at N = 1, 12, 24, 42 — constant pitch under th
         Math.abs(outer - TRUNK_DISC_R_MAX) < 0.01,
         `n=${n}: outer radius (${outer}) must have reached TRUNK_DISC_R_MAX (${TRUNK_DISC_R_MAX})`,
       );
-    } else {
-      // #921: pitch stays constant (nominal TRUNK.step) below the compression threshold — the
-      // outer radius must still be well short of the footprint ceiling.
-      assert.ok(outer < TRUNK_DISC_R_MAX, `n=${n}: outer radius (${outer}) must still be short of TRUNK_DISC_R_MAX (${TRUNK_DISC_R_MAX})`);
     }
   }
 });
@@ -2494,10 +2523,17 @@ for (const n of [100, 1000, 1_000_000]) {
 // EVERY count, including scales where the DEFAULT numeral font's own box would itself exceed
 // TRUNK_DISC_R_MAX (7+ digits — the reviewer's own rings=1,000,000 example). Rather than accept a
 // documented miss (round 2's resolution), the numeral itself now shrinks (`ringCountFontPx`) so
-// its own clearance box never exceeds the ceiling — AC3 holds unconditionally, AC1's real
-// (footprint-capped) draw count still renders honestly (zero rings here — the numeral alone
-// already claims the whole footprint), and pitch never goes negative.
-test("#921 gate② round 3 finding [1]: at the reviewer's own 7-digit extreme (rings=1,000,000), the numeral itself shrinks so AC3's footprint ceiling holds EXACTLY — no documented miss, no negative pitch", () => {
+// its own clearance box never exceeds the ceiling — AC3 holds unconditionally.
+//
+// #921 gate② round 4 finding [0] (ac3-extreme-clearance): searching against the bare
+// TRUNK_DISC_R_MAX let r0 pin RIGHT AT the ceiling, leaving zero room for even one ring's own
+// minimum pitch — `ringsThatFitFootprint` correctly computed zero drawn rings at this extreme,
+// which is the bug the AC names (a disc with a numeral but NO ring texture at all is not the
+// growth rule's "the count is the record" exception — that exception covers rings 42..N being
+// undrawn, never rings 1..N). `ringCountFontPx` now searches against TRUNK_DISC_R_MAX minus TWO
+// RING_PITCH_MIN slots, read directly from stage.tsx (VALUE doctrine) — this test asserts the
+// exact boundary AND that real ring texture survives even at this extreme.
+test("#921 gate② round 4 finding [0]: at the reviewer's own 7-digit extreme (rings=1,000,000), the numeral shrinks to leave TWO minimum-pitch ring slots — AC3's ceiling holds exactly AND at least one ring actually renders", () => {
   const rings = 1_000_000;
   const defaultBoxRadius = Math.hypot((String(rings).length * RING_COUNT_FONT_PX * 0.62) / 2, RING_COUNT_FONT_PX - 11);
   assert.ok(
@@ -2512,12 +2548,17 @@ test("#921 gate② round 3 finding [1]: at the reviewer's own 7-digit extreme (r
   );
 
   const r0 = ringInnerRadius(rings);
+  const reservedCeiling = TRUNK_DISC_R_MAX - 2 * RING_PITCH_MIN;
   assert.ok(
-    r0 <= TRUNK_DISC_R_MAX + 0.01,
-    `the numeral's OWN clearance (r0 = ${r0}) must fit inside TRUNK_DISC_R_MAX (${TRUNK_DISC_R_MAX}) once shrunk — AC3's own "textBox() fits inside r0" premise, applied to the ceiling itself`,
+    r0 <= reservedCeiling + 0.01,
+    `the numeral's OWN clearance (r0 = ${r0}) must fit inside TRUNK_DISC_R_MAX minus two RING_PITCH_MIN slots (${reservedCeiling}) — round 4's own stricter boundary, not just the bare ceiling`,
   );
 
   const radii = ringRadii(rings);
+  assert.ok(
+    radii.length >= 1,
+    `at least one ring must actually render here — a numeral with NO ring texture at all is the exact bug this finding names, got ${radii.length}`,
+  );
   for (const r of radii) {
     assert.ok(r >= r0 - 0.01, `every ring radius (${r}) must stay at/outside r0 (${r0}) — pitch never goes negative/inward-crossing`);
   }
@@ -2526,6 +2567,17 @@ test("#921 gate② round 3 finding [1]: at the reviewer's own 7-digit extreme (r
   assert.ok(
     outer <= TRUNK_DISC_R_MAX + 0.01,
     `AC3 must hold EXACTLY here, not as a documented miss (outer ${outer} vs TRUNK_DISC_R_MAX ${TRUNK_DISC_R_MAX})`,
+  );
+
+  // Component-level proof (real render, not just the pure function) — the "at least one ring"
+  // requirement rendered against the REAL production markup.
+  const html = markup({ ...initialHeroState(3), rings });
+  const trunk = trunkGroupInner(html);
+  assert.ok(trunk, "the .hero-trunk group must render");
+  assert.equal(
+    (trunk as string).match(/class="hero-ring"/g)?.length ?? 0,
+    radii.length,
+    "the REAL rendered ring count must match the production formula's own drawn count",
   );
 });
 

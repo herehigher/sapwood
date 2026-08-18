@@ -58,6 +58,15 @@ for (const dir of [OUTPUT_DIR, CAPTURES_DIR, MOCKUPS_OUT_DIR]) {
 test.describe.configure({ mode: "serial" });
 
 test("capture the ?demo fixture across viewports/themes/states and build the contact sheet", async ({ page }) => {
+  // #921 gate② round 4 witness follow-up: without this, a crop-pair capture (full panel +
+  // outcome-zone) can land mid-animation — the hero's own anime.js transitions (ring stroke
+  // draw-on, droplet travel) are still running when the screenshot fires, so the two crops of the
+  // SAME moment can show visibly different frames. `Hero.tsx`'s own `useReducedMotion` already
+  // turns every transition into an instant swap to its settled final state (never a different
+  // STATE, just no visual lag reaching it) — emulating it here removes the timing race
+  // deterministically, rather than an arbitrary "wait N ms" this repo's own review doctrine bans
+  // for exactly this class of flake.
+  await page.emulateMedia({ reducedMotion: "reduce" });
   for (const width of VIEWPORTS) {
     for (const theme of THEMES) {
       await page.setViewportSize({ width, height: 900 });

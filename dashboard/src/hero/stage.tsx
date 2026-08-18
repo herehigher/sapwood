@@ -344,15 +344,26 @@ function ringCountBoxRadius(fontPx: number, digits: number): number {
  * any realistic count (verified through 6 digits — under one million rings — `hero.test.ts`'s
  * own AC2/AC3 tests): the numeral stays at exactly `RING_COUNT_FONT_PX`, AC2's own floor, until
  * scale genuinely forces a trade-off no fixed font size can avoid.
+ *
+ * #921 gate② round 4 finding [0] (ac3-extreme-clearance): searching against the bare
+ * `TRUNK_DISC_R_MAX` let `r0` pin RIGHT AT the ceiling — leaving zero room for even one ring's
+ * own minimum pitch, so `ringsThatFitFootprint` correctly computed zero drawn rings at the
+ * extreme (rings=1,000,000), and the count went undrawn entirely (the disc is JUST the numeral,
+ * no ring texture at all). The search target is now `TRUNK_DISC_R_MAX` minus TWO
+ * `RING_PITCH_MIN` slots — one reserved slot alone risks `ringsThatFitFootprint`'s own
+ * `Math.floor` rounding a hairline-thin remaining gap down to zero on floating-point noise; two
+ * slots is real margin, not just a boundary the solver can land exactly on. The numeral still
+ * shrinks no more than necessary — this only tightens the target the binary search converges to.
  */
 export function ringCountFontPx(rings: number): number {
   const digits = String(rings).length;
-  if (ringCountBoxRadius(RING_COUNT_FONT_PX, digits) <= TRUNK_DISC_R_MAX) return RING_COUNT_FONT_PX;
+  const ceiling = TRUNK_DISC_R_MAX - 2 * RING_PITCH_MIN;
+  if (ringCountBoxRadius(RING_COUNT_FONT_PX, digits) <= ceiling) return RING_COUNT_FONT_PX;
   let lo = 1;
   let hi = RING_COUNT_FONT_PX;
   for (let i = 0; i < 30; i++) {
     const mid = (lo + hi) / 2;
-    if (ringCountBoxRadius(mid, digits) <= TRUNK_DISC_R_MAX) lo = mid;
+    if (ringCountBoxRadius(mid, digits) <= ceiling) lo = mid;
     else hi = mid;
   }
   return lo;
@@ -378,8 +389,10 @@ export function ringInnerRadius(rings: number): number {
 export const TRUNK_DISC_R_MAX = Math.min(128 / RENDER_SCALE_1440, 0.2 * STAGE.h);
 /** #921: a ring pitch below this compresses past what a hairline stroke can actually resolve —
  *  the issue's own "≥ 1.5px [at 1440]" floor, converted to this file's SVG-unit space —
- *  `ringsThatFitFootprint`'s own floor on how many rings the footprint can still fit. */
-const RING_PITCH_MIN = 1.5 / RENDER_SCALE_1440;
+ *  `ringsThatFitFootprint`'s own floor on how many rings the footprint can still fit. Exported so
+ *  `hero.test.ts` (#921 gate② round 4 finding [0]) reads the exact two-slot reservation
+ *  `ringCountFontPx` searches against, rather than a hand-copied literal. */
+export const RING_PITCH_MIN = 1.5 / RENDER_SCALE_1440;
 /**
  * #921: the sapling glyph's own footprint at zero rings — "≈ 40% of the disc footprint" (the
  * issue's own sizing), i.e. 40% of the max disc's DIAMETER (`2 * TRUNK_DISC_R_MAX`).
