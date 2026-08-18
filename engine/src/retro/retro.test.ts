@@ -28,6 +28,7 @@ import {
   createRetroStub,
   defaultRetroPromptPath,
   gatherRetroFacts,
+  isQuietRound,
   parseRetroScratch,
   RETRO_ALLOWED_TOOLS,
   RETRO_DISALLOWED_TOOLS,
@@ -42,6 +43,18 @@ import {
  *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
  *  so every deliberate real-clock read in this suite greps as one decision. */
 const realClock = (): Date => new Date();
+
+/** #961: most fixtures below only care about session-dispatch plumbing (allow/deny lists,
+ *  scratch parsing, cadence, prompt rendering) and don't care WHY the session dispatches — they
+ *  pre-date the quiet-round check and simply started a round with no events at all. A round with
+ *  zero events is now a quiet round (`isQuietRound`) and would short-circuit before ever reaching
+ *  the session, so those fixtures seed one `dispatched` event to keep the round non-quiet without
+ *  otherwise touching the digest/fact counts a handful of OTHER fixtures assert on (a `dispatched`
+ *  event carries neither the `retro` nor `pr-touched` tag). The quiet check itself is tested
+ *  directly in the "#961 quiet round" section below. */
+const seedDispatch = (state: State): void => {
+  state.appendEvent("dispatched", { worker: "lane-seed", issue: 0 });
+};
 
 class ScriptedRunner {
   calls: RoleSessionOpts[] = [];
@@ -201,6 +214,7 @@ test("RETRO_DISALLOWED_TOOLS: explicitly denies merge/review/ready, issue mutati
 test("createRetroStub: every dispatched session carries RETRO_ALLOWED_TOOLS/RETRO_DISALLOWED_TOOLS — never the base issues-only scope", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
   const runner = new ScriptedRunner(doneResult("role-retro-1"));
   const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
@@ -217,6 +231,7 @@ test("createRetroStub: every dispatched session carries RETRO_ALLOWED_TOOLS/RETR
 test("createRetroStub (#236): a done session's context manifest is persisted, keyed by (round, 'retro', 'retro', session name, attempt 1)", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
   const manifest = mkFakeManifest("retro-attempt");
   const runner = new ScriptedRunner({ ...doneResult("role-retro-1"), contextManifest: manifest });
   const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
@@ -281,6 +296,123 @@ test("gatherRetroFacts (#403, F25): the round window is id-cursor-bounded — a 
   assert.equal(facts.handoffs, 1);
   assert.equal(facts.needsHumanEscalations, 1);
   assert.equal(facts.ceilingEscalations, 1);
+  state.close();
+});
+
+// ── #961: a QUIET round (zero `retro`/`pr-touched`-tagged events, zero dispatched lanes) skips
+// the session structurally — no runner call, no digest build, one durable skip event, phase
+// still closes ───────────────────────────────────────────────────────────────────────────────
+
+test("isQuietRound: true for a fresh round with no events in its window", () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  assert.equal(isQuietRound(state, round), true);
+  state.close();
+});
+
+test("isQuietRound: events BEFORE round start don't count — a round right after a busy one is still quiet", () => {
+  const state = new State(":memory:");
+  state.appendEvent("handoff", { worker: "lane-x", issue: 99 }); // before round start
+  state.appendEvent("dispatched", { worker: "lane-x", issue: 99 }); // before round start
+  const round = state.startRound(new Date().toISOString());
+  assert.equal(isQuietRound(state, round), true);
+  state.close();
+});
+
+test("createRetroStub (#961 AC1, red-first): a quiet round returns the marker WITHOUT calling the session runner or building the digest, and appends exactly one skip event; a re-run with the marker already set is a no-op", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  const runner = new ScriptedRunner(doneResult("s1"));
+  const forge = new MinimalForge();
+  // buildRetroDigest always touches getCommitsSince, even for an empty round (the "still renders
+  // a digest" test above) — this throws if the quiet check fails to short-circuit BEFORE it.
+  forge.getCommitsSince = (): Promise<CommitInfo[]> => {
+    throw new Error("buildRetroDigest must never run for a quiet round");
+  };
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
+  const stub = createRetroStub(deps);
+  const { marker, ranSession } = await stub.run({ roundId: round.round_id, phase: "retro", marker: null });
+
+  assert.equal(marker, retroMarker(round.round_id));
+  assert.equal(ranSession, undefined, "#394 (F23): a structural skip -> ranSession stays unset, same as the cadence skip");
+  assert.equal(runner.calls.length, 0);
+  const skips = state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-quiet-skipped"]);
+  assert.equal(skips.length, 1);
+  assert.deepEqual(skips[0]!.payload, { round_id: round.round_id });
+
+  // Idempotence (#77 decision 4) unchanged: a re-run with the marker already set is a no-op.
+  const rerun = await stub.run({ roundId: round.round_id, phase: "retro", marker });
+  assert.equal(rerun.marker, marker);
+  assert.equal(runner.calls.length, 0);
+  assert.equal(
+    state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-quiet-skipped"]).length,
+    1,
+    "no second skip event on the idempotent re-run",
+  );
+  state.close();
+});
+
+// AC2's three cases each carry EXACTLY ONE of the three signals — a `retro`-tagged-only event
+// (`handoff`, tags: ["retro", "round-artifact"]), a `pr-touched`-tagged-only event (`merged`,
+// tags: ["pr-touched", ...] — no "retro" tag; the shape a harvest merging a PRIOR round's PR
+// leaves with zero fresh dispatch), and a bare `dispatched` event — so dropping any ONE of
+// `isQuietRound`'s three checks reddens the ONE case that check alone was catching, never a case
+// that another check would still catch. (The issue's own suggested `drive-needs-human` fixture
+// carries BOTH the `retro` and `pr-touched` tags at once — it would still be caught by whichever
+// check survived, so it doesn't mutation-kill either check on its own; these three do.)
+test("createRetroStub (#961 AC2): a retro-tagged event alone is material — the session still runs", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("handoff", { worker: "lane-a", issue: 1 });
+  assert.equal(isQuietRound(state, round), false);
+  const runner = new ScriptedRunner(doneResult("s1"));
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
+  await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
+  assert.equal(runner.calls.length, 1);
+  assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-quiet-skipped"]), []);
+  state.close();
+});
+
+test("createRetroStub (#961 AC2): a pr-touched-tagged event alone (e.g. harvest merging a PRIOR round's PR, zero fresh dispatch) is material — the session still runs", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("merged", { worker: "lane-a", issue: 7, pr: 42, headOid: "abc" });
+  assert.equal(isQuietRound(state, round), false);
+  const runner = new ScriptedRunner(doneResult("s1"));
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
+  await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
+  assert.equal(runner.calls.length, 1);
+  assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-quiet-skipped"]), []);
+  state.close();
+});
+
+test("createRetroStub (#961 AC2): a dispatched lane alone (no retro/pr-touched event) is material — the session still runs", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("dispatched", { worker: "lane-a", issue: 1 });
+  assert.equal(isQuietRound(state, round), false);
+  const runner = new ScriptedRunner(doneResult("s1"));
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
+  await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
+  assert.equal(runner.calls.length, 1);
+  assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-quiet-skipped"]), []);
+  state.close();
+});
+
+test("createRetroStub (#961): everyNRounds off-cadence skip still runs BEFORE the quiet check — an off-cadence round never even evaluates isQuietRound (marker set, no skip event)", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z"); // round_id 1
+  const runner = new ScriptedRunner(doneResult("s1"));
+  const cfg = mkCfg({ roles: { retro: { everyNRounds: 3 } } });
+  const deps: RetroDeps = { now: realClock, state, cfg, runner, forge: new MinimalForge() };
+  const { marker } = await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
+  assert.equal(marker, retroMarker(round.round_id));
+  assert.equal(runner.calls.length, 0);
+  assert.deepEqual(
+    state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-quiet-skipped"]),
+    [],
+    "the cadence skip returns before the quiet check runs at all — never a second skip event on top",
+  );
   state.close();
 });
 
@@ -354,6 +486,7 @@ test("createRetroStub: uses deps.forge to build the digest (PR diff + review dat
 test("createRetroStub: an empty round (no touched PRs, no escalated issues) still renders a digest — never a literal placeholder or a crash", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state); // #961: keeps the round non-quiet without touching the retro/pr-touched counts below
   const runner = new ScriptedRunner(doneResult("s1"));
   const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
@@ -428,6 +561,7 @@ test("parseRetroScratch: branch-name sanity fails closed — bad charset, leadin
 test("createRetroStub: happy path — session writes a proposal scratch; engine verifies the pushed branch and opens the PR itself with the exact title/body", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
   const runner = new ScriptedRunner(doneResult("s1", PROPOSAL_SCRATCH));
   const forge = new MinimalForge();
   forge.branchExistsResult = true;
@@ -448,6 +582,7 @@ test("createRetroStub: happy path — session writes a proposal scratch; engine 
 test("createRetroStub: quiet round ('none' scratch) — no branch check, no openPR, no degrade; the phase just closes", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
   const runner = new ScriptedRunner(doneResult("s1", "none"));
   const forge = new MinimalForge();
   const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
@@ -463,6 +598,7 @@ test("createRetroStub: quiet round ('none' scratch) — no branch check, no open
 test("createRetroStub: push verification fails (branch absent on the forge) — openPR is NEVER called, retro-pr-degraded appended, round not wedged", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
   const runner = new ScriptedRunner(doneResult("s1", PROPOSAL_SCRATCH));
   const forge = new MinimalForge(); // branchExistsResult defaults to false
   const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
@@ -484,6 +620,7 @@ test("createRetroStub: push verification fails (branch absent on the forge) — 
 test("createRetroStub: openPR throws AFTER a verified push — retro-pr-degraded names the pushed branch as preserved evidence, never a crash", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
   const runner = new ScriptedRunner(doneResult("s1", PROPOSAL_SCRATCH));
   const forge = new MinimalForge();
   forge.branchExistsResult = true;
@@ -507,6 +644,7 @@ test("createRetroStub: openPR throws AFTER a verified push — retro-pr-degraded
 test("createRetroStub: missing scratch file is an INVALID attempt — retried once, then retro-degraded; openPR never called", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
   // Literals, not doneResult(name, undefined): an explicit `undefined` argument would trigger
   // the helper's default ("none") — these results must genuinely carry NO scratchText field.
   const noScratch = (name: string): RoleSessionResult => ({
@@ -535,6 +673,7 @@ test("createRetroStub: missing scratch file is an INVALID attempt — retried on
 test("createRetroStub: malformed scratch on the first attempt, valid on the retry — two sessions, no degrade, PR opened", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
   const runner = new ScriptedRunner(doneResult("s1", "garbage that is not a proposal"), doneResult("s2", PROPOSAL_SCRATCH));
   const forge = new MinimalForge();
   forge.branchExistsResult = true;
@@ -559,6 +698,7 @@ test("prompts/retro.md instructs the scratch-file contract — fixed path, alway
 test("createRetroStub: a failed session is retried once — non-done then done means exactly two sessions, no degradation event", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
   const runner = new ScriptedRunner(timeoutResult("s1"), doneResult("s2"));
   const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
@@ -572,6 +712,7 @@ test("createRetroStub: a failed session is retried once — non-done then done m
 test("createRetroStub: two failed sessions degrade VISIBLY but never wedge the round — marker still set, retro-degraded event appended", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
   const runner = new ScriptedRunner(timeoutResult("s1"), timeoutResult("s2"));
   const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
@@ -610,6 +751,7 @@ test("createRetroStub: everyNRounds > 1 runs on a round whose id IS a multiple o
   const state = new State(":memory:");
   for (let i = 0; i < 2; i++) state.startRound(`2026-07-10T0${i}:00:00.000Z`); // round_id 1, 2
   const round3 = state.startRound("2026-07-10T03:00:00.000Z"); // round_id 3
+  seedDispatch(state);
   const runner = new ScriptedRunner(doneResult("role-retro-3"));
   const cfg = mkCfg({ roles: { retro: { everyNRounds: 3 } } });
   const deps: RetroDeps = { now: realClock, state, cfg, runner, forge: new MinimalForge() };
@@ -624,6 +766,7 @@ test("createRetroStub: everyNRounds > 1 runs on a round whose id IS a multiple o
 test("createRetroStub: everyNRounds default (1) runs every round, unchanged from #91 behavior", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
   const runner = new ScriptedRunner(doneResult("s1"));
   const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   const stub = createRetroStub(deps);
@@ -651,6 +794,7 @@ test("createRetroStub: roles.retro.promptFile override is honored (the #74 promp
     writeFileSync(promptPath, "custom retro prompt: round {{round.id}} handoffs={{round.handoffs}}");
     const state = new State(":memory:");
     const round = state.startRound("2026-07-10T00:00:00.000Z");
+    seedDispatch(state);
     const runner = new ScriptedRunner(doneResult("s1"));
     const cfg = mkCfg({ roles: { retro: { promptFile: promptPath } } });
     const deps: RetroDeps = { now: realClock, state, cfg, runner, forge: new MinimalForge() };
@@ -671,6 +815,7 @@ test("#701: createRetroStub renders {{lang.issuesAndPrs}} from cfg.language.issu
 
     const defaultState = new State(":memory:");
     const defaultRound = defaultState.startRound("2026-07-10T00:00:00.000Z");
+    seedDispatch(defaultState);
     const defaultRunner = new ScriptedRunner(doneResult("s1"));
     const defaultCfg = mkCfg({ roles: { retro: { promptFile: promptPath } } });
     await createRetroStub({ now: realClock, state: defaultState, cfg: defaultCfg, runner: defaultRunner, forge: new MinimalForge() }).run({
@@ -683,6 +828,7 @@ test("#701: createRetroStub renders {{lang.issuesAndPrs}} from cfg.language.issu
 
     const jaState = new State(":memory:");
     const jaRound = jaState.startRound("2026-07-10T00:00:00.000Z");
+    seedDispatch(jaState);
     const jaRunner = new ScriptedRunner(doneResult("s1"));
     const jaCfg = mkCfg({ roles: { retro: { promptFile: promptPath } }, language: { issuesAndPrs: "ja" } });
     await createRetroStub({ now: realClock, state: jaState, cfg: jaCfg, runner: jaRunner, forge: new MinimalForge() }).run({
@@ -732,6 +878,7 @@ test("#453: prompts/retro.md points at the finding-class tendency table, states 
 test("#453: the tendency table lands inside the substituted {{round.digest}} block, not as a second placeholder", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
   const runner = new ScriptedRunner(doneResult("role-retro-1"));
   const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
@@ -882,9 +1029,13 @@ class MinimalSupervisor implements Supervisor {
   clearStaleFixEntrySentinel(): void {}
 }
 
-const baseIntegrationDeps = (state: State, peripherals: Partial<Record<PeripheralPhase, PeripheralStub>>): RoundDeps => ({
+const baseIntegrationDeps = (
+  state: State,
+  peripherals: Partial<Record<PeripheralPhase, PeripheralStub>>,
+  forge: IForge = new MinimalForge(),
+): RoundDeps => ({
   now: realClock,
-  forge: new MinimalForge(),
+  forge,
   state,
   supervisor: new MinimalSupervisor(),
   // #125: MinimalForge is an intentionally empty board — these tests are about the retro
@@ -896,11 +1047,11 @@ const baseIntegrationDeps = (state: State, peripherals: Partial<Record<Periphera
   peripherals,
 });
 
-test("runRounds integration: the real retro stub runs during a normal round close and persists a marker", async () => {
+test("runRounds integration (#961): MinimalForge's board is empty — a genuinely idle round is QUIET, the session never dispatches, phase still closes", async () => {
   const state = new State(":memory:");
   const runner = new ScriptedRunner(doneResult("role-retro-int"));
   const retroStub = createRetroStub({ now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() });
-  const deps = baseIntegrationDeps(state, { retro: retroStub });
+  const deps = baseIntegrationDeps(state, { retro: retroStub }); // MinimalForge.getReadyIssues() -> [] — zero lanes ever dispatch
   // Graceful stop mid-round (round.test.ts's pattern): the in-flight round still finishes
   // every phase — retro included — and only the NEXT round is withheld.
   let stop = () => {};
@@ -914,9 +1065,44 @@ test("runRounds integration: the real retro stub runs during a normal round clos
   const result = await runRoundsGuarded(deps);
   assert.equal(result.stoppedBy, "signal");
   assert.equal(result.rounds, 1);
-  assert.equal(runner.calls.length, 1); // retro ran this round — on a GRACEFUL stop
+  // #961: pre-this-issue this round dispatched a full retro session every time (runner.calls.length
+  // === 1) purely because it was on-cadence — nothing looked at whether the round had anything to
+  // reflect on. An empty board leaves zero dispatched/retro/pr-touched events, so it is now QUIET.
+  assert.equal(runner.calls.length, 0, "an idle round is quiet — the retro session never dispatches");
   const round = state.getRound(1)!;
-  assert.equal(round.phase, "closed");
+  assert.equal(round.phase, "closed", "the phase still closes on a quiet round");
+  const skips = state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-quiet-skipped"]);
+  assert.equal(skips.length, 1);
+  assert.deepEqual(skips[0]!.payload, { round_id: round.round_id });
+  state.close();
+});
+
+test("runRounds integration (#961): a round that dispatched a lane is NOT quiet — retro still runs, no skip event", async () => {
+  const state = new State(":memory:");
+  const runner = new ScriptedRunner(doneResult("role-retro-int"));
+  const retroStub = createRetroStub({ now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() });
+  const forge = new MinimalForge();
+  forge.getReadyIssues = async (): Promise<Issue[]> => [{ number: 1, title: "t", labels: ["prio:3-feature"] }];
+  forge.getAuthenticatedActor = async () => "sapwood-bot"; // dispatch's own audit-comment step needs this
+  const deps = baseIntegrationDeps(state, { retro: retroStub }, forge);
+  // #380: a stop signal freezes NEW dispatch from the moment it's requested (round.ts's own doc:
+  // "dispatch frozen" once `stopRequested`) — requesting it at "aligning" (as the sibling idle-
+  // round test above does) would suppress this test's own dispatch before `executing` ever runs.
+  // Requesting it once the round reaches `retro` instead lets `executing` dispatch normally first
+  // and still stops the loop before round 2 opens.
+  let stop = () => {};
+  deps.registerSignals = (requestStop) => {
+    stop = requestStop;
+    return () => {};
+  };
+  deps.onRoundPhase = (_roundId, phase) => {
+    if (phase === "retro") stop();
+  };
+  const result = await runRoundsGuarded(deps);
+  assert.equal(result.stoppedBy, "signal");
+  assert.equal(result.rounds, 1);
+  assert.equal(runner.calls.length, 1, "a dispatched lane is material — retro's session still runs");
+  assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-quiet-skipped"]), []);
   state.close();
 });
 

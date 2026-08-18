@@ -248,4 +248,11 @@ export const GOVERNANCE_EVENT_KINDS = defineKinds({
     meaning: "retro's PR-opening step degraded/failed this round.",
     actionability: "investigate",
   },
+  "retro-quiet-skipped": {
+    tags: [],
+    meaning:
+      "the retro session was skipped because the round was quiet (zero retro/pr-touched-tagged events, zero lanes dispatched) — the phase still closed (#961).",
+    actionability: "routine",
+    see: "#961",
+  },
 });

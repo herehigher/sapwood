@@ -858,6 +858,7 @@ const TELEMETRY_KIND_NAMES: readonly EventKind[] = [
   "po-degraded",
   "harvest-degraded",
   "retro-degraded",
+  "retro-quiet-skipped",
 ];
 
 export const TELEMETRY_KINDS: ReadonlySet<EventKind> = new Set(TELEMETRY_KIND_NAMES);
