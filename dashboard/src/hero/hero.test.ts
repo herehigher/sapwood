@@ -3966,11 +3966,24 @@ test("#922 AC2 COLLISION at max radius: adjacent checkpoint and needs-human drop
       box: { left: d.x + pathBox.left, right: d.x + pathBox.right, top: d.y + pathBox.top, bottom: d.y + pathBox.bottom },
     });
   }
+  // 6 checkpoint droplets > CHECKPOINT_OVERFLOW_REAL_CAP, so the overflow badge must render at
+  // this fixture too (same trigger as the base "4 lanes, 6 checkpoint droplets" test above) —
+  // required, not optional: a parse miss here must fail the test, not silently drop the check.
   const overflowBadge = renderedCheckpointOverflowBadge(html);
-  if (overflowBadge) boxes.push(overflowBadge);
-  for (const lane of state.lanes) {
-    const laneLabel = renderedLaneLabel(html, lane.channel);
-    if (laneLabel) boxes.push(laneLabel);
+  assert.ok(overflowBadge, "the checkpoint overflow badge must render at this fixture (6 checkpoints > CHECKPOINT_OVERFLOW_REAL_CAP)");
+  boxes.push(overflowBadge as { label: string; box: Box });
+  // This fixture's own `state.lanes` carries 10 distinct workers (4 checkpoint + 6 needs-human)
+  // — `lanesMax: 4` at render time caps that down to the 4 most-recently-touched (`markup`'s own
+  // `withVisibleLanes`), so only SOME of `state.lanes` actually draws. Iterate the channels the
+  // markup itself actually rendered, never the raw (uncapped) fold state — every channel found
+  // this way is guaranteed to have its own label, so `renderedLaneLabel` returning null here is a
+  // real parse bug, not a fixture mismatch.
+  const renderedLaneChannels = [...html.matchAll(/<g class="hero-lane" data-lane-index="(\d+)"/g)].map((m) => Number(m[1]));
+  assert.ok(renderedLaneChannels.length > 0, "at least one lane must actually render at this fixture");
+  for (const channel of renderedLaneChannels) {
+    const laneLabel = renderedLaneLabel(html, channel);
+    assert.ok(laneLabel, `lane ${channel}'s own label must render`);
+    boxes.push(laneLabel as { label: string; box: Box });
   }
   assertNoOverlap(boxes);
   for (const { label, box } of boxes) {
