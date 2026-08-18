@@ -53,7 +53,10 @@ import { parseStructuredBlock } from "../state/structured-output.js";
 
 // ── Structured-output schema + validator ────────────────────────────────────────────────────
 
-const FixThreadResponseEntrySchema = z
+/** #963: exported so prompts/tests can derive expected field names from the REAL schema
+ *  instead of hand-copying them — a renamed field here must be caught by the shipped
+ *  fix.md's own coverage test, not silently rot out of sync. */
+export const FixThreadResponseEntrySchema = z
   .object({
     threadId: z.string().min(1),
     /** D7 (Codex sol-high PR #265 review round 1, P3): TRIMMED length, not raw `.min(1)` — a
@@ -69,7 +72,7 @@ const FixThreadResponseEntrySchema = z
  *  has no `threadId` to key on — its identity is `(runId, findingIndex)`, both rendered in that
  *  same comment. Same field discipline as its thread twin: trimmed-non-empty reply, closed
  *  resolution enum, strict object. */
-const FixFindingResponseEntrySchema = z
+export const FixFindingResponseEntrySchema = z
   .object({
     runId: z.string().min(1),
     findingIndex: z.number().int().nonnegative(),
@@ -78,7 +81,7 @@ const FixFindingResponseEntrySchema = z
   })
   .strict();
 
-const FixResponseMetadataSchema = z
+export const FixResponseMetadataSchema = z
   .object({
     threadResponses: z.array(FixThreadResponseEntrySchema),
     /** #461: OPTIONAL — a leg that emits no `findingResponses` at all validates, settles, and

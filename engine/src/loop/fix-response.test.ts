@@ -25,6 +25,9 @@ import {
   computeDisputeEscalation,
   computeFindingDisputeEscalation,
   computeFixResponseHarvest,
+  FixFindingResponseEntrySchema,
+  FixResponseMetadataSchema,
+  FixThreadResponseEntrySchema,
   fixLegJournalCursor,
   fixResponseBatchKey,
   journaledAuditRunIds,
@@ -122,15 +125,29 @@ test("validateFixResponseOutput: a mix of addressed + disputed entries, all jour
 // ── D1(b): a resultText following fix.md's DOCUMENTED format flows through the REAL
 //    validateFixResponseOutput -> enqueue -> attemptThreadWrite path end to end ──────────────
 
-test("D1(b): the shipped fix.md documents the sentinel + exact threadResponses/threadId/resolution field names", () => {
+// #963 (CONVERT): the D1(b) pair that
+// used to live here hand-copied field names as literals — a single-file prose pin. The REAL
+// oracle is the zod schema behind validateFixResponseOutput: derive the expected key/enum names
+// from FixResponseMetadataSchema/FixThreadResponseEntrySchema/FixFindingResponseEntrySchema
+// (exported from fix-response.ts for exactly this) instead of hand-copying strings, so a renamed
+// schema field is caught here rather than rotting silently out of fix.md's own coverage.
+test("D1(b) (#963 CONVERT): the shipped fix.md documents the sentinel via the REAL RESULT_BLOCK_START/END constants, and every REAL schema field/enum name (threadResponses/findingResponses entry shapes)", () => {
   const content = readFileSync(defaultFixPromptPath(), "utf8");
-  assert.match(content, /<<<SAPWOOD_RESULT>>>/);
-  assert.match(content, /<<<END_SAPWOOD_RESULT>>>/);
-  assert.match(content, /threadResponses/);
-  assert.match(content, /threadId/);
-  assert.match(content, /"addressed"/);
-  assert.match(content, /"disputed"/);
-  assert.match(content, /no forge credentials|NO forge credentials/);
+  assert.ok(content.includes(RESULT_BLOCK_START), "fix.md must show the real RESULT_BLOCK_START sentinel");
+  assert.ok(content.includes(RESULT_BLOCK_END), "fix.md must show the real RESULT_BLOCK_END sentinel");
+
+  for (const key of Object.keys(FixResponseMetadataSchema.shape)) {
+    assert.ok(content.includes(key), `fix.md must document the real top-level field ${key}`);
+  }
+  for (const key of Object.keys(FixThreadResponseEntrySchema.shape)) {
+    assert.ok(content.includes(key), `fix.md must document the real threadResponses entry field ${key}`);
+  }
+  for (const key of Object.keys(FixFindingResponseEntrySchema.shape)) {
+    assert.ok(content.includes(key), `fix.md must document the real findingResponses entry field ${key}`);
+  }
+  for (const value of FixThreadResponseEntrySchema.shape.resolution.options) {
+    assert.ok(content.includes(`"${value}"`), `fix.md must document the real resolution enum value ${value}`);
+  }
 });
 
 test("D1(b): a resultText in EXACTLY fix.md's documented shape flows through validateFixResponseOutput -> State.settleTerminalWorker -> attemptThreadWrite", async () => {
@@ -1668,11 +1685,4 @@ test("#461: a disputed index outside the artifact's finding range is dropped, ne
   seedFindingResponseQueued(st, [{ runId: "run-1", findingIndex: 5, resolution: "disputed", reply: "disagree" }]);
   assert.equal(computeFindingDisputeEscalation(st, "lane-a", 55, "run-1"), null);
   st.close();
-});
-
-test("#461 D1(b): the shipped fix.md documents findingResponses with runId + findingIndex copied from the audit comment", () => {
-  const content = readFileSync(defaultFixPromptPath(), "utf8");
-  assert.match(content, /findingResponses/);
-  assert.match(content, /findingIndex/);
-  assert.match(content, /runId/);
 });

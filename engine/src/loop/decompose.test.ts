@@ -3,10 +3,17 @@ import test from "node:test";
 import { ConfigSchema } from "../config/config.js";
 import type { IForge, Issue, SubIssue } from "../forge/forge.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
+import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import { buildBacklogDigest } from "./align.js";
-import { decomposeProposalId, isDecomposeCandidate, runDecompositionPass, validateDecomposeOutput } from "./decompose.js";
+import {
+  decomposeProposalId,
+  defaultPoDecomposePromptPath,
+  isDecomposeCandidate,
+  runDecompositionPass,
+  validateDecomposeOutput,
+} from "./decompose.js";
 import { proposalMarker } from "./issue-creation.js";
 
 /** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
@@ -227,6 +234,20 @@ function persistDecomposedSet(
   });
   return proposals;
 }
+
+test("#963: po-decompose.md renders with a distinctive {{lang.issuesAndPrs}} value reaching the output — real shipped file, real renderRolePrompt (drops the reference -> reddens)", () => {
+  const template = loadRolePromptTemplate(undefined, defaultPoDecomposePromptPath());
+  const parent: Issue = { number: 1, title: "t", labels: [], body: "b" };
+  const langCfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 4 },
+    language: { issuesAndPrs: "zz-ZZ" },
+  });
+  const rendered = renderRolePrompt(template, parent, langCfg, {
+    "decompose.maxChildren": String(langCfg.roles.po.maxChildren),
+    "decompose.acceptanceCriteriaHint": String(langCfg.roles.po.acceptanceCriteriaHint),
+  });
+  assert.ok(rendered.includes("zz-ZZ"), "po-decompose.md: the distinctive language value must reach the rendered shipped prompt");
+});
 
 test("validateDecomposeOutput: both union branches validate; mixed output preserves ready and honest remainder bodies", () => {
   const mixed = validateDecomposeOutput(result(mixedMetadata, [readyBody, remainderBody]), 8);

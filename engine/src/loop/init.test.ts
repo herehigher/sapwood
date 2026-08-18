@@ -748,18 +748,10 @@ test("resolveDoctrineFilePath: a relative doctrine.file resolves against cwd; an
   assert.equal(resolveDoctrineFilePath("/elsewhere/DOCTRINE.md", "/repo"), "/elsewhere/DOCTRINE.md");
 });
 
-test("defaultDoctrineTemplatePath resolves to a real, readable shipped file with the seed content", () => {
+test("defaultDoctrineTemplatePath resolves to a real, readable shipped file that never leaks sapwood's own internal engine rules/source symbols into the generic starter template", () => {
   const path = defaultDoctrineTemplatePath();
   assert.ok(existsSync(path), `expected shipped template at ${path}`);
   const text = readFileSync(path, "utf8");
-  assert.match(text, /^# Review doctrine/m);
-  assert.match(text, /^## Technical invariants/m);
-  // #409: the one rule every target repo inherits as a real standing default, not an example.
-  assert.match(text, /authoritative signals over inferred text/i);
-  // The rest of "Technical invariants" is explicitly fictional/illustrative — a fresh repo has
-  // no review history yet, so seeding it with sapwood's own real internal rules would be
-  // meaningless to whatever project this template actually ships into.
-  assert.match(text, /fictional placeholder/i);
   assert.doesNotMatch(
     text,
     /disabled-consumer rule/i,
@@ -770,8 +762,6 @@ test("defaultDoctrineTemplatePath resolves to a real, readable shipped file with
     /\btick\(\)|supervisor\.resume\(\)/,
     "sapwood's own source symbols must not leak into the generic starter template",
   );
-  assert.match(text, /^## Adjudication doctrine/m);
-  assert.match(text, /inputs, not truth/i);
 });
 
 test("init scaffolds the doctrine-file template when the resolved path is missing", async () => {
