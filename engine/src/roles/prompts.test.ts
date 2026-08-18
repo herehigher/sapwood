@@ -621,9 +621,14 @@ function extractFloor(body: string, floorName: string): string {
 
 function assertFloorMirrored(floorName: string, carriers: Readonly<Record<string, string>> = FLOOR_CARRIERS): void {
   const blocks = Object.entries(carriers).map(([name, path]) => [name, extractFloor(readPrompt(path), floorName)] as const);
-  const [[firstName, firstBlock], ...rest] = blocks;
+  // noUncheckedIndexedAccess: `blocks[0]` is typed possibly-undefined even though `carriers` is
+  // always a non-empty literal (every call site passes >=2 entries) — assert (not `!`) so a
+  // future empty-carriers call fails loudly here instead of throwing on the destructure below.
+  const first = blocks[0];
+  assert.ok(first !== undefined, `sanity: the carriers map for sapwood:floor:${floorName} must be non-empty`);
+  const [firstName, firstBlock] = first;
   assert.ok(firstBlock.length > 0, `sanity: ${firstName}'s sapwood:floor:${floorName} block is non-empty`);
-  for (const [name, block] of rest) {
+  for (const [name, block] of blocks.slice(1)) {
     assert.equal(
       block,
       firstBlock,
