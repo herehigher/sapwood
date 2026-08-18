@@ -99,10 +99,9 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     source; (2) the test exercises only the easy/nominal instance while the AC's own wording
     names a combinatorial or boundary case it never constructs; (3) the test asserts identity
     with the very constant that produced the render, so it proves nothing about the render
-    (#936, reproduced verbatim at #922 — same constant-vs-own-render shape); (4) the test's own
-    helper embeds the SAME simplifying assumption as the code under test, so a wrong assumption
-    in production can't fail its own proxy (#922: `circleBox()` stood in for the rendered path's
-    real, non-circular geometry). FINE: a literal that IS the specification — a golden value
+    (#936, #922); (4) proxy-shares-assumption: the test's own helper embeds the same
+    simplifying assumption as the code under test, so a wrong assumption in production can't
+    fail its own proxy (#922). FINE: a literal that IS the specification — a golden value
     nothing else in the codebase claims to own.
   - **DECISION (fake-verdict rule, engine side).** Presetting a fake collaborator to already
     return the acceptance criterion's target decision, then asserting against the fake's own
