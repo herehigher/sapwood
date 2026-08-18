@@ -1663,27 +1663,19 @@ to when v0.2 implementation issues are cut, not locked here.
   the duplicate. Stated for users in
   [`getting-started.md`](getting-started.md#what-the-ready-gate-does-not-check-duplicates).
   Revisit only if a real run is actually bitten.
-- **Comment-carried design guidance has no worker carrier (watch, #925/#947, 2026-08-18):**
-  the architect's round design note (`architect.ts`'s `deps.forge.addIssueComment` —
-  "comment/label edit only," never a body write) and any PO/human review thread on an
-  engine-agent lane are COMMENT-carried only; `worker.md`'s dispatch prompt substitutes
-  `{{issue.body}}` (plus `{{doctrine}}`/labels/title) and has no comment channel at all, so
-  neither ever reaches the worker who could act on it. Round #411 was bitten twice: architect
-  issue #925's own comment named the exact STYLE pitfall (`happy-dom` can't resolve
-  `light-dark()`; compute expected colours from `contrast.ts`, "a source-string comparison is
-  not the proof") that the worker's test committed anyway, drawing a real gate② rejection
-  (`ac1-style-oracle`, PR #951); separately, PR #947's PO merge record needed an ad-hoc "PM
-  rescue leg" to route four design findings past the same gap ("the engine has no native
-  carrier for PO review threads on an engine-agent lane"). **Not fixed here** — worker legs
-  are deliberately denied `mcp__`/GitHub-read tool access (DR #616, Decision #11's
-  producer-inherits-but-sealed floor), so the worker cannot fetch its own issue's comments
-  itself; the fix has to be engine-side (fold the note into the body `worker.md` already
-  reads, or a new engine-computed prompt block the way `{{doctrine}}` already is), and that
-  write path is shared with AC-snapshot drift detection (`checkAcDriftBeforeDrive`) — it needs
-  its own issue with ACs and a verification plan, not a blind retro edit. Same accept-and-
-  document stance as the "Duplicate `Ready` issues" item above (Decision #9): this item has
-  now crossed the "revisit if a real run is actually bitten" bar its sibling sets — needs a
-  human to file the follow-up issue.
+- **Comment-carried design guidance has no worker carrier (watch, #925):** guidance left only
+  in an issue/PR comment — an architect design note, a PO/human review thread on an
+  engine-agent lane, any of it — never reaches a fix leg. `worker.md`'s dispatch prompt
+  substitutes the issue body plus doctrine/labels/title and has no comment channel, and a
+  resumed session keeps its original body regardless of what gets commented afterward. The
+  only carriers that do reach a worker are a body rebaseline (which trips drift detection and
+  forces re-approval/re-entry) or a RESOLVED review thread; an open thread cannot land
+  guidance. **Not fixed here** — worker legs are deliberately denied GitHub-read tool access
+  (Decision #11), so landing this needs an engine-side change (fold guidance into the body, or
+  a new engine-computed prompt block), not a blind retro edit. Same accept-and-document stance
+  as the "Duplicate `Ready` issues" item above (Decision #9) — but this item has already
+  crossed the sibling's "revisit if bitten" bar, so the follow-up issue should be filed now,
+  not deferred further.
 
 ## Verification (how we'll prove v1)
 
