@@ -16,13 +16,21 @@ import test from "node:test";
  * `notEqual(x, "none")` have live, legitimate uses elsewhere in this suite (a real "did a font
  * actually resolve" or "is this element actually hidden" check, not a rendered-dimension proof).
  * Widening the ban to those literals would flag tests that already reasoned about this correctly.
+ *
+ * The matcher is line-based text matching, not a parser: a string literal or trailing inline
+ * comment that happens to quote the exact `assert.notEqual(..., "0px")` shape on a code line will
+ * still trip the scan (it doesn't distinguish code from same-line prose) — reword the line rather
+ * than working around the scan.
  */
 
-// Non-greedy `[^;]*?` lets the match skip over commas and nested parens in the first argument
-// (e.g. `notEqual(getComputedStyle(el, "::before").width, "0px")`) by searching forward for the
-// first `, "0px"` that is itself followed by `,` (a trailing message arg) or `)` (call end),
-// rather than assuming the first comma in the call is the argument boundary.
-const ZERO_PX_NOT_EQUAL = /\bnotEqual\([^;]*?,\s*["']0px["']\s*[,)]/;
+// Anchored on `assert.notEqual(`/`assert.strict.notEqual(` (this repo's only call shapes — see
+// self-test) so a same-named method on some other object (`api.notEqual(x, "0px")`) doesn't false
+// -positive. Non-greedy `[^;]*?` then lets the match skip over commas and nested parens in the
+// first argument (e.g. `assert.notEqual(getComputedStyle(el, "::before").width, "0px")`) by
+// searching forward for the first `, "0px"` that is itself followed by `,` (a trailing message
+// arg) or `)` (call end), rather than assuming the first comma in the call is the argument
+// boundary.
+const ZERO_PX_NOT_EQUAL = /\bassert(?:\.strict)?\.notEqual\([^;]*?,\s*["']0px["']\s*[,)]/;
 
 /** True if `line` contains an `assert.notEqual(..., "0px" [, message])` tautology call. */
 export function hasZeroPxNotEqual(line: string): boolean {
@@ -37,11 +45,14 @@ test("hasZeroPxNotEqual matcher self-test", () => {
     [`assert.notEqual(computed.borderWidth, "0px")`, true, "plain call"],
     [`assert.notEqual(computed.borderWidth, "0px", "border should resolve")`, true, "with message arg"],
     [`assert.notEqual(getComputedStyle(el, "::before").width, "0px")`, true, "nested-paren first arg"],
-    [`  notEqual(x, '0px')`, true, "single-quoted literal"],
+    [`  assert.notEqual(x, '0px')`, true, "single-quoted literal"],
+    [`assert.strict.notEqual(x, "0px")`, true, "assert.strict.notEqual variant"],
     // negative: legitimate uses and non-code lines that must not trip the scan
     [`assert.notEqual(x, "")`, false, "empty-string literal is a legitimate check"],
     [`assert.notEqual(x, "none")`, false, "none literal is a legitimate check"],
     [`assert.strictEqual(x, "0px")`, false, "strictEqual is not notEqual"],
+    [`api.notEqual(x, "0px")`, false, "non-assert object sharing the method name"],
+    [`notEqual(x, "0px")`, false, "bare call with no assert-namespace prefix"],
     [`// assert.notEqual(x, "0px") — do not do this`, false, "line comment"],
     [` * assert.notEqual(x, "0px") in a docblock`, false, "docblock continuation line"],
   ];
