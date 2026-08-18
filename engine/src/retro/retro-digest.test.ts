@@ -17,8 +17,11 @@ import {
   capDigest,
   gatherDigestIssues,
   gatherFindingTendency,
+  gatherOutstandingRetroPRs,
+  gatherRetroPRLifecycle,
   gatherTouchedPRs,
   PR_TOUCHED_EVENT_KINDS,
+  RETRO_PR_LIFECYCLE_READ_BOUND,
 } from "./retro-digest.js";
 
 // ── A programmable fake IForge — call-recording, per-item response tables ──────────────────
@@ -70,8 +73,23 @@ class FakeForge extends UnstubbedForge implements IForge {
   override async openPR(): Promise<number> {
     return 1;
   }
+  // #964: programmable per-PR status (default OPEN/MERGEABLE/green, same as before this field
+  // existed) — the outstanding-PRs section's classification tests set entries here.
+  statuses = new Map<number, PRStatus>();
+  statusCalls: number[] = [];
+  statusErrors = new Set<number>();
   override async getPRStatus(n: number): Promise<PRStatus> {
-    return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+    this.statusCalls.push(n);
+    if (this.statusErrors.has(n)) throw new Error(`simulated status fetch failure for PR #${n}`);
+    return this.statuses.get(n) ?? { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+  }
+  failedCheckSummaries = new Map<number, string>();
+  failedCheckSummaryErrors = new Set<number>();
+  failedCheckSummaryCalls: number[] = [];
+  override async getFailedCheckSummary(pr: number): Promise<string> {
+    this.failedCheckSummaryCalls.push(pr);
+    if (this.failedCheckSummaryErrors.has(pr)) throw new Error(`simulated checks-API failure for PR #${pr}`);
+    return this.failedCheckSummaries.get(pr) ?? "(no failing check runs found via the checks API)";
   }
   override async mergePR(): Promise<void> {}
   override async addPRComment(): Promise<void> {}
@@ -243,6 +261,271 @@ test("capDigest: a pathologically tiny cap still never exceeds maxChars — even
 test("capDigest: cap of 0 never throws and returns an empty result within bounds", () => {
   const out = capDigest("a".repeat(50), 0);
   assert.equal(out.length, 0);
+});
+
+// ── #964: gatherRetroPRLifecycle / gatherOutstandingRetroPRs — "your outstanding PRs" ───────
+
+test("gatherRetroPRLifecycle: folds retro-pr-opened/-updated to ONE row per PR, latest wins, NOT round-scoped", () => {
+  const state = new State(":memory:");
+  state.startRound(new Date().toISOString());
+  state.appendEvent("retro-pr-opened", { round_id: 1, pr: 5, branch: "retro/x", head: "aaa" });
+  state.appendEvent("retro-pr-opened", { round_id: 1, pr: 9, branch: "retro/y" }); // legacy: no head
+  state.appendEvent("retro-pr-updated", { round_id: 1, pr: 5, branch: "retro/x", head: "bbb" });
+  assert.deepEqual(gatherRetroPRLifecycle(state), [
+    { pr: 5, branch: "retro/x", head: "bbb" },
+    { pr: 9, branch: "retro/y" },
+  ]);
+  state.close();
+});
+
+test("gatherRetroPRLifecycle: a malformed payload (missing pr/branch) contributes nothing rather than throwing", () => {
+  const state = new State(":memory:");
+  state.appendEvent("retro-pr-opened", { round_id: 1, branch: "retro/x" }); // no pr
+  state.appendEvent("retro-pr-opened", { round_id: 1, pr: 5 }); // no branch
+  assert.deepEqual(gatherRetroPRLifecycle(state), []);
+  state.close();
+});
+
+test("gatherRetroPRLifecycle: events from an EARLIER round still count — a retro PR outlives the round that opened it", () => {
+  const state = new State(":memory:");
+  state.appendEvent("retro-pr-opened", { round_id: 1, pr: 5, branch: "retro/x", head: "aaa" });
+  state.startRound(new Date().toISOString()); // round 2 starts AFTER the event above
+  assert.deepEqual(gatherRetroPRLifecycle(state), [{ pr: 5, branch: "retro/x", head: "aaa" }]);
+  state.close();
+});
+
+// #964: bound the read set by a constant rather than a durable terminal event.
+test("gatherRetroPRLifecycle: 8 distinct own PRs -> only the newest RETRO_PR_LIFECYCLE_READ_BOUND (5) survive, newest first", () => {
+  const state = new State(":memory:");
+  for (let pr = 1; pr <= 8; pr++) {
+    state.appendEvent("retro-pr-opened", { round_id: 1, pr, branch: `retro/pr-${pr}` });
+  }
+  assert.equal(RETRO_PR_LIFECYCLE_READ_BOUND, 5, "this test's own math assumes the bound is 5");
+  assert.deepEqual(
+    gatherRetroPRLifecycle(state).map((r) => r.pr),
+    [8, 7, 6, 5, 4],
+  );
+  state.close();
+});
+
+test("gatherRetroPRLifecycle: an UPDATE re-touch moves a PR back into the newest-5 window even if it was originally opened long ago", () => {
+  const state = new State(":memory:");
+  for (let pr = 1; pr <= 8; pr++) {
+    state.appendEvent("retro-pr-opened", { round_id: 1, pr, branch: `retro/pr-${pr}` });
+  }
+  // PR 1 (the OLDEST) gets a fresh push — it must re-enter the window, displacing whichever PR
+  // was previously 5th (PR 4).
+  state.appendEvent("retro-pr-updated", { round_id: 2, pr: 1, branch: "retro/pr-1", head: "fresh" });
+  assert.deepEqual(
+    gatherRetroPRLifecycle(state).map((r) => r.pr),
+    [1, 8, 7, 6, 5],
+  );
+  state.close();
+});
+
+test("gatherOutstandingRetroPRs (#964 fix leg): 8 historical retro-pr-opened events -> only the newest 5 PRs are ever read from the forge (scripted call counting)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  for (let pr = 1; pr <= 8; pr++) {
+    state.appendEvent("retro-pr-opened", { round_id: 1, pr, branch: `retro/pr-${pr}` });
+  }
+  const rows = await gatherOutstandingRetroPRs(forge, state);
+  assert.equal(rows.length, 5);
+  assert.deepEqual(forge.statusCalls, [8, 7, 6, 5, 4], "only the newest 5 PRs are ever read — PRs 1-3 are never touched at all");
+  state.close();
+});
+
+test("gatherOutstandingRetroPRs (#964 fix leg): a legacy history of N (>5) already-merged PRs settles to a FLAT 5 reads, not N — the bound holds regardless of how large N grows", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  // 20 historical PRs, all long since merged — a real legacy history the bound must not choke on.
+  for (let pr = 1; pr <= 20; pr++) {
+    state.appendEvent("retro-pr-opened", { round_id: 1, pr, branch: `retro/pr-${pr}` });
+    forge.statuses.set(pr, { number: pr, headOid: "x", state: "MERGED", mergeable: "MERGEABLE", ciGreen: true });
+  }
+  const rows = await gatherOutstandingRetroPRs(forge, state);
+  assert.deepEqual(rows, [], "every read PR was merged — nothing outstanding");
+  assert.deepEqual(forge.statusCalls, [20, 19, 18, 17, 16], "bounded to the newest 5 — the other 15 are simply never read");
+  state.close();
+});
+
+test("gatherOutstandingRetroPRs (#964 AC1, red-first): a red PR lists state, failing check name, and a bounded excerpt; a merged PR is dropped; a forge-read failure renders status: unknown and is NEVER dropped", async () => {
+  const forge = new FakeForge();
+  forge.statuses.set(5, {
+    number: 5,
+    headOid: "aaa",
+    state: "OPEN",
+    mergeable: "MERGEABLE",
+    ciGreen: false,
+    ciRed: true,
+    ciChecks: [{ name: "test", conclusion: "FAILURE" }],
+  });
+  forge.failedCheckSummaries.set(5, "### test\nAssertionError: expected 1 to equal 2");
+  forge.statuses.set(6, { number: 6, headOid: "bbb", state: "MERGED", mergeable: "MERGEABLE", ciGreen: true });
+  forge.statusErrors.add(7);
+  const state = new State(":memory:");
+  state.appendEvent("retro-pr-opened", { round_id: 1, pr: 5, branch: "retro/x", head: "before" });
+  state.appendEvent("retro-pr-opened", { round_id: 1, pr: 6, branch: "retro/merged" });
+  state.appendEvent("retro-pr-opened", { round_id: 1, pr: 7, branch: "retro/unreadable" });
+  const rows = await gatherOutstandingRetroPRs(forge, state);
+  // #964: gatherRetroPRLifecycle returns NEWEST-TOUCHED-FIRST (pr 7 was opened after pr 5) —
+  // [7, 5], not ascending-by-number.
+  assert.deepEqual(
+    rows.map((r) => r.pr),
+    [7, 5],
+    "the merged PR (#6) is dropped entirely — never listed as outstanding",
+  );
+  const red = rows.find((r) => r.pr === 5)!;
+  assert.equal(red.state, "OPEN");
+  assert.equal(red.actionable, true);
+  assert.ok(
+    red.reasons.some((r) => r.includes("red CI") && r.includes("test")),
+    "names the failing check",
+  );
+  assert.ok(red.excerpt?.includes("AssertionError: expected 1 to equal 2"), "carries the bounded failure excerpt");
+  const unreadable = rows.find((r) => r.pr === 7)!;
+  assert.equal(unreadable.state, "unknown");
+  assert.equal(unreadable.actionable, true, "an unreadable status is ACTIONABLE, never silently quiet");
+  assert.ok(
+    unreadable.reasons.some((r) => r.includes("status: unknown")),
+    "#964 AC1's exact fail-closed wording",
+  );
+  state.close();
+});
+
+test("gatherOutstandingRetroPRs: a green, non-conflicting, no-changes-requested PR is listed as non-actionable with no excerpt", async () => {
+  const forge = new FakeForge();
+  forge.statuses.set(5, { number: 5, headOid: "aaa", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true, ciRed: false });
+  const state = new State(":memory:");
+  state.appendEvent("retro-pr-opened", { round_id: 1, pr: 5, branch: "retro/x" });
+  const rows = await gatherOutstandingRetroPRs(forge, state);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.actionable, false);
+  assert.deepEqual(rows[0]!.reasons, []);
+  assert.equal(rows[0]!.excerpt, undefined);
+  assert.equal(forge.failedCheckSummaryCalls.length, 0, "no excerpt fetch for a non-red PR");
+  state.close();
+});
+
+test("gatherOutstandingRetroPRs: ciInert names the inert check(s), CONFLICTING is its own reason, both without an excerpt fetch", async () => {
+  const forge = new FakeForge();
+  forge.statuses.set(5, {
+    number: 5,
+    headOid: "aaa",
+    state: "OPEN",
+    mergeable: "CONFLICTING",
+    ciGreen: false,
+    ciRed: false,
+    ciInert: true,
+    ciChecks: [{ name: "flaky-check", conclusion: "CANCELLED" }],
+  });
+  const state = new State(":memory:");
+  state.appendEvent("retro-pr-opened", { round_id: 1, pr: 5, branch: "retro/x" });
+  const [row] = await gatherOutstandingRetroPRs(forge, state);
+  assert.equal(row!.actionable, true);
+  assert.ok(row!.reasons.some((r) => r.includes("inert CI") && r.includes("flaky-check")));
+  assert.ok(row!.reasons.some((r) => r.includes("conflicting")));
+  assert.equal(forge.failedCheckSummaryCalls.length, 0);
+  state.close();
+});
+
+test("gatherOutstandingRetroPRs: a CHANGES_REQUESTED review standing on the CURRENT head is its own actionable reason", async () => {
+  const forge = new FakeForge();
+  forge.statuses.set(5, { number: 5, headOid: "aaa", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true, ciRed: false });
+  forge.reviews.set(5, {
+    headOid: "aaa",
+    author: "producer",
+    updatedAt: "2026-01-01T00:00:00Z",
+    isDraft: false,
+    labels: [],
+    state: "OPEN",
+    reactions: [],
+    unresolvedThreads: 1,
+    reviews: [{ author: "codex", commitOid: "aaa", state: "CHANGES_REQUESTED" }],
+  });
+  const state = new State(":memory:");
+  state.appendEvent("retro-pr-opened", { round_id: 1, pr: 5, branch: "retro/x" });
+  const [row] = await gatherOutstandingRetroPRs(forge, state);
+  assert.equal(row!.actionable, true);
+  assert.ok(row!.reasons.some((r) => r.includes("changes requested")));
+  state.close();
+});
+
+// #964: changesRequestedOnHead, not "the last review event" — two mis-cases the old logic got
+// wrong.
+test("gatherOutstandingRetroPRs: a LATER approve from a DIFFERENT reviewer must not hide an earlier reviewer's standing CHANGES_REQUESTED", async () => {
+  const forge = new FakeForge();
+  forge.statuses.set(5, { number: 5, headOid: "aaa", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true, ciRed: false });
+  forge.reviews.set(5, {
+    headOid: "aaa",
+    author: "producer",
+    updatedAt: "2026-01-01T00:00:00Z",
+    isDraft: false,
+    labels: [],
+    state: "OPEN",
+    reactions: [],
+    unresolvedThreads: 1,
+    reviews: [
+      { author: "reviewer-a", commitOid: "aaa", state: "CHANGES_REQUESTED" },
+      { author: "reviewer-b", commitOid: "aaa", state: "APPROVED" }, // a DIFFERENT reviewer approving
+    ],
+  });
+  const state = new State(":memory:");
+  state.appendEvent("retro-pr-opened", { round_id: 1, pr: 5, branch: "retro/x" });
+  const [row] = await gatherOutstandingRetroPRs(forge, state);
+  assert.equal(row!.actionable, true, "reviewer-a's standing request is not cleared by reviewer-b's approval");
+  assert.ok(row!.reasons.some((r) => r.includes("changes requested")));
+  state.close();
+});
+
+test("gatherOutstandingRetroPRs: a CHANGES_REQUESTED left on an OLD head does not stay actionable after a push superseded it", async () => {
+  const forge = new FakeForge();
+  forge.statuses.set(5, { number: 5, headOid: "new-head", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true, ciRed: false });
+  forge.reviews.set(5, {
+    headOid: "old-head",
+    author: "producer",
+    updatedAt: "2026-01-01T00:00:00Z",
+    isDraft: false,
+    labels: [],
+    state: "OPEN",
+    reactions: [],
+    unresolvedThreads: 0,
+    reviews: [{ author: "codex", commitOid: "old-head", state: "CHANGES_REQUESTED" }],
+  });
+  const state = new State(":memory:");
+  state.appendEvent("retro-pr-opened", { round_id: 1, pr: 5, branch: "retro/x" });
+  const [row] = await gatherOutstandingRetroPRs(forge, state);
+  assert.equal(row!.actionable, false, "a request on a superseded head is not a standing request on the CURRENT head");
+  state.close();
+});
+
+test("gatherOutstandingRetroPRs: a getFailedCheckSummary failure is contained — the row stays actionable with a named fetch-failure excerpt, never a thrown error", async () => {
+  const forge = new FakeForge();
+  forge.statuses.set(5, {
+    number: 5,
+    headOid: "aaa",
+    state: "OPEN",
+    mergeable: "MERGEABLE",
+    ciGreen: false,
+    ciRed: true,
+    ciChecks: [{ name: "test", conclusion: "FAILURE" }],
+  });
+  forge.failedCheckSummaryErrors.add(5);
+  const state = new State(":memory:");
+  state.appendEvent("retro-pr-opened", { round_id: 1, pr: 5, branch: "retro/x" });
+  const [row] = await gatherOutstandingRetroPRs(forge, state);
+  assert.equal(row!.actionable, true);
+  assert.ok(row!.excerpt?.includes("failure excerpt fetch failed"));
+  state.close();
+});
+
+test("gatherOutstandingRetroPRs: zero retro-pr-lifecycle events -> empty array, no forge calls at all", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const rows = await gatherOutstandingRetroPRs(forge, state);
+  assert.deepEqual(rows, []);
+  assert.equal(forge.statusCalls.length, 0);
+  state.close();
 });
 
 // ── buildRetroDigest: full assembly ─────────────────────────────────────────────────────────
@@ -419,6 +702,43 @@ test("small cap (Codex round 1): a cap the old floors couldn't afford — every 
   // Both oversize diffs were cut PER ITEM, each cut marked — never a silent drop:
   const markers = digest.split("digest truncated").length - 1;
   assert.ok(markers >= 2, `each oversize PR section carries its own truncation marker (got ${markers})`);
+  state.close();
+});
+
+// ── #964: buildRetroDigest carries "Your outstanding PRs" ───────────────────────────────────
+
+test("buildRetroDigest (#964): the outstanding-PRs section is NOT round-scoped — a PR opened in an EARLIER round still appears", async () => {
+  const forge = new FakeForge();
+  forge.statuses.set(5, {
+    number: 5,
+    headOid: "aaa",
+    state: "OPEN",
+    mergeable: "MERGEABLE",
+    ciGreen: false,
+    ciRed: true,
+    ciChecks: [{ name: "build", conclusion: "FAILURE" }],
+  });
+  forge.failedCheckSummaries.set(5, "### build\ncompile error: unexpected token");
+  const state = new State(":memory:");
+  // The retro-pr-opened event predates THIS round's start_event_id — round-scoped sections
+  // (PRs touched, escalated issues) would never see it; the outstanding section must anyway.
+  state.appendEvent("retro-pr-opened", { round_id: 1, pr: 5, branch: "retro/x" });
+  const round = state.startRound(new Date().toISOString());
+  const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS, 3);
+  assert.ok(digest.includes("Your outstanding PRs (1)"));
+  assert.ok(digest.includes("PR #5"));
+  assert.ok(digest.includes("build"));
+  assert.ok(digest.includes("compile error: unexpected token"));
+  state.close();
+});
+
+test("buildRetroDigest (#964): zero outstanding PRs renders the section's own explicit empty state, never a missing section", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  const round = state.startRound(new Date().toISOString());
+  const digest = await buildRetroDigest({ forge, state }, round, 60_000, ISSUE_KINDS, 3);
+  assert.ok(digest.includes("Your outstanding PRs (0)"));
+  assert.ok(digest.includes("no PR you opened is still open on the forge"));
   state.close();
 });
 

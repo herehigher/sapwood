@@ -26,6 +26,7 @@ import {
   OPEN_ISSUES_LIMIT,
   parseCompareChangedFiles,
   parseDefaultBranchChecksPage,
+  parseFailedCheckSummary,
   parseIssueLabels,
   parseIssueMeta,
   parseIssueRelations,
@@ -2229,6 +2230,88 @@ test("parsePRStatus (#783): a fully passing rollup is not inert — ciGreen alre
   );
   assert.equal(s.ciInert, false);
   assert.equal(s.ciGreen, true);
+});
+
+// ── #964: parseFailedCheckSummary / getFailedCheckSummary — the retro digest's bounded
+// failure-excerpt source (a `commits/{ref}/check-runs` REST read, distinct from the
+// GraphQL statusCheckRollup parsePRStatus already reads) ────────────────────────────────────
+
+test("parseFailedCheckSummary: renders only FAILING check runs, each with its output summary/text", () => {
+  const out = parseFailedCheckSummary(
+    JSON.stringify({
+      check_runs: [
+        { name: "unit-tests", conclusion: "failure", output: { summary: "3 failed", text: "AssertionError: expected 1 to equal 2" } },
+        { name: "lint", conclusion: "success", output: { summary: "clean" } },
+      ],
+    }),
+    4000,
+  );
+  assert.ok(out.includes("unit-tests"));
+  assert.ok(out.includes("AssertionError: expected 1 to equal 2"));
+  assert.ok(!out.includes("lint"), "a passing check run must not appear at all");
+});
+
+test("parseFailedCheckSummary: timed_out and startup_failure are FAILING too; a bare 'error' conclusion is a legacy Status-API name, not a CheckRun one, and does not match", () => {
+  const out = parseFailedCheckSummary(
+    JSON.stringify({
+      check_runs: [
+        { name: "slow-job", conclusion: "timed_out" },
+        { name: "boot-job", conclusion: "startup_failure" },
+        { name: "weird-job", conclusion: "error" },
+      ],
+    }),
+    4000,
+  );
+  assert.ok(out.includes("slow-job"));
+  assert.ok(out.includes("boot-job"));
+  assert.ok(!out.includes("weird-job"));
+});
+
+test("parseFailedCheckSummary: zero failing check runs renders an explicit, honest empty state — never a blank string", () => {
+  const out = parseFailedCheckSummary(JSON.stringify({ check_runs: [{ name: "unit-tests", conclusion: "success" }] }), 4000);
+  assert.equal(out, "(no failing check runs found via the checks API)");
+});
+
+test("parseFailedCheckSummary: a failing check run with no output text at all says so explicitly, never renders a blank section", () => {
+  const out = parseFailedCheckSummary(JSON.stringify({ check_runs: [{ name: "unit-tests", conclusion: "failure" }] }), 4000);
+  assert.ok(out.includes("unit-tests"));
+  assert.ok(out.includes("no output text reported by the checks API"));
+});
+
+test("parseFailedCheckSummary: an unnamed check run renders a placeholder name rather than an empty header", () => {
+  const out = parseFailedCheckSummary(JSON.stringify({ check_runs: [{ conclusion: "failure", output: { summary: "boom" } }] }), 4000);
+  assert.ok(out.includes("(unnamed check)"));
+  assert.ok(out.includes("boom"));
+});
+
+test("parseFailedCheckSummary: deterministic hard cap — same input+cap always truncates identically, and the marker names how much was cut", () => {
+  const runs = JSON.stringify({ check_runs: [{ name: "unit-tests", conclusion: "failure", output: { text: "x".repeat(1000) } }] });
+  const a = parseFailedCheckSummary(runs, 50);
+  const b = parseFailedCheckSummary(runs, 50);
+  assert.equal(a, b);
+  assert.ok(a.length <= 50);
+  assert.ok(a.includes("truncated"));
+});
+
+test("getFailedCheckSummary: re-derives the head via getPRStatus, then reads the checks API off THAT head — never a caller-supplied SHA", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    if (args[0] === "pr") {
+      return JSON.stringify({ number: 5, headRefOid: "deadbeef", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] });
+    }
+    return JSON.stringify({ check_runs: [{ name: "unit-tests", conclusion: "failure", output: { text: "boom" } }] });
+  };
+  const out = await forge.getFailedCheckSummary(5);
+  assert.ok(out.includes("boom"));
+  const checksCall = seen.find((a) => a.some((s) => s.includes("check-runs")));
+  assert.ok(checksCall, "must call the checks API");
+  assert.ok(
+    checksCall!.some((s) => s.includes("deadbeef")),
+    "must read off the head getPRStatus just reported, not a stale/caller SHA",
+  );
 });
 
 // ── #13 review-gate data: parsePRReviewView / parsePRReactions / parseUnresolvedThreads ──

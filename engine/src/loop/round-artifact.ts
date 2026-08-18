@@ -335,16 +335,27 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
       case "round-stop":
         roundStops.push({ name: p.name as string, detail: p.detail as string });
         break;
-      // The two retro outcomes are mutually exclusive — LAST event wins outright (Codex P2,
-      // PR #152): a crash-rerun can log retro-pr-opened then retro-pr-degraded (the rerun
-      // fails on the already-existing branch) in the same round's window, and the artifact
-      // must record the later outcome alone, never both.
+      // The three retro outcomes are mutually exclusive — LAST event wins outright (#152): a
+      // crash-rerun can log retro-pr-opened then retro-pr-degraded (the rerun fails on the
+      // already-existing branch) in the same round's window, and the artifact must record the
+      // later outcome alone, never both.
       case "retro-pr-opened":
         retroOpened = { pr: p.pr as number, branch: p.branch as string };
         retroDegraded = null;
         break;
+      // #964: an `update` outcome is, for THIS artifact's purposes, the same fact as `opened` —
+      // "retro has an active PR out this round" — just via a repair on an existing branch instead
+      // of a fresh one. Reuses the `opened` shape rather than widening the schema for a
+      // distinction round-artifact.md's readers don't need.
+      case "retro-pr-updated":
+        retroOpened = { pr: p.pr as number, branch: p.branch as string };
+        retroDegraded = null;
+        break;
       case "retro-pr-degraded":
-        retroDegraded = { branch: p.branch as string, title: p.title as string, reason: p.reason as string };
+        // #964: an `update`-flow degrade proposes no new title (nothing was ever titled), so
+        // `title` is ADDITIVE-OPTIONAL on this payload now — coalesced to "" rather than letting
+        // `undefined` reach the schema's non-optional `z.string()` and throw.
+        retroDegraded = { branch: p.branch as string, title: (p.title as string | undefined) ?? "", reason: p.reason as string };
         retroOpened = null;
         break;
       case "align-summary":

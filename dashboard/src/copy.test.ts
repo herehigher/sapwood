@@ -103,6 +103,7 @@ const DOC_TABLE_KINDS = [
   "escalation-resolved",
   "needs-human-swept",
   "retro-pr-opened",
+  "retro-pr-updated",
   "retro-pr-degraded",
   "run-started",
   "instance-lock-taken-over",
@@ -280,6 +281,7 @@ test("every PR-bearing sentence spells out the literal word PR before the entity
     ["pr-released", { pr: 1, issue: 1 }],
     ["lane-state-labeled", { worker: "w1", pr: 1, issue: 1 }],
     ["retro-pr-opened", { pr: 1 }],
+    ["retro-pr-updated", { pr: 1 }],
   ];
   for (const [kind, payload] of prBearing) {
     const before = textBeforeFirstPrToken(copyFor(kind)!.sentence(payload));
@@ -758,6 +760,7 @@ const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expec
     "Issue #7 no longer carries `sapwood:needs-human` — the engine removed the flag it had applied itself, now that its escalation is resolved",
   ],
   ["retro-pr-opened", { pr: 5 }, "The loop proposed an improvement to itself — PR #5 awaits review"],
+  ["retro-pr-updated", { pr: 5 }, "The loop repaired its own self-improvement PR — PR #5 awaits review"],
   ["retro-pr-degraded", {}, "A self-improvement proposal didn't come together this round"],
   ["run-started", {}, "Engine started a new run"],
   ["instance-lock-taken-over", { previousPid: 1234 }, "Took over the engine lock left by a crashed run (pid 1234)"],

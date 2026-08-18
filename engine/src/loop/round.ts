@@ -455,6 +455,9 @@ export class RoundScopedForge implements IForge {
   getPRStatus(pr: number) {
     return this.inner.getPRStatus(pr);
   }
+  getFailedCheckSummary(pr: number) {
+    return this.inner.getFailedCheckSummary(pr);
+  }
   mergePR(pr: number, headOid: string) {
     return this.inner.mergePR(pr, headOid);
   }
@@ -660,6 +663,9 @@ export class PoolScopedForge implements IForge {
   }
   getPRStatus(pr: number) {
     return this.inner.getPRStatus(pr);
+  }
+  getFailedCheckSummary(pr: number) {
+    return this.inner.getFailedCheckSummary(pr);
   }
   mergePR(pr: number, headOid: string) {
     return this.inner.mergePR(pr, headOid);
