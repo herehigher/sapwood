@@ -212,9 +212,11 @@
   stroke-opacity: 0.35;
 }
 
+/* #922 "What": idle stroke >= 2px --bark at >= 60% alpha — gate② finding [2] (ac5-lane-stroke-
+ * still-muted): the pre-#922 0.35 never actually moved to close this issue's own explicit floor. */
 .hero-channel {
   stroke: var(--bark);
-  stroke-opacity: 0.35;
+  stroke-opacity: 0.6;
   stroke-width: 2;
 }
 
@@ -234,7 +236,7 @@
 .hero-lane-connector {
   fill: none;
   stroke: var(--bark);
-  stroke-opacity: 0.35;
+  stroke-opacity: 0.6;
   stroke-width: 2;
 }
 
@@ -358,9 +360,12 @@
   stroke-dasharray: 10 6;
 }
 
+/* #922 "What": active --sap-text at 100% — gate② finding [2]: driving (a lane's PR out for
+ * review) is active engagement, not idle, so it gets the same full-opacity active treatment
+ * writing/fixing already carry above. */
 .hero-lane[data-phase="driving"] .hero-channel {
   stroke: var(--sap-text);
-  stroke-opacity: 0.5;
+  stroke-opacity: 1;
 }
 
 .hero-lane[data-phase="failed"] .hero-channel {

@@ -240,9 +240,15 @@ const FIXLOOP_LABEL = { x: 535, y: GATES.y + 100 } as const;
 const NEEDS_HUMAN_COLS = 2;
 /** #922 AC2: widened from 38/34 — `dropletRadius`'s own floor grew 9 → 9.8 (and grows further for
  *  a droplet with a longer number), so the old step no longer clears the same margin between
- *  adjacent droplet bodies. Kept proportionally generous (step − 2 × footprint ≈ the old margin). */
+ *  adjacent droplet bodies. Kept proportionally generous (step − 2 × footprint ≈ the old margin).
+ *  Column width is a true 2r (the shape's own x-range is exactly [-r, r]), so COL_STEP's own
+ *  margin against 2 × DROPLET_MAX_R (40) holds. Row HEIGHT is not 2r — `dropletPath`'s own tip/
+ *  belly extend to 9r/7 each way (≈2.571r total, gate② finding [0]'s own "moving the text/
+ *  shrinking the path can leave it green" catch, surfaced once the collision oracle read the
+ *  REAL rendered path instead of a circleBox stand-in) — ROW_STEP is sized against that true
+ *  height at the worst-case DROPLET_MAX_R (2.571 × 20 ≈ 51.4), not the old (too-small) 2r guess. */
 const NEEDS_HUMAN_COL_STEP = 46;
-const NEEDS_HUMAN_ROW_STEP = 42;
+const NEEDS_HUMAN_ROW_STEP = 58;
 /** #891 AC1: never draw more than this many needs-human droplets at once — see the doc above
  *  this cluster's own geometry constants for why 6 (2 cols × 3 rows) is the verified ceiling. */
 const NEEDS_HUMAN_DRAW_CAP = NEEDS_HUMAN_COLS * 3;
@@ -297,18 +303,27 @@ const NEEDS_HUMAN_DRAW_CAP = NEEDS_HUMAN_COLS * 3;
  */
 const CHECKPOINT_COLS = 2;
 /** #922 AC2: widened alongside NEEDS_HUMAN_COL_STEP/ROW_STEP — same growth, same reason
- *  (`dropletRadius`'s own doc). */
+ *  (`NEEDS_HUMAN_COL_STEP`/`_ROW_STEP`'s own doc: ROW_STEP is sized against the shape's true
+ *  ≈2.571r height, not a plain 2r). */
 const CHECKPOINT_COL_STEP = 46;
-const CHECKPOINT_ROW_STEP = 42;
-const CHECKPOINT_ROWS_MAX = 3;
+const CHECKPOINT_ROW_STEP = 58;
+/** #922 AC2 gate② finding [0]: was 3 — the taller ROW_STEP (above) needed to hold the shape's
+ *  true height no longer fits 3 rows between `CHECKPOINT_BASE_OFFSET` and the top of the
+ *  viewBox (y=0); 2 rows is what the same vertical budget actually holds without pushing rank 2
+ *  above the stage. `CHECKPOINT_DRAW_CAP` (below) shrinks with it — a real capacity cut, not a
+ *  cosmetic one, since the old 3-row cap was never actually collision-safe once the collision
+ *  oracle read the shape's REAL rendered path instead of a circleBox stand-in. */
+const CHECKPOINT_ROWS_MAX = 2;
 /** Vertical distance from `GATES.y` to checkpoint rank 0 — the grid's closest row to the gates.
  *  #920: 60 → 80, matching `GATES.r`'s own +10 growth (20 → 30) — keeps the gap between rank 0
  *  and the REVIEW-mode caption above `GATES` (which moved further from `GATES.y` by the same
  *  amount the circle grew) at its original, already-verified-safe margin. */
 const CHECKPOINT_BASE_OFFSET = 80;
 /** No badge needed at or under this many simultaneous checkpoint droplets — the grid draws all
- *  of them normally, exactly as before. */
-const CHECKPOINT_DRAW_CAP = CHECKPOINT_COLS * CHECKPOINT_ROWS_MAX;
+ *  of them normally, exactly as before. Exported so `hero.test.ts` reads the real, current cap
+ *  rather than a hand-copied literal that can silently drift once the grid's own geometry
+ *  changes (VALUE doctrine). */
+export const CHECKPOINT_DRAW_CAP = CHECKPOINT_COLS * CHECKPOINT_ROWS_MAX;
 /**
  * How many REAL chips draw once there's overflow — one full row short of `CHECKPOINT_DRAW_CAP`,
  * so the "+N more" badge can have the LAST row entirely to itself rather than sharing a row with
@@ -316,7 +331,7 @@ const CHECKPOINT_DRAW_CAP = CHECKPOINT_COLS * CHECKPOINT_ROWS_MAX;
  * enough that two side-by-side in the same row collide by rendered text width even though their
  * anchor points don't (caught by this file's own bbox test, not a guess).
  */
-const CHECKPOINT_OVERFLOW_REAL_CAP = CHECKPOINT_COLS * (CHECKPOINT_ROWS_MAX - 1);
+export const CHECKPOINT_OVERFLOW_REAL_CAP = CHECKPOINT_COLS * (CHECKPOINT_ROWS_MAX - 1);
 /**
  * #897 AC3: the frozen baseline's cross-section is dense and fine-grained (many close rings),
  * not the ~12 coarse widely-spaced circles this stage used to draw. #921: `step` is now the
