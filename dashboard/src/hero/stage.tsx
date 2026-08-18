@@ -13,9 +13,11 @@
  * dimmed "reserved" row — issue #144's AC forbids any reserved/dormant slot on the stage.
  */
 
-import { Sprout } from "lucide-react";
-import type { KeyboardEvent, Ref } from "react";
+import { ChartNoAxesColumn, Check, Eye, GitFork, Sprout, Target, TrendingUp, UserRound } from "lucide-react";
+import type { ComponentType, KeyboardEvent, Ref } from "react";
+import { GithubActionsGlyph } from "../components/icons.tsx";
 import { readConfigPath } from "../config-captions.ts";
+import { CI_CAPTION } from "../copy.ts";
 import type { DomainEvent } from "../domain-event.ts";
 import { formatRelativeTime } from "../format-time.ts";
 import type { StageNode } from "../inspector.ts";
@@ -95,7 +97,11 @@ export const ZONE_DIVIDERS = [366, 905] as const;
 // the old 22px step were measured colliding with the next chip's label at small render sizes.
 // #879: bumped 26 → 32 — the frozen baseline draws the ready backlog as filled CARDS, not a
 // thin list; a taller step is what gives the card rect (below) room to read as a card.
-export const BACKLOG = { x: 46, y: 62, w: 96, chip: 32 } as const;
+// #922 AC3: bumped 32 → 40 — the card rect itself grew 24 → 32 (the AC's own height floor), and a
+// step equal to the rect's own height left zero gap between consecutive cards.
+export const BACKLOG = { x: 46, y: 62, w: 96, chip: 40 } as const;
+/** #922 AC3: the chip rect's own height — the AC's own ≥ 32 stage-px-equivalent floor. */
+export const BACKLOG_CHIP_H = 32;
 /**
  * #897 AC4: only the FRONT of the ready pool draws as filled cards — the frozen baseline's
  * "about to be worked" emphasis — the rest draws as outlined candidate cards below them (same
@@ -103,6 +109,10 @@ export const BACKLOG = { x: 46, y: 62, w: 96, chip: 32 } as const;
  * 3 matches the baseline's own filled-card count.
  */
 const BACKLOG_FILLED_CAP = 3;
+/** #922 AC3: candidates beyond this many collapse into a single "…" chip instead of growing the
+ *  column without limit — same "cap what's drawn, keep the true count elsewhere" grammar every
+ *  other bounded cluster on this stage already uses (`NEEDS_HUMAN_DRAW_CAP`'s own doc). */
+const BACKLOG_CANDIDATE_DRAW_CAP = 5;
 /** `note` sits below the planning trio's own lowest content (`verify`'s caption) — #920 grew the
  *  trio's own vertical spread, so it no longer needs to independently clear the lane stack too;
  *  `LANES.top`'s own span (up to `lanes.max` 6) sits well above this y regardless. */
@@ -110,6 +120,16 @@ export const PLANNING = { x: 224, note: 430, noteX: 152 } as const;
 /** #920 AC2: ≥ 30 stage units (≥ 60 px at 1440 rendered width) — the planning trio's own circle
  *  radius, exported so `hero.test.ts` reads it directly rather than a copied literal. */
 export const PLANNING_NODE_R = 30;
+/**
+ * #922 AC1/AC7: the one below-circle label/caption offset every node type on the stage shares —
+ * planning trio, both gates, the escalation node (REFLECTION_NODES keep their own pre-existing
+ * r+12/r+24, already the same 12px label-to-caption gap this pair encodes). AC7 requires REVIEW's
+ * caption sit "the same style/offset as the planning nodes' captions" — a shared constant is what
+ * makes that true by construction rather than by two authors independently picking the same
+ * number.
+ */
+export const NODE_LABEL_OFFSET = 16;
+export const NODE_CAPTION_OFFSET = 28;
 /** §7: plain word first, internal term never. `role` is the config-captions.ts `roles.<role>`
  *  path (#716 gate② P2-8's model·effort caption) — never worker.* (that's the lanes zone).
  *  #920: y-spacing widened (96/158/220 → 62px apart) to (140/250/360 → 110px apart) — two
@@ -163,7 +183,8 @@ const LANE_TERMINAL_R = 4;
  *
  * #897: `r` shrank from an earlier 26 specifically to make room for the "CI"/"Review" word BELOW
  * the circle without reaching the needs-human cluster's own fixed ceiling (rank 5's droplet label top,
- * `ESCALATION.y - 30 - 2 * NEEDS_HUMAN_ROW_STEP - DROPLET_LABEL_FONT_PX` ≈ 198) — the cluster's
+ * `ESCALATION.y - NEEDS_HUMAN_BASE_OFFSET - 2 * NEEDS_HUMAN_ROW_STEP - DROPLET_LABEL_FONT_PX`,
+ * re-verified by this file's own stress tests whenever either constant moves) — the cluster's
  * own row cap (`NEEDS_HUMAN_DRAW_CAP`'s doc) was tuned against the OLD rect geometry, which drew
  * no text below itself at all; this stage's own below-circle label is what newly competes for
  * that space. The review-mode caption moved ABOVE the circle instead of stacking a second line
@@ -182,6 +203,9 @@ const LANE_TERMINAL_R = 4;
  */
 export const GATES = { ci: 762, review: 858, y: 190, r: 30 } as const;
 export const ESCALATION = { x: 810, y: 460 } as const;
+/** #922 AC4: grown from the old bare 13px circle to fit a person glyph — matches
+ *  `REFLECTION_R`, the stage's other small icon-bearing node. */
+export const ESCALATION_R = 16;
 /**
  * #897 AC1: the fix-loop return arrow's own send-back-reason label — plain upright text, not a
  * `textPath` riding the arrow's own (right-to-left, at this stretch) curve, which rendered the
@@ -215,8 +239,28 @@ const FIXLOOP_LABEL = { x: 535, y: GATES.y + 100 } as const;
  * `boundAttentionDroplets`'s collapsed counter chip instead of growing the grid further.
  */
 const NEEDS_HUMAN_COLS = 2;
-const NEEDS_HUMAN_COL_STEP = 38;
-const NEEDS_HUMAN_ROW_STEP = 34;
+/** #922 AC2: widened from 38/34 — `dropletRadius`'s own floor grew 9 → 9.8 (and grows further for
+ *  a droplet with a longer number), so the old step no longer clears the same margin between
+ *  adjacent droplet bodies. Kept proportionally generous (step − 2 × footprint ≈ the old margin).
+ *  Column width is a true 2r (the shape's own x-range is exactly [-r, r]), so COL_STEP's own
+ *  margin against 2 × DROPLET_MAX_R holds: `DROPLET_MAX_R` is 22 (that constant's own doc), so
+ *  2 × 22 = 44 — a real, if narrower, margin under 46. Row HEIGHT is not 2r —
+ *  `dropletPath`'s own tip/belly extend to 9r/7 each way (≈2.571r total, gate② finding [0]'s own
+ *  "moving the text/shrinking the path can leave it green" catch, surfaced once the collision
+ *  oracle read the REAL rendered path instead of a circleBox stand-in) — ROW_STEP is sized against
+ *  that true height at the worst-case DROPLET_MAX_R (2.571 × 22 ≈ 56.6), not the old (too-small)
+ *  2r guess; 66 keeps a real ~9.4px margin over it. */
+const NEEDS_HUMAN_COL_STEP = 46;
+const NEEDS_HUMAN_ROW_STEP = 66;
+/**
+ * gate② finding [1] (ac2-escalation-overlap): the rank-0 droplet's own vertical offset from
+ * `ESCALATION.y` — was a bare inline `30`, which at the worst-case `DROPLET_MAX_R` let the
+ * droplet's own bottom edge (`y + r * 9/7`) reach INSIDE the escalation circle (top edge
+ * `ESCALATION.y - ESCALATION_R` = 444) instead of clearing it. 56 keeps the worst-case droplet's
+ * bottom edge (`ESCALATION.y - 56 + r * 9/7`, ≈ 432.3 at `DROPLET_MAX_R`'s own 22) a real
+ * ~11.7px above the circle's own top edge.
+ */
+const NEEDS_HUMAN_BASE_OFFSET = 56;
 /** #891 AC1: never draw more than this many needs-human droplets at once — see the doc above
  *  this cluster's own geometry constants for why 6 (2 cols × 3 rows) is the verified ceiling. */
 const NEEDS_HUMAN_DRAW_CAP = NEEDS_HUMAN_COLS * 3;
@@ -226,7 +270,7 @@ const NEEDS_HUMAN_DRAW_CAP = NEEDS_HUMAN_COLS * 3;
  * grid), `checkpoint` had no per-droplet offset at all. Two PRs out for review at once is the
  * normal steady state, not an edge case, so this collided on the most common path — the exact
  * "N chips staged at ONE coordinate" shape #745 reports. Same COLS/STEP magnitudes as
- * NEEDS_HUMAN — same droplet label format (`⤳ 9999`/`⊙ 9999`), same verified-safe sizing;
+ * NEEDS_HUMAN — same droplet number/kind-mark rendering, same verified-safe sizing;
  * grows UPWARD (away from the CI/Review gates below), the same direction NEEDS_HUMAN grows away
  * from its own anchor.
  *
@@ -270,17 +314,28 @@ const NEEDS_HUMAN_DRAW_CAP = NEEDS_HUMAN_COLS * 3;
  * interpolated frame exists to intersect the caption with.
  */
 const CHECKPOINT_COLS = 2;
-const CHECKPOINT_COL_STEP = 38;
-const CHECKPOINT_ROW_STEP = 34;
-const CHECKPOINT_ROWS_MAX = 3;
+/** #922 AC2: widened alongside NEEDS_HUMAN_COL_STEP/ROW_STEP — same growth, same reason
+ *  (`NEEDS_HUMAN_COL_STEP`/`_ROW_STEP`'s own doc: ROW_STEP is sized against the shape's true
+ *  ≈2.571r height, not a plain 2r; both raised alongside `DROPLET_MAX_R`'s own 20 → 22). */
+const CHECKPOINT_COL_STEP = 46;
+const CHECKPOINT_ROW_STEP = 66;
+/** #922 AC2 gate② finding [0]: was 3 — the taller ROW_STEP (above) needed to hold the shape's
+ *  true height no longer fits 3 rows between `CHECKPOINT_BASE_OFFSET` and the top of the
+ *  viewBox (y=0); 2 rows is what the same vertical budget actually holds without pushing rank 2
+ *  above the stage. `CHECKPOINT_DRAW_CAP` (below) shrinks with it — a real capacity cut, not a
+ *  cosmetic one, since the old 3-row cap was never actually collision-safe once the collision
+ *  oracle read the shape's REAL rendered path instead of a circleBox stand-in. */
+const CHECKPOINT_ROWS_MAX = 2;
 /** Vertical distance from `GATES.y` to checkpoint rank 0 — the grid's closest row to the gates.
  *  #920: 60 → 80, matching `GATES.r`'s own +10 growth (20 → 30) — keeps the gap between rank 0
  *  and the REVIEW-mode caption above `GATES` (which moved further from `GATES.y` by the same
  *  amount the circle grew) at its original, already-verified-safe margin. */
 const CHECKPOINT_BASE_OFFSET = 80;
 /** No badge needed at or under this many simultaneous checkpoint droplets — the grid draws all
- *  of them normally, exactly as before. */
-const CHECKPOINT_DRAW_CAP = CHECKPOINT_COLS * CHECKPOINT_ROWS_MAX;
+ *  of them normally, exactly as before. Exported so `hero.test.ts` reads the real, current cap
+ *  rather than a hand-copied literal that can silently drift once the grid's own geometry
+ *  changes (VALUE doctrine). */
+export const CHECKPOINT_DRAW_CAP = CHECKPOINT_COLS * CHECKPOINT_ROWS_MAX;
 /**
  * How many REAL chips draw once there's overflow — one full row short of `CHECKPOINT_DRAW_CAP`,
  * so the "+N more" badge can have the LAST row entirely to itself rather than sharing a row with
@@ -288,7 +343,7 @@ const CHECKPOINT_DRAW_CAP = CHECKPOINT_COLS * CHECKPOINT_ROWS_MAX;
  * enough that two side-by-side in the same row collide by rendered text width even though their
  * anchor points don't (caught by this file's own bbox test, not a guess).
  */
-const CHECKPOINT_OVERFLOW_REAL_CAP = CHECKPOINT_COLS * (CHECKPOINT_ROWS_MAX - 1);
+export const CHECKPOINT_OVERFLOW_REAL_CAP = CHECKPOINT_COLS * (CHECKPOINT_ROWS_MAX - 1);
 /**
  * #897 AC3: the frozen baseline's cross-section is dense and fine-grained (many close rings),
  * not the ~12 coarse widely-spaced circles this stage used to draw. #921: `step` is now the
@@ -306,6 +361,22 @@ export const TRUNK = { x: 1006, y: 190, step: 3, max: 42 } as const;
  * every other width through this same ratio.
  */
 const RENDER_SCALE_1440 = 1440 / STAGE.w;
+/**
+ * gate② finding [0] (ac2-real-render-scale): `RENDER_SCALE_1440` above assumes the hero SVG gets
+ * the FULL 1440px of a 1440px viewport — it never does. The icon rail (`app.css` `.icon-rail`:
+ * 56px width + 1px `border-right`), `.stack`'s own padding (`app.css`, 2 × `--space-4` = 32px),
+ * and `.hero-frame`'s own `.panel` padding + border (`app.css` `.panel`: 2 × `--space-4` = 32px +
+ * 2 × 1px hairline) all eat into it first — 1440 − (56 + 1 + 32 + 32 + 2) = 1317px is the SVG's
+ * own REAL rendered width at that viewport. Every size floor #922 introduces (the droplet's own
+ * height, the backlog numeral) is sized against THIS scale. `RENDER_SCALE_1440` above stays as
+ * originally defined — #921's own RING_COUNT_FONT_PX/TRUNK_DISC_R_MAX/RING_PITCH_MIN were sized
+ * and reviewed against it; reconciling those to the real scale too is a separate round, not
+ * #922's, since it risks silently re-tuning already-shipped geometry this issue never touched.
+ */
+const HERO_ICON_RAIL_PX = 56 + 1; // app.css .icon-rail: width 56px + border-right 1px hairline
+const HERO_STACK_PADDING_PX = 2 * 16; // app.css .stack: padding var(--space-4) (16px), both sides
+const HERO_PANEL_CHROME_PX = 2 * 16 + 2 * 1; // app.css .panel (.hero-frame): padding var(--space-4) + border hairline, both sides
+export const REAL_RENDER_SCALE_1440 = (1440 - HERO_ICON_RAIL_PX - HERO_STACK_PADDING_PX - HERO_PANEL_CHROME_PX) / STAGE.w;
 /**
  * #921 AC2: the outcome count's rendered size floor — the frozen mockup's own ~75px cap-height
  * serif "24" against the old `--text-4` (33px, only ~40px at 1440) sitting well under AC2's 56px
@@ -369,7 +440,7 @@ export function ringCountFontPx(rings: number): number {
   return lo;
 }
 /**
- * #921 growth rule (issue anchors: `TRUNK`/`ringRadii`/`TRUNK_DROPLET_OFFSET`): the inner
+ * #921 growth rule (issue anchors: `TRUNK`/`ringRadii`/`trunkDropletOffset`): the inner
  * clearance radius no ring may draw inside of — sized to the numeral's OWN rendered box
  * (half-diagonal from the disc centre, `ringCountFontPx(rings)` at `rings`' own digit count)
  * rather than a fixed guess, so a wider running total (more digits) automatically buys more
@@ -442,16 +513,23 @@ const RING_WORD_RIGHT_X = TRUNK.x - 10;
  * #886 gate② run 2e566ac9 finding [1]: where the newest-merge droplet parks, offset from
  * `dropletPoint`'s "trunk" case — frees the true trunk CENTER for the outcome number (below).
  * Chosen for vertical clearance from the number's own worst-case rendered box (a multi-digit
- * ring count centered at `TRUNK.y + 11`, `RING_COUNT_FONT_PX`): the droplet's own label sits 14px
- * above its shape (`hero-droplet`'s own `y=-14` convention). #921: widened -40 → -48 — growing
- * `RING_COUNT_FONT_PX` (33 → 48, AC2) grew the numeral's own box upward by the same amount,
- * eating most of the old offset's margin; -48 restores comparable clearance, verified against a
- * deliberately stressed digit count (3-digit ring total, 6-digit PR number) by `hero.test.ts`'s
- * own test, the same discipline #728's NEEDS_HUMAN_COL_STEP/ROW_STEP doc already uses for its own
- * cluster. The horizontal +40 component only keeps the marker visually near "where the merge arm
- * feeds in" (`GATES.review` → `TRUNK`), not load-bearing for the clearance itself.
+ * ring count centered at `TRUNK.y + 11`, `RING_COUNT_FONT_PX`).
+ *
+ * #922 AC2: the droplet's own number now renders INSIDE the shape, whose belly radius GROWS to
+ * fit its own NUMBER (`dropletRadius` — never the kind mark) — a fixed offset tuned
+ * for the old constant-size droplet left no margin once a droplet's own number (worst case: the
+ * trunk's own multi-digit PR) grew the shape past that fixed clearance. The offset now grows WITH
+ * the droplet's own radius past `DROPLET_MIN_R` — verified against a deliberately stressed digit
+ * count (3-digit ring total, 5-digit PR number) by `hero.test.ts`'s own test, the same discipline #728's
+ * NEEDS_HUMAN_COL_STEP/ROW_STEP doc already uses for its own cluster. The horizontal +40 base
+ * only keeps the marker visually near "where the merge arm feeds in" (`GATES.review` → `TRUNK`),
+ * not load-bearing for the clearance itself — only the vertical component needs to keep pace
+ * with growth, since the ring count sits ABOVE the droplet's parked position.
  */
-const TRUNK_DROPLET_OFFSET = { dx: 40, dy: -48 } as const;
+function trunkDropletOffset(r: number): { dx: number; dy: number } {
+  const grow = Math.max(0, r - DROPLET_MIN_R);
+  return { dx: 40 + grow * 0.6, dy: -48 - grow * 1.3 };
+}
 /**
  * #897 AC2: the frozen baseline connects Summary/Retro BELOW the outcome disc as a lower
  * reflection tree — not beside the trunk at its own y-band (the old `REFLECTION.x` column
@@ -504,7 +582,7 @@ const REFLECTION_NODES = [
   { node: "retro" as const, x: REFLECTION.stemX + REFLECTION.spread, label: "Retro", role: "roles.retro" },
 ] as const;
 
-const laneY = (index: number) => LANES.top + index * LANES.gap;
+export const laneY = (index: number) => LANES.top + index * LANES.gap;
 
 /**
  * #920 AC3: a lane channel no longer stops short of CI with no visible convergence — a curved
@@ -606,7 +684,7 @@ export function dropletPoint(state: HeroState, d: Droplet, at: DropletAt = d.at)
       );
       const col = rank % NEEDS_HUMAN_COLS;
       const row = Math.floor(rank / NEEDS_HUMAN_COLS);
-      return { x: ESCALATION.x + col * NEEDS_HUMAN_COL_STEP, y: ESCALATION.y - 30 - row * NEEDS_HUMAN_ROW_STEP };
+      return { x: ESCALATION.x + col * NEEDS_HUMAN_COL_STEP, y: ESCALATION.y - NEEDS_HUMAN_BASE_OFFSET - row * NEEDS_HUMAN_ROW_STEP };
     }
     // #886 gate② run 2e566ac9 finding [1]: the frozen baseline's outcome ring has NOTHING
     // else drawn near it — just a big centered number. `merged` (state.ts) always parks the
@@ -617,8 +695,10 @@ export function dropletPoint(state: HeroState, d: Droplet, at: DropletAt = d.at)
     // the true center for the number to match the baseline exactly, at any ring count. The
     // offset is verified collision-free against a worst-case ring/PR digit count by
     // `hero.test.ts`'s own stress test (mirrors the #728 needs-human-cluster stress pattern).
-    case "trunk":
-      return { x: TRUNK.x + TRUNK_DROPLET_OFFSET.dx, y: TRUNK.y + TRUNK_DROPLET_OFFSET.dy };
+    case "trunk": {
+      const { dx, dy } = trunkDropletOffset(dropletRadius(dropletNumber(d)));
+      return { x: TRUNK.x + dx, y: TRUNK.y + dy };
+    }
   }
 }
 
@@ -719,15 +799,103 @@ function dropletFill(d: Droplet): string {
   return "var(--sap-fill)";
 }
 
+/** #922 AC2: the 11px numeral floor is inviolable — never shrunk — so the droplet's own NUMBER
+ *  (never a prefix) is the only input `dropletRadius` sizes the shape against. `dropletKind` is
+ *  the small secondary glyph identifying WHAT the number is (parked-PR / in-flight-PR / bare-issue
+ *  / merged) — drawn separately, at its own smaller size, never counted toward the shape's own
+ *  fit. */
+function dropletKind(d: Droplet): string {
+  if (d.at === "needs-human" && d.pr !== null) return "PR";
+  if (d.at === "trunk") return "✓";
+  return d.pr === null ? "⊙" : "⤳";
+}
+
+/** The bare number a droplet's belly is actually sized to fit — the PR once one exists, else the
+ *  issue number. Never a prefix (`dropletKind`'s job) — see that function's own doc. */
+function dropletNumber(d: Droplet): string {
+  return String(d.pr === null ? d.issue : d.pr);
+}
+
 /**
- * #879: the frozen baseline draws every issue token as a teardrop, not a bare circle. Kept
- * within the SAME ~9px reach the old `<circle r={9}>` had (tip at y=-9, belly arc capped at
- * y=+9, x within ±7) — `hero.test.ts`'s collision math (`circleBox(x, y, 9)`) treats a
- * droplet's footprint as that 9px-radius circle, and every hairline-margin overlap check in
- * this file (checkpoint grid, needs-human cluster, backlog column) was tuned against it; a
- * shape that grew past that footprint would silently invalidate those margins.
+ * #879: the frozen baseline draws every issue token as a teardrop, not a bare circle. #922 AC2:
+ * the number renders INSIDE the shape (was floating above it) — so the shape's own belly radius
+ * must fit its own NUMBER's text box, not just clear a fixed height floor. `dropletRadius` sizes
+ * that belly to the ACTUAL number (never a guessed fixed max, and never the kind mark — content
+ * fits the shape, not the font), the same "grow to fit content,
+ * floor at a minimum" posture `ringCountFontPx`/`ringInnerRadius` (above) already use for the
+ * trunk's own display number — a droplet carrying a short issue number stays compact near the
+ * floor; one carrying a longer PR number grows to fit it.
+ *
+ * `DROPLET_MIN_R` is the floor: sized so the rendered height clears AC2's own ≥ 28px floor at the
+ * REAL render scale (`REAL_RENDER_SCALE_1440`, gate② finding [0] — not the naive
+ * `RENDER_SCALE_1440`, which overstates how much of a 1440px viewport the SVG actually gets):
+ * height = (18/7) × r stage units (the tip/belly-bottom span at the r=7 baseline this ratio comes
+ * from) × `REAL_RENDER_SCALE_1440` (≈1.0975) ≥ 28 needs r ≳ 9.92; 10.5 clears it with real margin
+ * (≈29.6px). `dropletPath(r)` generalizes that SAME tip/belly-radius/control-point ratio to any
+ * belly radius `r` — a droplet that grows for its number keeps the identical teardrop silhouette,
+ * just bigger.
  */
-const DROPLET_SHAPE = "M0,-9 C4,-4.5 7,-1 7,2 A7,7 0 1 1 -7,2 C-7,-1 -4,-4.5 0,-9 Z";
+const DROPLET_MIN_R = 10.5;
+/** #922 AC2: the number's own font-size — FIXED, never shrunk. 11 stage units ×
+ *  `REAL_RENDER_SCALE_1440` (≈1.0975) ≈ 12.07px at 1440, clearing the AC's own ≥ 11px floor at
+ *  the REAL render scale with real margin. Every droplet's number renders at exactly this size,
+ *  regardless of digit count — a droplet whose number would blow past `DROPLET_MAX_R` grows the
+ *  SHAPE up to that ceiling instead (`dropletRadius`); past the ceiling the number's text box can
+ *  exceed the path box, which is why the ceiling itself is sized to the widest number this file
+ *  actually expects (`DROPLET_MAX_R`'s own doc), not the font. */
+export const DROPLET_NUM_FONT_PX = 11;
+const DROPLET_CHAR_ADVANCE = 0.62;
+const DROPLET_TEXT_PAD = 4;
+/** #922 AC2: the number's own secondary kind mark (`dropletKind`) — smaller than the number
+ *  itself (never competes with it for the AC's own ≥ 11px floor, which names the NUMBER only) and
+ *  never counted toward `dropletRadius`'s own fit. 7 rendered too faint to read at 1440 (a live
+ *  shot measured it a ~3px tick); 9 is the smallest size that stays legibly a mark rather than
+ *  noise, and the widest mark ("PR", 2 chars) at 9 still sits well inside `DROPLET_MIN_R`'s own
+ *  belly (half-width ≈ 5.4 against a floor of 10.5). */
+const DROPLET_MARK_FONT_PX = 9;
+/** #922 AC2: vertical gap between the number (its own fixed anchor, unchanged) and the kind mark
+ *  drawn above it — a plain constant offset, not a second fitted layout, since the mark's own
+ *  small size clears the belly at every radius between `DROPLET_MIN_R` and `DROPLET_MAX_R`
+ *  (verified by `hero.test.ts`'s containment checks). Wider than `DROPLET_MARK_FONT_PX` itself (9)
+ *  because some glyphs (`✓`'s own tall ascender in this font) render close enough to their own
+ *  em-box top to touch the number's own top edge at a tighter gap; 11 keeps a visible gap for
+ *  every mark this file draws. */
+const DROPLET_MARK_OFFSET = 11;
+/** #922 AC2: the belly radius ceiling, covering a realistic 4-5 digit PR/issue number (sapwood's
+ *  own repo is already in the 4-digit range) WITHOUT shrinking the number's font —
+ *  `dropletRadius`'s own half-width formula gives
+ *  "9202" (4 digits) ≈ 17.6 and "12345" (5 digits) ≈ 21.05, both under 22. Two adjacent
+ *  needs-human/checkpoint columns (`NEEDS_HUMAN_COL_STEP`/`CHECKPOINT_COL_STEP`, both 46) still
+ *  never touch (2 × 22 = 44, a real — if narrower — margin under 46); a 6th digit would clip the
+ *  number's own text box (out of the AC's own "realistic" scope, and never reached by any fixture
+ *  this file exercises).
+ */
+const DROPLET_MAX_R = 22;
+
+/** #922 AC2: the belly radius a droplet needs so its own NUMBER's text box sits fully inside
+ *  the path box — never smaller than `DROPLET_MIN_R` (the height floor) nor larger than
+ *  `DROPLET_MAX_R` (the collision ceiling; a number past both the ceiling AND `DROPLET_MIN_R`'s
+ *  clearance is out of scope, see that constant's own doc). The number's font is always
+ *  `DROPLET_NUM_FONT_PX` — never re-derived here, never shrunk. Takes the bare number text
+ *  (`dropletNumber`), never the kind mark. Exported so `hero.test.ts` derives the exact same
+ *  footprint this file actually draws, never a copied literal. */
+export function dropletRadius(number: string): number {
+  const halfWidth = (number.length * DROPLET_NUM_FONT_PX * DROPLET_CHAR_ADVANCE) / 2 + DROPLET_TEXT_PAD;
+  return Math.max(DROPLET_MIN_R, Math.min(DROPLET_MAX_R, halfWidth));
+}
+
+/** Same teardrop silhouette as the original hand-tuned r=7 shape, generalized to any belly
+ *  radius `r` by a uniform scale (`k = r / 7`) of every coordinate. */
+export function dropletPath(r: number): string {
+  const k = r / 7;
+  const tip = -9 * k;
+  const c1x = 4 * k;
+  const c1y = -4.5 * k;
+  const c2x = 7 * k;
+  const c2y = -1 * k;
+  const beltY = 2 * k;
+  return `M0,${tip} C${c1x},${c1y} ${c2x},${c2y} ${c2x},${beltY} A${r},${r} 0 1 1 ${-c2x},${beltY} C${-c2x},${c2y} ${-c1x},${c1y} 0,${tip} Z`;
+}
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
@@ -797,77 +965,78 @@ export function modelEffortCaption(config: Record<string, unknown> | null | unde
   return typeof effort === "string" ? `${model} · ${effort}` : model;
 }
 
-/**
- * #879: the frozen baseline draws a small glyph inside each PLAN circle — target (goal-align),
- * a tiny hierarchy (arch-review), a checkmark (verify). Hand-drawn vector primitives, not a new
- * icon-font/library dependency, matching how the stage already draws every other glyph (✓/✕
- * text, hairline shapes) — three static, tightly-scoped shapes don't earn a package.
- * `[data-active="true"] .hero-planning-icon` (hero.css) recolors the same way the node's own
- * circle does; the icon carries no state of its own.
- */
+/** #922 owner ruling: REVIEW's caption prefers a real model·effort pair (`reviewer.agent.*`,
+ *  same allowlisted path AC7 names); a hosted-bot mode with no agent model (e.g. `codex`) falls
+ *  back to that plain mode word instead — never the internal `reviewer.mode` value directly
+ *  (§7's "plain word first, internal term never" — `reviewer.mode` can legitimately hold an
+ *  internal term like "engine-agent"). No config at all draws nothing (honest gap). */
+function reviewCaption(config: Record<string, unknown> | null | undefined): string | null {
+  const modelEffort = modelEffortCaption(config, "reviewer.agent");
+  if (modelEffort) return modelEffort;
+  if (!config) return null;
+  const mode = readConfigPath(config, "reviewer.mode");
+  return typeof mode === "string" && mode !== "engine-agent" ? mode : null;
+}
+
+/** #922 AC6: every hero UTILITY glyph (planning trio, gates, reflection pair, escalation) sources
+ *  from `lucide-react` — standard resources first, per the owner ruling; the hero's own IDENTITY
+ *  set (droplet, rings) stays hand-drawn. One shared size/placement helper so every node icon is
+ *  centred on `(cx, cy)` the same way `Sprout`'s own sapling glyph already is above. Colour is
+ *  never set per-icon: `className` carries `.hero-planning-icon`/`.hero-gate-icon`, whose `color`
+ *  (hero.css) every lucide icon's own `currentColor` stroke/fill inherits — the SAME mechanism
+ *  the sapling already validates, extended to a class instead of an inline style so
+ *  `[data-active="true"]` can still switch it. */
+const NODE_ICON_SIZE = 16;
+
+function nodeIcon(
+  Icon: ComponentType<{ x: number; y: number; width: number; height: number; strokeWidth?: number }>,
+  cx: number,
+  cy: number,
+  className: string,
+  dataIcon: string,
+  size: number = NODE_ICON_SIZE,
+) {
+  return (
+    <g className={className} data-icon={dataIcon}>
+      <Icon x={cx - size / 2} y={cy - size / 2} width={size} height={size} strokeWidth={1.6} />
+    </g>
+  );
+}
+
+/** #922 AC8: the breathing halo — a larger, blurred circle drawn BEHIND the node's own disc
+ *  (source order), r+6 per the AC's own spec. Callers render this only for the currently active
+ *  node — an inactive node carries no halo element at all, not merely a hidden one. */
+function nodeHalo(cx: number, cy: number, r: number) {
+  return <circle className="hero-node-halo" cx={cx} cy={cy} r={r + 6} filter="url(#hero-node-glow)" />;
+}
+
 function planningIcon(node: (typeof PLANNING_NODES)[number]["node"], cx: number, cy: number) {
   switch (node) {
     case "goal-align":
-      return (
-        <g className="hero-planning-icon" data-icon="target">
-          <circle cx={cx} cy={cy} r={6.5} />
-          <circle className="hero-planning-icon-dot" cx={cx} cy={cy} r={1.6} />
-        </g>
-      );
+      return nodeIcon(Target, cx, cy, "hero-planning-icon", "target");
     case "arch-review":
-      return (
-        <g className="hero-planning-icon" data-icon="tree">
-          <line x1={cx} y1={cy - 4} x2={cx} y2={cy + 1} />
-          <line x1={cx} y1={cy + 1} x2={cx - 6} y2={cy + 5} />
-          <line x1={cx} y1={cy + 1} x2={cx + 6} y2={cy + 5} />
-          <rect x={cx - 2} y={cy - 8} width={4} height={4} />
-          <rect x={cx - 8} y={cy + 5} width={4} height={4} />
-          <rect x={cx + 4} y={cy + 5} width={4} height={4} />
-        </g>
-      );
+      return nodeIcon(GitFork, cx, cy, "hero-planning-icon", "git-fork");
     case "verify":
-      return (
-        <g className="hero-planning-icon" data-icon="check">
-          <path d={`M ${cx - 5} ${cy} L ${cx - 1.5} ${cy + 4} L ${cx + 5} ${cy - 5}`} />
-        </g>
-      );
+      return nodeIcon(Check, cx, cy, "hero-planning-icon", "check");
   }
 }
 
 /**
- * #897 AC2: the frozen baseline draws a hand-drawn glyph inside each gate circle — a gear for
- * CI, an eye for Review — same "hand-drawn vector primitive, no icon-font" posture as
- * `planningIcon` above (two static, tightly-scoped shapes don't earn a package either). A
- * distinct `hero-gate-icon` class, not a reuse of `hero-planning-icon` — the two zones stay
- * separately countable (`hero.test.ts`'s own "one icon per PLAN node" oracle depends on
- * `hero-planning-icon` never drawing outside the planning trio); `hero.css` shares the actual
- * stroke styling between the two classes.
+ * #922 owner ruling: CI swaps its icon for the standard GitHub Actions asset
+ * (`GithubActionsGlyph`, `components/icons.tsx`) — never lucide, since no lucide entry names it.
+ * Review swaps its hand-drawn eye for lucide's own `Eye`, same `nodeIcon` placement/colour
+ * mechanism as the planning trio.
  */
 function gateIcon(gate: "ci" | "review", cx: number, cy: number) {
   switch (gate) {
     case "ci":
       return (
-        <g className="hero-gate-icon" data-icon="gear">
-          <circle cx={cx} cy={cy} r={7} />
-          <circle className="hero-planning-icon-dot" cx={cx} cy={cy} r={2.2} />
-          {[0, 45, 90, 135].map((deg) => (
-            <line
-              key={deg}
-              x1={cx + 10 * Math.cos((deg * Math.PI) / 180)}
-              y1={cy + 10 * Math.sin((deg * Math.PI) / 180)}
-              x2={cx - 10 * Math.cos((deg * Math.PI) / 180)}
-              y2={cy - 10 * Math.sin((deg * Math.PI) / 180)}
-            />
-          ))}
+        <g className="hero-gate-icon" data-icon="github-actions">
+          <GithubActionsGlyph x={cx - NODE_ICON_SIZE / 2} y={cy - NODE_ICON_SIZE / 2} width={NODE_ICON_SIZE} height={NODE_ICON_SIZE} />
         </g>
       );
     case "review":
-      return (
-        <g className="hero-gate-icon" data-icon="eye">
-          <path d={`M ${cx - 11} ${cy} Q ${cx} ${cy - 8} ${cx + 11} ${cy} Q ${cx} ${cy + 8} ${cx - 11} ${cy} Z`} />
-          <circle className="hero-planning-icon-dot" cx={cx} cy={cy} r={2.6} />
-        </g>
-      );
+      return nodeIcon(Eye, cx, cy, "hero-gate-icon", "eye");
   }
 }
 
@@ -937,7 +1106,6 @@ export function HeroStage({
   const activePlanning = activePlanningNode(roundPhase);
   const activeReflection = activeReflectionNode(roundPhase);
   const staleness = stalenessCaption(state.lastEventTs, clock);
-  const reviewMode = config ? readConfigPath(config, "reviewer.mode") : undefined;
   // §6: "N merged · N pending · N needs human" — merged is THIS round's tally (never the
   // all-time ring count); pending/needs-human are the droplets currently in each state.
   //
@@ -1011,6 +1179,12 @@ export function HeroStage({
         <marker id="hero-return-arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path className="hero-arrowhead" d="M 0 0 L 10 5 L 0 10 Z" />
         </marker>
+        {/* #922 AC8: the active-node halo's own blur — stdDeviation ≈ 3, per the AC's own wording;
+         * `x`/`y`/`width`/`height` widen the filter region past its 10% default margin so the
+         * blur isn't itself clipped at the halo circle's own edge. */}
+        <filter id="hero-node-glow" x="-60%" y="-60%" width="220%" height="220%">
+          <feGaussianBlur stdDeviation="3" />
+        </filter>
       </defs>
 
       {/* ── Phase captions — §5: the big display face, sparingly ── */}
@@ -1038,7 +1212,7 @@ export function HeroStage({
         <text className="hero-label" x={BACKLOG.x} y={BACKLOG.y - 12}>
           BACKLOG ({state.pool.length} ready)
         </text>
-        <rect className="hero-well" x={BACKLOG.x} y={BACKLOG.y} width={BACKLOG.w} height={210} rx={6} />
+        {/* #922 AC3: no well rect — a frameless column of filled/outlined cards, per the mockup. */}
         {state.pool.slice(0, BACKLOG_FILLED_CAP).map((issue, i) => (
           <g className="hero-pool-chip" key={issue} data-issue={issue}>
             <rect
@@ -1046,15 +1220,15 @@ export function HeroStage({
               x={BACKLOG.x + 8}
               y={BACKLOG.y + 6 + i * BACKLOG.chip}
               width={BACKLOG.w - 16}
-              height={24}
+              height={BACKLOG_CHIP_H}
               rx={8}
             />
             {/* #924: `.hero-pool-num` (hero.css) fills from --on-sap-fill — always dark ink on
              * this card's amber, in both themes (see hero.css's own doc). */}
             <text
-              className="hero-num hero-pool-num"
+              className="hero-num hero-pool-num hero-backlog-num"
               x={BACKLOG.x + BACKLOG.w / 2}
-              y={BACKLOG.y + 22 + i * BACKLOG.chip}
+              y={BACKLOG.y + 6 + BACKLOG_CHIP_H / 2 + 5 + i * BACKLOG.chip}
               textAnchor="middle"
             >
               ⊙ {issue}
@@ -1062,20 +1236,50 @@ export function HeroStage({
           </g>
         ))}
         {/* #897 AC4: the rest of the ready pool — an outlined candidate stack, distinguishable
-         * from the filled cards above rather than folded into the same filled-chip list. */}
-        {state.pool.slice(BACKLOG_FILLED_CAP).map((issue, i) => (
+         * from the filled cards above rather than folded into the same filled-chip list.
+         * #922 AC3: capped at `BACKLOG_CANDIDATE_DRAW_CAP` — the true remainder collapses into a
+         * single "…" chip below instead of growing the column without limit. */}
+        {state.pool.slice(BACKLOG_FILLED_CAP, BACKLOG_FILLED_CAP + BACKLOG_CANDIDATE_DRAW_CAP).map((issue, i) => (
           <g className="hero-pool-candidate" key={issue} data-issue={issue}>
-            <rect x={BACKLOG.x + 8} y={BACKLOG.y + 6 + (i + BACKLOG_FILLED_CAP) * BACKLOG.chip} width={BACKLOG.w - 16} height={24} rx={8} />
+            <rect
+              x={BACKLOG.x + 8}
+              y={BACKLOG.y + 6 + (i + BACKLOG_FILLED_CAP) * BACKLOG.chip}
+              width={BACKLOG.w - 16}
+              height={BACKLOG_CHIP_H}
+              rx={8}
+            />
             <text
-              className="hero-num"
+              className="hero-num hero-backlog-num"
               x={BACKLOG.x + BACKLOG.w / 2}
-              y={BACKLOG.y + 22 + (i + BACKLOG_FILLED_CAP) * BACKLOG.chip}
+              y={BACKLOG.y + 6 + BACKLOG_CHIP_H / 2 + 5 + (i + BACKLOG_FILLED_CAP) * BACKLOG.chip}
               textAnchor="middle"
             >
               ⊙ {issue}
             </text>
           </g>
         ))}
+        {state.pool.length > BACKLOG_FILLED_CAP + BACKLOG_CANDIDATE_DRAW_CAP && (
+          <g
+            className="hero-pool-candidate hero-pool-overflow"
+            data-count={state.pool.length - BACKLOG_FILLED_CAP - BACKLOG_CANDIDATE_DRAW_CAP}
+          >
+            <rect
+              x={BACKLOG.x + 8}
+              y={BACKLOG.y + 6 + (BACKLOG_CANDIDATE_DRAW_CAP + BACKLOG_FILLED_CAP) * BACKLOG.chip}
+              width={BACKLOG.w - 16}
+              height={BACKLOG_CHIP_H}
+              rx={8}
+            />
+            <text
+              className="hero-num hero-backlog-num"
+              x={BACKLOG.x + BACKLOG.w / 2}
+              y={BACKLOG.y + 6 + BACKLOG_CHIP_H / 2 + 5 + (BACKLOG_CANDIDATE_DRAW_CAP + BACKLOG_FILLED_CAP) * BACKLOG.chip}
+              textAnchor="middle"
+            >
+              …
+            </text>
+          </g>
+        )}
       </g>
 
       {/*
@@ -1086,21 +1290,24 @@ export function HeroStage({
       <g className="hero-planning" data-node="planning">
         {PLANNING_NODES.map((n) => {
           const caption = modelEffortCaption(config, n.role);
+          const active = activePlanning === n.node;
           return (
-            <g
-              key={n.node}
-              data-active={activePlanning === n.node ? "true" : "false"}
-              {...inspectProps(n.node, `inspect ${n.label}`, onInspect)}
-            >
+            <g key={n.node} data-active={active ? "true" : "false"} {...inspectProps(n.node, `inspect ${n.label}`, onInspect)}>
               <title>{n.hint}</title>
-              {hitTarget(PLANNING.x - PLANNING_NODE_R - 4, n.y - PLANNING_NODE_R - 4, PLANNING_NODE_R * 2 + 178, PLANNING_NODE_R + 38)}
+              {hitTarget(
+                PLANNING.x - PLANNING_NODE_R - 60,
+                n.y - PLANNING_NODE_R - 4,
+                PLANNING_NODE_R * 2 + 120,
+                PLANNING_NODE_R + NODE_CAPTION_OFFSET + 10,
+              )}
+              {active && nodeHalo(PLANNING.x, n.y, PLANNING_NODE_R)}
               <circle className="hero-planning-node" cx={PLANNING.x} cy={n.y} r={PLANNING_NODE_R} />
               {planningIcon(n.node, PLANNING.x, n.y)}
-              <text className="hero-node-label" x={PLANNING.x + PLANNING_NODE_R + 14} y={n.y + 4}>
+              <text className="hero-node-label" x={PLANNING.x} y={n.y + PLANNING_NODE_R + NODE_LABEL_OFFSET} textAnchor="middle">
                 {n.label}
               </text>
               {caption && (
-                <text className="hero-node-caption" x={PLANNING.x + PLANNING_NODE_R + 14} y={n.y + 17}>
+                <text className="hero-node-caption" x={PLANNING.x} y={n.y + PLANNING_NODE_R + NODE_CAPTION_OFFSET} textAnchor="middle">
                   {caption}
                 </text>
               )}
@@ -1211,16 +1418,23 @@ export function HeroStage({
        * Plain labels only — CI / Review, never gate①/gate②.
        */}
       <g className="hero-gates">
-        {/* #897 AC2: large circular gate nodes with a hand-drawn icon marker (`gateIcon`), not
-         * the small rects this stage used to draw — the primary "CI"/"Review" label moves below
-         * the circle (the circle itself carries the icon), matching the planning trio's own
-         * circle-then-label-below convention. */}
+        {/* #897 AC2: large circular gate nodes with an icon marker (`gateIcon`), not the small
+         * rects this stage used to draw — the primary "CI"/"Review" label sits below the circle
+         * (the circle itself carries the icon), matching the planning trio's own
+         * circle-then-label-below convention; #922 AC1/AC7 adds a small-print caption in the same
+         * slot every other node's caption uses. */}
         <g className="hero-gate" data-gate="ci" data-state={gateState} {...inspectProps("ci", "inspect CI", onInspect)}>
           {hitTarget(GATES.ci - GATES.r - 4, GATES.y - GATES.r - 30, GATES.r * 2 + 8, GATES.r * 2 + 60)}
           <circle className="hero-gate-node" cx={GATES.ci} cy={GATES.y} r={GATES.r} />
           {gateIcon("ci", GATES.ci, GATES.y)}
-          <text className="hero-node-label" x={GATES.ci} y={GATES.y + GATES.r + 16} textAnchor="middle">
+          <text className="hero-node-label" x={GATES.ci} y={GATES.y + GATES.r + NODE_LABEL_OFFSET} textAnchor="middle">
             CI
+          </text>
+          {/* #922 owner ruling: CI's caption is the plain, non-configurable provider word — a
+           * constant (`copy.ts`), never a config read (the CI provider isn't configurable in
+           * v0.2, unlike REVIEW's genuinely-configurable reviewer identity below). */}
+          <text className="hero-node-caption" x={GATES.ci} y={GATES.y + GATES.r + NODE_CAPTION_OFFSET} textAnchor="middle">
+            {CI_CAPTION}
           </text>
           {/* #716 gate② P2-5: the merged flash used to be a border-color change ONLY
            * (`.hero-gate.is-merged circle`) — a real ✓ glyph is the non-color-carried channel
@@ -1234,27 +1448,21 @@ export function HeroStage({
           {hitTarget(GATES.review - GATES.r - 4, GATES.y - GATES.r - 30, GATES.r * 2 + 8, GATES.r * 2 + 60)}
           <circle className="hero-gate-node" cx={GATES.review} cy={GATES.y} r={GATES.r} />
           {gateIcon("review", GATES.review, GATES.y)}
-          <text className="hero-node-label" x={GATES.review} y={GATES.y + GATES.r + 16} textAnchor="middle">
+          <text className="hero-node-label" x={GATES.review} y={GATES.y + GATES.r + NODE_LABEL_OFFSET} textAnchor="middle">
             Review
           </text>
           <text className="hero-gate-check" x={GATES.review + GATES.r - 4} y={GATES.y - GATES.r + 6} textAnchor="middle">
             ✓
           </text>
-          {/* §6: REVIEW carries the review MODE word (e.g. "codex", "engine-agent"), not a
-           * model·effort pair — it isn't itself model-backed, the mode just names which
-           * reviewer runs.
-           * #745 gate② round 5 PO pre-merge Tier-C probe (1700px, live DB): a drawn checkpoint
-           * chip's label bbox-intersected this caption — pushed further from the gate box as the
-           * cheap half of the fix, paired with the checkpoint grid's own extra clearance below
-           * (`dropletPoint`'s checkpoint case).
-           * #897: moved ABOVE the circle (`GATES.y - GATES.r - 12`) — the space below the circle
-           * is spoken for by the "Review" word label
-           * alone (`GATES`'s own doc: no room below for two stacked lines before the needs-human
-           * cluster's fixed ceiling). Above the circle sits comfortably clear of the checkpoint
-           * grid's own closest content — same doc's own margin accounting. */}
-          {typeof reviewMode === "string" && (
-            <text className="hero-node-caption" x={GATES.review} y={GATES.y - GATES.r - 12} textAnchor="middle">
-              {reviewMode}
+          {/* #922 owner ruling: REVIEW carries a model·effort caption like every other model-backed
+           * node — never the internal `reviewer.mode` word (§7). `reviewCaption` falls back to the
+           * reviewer's plain name for a hosted-bot mode with no agent model, and draws nothing at
+           * all absent config (the existing "honest gap" rule) — same `.hero-node-caption` slot
+           * and offset as the planning trio's own captions (`NODE_CAPTION_OFFSET`), directly below
+           * the label instead of the old above-circle placement. */}
+          {reviewCaption(config) && (
+            <text className="hero-node-caption" x={GATES.review} y={GATES.y + GATES.r + NODE_CAPTION_OFFSET} textAnchor="middle">
+              {reviewCaption(config)}
             </text>
           )}
         </g>
@@ -1272,10 +1480,14 @@ export function HeroStage({
         <path
           style={{ stroke: "var(--rust)" }}
           className="hero-branch"
-          d={`M ${ESCALATION.x} ${GATES.y} L ${ESCALATION.x} ${ESCALATION.y - 18}`}
+          d={`M ${ESCALATION.x} ${GATES.y} L ${ESCALATION.x} ${ESCALATION.y - ESCALATION_R - 5}`}
         />
-        <circle style={{ stroke: "var(--rust)" }} cx={ESCALATION.x} cy={ESCALATION.y} r={13} />
-        <text className="hero-node-label" x={ESCALATION.x + 24} y={ESCALATION.y + 4}>
+        <circle style={{ stroke: "var(--rust)" }} cx={ESCALATION.x} cy={ESCALATION.y} r={ESCALATION_R} />
+        {/* #922 AC4/AC6: a person glyph (lucide `UserRound`) inside the rust hairline circle —
+         * `--rust` is the escalation node's own colour, so the icon inherits it via `color`
+         * (`hero.css`'s `.hero-escalation-icon`), not the planning/gate icon's idle `--bark`. */}
+        {nodeIcon(UserRound, ESCALATION.x, ESCALATION.y, "hero-escalation-icon", "user-round", 14)}
+        <text className="hero-node-label" x={ESCALATION.x} y={ESCALATION.y + ESCALATION_R + NODE_LABEL_OFFSET} textAnchor="middle">
           Needs human
         </text>
       </g>
@@ -1323,7 +1535,7 @@ export function HeroStage({
              * cross-section with nothing else drawn near it. Earlier rounds moved this text itself
              * off-center to dodge the newest-merge droplet that always parks at the trunk (see
              * `merged` in state.ts); that read as "floating below the ring" for the realistic
-             * low-ring-count case a live probe actually captures. `TRUNK_DROPLET_OFFSET` (above)
+             * low-ring-count case a live probe actually captures. `trunkDropletOffset` (above)
              * moves the DROPLET out of the way instead, so this can stay truly centered at any ring
              * count. +11 is a baseline-centering nudge for the display font's cap-height, not a
              * collision-avoidance number. #921 AC2: `fontSize` is now inline (`RING_COUNT_FONT_PX`,
@@ -1375,13 +1587,21 @@ export function HeroStage({
         />
         {REFLECTION_NODES.map((n) => {
           const caption = modelEffortCaption(config, n.role);
+          const active = activeReflection === n.node;
           return (
-            <g
-              key={n.node}
-              data-active={activeReflection === n.node ? "true" : "false"}
-              {...inspectProps(n.node, `inspect ${n.label}`, onInspect)}
-            >
+            <g key={n.node} data-active={active ? "true" : "false"} {...inspectProps(n.node, `inspect ${n.label}`, onInspect)}>
+              {active && nodeHalo(n.x, REFLECTION.y, REFLECTION.r)}
               <circle className="hero-planning-node" cx={n.x} cy={REFLECTION.y} r={REFLECTION.r} />
+              {/* #922 AC6: bar-chart (Summary) / trend-arrow (Retro) — every reflection/escalation
+               * node carries a glyph now, matching the planning trio and gates. */}
+              {nodeIcon(
+                n.node === "summary" ? ChartNoAxesColumn : TrendingUp,
+                n.x,
+                REFLECTION.y,
+                "hero-planning-icon",
+                n.node === "summary" ? "chart-no-axes-column" : "trending-up",
+                14,
+              )}
               {/* #920 gate② review thread (PRRT…gJ/…GgK): the label used to sit ON the circle's
                * own bottom arc (`REFLECTION.y + 20` vs a circle bottom of `REFLECTION.y + r` =
                * +16) — text-on-stroke. `REFLECTION.r + 12` gives real clearance below the edge. */}
@@ -1431,6 +1651,17 @@ export function HeroStage({
           // droplets that ACTUALLY draw, never among the hidden ones sitting ahead of it too
           // (`geometryState`'s own doc above).
           const { x, y } = dropletPoint(geometryState, d);
+          // #922 AC2: the shape grows to fit THIS droplet's own NUMBER
+          // only (never a fixed guess, `dropletRadius`'s own doc) — the kind mark is secondary and
+          // never grows the shape. `bottom` is the shape's own real rendered bottom edge (the same
+          // 9/7 ratio `dropletPath` draws its tip at, mirrored) — every element below the number
+          // anchors off it instead of a fixed offset that only held for the old constant-size
+          // shape.
+          const kind = dropletKind(d);
+          const number = dropletNumber(d);
+          const r = dropletRadius(number);
+          const bottom = (r * 9) / 7;
+          const numY = bottom * 0.35;
           return (
             <g
               className="hero-droplet"
@@ -1441,18 +1672,28 @@ export function HeroStage({
               data-lane={d.lane ?? ""}
               transform={`translate(${x} ${y})`}
             >
-              <path className="hero-droplet-shape" d={DROPLET_SHAPE} style={{ fill: dropletFill(d) }} />
-              <text className="hero-num hero-small" x={0} y={-14} textAnchor="middle">
-                {d.at === "trunk" ? "✓ " : ""}
-                {d.pr === null ? `⊙ ${d.issue}` : `⤳ ${d.pr}`}
+              <path className="hero-droplet-shape" d={dropletPath(r)} style={{ fill: dropletFill(d) }} />
+              {/* #922 AC2: the kind mark (⊙ / ⤳ / ✓ / PR) — WHAT the number is, drawn smaller
+               *  and above it, never sized into the shape's own fit (`dropletRadius`'s own doc). */}
+              <text
+                className="hero-droplet-kind"
+                x={0}
+                y={numY - DROPLET_MARK_OFFSET}
+                textAnchor="middle"
+                style={{ fontSize: DROPLET_MARK_FONT_PX }}
+              >
+                {kind}
+              </text>
+              <text className="hero-num hero-droplet-num" x={0} y={numY} textAnchor="middle" style={{ fontSize: DROPLET_NUM_FONT_PX }}>
+                {number}
               </text>
               {d.failed && (
-                <text className="hero-mark" x={0} y={4} textAnchor="middle">
+                <text className="hero-mark" x={0} y={bottom + 12} textAnchor="middle">
                   ✕
                 </text>
               )}
               {d.handedOff && (
-                <text className="hero-small hero-badge" x={0} y={24} textAnchor="middle">
+                <text className="hero-small hero-badge" x={0} y={bottom + (d.failed ? 26 : 12)} textAnchor="middle">
                   saved for a successor
                 </text>
               )}
@@ -1481,17 +1722,21 @@ export function HeroStage({
          * (`PLANNING.noteX`/`PLANNING.note` = 152, 300) with a long enough label to run straight
          * into it. Moved below the ESCALATION node instead — the one stretch of the stage
          * nothing else draws into at ANY zone's worst case: below the needs-human cluster's
-         * lowest row (`ESCALATION.y - 30`, itself well above this y), below the node's own
-         * label/circle, and above the dashed return path's horizontal leg (`STAGE.h - 20`).
+         * lowest row (`ESCALATION.y - NEEDS_HUMAN_BASE_OFFSET`, itself well above this y), below
+         * the node's own label/circle, and above the dashed return path's horizontal leg
+         * (`STAGE.h - 20`).
          * Shortened text, verified collision-free against every neighboring caption/tally by
          * `hero.test.ts`'s own worst-case stress test, the same discipline this file's other
-         * geometry constants already cite. */}
+         * geometry constants already cite.
+         * #922: pushed from the old fixed `+ 34` to below the escalation node's own label
+         * (`ESCALATION_R + NODE_LABEL_OFFSET`, now that AC1 moved that label below the circle
+         * instead of beside it) plus a caption-line gap, so it never sits on top of that label. */}
         {collapsedCount > 0 && (
           <text
             className="hero-num hero-small hero-badge hero-attention-collapsed"
             data-count={collapsedCount}
             x={ESCALATION.x}
-            y={ESCALATION.y + 34}
+            y={ESCALATION.y + ESCALATION_R + NODE_LABEL_OFFSET + 14}
             textAnchor="middle"
           >
             +{collapsedCount} earlier — see strip

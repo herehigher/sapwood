@@ -100,6 +100,10 @@ function minimalAppViewModel(
     // sets this explicitly, same self-consistency posture `rounds`/`selectedRoundId` above
     // already documents for #733 engine-agent finding [2].
     replayPosition?: unknown;
+    // #922 AC5 gate② finding [5]: replay's own phase windows (`replay.phaseWindows`) — defaults
+    // to `[]` (no windows), same "nothing selected" posture every other replay field starts in; a
+    // test proving `roundPhase={mode === "live" ? ... : phaseAtCursor(...)}` sets this explicitly.
+    phaseWindows?: { phase: string; startTs: string; endTs: string | null }[];
   } = {},
 ) {
   return {
@@ -140,7 +144,7 @@ function minimalAppViewModel(
       setSpeed: () => {},
       scrub: () => {},
       spendThroughCursor: [],
-      phaseWindows: [],
+      phaseWindows: overrides.phaseWindows ?? [],
       roundEvents: overrides.roundEvents ?? [],
       roundSpend: [],
       asOf: overrides.asOf ?? null,
@@ -453,6 +457,56 @@ test("#733 AC5: a selected closed round hides the control group entirely and sho
   assert.match(liveHtml, /aria-label="operations"/, "same rounds list, nothing selected -> the control group DOES render");
   assert.match(liveHtml, /EMERGENCY STOP/, "engine.state running -> EMERGENCY STOP renders too");
   assert.doesNotMatch(liveHtml, /back to live/, "no round selected -> no 'back to live' jump either");
+});
+
+// #922 AC5 gate② finding [5] (ac5-active-capture): "replay highlights the cursor's phase" —
+// `roundPhase` is now derived from `phaseAtCursor(replay.phaseWindows, replay.asOf)` in replay
+// mode, never a hardcoded `null` (`App.tsx`'s own call site). Proves BOTH halves at once: (1) the
+// active planning node genuinely renders during replay (the whole point — without this wiring no
+// `?demo` capture could ever show one, AC5's own bug); (2) dimming stays a LIVE-only concept even
+// though `roundPhase` is non-null now — a dimming engine state (`stopped`) + the SAME asOf/
+// phaseWindows fixture must NOT dim in replay, only in live (`Hero.tsx`'s `live` prop, not
+// `roundPhase !== null`, is what gates it post-#922).
+test("#922 AC5: replay derives an active planning node from the cursor's own phase window, and never dims from it (live-only dimming stays intact)", () => {
+  const data = { ...LOOP_STATE_OK, engine: { ...LOOP_STATE_OK.engine, state: "stopped" } };
+  const phaseWindows = [{ phase: "aligning", startTs: "2026-01-01T00:00:00Z", endTs: null }];
+  const closedRound = {
+    roundId: 42,
+    status: "done",
+    startedAt: "2026-01-01T00:00:00Z",
+    endedAt: null,
+    startEventId: 1,
+    startSpendId: 1,
+    eventCount: 10,
+    schemaVersion: null,
+    artifact: null,
+  };
+
+  const replayVm = minimalAppViewModel({
+    mode: "replay",
+    loop: { data, isPending: false },
+    rounds: [closedRound],
+    selectedRoundId: 42,
+    asOf: "2026-01-01T00:05:00Z",
+    phaseWindows,
+    activeHero: initialHeroState(1),
+  });
+  const replayHtml = renderToStaticMarkup(appContent(replayVm));
+  assert.match(replayHtml, /data-active="true"/, "the replay cursor's own phase (aligning) must render an active planning node");
+  assert.doesNotMatch(
+    replayHtml,
+    /data-dimmed="true"/,
+    "a dimming engine state must NOT dim the stage in replay — dimming is live-only, even with a non-null roundPhase",
+  );
+
+  // Sanity: the SAME phase/asOf fixture in LIVE mode (round.phase set instead of derived from the
+  // replay cursor) DOES dim under the same dimming engine state — proves the assertion above is a
+  // real regression guard tied to `live`, not a fixture that never dims regardless of it.
+  const liveData = { ...data, round: { phase: "aligning" } };
+  const liveVm = minimalAppViewModel({ mode: "live", loop: { data: liveData, isPending: false }, activeHero: initialHeroState(1) });
+  const liveHtml = renderToStaticMarkup(appContent(liveVm));
+  assert.match(liveHtml, /data-active="true"/, "live mode with the same phase also renders the active planning node");
+  assert.match(liveHtml, /data-dimmed="true"/, "live mode with a dimming engine state DOES dim — the same fixture, only `live` differs");
 });
 
 test("both queries succeeding renders the normal header, not disconnected", async () => {

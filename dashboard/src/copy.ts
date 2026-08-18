@@ -1018,6 +1018,11 @@ export function laneStateCaption(state: string): string {
   return LANE_STATE_CAPTION[state] ?? state;
 }
 
+/** #922 owner ruling (2026-08-17): the CI gate's small-print caption — a constant, not a config
+ *  read, since the CI provider isn't configurable in v0.2 (unlike REVIEW's model·effort caption,
+ *  which genuinely varies per deployment). */
+export const CI_CAPTION = "github";
+
 /** §3 Operations / §7: the misfire-protection confirm copy for each control verb, verbatim from
  *  the design doc's own table + confirm-wording examples — sourced from here, never an inline
  *  string in the Controls component, so a reviewer checking §7 compliance has one place to look. */

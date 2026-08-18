@@ -61,6 +61,19 @@ export function buildPhaseWindows(events: readonly DomainEvent[]): PhaseWindow[]
   }));
 }
 
+/**
+ * #922 "What" (owner observations, folded in): "replay highlights the cursor's phase" — the
+ * phase window containing `ts`, the SAME `[startTs, endTs)` containment `bucketSpendByPhase`
+ * already uses for spend rows, reused here so the hero's active planning/reflection node during
+ * REPLAY can never diverge from what a spend row at that same instant would bucket into. `null`
+ * `ts` (no cursor yet) or no containing window (before the round's first `round-phase` event)
+ * both mean "no active phase" — the honest gap (§6), never a guessed one.
+ */
+export function phaseAtCursor(windows: readonly PhaseWindow[], ts: string | null): string | null {
+  if (ts === null) return null;
+  return windows.find((w) => ts >= w.startTs && (w.endTs === null || ts < w.endTs))?.phase ?? null;
+}
+
 export interface PhaseSpendBucket {
   phase: string;
   rows: SpendRow[];

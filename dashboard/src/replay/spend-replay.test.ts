@@ -6,6 +6,7 @@ import {
   bucketSpendByPhase,
   buildPhaseWindows,
   mergeRoundPhaseBuckets,
+  phaseAtCursor,
   phaseSpendBars,
   spendThroughTs,
   UNATTRIBUTED_PHASE,
@@ -146,6 +147,29 @@ test("a mixed pre-#206 and post-#206 log never misfiles the pre-history rows int
     buckets.find((b) => b.phase === "executing")?.rows.map((r) => r.id),
     [3],
   );
+});
+
+// ── #922 "What"/AC5 gate② finding [5]: phaseAtCursor — "replay highlights the cursor's phase" ──
+
+test("phaseAtCursor returns the phase whose window contains the cursor ts — the same containment bucketSpendByPhase uses for spend rows", () => {
+  const windows = buildPhaseWindows([
+    roundPhaseEvent(1, "2026-08-10T00:00:00Z", "aligning"),
+    roundPhaseEvent(2, "2026-08-10T00:10:00Z", "architecting"),
+  ]);
+  assert.equal(phaseAtCursor(windows, "2026-08-10T00:05:00Z"), "aligning");
+  assert.equal(
+    phaseAtCursor(windows, "2026-08-10T00:10:00Z"),
+    "architecting",
+    "the transition instant itself belongs to the NEW window (>= startTs)",
+  );
+  assert.equal(phaseAtCursor(windows, "2026-08-10T00:59:00Z"), "architecting", "the last window is open-ended (endTs: null)");
+});
+
+test("phaseAtCursor is null for a null cursor (no round loaded) or a ts before any window starts — the honest gap, never a guessed phase", () => {
+  const windows = buildPhaseWindows([roundPhaseEvent(1, "2026-08-10T00:10:00Z", "aligning")]);
+  assert.equal(phaseAtCursor(windows, null), null);
+  assert.equal(phaseAtCursor(windows, "2026-08-10T00:00:00Z"), null);
+  assert.equal(phaseAtCursor([], "2026-08-10T00:00:00Z"), null, "no windows at all (pre-#206 history) is also the honest gap");
 });
 
 // ── mergeRoundPhaseBuckets: per-round bucketing preserves ID association across a union ──────────

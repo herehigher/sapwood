@@ -5,16 +5,21 @@ import test from "node:test";
 import {
   AA,
   checkContrast,
+  checkFillFloorContrast,
   checkFillTextContrast,
   checkFillTrackContrast,
+  checkRustTextContrast,
   contrastRatio,
   FILL_TOKENS,
   GROUNDS,
   NON_TEXT_AA,
   ON_FILL_TOKEN,
+  ON_RUST_TOKEN,
   parseColorTokens,
   parseTokens,
+  RUST_FILL_TOKEN,
   readTokensCss,
+  SAP_FILL_HALO_FLOOR,
   TEXT_TOKENS,
 } from "./contrast.ts";
 
@@ -139,6 +144,43 @@ test("AC3 (re-baselined 2026-08-17): --sap-fill vs the real .cost-bar-track comp
   );
 });
 
+// #922 AC2 gate② finding [2] (ac2-rust-ink-contrast): the parked-PR/failed droplet's own number
+// draws --on-rust on --rust — a bare --on-sap-fill-on-rust pair (the old, unchecked state)
+// measured only ~2.74:1 in light theme. --on-rust flips per-theme (tokens.css's own doc); this
+// proves BOTH themes independently clear the real AA text floor (4.5:1 — droplet numerals are
+// text, not the 3:1 non-text boundary the fill-floor checks above use).
+test("AC2: --on-rust on --rust clears AA (4.5:1) in both themes", () => {
+  assert.equal(RUST_FILL_TOKEN, "--rust");
+  assert.equal(ON_RUST_TOKEN, "--on-rust");
+  const failures = checkRustTextContrast(css).filter((row) => !row.pass);
+  assert.deepEqual(failures, [], failures.map((f) => `${f.theme} ${f.text} on ${f.ground} = ${f.ratio}`).join("; "));
+});
+
+// #922 AC8: the breathing active-node disc's fill never drops below SAP_FILL_HALO_FLOOR — the
+// glyph drawn on top (--on-sap-fill, never itself animated) must clear 3:1 against --sap-fill at
+// that worst-case floor, composited over --panel, independently in both themes.
+test("AC8: --on-sap-fill on --sap-fill at the breathing floor clears 3:1 (non-text) over --panel in both themes", () => {
+  const rows = checkFillFloorContrast(css);
+  const failures = rows.filter((row) => !row.pass);
+  assert.deepEqual(failures, [], failures.map((f) => `${f.theme} ${f.text} on ${f.ground} = ${f.ratio}`).join("; "));
+  assert.ok(
+    SAP_FILL_HALO_FLOOR.sapwood >= 0.45 && SAP_FILL_HALO_FLOOR.heartwood >= 0.45,
+    "floor must never sink below the AC's own 0.45 lower bound",
+  );
+});
+
+// #922 AC8: the CSS custom properties hero.css's own @keyframes animate to must be the SAME
+// numbers checkFillFloorContrast (contrast.ts) proves clear 3:1 — VALUE doctrine, never two
+// independently hand-tuned floors.
+test("AC8: --sap-fill-halo-floor's authored dark/light values match contrast.ts's SAP_FILL_HALO_FLOOR", () => {
+  const rootMatch = css.match(/:root\s*\{[\s\S]*?--sap-fill-halo-floor:\s*([\d.]+)/);
+  assert.ok(rootMatch, "the :root (dark-default) --sap-fill-halo-floor must be declared");
+  assert.equal(Number(rootMatch![1]), SAP_FILL_HALO_FLOOR.heartwood);
+  const floorValues = [...css.matchAll(/--sap-fill-halo-floor:\s*([\d.]+)/g)].map((m) => Number(m[1]));
+  assert.equal(floorValues.length, 3, "root default + data-theme override + prefers-color-scheme override");
+  assert.ok(floorValues.slice(1).every((v) => v === SAP_FILL_HALO_FLOOR.sapwood));
+});
+
 // #924 AC3: happy-dom never evaluates light-dark() (verified directly, both with and without a
 // var() indirection, on both a bare HTML `color` and an SVG `stroke`) — the STYLE proof this pins
 // therefore needs `--sap-fill-outline`'s WINNING declaration to be a literal hex, not a
@@ -256,6 +298,13 @@ test("AC3 COVERAGE: every production var(--sap-fill) paint site is on record", (
   //   site) — ActivityFeed.test.tsx's own markup test.
   // - hero/stage.tsx dropletFill's "sap" role + the .hero-pool-chip inline style — hero.css's
   //   `.hero-droplet-shape`/`.hero-pool-chip rect` outline rules, App.test.tsx's AC3 STYLE test.
+  // - #922 AC8: .hero-node-halo and the active [data-active="true"] .hero-planning-node disc are
+  //   EXEMPT from the --sap-fill-outline compensation — that rule exists for a STATIC, fully
+  //   opaque surface (a solid chip/pill). These two are the opposite: an animated fill-opacity
+  //   NEVER at 1 (peak is 0.85-0.90, floor 0.50-0.55, tokens.css's `--sap-fill-halo-peak`/
+  //   `-floor`), so their own contrast guarantee comes from `contrast.ts`'s
+  //   `checkFillFloorContrast` (AC8's own dedicated test, tokens.test.ts) checked at the WORST
+  //   case (the floor alpha) instead — a different, already-covered mechanism, not a gap.
   // - panels.css .header-back-to-live (background) — #923: its own `border: 1px solid
   //   var(--sap-fill-outline)` on the SAME rule, same compensation shape as `.cost-bar-fill`.
   const knownSites = [
@@ -265,6 +314,8 @@ test("AC3 COVERAGE: every production var(--sap-fill) paint site is on record", (
     "panels.css:.transport-scrub::-moz-range-thumb:background: var(--sap-fill);",
     'components/ActivityFeed.tsx:const dotColor = attention ? "var(--rust)" : glyph === true ? "var(--moss)" : "var(--sap-fill)";',
     'components/ActivityFeed.tsx:const dotBorder = dotColor === "var(--sap-fill)" ? "1px solid var(--sap-fill-outline)" : "none";',
+    "hero/hero.css:.hero-node-halo:fill: var(--sap-fill);",
+    'hero/hero.css:[data-active="true"] .hero-planning-node:fill: var(--sap-fill);',
     'hero/stage.tsx:return "var(--sap-fill)";',
     'hero/stage.tsx:style={{ fill: "var(--sap-fill)" }}',
   ];

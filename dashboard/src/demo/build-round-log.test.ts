@@ -58,9 +58,12 @@ test("buildRoundLog: the spend row AT startSpendId is excluded (exclusive lower 
   );
 });
 
+// #922 AC5 gate② finding [5]: the fixture now opens with a real `aligning` round-phase event
+// (source.ts's own doc) before its "executing" transition — two windows, not one.
 test("buildRoundLog: builds checkpoints and phase windows from the SAME shared reducer helpers useReplay uses", () => {
   const log = buildRoundLog(DEMO_SOURCE, round, 2);
   assert.ok(Array.isArray(log.checkpoints));
-  assert.ok(log.phaseWindows.length >= 1, "the fixture's round-phase event must produce at least one window");
-  assert.equal(log.phaseWindows[0]!.phase, "executing");
+  assert.equal(log.phaseWindows.length, 2, "the fixture's two round-phase events must produce two windows");
+  assert.equal(log.phaseWindows[0]!.phase, "aligning");
+  assert.equal(log.phaseWindows[1]!.phase, "executing");
 });
