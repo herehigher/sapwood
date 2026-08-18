@@ -93,7 +93,7 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     (docs/dev-guide/07-dashboard.md) — EXCEPT a computed-style claim itself; see STYLE below.
     Worked example: `textBox()`/`CHAR_ADVANCE` (`dashboard/src/hero/hero.test.ts`) turns
     font-size/char-count into a rendered extent without a browser, tied to the real draw path's
-    own inputs, plus a cascade/source-order assertion instead of hand-copying which rule wins.
+    own inputs.
     Three shapes seen (#353, PR #738 (issue #728), PR #737): (1) the test computes its
     expected value outside the thing it's testing instead of reading/pinning it against the real
     source; (2) the test exercises only the easy/nominal instance while the AC's own wording
@@ -103,9 +103,9 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     codebase claims to own.
   - **DECISION (fake-verdict rule, engine side).** Presetting a fake collaborator to already
     return the acceptance criterion's target decision, then asserting against the fake's own
-    canned value, proves only that the fake echoes what it was told — the real policy function
-    that is supposed to decide that value never runs. Distinct from VALUE (a copied constant
-    drifting from its source): here the deciding code path never executes at all. Worked
+    canned value, proves only that the fake echoes what it was told. Distinct from VALUE (a
+    copied constant drifting from its source): here the deciding code path never executes at
+    all. Worked
     example: PR #835 (issue #824)'s `ac1`/`ac2` fixtures preset
     `FakeSupervisor.reclaimResults` straight to the AC's target `worktreeRetained` value with no
     baseline ever established, so `WorkerSupervisor.reclaim`'s real mtime/ctime policy never ran;
@@ -122,28 +122,30 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     only a unit test of the extracted piece; ACs with no render path (server routes, pure modules)
     are outside this rule. Distinct from VALUE above: that sub-case governs which VALUE an
     assertion checks, this one governs which TREE produces it.
-    **Data-flow sub-shape (#866, #868), one level up.** Real entry-point rendering isn't enough
-    if its props/state are hand-assembled into a combination the real derivation could never
-    produce — mount with real prefetched/settled queries and a stubbed `fetch`, over a fixture
-    building the AC's named boundary case, not just the nominal one. `registerRealDom()`
+    **Data-flow sub-shape (#866, #868, #925), one level up.** Real entry-point rendering isn't
+    enough if its props/state are hand-assembled into a combination the real derivation could
+    never produce — mount with real prefetched/settled queries and a stubbed `fetch`, over a
+    fixture building the AC's named boundary case, not just the nominal one. `registerRealDom()`
     (`docs/dev-guide/07-dashboard.md`) solved this for CLICK wiring (retro #355); QUERY/data-flow
-    wiring has no equivalent shared helper yet.
+    wiring has no equivalent shared helper yet. Same shape at #925: `NeedsAttention` fixtures
+    built `DomainEvent`s via `toDomainEvent` directly instead of folding wire events through
+    `foldOpenAttention`, so its real output combination was never under test.
   - **STYLE (computed-style ACs are VALUE's real-DOM exception).** "Authored" isn't "rendered" —
     a CSS/typography AC needs `registerRealDom()` plus a real `getComputedStyle` read, never a
-    stand-in. Seen twice on #879 / PR #886: a regex on declaration TEXT proves a rule exists, not
-    that it cascades or wins over a later rule; mounting only the ONE stylesheet under test still
-    gets an inherited `em` wrong, since a partial cascade misses the font-size it resolves off.
-    Mount every stylesheet the element inherits, in production order, and assert the exact value —
-    never `notEqual`/existence, which any non-default value satisfies.
+    stand-in. (a) Text vs. cascade (#879 / PR #886): a regex on declaration TEXT proves a rule
+    exists, not that it cascades; mount every inherited stylesheet, in production order, and
+    assert the exact value — never `notEqual`/existence. (b) `light-dark()` is unresolvable here
+    (#924 AC3, #923, #925): happy-dom always echoes the raw unresolved text, either theme. Fix at
+    the token: a literal-hex value pinned to its source by a
+    `tokens.test.ts` assertion (`tokens.css`'s `--sap-fill-outline`/`--attention-tone-*`
+    pattern), never a raw `.style` read.
   - **COLLISION → COVERAGE (any AC/doc's "all/every named set" claim, not only neighbor
     boxes).** `assertNoOverlap`/`boxesOverlap` (`dashboard/src/hero/hero.test.ts`) is sound
     infra, but each PR hand-curates a partial box list, missing neighbors its author forgot —
-    recurring (#728, #745, #891, #901, #902). Include every element sharing the new one's
+    recurring (#728, #745, #891, #892, #901, #902). Include every element sharing the new one's
     region, position read off rendered markup wherever filtering/compaction can diverge — a
-    constant is fine for genuinely static geometry. Same shape, #892 (Playwright covered only
-    `PhaseInspectorDrawer`, not `ConfigDrawer`/`Controls`; `.recipe-list-entry` covered only
-    `NeedsAttention`, not `ActivityFeed`/`LaneBoard`). Derive the covered set from what the
-    AC/doc names, never a hand-typed list.
+    constant is fine for genuinely static geometry. Derive the covered set from what the AC/doc
+    names, never a hand-typed list.
 
 ### Documentation claims
 
