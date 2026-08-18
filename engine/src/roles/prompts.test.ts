@@ -559,7 +559,7 @@ test("#605: no shipped prompt (worker.md, fix.md, or any peripheral prompt) inst
 // these assertions pin the AUTHORING-DEFAULT rule's key phrases, not the tier definitions
 // themselves (those live in docs/security.md, outside this test file's scope). ──────────────────
 
-test("#628 (#963 CONVERT, codex terra fix leg): every one of the three authoring prompts (po.md, po-decompose.md, verification-plan-drafter.md) ships the sapwood:floor:evidence-tiers marker block, byte-equal (whitespace-normalized) across carriers — wording may change freely as long as all carriers change together", () => {
+test("#628 (#963 CONVERT): every one of the three authoring prompts (po.md, po-decompose.md, verification-plan-drafter.md) ships the sapwood:floor:evidence-tiers marker block, byte-equal (whitespace-normalized) across carriers — wording may change freely as long as all carriers change together", () => {
   assertFloorMirrored("evidence-tiers", EVIDENCE_TIER_CARRIERS);
 });
 

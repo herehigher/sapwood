@@ -5886,14 +5886,14 @@ test("#701 (per-surface independence, PM ruling on gate② P2 #2): changing ONLY
 //    issue.title/body/labels — a fix leg's evidence channel is the PR-facing proxy tools, not
 //    issue prose) — and takes a bare issue NUMBER, never a fabricated `Issue` object. ──────────
 
-test("#963 (codex terra fix leg, CONVERT): fix.md renders {{pr.number}}/{{issue.number}} through the REAL buildRenderFixPrompt render path with distinctive values reaching the output", () => {
+test("#963 (CONVERT): fix.md renders {{pr.number}}/{{issue.number}} through the REAL buildRenderFixPrompt render path with distinctive values reaching the output", () => {
   const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
   const rendered = buildRenderFixPrompt(scfg)(424242, 777777);
   assert.ok(rendered.includes("424242"), "the distinctive issue number must reach the rendered shipped fix.md");
   assert.ok(rendered.includes("777777"), "the distinctive PR number must reach the rendered shipped fix.md");
 });
 
-test("#963 (codex terra fix leg, CONVERT): fix.md names the REAL mcp__forge__ tool name for pr_audit_comments (mcpToolFullName(TOOL_PR_AUDIT_COMMENTS), cross-artifact against proxy/tools.ts)", () => {
+test("#963 (CONVERT): fix.md names the REAL mcp__forge__ tool name for pr_audit_comments (mcpToolFullName(TOOL_PR_AUDIT_COMMENTS), cross-artifact against proxy/tools.ts)", () => {
   const content = readFileSync(defaultFixPromptPath(), "utf8");
   assert.ok(
     content.includes(mcpToolFullName(TOOL_PR_AUDIT_COMMENTS)),

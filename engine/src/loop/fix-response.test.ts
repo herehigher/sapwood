@@ -125,7 +125,7 @@ test("validateFixResponseOutput: a mix of addressed + disputed entries, all jour
 // ── D1(b): a resultText following fix.md's DOCUMENTED format flows through the REAL
 //    validateFixResponseOutput -> enqueue -> attemptThreadWrite path end to end ──────────────
 
-// #963 (PM fix leg, correcting a DELETE that should have been a CONVERT): the D1(b) pair that
+// #963 (CONVERT): the D1(b) pair that
 // used to live here hand-copied field names as literals — a single-file prose pin. The REAL
 // oracle is the zod schema behind validateFixResponseOutput: derive the expected key/enum names
 // from FixResponseMetadataSchema/FixThreadResponseEntrySchema/FixFindingResponseEntrySchema

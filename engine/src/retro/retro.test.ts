@@ -553,7 +553,7 @@ test("prompts/retro.md instructs the scratch-file contract at the REAL RETRO_SCR
   assert.ok(!body.includes("gh pr create"), "must not instruct the session to open the PR itself");
 });
 
-test("#963 (PM fix leg, CONVERT): retro.md's OWN shown proposal-format example, fed through the REAL parseRetroScratch, actually parses to a proposal — not a hand-copied header-line pin", () => {
+test("#963 (CONVERT): retro.md's OWN shown proposal-format example, fed through the REAL parseRetroScratch, actually parses to a proposal — not a hand-copied header-line pin", () => {
   const body = readFileSync(defaultRetroPromptPath(), "utf8");
   const anchor = "in EXACTLY this format (two labeled header lines, then the body):";
   const anchorIdx = body.indexOf(anchor);
