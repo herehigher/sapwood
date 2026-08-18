@@ -255,6 +255,10 @@ test("#963: po-decompose.md renders with a distinctive {{lang.issuesAndPrs}} val
   const rendered = renderRolePrompt(template, parent, langCfg, {
     "decompose.maxChildren": String(langCfg.roles.po.maxChildren),
     "decompose.acceptanceCriteriaHint": String(langCfg.roles.po.acceptanceCriteriaHint),
+    // #965: the shipped template's {{decompose.wip}} slot — "" here (no WIP pointer for this
+    // fixture's parent) matches runDecompositionPass's own render when a cap-split parent's
+    // WIP-pointer comment is absent (renderCapSplitWipForPrompt's own doc).
+    "decompose.wip": "",
   });
   assert.ok(rendered.includes("zz-ZZ"), "po-decompose.md: the distinctive language value must reach the rendered shipped prompt");
 });
