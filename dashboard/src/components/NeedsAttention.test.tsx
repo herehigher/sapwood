@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -54,13 +55,13 @@ test("#924 AC1: the populated strip's head carries .panel-head, with the summary
 test("renders the row's category chip, matching the mockup's taxonomy", () => {
   const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 42, issue: 7 }));
   const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
-  assert.match(html, /class="attention-chip">DECISION</);
+  assert.match(html, /class="attention-chip"[^>]*>DECISION</);
 });
 
 test("renders a different chip label for a different category (CI)", () => {
   const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "ci-inert-escalated", { pr: 42, issue: 7, checks: [] }));
   const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
-  assert.match(html, /class="attention-chip">CI</);
+  assert.match(html, /class="attention-chip"[^>]*>CI</);
 });
 
 // ── #893 / PR #900 gate② finding [1]: REVIEW SILENCE / DISSENT — folded through the REAL
@@ -74,7 +75,7 @@ test("renders a different chip label for a different category (CI)", () => {
 test("#893: review-silence-escalated reaches the strip and renders the REVIEW SILENCE chip", () => {
   const open = foldAt([wire(1, "2026-08-10T11:59:00.000Z", "review-silence-escalated", { pr: 42, issue: 7, silenceSec: 600 })]);
   const html = renderToStaticMarkup(<NeedsAttention items={Object.values(open)} titles={{}} now={NOW} />);
-  assert.match(html, /class="attention-chip">REVIEW SILENCE</);
+  assert.match(html, /class="attention-chip"[^>]*>REVIEW SILENCE</);
   assert.match(html, /went unanswered/);
   assert.match(html, /asks: check the reviewer/);
 });
@@ -82,14 +83,14 @@ test("#893: review-silence-escalated reaches the strip and renders the REVIEW SI
 test("#893: review-disputed reaches the strip and renders the DISSENT chip", () => {
   const open = foldAt([wire(1, "2026-08-10T11:59:00.000Z", "review-disputed", { pr: 42, issue: 7, worker: "w1" })]);
   const html = renderToStaticMarkup(<NeedsAttention items={Object.values(open)} titles={{}} now={NOW} />);
-  assert.match(html, /class="attention-chip">DISSENT</);
+  assert.match(html, /class="attention-chip"[^>]*>DISSENT</);
   assert.match(html, /successive reviews disagreed/);
 });
 
 test("#893: review-non-convergent ALSO renders the DISSENT chip — same category, different trigger", () => {
   const open = foldAt([wire(1, "2026-08-10T11:59:00.000Z", "review-non-convergent", { pr: 42, issue: 7, worker: "w1" })]);
   const html = renderToStaticMarkup(<NeedsAttention items={Object.values(open)} titles={{}} now={NOW} />);
-  assert.match(html, /class="attention-chip">DISSENT</);
+  assert.match(html, /class="attention-chip"[^>]*>DISSENT</);
   assert.match(html, /failed to converge/);
 });
 
@@ -102,10 +103,12 @@ test("renders no chip for an unrecognized event kind, never a fabricated label",
 test("row renders the mockup's shape — chip, reason + explicit ask, and a bordered age box", () => {
   const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "fix-rounds-capped", { pr: 9, issue: 1, fixRounds: 3, cap: 3 }));
   const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
-  assert.match(html, /attention-chip">FIX CAP/);
+  assert.match(html, /attention-chip"[^>]*>FIX CAP/);
   assert.match(html, /\(3\/3\)/);
   assert.match(html, /asks: adjudicate/);
-  assert.match(html, /class="muted data attention-ts attention-age"/);
+  // #925 AC2: the only row in the fold is trivially the greatest-age one, so it carries the
+  // emphasis modifier alongside the base age classes.
+  assert.match(html, /class="muted data attention-ts attention-age attention-age-emphasis"/);
 });
 
 test("does not render, import, or re-implement the legend", () => {
@@ -234,5 +237,192 @@ test("real DOM: the attention-age trigger is Tab-reachable and its tooltip (the 
       root.unmount();
     });
     container.remove();
+  }
+});
+
+// ── #925: row anatomy — severity/chip/entity/age-emphasis/COVERAGE alignment ────────────────
+
+const tokensCssRow = readFileSync(new URL("../tokens.css", import.meta.url), "utf8");
+const panelsCssRow = readFileSync(new URL("../panels.css", import.meta.url), "utf8");
+
+/** Real DOM, real tokens.css + panels.css cascade — every #925 assertion below is a computed-
+ *  style claim (STYLE doctrine), never a stand-in read of the CSS source text. */
+async function mountWithCascade(element: React.ReactElement) {
+  const style = document.createElement("style");
+  style.textContent = `${tokensCssRow}\n${panelsCssRow}`;
+  document.head.appendChild(style);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(element);
+  });
+  return {
+    container,
+    cleanup: async () => {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+      document.head.removeChild(style);
+    },
+  };
+}
+
+const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
+const FORTY_FIVE_MIN_MS = 45 * 60 * 1000;
+
+function attentionRowsByAge(rows: { id: number; ageMs: number }[]) {
+  return rows.map(({ id, ageMs }) =>
+    toDomainEvent(wire(id, new Date(NOW.getTime() - ageMs).toISOString(), "drive-needs-human", { pr: id, issue: id })),
+  );
+}
+
+test("#925 AC2: the row with the greatest age (3d) renders its age box at >=2x the height and font-size of the others (2h, 45m), regardless of render order", async () => {
+  // id assigned so the OLDEST event (id=1) does NOT sort first — `NeedsAttention`'s own `sorted`
+  // is descending by id, so a bug that always emphasised whichever row rendered first would still
+  // pass a naively-ordered fixture.
+  const items = attentionRowsByAge([
+    { id: 3, ageMs: TWO_HOURS_MS },
+    { id: 2, ageMs: FORTY_FIVE_MIN_MS },
+    { id: 1, ageMs: THREE_DAYS_MS },
+  ]);
+  const { container, cleanup } = await mountWithCascade(<NeedsAttention items={items} titles={{}} now={NOW} />);
+  try {
+    const ageBoxes = [...container.querySelectorAll(".attention-age")];
+    assert.equal(ageBoxes.length, 3);
+    const emphasized = ageBoxes.filter((el) => el.classList.contains("attention-age-emphasis"));
+    assert.equal(emphasized.length, 1, "exactly one row must carry the emphasis modifier");
+    const others = ageBoxes.filter((el) => !el.classList.contains("attention-age-emphasis"));
+    assert.equal(others.length, 2);
+    assert.equal(emphasized[0]?.textContent, "3d ago", "the emphasis must land on the 3d-ago event specifically");
+
+    const emphasizedHeight = Number.parseFloat(getComputedStyle(emphasized[0] as Element).minHeight);
+    const emphasizedFontSize = Number.parseFloat(getComputedStyle(emphasized[0] as Element).fontSize);
+    for (const other of others) {
+      const otherComputed = getComputedStyle(other as Element);
+      const otherHeight = Number.parseFloat(otherComputed.minHeight);
+      const otherFontSize = Number.parseFloat(otherComputed.fontSize);
+      assert.ok(
+        emphasizedHeight >= otherHeight * 2,
+        `emphasized height (${emphasizedHeight}) must be >= 2x "${other.textContent}"'s (${otherHeight})`,
+      );
+      assert.ok(
+        emphasizedFontSize >= otherFontSize * 2,
+        `emphasized font-size (${emphasizedFontSize}) must be >= 2x "${other.textContent}"'s (${otherFontSize})`,
+      );
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test("#925 AC2: with a single row, that row is the emphasised one", async () => {
+  const items = attentionRowsByAge([{ id: 1, ageMs: FORTY_FIVE_MIN_MS }]);
+  const { container, cleanup } = await mountWithCascade(<NeedsAttention items={items} titles={{}} now={NOW} />);
+  try {
+    const ageBox = container.querySelector(".attention-age");
+    assert.ok(ageBox, "the age box must render");
+    assert.ok(ageBox?.classList.contains("attention-age-emphasis"), "the lone row must carry the emphasis modifier");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("#925 AC2: the emphasis follows the greatest age when the fixture reorders which event is oldest", async () => {
+  // Same three ages as the first test above, but under DIFFERENT ids/positions — proves the
+  // emphasis is computed from age, not memorized from row position.
+  const items = attentionRowsByAge([
+    { id: 10, ageMs: FORTY_FIVE_MIN_MS },
+    { id: 20, ageMs: THREE_DAYS_MS },
+    { id: 30, ageMs: TWO_HOURS_MS },
+  ]);
+  const { container, cleanup } = await mountWithCascade(<NeedsAttention items={items} titles={{}} now={NOW} />);
+  try {
+    const emphasized = container.querySelector(".attention-age-emphasis");
+    assert.ok(emphasized, "one row must carry the emphasis modifier");
+    assert.equal(emphasized?.textContent, "3d ago", "emphasis must follow the 3d-ago event, wherever it renders");
+  } finally {
+    await cleanup();
+  }
+});
+
+// ── #925 AC3: colour is never the sole carrier; the severity element is aria-hidden ─────────
+
+test("#925 AC3: a DISSENT row (--sap-text tone) still names its category in the chip's own text, and the severity element is aria-hidden", () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "review-disputed", { pr: 42, issue: 7, worker: "w1" }));
+  const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
+  assert.match(html, /class="attention-chip"[^>]*>DISSENT</, "the category must be readable as TEXT, not colour alone");
+  assert.match(html, /class="attention-severity" aria-hidden="true"/);
+});
+
+test("#925 AC3: a DECISION row (--rust tone) still names its category in the chip's own text, and the severity element is aria-hidden", () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 42, issue: 7 }));
+  const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
+  assert.match(html, /class="attention-chip"[^>]*>DECISION</);
+  assert.match(html, /class="attention-severity" aria-hidden="true"/);
+});
+
+// ── #925 AC5: fixed chip/entity/age tracks — COVERAGE over every rendered row ────────────────
+
+test("#925 AC5: every .attention-chip shares the SAME computed width, every entity-ref cell the same left edge, every age box the same right edge — across the longest and shortest category words", async () => {
+  // Three categories spanning ATTENTION_CATEGORY's own extremes: "REVIEW SILENCE" (the longest
+  // word, 14 chars) and "CI"/"ENV"-scale short words — read from the real fixture kinds, never a
+  // hand-picked pair that happens to match today's longest/shortest.
+  const items = [
+    toDomainEvent(wire(1, "2026-08-05T00:00:00.000Z", "review-silence-escalated", { pr: 100, issue: 1, silenceSec: 600 })),
+    toDomainEvent(wire(2, "2026-08-08T00:00:00.000Z", "ci-inert-escalated", { pr: 200, issue: 2, checks: [] })),
+    toDomainEvent(wire(3, "2026-08-09T00:00:00.000Z", "env-failure-preserved", { pr: 300, issue: 3 })),
+  ];
+  const { container, cleanup } = await mountWithCascade(<NeedsAttention items={items} titles={{}} now={NOW} />);
+  try {
+    const rows = [...container.querySelectorAll(".attention-row")];
+    assert.equal(rows.length, 3, "COVERAGE: every rendered row must be included, not a hand-picked subset");
+
+    // happy-dom never runs a real layout pass (`getBoundingClientRect`/`clientWidth`/`scrollWidth`
+    // are all hard-coded 0 on every element, confirmed directly — there is no box-metric read this
+    // harness can perform). What it DOES resolve reliably is the CASCADE — which declaration wins,
+    // verbatim — so this proves the thing that actually GUARANTEES alignment under CSS Grid's
+    // deterministic column algorithm: every row's `.attention-row` grid-template-columns is the
+    // SAME literal, content-independent declaration (no per-row branch sizes the chip/entity/age
+    // tracks off that row's own word/title length), and `.attention-chip`'s own width is likewise
+    // one shared, non-`auto` value. Two rows sharing the same fixed tracks CANNOT render at
+    // different x-offsets in any real layout engine — this is what a browser would compute from.
+    const rowTemplates = new Set(rows.map((row) => getComputedStyle(row).gridTemplateColumns));
+    assert.equal(
+      rowTemplates.size,
+      1,
+      `every .attention-row must share the identical, content-independent grid-template-columns, got: ${[...rowTemplates].join(" | ")}`,
+    );
+    assert.doesNotMatch(
+      [...rowTemplates][0]!,
+      /\bauto\b/,
+      "no track before the reason column may be `auto` (content-sized) — only `1fr` (the reason column itself) may flex",
+    );
+
+    const chips = rows.map((row) => row.querySelector(".attention-chip") as HTMLElement);
+    assert.ok(
+      chips.every((chip) => chip),
+      "every row must render a chip",
+    );
+    const chipWidths = new Set(chips.map((chip) => getComputedStyle(chip).width));
+    assert.equal(chipWidths.size, 1, `every .attention-chip must share the same declared width, got: ${[...chipWidths].join(", ")}`);
+    assert.doesNotMatch([...chipWidths][0]!, /^auto$/, ".attention-chip's width must be a fixed value, never content-sized `auto`");
+
+    // The longest word ("REVIEW SILENCE") must never wrap onto a second line inside its box.
+    const longestChip = chips.find((chip) => chip.textContent === "REVIEW SILENCE");
+    assert.ok(longestChip, "the REVIEW SILENCE fixture row must render its chip");
+    assert.equal(getComputedStyle(longestChip as HTMLElement).whiteSpace, "nowrap");
+
+    // Both the entity-ref cell (chip/glyph tracks precede it) and the age box (the age track
+    // itself is fixed) are governed by that SAME shared, content-independent template — proven
+    // above — so their start/end x-offsets are identical across rows by construction.
+    for (const row of rows) {
+      assert.ok(row.querySelector(".attention-entity"), "every row must render its entity-ref cell");
+      assert.ok(row.querySelector(".attention-age"), "every row must render its age box");
+    }
+  } finally {
+    await cleanup();
   }
 });

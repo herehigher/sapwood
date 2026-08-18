@@ -695,31 +695,63 @@
   cursor: pointer;
 }
 
-/* ---- needs-attention strip (§3, #361) ------------------------------------- */
+/* ---- needs-attention strip (§3, #361, row anatomy #925) -------------------- */
 
+/* #925: severity bar | chip | entity ref (glyph+number+title) | reason · asks | age — every
+ * track but reason is a FIXED size so the columns line up down the whole strip (#729 owner walk:
+ * "the chip's word length currently drives the chip's width, so every column to its right shifts
+ * per row"). `--attention-chip-w` is sized to `copy.ts`'s `ATTENTION_CATEGORY`'s own longest
+ * word, "REVIEW SILENCE" (14 chars) — bump this value (and the comment) together if a longer
+ * category name is ever added; `text-transform: uppercase`/`letter-spacing` in `.attention-chip`
+ * below already only ever WIDEN a word, so shorter words always fit too. */
 .attention-list {
+  --attention-chip-w: calc(14ch + 26px);
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
 }
 
 .attention-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: var(--space-2);
+  display: grid;
+  grid-template-columns: 4px var(--attention-chip-w) 280px 1fr 96px;
+  align-items: center;
+  column-gap: var(--space-2);
+  min-height: 56px;
+  /* Longhands, not the `border-bottom: var(--hairline)` shorthand — happy-dom's CSS engine can't
+   * resolve a `color-mix()` that appears INSIDE a border shorthand (`.panel-head`'s own documented
+   * gap, above); longhands sidestep it without changing what renders. */
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+  border-bottom-color: color-mix(in srgb, var(--bark) 25%, transparent);
+  font-family: var(--font-data);
 }
 
 .attention-ts {
   margin-left: auto;
 }
 
-/* #881: the mockup's category chip (FIX CAP/REVIEW SILENCE/CEILING/DISSENT) — one shared style
- * for every category; the taxonomy is in the label text, not a per-category color scheme. */
+/* #925: 4px, full row height, aria-hidden — colour ALWAYS mirrors the chip's own border colour
+ * (set inline, from the SAME `tone` value NeedsAttention.tsx derives once per row), never a
+ * second, independently-maintained colour so the two can't drift apart. Never the sole carrier of
+ * the category (§5) — the chip's own text is. */
+.attention-severity {
+  align-self: stretch;
+  width: 4px;
+}
+
+/* #881/#925: rust for the general escalation class, `--sap-text` for the review/dissent class
+ * (`copy.ts`'s `isReviewDissentCategory` — REVIEW/REVIEW SILENCE/DISSENT) — set inline per row
+ * from that same source, never a per-category colour hand-maintained here. The taxonomy itself
+ * still lives in the label text (§5: colour is never the sole carrier). */
 .attention-chip {
+  width: var(--attention-chip-w);
+  box-sizing: border-box;
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 2px var(--space-2);
   border: 1px solid var(--rust);
   border-radius: var(--radius-card);
@@ -728,14 +760,63 @@
   font-size: var(--text-0);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 
-/* #881: the mockup's bordered age readout, distinguishing it from the plain muted timestamps
+.attention-entity {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Scoped override, not a change to `.entity-ref` itself — that class also renders at the feed's
+ * small inline scale elsewhere (lane cards, activity feed); only this row's own cell needs the
+ * mockup's ≥24px glyph / ≥14px mono number. */
+.attention-entity .entity-ref {
+  font-size: var(--text-1);
+}
+
+.attention-entity .entity-ref svg {
+  width: 24px;
+  height: 24px;
+}
+
+.attention-entity-title {
+  color: var(--sapwood);
+}
+
+.attention-sentence {
+  color: var(--bark-text);
+  font-family: var(--font-data);
+  font-size: var(--text-0);
+}
+
+/* #881/#925: the mockup's bordered age readout, distinguishing it from the plain muted timestamps
  * used elsewhere in the feed. */
 .attention-age {
   border: var(--hairline);
   border-radius: var(--radius-card);
   padding: 2px var(--space-2);
+  min-height: 40px;
+  font-size: var(--text-1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* #925 AC2: the row carrying the fold's greatest age — ≥2× `.attention-age`'s own 40px/16px base
+ * (100px/48px, both comfortably over the 2× floor, matching the mockup's bold ~48px numeral), a
+ * heavier border. Literal values, not `calc(40px * 2.5)`/`calc(var(--text-1) * 3)` — happy-dom's
+ * `getComputedStyle` never resolves a `calc()`, it echoes the unresolved expression text back
+ * (confirmed directly; same family as this file's other documented happy-dom gaps), which would
+ * make the AC2 STYLE test's own height/font-size floor unreadable. Keep both pairs (here and
+ * `.attention-age`'s own base rule) in sync by hand if either changes. */
+.attention-age-emphasis {
+  min-height: 100px;
+  font-size: 48px;
+  font-weight: 700;
+  border-width: 2px;
+  border-style: solid;
 }
 
 /* AC7 (#861): a sibling control next to the sentence's own GitHub anchor, never nested inside

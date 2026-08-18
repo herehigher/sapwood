@@ -301,7 +301,9 @@ test("#900 finding [1]: review-silence-escalated reaches the needs-attention str
     },
   });
   assert.match(html, /aria-label="needs attention"/, "the strip section must actually render, not be skipped as empty");
-  assert.match(html, /class="attention-chip">REVIEW SILENCE</);
+  // #925: the chip now also carries an inline `style` (its per-category tone) between the class
+  // attribute and its text — matched loosely rather than the exact adjacent-attribute string.
+  assert.match(html, /class="attention-chip"[^>]*>REVIEW SILENCE</);
   assert.match(html, /went unanswered/);
 });
 
@@ -319,7 +321,7 @@ test("#900 finding [1]: review-disputed and review-non-convergent BOTH reach the
       },
     },
   });
-  const dissentChips = html.match(/class="attention-chip">DISSENT</g)?.length ?? 0;
+  const dissentChips = html.match(/class="attention-chip"[^>]*>DISSENT</g)?.length ?? 0;
   assert.equal(dissentChips, 2, "both review-disputed and review-non-convergent must independently reach the strip");
 });
 
@@ -3687,5 +3689,127 @@ test("#923: with a closed round selected, BACK TO LIVE still renders inside .app
     } finally {
       await cleanup();
     }
+  }
+});
+
+// ── #925 AC1: row anatomy — height/severity/chip/entity/reason/hairline, through the REAL query
+// wiring (registerRealDom() + the full production CSS cascade + a stubbed /api/events), not a
+// hand-assembled view-model — docs/dev-guide/07-dashboard.md's still-open "query/data-flow wiring
+// has no shared helper yet" gap: this local helper combines `mountAppWithCascade`'s CSS injection
+// with `mountSettledApp`'s real fetch stubbing, the same combination that gap names as unmet.
+
+async function mountLiveAppWithCascade(byPath: Record<string, { status: number; body: unknown }>) {
+  (window as unknown as { happyDOM: { setViewport: (v: { width: number }) => void } }).happyDOM.setViewport({ width: 1440 });
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss924}\n${panelsCss924}\n${heroCss924}\n${appCss924}`;
+  document.head.appendChild(style);
+  stubFetch({ ...SPEND_EMPTY, ...ROUNDS_EMPTY, ...byPath });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await Promise.allSettled([
+    client.prefetchQuery(loopStateQuery()),
+    client.prefetchQuery(eventsQuery(0)),
+    client.prefetchQuery(spendQuery(0)),
+    client.prefetchQuery(roundsQuery()),
+  ]);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+  });
+  return {
+    container,
+    cleanup: async () => {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+      document.head.removeChild(style);
+    },
+  };
+}
+
+test("#925 AC1: every .attention-row is >=56px with a hairline separator, its severity bar mirrors its chip's own border tone, the chip is >=30px/uppercase/mono, the entity ref is >=14px mono, and the reason is mono", async () => {
+  const fontDataStack = parseTokensLocal(tokensCss924)["--font-data"];
+  assert.ok(fontDataStack, "tokens.css must still declare --font-data for this test's own oracle");
+  // Two distinct categories (DECISION/rust, DISSENT/--sap-text) — COVERAGE over both severity
+  // tones, not just the default one, and both carry a PR token so the entity-ref cell renders.
+  const { container, cleanup } = await mountLiveAppWithCascade({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/events": {
+      status: 200,
+      body: {
+        events: [
+          { id: 1, ts: "2026-08-14T00:00:00Z", kind: "drive-needs-human", payload: { pr: 42, issue: 7 } },
+          { id: 2, ts: "2026-08-14T00:01:00Z", kind: "review-disputed", payload: { pr: 43, issue: 8, worker: "w1" } },
+        ],
+        lastId: 2,
+      },
+    },
+  });
+  try {
+    const rows = [...container.querySelectorAll(".attention-row")];
+    assert.ok(rows.length >= 2, "at least two attention rows must render");
+    for (const row of rows) {
+      const rowComputed = getComputedStyle(row as Element);
+      assert.ok(Number.parseFloat(rowComputed.minHeight) >= 56, `each row's min-height (${rowComputed.minHeight}) must be >= 56px`);
+      assert.equal(rowComputed.borderBottomWidth, "1px", "each row must resolve a real 1px hairline, not an unresolved empty value");
+      assert.equal(rowComputed.borderBottomStyle, "solid");
+
+      const severity = row.querySelector(".attention-severity") as HTMLElement | null;
+      assert.ok(severity, "each row must render its severity element");
+      assert.equal(getComputedStyle(severity as Element).width, "4px");
+      assert.equal(severity?.getAttribute("aria-hidden"), "true");
+
+      const chip = row.querySelector(".attention-chip") as HTMLElement | null;
+      assert.ok(chip, "each row must render its category chip");
+      const chipComputed = getComputedStyle(chip as Element);
+      assert.ok(Number.parseFloat(chipComputed.minHeight) >= 30, `chip min-height (${chipComputed.minHeight}) must be >= 30px`);
+      assert.equal(chipComputed.textTransform, "uppercase");
+      assert.equal(chipComputed.fontFamily, fontDataStack);
+
+      // happy-dom never resolves a light-dark()-fed COLOUR property, even under the full cascade
+      // (the SAME gap #924 AC3's own `--sap-fill-outline` comment documents — border-color and
+      // background-color both come back an empty string). Both this row's tones are set INLINE
+      // (NeedsAttention.tsx's own `tone` value), so reading the raw `.style` (not
+      // `getComputedStyle`) still proves the two literally share the SAME source value — a real
+      // property this harness CAN read, on a real mounted DOM node, not a stand-in.
+      assert.ok(severity?.style.backgroundColor, "the tone value itself must be non-empty");
+      assert.equal(
+        severity?.style.backgroundColor,
+        chip?.style.borderColor,
+        "the severity bar's background must be set from the SAME tone value as the chip's own border colour",
+      );
+
+      const entityRef = row.querySelector(".attention-entity .entity-ref") as HTMLElement | null;
+      if (entityRef) {
+        const entityComputed = getComputedStyle(entityRef);
+        assert.ok(Number.parseFloat(entityComputed.fontSize) >= 14, `entity ref font-size (${entityComputed.fontSize}) must be >= 14px`);
+        assert.equal(entityComputed.fontFamily, fontDataStack);
+      }
+
+      const reason = row.querySelector(".attention-sentence") as HTMLElement | null;
+      assert.ok(reason, "each row must render its reason cell");
+      assert.equal(getComputedStyle(reason as Element).fontFamily, fontDataStack);
+    }
+    // Both fixture kinds carry a PR token — the `if (entityRef)` guard above would otherwise
+    // silently skip its own assertion if wiring ever dropped the token through to the row.
+    assert.equal(container.querySelectorAll(".attention-entity .entity-ref").length, 2, "both rows must render an entity ref");
+
+    // The reason cell's `color: var(--bark-text)` hits the SAME light-dark() gap above — proven
+    // the only way this harness can: the declaration exists, and nothing else in the shipped
+    // cascade redeclares `.attention-sentence`'s own `color` to contest which one wins.
+    const sentenceColorRules = [panelsCss924, tokensCss924, heroCss924, appCss924]
+      .join("\n")
+      .match(/\.attention-sentence\s*\{[^}]*\}/g)
+      ?.filter((rule) => /color:/.test(rule));
+    assert.equal(sentenceColorRules?.length, 1, ".attention-sentence's color must be declared exactly once across the shipped cascade");
+    assert.match(sentenceColorRules![0]!, /color:\s*var\(--bark-text\)/);
+  } finally {
+    await cleanup();
   }
 });
