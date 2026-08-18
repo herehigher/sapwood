@@ -113,9 +113,11 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     prove, the deciding code never ran — run the real function instead.
   - **WIRING (unwired-test rule).** A dashboard test that renders an extracted pure function, a
     bare component, or a hook in isolation proves that piece correct alone — it does not prove
-    the app wires it up. Recurring class (#759, #766): a helper/component test stayed green while
-    the real app tree never called the helper, called it with the wrong data source, or dropped
-    the prop between wrapper and consumer. Any new dashboard rendered-UI behavior needs at least
+    the app wires it up. Recurring class (#759, #766, #927, #934): a helper/component test stayed
+    green while the real app tree never called the helper, called it with the wrong data source,
+    dropped the prop between wrapper and consumer, or asserted only the interaction's start/end
+    state while the AC's real weight sits at an interior step (a scrub midpoint, a post-click
+    state) the test never drove to. Any new dashboard rendered-UI behavior needs at least
     one test rendering today's real entry points (e.g. `App`/`appContent`, or the smallest real
     ancestor owning the wiring) with distinguishable fixture values at the seam under test — not
     only a unit test of the extracted piece; ACs with no render path (server routes, pure modules)
@@ -124,7 +126,7 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     **Data-flow sub-shape (#866, #868, #925), one level up.** Real entry-point rendering isn't
     enough if its props/state are hand-assembled into a combination the real derivation could
     never produce — mount with real prefetched/settled queries and a stubbed `fetch`, over a
-    fixture building the AC's named boundary case, not just the nominal one. `registerRealDom()`
+    fixture building the AC's named boundary case. `registerRealDom()`
     (`docs/dev-guide/07-dashboard.md`) solved this for CLICK wiring (retro #355); QUERY/data-flow
     wiring has no equivalent shared helper yet. Same shape at #925: `NeedsAttention` fixtures
     built `DomainEvent`s via `toDomainEvent` directly instead of folding wire events through
