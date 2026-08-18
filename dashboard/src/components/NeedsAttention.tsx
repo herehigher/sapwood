@@ -67,8 +67,8 @@ function AttentionRow({
   const payload = event.payload ?? {};
   const parts: SentencePart[] = event.known ? copyFor(event.kind)!.sentence(payload) : [`Unrecognized event: ${event.kind}`];
   const { text, title } = formatRelativeWithAbsoluteTitle(event.ts, "local", now);
-  // B1 (#925 AC4): the emphasis box's bold ≥40px numeral only ever fits the fixed 96px age track
-  // in its COMPACT form ("8d", never "8d ago") — the small boxes keep the full relative text.
+  // #925 AC4: the emphasis box's bold ≥40px numeral only ever fits the fixed 96px age track in
+  // its COMPACT form ("8d", never "8d ago") — the small boxes keep the full relative text.
   const ageText = emphasize ? formatCompactAge(event.ts, now) : text;
   const node = event.known ? ATTENTION_KIND_TO_NODE[event.kind] : undefined;
   // #881: the mockup's category-chip taxonomy — absent for an unrecognized kind (no fallback
@@ -132,7 +132,7 @@ function AttentionRow({
        *  + `text-overflow: ellipsis` live on `.attention-entity` itself (panels.css): the title
        *  consumes whatever free space the grid's `1fr` entity track has and truncates exactly where
        *  the reason column's own track begins — never earlier, never by JS string-slicing.
-       *  C1: the glyph lives INSIDE `.attention-entity-ref` (not a preceding sibling) so the WHOLE
+       *  The glyph lives INSIDE `.attention-entity-ref` (not a preceding sibling) so the WHOLE
        *  composed trigger — glyph + label — is the one element `HintTooltip` clones via Radix's
        *  `asChild` (a single-child contract); reusing `EntityRef`/the age box's own tooltip
        *  mechanism, never a second hover/focus implementation. */}

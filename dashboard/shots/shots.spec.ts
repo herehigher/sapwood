@@ -907,13 +907,12 @@ test("#925 AC5 (REAL measurement, the actual geometry proof — see NeedsAttenti
 });
 
 /**
- * B1 (#925 AC4) — real-Chromium companion to `NeedsAttention.test.tsx`'s own regex
- * guard (`/^\d+[smhd]$/`, which happy-dom's zeroed layout metrics can't itself prove FITS): the
- * emphasis box's own bold ≥40px numeral must not overflow its box, and the box itself must not
- * overflow the panel it sits in — the exact defect the finding named (a "8d ago" numeral 134px
- * wide inside a 96px track, spilling past the panel's own right edge in the full-page capture).
+ * #925 AC4 — real-Chromium companion to `NeedsAttention.test.tsx`'s own regex guard
+ * (`/^\d+[smhd]$/`, which happy-dom's zeroed layout metrics can't itself prove FITS): the
+ * emphasis box's own bold ≥40px numeral must fit inside its box, and the box itself must stay
+ * inside the panel it sits in — neither may overflow, under a real browser layout engine.
  */
-test("B1 (REAL measurement): the emphasis age box's text fits inside the box, and the box's own right edge sits inside the needs-attention panel's content box", async ({
+test("#925 AC4 (REAL measurement): the emphasis age box's text fits inside the box, and the box's own right edge sits inside the needs-attention panel's content box", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });

@@ -216,12 +216,11 @@ export function foldOpenAttention(events: readonly DomainEvent[], seed: OpenAtte
  *  as plain strings (same convention `foldOpenAttention`'s own ordering relies on), so the
  *  oldest item is just the lexical minimum `ts`.
  *
- *  #925 AC4 follow-up: `oldestAge` is `format-time.ts`'s `formatCompactAge` — the SAME formatter,
- *  same `now` argument, as the rows' own emphasis box — never a second, independently-floored
- *  "days since" figure. A day-floor here used to read "oldest 0d" for anything under 24h wide
- *  (honest about not rounding UP, but silently wrong once a real fixture/round has a sub-day
- *  oldest item and the row right below it plainly reads "3h") — the compact age reports the
- *  SAME magnitude the emphasized row does, at whatever unit actually fits (s/m/h/d). */
+ *  #925 AC4: `oldestAge` is `format-time.ts`'s `formatCompactAge` — the SAME formatter, same
+ *  `now` argument, as the rows' own emphasis box — never a second, independently-floored "days
+ *  since" figure. A day-floor here reads "oldest 0d" for anything under 24h wide, contradicting a
+ *  row directly below it reading e.g. "3h" — the compact age reports the SAME magnitude the
+ *  emphasized row does, at whatever unit actually fits (s/m/h/d). */
 export function attentionSummary(items: readonly DomainEvent[], now: Date): { waiting: number; oldestAge: string; dissent: number } {
   const oldestTs = items.reduce<string | null>((min, e) => (min === null || e.ts < min ? e.ts : min), null);
   const oldestAge = oldestTs === null ? "0s" : formatCompactAge(oldestTs, now);

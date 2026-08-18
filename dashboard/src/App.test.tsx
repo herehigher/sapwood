@@ -1608,6 +1608,37 @@ test("#895 item 1: while replaying, the hero's staleness caption reads the repla
   assert.doesNotMatch(html, /last event \d+d ago/, "the live wall clock must never leak into a replayed staleness reading");
 });
 
+// ── #925 AC4: NeedsAttention's own age reads the SAME replay cursor #895 item 1 established for
+// the hero staleness caption — WIRING sub-case: NeedsAttention.test.tsx proves the component's
+// own `now` prop drives its row ages in isolation, this proves App's REAL tree threads the
+// replay cursor's own timestamp into it while replaying, rather than falling back to
+// appContent's own `clock`. ──────────────────────────────────────────────────────────────────
+
+test("#925 AC4: while replaying/demo, NeedsAttention's row age reads the replay cursor's own 'as of' timestamp, not appContent's live wall clock", () => {
+  // The fold's only item is trivially the greatest-age one, so it renders the emphasis box's
+  // COMPACT form ("10m", no " ago" — NeedsAttention.tsx's own `formatCompactAge` branch).
+  const item = { ...domainEvent(1, "drive-needs-human"), ts: "2026-08-10T11:50:00.000Z" };
+  const vm = minimalAppViewModel({
+    mode: "replay",
+    activeOpenAttention: [item],
+    asOf: "2026-08-10T12:00:00.000Z",
+  });
+  const html = renderToStaticMarkup(appContent(vm));
+  assert.match(
+    html,
+    /class="data attention-age attention-age-emphasis"[^>]*>10m</,
+    "the row's age must rebase against the replay cursor's own 'as of' timestamp (10 minutes before asOf), not appContent's own wall-clock `clock` (2026-01-01, months before this replayed event)",
+  );
+  // `clock` (2026-01-01) sits BEFORE this replayed event's own ts (2026-08-10) — falling back to
+  // it would produce a NEGATIVE delta, clamped to zero, so a `now: clock` regression here reads
+  // "0s" instead of "10m"; this assertion reddens on exactly that regression.
+  assert.doesNotMatch(
+    html,
+    /class="data attention-age attention-age-emphasis"[^>]*>0s</,
+    "the live wall clock must never leak into a replayed row's age",
+  );
+});
+
 // ── #803: App's REAL wiring of `/api/loop/state`'s `mergedPrs` into the hero tally ────────────
 //
 // hero.test.ts proves `HeroStage` itself honors `mergedPrs` in isolation — this proves App.tsx

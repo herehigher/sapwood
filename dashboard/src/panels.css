@@ -826,7 +826,7 @@
  * baseline (gate① round-3 finding [0]: no separate, differently-sized "PR " literal or title
  * span). `--text-1` (16px) comfortably clears the AC's ≥14px floor.
  *
- * B2 (#925 AC4): an unstyled `<a>` (this element is a link when `repoUrl` is set) otherwise falls
+ * #925 AC4: an unstyled `<a>` (this element is a link when `repoUrl` is set) otherwise falls
  * back to the UA's default blue/underline — the mockup reads this ref in the row's own cream
  * ("primary text") ink, no underline. `--attention-emphasis-text` (tokens.css), not `--sapwood`
  * directly — the SAME resolvable-literal alias this file's own `.attention-age-emphasis` already
