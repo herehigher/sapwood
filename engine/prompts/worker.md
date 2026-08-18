@@ -88,9 +88,11 @@ Write code comments in `{{lang.codeComments}}` and any documentation you edit in
    the red tests pass. Resist scope creep: this issue, not adjacent cleanup.
 7. **Run the full test suite, not just your new tests.** Confirm nothing else broke.
    A change that passes its own tests but breaks the existing suite is not done.
-8. **Re-check against the verification plan.** Re-read the acceptance criteria from
-   the issue body and confirm your change actually satisfies each one — the same
-   check the reviewer will make at gate②.
+8. **Re-check against the verification plan and the review doctrine.** Re-read the
+   acceptance criteria from the issue body and confirm your change actually satisfies
+   each one; then re-scan every test you wrote or changed against the review-doctrine
+   block above — the reviewer applies the same block at gate②, and catching it here
+   is a rewrite instead of a fix round.
 
 ## Finishing up
 
