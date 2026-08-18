@@ -243,20 +243,22 @@ const NEEDS_HUMAN_COLS = 2;
  *  a droplet with a longer number), so the old step no longer clears the same margin between
  *  adjacent droplet bodies. Kept proportionally generous (step − 2 × footprint ≈ the old margin).
  *  Column width is a true 2r (the shape's own x-range is exactly [-r, r]), so COL_STEP's own
- *  margin against 2 × DROPLET_MAX_R (40) holds. Row HEIGHT is not 2r — `dropletPath`'s own tip/
- *  belly extend to 9r/7 each way (≈2.571r total, gate② finding [0]'s own "moving the text/
- *  shrinking the path can leave it green" catch, surfaced once the collision oracle read the
- *  REAL rendered path instead of a circleBox stand-in) — ROW_STEP is sized against that true
- *  height at the worst-case DROPLET_MAX_R (2.571 × 20 ≈ 51.4), not the old (too-small) 2r guess. */
+ *  margin against 2 × DROPLET_MAX_R holds: Rescue #950 raised the ceiling 20 → 22 (that constant's
+ *  own doc), so 2 × 22 = 44 — a real, if narrower, margin under 46. Row HEIGHT is not 2r —
+ *  `dropletPath`'s own tip/belly extend to 9r/7 each way (≈2.571r total, gate② finding [0]'s own
+ *  "moving the text/shrinking the path can leave it green" catch, surfaced once the collision
+ *  oracle read the REAL rendered path instead of a circleBox stand-in) — ROW_STEP is sized against
+ *  that true height at the worst-case DROPLET_MAX_R (2.571 × 22 ≈ 56.6), not the old (too-small)
+ *  2r guess; 66 keeps a real ~9.4px margin over it. */
 const NEEDS_HUMAN_COL_STEP = 46;
-const NEEDS_HUMAN_ROW_STEP = 58;
+const NEEDS_HUMAN_ROW_STEP = 66;
 /**
  * gate② finding [1] (ac2-escalation-overlap): the rank-0 droplet's own vertical offset from
- * `ESCALATION.y` — was a bare inline `30`, which at the worst-case `DROPLET_MAX_R` (20) let the
- * droplet's own bottom edge (`y + r * 9/7` ≈ +25.7) reach y=455.7, INSIDE the escalation circle
- * (top edge `ESCALATION.y - ESCALATION_R` = 444) instead of clearing it. 56 keeps the same
- * worst-case droplet's bottom edge (`ESCALATION.y - 56 + 25.7` ≈ 429.7) a real ~14px above the
- * circle's own top edge.
+ * `ESCALATION.y` — was a bare inline `30`, which at the worst-case `DROPLET_MAX_R` let the
+ * droplet's own bottom edge (`y + r * 9/7`) reach INSIDE the escalation circle (top edge
+ * `ESCALATION.y - ESCALATION_R` = 444) instead of clearing it. 56 keeps the worst-case droplet's
+ * bottom edge (`ESCALATION.y - 56 + r * 9/7`, ≈ 432.3 at Rescue #950's raised `DROPLET_MAX_R` of
+ * 22) a real ~11.7px above the circle's own top edge.
  */
 const NEEDS_HUMAN_BASE_OFFSET = 56;
 /** #891 AC1: never draw more than this many needs-human droplets at once — see the doc above
@@ -268,7 +270,7 @@ const NEEDS_HUMAN_DRAW_CAP = NEEDS_HUMAN_COLS * 3;
  * grid), `checkpoint` had no per-droplet offset at all. Two PRs out for review at once is the
  * normal steady state, not an edge case, so this collided on the most common path — the exact
  * "N chips staged at ONE coordinate" shape #745 reports. Same COLS/STEP magnitudes as
- * NEEDS_HUMAN — same droplet label format (`⤳ 9999`/`⊙ 9999`), same verified-safe sizing;
+ * NEEDS_HUMAN — same droplet number/kind-mark rendering (Rescue #950), same verified-safe sizing;
  * grows UPWARD (away from the CI/Review gates below), the same direction NEEDS_HUMAN grows away
  * from its own anchor.
  *
@@ -314,9 +316,10 @@ const NEEDS_HUMAN_DRAW_CAP = NEEDS_HUMAN_COLS * 3;
 const CHECKPOINT_COLS = 2;
 /** #922 AC2: widened alongside NEEDS_HUMAN_COL_STEP/ROW_STEP — same growth, same reason
  *  (`NEEDS_HUMAN_COL_STEP`/`_ROW_STEP`'s own doc: ROW_STEP is sized against the shape's true
- *  ≈2.571r height, not a plain 2r). */
+ *  ≈2.571r height, not a plain 2r; Rescue #950 raised both alongside `DROPLET_MAX_R`'s own 20 →
+ *  22). */
 const CHECKPOINT_COL_STEP = 46;
-const CHECKPOINT_ROW_STEP = 58;
+const CHECKPOINT_ROW_STEP = 66;
 /** #922 AC2 gate② finding [0]: was 3 — the taller ROW_STEP (above) needed to hold the shape's
  *  true height no longer fits 3 rows between `CHECKPOINT_BASE_OFFSET` and the top of the
  *  viewBox (y=0); 2 rows is what the same vertical budget actually holds without pushing rank 2
@@ -514,11 +517,11 @@ const RING_WORD_RIGHT_X = TRUNK.x - 10;
  * ring count centered at `TRUNK.y + 11`, `RING_COUNT_FONT_PX`).
  *
  * #922 AC2: the droplet's own number now renders INSIDE the shape, whose belly radius GROWS to
- * fit its own text (`dropletRadius`) — a fixed offset tuned for the old constant-size droplet
- * left no margin once a droplet's own text (worst case: the trunk's "✓ ⤳ " prefix plus a long PR
- * number) grew the shape past that fixed clearance. The offset now grows WITH the droplet's own
- * radius past `DROPLET_MIN_R` — verified against a deliberately stressed digit count (3-digit
- * ring total, 6-digit PR number) by `hero.test.ts`'s own test, the same discipline #728's
+ * fit its own NUMBER (`dropletRadius`, Rescue #950: never the kind mark) — a fixed offset tuned
+ * for the old constant-size droplet left no margin once a droplet's own number (worst case: the
+ * trunk's own multi-digit PR) grew the shape past that fixed clearance. The offset now grows WITH
+ * the droplet's own radius past `DROPLET_MIN_R` — verified against a deliberately stressed digit
+ * count (3-digit ring total, 5-digit PR number) by `hero.test.ts`'s own test, the same discipline #728's
  * NEEDS_HUMAN_COL_STEP/ROW_STEP doc already uses for its own cluster. The horizontal +40 base
  * only keeps the marker visually near "where the merge arm feeds in" (`GATES.review` → `TRUNK`),
  * not load-bearing for the clearance itself — only the vertical component needs to keep pace
@@ -694,7 +697,7 @@ export function dropletPoint(state: HeroState, d: Droplet, at: DropletAt = d.at)
     // offset is verified collision-free against a worst-case ring/PR digit count by
     // `hero.test.ts`'s own stress test (mirrors the #728 needs-human-cluster stress pattern).
     case "trunk": {
-      const { dx, dy } = trunkDropletOffset(dropletRadius(dropletText(d)));
+      const { dx, dy } = trunkDropletOffset(dropletRadius(dropletNumber(d)));
       return { x: TRUNK.x + dx, y: TRUNK.y + dy };
     }
   }
@@ -797,23 +800,32 @@ function dropletFill(d: Droplet): string {
   return "var(--sap-fill)";
 }
 
-/** #922 AC2: the droplet's own number, now rendered INSIDE the shape. A droplet parked on the
- *  escalation branch that already carries a PR reads "PR #N" (the AC's own wording) rather than
- *  the generic ⤳ marker every other in-flight droplet uses. */
-function dropletText(d: Droplet): string {
-  if (d.at === "needs-human" && d.pr !== null) return `PR #${d.pr}`;
-  const prefix = d.at === "trunk" ? "✓ " : "";
-  return `${prefix}${d.pr === null ? `⊙ ${d.issue}` : `⤳ ${d.pr}`}`;
+/** Rescue #950 (#922 AC2, second pass): the shrink-to-fit path is gone — the 11px numeral floor
+ *  is inviolable, so the droplet's own NUMBER (never a prefix) is the only input `dropletRadius`
+ *  sizes the shape against. `dropletKind` is the small secondary glyph identifying WHAT the
+ *  number is (parked-PR / in-flight-PR / bare-issue / merged) — drawn separately, at its own
+ *  smaller size, never counted toward the shape's own fit. */
+function dropletKind(d: Droplet): string {
+  if (d.at === "needs-human" && d.pr !== null) return "PR";
+  if (d.at === "trunk") return "✓";
+  return d.pr === null ? "⊙" : "⤳";
+}
+
+/** The bare number a droplet's belly is actually sized to fit — the PR once one exists, else the
+ *  issue number. Never a prefix (`dropletKind`'s job) — see that function's own doc. */
+function dropletNumber(d: Droplet): string {
+  return String(d.pr === null ? d.issue : d.pr);
 }
 
 /**
  * #879: the frozen baseline draws every issue token as a teardrop, not a bare circle. #922 AC2:
- * the number now renders INSIDE the shape (was floating above it) — so the shape's own belly
- * radius must fit its own text box, not just clear a fixed height floor. `dropletRadius` sizes
- * that belly to the ACTUAL text (never a guessed fixed max), the same "grow to fit content, floor
- * at a minimum" posture `ringCountFontPx`/`ringInnerRadius` (above) already use for the trunk's
- * own display number — a droplet carrying a short issue number stays compact near the floor; one
- * carrying a longer PR number (or the trunk's "✓ ⤳ N" prefix) grows to fit it.
+ * the number renders INSIDE the shape (was floating above it) — so the shape's own belly radius
+ * must fit its own NUMBER's text box, not just clear a fixed height floor. `dropletRadius` sizes
+ * that belly to the ACTUAL number (never a guessed fixed max, and never the kind mark — Rescue
+ * #950's own "fit the content to the shape, not the font" ruling), the same "grow to fit content,
+ * floor at a minimum" posture `ringCountFontPx`/`ringInnerRadius` (above) already use for the
+ * trunk's own display number — a droplet carrying a short issue number stays compact near the
+ * floor; one carrying a longer PR number grows to fit it.
  *
  * `DROPLET_MIN_R` is the floor: sized so the rendered height clears AC2's own ≥ 28px floor at the
  * REAL render scale (`REAL_RENDER_SCALE_1440`, gate② finding [0] — not the naive
@@ -821,48 +833,53 @@ function dropletText(d: Droplet): string {
  * height = (18/7) × r stage units (the tip/belly-bottom span at the r=7 baseline this ratio comes
  * from) × `REAL_RENDER_SCALE_1440` (≈1.0975) ≥ 28 needs r ≳ 9.92; 10.5 clears it with real margin
  * (≈29.6px). `dropletPath(r)` generalizes that SAME tip/belly-radius/control-point ratio to any
- * belly radius `r` — a droplet that grows for its text keeps the identical teardrop silhouette,
+ * belly radius `r` — a droplet that grows for its number keeps the identical teardrop silhouette,
  * just bigger.
  */
 const DROPLET_MIN_R = 10.5;
-/** #922 AC2: the number's own NOMINAL font-size, now that it draws inside the shape — gate②
- *  finding [0]: 11 stage units × `REAL_RENDER_SCALE_1440` (≈1.0975) ≈ 12.07px at 1440, clearing
- *  the AC's own ≥ 11px floor at the REAL render scale (the old 10 cleared only the naive,
- *  overstated scale). Every droplet up to a realistic 1-3 digit issue/PR number renders at
- *  exactly this size; only past `DROPLET_MAX_R` does `dropletNumFontPx` shrink it, the same
- *  "floor holds until physically impossible" posture `ringCountFontPx` already uses for the
- *  trunk's own display number. */
+/** Rescue #950: the number's own font-size — FIXED, never shrunk. 11 stage units ×
+ *  `REAL_RENDER_SCALE_1440` (≈1.0975) ≈ 12.07px at 1440, clearing the AC's own ≥ 11px floor at
+ *  the REAL render scale with real margin. Every droplet's number renders at exactly this size,
+ *  regardless of digit count — a droplet whose number would blow past `DROPLET_MAX_R` grows the
+ *  SHAPE up to that ceiling instead (`dropletRadius`); past the ceiling the number's text box can
+ *  exceed the path box, which is why the ceiling itself is sized to the widest number this file
+ *  actually expects (`DROPLET_MAX_R`'s own doc), not the font. */
 export const DROPLET_NUM_FONT_PX = 11;
 const DROPLET_CHAR_ADVANCE = 0.62;
 const DROPLET_TEXT_PAD = 4;
-/** #922 AC2: the belly radius ceiling — past this, a droplet stops growing the SHAPE and shrinks
- *  its own NUMBER instead (`dropletNumFontPx`). Sized so two adjacent needs-human/checkpoint
- *  columns (`NEEDS_HUMAN_COL_STEP`/`CHECKPOINT_COL_STEP`, both 46) never touch (2 × 20 = 40, a
- *  real margin under 46) and the cluster's own rightmost reach stays clear of the trunk rings
- *  (`GATES`'s own doc on `TRUNK_DISC_R_MAX`'s leftmost extent) — verified by `hero.test.ts`'s own
- *  stress fixtures (4-digit PR numbers), never a guessed number.
+/** Rescue #950: the number's own secondary kind mark (`dropletKind`) — smaller than the number
+ *  itself (never competes with it for the AC's own ≥ 11px floor, which names the NUMBER only) and
+ *  never counted toward `dropletRadius`'s own fit; the widest mark ("PR", 2 chars) at this size
+ *  still sits well inside `DROPLET_MIN_R`'s own belly. */
+const DROPLET_MARK_FONT_PX = 7;
+/** Rescue #950: vertical gap between the number (its own fixed anchor, unchanged) and the kind
+ *  mark drawn above it — a plain constant offset, not a second fitted layout, since the mark's
+ *  own small size clears the belly at every radius between `DROPLET_MIN_R` and `DROPLET_MAX_R`
+ *  (verified by `hero.test.ts`'s containment checks). 11 (not `DROPLET_MARK_FONT_PX`'s own 7) —
+ *  a live shot at the smallest realistic radius showed some glyphs (`✓`'s own tall ascender in
+ *  this font) touching the number's own top edge at a tighter gap; 11 clears it with a visible
+ *  gap for every mark this file draws. */
+const DROPLET_MARK_OFFSET = 11;
+/** Rescue #950 (#922 AC2, second pass — PO ruling): the belly radius ceiling, raised from 20 to
+ *  cover a realistic 4-5 digit PR/issue number (sapwood's own repo is already in the 4-digit
+ *  range) WITHOUT shrinking the number's font — `dropletRadius`'s own half-width formula gives
+ *  "9202" (4 digits) ≈ 17.6 and "12345" (5 digits) ≈ 21.05, both under 22. Two adjacent
+ *  needs-human/checkpoint columns (`NEEDS_HUMAN_COL_STEP`/`CHECKPOINT_COL_STEP`, both 46) still
+ *  never touch (2 × 22 = 44, a real — if narrower — margin under 46); a 6th digit would clip the
+ *  number's own text box (out of the AC's own "realistic" scope, and never reached by any fixture
+ *  this file exercises).
  */
-const DROPLET_MAX_R = 20;
+const DROPLET_MAX_R = 22;
 
-/** #922 AC2: the font size a droplet's own number actually renders at — the nominal
- *  `DROPLET_NUM_FONT_PX` for any text short enough to fit `DROPLET_MAX_R` at that size (every
- *  realistic issue/PR number), shrinking only for text that would otherwise blow the shape past
- *  its ceiling. */
-export function dropletNumFontPx(text: string): number {
-  const nominalHalfWidth = (text.length * DROPLET_NUM_FONT_PX * DROPLET_CHAR_ADVANCE) / 2 + DROPLET_TEXT_PAD;
-  if (nominalHalfWidth <= DROPLET_MAX_R) return DROPLET_NUM_FONT_PX;
-  const available = DROPLET_MAX_R - DROPLET_TEXT_PAD;
-  return (available * 2) / (text.length * DROPLET_CHAR_ADVANCE);
-}
-
-/** #922 AC2: the belly radius a droplet needs so its own number's text box sits fully inside the
- *  path box — never smaller than `DROPLET_MIN_R` (the height floor) nor larger than
- *  `DROPLET_MAX_R` (past which the number's own font shrinks instead, `dropletNumFontPx`).
- *  Exported so `hero.test.ts` derives the exact same footprint this file actually draws, never a
- *  copied literal. */
-export function dropletRadius(text: string): number {
-  const fontPx = dropletNumFontPx(text);
-  const halfWidth = (text.length * fontPx * DROPLET_CHAR_ADVANCE) / 2 + DROPLET_TEXT_PAD;
+/** Rescue #950: the belly radius a droplet needs so its own NUMBER's text box sits fully inside
+ *  the path box — never smaller than `DROPLET_MIN_R` (the height floor) nor larger than
+ *  `DROPLET_MAX_R` (the collision ceiling; a number past both the ceiling AND `DROPLET_MIN_R`'s
+ *  clearance is out of scope, see that constant's own doc). The number's font is always
+ *  `DROPLET_NUM_FONT_PX` — never re-derived here, never shrunk. Takes the bare number text
+ *  (`dropletNumber`), never the kind mark. Exported so `hero.test.ts` derives the exact same
+ *  footprint this file actually draws, never a copied literal. */
+export function dropletRadius(number: string): number {
+  const halfWidth = (number.length * DROPLET_NUM_FONT_PX * DROPLET_CHAR_ADVANCE) / 2 + DROPLET_TEXT_PAD;
   return Math.max(DROPLET_MIN_R, Math.min(DROPLET_MAX_R, halfWidth));
 }
 
@@ -1633,14 +1650,17 @@ export function HeroStage({
           // droplets that ACTUALLY draw, never among the hidden ones sitting ahead of it too
           // (`geometryState`'s own doc above).
           const { x, y } = dropletPoint(geometryState, d);
-          // #922 AC2: the shape and its own number are sized together — the belly grows to fit
-          // THIS droplet's own text, never a fixed guess (`dropletRadius`'s own doc). `bottom` is
-          // the shape's own real rendered bottom edge (the same 9/7 ratio `dropletPath` draws its
-          // tip at, mirrored) — every element below the number anchors off it instead of a fixed
-          // offset that only held for the old constant-size shape.
-          const text = dropletText(d);
-          const r = dropletRadius(text);
+          // Rescue #950 (#922 AC2, second pass): the shape grows to fit THIS droplet's own NUMBER
+          // only (never a fixed guess, `dropletRadius`'s own doc) — the kind mark is secondary and
+          // never grows the shape. `bottom` is the shape's own real rendered bottom edge (the same
+          // 9/7 ratio `dropletPath` draws its tip at, mirrored) — every element below the number
+          // anchors off it instead of a fixed offset that only held for the old constant-size
+          // shape.
+          const kind = dropletKind(d);
+          const number = dropletNumber(d);
+          const r = dropletRadius(number);
           const bottom = (r * 9) / 7;
+          const numY = bottom * 0.35;
           return (
             <g
               className="hero-droplet"
@@ -1652,14 +1672,19 @@ export function HeroStage({
               transform={`translate(${x} ${y})`}
             >
               <path className="hero-droplet-shape" d={dropletPath(r)} style={{ fill: dropletFill(d) }} />
+              {/* Rescue #950: the kind mark (⊙ / ⤳ / ✓ / PR) — WHAT the number is, drawn smaller
+               *  and above it, never sized into the shape's own fit (`dropletRadius`'s own doc). */}
               <text
-                className="hero-num hero-droplet-num"
+                className="hero-droplet-kind"
                 x={0}
-                y={bottom * 0.35}
+                y={numY - DROPLET_MARK_OFFSET}
                 textAnchor="middle"
-                style={{ fontSize: dropletNumFontPx(text) }}
+                style={{ fontSize: DROPLET_MARK_FONT_PX }}
               >
-                {text}
+                {kind}
+              </text>
+              <text className="hero-num hero-droplet-num" x={0} y={numY} textAnchor="middle" style={{ fontSize: DROPLET_NUM_FONT_PX }}>
+                {number}
               </text>
               {d.failed && (
                 <text className="hero-mark" x={0} y={bottom + 12} textAnchor="middle">

@@ -117,22 +117,35 @@
   font-size: 14px;
 }
 
-/* #922 AC2: the droplet's own number, now inside the shape instead of floating above it.
- * `font-size` is inline (`stage.tsx`'s `dropletNumFontPx`) — the nominal 10px for any realistic
- * issue/PR number, shrinking only past `DROPLET_MAX_R` (extreme digit counts); no redundant
- * value declared here to drift from that (`.hero-ring-count`'s own doc, same reasoning). */
+/* Rescue #950 (#922 AC2, second pass): the droplet's own NUMBER, inside the shape. `font-size` is
+ * inline (`stage.tsx`'s `DROPLET_NUM_FONT_PX`) — a fixed 11px for every droplet regardless of
+ * digit count; the shrink-to-fit path is gone (the PO ruling: the 11px floor is inviolable). No
+ * redundant value declared here to drift from that (`.hero-ring-count`'s own doc, same
+ * reasoning). */
 .hero-droplet-num {
   font-weight: 600;
   fill: var(--on-sap-fill);
 }
 
+/* Rescue #950: the droplet's own secondary KIND mark (⊙ / ⤳ / ✓ / PR) — WHAT the number is, drawn
+ * smaller and above it (`stage.tsx`'s `DROPLET_MARK_FONT_PX`, inline). Never sized into the
+ * shape's own fit — only the number does that (`dropletRadius`'s own doc). */
+.hero-droplet-kind {
+  font-family: var(--font-data);
+  font-weight: 600;
+  fill: var(--on-sap-fill);
+  opacity: 0.85;
+}
+
 /* #922 AC2 gate② finding [2] (ac2-rust-ink-contrast): needs-human/failed droplets fill --rust
- * (`dropletFill`, stage.tsx), never --sap-fill — their own number needs --rust's own ink
+ * (`dropletFill`, stage.tsx), never --sap-fill — their own number/kind mark needs --rust's own ink
  * (--on-rust, tokens.css's own doc), not --on-sap-fill, which only clears AA against the flat
- * --sap-fill surface. Two classes on `.hero-droplet-num` (specificity 0,2,0) beats the bare rule
- * above (0,1,0) regardless of declaration order. */
+ * --sap-fill surface. Two classes on each selector (specificity 0,2,0) beats the bare rule above
+ * (0,1,0) regardless of declaration order. */
 .hero-droplet[data-at="needs-human"] .hero-droplet-num,
-.hero-droplet[data-failed="true"] .hero-droplet-num {
+.hero-droplet[data-failed="true"] .hero-droplet-num,
+.hero-droplet[data-at="needs-human"] .hero-droplet-kind,
+.hero-droplet[data-failed="true"] .hero-droplet-kind {
   fill: var(--on-rust);
 }
 
