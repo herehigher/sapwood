@@ -19,6 +19,12 @@ export type Lane = {
   costUsd: number | null;
   /** #33 priced estimate while running; cleared to null the instant the lane stops. */
   estCostUsd: number | null;
+  /** #927: `costUsd`'s own provenance — `false` (known-real, provider-reported) is what gates
+   *  `copy.ts`'s `calibrationClause`/`LaneBoard.tsx`'s `laneCostText` est→real reading; `true`
+   *  or unset never render one. Optional/absent for a live lane — `/api/loop/state` never sends
+   *  this field today; only `deriveReplayedLanes` (App.tsx) populates it, from the replayed
+   *  fold's own `reclaim-done`-recorded `LaneView.costEstimated`. */
+  costEstimated?: boolean | null;
   /** #926: `workers.fix_rounds` — the "round n of cap" numerator for a `fixing` lane's chip
    *  (`lanes.prFixCap` config is the denominator). 0 for a lane that has never entered a fix
    *  round. */

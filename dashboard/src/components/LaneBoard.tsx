@@ -1,5 +1,5 @@
 import type { Lane } from "../api/types.ts";
-import { laneStateCaption } from "../copy.ts";
+import { calibrationClause, laneStateCaption } from "../copy.ts";
 import type { EntityTitles } from "../entities.ts";
 import { formatElapsed, formatUsd } from "../format.ts";
 import { modelEffortCaption } from "../hero/stage.tsx";
@@ -21,9 +21,15 @@ export function laneHeadStat(config: Record<string, unknown> | null | undefined,
  *  `estCostUsd` is never silently dropped (the pre-#890 behavior: any lane with `costUsd: null`
  *  read as "—, settles when the lane ends" even when the engine already had a live estimate).
  *  `costUsd` still wins once settled — an est figure is a placeholder for the not-yet-real
- *  number, never shown alongside its own settled replacement. */
+ *  number, never shown alongside its own settled replacement.
+ *
+ *  #927 gate② finding [1] (ac2-calibration-dropped): once settled, `calibrationClause`
+ *  (`copy.ts` — the SAME gate the reclaim-done feed sentence already uses, never a second
+ *  hand-copied implementation) appends the recorded est→real reading when `lane.estCostUsd`/
+ *  `costEstimated` name a known-real provenance — `costEstimated === false` exactly, absent for
+ *  a live card today (no live overlay carries it), so this is a no-op there. */
 export function laneCostText(lane: Lane): string {
-  if (lane.costUsd !== null) return formatUsd(lane.costUsd);
+  if (lane.costUsd !== null) return `${formatUsd(lane.costUsd)}${calibrationClause(lane)}`;
   if (lane.estCostUsd !== null) return `${formatUsd(lane.estCostUsd)} est`;
   return "—, settles when the lane ends";
 }

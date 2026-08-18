@@ -132,6 +132,34 @@ test("a settled lane's real costUsd wins over any lingering estCostUsd — never
   assert.doesNotMatch(html, /6\.21/);
 });
 
+// #927 gate② finding [1] (ac2-calibration-dropped): a settled lane whose recorded estimate has a
+// KNOWN-REAL provenance (`costEstimated: false`) — the shape only `deriveReplayedLanes` (App.tsx)
+// populates today — renders the est→real calibration reading in its own cost TEXT, but never
+// leaks it into the live-est BAR segment (`CostBar`'s own hatch pattern), since `LaneCard`'s
+// `estUsd` prop is unconditionally `null` once `costUsd` is settled.
+test("a settled lane with a known-real recorded estimate (costEstimated: false) renders the est→real calibration reading in its cost text, never in the bar", () => {
+  const html = renderToStaticMarkup(
+    <LaneBoard lanesMax={1} lanes={[lane({ costUsd: 1.1, estCostUsd: 1.05, costEstimated: false })]} titles={{}} now={NOW} />,
+  );
+  assert.match(html, /\$1\.10 · est \$1\.05 → real \$1\.10/);
+  assert.doesNotMatch(html, /url\(#[^)]*cost-bar-est-hatch\)/, "the historical estimate must never draw the bar's live-est hatch segment");
+});
+
+// The provenance gate itself: `costEstimated: true` (the settled figure is ITSELF an estimate,
+// never labelled "real") and `costEstimated` absent (unknown provenance — today's live posture,
+// since no live overlay carries this field) both render no calibration clause at all.
+test("a settled lane's calibration clause renders ONLY when costEstimated is known-false — true or absent renders no clause", () => {
+  const estimatedHtml = renderToStaticMarkup(
+    <LaneBoard lanesMax={1} lanes={[lane({ costUsd: 1.1, estCostUsd: 1.05, costEstimated: true })]} titles={{}} now={NOW} />,
+  );
+  assert.doesNotMatch(estimatedHtml, /est \$1\.05/, "costEstimated: true must never render a fabricated 'real' clause");
+
+  const unknownHtml = renderToStaticMarkup(
+    <LaneBoard lanesMax={1} lanes={[lane({ costUsd: 1.1, estCostUsd: 1.05 })]} titles={{}} now={NOW} />,
+  );
+  assert.doesNotMatch(unknownHtml, /est \$1\.05/, "unset costEstimated (today's live posture) must never render a clause either");
+});
+
 test("a lane with a live estimate renders the shared hatched CostBar", () => {
   const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ costUsd: null, estCostUsd: 6.21 })]} titles={{}} now={NOW} />);
   assert.match(html, /class="cost-bar lane-card-bar"/);

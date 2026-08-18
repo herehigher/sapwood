@@ -86,13 +86,26 @@ const REPLAY_LANE_STATE: Partial<Record<HeroState["lanes"][number]["phase"], str
  * #927 (§729 remainder, D35; Q4 owner ruling): replay/`?demo` has no live `/api/loop/state`
  * lane snapshot — this derives the SAME `Lane[]` shape `LaneBoard` already renders straight from
  * the shared fold's own state (`hero/state.ts`'s `LaneView`/`Droplet`), one code path for live
- * and replay (§11 renderer contract, this issue's amendment to the boundary table). The PR ref
- * comes from the droplet riding this lane (`Droplet.pr`, learned the moment ANY event names both
- * issue+pr — `hero/state.ts`'s own doc), never a second source. `estCostUsd` is always `null`:
- * §11 draws no live-telemetry overlay in replay even once `reclaim-done` recorded one
- * (`LaneView.estCostUsd` exists for the reducer's own bookkeeping, not this card's est bar) — so
- * `laneHasCostToShow`/`CostBar` (`LaneBoard.tsx`) never draw an est segment here, only ever the
- * settled one once `reclaim-done` has folded.
+ * and replay (§11 renderer contract, this issue's amendment to the boundary table).
+ *
+ * The PR ref comes from the droplet riding THIS card's own issue (`hero.droplets` is keyed by
+ * issue — `hero/state.ts`'s `Draft.droplets: Map<number, Droplet>` — so matching by `d.issue ===
+ * l.issue` is exact, never ambiguous). gate② finding [2] (replayed-pr-worker-alias): matching by
+ * `d.lane === l.worker` instead is a real bug — `Droplet.lane` is never cleared once set (merged/
+ * handoff/trunk all leave it standing), so once a worker NAME is reused for a later, unrelated
+ * issue, `.find` would return whichever droplet happened to touch that name FIRST — a stale
+ * droplet's PR from a long-merged issue, shown on the new issue's card.
+ *
+ * `estCostUsd`/`costEstimated` carry the settled `reclaim-done`'s OWN recorded estimate/
+ * provenance through to `laneCostText`'s est→real calibration reading (gate② finding [1]:
+ * dropping them left the card at the bare settled figure, short of what the issue's own "cost
+ * line = settled figure with the est→real reading when recorded" names) — WITHOUT ever feeding
+ * a live-est BAR segment: `LaneCard`'s own `CostBar` call (`LaneBoard.tsx`) already forces
+ * `estUsd: null` the instant `costUsd` is non-null, and `costUsd` is exactly what a settled
+ * replayed lane always has once `reclaim-done` has folded — so the historical estimate only ever
+ * reaches the TEXT, never the bar. While the lane is still running (no `reclaim-done` yet),
+ * `LaneView.estCostUsd` is itself still `null` (§11: no live-telemetry overlay exists in replay
+ * to have set it early) — no fabricated est renders there either.
  */
 export function deriveReplayedLanes(hero: HeroState): Lane[] {
   const lanes: Lane[] = [];
@@ -100,18 +113,20 @@ export function deriveReplayedLanes(hero: HeroState): Lane[] {
     if (l.worker === null || l.issue === null) continue;
     const state = REPLAY_LANE_STATE[l.phase];
     if (!state) continue;
+    const droplet = hero.droplets.find((d) => d.issue === l.issue);
     lanes.push({
       lane: l.worker,
       issue: l.issue,
       state,
-      pr: hero.droplets.find((d) => d.lane === l.worker)?.pr ?? null,
+      pr: droplet?.pr ?? null,
       // `l.startedAt` is always set once a lane is occupied — every claim path (`dispatched`,
       // a released lane's `fix-leg-started`/`-resumed`) stamps it before this filter admits the
       // lane at all (`hero/state.ts`'s own doc).
       startedAt: l.startedAt ?? "",
       endedAt: null,
       costUsd: l.costUsd,
-      estCostUsd: null,
+      estCostUsd: l.estCostUsd,
+      costEstimated: l.costEstimated,
       fixRound: l.fixRound,
       contextTokens: null,
       tokenComposition: null,
@@ -859,9 +874,11 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
  * `useDemoFixture` is a ONE-SHOT fetch of `/demo-fixture.json` (never `/api/loop/state` or
  * `/api/events`), and `useDemoReplay` folds it through the identical replay/player machinery
  * `LiveApp`'s own `useReplay` uses (§9 "one state reducer"). `mode` is always `"replay"` once the
- * fixture loads — there is no live engine to fall back to — which is exactly why every "live only"
- * panel (`LaneBoard`, `ConfigDrawer`, the engine control verbs) already greys out for free: the
- * SAME wiring `appContent` already uses whenever a closed round is selected under live mode.
+ * fixture loads — there is no live engine to fall back to. `LaneBoard` is NOT one of the panels
+ * this leaves greyed out (#927): it replays its own lane narrative from `deriveReplayedLanes`,
+ * the same as `LiveApp`'s own replay branch. The genuinely live-only panels (`ConfigDrawer`, the
+ * engine control verbs) already grey out for free — the SAME wiring `appContent` already uses
+ * whenever a closed round is selected under live mode.
  */
 function DemoApp({ now, initialConfigOpen }: AppProps) {
   const clock = now ?? new Date();

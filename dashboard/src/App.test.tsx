@@ -38,7 +38,6 @@ import { laneCostText, laneStateChipText } from "./components/LaneBoard.tsx";
 import { NeedsAttention } from "./components/NeedsAttention.tsx";
 import { parseColorTokens } from "./contrast.ts";
 import { buildClosedRoundCostPanel } from "./cost-panel.ts";
-import { buildRoundLog } from "./demo/build-round-log.ts";
 import { DEMO_SOURCE } from "./demo/source.ts";
 import type { DemoBundle } from "./demo/types.ts";
 import { type DomainEvent, toDomainEvent } from "./domain-event.ts";
@@ -46,7 +45,6 @@ import type { EntityTitles } from "./entities.ts";
 import { formatElapsed } from "./format.ts";
 import { Hero } from "./hero/Hero.tsx";
 import { foldEvents, type HeroState, initialHeroState } from "./hero/state.ts";
-import { scrubTo } from "./replay/player.ts";
 import { foldReplay, initialReplayState } from "./replay/reducer.ts";
 
 /** Same tree-walk IconRail.test.tsx uses — finds a node in a REAL React element tree (never a
@@ -340,7 +338,13 @@ test("#927 AC2: deriveReplayedLanes yields the card's state/pr/cost-text/elapsed
   const card2 = cardsAfterReclaim[0]!;
   assert.equal(card2.pr, null, "reclaim-done here carries no pr field — still unknown at this cursor");
   assert.equal(laneStateChipText(card2, 2), "PR under review", "the DRIVING transition reads the driving caption");
-  assert.equal(laneCostText(card2), "$1.10", "the settled figure — recorded estCostUsd never leaks into the card's est bar");
+  assert.equal(
+    laneCostText(card2),
+    "$1.10 · est $1.05 → real $1.10",
+    "the settled figure carries the recorded est→real calibration reading (gate② finding [1]) — the historical estimate never leaks into the card's live-est BAR though (asserted separately below)",
+  );
+  assert.equal(card2.estCostUsd, 1.05, "the recorded estimate reaches the card for text purposes");
+  assert.equal(card2.costEstimated, false, "the recorded provenance reaches the card too");
   assert.equal(
     formatElapsed(card2.startedAt, new Date("2026-08-10T09:15:00.000Z")),
     "15m",
@@ -356,6 +360,28 @@ test("#927 AC2: deriveReplayedLanes yields the card's state/pr/cost-text/elapsed
     96,
     "the PR itself is now known, even though the released lane no longer carries a card",
   );
+});
+
+// #927 gate② finding [2] (replayed-pr-worker-alias): `Droplet.lane` is never cleared once set —
+// merged/handoff/trunk all leave it standing — so matching a card's PR by `d.lane === l.worker`
+// (the pre-fix behavior) could return a STALE droplet from a worker name reused for a later,
+// unrelated issue. `deriveReplayedLanes` now matches by `d.issue === l.issue` instead — exact,
+// since `hero.droplets` is keyed by issue (`hero/state.ts`'s own `Draft.droplets: Map<number,
+// Droplet>` doc) — immune to the alias regardless of how worker names get reused.
+test("#927 gate② finding [2]: a worker name reused for a later issue never shows the earlier, merged issue's stale PR on the new card", () => {
+  const events: DomainEvent[] = [
+    { known: false, id: 1, ts: "2026-08-10T09:00:00.000Z", kind: "dispatched", payload: { worker: "w1", issue: 94 } },
+    { known: false, id: 2, ts: "2026-08-10T09:10:00.000Z", kind: "reclaim-done", payload: { worker: "w1", issue: 94, next: "DRIVING" } },
+    { known: false, id: 3, ts: "2026-08-10T09:15:00.000Z", kind: "merged", payload: { worker: "w1", issue: 94, pr: 96 } },
+    // The SAME worker name, "w1", picks up a brand-new, unrelated issue — #94's own droplet
+    // (now `at: "trunk"`, `pr: 96`) still carries `lane: "w1"` from its own original dispatch.
+    { known: false, id: 4, ts: "2026-08-10T09:20:00.000Z", kind: "dispatched", payload: { worker: "w1", issue: 200 } },
+  ];
+  const state = foldEvents(initialHeroState(1), events).state;
+  const cards = deriveReplayedLanes(state);
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0]!.issue, 200);
+  assert.equal(cards[0]!.pr, null, "issue #200 has no PR-bearing event of its own — must never inherit #94's stale PR #96");
 });
 
 // ── PR #900 gate② finding [1] (attention-strip-wiring-proof): #893's newly-mapped attention
@@ -2305,48 +2331,89 @@ async function renderSettledDemoApp(bundle: DemoBundle): Promise<string> {
   );
 }
 
+/**
+ * #927 gate② finding [0] (ac1-midpoint-unwired): a raw DOM `dispatchEvent(new Event("input"))`
+ * never reaches React's root-delegated listener in this harness (confirmed directly: not even a
+ * plain controlled `<input type="text">` re-renders from one — no jsdom here, and happy-dom's
+ * dispatch doesn't trigger React 19's synthetic pickup), so scrubbing via a simulated DOM event is
+ * not available. The REAL `onChange` React attached to the DOM node during the actual render IS
+ * still reachable, though — every React-managed DOM node carries it under an internal
+ * `__reactProps$<random>` key. Reading that key and calling the handler directly invokes the
+ * EXACT closure `Transport.tsx` created (`onChange={(e) => onScrub?.(Number(e.target.value))}`),
+ * closing over the real, live `useDemoReplay`'s own `scrub` — not a hand-rolled substitute for it.
+ * This is strictly closer to the real wiring than a simulated `dispatchEvent` would even be: the
+ * DOM/bubbling layer was never the part of `Transport → useDemoReplay.scrub → resolveActiveFold`
+ * this AC needs proof of; the handler identity and its closure are.
+ */
+function realOnChange(input: HTMLInputElement): (e: { target: { value: string } }) => void {
+  const propsKey = Object.keys(input).find((k) => k.startsWith("__reactProps$"));
+  assert.ok(propsKey, "the real React internal props key must be present on a React-managed DOM node");
+  const props = (input as unknown as Record<string, { onChange?: (e: { target: { value: string } }) => void }>)[propsKey as string]!;
+  assert.equal(typeof props.onChange, "function", "the real onChange handler must be attached to the scrub input");
+  return props.onChange as (e: { target: { value: string } }) => void;
+}
+
 // #927 AC1 (§729 remainder, D35; Q4 owner ruling), WIRING/data-flow: `DemoApp` with the ACTUAL
 // shipped bundle (`demo/source.ts`'s `DEMO_SOURCE`, the real recorded dogfood fixture — never a
-// hand-trimmed test double) must render `section[aria-label="lanes"]` with a real card at the
-// idle (end) position — `renderSettledDemoApp`'s own default, `useDemoReplay`'s `endPosition` —
-// and, at the round's own midpoint, a card for the lane the fixture's own event log names in
-// flight there (`lane-b` on `#9102`: dispatched at event 5, not reclaimed until event 7, so it's
-// still occupying its lane at the round's own midpoint, event 6). `[aria-label="live only"]` must
-// be absent throughout — the board itself replays now (#927), never the greyed placeholder.
-//
-// This harness's `renderToStaticMarkup`-only test route has no working DOM `input`-event
-// simulation for a range control (confirmed: not even a plain controlled `<input type="text">`
-// re-renders from a dispatched `input` event here — this repo's test infra has no jsdom, and
-// happy-dom's dispatch never reaches React's root-delegated listener for it), so the midpoint half
-// drives the SAME real functions `useDemoReplay.ts` itself calls (`buildRoundLog`/`scrubTo`) —
-// never a hand-rolled fold — and renders their output through the real `appContent`/`LaneBoard`
-// production tree, the same "real fold, real render tree, not a literal click" shape #920 AC1's
-// own test above already established for this exact class of case.
-test("#927 AC1 (WIRING/data-flow): DemoApp with the shipped bundle renders lane cards at idle and at the midpoint, never the live-only placeholder", async () => {
-  const idleHtml = await renderSettledDemoApp(DEMO_SOURCE);
-  assert.match(idleHtml, /aria-label="lanes"/, "the lanes section must render (never the LiveOnly placeholder) at the idle end position");
-  assert.doesNotMatch(idleHtml, /aria-label="live only"/, '"live only" must be absent at the idle position');
-  assert.equal(
-    (idleHtml.match(/class="lane-card panel recipe-list-entry"/g) ?? []).length >= 1,
-    true,
-    "at least one real lane card must render at the idle (end) position",
-  );
-
-  const round = DEMO_SOURCE.rounds[0]!;
-  const lanesMax = DEMO_SOURCE.loopState.lanes.max;
-  const log = buildRoundLog(DEMO_SOURCE, round, lanesMax);
-  const midEventId = Math.round((round.startEventId + round.startEventId + round.eventCount) / 2);
-  const midPosition = scrubTo(log.events, log.checkpoints, midEventId, lanesMax);
-  const vm = minimalAppViewModel({
-    mode: "replay",
-    loop: { data: DEMO_SOURCE.loopState, isPending: false },
-    activeHero: midPosition.state.hero,
+// hand-trimmed test double), mounted for real (`createRoot`/`act`, never `renderToStaticMarkup`),
+// must render `section[aria-label="lanes"]` with a real card at the idle (end) position —
+// `useDemoReplay`'s own `endPosition` default, nothing driven yet — and, scrubbed via the REAL
+// Transport control (`realOnChange` above) to the round's own midpoint, a card for the lane the
+// fixture's own event log names in flight there (`lane-b` on `#9102`: dispatched at event 5, not
+// reclaimed until event 7, so it's still occupying its lane at the round's own midpoint, event 6).
+// `[aria-label="live only"]` must be absent throughout — the board itself replays now (#927),
+// never the greyed placeholder.
+test("#927 AC1 (WIRING/data-flow): DemoApp with the shipped bundle renders lane cards at idle and at the midpoint, driven through the REAL scrub wiring, never the live-only placeholder", async () => {
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const path = url.split("?")[0]!;
+    if (path === "/demo-fixture.json") {
+      return new Response(JSON.stringify(DEMO_SOURCE), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    throw new Error(`?demo must never call ${url} — it is not a static asset`);
   });
-  const midHtml = renderToStaticMarkup(appContent(vm));
-  const midLaneSection = midHtml.slice(midHtml.indexOf('aria-label="lanes"'), midHtml.indexOf('id="cost"'));
-  assert.doesNotMatch(midLaneSection, /live only/, '"live only" must be absent at the midpoint too');
-  assert.match(midLaneSection, /lane-b/, "the lane the ledger names in flight at the midpoint (lane-b, #9102) must render its own card");
-  assert.match(midLaneSection, /9102/, "issue #9102 must render on that card");
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await client.prefetchQuery(demoFixtureQuery());
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={client}>
+        <App demo />
+      </QueryClientProvider>,
+    );
+  });
+  try {
+    const lanesIdle = container.querySelector('section[aria-label="lanes"]');
+    assert.ok(lanesIdle, "the lanes section must render (never the LiveOnly placeholder) at the idle end position");
+    assert.equal(container.querySelector('[aria-label="live only"]'), null, '"live only" must be absent at the idle position');
+    assert.ok(
+      lanesIdle.querySelectorAll(".lane-card.panel.recipe-list-entry").length >= 1,
+      "at least one real lane card must render at the idle (end) position",
+    );
+
+    const scrub = container.querySelector<HTMLInputElement>('[aria-label="scrub"]');
+    assert.ok(scrub, "the real Transport scrub bar must render");
+    const midEventId = Math.round((Number(scrub.min) + Number(scrub.max)) / 2);
+    await act(async () => {
+      realOnChange(scrub)({ target: { value: String(midEventId) } });
+    });
+
+    const lanesAtMid = container.querySelector('section[aria-label="lanes"]');
+    assert.ok(lanesAtMid, "the lanes section must still render at the midpoint");
+    assert.equal(container.querySelector('[aria-label="live only"]'), null, '"live only" must be absent at the midpoint too');
+    assert.match(
+      lanesAtMid.textContent ?? "",
+      /lane-b/,
+      "the lane the ledger names in flight at the midpoint (lane-b, #9102) must render its own card",
+    );
+    assert.match(lanesAtMid.textContent ?? "", /9102/, "issue #9102 must render on that card");
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
 });
 
 test("#742: ?demo makes zero network calls to /api/loop/state or /api/events — fully static", async () => {
