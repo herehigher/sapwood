@@ -557,14 +557,13 @@ test("#890: a lane's settled cost bar scales against worker.budgetUsdSoft, not i
     html.indexOf('class="cost-bar lane-card-bar"'),
     html.indexOf("</svg>", html.indexOf('class="cost-bar lane-card-bar"')),
   );
-  // The background TRACK line is always full-width (x1="0" x2="100", a fixed reference) — the
-  // settled FILL line (`class="cost-bar-fill"`, its colour resolved through CSS from
-  // `--sap-fill`) is the one whose own `x2` must scale against the configured ceiling (#924 AC2:
-  // the fill is a `<line x1="0" x2={settledPct}>`, not a `<rect width>`).
-  assert.match(laneBarSvg, /class="cost-bar-fill" x1="0"[^>]*x2="20"/, "$2 against a $10 soft budget must draw a 20%-wide fill");
+  // The background TRACK line is always full-width (x1="0" x2="100%", a fixed reference) — the
+  // settled FILL rect (`class="cost-bar-fill"`, its colour resolved through CSS from
+  // `--sap-fill`) is the one whose own `width` must scale against the configured ceiling.
+  assert.match(laneBarSvg, /class="cost-bar-fill" x="0"[^>]*width="20%"/, "$2 against a $10 soft budget must draw a 20%-wide fill");
   assert.doesNotMatch(
     laneBarSvg,
-    /class="cost-bar-fill" x1="0"[^>]*x2="100"/,
+    /class="cost-bar-fill" x="0"[^>]*width="100%"/,
     "the settled fill must never self-scale to a full-width bar regardless of the real dollar amount",
   );
 });
@@ -2856,10 +2855,10 @@ function fullCoverageViewModel() {
       isPending: false,
       data: {
         ...LOOP_STATE_OK,
-        // #924: a nonzero settled spend is what makes the header's own spend-meter bar render its
-        // `.cost-bar-fill`/`.cost-bar-fill-outline` lines at all — those are guarded on
-        // `settledPct > 0` (no phantom zero-length round-cap dot), so LOOP_STATE_OK's own
-        // `todayUsd: 0` would silently drop this module out of the "full coverage" fixture.
+        // #924: a nonzero settled spend is what makes the header's own spend-meter bar render
+        // its `.cost-bar-fill` rect at all — that's guarded on `settledPct > 0` (no phantom
+        // zero-width pill), so LOOP_STATE_OK's own `todayUsd: 0` would silently drop this module
+        // out of the "full coverage" fixture.
         spend: { todayUsd: 4, dailyBudgetUsd: 10, runUsd: null, runBudgetUsd: null, byModel: [] },
         lanes: {
           max: 1,
@@ -3058,42 +3057,28 @@ test("AC2: .cost-bar-target stroke resolves to the real --sap-text colour, and .
 });
 
 /**
- * #924 gate② finding [1]: `CostBar.tsx`'s track/fill/tick geometry (height="1", height="6", a
- * tick spanning y1=1..y2=11) is set in the SVG's own LOCAL user-unit space (viewBox="0 0 100 12")
- * — with `preserveAspectRatio="none"`, those numbers only equal real rendered CSS pixels when the
- * `<svg>`'s own CSS height ALSO equals 12; any other CSS height non-uniformly rescales the Y axis
- * (the finding's own numbers: a 10px container rendered the "1px" track at ~0.83px). happy-dom has
- * no real layout engine — `getBoundingClientRect()` on an SVG shape returns all-zero regardless of
- * its attributes (verified directly; also documented in `docs/dev-guide/07-dashboard.md`'s "DOM-
- * free by default" posture) — so the RENDERED pixel size of an SVG shape's geometry ATTRIBUTE
- * cannot be read directly in this harness. What CAN be read is the outer `<svg>` element's own
- * CSS `height` (a plain box property, unaffected by that gap) — asserting it equals the SAME
- * viewBox height CostBar.tsx declares (read from the rendered markup, never hand-copied) is the
- * exact condition that makes the scale factor 1 and therefore makes CostBar.test.tsx's own
- * attribute-value assertions (track height="1", fill height="6" >= 6, tick taller than the fill)
- * equal to real rendered pixels too — combined, these two facts are the achievable ceiling this
- * harness allows for proving the bug is fixed, for every production bar context at once.
+ * #924 AC2: `CostBar.tsx` has no `viewBox` — its track/fill/tick geometry (y=5.5, y=3/height=6, a
+ * tick spanning y1=1..y2=11) is set directly in real CSS px, so those numbers only land where
+ * they're drawn to when the `<svg>`'s own CSS height ALSO equals 12 (its own default, panels.css);
+ * a shorter box would clip the tick, a taller one would leave dead space below the bar — never a
+ * distortion now (no scale transform exists to distort), but still a real positioning contract
+ * every context sharing this primitive must hold. COVERAGE: every production bar context this
+ * fixture renders — a cost-panel bar (multiple: by-stage/by-model, today AND round), the lane
+ * card's own bar, and the header spend-meter's bar — never a hand-picked subset.
  */
-test("AC2 gate② finding [1]: every hairline-bar instance's own CSS height matches its SVG viewBox height exactly — the fix for the preserveAspectRatio scale-distortion bug", async () => {
+test("AC2: every hairline-bar instance's own CSS height is exactly 12px, the box its track/fill/tick coordinates assume", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   try {
     const bars = [...container.querySelectorAll("svg.cost-bar")];
-    // COVERAGE: every production bar context this fixture renders — a cost-panel bar (multiple:
-    // by-stage/by-model, today AND round), the lane card's own bar, and the header spend-meter's
-    // bar — never a hand-picked subset.
     const contexts = new Set(bars.map((b) => b.getAttribute("class")));
     for (const required of ["cost-bar", "cost-bar lane-card-bar", "cost-bar spend-meter-bar"]) {
       assert.ok(contexts.has(required), `expected a rendered "${required}" bar; got classes: ${[...contexts].join(", ")}`);
     }
     for (const bar of bars) {
-      const viewBox = bar.getAttribute("viewBox");
-      assert.ok(viewBox, "every bar must declare its own viewBox");
-      const viewBoxHeight = Number(viewBox!.trim().split(/\s+/)[3]);
-      const cssHeight = getComputedStyle(bar as Element).height;
       assert.equal(
-        cssHeight,
-        `${viewBoxHeight}px`,
-        `"${bar.getAttribute("class")}" CSS height (${cssHeight}) must equal its own viewBox height (${viewBoxHeight}px) — any mismatch re-introduces the non-uniform preserveAspectRatio scale distortion`,
+        getComputedStyle(bar as Element).height,
+        "12px",
+        `"${bar.getAttribute("class")}" CSS height must be exactly 12px — the box CostBar.tsx's own y-coordinates assume`,
       );
     }
   } finally {
@@ -3102,76 +3087,65 @@ test("AC2 gate② finding [1]: every hairline-bar instance's own CSS height matc
 });
 
 /**
- * #924 AC2: the target tick is a VERTICAL line whose own `stroke-width` extends in the bar's X
- * axis, which scales by roughly the bar's own width/100 under `preserveAspectRatio="none"` — a
- * ~490px-wide bar scales X by ~4.9x while `.cost-bar`'s 12px height already pins Y at 1x; an
- * unguarded stroke would render as a multi-px filled block rather than a hairline. The track has
- * the same requirement in the opposite axis (a filled rect's top edge can straddle a physical
- * pixel row at fractional Y). Both are stroked lines with `vector-effect: non-scaling-stroke`
- * (panels.css) — the SVG-native mechanism that pins a stroke's rendered WIDTH to a real device
- * pixel regardless of the element's own CTM scale, in either axis. happy-dom has no real layout
- * engine (confirmed directly, repeatedly, in this file and hero.test.ts —
- * `getBoundingClientRect()` returns an all-zero box for every element), so the ACTUAL rendered
- * pixel width `vector-effect` produces cannot be measured here — that is a real-browser fact, same
+ * #924 AC2: `CostBar.tsx` has no `viewBox` — the track and tick's own `stroke-width: 1` (panels.css)
+ * is already a real device px, with no scale-compensation mechanism (`vector-effect`) needed to
+ * keep it one. happy-dom has no real layout engine (confirmed directly, repeatedly, in this file
+ * and hero.test.ts — `getBoundingClientRect()` returns an all-zero box for every element), so the
+ * ACTUAL rendered pixel width still can't be measured here — that is a real-browser fact, same
  * ceiling the light-dark()-outline tests above already document. What IS provable in this harness:
- * the declaration cascades onto the real elements at all (a regression that dropped it, or the
- * stroke-width value, would fail this) — the achievable half of the proof, same STYLE-doctrine
- * posture as the rest of this file.
+ * the `stroke-width` declaration cascades onto the real elements at all (a regression that dropped
+ * it would fail this) — the achievable half of the proof, same STYLE-doctrine posture as the rest
+ * of this file.
  */
-test("AC2 (track/tick non-scaling-stroke): the track and target tick both resolve vector-effect: non-scaling-stroke and stroke-width: 1, pinning them against the bar's own non-uniform scale", async () => {
+test("AC2 (track/tick stroke-width): the track and target tick both resolve stroke-width: 1", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   try {
     const track = container.querySelector(".cost-bar-track");
     assert.ok(track, "a real .cost-bar-track must render");
-    const trackComputed = getComputedStyle(track as Element);
-    assert.equal(
-      trackComputed.vectorEffect,
-      "non-scaling-stroke",
-      ".cost-bar-track must pin its stroke width against the bar's own non-uniform scale",
-    );
-    assert.equal(trackComputed.strokeWidth, "1", ".cost-bar-track stroke-width");
+    assert.equal(getComputedStyle(track as Element).strokeWidth, "1", ".cost-bar-track stroke-width");
 
     const tick = container.querySelector(".cost-bar-target");
     assert.ok(tick, "a real .cost-bar-target must render (costToday.targetUsd is set)");
-    const tickComputed = getComputedStyle(tick as Element);
-    assert.equal(
-      tickComputed.vectorEffect,
-      "non-scaling-stroke",
-      ".cost-bar-target must pin its stroke width against the bar's own non-uniform scale",
-    );
-    assert.equal(tickComputed.strokeWidth, "1", ".cost-bar-target stroke-width");
+    assert.equal(getComputedStyle(tick as Element).strokeWidth, "1", ".cost-bar-target stroke-width");
   } finally {
     await cleanup();
   }
 });
 
 /**
- * #924 AC2 (pill end caps): the pill's own `rx` on a filled `rect` is FILL geometry, which
- * `vector-effect` (a STROKE-only property) never protects, so the bar's non-uniform X-axis
- * stretch elongates a "circular" corner into an ellipse. Drawing the pill as a STROKED line with
- * `stroke-linecap: round` instead (panels.css) fixes this — a round linecap's own radius (half
- * the stroke-width) IS part of the stroke render, so `vector-effect: non-scaling-stroke` protects
- * it exactly like the track/tick strokes. Same STYLE-doctrine ceiling as those: happy-dom cannot
- * measure the actual rendered cap radius (no real layout engine), so this proves the mechanism is
- * correctly wired — stroke-width/linecap/vector-effect all resolving on the real element is what
- * GUARANTEES a true (non-elongated) circular cap in any real browser.
+ * #924 AC2 (pill end caps): the pill is a real rounded `<rect rx>` (CostBar.tsx), not a stroked
+ * line — a rounded CORNER is carved INWARD from the rect's own x/width box, so it's fully
+ * contained at every settled percentage with no scale-compensation mechanism needed (unlike a
+ * stroked line's round LINECAP, which bulges OUTWARD past its own endpoint and needed
+ * `vector-effect: non-scaling-stroke` to stay a true circle under a non-uniform scale that no
+ * longer exists here). Same STYLE-doctrine ceiling as the track/tick test above: happy-dom cannot
+ * measure the actual rendered corner radius (no real layout engine), so this proves the
+ * mechanism is correctly wired — `rx`/`fill`/`stroke` all resolving on the real element is what
+ * GUARANTEES a true semicircle cap, fully inside the box, in any real browser (the real-pixel half
+ * of that proof — cap containment and the light outline's own visibility at the tip — lives in
+ * `shots.spec.ts`, which has a real layout engine).
  */
-test("AC2 (pill end caps): the fill pill resolves stroke-linecap: round, stroke-width: 6, and vector-effect: non-scaling-stroke, pinning its round caps against the bar's own non-uniform scale", async () => {
+test("AC2 (pill end caps): the fill pill is a rect with rx=3 (half its own 6px height) and resolves the real --sap-fill/--sap-fill-outline colours", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   const { light: lightTokens } = parseColorTokens(tokensCss924);
   try {
     const fills = [...container.querySelectorAll(".cost-bar-fill")];
-    assert.ok(fills.length >= 3, `expected fill lines across cost panel/lane card/header meter contexts; found ${fills.length}`);
+    assert.ok(fills.length >= 3, `expected fill rects across cost panel/lane card/header meter contexts; found ${fills.length}`);
     for (const fill of fills) {
+      assert.equal(fill.tagName.toLowerCase(), "rect", ".cost-bar-fill must be a real <rect>, not a stroked line");
+      assert.equal(fill.getAttribute("rx"), "3", ".cost-bar-fill rx — half of FILL_HEIGHT (CostBar.tsx), a true pill radius");
       const computed = getComputedStyle(fill as Element);
-      assert.equal(computed.strokeLinecap, "round", ".cost-bar-fill stroke-linecap — a true circular cap, not a square-ended bar");
-      assert.equal(computed.strokeWidth, "6", ".cost-bar-fill stroke-width — matches FILL_HEIGHT (CostBar.tsx)");
+      assert.equal(computed.fill, lightTokens["--sap-fill"], ".cost-bar-fill's own fill must resolve the real --sap-fill hex");
       assert.equal(
-        computed.vectorEffect,
-        "non-scaling-stroke",
-        ".cost-bar-fill must pin its stroke width/cap radius against the bar's own non-uniform scale",
+        computed.stroke,
+        lightTokens["--sap-fill-outline"],
+        ".cost-bar-fill's own stroke (the light outline) must resolve --sap-fill-outline",
       );
-      assert.equal(computed.stroke, lightTokens["--sap-fill"], ".cost-bar-fill stroke must resolve the real --sap-fill hex");
+      assert.equal(
+        computed.strokeWidth,
+        "1",
+        ".cost-bar-fill stroke-width — the light outline is a plain 1px stroke, no extra element needed",
+      );
     }
   } finally {
     await cleanup();
@@ -3257,28 +3231,26 @@ test("AC2: every rendered cost-bar label, including one longer than the 7em floo
  * individually, not folded into one generic `.cost-bar-fill` query.
  *
  * #924 AC3: `CostBar.tsx`'s own three shapes (`.cost-bar` pill, `.lane-card-bar` pill,
- * `.spend-meter-bar`) carry their outline on a SEPARATE `.cost-bar-fill-outline` element (a wider,
- * round-capped line drawn UNDER the pill — panels.css's own "stroke ring" doc) — its own
- * `stroke-width` is 8 (the pill's 6 plus 1px on each side), not the bare 1px `.hero-pool-chip`/
- * droplet declare directly, since those two never need a second element (their own shapes aren't
- * independently stroke-width-scaled the way the pill's round cap is).
+ * `.spend-meter-bar`) carry their outline directly on `.cost-bar-fill` itself (a plain 1px stroke
+ * tracing the rect's own already-rounded path) — same width as the bare `.hero-pool-chip`/droplet
+ * outlines below, no second wider element needed.
  */
-test("AC3: every named filled shape (.cost-bar pill, .lane-card-bar pill, .hero-pool-chip, an in-motion droplet, .spend-meter-bar) resolves the REAL --sap-text hex as a 1px-equivalent outline in light theme, and none in dark", async () => {
+test("AC3: every named filled shape (.cost-bar pill, .lane-card-bar pill, .hero-pool-chip, an in-motion droplet, .spend-meter-bar) resolves the REAL --sap-text hex as a 1px outline in light theme, and none in dark", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   const { light: lightTokens } = parseColorTokens(tokensCss924);
   const lightOutlineHex = lightTokens["--sap-text"]!;
   assert.ok(lightOutlineHex, "--sap-text must resolve a light-theme hex via parseColorTokens");
 
   const namedShapes: [string, () => Element | null, string][] = [
-    [".cost-bar pill (cost panel)", () => container.querySelector("#cost .cost-bar-fill-outline"), "8"],
-    [".lane-card-bar pill", () => container.querySelector("svg.lane-card-bar .cost-bar-fill-outline"), "8"],
+    [".cost-bar pill (cost panel)", () => container.querySelector("#cost .cost-bar-fill"), "1"],
+    [".lane-card-bar pill", () => container.querySelector("svg.lane-card-bar .cost-bar-fill"), "1"],
     [".hero-pool-chip", () => container.querySelector(".hero-pool-chip rect"), "1px"],
     [
       "an in-motion droplet",
       () => container.querySelector('.hero-droplet:not([data-at="trunk"]):not([data-at="needs-human"]) .hero-droplet-shape'),
       "1px",
     ],
-    [".spend-meter-bar", () => container.querySelector("svg.spend-meter-bar .cost-bar-fill-outline"), "8"],
+    [".spend-meter-bar", () => container.querySelector("svg.spend-meter-bar .cost-bar-fill"), "1"],
   ];
 
   try {

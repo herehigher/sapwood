@@ -194,7 +194,8 @@ test("AC3 COVERAGE: every production var(--sap-fill) paint site is on record", (
   }
   // Every known production consumer, each verified elsewhere to carry the --sap-fill-outline
   // compensation (or, for the dotBorder line, being the very declaration OF that compensation):
-  // - panels.css .cost-bar-fill (stroke) — App.test.tsx's "AC2" + "AC3" STYLE tests.
+  // - panels.css .cost-bar-fill (fill, plus its own stroke: var(--sap-fill-outline) on the SAME
+  //   rule) — App.test.tsx's "AC2" + "AC3" STYLE tests.
   // - panels.css ::-webkit-slider-thumb / ::-moz-range-thumb (background) — `border: 1px solid
   //   var(--sap-fill-outline)` on the SAME two rules; a real browser's
   //   `getComputedStyle(el, pseudo)` cannot query a vendor slider pseudo-element at all
@@ -205,7 +206,7 @@ test("AC3 COVERAGE: every production var(--sap-fill) paint site is on record", (
   // - hero/stage.tsx dropletFill's "sap" role + the .hero-pool-chip inline style — hero.css's
   //   `.hero-droplet-shape`/`.hero-pool-chip rect` outline rules, App.test.tsx's AC3 STYLE test.
   const knownSites = [
-    "panels.css:.cost-bar-fill:stroke: var(--sap-fill);",
+    "panels.css:.cost-bar-fill:fill: var(--sap-fill);",
     "panels.css:.transport-scrub::-webkit-slider-thumb:background: var(--sap-fill);",
     "panels.css:.transport-scrub::-moz-range-thumb:background: var(--sap-fill);",
     'components/ActivityFeed.tsx:const dotColor = attention ? "var(--rust)" : glyph === true ? "var(--moss)" : "var(--sap-fill)";',

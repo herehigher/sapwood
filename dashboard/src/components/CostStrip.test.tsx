@@ -103,7 +103,7 @@ test("the target-tick marker draws at the correct bar coordinate, shared across 
     <CostStrip today={todayPanel({ stageBars: [{ label: "Lanes", usd: 10 }], targetUsd: 5, modelBars: [] })} round={null} />,
   );
   // max is 10 (the bar's own usd, since it exceeds targetUsd 5) -> tick at 50%.
-  assert.match(html, /x1="50"/);
+  assert.match(html, /x1="50%"/);
 });
 
 test("no target tick renders at all when targetUsd is null (no ceiling configured)", () => {

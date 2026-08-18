@@ -1,8 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { expect, type Locator, type Page, test } from "@playwright/test";
-import react from "@vitejs/plugin-react";
-import { createServer } from "vite";
 import { formatUsd } from "../src/format.ts";
 import { STAGE, ZONE_DIVIDERS } from "../src/hero/stage.tsx";
 
@@ -17,7 +15,6 @@ const OUTPUT_DIR = fileURLToPath(new URL("../shots-output", import.meta.url));
 const CAPTURES_DIR = `${OUTPUT_DIR}/captures`;
 const MOCKUPS_SRC_DIR = fileURLToPath(new URL("../../docs/design/mockup", import.meta.url));
 const MOCKUPS_OUT_DIR = `${OUTPUT_DIR}/mockups`;
-const DASHBOARD_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 const VIEWPORTS = [1440, 1024, 720] as const;
 const THEMES = [
@@ -735,147 +732,129 @@ test("#892 AC4: the operations confirm dialog traps focus (background inert) and
 });
 
 /**
- * #924 AC2 (gate② P2): the pill's round linecap radius extends `CAP_RADIUS_PX` (CostBar.tsx, kept
- * in sync with the wider `.cost-bar-fill-outline` stroke — 8px, panels.css) beyond its own line
- * endpoint in screen space. An endpoint sitting exactly on the SVG viewport's own edge (x=0
- * always; x=100 once spend reaches 100%) either gets that radius clipped flat by the viewport
- * (losing the cap and the light outline ring around it) or, with clipping disabled, bleeds outside
- * the bar's own box. Neither the shipped `?demo` fixture (whose settled percentages come from a
- * recorded round, not a test knob) nor happy-dom (no real layout engine — this file's own
- * `App.test.tsx` documents that ceiling repeatedly) can pin exact 0%/partial/100% pixel geometry,
- * so this test starts an ad-hoc Vite dev server for `fixtures/costbar-harness.tsx` (never part of
- * the shipped `dist/` build) — the REAL component at three controlled settled percentages, each in
- * a different real container width (the fix computes its own inset from each instance's own
- * measured width, so varying the width is what actually exercises that code path rather than its
- * zero-width SSR/no-measurement fallback).
- *
- * Two proofs per cap, both real-pixel: (1) the endpoint's own geometric clearance from the box
- * edge (via the svg's `screenCTM`) — `getBoundingClientRect()` on an SVG `<line>` is verified
- * directly to report the geometry-only path box (matching `getBBox()` exactly, excluding the
- * stroke/cap paint), so it can't itself prove containment; (2) `elementFromPoint` hit-testing at
- * three x positions along the pill's own vertical center — outside the box (must hit neither line),
- * in the "outline-only" ring (between the fill's 3px cap radius and the wider outline's 4px one —
- * must hit the outline specifically, proving it survives right at the tip), and inside the fill's
- * own reach (must hit the fill) — distinguishing a genuinely-painted cap from one clipped to
- * nothing, which a geometry-only check can't rule out by itself.
+ * #924 AC2 (simplest architecture that is correct — no runtime measurement needed): `CostBar.tsx`
+ * has no `viewBox`/`preserveAspectRatio` — the settled fill is a real
+ * rounded `<rect rx>`, whose rounding is carved INWARD from its own x/width box (unlike a stroked
+ * line's round linecap, which bulges OUTWARD past its own endpoint), so it's fully contained at
+ * every settled percentage with no runtime measurement or scale-compensation machinery needed.
+ * This is the real-pixel proof that holds in an actual browser, reusing the SAME fixtures the
+ * rest of this file already drives — never a bespoke harness: the mocked live lane board (w1: est-
+ * only, 0% settled; w3: costUsd $1.10 of a $10 soft budget ≈ 11% settled, `.lane-card-bar`) and
+ * the `?demo` fixture's cost panel (its "Lanes" by-stage bar self-scales to its own group's own
+ * max, i.e. 100% settled; "Goal & align" stays at 0%, the only spend this fixture records is in
+ * the "Lanes"/executing phase).
  */
 test("#924 AC2: the pill's round caps stay inside the bar box at 0%/partial/100% settled, with the light outline present at both caps", async ({
-  browser,
+  page,
 }) => {
-  const vite = await createServer({
-    root: DASHBOARD_ROOT,
-    configFile: false,
-    plugins: [react()],
-    server: { host: "127.0.0.1", port: 0, strictPort: false },
-    logLevel: "silent",
-  });
-  await vite.listen();
-  const address = vite.httpServer?.address();
-  if (!address || typeof address === "string") throw new Error("expected the ad-hoc Vite dev server to bind a TCP port");
-  const harnessUrl = `http://127.0.0.1:${address.port}/shots/fixtures/costbar-harness.html`;
+  await page.setViewportSize({ width: 1440, height: 900 });
 
-  const page = await browser.newPage();
-  try {
-    await page.goto(harnessUrl);
-    await page.locator('[data-case="full"] svg.cost-bar').waitFor({ state: "visible" });
+  // 0% (est-only, no settled fill at all) and ~11% partial (lane w3: $1.10 of a $10 soft budget).
+  await mockLiveApi(page, liveLanesLoopState());
+  await page.goto("/");
+  await page.locator('section[aria-label="lanes"]').waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "sapwood"));
 
-    // 0%: the phantom-dot guard (CostBar.tsx: `settledPct > 0`) means neither line renders at
-    // all — no cap to clip, so the honest edge-case proof here is simply that nothing paints.
-    const zeroContainer = page.locator('[data-case="zero"]');
-    expect(await zeroContainer.locator(".cost-bar-fill").count(), "0% settled: no fill line at all").toBe(0);
-    expect(await zeroContainer.locator(".cost-bar-fill-outline").count(), "0% settled: no outline line at all").toBe(0);
+  const w1Card = page.locator(".lane-card", { hasText: "w1" });
+  expect(await w1Card.locator(".cost-bar-fill").count(), "lane w1 (est-only, 0% settled) must render no fill rect at all").toBe(0);
 
-    const FILL_CAP_PX = 3; // half of .cost-bar-fill's own 6px stroke-width
-    const OUTLINE_CAP_PX = 4; // half of .cost-bar-fill-outline's own 8px stroke-width — the wider cap
-    const SLACK = 0.75; // sub-pixel rounding across the CTM transform + non-scaling-stroke
+  const w3Card = page.locator(".lane-card", { hasText: "w3" });
+  await assertPillCapsContained(page, w3Card.locator("svg.lane-card-bar"), "lane w3 (~11% settled)", { left: true, right: false });
 
-    for (const testCase of ["partial", "full"] as const) {
-      const container = page.locator(`[data-case="${testCase}"]`);
-      expect(await container.locator(".cost-bar-fill").count(), `${testCase}: exactly one fill line`).toBe(1);
-      expect(await container.locator(".cost-bar-fill-outline").count(), `${testCase}: exactly one outline line`).toBe(1);
+  // 100%: the ?demo fixture's cost panel "Lanes" by-stage bar self-scales to its own group max.
+  await page.goto("/?demo");
+  await page.locator("#cost").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "sapwood"));
 
-      // Both lines share the SAME x1/x2/y1 (CostBar.tsx) — one geometry read (from the wider
-      // outline) covers both.
-      const geometry = await container.locator(".cost-bar-fill-outline").evaluate((el: SVGLineElement) => {
-        const svgEl = el.closest("svg") as SVGSVGElement;
-        const ctm = svgEl.getScreenCTM();
-        if (!ctm) throw new Error("expected a real screenCTM on a visible, connected <svg>");
-        const x1 = el.x1.baseVal.value;
-        const x2 = el.x2.baseVal.value;
-        const y1 = el.y1.baseVal.value;
-        const toScreenX = (x: number) => new DOMPoint(x, y1).matrixTransform(ctm).x;
-        const svgRect = svgEl.getBoundingClientRect();
-        return {
-          geomLeft: Math.min(toScreenX(x1), toScreenX(x2)),
-          geomRight: Math.max(toScreenX(x1), toScreenX(x2)),
-          centerY: new DOMPoint(x1, y1).matrixTransform(ctm).y,
-          svgLeft: svgRect.left,
-          svgRight: svgRect.right,
-        };
-      });
+  const lanesRow = page.locator("#cost .cost-bar-row", { hasText: "Lanes" }).first();
+  await assertPillCapsContained(page, lanesRow.locator("svg.cost-bar"), "Lanes stage (100% settled)", { left: true, right: true });
 
-      const hitClassAt = (x: number, y: number) =>
-        page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.getAttribute("class") ?? "", { x, y });
-      // Two probe distances IN from a cap's own geometric endpoint: one inside the narrower
-      // fill's own reach (must hit the amber pill), one between the fill's and the wider
-      // outline's own reach (must hit ONLY the outline — the "peeking ring" that proves the light
-      // outline survives right at the tip, not just somewhere mid-pill).
-      const fillZoneOffset = FILL_CAP_PX - 1;
-      const outlineOnlyOffset = (FILL_CAP_PX + OUTLINE_CAP_PX) / 2;
-
-      // LEFT cap — always at the pill's own start, regardless of settled percentage, so it must
-      // ALWAYS sit exactly the outline's own radius inside the box (never a wasted, arbitrarily
-      // large margin either — the whole point of measuring the real width is a TIGHT inset).
-      const leftClearance = geometry.geomLeft - geometry.svgLeft;
-      expect(leftClearance, `${testCase}: left cap clearance (${leftClearance.toFixed(2)}) must not be clipped`).toBeGreaterThanOrEqual(
-        OUTLINE_CAP_PX - SLACK,
-      );
-      expect(leftClearance, `${testCase}: left cap clearance (${leftClearance.toFixed(2)}) must sit tight to the edge`).toBeLessThanOrEqual(
-        OUTLINE_CAP_PX + SLACK,
-      );
-      expect(
-        await hitClassAt(geometry.svgLeft - 1, geometry.centerY),
-        `${testCase}: 1px outside the left edge must not paint either line`,
-      ).not.toContain("cost-bar-fill");
-      expect(
-        await hitClassAt(geometry.svgLeft + (OUTLINE_CAP_PX - outlineOnlyOffset), geometry.centerY),
-        `${testCase}: the outline-only ring (between the fill's and outline's own cap radii) must be visible at the left tip`,
-      ).toBe("cost-bar-fill-outline");
-      expect(
-        await hitClassAt(geometry.svgLeft + (OUTLINE_CAP_PX - fillZoneOffset), geometry.centerY),
-        `${testCase}: the amber pill itself must also reach the left cap, not just its outline`,
-      ).toBe("cost-bar-fill");
-
-      // RIGHT cap — only sits near the box edge once settled reaches 100% (the actual P2
-      // regression); at a partial percentage it's mid-track, where a large clearance is correct,
-      // not a defect, and a pixel probe there would hit unrelated content (the track/target).
-      const rightClearance = geometry.svgRight - geometry.geomRight;
-      expect(rightClearance, `${testCase}: right cap clearance (${rightClearance.toFixed(2)}) must not be clipped`).toBeGreaterThanOrEqual(
-        OUTLINE_CAP_PX - SLACK,
-      );
-      if (testCase === "full") {
-        expect(rightClearance, `full: right cap clearance (${rightClearance.toFixed(2)}) must sit tight to the edge`).toBeLessThanOrEqual(
-          OUTLINE_CAP_PX + SLACK,
-        );
-        expect(
-          await hitClassAt(geometry.svgRight + 1, geometry.centerY),
-          "full: 1px outside the right edge must not paint either line",
-        ).not.toContain("cost-bar-fill");
-        expect(
-          await hitClassAt(geometry.svgRight - (OUTLINE_CAP_PX - outlineOnlyOffset), geometry.centerY),
-          "full: the outline-only ring must be visible at the right tip too — the exact P2 regression (100% spend clipped the right cap flat)",
-        ).toBe("cost-bar-fill-outline");
-        expect(
-          await hitClassAt(geometry.svgRight - (OUTLINE_CAP_PX - fillZoneOffset), geometry.centerY),
-          "full: the amber pill itself must also reach the right cap, not just its outline",
-        ).toBe("cost-bar-fill");
-      }
-    }
-  } finally {
-    await page.close();
-    await vite.close();
-  }
+  const zeroRow = page.locator("#cost .cost-bar-row", { hasText: "Goal & align" }).first();
+  expect(await zeroRow.locator(".cost-bar-fill").count(), "Goal & align stage (0% settled) must render no fill rect at all").toBe(0);
 });
+
+/**
+ * Real-pixel proof for one `<CostBar>` instance's own `.cost-bar-fill` rect, checked at whichever
+ * end(s) actually sit at the bar's own box edge for that settled percentage (a cap mid-track has
+ * nothing edge-specific to prove — a large geometric clearance there is correct, not a defect).
+ * Two kinds of evidence: (1) the rect's own bounding box (unaffected by its stroke — a `<rect>`'s
+ * `getBoundingClientRect()` is verified directly to report the geometry-only box, matching its own
+ * x/y/width/height) never extends past the bar's own box — the P2 regression's own containment
+ * half; (2) `elementFromPoint` hit-testing at the pill's own vertical center — outside the box
+ * (must not paint, the "never bleeds past its own box" half) and at the box edge itself (the
+ * cap's own tip — a true semicircle touches the box there, so it MUST paint, the "never clips
+ * short" half; the P2 regression's own failure mode was exactly this — the cap's outer curve
+ * clipped away entirely at 100% spend). `rx`'s own genuine roundedness (as opposed to a square
+ * end) is a declarative fact, not a pixel one — CostBar.test.tsx's own markup test and
+ * App.test.tsx's "AC2 (pill end caps)" STYLE test both pin the `rx` attribute directly; sub-pixel
+ * hit-testing to distinguish a curve from a square corner on a 3px radius is dominated by
+ * antialiasing noise at this scale, not a reliable real-browser signal.
+ */
+async function assertPillCapsContained(
+  page: Page,
+  svgLocator: Locator,
+  label: string,
+  ends: { left: boolean; right: boolean },
+): Promise<void> {
+  const fill = svgLocator.locator(".cost-bar-fill");
+  await expect(fill, `${label}: a real .cost-bar-fill must render`).toHaveCount(1);
+  // `elementFromPoint` only sees the current viewport — a card scrolled below the fold (this
+  // fixture's third lane card, at 1440x900) would otherwise report every hit-test as null.
+  await fill.scrollIntoViewIfNeeded();
+
+  const geometry = await fill.evaluate((el: SVGRectElement) => {
+    const svgEl = el.closest("svg") as SVGSVGElement;
+    const rect = el.getBoundingClientRect();
+    const svgRect = svgEl.getBoundingClientRect();
+    return {
+      left: rect.left,
+      right: rect.right,
+      centerY: (rect.top + rect.bottom) / 2,
+      svgLeft: svgRect.left,
+      svgRight: svgRect.right,
+    };
+  });
+
+  const SLACK = 0.5;
+  expect(geometry.left, `${label}: the fill must never paint left of the bar's own box`).toBeGreaterThanOrEqual(geometry.svgLeft - SLACK);
+  expect(geometry.right, `${label}: the fill must never paint right of the bar's own box`).toBeLessThanOrEqual(geometry.svgRight + SLACK);
+
+  const hitClassAt = (x: number, y: number) =>
+    page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.getAttribute("class") ?? "", { x, y });
+
+  if (ends.left) {
+    expect(
+      await hitClassAt(geometry.left - 1, geometry.centerY),
+      `${label}: 1px outside the left edge must not paint the fill`,
+    ).not.toContain("cost-bar-fill");
+    expect(
+      await hitClassAt(geometry.left + 0.5, geometry.centerY),
+      `${label}: the fill must reach the box's own left edge at vertical center — the cap's own tip`,
+    ).toContain("cost-bar-fill");
+  }
+  if (ends.right) {
+    expect(
+      await hitClassAt(geometry.right + 1, geometry.centerY),
+      `${label}: 1px outside the right edge must not paint the fill`,
+    ).not.toContain("cost-bar-fill");
+    expect(
+      await hitClassAt(geometry.right - 0.5, geometry.centerY),
+      `${label}: the fill must reach the box's own right edge at vertical center — the cap's own tip`,
+    ).toContain("cost-bar-fill");
+  }
+
+  // The light outline (AC3) — a plain stroke directly on this same rect (panels.css), so its own
+  // presence is a computed-style fact, not a second pixel probe.
+  const strokeInfo = await fill.evaluate((el) => {
+    const computed = getComputedStyle(el);
+    return { stroke: computed.stroke, strokeWidth: computed.strokeWidth };
+  });
+  expect(strokeInfo.stroke, `${label}: the light-theme outline stroke must resolve to a real, non-transparent colour`).not.toBe("none");
+  expect(strokeInfo.stroke, `${label}: the light-theme outline stroke must resolve to a real, non-transparent colour`).not.toBe("");
+  expect(strokeInfo.strokeWidth, `${label}: the outline is a plain 1px stroke`).toBe("1px");
+}
 
 /** #882: the fixture-shaped `/api/loop/state` lanes payload fed to `captureLiveLanes` below —
  *  three active-lane variety (running/fixing/driving) plus one open idle slot (`lanesMax: 4`),

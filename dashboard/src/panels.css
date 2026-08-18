@@ -260,78 +260,46 @@
   white-space: nowrap;
 }
 
-/* #924 gate② finding [1]: `CostBar.tsx`'s viewBox is 12 user units tall (TRACK_Y/FILL_HEIGHT/
- * TICK_Y1/TICK_Y2's own local coordinate space) — with `preserveAspectRatio="none"`, any CSS
- * height OTHER than 12px non-uniformly rescales that space, so a 10px/8px/6px container (this
- * rule's old values) rendered the "1px" track/">=6px" fill at a FRACTION of a real pixel. Setting
- * every hairline-bar instance's own CSS height to the SAME 12px the viewBox declares makes the Y
- * scale factor exactly 1 — the component's own local units and real rendered CSS pixels are the
- * same number, everywhere `<CostBar>` mounts (cost panels, lane cards, the header meter alike). */
+/* `CostBar.tsx` has no `viewBox` — its own coordinates are already real CSS px (or SVG
+ * percentages resolved against this real rendered box), so this rule's only job is picking that
+ * box's own size: full width, and 12px tall (`TRACK_Y`/`FILL_HEIGHT`/`TICK_Y1`/`TICK_Y2`'s shared
+ * local space), everywhere `<CostBar>` mounts (cost panels, lane cards, the header meter alike). */
 .cost-bar {
   width: 100%;
   height: 12px;
 }
 
-/* #924 (D29/D30) — the shared hairline-bar grammar `CostBar.tsx` draws: a 1px `--bark` track,
- * an amber pill fill >= 6px tall (`.cost-bar-fill`, `--sap-fill`), and a 1px `--sap-text` tick
- * taller than the pill (`.cost-bar-target`). Geometry (heights/y/rx) is fixed per instance as SVG
- * attributes in `CostBar.tsx` itself, at the SAME 1:1 scale `.cost-bar`'s own 12px height (above)
- * guarantees regardless of which container mounts it. */
-/* #924 AC2: a STROKE, not a fill — `stroke-width` under `vector-effect: non-scaling-stroke` stays
- * a real 1 device px regardless of the bar's own X/Y scale factors (a wide, short SVG under
- * `preserveAspectRatio="none"` scales those independently — see `.cost-bar-target` below for the
- * same fix on the tick, which suffers the SAME distortion in the opposite (X) axis). `stroke-width:
- * 1` here is a plain number — 1 LOCAL unit, matching `.cost-bar`'s own 12px-tall viewBox 1:1,
- * exactly like the tick's own `1` below. */
+/* #924 (D29/D30) — the shared hairline-bar grammar `CostBar.tsx` draws: a 1px `--bark` track, an
+ * amber pill fill 6px tall (`.cost-bar-fill`, `--sap-fill`, `rx` = a true semicircle at both
+ * ends), and a 1px `--sap-text` tick taller than the pill (`.cost-bar-target`). Geometry is fixed
+ * per instance as SVG attributes in `CostBar.tsx` itself. */
 .cost-bar-track {
   stroke: var(--bark);
   stroke-width: 1;
   opacity: 0.4;
-  vector-effect: non-scaling-stroke;
 }
 
-/* #924 AC2: the pill body itself, drawn as a STROKED line with a round cap — same fix family as
- * `.cost-bar-track`/`.cost-bar-target` above/below. A round linecap's own radius (half the
- * stroke-width) is part of the stroke render, so `vector-effect: non-scaling-stroke` keeps the cap
- * a true semicircle regardless of the bar's own X-axis stretch, unlike a plain `rx` (fill
- * geometry, never protected by `vector-effect`), which elongates into an ellipse under the same
- * scale. `stroke-width: 6` matches `FILL_HEIGHT` (CostBar.tsx) exactly — the pill's rendered
- * height. */
+/* #924 AC2/AC3: the pill body — a filled, rounded rect (`rx` = half its own height, CostBar.tsx),
+ * so both caps are a true semicircle, fully contained inside the rect's own x/width box at every
+ * settled percentage including 0 and 100 (a rounded CORNER is carved INWARD, never bulging past
+ * its own bounds the way a stroked line's round LINECAP does past its endpoint). #924 AC3: the
+ * SAME rect carries the light-theme outline directly (`stroke: var(--sap-fill-outline)`, 1px) —
+ * the real rendered `.cost-bar-track` (this fill's own immediate neighbour — `--bark` at 0.4
+ * opacity over `--panel`, `contrast.ts`'s `checkFillTrackContrast`) clears 3:1 against `--sap-fill`
+ * in dark theme (4.24:1) but NOT in light (1.15:1); `--sap-fill-outline` is invisible in dark
+ * theme, where it already clears unaided (tokens.css). The stroke traces the rect's own already-
+ * rounded path directly, so one element carries both fill and outline — no second element needed. */
 .cost-bar-fill {
-  stroke: var(--sap-fill);
-  stroke-width: 6;
-  stroke-linecap: round;
-  vector-effect: non-scaling-stroke;
-}
-
-/* #924 AC3: the REAL rendered `.cost-bar-track` (this fill's own immediate neighbour — `--bark` at
- * 0.4 opacity over `--panel`, `contrast.ts`'s `checkFillTrackContrast`) clears 3:1 against
- * `--sap-fill` in dark theme (4.24:1) but NOT in light (1.15:1) — every use of this fill, not only
- * the header meter, compensates with the same 1px `--sap-text` outline (invisible in dark theme,
- * where it already clears unaided — `--sap-fill-outline`, tokens.css). Drawn as a SEPARATE, WIDER
- * (`stroke-width: 8` — the pill's own 6, plus 1px on each side), round-capped line UNDERNEATH the
- * pill (CostBar.tsx renders this one first) — the classic SVG "stroke ring" technique: the pill on
- * top covers the middle, leaving only this outline's own outer 1px peeking out on every edge,
- * caps included, exactly where a real `stroke: X` ON the pill itself would show if a single
- * element could carry two different-width strokes at once. */
-.cost-bar-fill-outline {
+  fill: var(--sap-fill);
   stroke: var(--sap-fill-outline);
-  stroke-width: 8;
-  stroke-linecap: round;
-  vector-effect: non-scaling-stroke;
+  stroke-width: 1;
 }
 
 /* #924 AC2: the by-stage group's shared target/ceiling tick (`cost-panel.ts`'s `tickPositionPct`)
- * — a VERTICAL line, so its own `stroke-width` extends in the bar's X axis. A ~490px-wide bar
- * built from a 100-unit-wide viewBox scales X by roughly 4.9x (`preserveAspectRatio="none"`,
- * independent from the ~1x Y scale `.cost-bar`'s 12px height already pins) — an unguarded
- * `stroke-width: 1` would render as a ~5px filled block instead of a hairline. `vector-effect:
- * non-scaling-stroke` is the SVG-native fix: it pins stroke width to a real device pixel
- * regardless of the CTM's scale, in either axis. */
+ * — a plain 1px vertical hairline, taller than the pill. */
 .cost-bar-target {
   stroke: var(--sap-text);
   stroke-width: 1;
-  vector-effect: non-scaling-stroke;
 }
 
 /* ---- header: engine state word + spend meter (§3 A, #361) ---------------- */
@@ -371,9 +339,10 @@
   gap: 4px;
 }
 
-/* #924 gate② finding [1]: height is deliberately UNCHANGED from `.cost-bar`'s own 12px (no
- * override here) — a distinct height would re-introduce the same non-uniform-scale distortion the
- * base rule's own comment documents. Only width/shape (rounded, wider) differ per instance. */
+/* #924 AC2: height is deliberately UNCHANGED from `.cost-bar`'s own 12px (no override here) —
+ * `CostBar.tsx`'s own y-coordinates (track/fill/tick) are plain CSS px assuming that exact box
+ * height; a different height here would misposition them, not merely rescale them. Only
+ * width/shape (rounded, wider) differ per instance. */
 .spend-meter-bar {
   width: 140px;
   border-radius: var(--radius-pill);
@@ -381,8 +350,8 @@
 }
 
 /* #890: the lane card's own settled/est bar — full card width, flush with the foot row above it.
- * #924 gate② finding [1]: height also deliberately unchanged from `.cost-bar`'s 12px, same
- * reasoning as `.spend-meter-bar` above. */
+ * #924 AC2: height also deliberately unchanged from `.cost-bar`'s 12px, same reasoning as
+ * `.spend-meter-bar` above. */
 .lane-card-bar {
   width: 100%;
 }
