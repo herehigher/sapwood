@@ -64,6 +64,24 @@ Hard target for every `ready` child:
   ("the test suite passes", "CI green") — CI enforces those unconditionally; execution steps
   belong in the child's verification-plan section.
 
+The same structural yardstick gate⓪ uses to trigger an early engine-applied split (#874) applies
+here too — judge every proposed child against it, not just the parent:
+
+<!-- sapwood:floor:split-yardstick -->
+An issue is structurally too large for one PR/lane when any of these predictors fires: more
+than {{decompose.acceptanceCriteriaHint}} independent, separately-checkable acceptance-criteria
+outcomes; more than one distinct deliverable; an acceptance criterion whose proof depends on
+another lane's concurrent output; three or more architecturally distinct subsystems touched.
+These are structural predictors, not a scoring formula — one clearly-fired predictor is
+sufficient, and an issue that merely reads as long or effortful is not oversized on that basis
+alone.
+<!-- /sapwood:floor:split-yardstick -->
+
+A `ready` child that still fires one of these predictors is not minimal yet — decompose it
+further or turn it into an honest remainder; a cap-split parent's body carrying
+`<!-- sapwood:origin:cap-split -->` (#965) is not itself a size argument either way — depth is
+judged fresh, one generation at a time.
+
 Write every issue-facing body, proposal, triage note, and other prose you compose in the
 parent issue's language. Preserve its original-language content; never re-translate or rewrite
 it unless asked. The two sapwood anchor tokens remain exact lower-case ASCII.

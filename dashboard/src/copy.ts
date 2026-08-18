@@ -442,6 +442,18 @@ export const COPY: Partial<Record<EventKind, CopyEntry>> = {
     ],
     attention: true,
   },
+  "plan-review-too-large-split": {
+    // #874: payload carries {round_id, issue, evidence} — a healthy, autonomous outcome (gate⓪
+    // judged the issue structurally too large and applied `split` itself, the SAME writer entry
+    // #965's resume-cap CAPPED branch uses, just judged early). No "asks:" clause and no
+    // `attention` marker — same "not an attention item" stance `resume-capped`'s own split:true
+    // case takes below; a later po-decompose session picks the issue up with no human step.
+    sentence: (p) => [
+      "Issue ",
+      issueTok(p.issue),
+      ` was too large for one PR — the engine split it for decomposition${typeof p.evidence === "string" && p.evidence ? `: ${p.evidence}` : ""}`,
+    ],
+  },
   "verify-na-proposed": {
     // #881 payload audit: `plan-review.ts`'s emit site carries only `round_id`/`issue` — the
     // proposal's rationale lives in the forge comment body, never in the event payload, a genuine

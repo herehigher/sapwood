@@ -185,6 +185,18 @@ export const GOVERNANCE_EVENT_KINDS = defineKinds({
     actionability: "intervene",
     see: "#296",
   },
+  // #874: NOT an escalation-source — unlike `verify-na-proposed`/`plan-review-escalated` above,
+  // no human action is required: the engine already applied `labels.split` itself, the SAME
+  // writer entry #965's resume-cap CAPPED branch uses, just judged BEFORE the first lane is ever
+  // spent. A later po-decompose session picks the issue up automatically. Same "not an attention
+  // item" framing `resume-capped`'s own `split: true` case documents.
+  "plan-review-too-large-split": {
+    tags: ["retro", "round-artifact"],
+    meaning:
+      "gate⓪ judged an approved-shape issue structurally too large for one PR/lane (#874) and applied `labels.split` directly — the engine-initiated EARLY split trigger, as opposed to `resume-capped{split:true}`'s LATE one (#965); po-decompose picks the issue up next round, no human action required.",
+    actionability: "routine",
+    see: "#874, #965",
+  },
   "operator-fence-violated": {
     tags: [],
     meaning:

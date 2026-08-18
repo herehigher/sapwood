@@ -119,11 +119,13 @@ export const LANE_EVENT_KINDS = defineKinds({
     meaning: "resuming a handed-off lane failed this attempt; eligible for a further retry.",
     actionability: "expected-noise",
   },
-  // #965: NOT tagged `retro` (deliberately) — a split-vs-needs-human round-digest treatment for
-  // this kind is #874's own AC, not this one's. Leave the tag off here; #874 adds it in the same
-  // PR that wires the round-digest consumer, so a tag with no reader never lands ahead of it.
+  // #874 AC4: tagged `retro` so retro's own round digest surfaces every issue this round carrying
+  // a resume-capped event (`retro-digest.ts::gatherDigestIssues` folds any `retro`-tagged kind's
+  // `payload.issue` into the digest automatically — no dedicated reader needed) — retro sees caps
+  // first-hand, split or needs-human alike, and applies the two-branch anti-ratchet rule
+  // (`prompts/retro.md`) rather than reflexively proposing a budget change off a single instance.
   "resume-capped": {
-    tags: ["escalation-source:always"],
+    tags: ["retro", "escalation-source:always"],
     meaning:
       "a handed-off lane exhausted its resume-attempt budget (#172). `split: false` (or absent, every pre-#965 " +
       "event): needs-human, always proven by presence. `split: true` (#965): the engine applied `labels.split` " +

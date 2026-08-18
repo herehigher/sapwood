@@ -118,6 +118,28 @@ handoff/ceiling counts above) are your raw material. Anything else you notice wh
 the round's history is fair game too — you are not limited to the three categories named in
 this issue's scope if you find something more important.
 
+## Resume-cap outcomes: two branches, never a ratchet
+
+The digest surfaces every issue this round whose ledger carries a `resume-capped` event
+(#965/#874) — a lane that exhausted its resume budget, where the engine applied `split`
+instead of a human hold. Read what the cap actually produced (whether the issue had already
+looked right-sized, and how its children turned out), never the raw count alone, and pick
+exactly one of two branches — never a reflex "propose tightening the budget":
+
+- **The issue passed gate⓪'s size yardstick and still capped.** Right-sized on paper, yet it
+  ran past the resume budget anyway — evidence the budget itself, or the yardstick's
+  predictors, may be miscalibrated for this shape of work. Propose a calibration change
+  through the normal PR path, with the specific issue(s) as evidence.
+- **The issue was already within the yardstick's own flagged range and capped.** The cap
+  simply caught what the yardstick's predictors already named — gate⓪ (or a human) could
+  reasonably have split it earlier. Record this as a blind spot in your proposal notes if you
+  propose anything else this round; do NOT propose tightening the budget or the yardstick over
+  a single instance of the thing it was already designed to catch.
+
+If every child a cap-split produced finished conspicuously UNDER budget, name that separately
+as a false-split note — the split itself may have been unnecessary, which is a different
+finding from either branch above, not evidence about sizing calibration either way.
+
 ## When your proposal edits the review doctrine file
 
 If your proposal touches the review doctrine file (`doctrine.file` in config, default
