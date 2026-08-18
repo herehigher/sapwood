@@ -239,13 +239,19 @@ export const GOVERNANCE_EVENT_KINDS = defineKinds({
     actionability: "investigate",
   },
   "retro-pr-opened": {
-    tags: ["round-artifact"],
+    tags: ["round-artifact", "retro-pr-lifecycle"],
     meaning: "retro opened a documentation/round-close PR summarizing this round's durable-knowledge changes.",
     actionability: "routine",
   },
+  "retro-pr-updated": {
+    tags: ["round-artifact", "retro-pr-lifecycle"],
+    meaning: "retro pushed a repair to a PR it had already opened (in this round or a prior one) instead of opening a duplicate.",
+    actionability: "routine",
+    see: "#964",
+  },
   "retro-pr-degraded": {
     tags: ["round-artifact"],
-    meaning: "retro's PR-opening step degraded/failed this round.",
+    meaning: "retro's PR-opening or PR-updating step degraded/failed this round.",
     actionability: "investigate",
   },
   "retro-quiet-skipped": {

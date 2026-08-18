@@ -490,6 +490,12 @@ export const COPY: Partial<Record<EventKind, CopyEntry>> = {
   "retro-pr-opened": {
     sentence: (p) => ["The loop proposed an improvement to itself — PR ", prTok(p.pr), " awaits review"],
   },
+  // #964: retro repaired a PR it had already opened (this round or a prior one) rather than
+  // proposing a duplicate — same "awaits review" tail as retro-pr-opened (both leave the PR in
+  // the identical reviewer-facing state), distinguished only by the verb.
+  "retro-pr-updated": {
+    sentence: (p) => ["The loop repaired its own self-improvement PR — PR ", prTok(p.pr), " awaits review"],
+  },
   "retro-pr-degraded": {
     sentence: () => ["A self-improvement proposal didn't come together this round"],
   },

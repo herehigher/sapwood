@@ -230,6 +230,40 @@ test("assembleRoundArtifact: retro-pr-opened/-degraded populate the retro sectio
   assert.deepEqual(degradedThenOpened.retro, { opened: { pr: 6, branch: "retro/x" }, degraded: null });
 });
 
+test("assembleRoundArtifact (#964): retro-pr-updated reads as the SAME 'opened' shape as retro-pr-opened, and is mutually exclusive with degraded across kinds too", () => {
+  const updated = assembleRoundArtifact(
+    [{ kind: "retro-pr-updated", payload: { round_id: 1, pr: 5, branch: "retro/x", head: "abc123" } }],
+    meta,
+    0,
+    30,
+  );
+  assert.deepEqual(updated.retro, { opened: { pr: 5, branch: "retro/x" }, degraded: null });
+
+  const openedThenUpdated = assembleRoundArtifact(
+    [
+      { kind: "retro-pr-opened", payload: { round_id: 1, pr: 5, branch: "retro/x", head: "aaa" } },
+      { kind: "retro-pr-updated", payload: { round_id: 1, pr: 5, branch: "retro/x", head: "bbb" } },
+    ],
+    meta,
+    0,
+    30,
+  );
+  assert.deepEqual(openedThenUpdated.retro, { opened: { pr: 5, branch: "retro/x" }, degraded: null });
+
+  const updatedThenDegraded = assembleRoundArtifact(
+    [
+      { kind: "retro-pr-updated", payload: { round_id: 1, pr: 5, branch: "retro/x", head: "bbb" } },
+      // #964: an update-flow degrade carries no `title` at all (nothing was ever titled) — must
+      // coalesce to "" rather than throw the schema's non-optional title field.
+      { kind: "retro-pr-degraded", payload: { round_id: 1, pr: 5, branch: "retro/x", reason: "head unchanged" } },
+    ],
+    meta,
+    0,
+    30,
+  );
+  assert.deepEqual(updatedThenDegraded.retro, { opened: null, degraded: { branch: "retro/x", title: "", reason: "head unchanged" } });
+});
+
 test("assembleRoundArtifact: align-summary populates the align section verbatim; absent -> null", () => {
   const withAlign = assembleRoundArtifact(
     [

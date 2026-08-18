@@ -959,6 +959,7 @@ checklist item**):
 | `escalation-resolved` | Branches on `payload.via`: merged → "Issue #{issue} no longer needs you — PR #{pr} was merged"; issue-closed → "Issue #{issue} no longer needs you — it was closed"; pr-closed → "Issue #{issue} no longer needs you — PR #{pr} was closed without merging"; label-removed → "Issue #{issue} no longer needs you — the flag was cleared"; board-fixed → "Issue #{issue} no longer needs you — the board was set to Done". Never an attention item — this is the event that *clears* one (§3) |
 | `needs-human-swept` | Issue #{issue} no longer carries `{label}` — the engine removed the flag it had applied itself, now that its escalation is resolved. Never an attention item; it is the receipt that a cleared item's *carrier* was cleared too. Only ever follows a `merged` or `issue-closed` resolution; a PR closed without merging still owes a human decision and keeps its flag (#441) |
 | `retro-pr-opened` | The loop proposed an improvement to itself — PR #{pr} awaits review |
+| `retro-pr-updated` | The loop repaired its own self-improvement PR — PR #{pr} awaits review |
 | `retro-pr-degraded` | A self-improvement proposal didn't come together this round |
 | `run-started` | Engine started a new run |
 | `instance-lock-taken-over` | Took over the engine lock left by a crashed run (pid {previousPid}) |

@@ -303,19 +303,114 @@ test("gatherRetroFacts (#403, F25): the round window is id-cursor-bounded — a 
 // the session structurally — no runner call, no digest build, one durable skip event, phase
 // still closes ───────────────────────────────────────────────────────────────────────────────
 
-test("isQuietRound: true for a fresh round with no events in its window", () => {
+test("isQuietRound: true for a fresh round with no events in its window", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
-  assert.equal(isQuietRound(state, round), true);
+  assert.equal(await isQuietRound(new MinimalForge(), state, round), true);
   state.close();
 });
 
-test("isQuietRound: events BEFORE round start don't count — a round right after a busy one is still quiet", () => {
+test("isQuietRound: events BEFORE round start don't count — a round right after a busy one is still quiet", async () => {
   const state = new State(":memory:");
   state.appendEvent("handoff", { worker: "lane-x", issue: 99 }); // before round start
   state.appendEvent("dispatched", { worker: "lane-x", issue: 99 }); // before round start
   const round = state.startRound(new Date().toISOString());
-  assert.equal(isQuietRound(state, round), true);
+  assert.equal(await isQuietRound(new MinimalForge(), state, round), true);
+  state.close();
+});
+
+// ── #964's FOURTH signal: an own PR retro previously opened, checked ONLY when the three
+// #961 signals above are silent (otherwise-quiet round, zero fresh material) ────────────────
+
+test("isQuietRound (#964): a green, non-conflicting own PR with no changes-requested review is STILL quiet — the fourth signal adds no material", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 5, branch: "retro/x" }); // before round start — same as any prior-round PR
+  const forge = new MinimalForge();
+  forge.statuses.set(5, { number: 5, headOid: "aaa", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true, ciRed: false });
+  assert.equal(await isQuietRound(forge, state, round), true);
+  state.close();
+});
+
+test("isQuietRound (#964): a red own PR makes an otherwise-quiet round NOT quiet", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 5, branch: "retro/x" });
+  const forge = new MinimalForge();
+  forge.statuses.set(5, { number: 5, headOid: "aaa", state: "OPEN", mergeable: "MERGEABLE", ciGreen: false, ciRed: true });
+  assert.equal(await isQuietRound(forge, state, round), false);
+  state.close();
+});
+
+test("isQuietRound (#964): a CONFLICTING own PR is also actionable — not quiet", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 5, branch: "retro/x" });
+  const forge = new MinimalForge();
+  forge.statuses.set(5, { number: 5, headOid: "aaa", state: "OPEN", mergeable: "CONFLICTING", ciGreen: false });
+  assert.equal(await isQuietRound(forge, state, round), false);
+  state.close();
+});
+
+test("isQuietRound (#964): a CHANGES_REQUESTED review on an own PR is also actionable — not quiet", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 5, branch: "retro/x" });
+  const forge = new MinimalForge();
+  forge.statuses.set(5, { number: 5, headOid: "aaa", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true, ciRed: false });
+  forge.reviews.set(5, {
+    headOid: "aaa",
+    author: "producer",
+    updatedAt: "2026-01-01T00:00:00Z",
+    isDraft: false,
+    labels: [],
+    state: "OPEN",
+    reactions: [],
+    unresolvedThreads: 1,
+    reviews: [{ author: "codex", commitOid: "aaa", state: "CHANGES_REQUESTED" }],
+  });
+  assert.equal(await isQuietRound(forge, state, round), false);
+  state.close();
+});
+
+test("isQuietRound (#964): a merged own PR is excluded entirely — no longer outstanding, no forge review-read needed", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 5, branch: "retro/x" });
+  const forge = new MinimalForge();
+  forge.statuses.set(5, { number: 5, headOid: "aaa", state: "MERGED", mergeable: "MERGEABLE", ciGreen: true });
+  assert.equal(await isQuietRound(forge, state, round), true);
+  state.close();
+});
+
+test("isQuietRound (#964): a forge status-read failure fails CLOSED — reads as actionable, not quiet (a wrong 'quiet' costs a missed repair)", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 5, branch: "retro/x" });
+  const forge = new MinimalForge();
+  forge.statusErrors.add(5);
+  assert.equal(await isQuietRound(forge, state, round), false);
+  state.close();
+});
+
+test("isQuietRound (#964): zero retro-pr-lifecycle events at all -> the fourth signal makes no forge call and adds nothing", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  const forge = new MinimalForge();
+  assert.equal(await isQuietRound(forge, state, round), true);
+  assert.deepEqual(forge.statusCalls, []);
+  state.close();
+});
+
+test("isQuietRound (#964): the fourth signal is checked ONLY when the three #961 signals are silent — an already-busy round never touches the forge", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("dispatched", { worker: "lane-a", issue: 1 }); // #961 signal 3 alone already makes this non-quiet
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 5, branch: "retro/x" });
+  const forge = new MinimalForge();
+  forge.statusErrors.add(5); // would flip the verdict if ever reached — it must not be
+  assert.equal(await isQuietRound(forge, state, round), false);
+  assert.deepEqual(forge.statusCalls, [], "short-circuited before the fourth signal's forge read");
   state.close();
 });
 
@@ -364,7 +459,7 @@ test("createRetroStub (#961 AC2): a retro-tagged event alone is material — the
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   state.appendEvent("handoff", { worker: "lane-a", issue: 1 });
-  assert.equal(isQuietRound(state, round), false);
+  assert.equal(await isQuietRound(new MinimalForge(), state, round), false);
   const runner = new ScriptedRunner(doneResult("s1"));
   const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
@@ -377,7 +472,7 @@ test("createRetroStub (#961 AC2): a pr-touched-tagged event alone (e.g. harvest 
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   state.appendEvent("merged", { worker: "lane-a", issue: 7, pr: 42, headOid: "abc" });
-  assert.equal(isQuietRound(state, round), false);
+  assert.equal(await isQuietRound(new MinimalForge(), state, round), false);
   const runner = new ScriptedRunner(doneResult("s1"));
   const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
@@ -390,7 +485,7 @@ test("createRetroStub (#961 AC2): a dispatched lane alone (no retro/pr-touched e
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   state.appendEvent("dispatched", { worker: "lane-a", issue: 1 });
-  assert.equal(isQuietRound(state, round), false);
+  assert.equal(await isQuietRound(new MinimalForge(), state, round), false);
   const runner = new ScriptedRunner(doneResult("s1"));
   const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
@@ -406,7 +501,7 @@ test("createRetroStub (#961): a round with zero `dispatched` events but one `fix
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   state.appendEvent("fix-leg-started", { worker: "lane-a", issue: 1, pr: 30, fixRounds: 1, journalCursor: 0 });
-  assert.equal(isQuietRound(state, round), false);
+  assert.equal(await isQuietRound(new MinimalForge(), state, round), false);
   const runner = new ScriptedRunner(doneResult("s1"));
   const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
@@ -419,7 +514,7 @@ test("createRetroStub (#961): a round with zero `dispatched` events but one `res
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   state.appendEvent("resumed", { worker: "lane-a", issue: 1, attempt: 1 });
-  assert.equal(isQuietRound(state, round), false);
+  assert.equal(await isQuietRound(new MinimalForge(), state, round), false);
   const runner = new ScriptedRunner(doneResult("s1"));
   const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge: new MinimalForge() };
   await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
@@ -585,6 +680,38 @@ test("parseRetroScratch: branch-name sanity fails closed — bad charset, leadin
   assert.equal(parseRetroScratch("branch: feat/x.y-z/1\ntitle: t\n\nbody\n").kind, "proposal");
 });
 
+// ── #964: the `update` scratch outcome — repair a PR retro already opened ───────────────────
+
+test("parseRetroScratch (#964): a well-formed update parses to exact pr/branch/body", () => {
+  const p = parseRetroScratch("update: 42\nbranch: retro/round-1-proposal\n\nThe finding no longer stands; closing the loop.\n");
+  assert.deepEqual(p, {
+    kind: "update",
+    pr: 42,
+    branch: "retro/round-1-proposal",
+    body: "The finding no longer stands; closing the loop.",
+  });
+});
+
+test("parseRetroScratch (#964): an update with an empty body is body: null — 'keep the existing body', not a parse failure", () => {
+  assert.deepEqual(parseRetroScratch("update: 42\nbranch: retro/x\n\n   \n"), { kind: "update", pr: 42, branch: "retro/x", body: null });
+  assert.deepEqual(parseRetroScratch("update: 42\nbranch: retro/x"), { kind: "update", pr: 42, branch: "retro/x", body: null });
+});
+
+test("parseRetroScratch (#964): update fails closed — non-numeric/zero/negative PR, missing branch line, and bad branch names", () => {
+  for (const bad of ["update: not-a-number\nbranch: retro/x\n", "update: 0\nbranch: retro/x\n", "update: -1\nbranch: retro/x\n"]) {
+    assert.equal(parseRetroScratch(bad).kind, "invalid", `${JSON.stringify(bad)} must fail closed`);
+  }
+  assert.equal(parseRetroScratch("update: 42\nno branch line here\n").kind, "invalid");
+  for (const branch of ["has space", "-leading-dash", "a..b", "main", "master"]) {
+    assert.equal(parseRetroScratch(`update: 42\nbranch: ${branch}\n`).kind, "invalid", `branch ${JSON.stringify(branch)} must fail closed`);
+  }
+});
+
+test("parseRetroScratch (#964): 'update:' and 'branch:' first lines never collide — a proposal file is unaffected", () => {
+  assert.equal(parseRetroScratch(PROPOSAL_SCRATCH).kind, "proposal");
+  assert.equal(parseRetroScratch("none").kind, "none");
+});
+
 // ── #111 PR-B: engine-side PR creation — verify push, then openPR, partial failures degrade ─
 
 test("createRetroStub: happy path — session writes a proposal scratch; engine verifies the pushed branch and opens the PR itself with the exact title/body", async () => {
@@ -603,7 +730,9 @@ test("createRetroStub: happy path — session writes a proposal scratch; engine 
   assert.deepEqual(forge.openPRCalls, [["retro/round-1-proposal", "docs: tighten worker prompt", "## Why\n\nRecurring gate② finding."]]);
   const opened = state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-opened"]);
   assert.equal(opened.length, 1);
-  assert.deepEqual(opened[0]!.payload, { round_id: round.round_id, pr: 77, branch: "retro/round-1-proposal" });
+  // #964: `head` is recorded off a POST-openPR getPRStatus read (MinimalForge.getPRStatus always
+  // answers headOid "x") — the `update` outcome's head-moved verification needs it.
+  assert.deepEqual(opened[0]!.payload, { round_id: round.round_id, pr: 77, branch: "retro/round-1-proposal", head: "x" });
   assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-degraded", "retro-degraded"]), []);
   state.close();
 });
@@ -712,6 +841,180 @@ test("createRetroStub: malformed scratch on the first attempt, valid on the retr
   assert.equal(runner.calls.length, 2);
   assert.equal(forge.openPRCalls.length, 1);
   assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-degraded", "retro-pr-degraded"]), []);
+  state.close();
+});
+
+// ── #964: the `update` scratch outcome — engine-side verify-then-append, never openPR ────────
+
+test("createRetroStub (#964): update happy path — appends retro-pr-updated with the fresh head, never calls openPR, and overwrites the PR body", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 77, branch: "retro/round-1-proposal", head: "aaa" });
+  const runner = new ScriptedRunner(
+    doneResult("s1", "update: 77\nbranch: retro/round-1-proposal\n\nThe finding still stands; pushed a fix.\n"),
+  );
+  const forge = new MinimalForge();
+  forge.branchExistsResult = true;
+  forge.statuses.set(77, { number: 77, headOid: "bbb", state: "OPEN", mergeable: "MERGEABLE", ciGreen: false });
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
+  await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
+
+  assert.deepEqual(forge.openPRCalls, [], "an update never opens a duplicate PR");
+  assert.deepEqual(forge.branchExistsCalls, ["retro/round-1-proposal"]);
+  const updated = state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-updated"]);
+  assert.equal(updated.length, 1);
+  assert.deepEqual(updated[0]!.payload, { round_id: round.round_id, pr: 77, branch: "retro/round-1-proposal", head: "bbb" });
+  assert.deepEqual(forge.updateIssueBodyCalls, [[77, "The finding still stands; pushed a fix."]]);
+  assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-degraded", "retro-degraded"]), []);
+  state.close();
+});
+
+test("createRetroStub (#964): an empty-body update ('keep the existing body') never calls updateIssueBody", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 77, branch: "retro/round-1-proposal", head: "aaa" });
+  const runner = new ScriptedRunner(doneResult("s1", "update: 77\nbranch: retro/round-1-proposal\n"));
+  const forge = new MinimalForge();
+  forge.branchExistsResult = true;
+  forge.statuses.set(77, { number: 77, headOid: "bbb", state: "OPEN", mergeable: "MERGEABLE", ciGreen: false });
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
+  await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
+
+  assert.equal(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-updated"]).length, 1);
+  assert.deepEqual(forge.updateIssueBodyCalls, []);
+  state.close();
+});
+
+test("createRetroStub (#964): PR retro never opened -> retro-pr-degraded naming the reason, and NEITHER branchExists NOR openPR is ever called (mutation-kill: dropping this check would proceed to a live forge read)", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
+  // Deliberately NO prior retro-pr-opened/-updated event for PR 999.
+  const runner = new ScriptedRunner(doneResult("s1", "update: 999\nbranch: retro/some-branch\n\nbody\n"));
+  const forge = new MinimalForge();
+  forge.branchExistsResult = true; // would happily answer true if ever asked — it must not be asked
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
+  await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
+
+  assert.deepEqual(forge.branchExistsCalls, [], "must refuse before ever touching the forge");
+  assert.deepEqual(forge.openPRCalls, []);
+  const degraded = state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-degraded"]);
+  assert.equal(degraded.length, 1);
+  assert.match((degraded[0]!.payload as { reason: string }).reason, /never opened that PR|does not own/);
+  assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-updated"]), []);
+  state.close();
+});
+
+test("createRetroStub (#964): scratch branch does not match the PR's RECORDED branch -> degrades, and branchExists is never called (mutation-kill: dropping this check would proceed to verify the WRONG branch)", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 77, branch: "retro/the-real-branch", head: "aaa" });
+  const runner = new ScriptedRunner(doneResult("s1", "update: 77\nbranch: retro/a-different-branch\n\nbody\n"));
+  const forge = new MinimalForge();
+  forge.branchExistsResult = true;
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
+  await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
+
+  assert.deepEqual(forge.branchExistsCalls, [], "must refuse before ever checking the (wrong) branch on the forge");
+  const degraded = state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-degraded"]);
+  assert.equal(degraded.length, 1);
+  assert.match((degraded[0]!.payload as { reason: string }).reason, /does not match PR #77's recorded branch/);
+  state.close();
+});
+
+test("createRetroStub (#964): branch not verifiably pushed -> degrades, updateProposalPR's OWN head-moved check never runs a SECOND getPRStatus read", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 77, branch: "retro/x", head: "aaa" });
+  const runner = new ScriptedRunner(doneResult("s1", "update: 77\nbranch: retro/x\n\nbody\n"));
+  const forge = new MinimalForge(); // branchExistsResult defaults to false
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
+  await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
+
+  // ONE getPRStatus(77) call is expected — the digest's OWN "your outstanding PRs" read
+  // (gatherOutstandingRetroPRs, built before the session runs at all); updateProposalPR must
+  // decline BEFORE its own head-moved check ever issues a second one.
+  assert.deepEqual(forge.statusCalls, [77]);
+  const degraded = state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-degraded"]);
+  assert.equal(degraded.length, 1);
+  assert.match((degraded[0]!.payload as { reason: string }).reason, /no such branch exists/);
+  state.close();
+});
+
+test("createRetroStub (#964): recorded head unchanged -> degrades 'nothing to update', never appends retro-pr-updated", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 77, branch: "retro/x", head: "aaa" });
+  const runner = new ScriptedRunner(doneResult("s1", "update: 77\nbranch: retro/x\n\nbody\n"));
+  const forge = new MinimalForge();
+  forge.branchExistsResult = true;
+  forge.statuses.set(77, { number: 77, headOid: "aaa", state: "OPEN", mergeable: "MERGEABLE", ciGreen: false }); // same head
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
+  await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
+
+  assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-updated"]), []);
+  const degraded = state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-degraded"]);
+  assert.equal(degraded.length, 1);
+  assert.match((degraded[0]!.payload as { reason: string }).reason, /has not moved/);
+  state.close();
+});
+
+test("createRetroStub (#964): a LEGACY retro-pr-opened (no recorded head) accepts once branchExists and the current head differs from base", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 77, branch: "retro/x" }); // pre-#964: no head field at all
+  const runner = new ScriptedRunner(doneResult("s1", "update: 77\nbranch: retro/x\n\nbody\n"));
+  const forge = new MinimalForge();
+  forge.branchExistsResult = true;
+  forge.statuses.set(77, { number: 77, headOid: "bbb", baseOid: "base1", state: "OPEN", mergeable: "MERGEABLE", ciGreen: false });
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
+  await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
+
+  assert.equal(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-updated"]).length, 1);
+  state.close();
+});
+
+test("createRetroStub (#964): a LEGACY retro-pr-opened whose current head equals base degrades — nothing ahead to update", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 77, branch: "retro/x" });
+  const runner = new ScriptedRunner(doneResult("s1", "update: 77\nbranch: retro/x\n\nbody\n"));
+  const forge = new MinimalForge();
+  forge.branchExistsResult = true;
+  forge.statuses.set(77, { number: 77, headOid: "same", baseOid: "same", state: "OPEN", mergeable: "MERGEABLE", ciGreen: false });
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
+  await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
+
+  assert.deepEqual(state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-updated"]), []);
+  const degraded = state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-degraded"]);
+  assert.equal(degraded.length, 1);
+  assert.match((degraded[0]!.payload as { reason: string }).reason, /pre-#964 PR/);
+  state.close();
+});
+
+test("createRetroStub (#964): a retro-pr-updated event (not just -opened) counts as the prior record — the SECOND update in a row still verifies against it", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  seedDispatch(state);
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 77, branch: "retro/x", head: "aaa" });
+  state.appendEvent("retro-pr-updated", { round_id: 0, pr: 77, branch: "retro/x", head: "bbb" });
+  const runner = new ScriptedRunner(doneResult("s1", "update: 77\nbranch: retro/x\n\nbody\n"));
+  const forge = new MinimalForge();
+  forge.branchExistsResult = true;
+  forge.statuses.set(77, { number: 77, headOid: "ccc", state: "OPEN", mergeable: "MERGEABLE", ciGreen: false }); // moved again, past "bbb"
+  const deps: RetroDeps = { now: realClock, state, cfg: mkCfg(), runner, forge };
+  await createRetroStub(deps).run({ roundId: round.round_id, phase: "retro", marker: null });
+
+  const updated = state.eventsSince("2020-01-01T00:00:00.000Z", ["retro-pr-updated"]);
+  assert.equal(updated.length, 2);
+  assert.deepEqual(updated[1]!.payload, { round_id: round.round_id, pr: 77, branch: "retro/x", head: "ccc" });
   state.close();
 });
 
@@ -936,6 +1239,20 @@ test("prompts/retro.md no longer instructs live gh browsing (negative lint — a
   }
 });
 
+test("prompts/retro.md (#964 AC5, doc-gate): describes the `update` outcome, names the actionable-own-PR-first rule, forbids closing a PR, and the tool scope/never-list is unchanged", () => {
+  const body = readFileSync(defaultRetroPromptPath(), "utf8");
+  assert.ok(body.includes("Your outstanding PRs"), "must name the digest section by its own heading");
+  assert.ok(body.includes("update:"), "must document the update: scratch outcome");
+  assert.ok(/first candidate/i.test(body), "must state an actionable own PR is the round's first candidate");
+  assert.ok(/repair it on its existing branch/i.test(body), "must instruct repairing the EXISTING branch, not a new one");
+  assert.ok(/never close or withdraw|close or withdraw a PR/i.test(body), "must forbid closing/withdrawing a PR");
+  assert.ok(/a human/i.test(body) && /decides|closes/i.test(body), "closing stays a human decision");
+  // #235 freeze holds: no new tool grant, the allow-list stays exactly what RETRO_ALLOWED_TOOLS
+  // pins (asserted byte-for-byte elsewhere in this file) — this prompt change never widens it.
+  assert.ok(!body.includes("gh pr close"));
+  assert.ok(!/these are all|the complete (set|list)/i.test(body), "no positive-completeness phrasing");
+});
+
 // ── Integration: wired as round.ts's real `retro` peripheral ────────────────────────────────
 
 class MinimalForge extends UnstubbedForge implements IForge {
@@ -983,8 +1300,16 @@ class MinimalForge extends UnstubbedForge implements IForge {
     this.branchExistsCalls.push(branch);
     return this.branchExistsResult;
   }
+  // #964: programmable per-PR status (default unchanged: OPEN/MERGEABLE/headOid "x"/green) —
+  // the `update` outcome's head-moved verification and isQuietRound's fourth-signal tests need
+  // to vary this per PR.
+  statuses = new Map<number, PRStatus>();
+  statusCalls: number[] = [];
+  statusErrors = new Set<number>();
   override async getPRStatus(n: number): Promise<PRStatus> {
-    return { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
+    this.statusCalls.push(n);
+    if (this.statusErrors.has(n)) throw new Error(`simulated status fetch failure for PR #${n}`);
+    return this.statuses.get(n) ?? { number: n, headOid: "x", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true };
   }
   override async mergePR(): Promise<void> {}
   override async addPRComment(): Promise<void> {}
@@ -996,18 +1321,23 @@ class MinimalForge extends UnstubbedForge implements IForge {
   override async updateIssueBody(issue: number, body: string): Promise<void> {
     this.updateIssueBodyCalls.push([issue, body]);
   }
-  override async getPRReviewData(): Promise<PRReviewData> {
-    return {
-      headOid: "x",
-      author: "producer",
-      updatedAt: "2026-01-01T00:00:00Z",
-      isDraft: false,
-      labels: [],
-      state: "OPEN",
-      reactions: [],
-      reviews: [],
-      unresolvedThreads: 0,
-    };
+  // #964: programmable per-PR review data (default unchanged: no reviews) — isQuietRound's
+  // fourth signal and the outstanding-PRs digest section both check for CHANGES_REQUESTED.
+  reviews = new Map<number, PRReviewData>();
+  override async getPRReviewData(pr: number): Promise<PRReviewData> {
+    return (
+      this.reviews.get(pr) ?? {
+        headOid: "x",
+        author: "producer",
+        updatedAt: "2026-01-01T00:00:00Z",
+        isDraft: false,
+        labels: [],
+        state: "OPEN",
+        reactions: [],
+        reviews: [],
+        unresolvedThreads: 0,
+      }
+    );
   }
   override async getPRDiff(_pr: number): Promise<string> {
     return "";

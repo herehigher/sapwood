@@ -229,8 +229,9 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `po-degraded` — **investigate** [round-artifact]: the PO's phase degraded/failed this round.
 - `harvest-degraded` — **investigate** [round-artifact]: the harvest phase degraded/failed this round.
 - `retro-degraded` — **investigate** [round-artifact]: the retro phase degraded/failed this round.
-- `retro-pr-opened` — **routine** [round-artifact]: retro opened a documentation/round-close PR summarizing this round's durable-knowledge changes.
-- `retro-pr-degraded` — **investigate** [round-artifact]: retro's PR-opening step degraded/failed this round.
+- `retro-pr-opened` — **routine** [round-artifact, retro-pr-lifecycle]: retro opened a documentation/round-close PR summarizing this round's durable-knowledge changes.
+- `retro-pr-updated` — **routine** [round-artifact, retro-pr-lifecycle]: retro pushed a repair to a PR it had already opened (in this round or a prior one) instead of opening a duplicate. (see #964)
+- `retro-pr-degraded` — **investigate** [round-artifact]: retro's PR-opening or PR-updating step degraded/failed this round.
 - `retro-quiet-skipped` — **routine**: the retro session was skipped because the round was quiet (zero retro/pr-touched-tagged events, zero lanes dispatched) — the phase still closed (#961). (see #961)
 
 ### Escalation reconciliation
