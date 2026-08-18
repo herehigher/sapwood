@@ -297,6 +297,10 @@ test("/api/loop/state matches the §8 shape against a seeded DB", async () => {
       started_at: "2026-07-24T10:00:00.000Z",
       ended_at: null,
       pr: 97,
+      // #926 gate② finding [1] (ac4-real-data-flow-uncovered): a nonzero, non-default fix_rounds
+      // row — pins laneItem's `fixRound: w.fix_rounds ?? 0` mapping against a REAL DB row, not
+      // just the schema-default 0 every other worker in this fixture already carries.
+      fix_rounds: 2,
     });
     s.recordSpend("w2", 88, 1.25, "2026-07-24T11:30:00.000Z", [
       { model: "opus", inputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheCreationTokens: 0 },
@@ -358,6 +362,7 @@ test("/api/loop/state matches the §8 shape against a seeded DB", async () => {
     // in flight: the real bill does not exist yet — null, never a $0.00 that reads as settled
     assert.equal(w1.costUsd, null);
     assert.equal(w1.estCostUsd, 0.73);
+    assert.equal(w1.fixRound, 0, "a worker never fixed carries the schema default");
     assert.equal(w1.contextTokens, 41000);
     assert.deepEqual(w1.tokenComposition, { inputTokens: 12000, outputTokens: 3000, cacheReadTokens: 90000, cacheCreationTokens: 4000 });
     assert.equal(w1.pr, null);
@@ -367,6 +372,7 @@ test("/api/loop/state matches the §8 shape against a seeded DB", async () => {
     assert.equal(w2.contextTokens, null);
     assert.equal(w2.tokenComposition, null);
     assert.equal(w2.pr, 97);
+    assert.equal(w2.fixRound, 2, "the real fix_rounds row must reach the served lane, not a fabricated/default value");
 
     assert.deepEqual(body.round, { id: 1, phase: "aligning" });
     assert.equal(body.spend.todayUsd, 2);

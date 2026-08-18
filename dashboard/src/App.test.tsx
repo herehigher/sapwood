@@ -2836,6 +2836,48 @@ test("AC1 (STYLE, registerRealDom() + getComputedStyle, App at 1440 with a real 
   }
 });
 
+// ── #926 AC4: fixCap reaches the rendered chip through the real API -> App -> LaneBoard wiring ──
+// gate② finding [1] (ac4-real-data-flow-uncovered): LaneBoard.test.tsx's own tests inject
+// `fixRound`/`fixCap` directly as props, which never proves App actually threads `resolveFixCap`'s
+// output down — removing `fixCap={fixCap}` from App.tsx's own <LaneBoard> call site would leave
+// those tests green (LaneBoard's own `fixCap = 2` default would silently mask the drop) while a
+// real, non-default `lanes.prFixCap` config rendered the wrong cap. This test settles a REAL
+// `/api/loop/state` fetch (renderSettledApp — the same real App -> LiveApp -> LaneBoard tree
+// #900's own wiring tests use) with a nested non-default cap (5, never the hardcoded default 2)
+// and a nonzero fixRound (3), so only the real config-to-render path can produce this exact text.
+
+test("#926 AC4: a configured non-default lanes.prFixCap and a nonzero fix round reach the rendered chip through the real /api/loop/state -> App -> LaneBoard wiring", async () => {
+  const html = await renderSettledApp({
+    "/api/loop/state": {
+      status: 200,
+      body: {
+        ...LOOP_STATE_OK,
+        lanes: {
+          max: 1,
+          items: [
+            {
+              lane: "w1",
+              issue: 95,
+              state: "fixing",
+              pr: 97,
+              startedAt: "2026-01-01T00:00:00Z",
+              endedAt: null,
+              costUsd: null,
+              estCostUsd: null,
+              fixRound: 3,
+              contextTokens: null,
+              tokenComposition: null,
+            },
+          ],
+        },
+        config: { lanes: { prFixCap: 5 } },
+      },
+    },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  assert.match(html, /FIXING · ROUND 3\/5/, "the real config's non-default cap and the real lane's fixRound must both reach the chip");
+});
+
 // ── #924: one `.panel-head` recipe + one bar grammar + the --sap-text/--sap-fill split ─────────
 
 const tokensCss924 = readFileSync(new URL("./tokens.css", import.meta.url), "utf8");
@@ -3182,8 +3224,16 @@ test("AC2 (pill end caps): the fill pill is a rect with rx=3 (half its own 6px h
 // ── #926 AC3: the lane card's own head/body anatomy — border-bottom, chip casing, issue-number
 // scale — resolved on the real rendered cascade (STYLE doctrine), not the authored source text ──
 
+// gate② finding [0] (ac3-font-token-oracle): a partial regex match on one family name in the
+// stack (`/JetBrains Mono/`) passes even for an unrelated or misordered font-family list that
+// merely CONTAINS that substring — it never proves the resolved value IS `--font-data`'s own
+// stack. Same fix #923's own pill test already applies (`parseTokensLocal`, exact equality
+// against the real token) — read the value from its source only to prevent drift, per this
+// repo's VALUE doctrine, never re-derive it by hand.
 test("#926 AC3: .lane-card-head resolves a 1px border-bottom, and its state chip resolves uppercase --font-data", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  const fontDataStack = parseTokensLocal(tokensCss924)["--font-data"];
+  assert.ok(fontDataStack, "tokens.css must still declare --font-data for this test's own oracle");
   try {
     const head = container.querySelector(".lane-card-head");
     assert.ok(head, "a real .lane-card-head must render — fullCoverageViewModel's fixture carries a real lane");
@@ -3193,7 +3243,11 @@ test("#926 AC3: .lane-card-head resolves a 1px border-bottom, and its state chip
     assert.ok(chip, "a real .lane-card-state must render");
     const chipComputed = getComputedStyle(chip as Element);
     assert.equal(chipComputed.textTransform, "uppercase", ".lane-card-state text-transform");
-    assert.match(chipComputed.fontFamily, /JetBrains Mono/, ".lane-card-state must resolve --font-data");
+    assert.equal(
+      chipComputed.fontFamily,
+      fontDataStack,
+      ".lane-card-state font-family must resolve the COMPLETE --font-data stack, not just contain one family name",
+    );
   } finally {
     await cleanup();
   }
