@@ -2475,6 +2475,57 @@ test("#975 (AC6): getFailedCheckSummary — one dead source (annotations fetch t
   assert.ok(out.includes("boom"), "output text still renders even though annotations failed");
 });
 
+// #975 P1 (an embedded per-source failure reason reaches a session WITHOUT ever passing through
+// the proxy's own top-level-throw sanitization — pr_failed_checks deliberately never throws on a
+// forge read failure, so the reason string needed the same scrub at its own embedding point).
+test("#975 P1: a token-bearing annotations-fetch error is sanitized before it reaches the excerpt", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[0] === "pr") {
+      return JSON.stringify({ number: 5, headRefOid: "deadbeef", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] });
+    }
+    if (args.some((a) => a.includes("check-runs?per_page="))) {
+      return JSON.stringify({ check_runs: [{ id: 1, name: "unit-tests", conclusion: "failure", output: { text: "boom" } }] });
+    }
+    throw new Error("gh: HTTP 401 authenticating with token ghp_ABCDEFGHIJ0123456789abcdefghij");
+  };
+  const out = await forge.getFailedCheckSummary(5);
+  assert.ok(!out.includes("ghp_ABCDEFGHIJ0123456789abcdefghij"), "a raw token must never survive into the rendered excerpt");
+  assert.ok(out.includes("[redacted]"));
+});
+
+test("#975 P1: a token-bearing log-tail-fetch error is sanitized before it reaches the excerpt", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[0] === "pr") {
+      return JSON.stringify({ number: 5, headRefOid: "deadbeef", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] });
+    }
+    if (args.some((a) => a.includes("check-runs?per_page="))) {
+      return JSON.stringify({
+        check_runs: [
+          {
+            id: 1,
+            name: "unit-tests",
+            conclusion: "failure",
+            output: { text: "boom" },
+            details_url: "https://github.com/o/r/actions/runs/9/job/99",
+          },
+        ],
+      });
+    }
+    if (args.some((a) => a.includes("annotations"))) return JSON.stringify([]);
+    if (args[0] === "run" && args[1] === "view") {
+      throw new Error("fatal: unable to access 'https://x-access-token:ghp_ABCDEFGHIJ0123456789abcdefghij@github.com/o/r.git/'");
+    }
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+  const out = await forge.getFailedCheckSummary(5);
+  assert.ok(!out.includes("ghp_ABCDEFGHIJ0123456789abcdefghij"), "a raw token must never survive into the rendered excerpt");
+  assert.ok(out.includes("[redacted]"));
+});
+
 test("#975 (AC6): getFailedCheckSummary never exceeds FAILED_CHECK_SUMMARY_CAP even with three sources feeding one excerpt", async () => {
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);
@@ -2510,6 +2561,45 @@ test("#975 (AC6): getFailedCheckSummary never exceeds FAILED_CHECK_SUMMARY_CAP e
   const out = await forge.getFailedCheckSummary(5);
   assert.ok(out.length <= 4_000);
   assert.ok(out.includes("truncated"));
+});
+
+// #975 P2: the fan-out bound — only the first MAX_EVIDENCE_RUNS (8) failing check runs get real
+// evidence gathered; the rest are named, never dropped, in one overflow line. The Actions
+// log-tail fetch is memoized by runId WITHIN one call, so several check runs sharing one
+// workflow run cost exactly one `gh run view`, not one per check run.
+test("#975 P2: 12 failing runs across 3 distinct runIds -> at most 8 evidence sections + one 'not expanded' line naming the rest, gh run view called at most once per distinct runId", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const runViewCalls: string[] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[0] === "pr") {
+      return JSON.stringify({ number: 5, headRefOid: "deadbeef", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] });
+    }
+    if (args.some((a) => a.includes("check-runs?per_page="))) {
+      return JSON.stringify({
+        check_runs: Array.from({ length: 12 }, (_, i) => ({
+          id: i + 1,
+          name: `run-${i}`,
+          conclusion: "failure",
+          output: { text: `boom${i}` },
+          details_url: `https://github.com/o/r/actions/runs/${(i % 3) + 1}/job/${100 + i}`,
+        })),
+      });
+    }
+    if (args.some((a) => a.includes("annotations"))) return JSON.stringify([]);
+    if (args[0] === "run" && args[1] === "view") {
+      runViewCalls.push(args[2]!);
+      return `Error: log tail for runId ${args[2]}`;
+    }
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+  const out = await forge.getFailedCheckSummary(5);
+  const expandedNames = [...out.matchAll(/### run-(\d+)/g)].map((m) => Number(m[1])).sort((a, b) => a - b);
+  assert.deepEqual(expandedNames, [0, 1, 2, 3, 4, 5, 6, 7], "only the first 8 failing runs (API order) are expanded");
+  assert.ok(out.includes("4 more failing check run(s) not expanded"));
+  for (const overflowIndex of [8, 9, 10, 11]) assert.ok(out.includes(`run-${overflowIndex}`), `overflow name run-${overflowIndex} missing`);
+  assert.equal(runViewCalls.length, 3, "gh run view called at most once per distinct runId among the expanded runs");
+  assert.deepEqual([...new Set(runViewCalls)].sort(), ["1", "2", "3"]);
 });
 
 // ── #13 review-gate data: parsePRReviewView / parsePRReactions / parseUnresolvedThreads ──

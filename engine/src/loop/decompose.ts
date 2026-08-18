@@ -8,9 +8,10 @@ import { extractAcceptanceCriteria, extractVerificationPlan, extractVerification
 import { labelsInclude } from "../forge/labels.js";
 import type { RoleRunner, RoleSessionResult } from "../roles/peripheral.js";
 import { PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, runSessionWithRetry } from "../roles/peripheral.js";
-import { escapeAngleBrackets, loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.js";
+import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.js";
 import type { State } from "../state/state.js";
 import { type DecomposeOutputMetadata, DecomposeOutputMetadataSchema, parseStructuredBlock } from "../state/structured-output.js";
+import { escapeAngleBrackets } from "../util/markdown.js";
 import { CAP_SPLIT_ORIGIN_MARKER, type CapSplitWipPointer, findCapSplitWipPointer, wasCapSplitByState } from "./cap-split.js";
 import { type Concern, ConcernSchema, postConcerns } from "./dissent.js";
 import {
@@ -33,7 +34,7 @@ const RESERVED_PROPOSAL_MARKER_NAMESPACE = "<!-- sapwood:proposal:";
  *  is absent (AC3: nothing WIP-related renders for an ordinary human-`split` parent). The
  *  session never fetches this itself — po-decompose holds no ISSUE_TOOLS grant at all
  *  (`proxy/access.ts`'s PROXY_ROLE_TOOL_MATRIX has no `po-decompose` entry) — so the digest is
- *  the ONLY channel; every field is angle-bracket-escaped (plan-review.ts's escapeAngleBrackets)
+ *  the ONLY channel; every field is angle-bracket-escaped (util/markdown.ts's escapeAngleBrackets)
  *  the same as every other untrusted comment this codebase renders into a prompt, even though
  *  the engine composed the comment itself: the fields it quotes (branch name, PR number) are
  *  still comment-carried data by that module's own doctrine, not prompt structure. */

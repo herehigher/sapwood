@@ -16,7 +16,8 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ForgeProxyBundleRow, ForgeProxyIdentity, ForgeProxyJournalResponse, ForgeProxyJournalRow, State } from "../state/state.js";
-import { canonicalJson, PROXY_VERSION, type ProxyCaps, type ProxyToolError, sanitizeUpstreamError, toolError } from "./tools.js";
+import { sanitizeUpstreamError } from "../util/sanitize.js";
+import { canonicalJson, PROXY_VERSION, type ProxyCaps, type ProxyToolError, toolError } from "./tools.js";
 
 /** The narrow State surface journal.ts needs — kept as a Pick (not the whole State class) so
  *  tests can fake it without a real sqlite handle, same convention peripheral.ts's

@@ -32,6 +32,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { z } from "zod";
 import type { IForge } from "../forge/forge.js";
 import type { ForgeProxyIdentity } from "../state/state.js";
+import { sanitizeUpstreamError } from "../util/sanitize.js";
 import { markDelivered, type ProxyBudget, type ProxyJournalState, ProxyTimeoutError, runJournaledCall } from "./journal.js";
 import {
   FORGE_MCP_SERVER_NAME,
@@ -59,7 +60,6 @@ import {
   type ProxyCaps,
   type ProxyToolError,
   type SearchIssuesArgs,
-  sanitizeUpstreamError,
   TOOL_DEFINITIONS,
   TOOL_ISSUE_COMMENTS,
   TOOL_ISSUE_DETAILS,

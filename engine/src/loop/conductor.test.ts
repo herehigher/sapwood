@@ -32,7 +32,7 @@ import type { EngineReviewArtifact } from "../review/audit.js";
 import { classicThreadFindingKey, engineAgentFindingKey } from "../review/finding-key.js";
 import { type DriveOutcome, MergeDriver } from "../roles/merge-driver.js";
 import { CODEX_REVIEWER_LOGINS, CodexReviewer, type ReviewFallbackLock, type ReviewTriggerPin } from "../roles/reviewer.js";
-import { WorkerSupervisor } from "../roles/worker.js";
+import { buildRenderFixPrompt, WorkerSupervisor } from "../roles/worker.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import { State, type WorkerRow } from "../state/state.js";
 import { RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
@@ -4163,7 +4163,7 @@ test("tick DRIVE (#503): ci-red FIXABLE uses the existing lane/counter with the 
 // session starts. This proves the contract mechanically: even a forge SCRIPTED to return a
 // distinctive sentinel for getFailedCheckSummary never gets that sentinel anywhere near the
 // rendered fix-leg prompt, because startFixLeg's prompt path has no forge access at all.
-test("tick DRIVE (#975 AC5): a forge whose getFailedCheckSummary returns a sentinel never leaks that sentinel into the rendered fix-leg prompt", async () => {
+test("tick DRIVE (#975 AC5): a forge whose getFailedCheckSummary returns a sentinel never leaks that sentinel into the ACTUAL shipped fix-leg prompt", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const SENTINEL = "SENTINEL-CI-TEXT-DO-NOT-LEAK-INTO-THE-PROMPT";
@@ -4172,17 +4172,25 @@ test("tick DRIVE (#975 AC5): a forge whose getFailedCheckSummary returns a senti
   seedDriving(st, "lane-a", 2, 55);
   const gate = new FakeMergeGate();
   gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:CI_RED:test@github-actions", prescription: "ci-red" };
+  const cfg = mkCfg();
   await tick({
     now: realClock,
     forge,
     state: st,
     supervisor: sup,
-    cfg: mkCfg(),
+    cfg,
     mergeGate: gate,
-    fixLegResume: { renderFixPrompt: () => "base fix prompt", mintProxy: async () => ({}) as never },
+    // #975 P2 (round 2): the REAL renderer (buildRenderFixPrompt over the shipped prompts/fix.md,
+    // same as production's own wiring) rather than a stub — proves the shipped template stays
+    // clean, not just that the conductor itself never threads a value through.
+    fixLegResume: { renderFixPrompt: buildRenderFixPrompt(cfg), mintProxy: async () => ({}) as never },
   });
   const prompt = sup.resumeCalls[0]!.opts?.prompt ?? "";
   assert.ok(!prompt.includes(SENTINEL), "CI-failure text must never reach the fix-leg prompt by prompt injection");
+  assert.ok(
+    prompt.includes(mcpToolFullName(TOOL_PR_FAILED_CHECKS)),
+    "the real shipped fix.md must have actually rendered — proves this test exercised the real template, not a stub",
+  );
   st.close();
 });
 

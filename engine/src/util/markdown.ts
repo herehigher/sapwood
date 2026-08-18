@@ -68,8 +68,8 @@ export function extractMarkdownSections(body: string, headingPattern: RegExp): s
  *  so `proxy/tools.ts` can reuse the SAME neutralization for `pr_failed_checks`' CI-log excerpt
  *  (#975) without creating an import cycle: `proxy/tools.ts` -> `roles/plan-review.ts` ->
  *  `roles/peripheral.ts` -> `proxy/access.ts` -> `proxy/tools.ts` would otherwise close a loop.
- *  `roles/plan-review.ts` re-exports this so its own existing callers (and `loop/decompose.ts`,
- *  #965) see no import-path change. */
+ *  Every caller (`roles/plan-review.ts`, `loop/decompose.ts` #965, `proxy/tools.ts` #975) imports
+ *  directly from here — no re-export shim (pre-v1: no compat layers). */
 export function escapeAngleBrackets(text: string): string {
   return text.replaceAll("<", "&lt;");
 }

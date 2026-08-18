@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import type { SapwoodConfig } from "../config/config.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import { extractMarkdownSections } from "../util/markdown.js";
+import { sanitizeUpstreamError } from "../util/sanitize.js";
 import { ghWithTimeout } from "./gh.js";
 import { createMissingLabels, type LabelSpec, labelsInclude } from "./labels.js";
 
@@ -1026,7 +1027,26 @@ export class GithubForge implements IForge {
     const out = await this.gh(["api", `repos/${owner}/${repo}/commits/${status.headOid}/check-runs?per_page=100`]);
     const failing = parseFailingCheckRuns(out);
     if (failing.length === 0) return "(no failing check runs found via the checks API)";
-    const sections = await Promise.all(failing.map((run) => this.gatherFailingCheckRunEvidence(run, owner, repo)));
+    // #975 P2: only the first MAX_EVIDENCE_RUNS get real evidence gathered — the rest are named
+    // in one summary line, never silently dropped, just not expanded (see the constant's own
+    // doc for why an unbounded fan-out here is a real resource hazard, not just noise).
+    const expanded = failing.slice(0, MAX_EVIDENCE_RUNS);
+    const overflow = failing.slice(MAX_EVIDENCE_RUNS);
+    // #975 P2: fetched SEQUENTIALLY (never Promise.all) — 8 sequential bounded `gh` reads is fine
+    // for an advisory excerpt; up to 8 CONCURRENT ones (times two calls each) is the unbounded
+    // fan-out this cap and this loop shape exist to avoid. logTailCache memoizes the Actions
+    // log-tail fetch by runId WITHIN this one call — several failing check runs from the SAME
+    // Actions workflow run (distinct jobs, same run) would otherwise re-download the identical
+    // `gh run view --log-failed` output once per check run.
+    const logTailCache = new Map<string, Promise<CheckSourceResult>>();
+    const sections: string[] = [];
+    for (const run of expanded) {
+      sections.push(await this.gatherFailingCheckRunEvidence(run, owner, repo, logTailCache));
+    }
+    if (overflow.length > 0) {
+      const names = overflow.map((r) => (r.name && r.name.trim() !== "" ? r.name : "(unnamed check)"));
+      sections.push(`(${overflow.length} more failing check run(s) not expanded — names: ${names.join(", ")})`);
+    }
     return hardCapExcerpt(sections.join("\n\n"), FAILED_CHECK_SUMMARY_CAP);
   }
 
@@ -1035,12 +1055,35 @@ export class GithubForge implements IForge {
    *  helper every other read in this class uses. Never throws: a source that fails to fetch
    *  renders its own stated-unavailable text (renderFailingCheckRunSection) rather than
    *  propagating, so one dead source never blanks the excerpt for every failing check. */
-  private async gatherFailingCheckRunEvidence(run: RawFailingCheckRun, owner: string, repo: string): Promise<string> {
+  private async gatherFailingCheckRunEvidence(
+    run: RawFailingCheckRun,
+    owner: string,
+    repo: string,
+    logTailCache: Map<string, Promise<CheckSourceResult>>,
+  ): Promise<string> {
     const name = run.name && run.name.trim() !== "" ? run.name : "(unnamed check)";
     const annotations = await this.fetchAnnotationsResult(run.id, owner, repo);
     const actionsRunId = extractActionsRunId(run.detailsUrl);
-    const log = actionsRunId === null ? null : await this.fetchLogTailResult(actionsRunId, owner, repo);
+    const log = actionsRunId === null ? null : await this.fetchLogTailResultCached(actionsRunId, owner, repo, logTailCache);
     return renderFailingCheckRunSection(name, annotations, log, renderOutputText(run.output));
+  }
+
+  /** #975 P2: the memoized front door to fetchLogTailResult — a `runId` already IN the cache
+   *  returns the SAME in-flight/settled promise rather than issuing a second `gh run view`
+   *  call, so N failing check runs sharing one Actions workflow run cost exactly ONE log-tail
+   *  fetch, not N. Synchronous cache check + set (no `await` in between), so two check runs
+   *  processed back-to-back in the same sequential loop can never race past this check. */
+  private fetchLogTailResultCached(
+    actionsRunId: string,
+    owner: string,
+    repo: string,
+    cache: Map<string, Promise<CheckSourceResult>>,
+  ): Promise<CheckSourceResult> {
+    const cached = cache.get(actionsRunId);
+    if (cached !== undefined) return cached;
+    const fetched = this.fetchLogTailResult(actionsRunId, owner, repo);
+    cache.set(actionsRunId, fetched);
+    return fetched;
   }
 
   private async fetchAnnotationsResult(checkRunId: number | undefined, owner: string, repo: string): Promise<CheckSourceResult> {
@@ -1053,7 +1096,12 @@ export class GithubForge implements IForge {
         text: annotations.length === 0 ? "(no annotations reported by the checks API for this run)" : renderAnnotationsText(annotations),
       };
     } catch (e) {
-      return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+      // #975 P1: this reason string reaches a session EMBEDDED in an otherwise-successful
+      // excerpt (renderFailingCheckRunSection) — it never passes through the proxy's own
+      // top-level-throw sanitization (pr_failed_checks deliberately never throws on a forge read
+      // failure, tools.ts's fetchPRFailedChecksResponse), so it needs the same token scrub here,
+      // at its own embedding point, or a raw `gh` error could carry a credential straight through.
+      return { ok: false, reason: sanitizeUpstreamError(e instanceof Error ? e.message : String(e)) };
     }
   }
 
@@ -1063,7 +1111,8 @@ export class GithubForge implements IForge {
       const lines = filterFailureLogLines(log, MAX_LOG_TAIL_LINES);
       return { ok: true, text: lines.length === 0 ? "(no lines matched the failure signature in the log tail)" : lines.join("\n") };
     } catch (e) {
-      return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+      // #975 P1: same rationale as fetchAnnotationsResult's own catch above.
+      return { ok: false, reason: sanitizeUpstreamError(e instanceof Error ? e.message : String(e)) };
     }
   }
 
@@ -3123,6 +3172,17 @@ export function parsePRStatus(json: string): PRStatus {
 // generous enough for a handful of failing checks' output text, small enough to stay a bounded
 // excerpt rather than a second unbounded log dump inside the retro digest's own cap.
 const FAILED_CHECK_SUMMARY_CAP = 4_000;
+
+// #975 P2: the FAN-OUT bound — independent of FAILED_CHECK_SUMMARY_CAP (a char cap applied once
+// at the very end, after every source has already been fetched). Without this, a PR with up to
+// 100 failing check runs (the checks-API page size) would issue up to 100 concurrent `gh api`
+// annotations reads AND up to 100 concurrent `gh run view --log-failed` reads, each buffering up
+// to 32 MiB before the excerpt ever gets capped — the excerpt's own bound protects the SESSION
+// reading it, not the engine process doing the fetching. Only the first N failing runs (API
+// order) get real evidence gathered; the rest are named in one summary line so nothing is
+// silently dropped, just not expanded. 8 sequential bounded reads is fine for an advisory
+// excerpt a fix leg reads once per CI-red round.
+const MAX_EVIDENCE_RUNS = 8;
 
 // #975: the deterministic truncation marker's stable substring — asserted against directly by
 // `isFailedCheckSummaryTruncated` below, so the two can never drift apart (the marker's own
