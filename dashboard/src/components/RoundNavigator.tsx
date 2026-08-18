@@ -1,3 +1,4 @@
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useState } from "react";
 import type { EngineState, Round } from "../api/types.ts";
 import { formatUsd } from "../format.ts";
@@ -250,7 +251,12 @@ export function RoundNavigator({
        *  buttons, nothing that ever needs to escape it) lets `.round-nav-list-wrap` sit as this
        *  wrapper's own SIBLING instead — a sibling is never subject to an ancestor's overflow
        *  clip, so the dropdown escapes cleanly while the stepper still gets its rounded corners. */}
-      <div className="round-nav-stepper">
+      {/* #923 PO design-witness item 1: the mockup's chevrons are STROKED lucide glyphs
+       *  (~8×15px), not the tiny filled ◂▸ characters, which rendered near-empty at the cell's
+       *  40px min-height. #923 PO item 3: a closed (replaying) round tints the whole joined
+       *  stepper's own border amber (`--sap-text`) — `round-nav-stepper-closed` carries that,
+       *  never a per-cell override, so the group still reads as ONE joined outline. */}
+      <div className={label.closed ? "round-nav-stepper round-nav-stepper-closed" : "round-nav-stepper"}>
         <button
           type="button"
           className="round-nav-arrow"
@@ -259,7 +265,7 @@ export function RoundNavigator({
           disabled={!canStepLeft}
           onClick={() => onSelectRound(leftTarget)}
         >
-          ◂
+          <ChevronLeft size={16} strokeWidth={1.5} aria-hidden="true" />
         </button>
         <button
           type="button"
@@ -278,7 +284,7 @@ export function RoundNavigator({
           disabled={!canStepRight}
           onClick={() => onSelectRound(rightTarget)}
         >
-          ▸
+          <ChevronRight size={16} strokeWidth={1.5} aria-hidden="true" />
         </button>
       </div>
       {open && (

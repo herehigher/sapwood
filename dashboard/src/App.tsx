@@ -1,3 +1,4 @@
+import { FastForward } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import { useEffect, useRef, useState } from "react";
 import { fetchEvents } from "./api/client.ts";
@@ -479,16 +480,23 @@ export function appContent(vm: AppViewModel) {
               onSelectRound={replay.selectRound}
               liveRoundId={liveRoundId}
               now={clock}
+              // #923 PO design-witness item 4: mockup band-2 order is status · stepper · BACK TO
+              // LIVE · meter · "?" — Header.tsx renders this between its own round navigator and
+              // spend meter, rather than here as a later sibling in `.app-header-row` (which put
+              // it after the meter, ahead of only the "?"). Still a descendant of `.app-header`,
+              // never of the transport row below (AC2's own wiring check).
+              replayAction={
+                mode === "replay" ? (
+                  <button type="button" className="header-back-to-live" onClick={() => replay.selectRound(null)}>
+                    <FastForward size={18} strokeWidth={1.5} aria-hidden="true" /> back to live
+                  </button>
+                ) : undefined
+              }
             />
             {/* §3 Operations: the engine control verbs hide entirely while viewing a closed round
                 — they act on the PRESENT engine while every other pixel shows an as-of-cursor
-                past. #923 AC2 (D15): BACK TO LIVE takes their place in this SAME row, never inside
-                the transport row below. */}
-            {mode === "replay" ? (
-              <button type="button" className="header-back-to-live" onClick={() => replay.selectRound(null)}>
-                <span aria-hidden="true">⏩</span> back to live
-              </button>
-            ) : (
+                past. BACK TO LIVE (Header.tsx's `replayAction`) takes their place while replaying. */}
+            {mode !== "replay" && (
               <Controls
                 enabled={(loop.data?.controlsEnabled ?? false) && mode === "live"}
                 running={loop.data?.engine.state === "running"}

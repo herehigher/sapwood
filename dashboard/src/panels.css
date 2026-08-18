@@ -438,6 +438,18 @@
   cursor: pointer;
 }
 
+/* #923 PO design-witness item 3: a closed (replaying) round's stepper reads amber
+ * (`--sap-text`, "in motion"'s own token) — the group border AND each cell's own dividing
+ * border, so the joined outline reads as one continuous amber frame, not a grey group with one
+ * amber cell. Plain `var(--sap-text)`, not a `color-mix()` wrapper — the longhand-var()
+ * resolution this file's `.header-back-to-live` comment documents, needed for a STYLE test to
+ * read the exact resolved hex back. */
+.round-nav-stepper-closed,
+.round-nav-stepper-closed .round-nav-arrow,
+.round-nav-stepper-closed .round-nav-pill {
+  border-color: var(--sap-text);
+}
+
 .round-nav-arrow {
   width: 32px;
   padding: 0;
