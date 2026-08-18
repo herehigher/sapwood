@@ -202,8 +202,8 @@ test("AC3 COVERAGE: every production var(--sap-fill) paint site is on record", (
     "panels.css:631",
     "components/ActivityFeed.tsx:82",
     "components/ActivityFeed.tsx:86",
-    "hero/stage.tsx:596",
-    "hero/stage.tsx:922",
+    "hero/stage.tsx:719",
+    "hero/stage.tsx:1045",
   ];
   assert.deepEqual(
     sites.sort(),
