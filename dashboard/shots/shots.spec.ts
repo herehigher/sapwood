@@ -1,6 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { expect, type Locator, type Page, test } from "@playwright/test";
+import { contrastRatio, NON_TEXT_AA } from "../src/contrast.ts";
 import { buildRoundLog } from "../src/demo/build-round-log.ts";
 import type { DemoBundle } from "../src/demo/types.ts";
 import { formatUsd } from "../src/format.ts";
@@ -897,6 +898,139 @@ test("#924 AC2: the pill's round caps stay inside the bar box at 0%/partial/100%
   const zeroRow = page.locator("#cost .cost-bar-row", { hasText: "Goal & align" }).first();
   expect(await zeroRow.locator(".cost-bar-fill").count(), "Goal & align stage (0% settled) must render no fill rect at all").toBe(0);
 });
+
+/**
+ * #926 AC3 (rendered oracle, real Chromium): the est-only lane card's own hatch stroke must
+ * clear >= 3:1 against the track in dark theme. `App.test.tsx`'s own real-DOM test proves the
+ * SAME contract in happy-dom, but happy-dom cannot resolve `var()` from a plain SVG presentation
+ * attribute at all (confirmed directly — `getComputedStyle(line).stroke` reads back `""`, not the
+ * unfixed `--bark` OR the fixed `--sap-fill`), so it needed `CostBar.tsx`'s `<line>` moved onto a
+ * `style=` declaration to become resolvable there. A real browser has no such gap — this test
+ * reads the SAME computed `stroke` real Chromium actually paints with, AND independently confirms
+ * a real pixel was painted with it (not just declared), the two kinds of evidence together closing
+ * the exact hole the CSS-source/luminance-math "oracle" (tokens.test.ts, removed) left open: it
+ * asserted the TOKEN pair would clear 3:1 if rendered, never that the referenced `<pattern>`
+ * actually was the lane's own.
+ */
+test("#926 AC3: the lane card's own est hatch resolves --sap-fill and clears 3:1 against the track in dark theme (real pixel)", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mockLiveApi(page, liveLanesLoopState());
+  await page.goto("/");
+  await page.locator('section[aria-label="lanes"]').waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "heartwood"));
+
+  // w1: costUsd null, estCostUsd 0.53 — est-only, 0% settled, same fixture the #924 AC2 test above
+  // already relies on for "no fill rect at all".
+  const w1Card = page.locator(".lane-card", { hasText: "w1" });
+  const hatchRect = w1Card.locator("svg.lane-card-bar rect[fill]");
+  await expect(hatchRect, "lane w1 (est-only) must render a hatch rect").toHaveCount(1);
+  await hatchRect.scrollIntoViewIfNeeded();
+
+  // Resolve the SAME way a browser does: follow `fill="url(#id)"` to the actual referenced
+  // `<pattern>` (`getElementById` — SVG ids are document-global, never scoped to their own
+  // subtree) and read ITS OWN `<line>`'s computed stroke. A stale shared id would resolve to
+  // whichever `<pattern>` is first in the DOM instead — the header spend meter's, carrying
+  // `--bark`, not this bar's own `--hatch-stroke-lane`.
+  const strokeRgb = await hatchRect.evaluate((rect) => {
+    const url = rect.getAttribute("fill") ?? "";
+    const id = url.match(/^url\(#(.+)\)$/)?.[1];
+    if (!id) throw new Error(`unexpected fill value: ${url}`);
+    const pattern = document.getElementById(id);
+    const line = pattern?.querySelector("line");
+    if (!line) throw new Error("no <line> found inside the referenced pattern");
+    return getComputedStyle(line).stroke;
+  });
+  const sapFillHex = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--sap-fill").trim());
+  const barkHex = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--bark").trim());
+  expect(
+    rgbStringToHex(strokeRgb),
+    `the lane's own hatch line must resolve --sap-fill (${sapFillHex}) — the lane-scoped override — not --bark (${barkHex}), the shared default a stale shared pattern id would leak in`,
+  ).toBe(sapFillHex.toUpperCase());
+
+  // Real-pixel corroboration that paint, not just declared style, reached the page: the hatch is
+  // a repeating 3px diagonal pattern, so a single fixed coordinate risks landing on a gap between
+  // strokes — scan the rect's own tiny bounding box for its most-saturated pixel (the stroke's own
+  // peak) instead of guessing one coordinate.
+  const geometry = await hatchRect.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return { x: r.x, y: r.y, width: r.width, height: r.height, right: r.right, centerY: r.top + r.height / 2 };
+  });
+  const trackRgb = await samplePixel(page, geometry.right + 12, geometry.centerY);
+  const peakRgb = await scanPeakDeltaPixel(
+    page,
+    geometry.x,
+    geometry.y,
+    Math.max(1, Math.round(geometry.width)),
+    Math.max(1, Math.round(geometry.height)),
+    [trackRgb[0], trackRgb[1], trackRgb[2]],
+  );
+  const trackHex = rgbToHex(trackRgb[0], trackRgb[1], trackRgb[2]);
+  const peakHex = rgbToHex(peakRgb[0], peakRgb[1], peakRgb[2]);
+  const ratio = contrastRatio(peakHex, trackHex);
+  expect(
+    ratio,
+    `lane hatch peak pixel ${peakHex} vs sampled track ${trackHex} must clear ${NON_TEXT_AA}:1 in dark theme, measured ${ratio.toFixed(2)}:1`,
+  ).toBeGreaterThanOrEqual(NON_TEXT_AA);
+});
+
+/** `rgb(r, g, b)`/`rgba(r, g, b, a)`, as `getComputedStyle` returns it, to `#RRGGBB`. */
+function rgbStringToHex(rgb: string): string {
+  const match = rgb.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+  if (!match) throw new Error(`not an rgb()/rgba() colour: ${rgb}`);
+  return rgbToHex(Number(match[1]), Number(match[2]), Number(match[3]));
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  return `#${[r, g, b].map((c) => c.toString(16).padStart(2, "0")).join("")}`.toUpperCase();
+}
+
+/** Screenshots a small region and returns the pixel with the greatest colour distance from
+ *  `referenceRgb` — the region's own most-saturated point, robust to a fixed-coordinate sample
+ *  missing a thin repeating stroke entirely. */
+async function scanPeakDeltaPixel(
+  page: Page,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  referenceRgb: [number, number, number],
+): Promise<[number, number, number]> {
+  const buffer = await page.screenshot({ clip: { x, y, width, height } });
+  const base64 = buffer.toString("base64");
+  return page.evaluate(
+    async ({ base64, referenceRgb }) => {
+      const img = new Image();
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error("failed to decode the cropped screenshot"));
+        img.src = `data:image/png;base64,${base64}`;
+      });
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext("2d")!;
+      ctx.drawImage(img, 0, 0);
+      const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let best: [number, number, number] = [referenceRgb[0], referenceRgb[1], referenceRgb[2]];
+      let bestDist = -1;
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i] as number;
+        const g = data[i + 1] as number;
+        const b = data[i + 2] as number;
+        const dist = (r - referenceRgb[0]) ** 2 + (g - referenceRgb[1]) ** 2 + (b - referenceRgb[2]) ** 2;
+        if (dist > bestDist) {
+          bestDist = dist;
+          best = [r, g, b];
+        }
+      }
+      return best;
+    },
+    { base64, referenceRgb },
+  );
+}
 
 /**
  * #925 AC5 — THE real measurement AC5 names ("every chip the SAME computed width, every entity

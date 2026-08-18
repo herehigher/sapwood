@@ -102,7 +102,7 @@ test("a settled lane's real costUsd wins over any lingering estCostUsd — never
 test("a lane with a live estimate renders the shared hatched CostBar", () => {
   const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ costUsd: null, estCostUsd: 6.21 })]} titles={{}} now={NOW} />);
   assert.match(html, /class="cost-bar lane-card-bar"/);
-  assert.match(html, /url\(#cost-bar-est-hatch\)/);
+  assert.match(html, /url\(#[^)]*cost-bar-est-hatch\)/);
 });
 
 test("a lane with neither a settled nor an est figure renders no bar at all — never a zero-width chart", () => {

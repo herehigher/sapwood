@@ -147,15 +147,21 @@ test("AC3 (re-baselined 2026-08-17): --sap-fill vs the real .cost-bar-track comp
   );
 });
 
-// #926 gate② finding [0] (ac3-lane-est-hatch): a lane card's own est hatch (`.lane-card-bar`,
-// `CostBar.tsx`'s <pattern> <line stroke="var(--hatch-stroke)">) inherits the SHARED
-// --hatch-stroke (--bark, panels.css/tokens.css) everywhere else — but AC3's own text ("est hatch
-// per §3 E, >= 3:1 vs track") requires a LANE card's hatch specifically to clear the same 3:1
-// dark-theme floor the fill pill above does. The shared --bark hatch stroke does not (well under
-// 2:1) — `--hatch-stroke-lane` (tokens.css) is the scoped fix, applied only via `.lane-card-bar`'s
-// own custom-property override (panels.css), never by retinting the shared --hatch-stroke other
-// bars (header spend meter, cost panels) still use.
-test("#926 gate② finding [0]: .lane-card-bar's own --hatch-stroke-lane clears 3:1 against .cost-bar-track in dark theme, without touching the shared --hatch-stroke other bars use", () => {
+// #926 AC3: a lane card's own est hatch (`.lane-card-bar`) needs a stroke that clears 3:1 against
+// the track in dark theme — the shared `--hatch-stroke` (--bark) other bars use does not (well
+// under 2:1) — so `--hatch-stroke-lane` (tokens.css) exists as a `.lane-card-bar`-scoped override
+// (panels.css), never a retint of the shared token other bars still use.
+//
+// TOKEN-VALUE PIN ONLY — this is source/declaration text and luminance arithmetic, not a render
+// claim: it never observes which `<pattern>` a bar's `fill="url(#…)"` actually resolves to, so it
+// cannot by itself catch a pattern-id collision leaving the override unreachable (that was a real,
+// shipped defect — CostBar.tsx used one fixed id per prior state, so every bar's fill resolved to
+// whichever `<pattern>` came first in the DOM, regardless of what any of this cascades to). The
+// render-level proof lives in App.test.tsx's real-DOM test (resolves the ACTUAL referenced
+// pattern's computed stroke) and shots.spec.ts's real-Chromium pixel test (samples the ACTUAL
+// painted colour) — this test only pins that the VALUES those two would resolve to, if the
+// reference is correct, clear the floor.
+test("#926 AC3 token pin: --hatch-stroke-lane is declared as a --sap-fill alias that would clear 3:1 against .cost-bar-track in dark theme, without touching the shared --hatch-stroke other bars use", () => {
   // --hatch-stroke-lane aliases --sap-fill directly rather than duplicating its hex — reading
   // --sap-fill's own already-parsed value below is reading the alias's SOURCE (VALUE doctrine),
   // never a hand-copied duplicate that could silently drift from it.
@@ -179,7 +185,7 @@ test("#926 gate② finding [0]: .lane-card-bar's own --hatch-stroke-lane clears 
   const hatchRatio = contrastRatio(dark["--sap-fill"]!, trackComposite);
   assert.ok(
     hatchRatio >= NON_TEXT_AA,
-    `dark theme's lane hatch stroke (--sap-fill, aliased via --hatch-stroke-lane) vs .cost-bar-track must clear ${NON_TEXT_AA}:1: ${hatchRatio}`,
+    `dark theme's lane hatch stroke VALUE (--sap-fill, aliased via --hatch-stroke-lane) vs .cost-bar-track must clear ${NON_TEXT_AA}:1: ${hatchRatio}`,
   );
 });
 

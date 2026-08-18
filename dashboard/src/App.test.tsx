@@ -560,7 +560,7 @@ test("#890: a live lane's estCostUsd flows through the real fetch pipeline into 
   const costSectionHtml = html.slice(html.indexOf('id="cost"'));
   assert.match(
     costSectionHtml,
-    /url\(#cost-bar-est-hatch\)/,
+    /url\(#[^)]*cost-bar-est-hatch\)/,
     "the cost panel's own Lanes stage bar must render hatched, independent of the header's own bar",
   );
   // #890: the header/cost-panel assertions above prove `estCostUsd` reached THOSE two
@@ -572,9 +572,105 @@ test("#890: a live lane's estCostUsd flows through the real fetch pipeline into 
   assert.match(laneSectionHtml, /class="cost-bar lane-card-bar"/, "the lane card's own CostBar must render");
   assert.match(
     laneSectionHtml,
-    /url\(#cost-bar-est-hatch\)/,
+    /url\(#[^)]*cost-bar-est-hatch\)/,
     "the lane card's own bar must render hatched, independent of the header's/cost panel's own bars",
   );
+});
+
+/** The hatch rect's own `fill="url(#…)"` attribute, parsed down to the bare pattern id — the
+ *  SAME resolution a browser performs to pick which `<pattern>` a `fill` reference paints with. */
+function hatchPatternIdFromRect(rect: Element): string {
+  const fill = rect.getAttribute("fill") ?? "";
+  const match = fill.match(/^url\(#(.+)\)$/);
+  assert.ok(match, `rect fill must be a url(#id) reference, got: ${JSON.stringify(fill)}`);
+  return match![1]!;
+}
+
+/** Resolves a hatch rect's `fill` reference to the REAL `<pattern>` element it paints from
+ *  (`getElementById`, the same document-global lookup a browser's `url(#id)` performs — SVG ids
+ *  are NOT scoped to their own subtree), then reads that pattern's own `<line>`'s computed
+ *  `stroke` — the rendered colour, not the CSS source text. A shared/duplicate pattern id would
+ *  resolve every bar's `fill` to whichever `<pattern>` happens to be FIRST in document order, so
+ *  this is the oracle that actually distinguishes "some bar has a hatch pattern somewhere" from
+ *  "THIS bar's hatch resolves to ITS OWN scoped stroke". */
+function resolvedHatchStroke(rect: Element): string {
+  const patternId = hatchPatternIdFromRect(rect);
+  const pattern = document.getElementById(patternId);
+  assert.ok(pattern, `fill="url(#${patternId})" must resolve to a real element with that id`);
+  const line = pattern?.querySelector("line");
+  assert.ok(line, "the resolved pattern must contain its own hatch <line>");
+  return getComputedStyle(line as Element).stroke.toUpperCase();
+}
+
+// #926 AC3 (rendered oracle): a fixed, shared pattern id on every `<CostBar>` — every instance
+// mounting its own `<pattern id="cost-bar-est-hatch">`, referenced via
+// `fill="url(#cost-bar-est-hatch)"` — is a document-global reference, so it resolves every bar's
+// hatch to the FIRST such id in the DOM (the header spend meter's, which precedes the lane
+// board), leaving a lane's own `--hatch-stroke-lane` override unreachable; a CSS-source
+// regex/luminance check alone can't catch this, since it never observes which `<pattern>` a
+// `fill` reference actually resolves to. Mounted with the REAL fetch pipeline + REAL
+// tokens.css/panels.css cascade (`mountLiveAppWithCascade`), at 1440, dark theme (this suite's
+// default, no `data-theme` override) — proving per-instance (`useId()`) pattern ids actually work
+// by resolving each bar's `fill` reference to its OWN `<pattern>` and reading that pattern's own
+// rendered stroke, not the source token declaration.
+test("#926 AC3: the lane card's own est hatch resolves ITS OWN --hatch-stroke-lane (--sap-fill), independent of the header meter's own --hatch-stroke (--bark), because each bar's fill reference now resolves to its own pattern", async () => {
+  const { dark: darkTokens } = parseColorTokens(tokensCss924);
+  const { container, cleanup } = await mountLiveAppWithCascade({
+    "/api/loop/state": {
+      status: 200,
+      body: {
+        ...LOOP_STATE_OK,
+        spend: { todayUsd: 10.4, dailyBudgetUsd: 100, runUsd: null, runBudgetUsd: null, byModel: [] },
+        lanes: {
+          max: 1,
+          items: [
+            {
+              lane: "w1",
+              issue: 90,
+              state: "running",
+              pr: null,
+              startedAt: "2026-08-14T00:00:00Z",
+              endedAt: null,
+              costUsd: null,
+              estCostUsd: 2.2,
+              contextTokens: null,
+              tokenComposition: null,
+            },
+          ],
+        },
+      },
+    },
+    "/api/events": { status: 200, body: { events: [], lastId: 0 } },
+  });
+  try {
+    // The est rect is the only rect on either bar carrying an explicit `fill` attribute — the
+    // settled pill (`.cost-bar-fill`) is coloured entirely by its CSS class, never an inline fill.
+    const headerRect = container.querySelector("svg.spend-meter-bar rect[fill]");
+    assert.ok(headerRect, "the header meter's own hatch rect must render (spend estUsd > 0 in this fixture)");
+    const laneRect = container.querySelector("svg.lane-card-bar rect[fill]");
+    assert.ok(laneRect, "the lane card's own hatch rect must render (est-only lane in this fixture)");
+
+    const headerPatternId = hatchPatternIdFromRect(headerRect as Element);
+    const lanePatternId = hatchPatternIdFromRect(laneRect as Element);
+    assert.notEqual(
+      headerPatternId,
+      lanePatternId,
+      "each CostBar instance must mint its own pattern id — a shared id resolves both bars' fill references to the same first-in-DOM pattern",
+    );
+
+    assert.equal(
+      resolvedHatchStroke(headerRect as Element),
+      darkTokens["--bark"],
+      "the header meter's hatch must keep resolving the SHARED --hatch-stroke (--bark) — the lane override must never leak into it",
+    );
+    assert.equal(
+      resolvedHatchStroke(laneRect as Element),
+      darkTokens["--sap-fill"],
+      "the lane card's own hatch must resolve the LANE-SCOPED --hatch-stroke-lane (--sap-fill) — a stale shared id would read --bark here instead, exactly the defect this test catches",
+    );
+  } finally {
+    await cleanup();
+  }
 });
 
 // #890: a self-scaled `max` (settledUsd + estUsd) draws every positive lane spend as a

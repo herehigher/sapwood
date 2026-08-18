@@ -1,3 +1,5 @@
+import { useId } from "react";
+
 /**
  * The est/settled budget-bar grammar (frontend-design.md §3 E, #890 — fidelity-ledger row 7
  * reopened): ONE shared primitive + ONE SVG `<pattern>` hatch def (§2 no-chart-library
@@ -7,19 +9,42 @@
  * hatch pattern, never color alone (§3 E / §5 quality floor).
  */
 
-export const HATCH_PATTERN_ID = "cost-bar-est-hatch";
+/** Suffix shared by every instance's own pattern id — never the whole id. SVG element ids are
+ *  document-global, so a fixed id shared across every `<CostBar>` would let `fill="url(#id)"`
+ *  resolve to whichever instance's `<pattern>` happens to be first in the DOM (its ancestry's own
+ *  `--hatch-stroke`), not the bar's own. Each instance prefixes this suffix with `useId()` so its
+ *  `url(#…)` reference always resolves to ITS OWN def — which inherits ITS OWN `--hatch-stroke`
+ *  override (e.g. a lane card's `--hatch-stroke-lane`), independent of every other bar on the
+ *  page. Exported only because tests need to recognize "some bar's hatch def" without hardcoding
+ *  a single global id. */
+export const HATCH_PATTERN_ID_SUFFIX = "cost-bar-est-hatch";
 
 /** The hatch pattern def, styled entirely from `tokens.css`'s `--hatch-*` custom properties (§2
- *  adjudication log, 2026-08-14) — duplicated into each `<CostBar>` instance's own `<defs>` rather
- *  than mounted once at the app root, so a bar renders correctly in isolation (a component test,
- *  a single-panel embed) without depending on some other tree having mounted the def first. SVG
- *  ids are document-global, but a repeated identical def is idempotent — later instances simply
- *  redeclare the same id, never a visual conflict. */
-function HatchDef() {
+ *  adjudication log, 2026-08-14) — mounted into each `<CostBar>` instance's own `<defs>` under its
+ *  own per-instance id, so a bar renders correctly in isolation (a component test, a single-panel
+ *  embed) without depending on some other tree having mounted the def first, AND so its
+ *  `--hatch-stroke` override can never leak into or be shadowed by another instance.
+ *
+ *  `stroke`/`strokeWidth` are set via `style`, not plain SVG presentation attributes — CSS
+ *  `var()` substitution for a presentation-attribute value is a real ancestor-chain lookup a
+ *  browser performs at computed-value time, identical to a `style` declaration's, so this changes
+ *  no rendering. It DOES change testability: it's the difference between a rendered oracle that
+ *  can actually observe which `--hatch-stroke` scope won (this file's own real-DOM test) and one
+ *  that can't. */
+function HatchDef({ patternId }: { patternId: string }) {
   return (
     <defs>
-      <pattern id={HATCH_PATTERN_ID} width="3" height="3" patternUnits="userSpaceOnUse" patternTransform="rotate(var(--hatch-angle))">
-        <line x1="0" y1="0" x2="0" y2="3" stroke="var(--hatch-stroke)" strokeWidth="var(--hatch-stroke-width)" />
+      {/* `patternTransform` is an SVG-attribute-only transform-list, never a CSS property — it
+       *  never goes through CSS value processing, so `var()` inside it doesn't substitute at all
+       *  (confirmed directly: the attribute is left as literal text, and a browser treats an
+       *  unparseable transform-list as absent, applying no rotation whatsoever — silently
+       *  un-rotated, not a 45° fallback). tokens.css's `--hatch-angle: 45deg` is this repo's only
+       *  declared angle and this is the only consumer, so the literal below is that same 45,
+       *  spelled the way `rotate()`'s SVG transform-list grammar requires (a bare number of
+       *  degrees, no unit, no `var()`) — keep the two in sync by hand if `--hatch-angle` ever
+       *  changes. */}
+      <pattern id={patternId} width="3" height="3" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <line x1="0" y1="0" x2="0" y2="3" style={{ stroke: "var(--hatch-stroke)", strokeWidth: "var(--hatch-stroke-width)" }} />
       </pattern>
     </defs>
   );
@@ -70,6 +95,9 @@ const BASE_TICK_Y2 = 11;
  *  dependency budget). Settled fill first, hatched est tail immediately after it, both clamped to
  *  the track so neither segment ever draws past 100%. */
 export function CostBar({ settledUsd, estUsd, max, targetPct = null, label, className, height = BASE_HEIGHT }: CostBarProps) {
+  // Per-instance id (see HATCH_PATTERN_ID_SUFFIX above) — this bar's own `fill="url(#…)"` below
+  // resolves to the `<pattern>` this SAME render mounts, never another instance's.
+  const patternId = `${useId()}${HATCH_PATTERN_ID_SUFFIX}`;
   const est = estUsd ?? 0;
   const settledPct = max > 0 ? Math.min(100, (settledUsd / max) * 100) : 0;
   const totalPct = max > 0 ? Math.min(100, ((settledUsd + est) / max) * 100) : 0;
@@ -105,14 +133,14 @@ export function CostBar({ settledUsd, estUsd, max, targetPct = null, label, clas
   const hatchWidth = `calc(${estPct}% + min(${fillRadius}px, ${settledPct}%))`;
   return (
     <svg width="100%" height={height} className={className ? `cost-bar ${className}` : "cost-bar"} role="img" aria-label={ariaLabel}>
-      <HatchDef />
+      <HatchDef patternId={patternId} />
       {/* The bar's fixed full-width reference — a plain 1px stroke, no `rx`/round cap of its own,
        * so it never needs anything beyond its own coordinates to stay inside the box. */}
       <line className="cost-bar-track" x1="0" y1={trackY} x2="100%" y2={trackY} />
       {/* #924 AC2: rendered BEFORE the pill (below), extended back under it (see `hatchX`/
        * `hatchWidth` above) — the pill's own opaque fill, painted on top, covers the seam cleanly
        * instead of a flat hatch edge cutting a visible notch into the pill's curved cap. */}
-      {estPct > 0 && <rect style={{ x: hatchX, width: hatchWidth }} y={fillY} height={fillHeight} fill={`url(#${HATCH_PATTERN_ID})`} />}
+      {estPct > 0 && <rect style={{ x: hatchX, width: hatchWidth }} y={fillY} height={fillHeight} fill={`url(#${patternId})`} />}
       {/* #924 AC2: the settled fill — never a phantom zero-width pill at 0% (same "never a
        * phantom segment" posture the est hatch tail above already follows). The light-theme
        * outline (panels.css: `stroke: var(--sap-fill-outline)`) lives on this SAME rect, not a
