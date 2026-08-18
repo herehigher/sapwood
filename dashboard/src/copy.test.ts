@@ -19,6 +19,7 @@ import {
   hasAttention,
   isDissentSignal,
   isKnownKind,
+  isReviewDissentCategory,
   type SentencePart,
   TELEMETRY_KINDS,
 } from "./copy.ts";
@@ -1056,6 +1057,18 @@ test("#893: REVIEW SILENCE and DISSENT chips exist for their named kinds, per th
   assert.equal(attentionCategory("review-silence-escalated"), "REVIEW SILENCE");
   assert.equal(attentionCategory("review-disputed"), "DISSENT");
   assert.equal(attentionCategory("review-non-convergent"), "DISSENT");
+});
+
+// ── #925: NeedsAttention.tsx's severity-bar/chip tone split ──────────────────────────────────
+
+test("isReviewDissentCategory names exactly REVIEW / REVIEW SILENCE / DISSENT — every other category is the default (rust) tone", () => {
+  assert.equal(isReviewDissentCategory("REVIEW"), true);
+  assert.equal(isReviewDissentCategory("REVIEW SILENCE"), true);
+  assert.equal(isReviewDissentCategory("DISSENT"), true);
+  for (const category of new Set(Object.values(ATTENTION_CATEGORY))) {
+    const expected = category === "REVIEW" || category === "REVIEW SILENCE" || category === "DISSENT";
+    assert.equal(isReviewDissentCategory(category), expected, `${category} tone classification`);
+  }
 });
 
 // ── #893: cross-package exhaustiveness — every REAL engine-registered kind is classified ───────

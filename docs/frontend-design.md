@@ -362,6 +362,25 @@ payload carries it, verbatim fields, never synthesized** — what the engine
 did about it. Each row links to the GitHub issue/PR and opens the relevant
 inspector drawer on click.
 
+Row anatomy (#925, matching `needs-attention-dark.png`'s row scale): each row
+is ≥ 56 px tall, hairline-separated, and reads left to right as a 4 px
+**severity bar** (never the sole carrier — the chip's own text still names the
+category; `aria-hidden`) · the category **chip** (≥ 30 px, uppercase mono,
+bordered) · an **entity ref** (`EntityRef` — type glyph, `#NNN`, and the
+folded title, "PR #212 — title") · the **reason + asks** clause · a bordered
+**age box**. The chip's colour is **rust** for the general escalation class
+and **`--sap-text`** (amber) for the review/dissent class — REVIEW / REVIEW
+SILENCE / DISSENT, `copy.ts`'s `isReviewDissentCategory` — and the severity
+bar always mirrors that same colour. The chip, entity, and age columns are
+**fixed-width tracks**, sized once to the taxonomy's own longest word
+(`REVIEW SILENCE`) rather than per-row `auto` — so every column lines up down
+the whole strip regardless of which row's chip word or entity title is
+longest; only the reason column flexes. The row carrying the **greatest age**
+(ties broken by render order) renders its age box at roughly double the
+others' height and numeral size, with a heavier border — the mockup's bold
+"3d" emphasis — so "how long has this waited" stays legible at a glance
+instead of every age box reading the same weight.
+
 Membership is carried by the copy map, not a second list — and it is
 defined **semantically, not by sentence wording**: a kind whose event
 *leaves work waiting on a person* carries an `attention` field on its

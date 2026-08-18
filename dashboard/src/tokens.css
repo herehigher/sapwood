@@ -86,6 +86,22 @@
      compensation) — dark's own value lives here as the default; the two light-theme trigger
      rules below `:root` (this file's own established pattern) override it to light's value. */
   --stepper-replay-outline: #E8A33D;
+  /* #925 gate① engine-agent finding [0] (ac1-style-oracle): the needs-attention row's severity
+     bar/chip tone and reason text all need the SAME resolvable-literal treatment
+     --stepper-replay-outline takes above — --rust/--sap-text/--bark-text are all light-dark(),
+     which happy-dom's getComputedStyle never evaluates for a colour-typed property (confirmed
+     directly, same gap that token's own comment documents). Real browsers render these
+     identically to --rust/--sap-text/--bark-text either way; these three exist solely so a STYLE
+     test can assert the exact winning colour. Dark's own value lives here as the default; the two
+     light-theme trigger rules below `:root` override to light's value, same as every token above. */
+  --attention-tone-rust: #D9713F;
+  --attention-tone-review: #E8A33D;
+  --attention-reason-text: #A6957C;
+  /* #925 gate① engine-agent finding [1] (ac4-age-box): the oldest-age emphasis box's numeral/
+     border need the primary-text ("cream") role, not the muted `--bark-text` its `.muted` class
+     would otherwise carry — same resolvable-literal alias treatment as the three above, mirroring
+     --sapwood. */
+  --attention-emphasis-text: #F1E7D2;
 
   /* ---- Motion ------------------------------------------------------------ */
   --beat: 240ms; /* state flips */
@@ -138,6 +154,10 @@
   color-scheme: light;
   --sap-fill-outline: #8A5A14;
   --stepper-replay-outline: #8A5A14;
+  --attention-tone-rust: #A34620;
+  --attention-tone-review: #8A5A14;
+  --attention-reason-text: #57604A;
+  --attention-emphasis-text: #251B10;
 }
 
 /* The other light-theme trigger `light-dark()` used to cover for free: system preference, with NO
@@ -150,5 +170,9 @@
   :root:not([data-theme]) {
     --sap-fill-outline: #8A5A14;
     --stepper-replay-outline: #8A5A14;
+    --attention-tone-rust: #A34620;
+    --attention-tone-review: #8A5A14;
+    --attention-reason-text: #57604A;
+    --attention-emphasis-text: #251B10;
   }
 }
