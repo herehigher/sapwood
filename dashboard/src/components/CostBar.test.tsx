@@ -70,9 +70,9 @@ test("no target tick renders when targetPct is null", () => {
 
 // ── #924 AC2: the hairline-bar grammar's own geometry ───────────────────────────────────────────
 
-// #924 gate② round 3: the track is a STROKED line, not a filled rect (`vector-effect:
-// non-scaling-stroke`, panels.css, keeps its 1px width crisp under the bar's own non-uniform
-// scaling) — full-width, at a fixed local-unit Y regardless of the settled fill.
+// #924 AC2: the track is a STROKED line, not a filled rect (`vector-effect: non-scaling-stroke`,
+// panels.css, keeps its 1px width crisp under the bar's own non-uniform scaling) — full-width, at
+// a fixed local-unit Y regardless of the settled fill.
 test("AC2: the track is a full-width line at a fixed Y, its own width fixed via CSS (not a fill rect)", () => {
   const html = renderToStaticMarkup(<CostBar settledUsd={4} max={10} label="lane" />);
   assert.match(html, /<line class="cost-bar-track" x1="0" y1="5\.5" x2="100" y2="5\.5">/);

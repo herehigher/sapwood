@@ -118,19 +118,14 @@ test("AC3: --on-sap-fill on --sap-fill clears AA (4.5:1) in both themes", () => 
   assert.deepEqual(failures, [], failures.map((f) => `${f.theme} ${f.text} on ${f.ground} = ${f.ratio}`).join("; "));
 });
 
-// #924 gate② round 1 finding [2] (fixed): modeled against the REAL rendered .cost-bar-track
-// (--bark at its own declared opacity, composited over --panel) — not a bare --heartwood pair
-// that never existed as a rendered surface.
-//
-// #924 gate② round 2 finding [1] (ac3-light-track-contrast-fails) — DISPUTED, per the PO's own
-// re-baselined AC3 (issue body edited 2026-08-17, PO adjudication on this PR's leg-2 review
-// thread): AC3 now reads, verbatim, "--sap-fill on the pill track >= 3:1 in the DARK theme; in
-// the LIGHT theme the same pair is physically below 3:1 (measured 1.15:1 with --bark at 0.4 over
-// the panel ... this is expected, not a failure) and the compensation is mandatory: every filled
-// --sap-fill element ... resolves a 1px --sap-text outline/stroke in the light theme". The finding
-// judged this test against the OLD AC3 (both themes must pass unaided) — the PO's own ruling is
-// explicit: do NOT darken/retint --sap-fill or the track to force 3:1 in light (that would break
-// AC5's mockup match); the light-theme 1.15:1 row stays on record as a documented, expected
+// #924 AC3 (adjudicated 2026-08-17): modeled against the REAL rendered .cost-bar-track (--bark at
+// its own declared opacity, composited over --panel) — not a bare --heartwood pair that never
+// existed as a rendered surface. AC3 reads, verbatim: "--sap-fill on the pill track >= 3:1 in the
+// DARK theme; in the LIGHT theme the same pair is physically below 3:1 (measured 1.15:1 with
+// --bark at 0.4 over the panel ... this is expected, not a failure) and the compensation is
+// mandatory: every filled --sap-fill element ... resolves a 1px --sap-text outline/stroke in the
+// light theme." Do NOT darken/retint --sap-fill or the track to force 3:1 in light (that would
+// break AC5's mockup match); the light-theme 1.15:1 row stays on record as a documented, expected
 // exception the outline rule (not the fill/track colours) compensates for.
 test("AC3 (re-baselined 2026-08-17): --sap-fill vs the real .cost-bar-track composite clears 3:1 in dark; light's 1.15:1 is recorded as the EXPECTED shortfall the outline rule compensates for, never 'fixed' by retinting the fill/track", () => {
   const rows = checkFillTrackContrast(css);
@@ -144,9 +139,8 @@ test("AC3 (re-baselined 2026-08-17): --sap-fill vs the real .cost-bar-track comp
   );
 });
 
-// #924 gate② round 2 finding [2] (ac3-outline-resolution-unverified) fix, PO leg-2 adjudication:
-// happy-dom never evaluates light-dark() (verified directly, both with and without a var()
-// indirection, on both a bare HTML `color` and an SVG `stroke`) — the STYLE proof this pins
+// #924 AC3: happy-dom never evaluates light-dark() (verified directly, both with and without a
+// var() indirection, on both a bare HTML `color` and an SVG `stroke`) — the STYLE proof this pins
 // therefore needs `--sap-fill-outline`'s WINNING declaration to be a literal hex, not a
 // light-dark() call, in the light theme (tokens.css's `:root[data-theme="sapwood"]` /
 // `@media (prefers-color-scheme: light)` rules). This test is the VALUE-family guarantee that

@@ -7,6 +7,8 @@
  * hatch pattern, never color alone (§3 E / §5 quality floor).
  */
 
+import { type RefObject, useLayoutEffect, useRef, useState } from "react";
+
 export const HATCH_PATTERN_ID = "cost-bar-est-hatch";
 
 /** The hatch pattern def, styled entirely from `tokens.css`'s `--hatch-*` custom properties (§2
@@ -56,18 +58,70 @@ const FILL_HEIGHT = 6;
 const FILL_CENTER_Y = 6; // the viewBox's own vertical center (0 0 100 12) — symmetric either way
 const TICK_Y1 = 1;
 const TICK_Y2 = 11;
+// #924 AC2: a round linecap's own radius (half the stroke-width) extends beyond its line
+// endpoint in screen space. `CAP_RADIUS_PX` is that radius, sized to the WIDER of the two
+// concentric lines that share these endpoints (`.cost-bar-fill-outline`'s own 8px stroke, not the
+// narrower 6px `.cost-bar-fill` on top of it, panels.css) — the outline's cap is the one that
+// would clip/overshoot first if the inset were sized to the fill instead. `usePillInsetUserUnits`
+// below converts this screen-space radius into THIS instance's own viewBox user units, from its
+// real rendered width, so both lines' shared endpoints stay that far inside the viewBox edges —
+// never sitting exactly on them.
+const OUTLINE_STROKE_WIDTH = 8; // .cost-bar-fill-outline's own stroke-width, panels.css
+const CAP_RADIUS_PX = OUTLINE_STROKE_WIDTH / 2;
+
+/**
+ * The pill's endpoints must never land exactly on the viewBox's own left/right edge (x=0 always;
+ * x=100 at 100% spend) — a round linecap's radius extends past its endpoint, so an edge-sitting
+ * endpoint either gets clipped flat by the SVG viewport (losing the cap and the light outline
+ * ring around it) or, with clipping disabled, bleeds outside the bar's own box. The viewBox's own
+ * `preserveAspectRatio="none"` X scale is non-uniform and differs per caller (cost panel / lane
+ * card / header capsule each render at a different width), so the inset needed to keep a
+ * constant on-screen radius inside the box can only be computed from this instance's own real
+ * rendered width — measured via `ResizeObserver`, not assumed. Before that measurement exists
+ * (SSR, a DOM with no real layout engine, or the observer racing the first paint), the inset is
+ * 0 — the pill spans the full raw 0–100 range, same as before this fix; real per-instance layout
+ * only tightens it once a real width is known, never loosens it.
+ */
+function usePillInsetUserUnits(): [RefObject<SVGSVGElement | null>, number] {
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [widthPx, setWidthPx] = useState(0);
+  useLayoutEffect(() => {
+    const el = svgRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width;
+      if (width) setWidthPx(width);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  return [svgRef, widthPx > 0 ? (CAP_RADIUS_PX / widthPx) * 100 : 0];
+}
 
 /** Hand-rolled SVG bar (frontend-design.md §3 E) — zero chart-library dependency, on purpose (§2
  *  dependency budget). Settled fill first, hatched est tail immediately after it, both clamped to
  *  the track so neither segment ever draws past 100%. */
 export function CostBar({ settledUsd, estUsd, max, targetPct = null, label, className }: CostBarProps) {
+  const [svgRef, insetUserUnits] = usePillInsetUserUnits();
   const est = estUsd ?? 0;
   const settledPct = max > 0 ? Math.min(100, (settledUsd / max) * 100) : 0;
   const totalPct = max > 0 ? Math.min(100, ((settledUsd + est) / max) * 100) : 0;
   const estPct = Math.max(0, totalPct - settledPct);
   const ariaLabel = est > 0 ? `${label}: $${settledUsd.toFixed(2)} + $${est.toFixed(2)} est` : `${label}: $${settledUsd.toFixed(2)}`;
+  // #924 AC2: the pill's own value range (0–100) is compressed into [inset, 100 - inset] rather
+  // than drawn against the raw 0–100 span, so BOTH its caps — the always-at-the-start left one and
+  // the only-at-100%-spend right one — stay inside the viewBox. The est hatch tail (a plain filled
+  // `rect`, no round cap of its own, so it never needs the inset) is remapped through the SAME
+  // function so its own leading edge stays flush against the pill's — never a gap, never an
+  // overlap at the join.
+  const availableSpan = Math.max(0, 100 - 2 * insetUserUnits);
+  const toPillX = (pct: number) => insetUserUnits + (pct / 100) * availableSpan;
+  const fillStartX = toPillX(0);
+  const fillEndX = toPillX(settledPct);
+  const hatchEndX = toPillX(totalPct);
   return (
     <svg
+      ref={svgRef}
       viewBox="0 0 100 12"
       preserveAspectRatio="none"
       className={className ? `cost-bar ${className}` : "cost-bar"}
@@ -75,12 +129,12 @@ export function CostBar({ settledUsd, estUsd, max, targetPct = null, label, clas
       aria-label={ariaLabel}
     >
       <HatchDef />
-      {/* #924 gate② round 3 finding (witness-blocking 3): a STROKED line, not a filled rect — a
-       * fill-rect's crispness depends on its Y edges landing on integer pixel rows, which drifted
-       * under real-browser rasterization (rendered ~2px tall); `vector-effect: non-scaling-stroke`
-       * (panels.css) keeps a stroke's WIDTH pinned to exactly 1 device px regardless of any
-       * scaling, and TRACK_Y's own half-integer value centers that 1px stroke exactly on pixel
-       * row 5 (5.0–6.0). */}
+      {/* #924 AC2: a STROKED line, not a filled rect — a fill-rect's crispness depends on its Y
+       * edges landing on integer pixel rows, which drifts under real-browser rasterization;
+       * `vector-effect: non-scaling-stroke` (panels.css) keeps a stroke's WIDTH pinned to exactly
+       * 1 device px regardless of any scaling, and TRACK_Y's own half-integer value centers that
+       * 1px stroke exactly on pixel row 5 (5.0–6.0). The track is the bar's fixed full-width
+       * reference — unlike the pill below, it has no round cap, so it never needs the inset. */}
       <line className="cost-bar-track" x1="0" y1={TRACK_Y} x2="100" y2={TRACK_Y} />
       {/* #924 AC2/AC3: a filled `rect rx=...` sits inside the SAME non-uniformly scaled viewBox
        * the tick/track lines address — `rx` is fill geometry, not a stroke, so `vector-effect`
@@ -95,12 +149,18 @@ export function CostBar({ settledUsd, estUsd, max, targetPct = null, label, clas
        * dark — around the whole pill, caps included), then the actual amber pill on top. */}
       {settledPct > 0 && (
         <>
-          <line className="cost-bar-fill-outline" x1="0" y1={FILL_CENTER_Y} x2={settledPct} y2={FILL_CENTER_Y} />
-          <line className="cost-bar-fill" x1="0" y1={FILL_CENTER_Y} x2={settledPct} y2={FILL_CENTER_Y} />
+          <line className="cost-bar-fill-outline" x1={fillStartX} y1={FILL_CENTER_Y} x2={fillEndX} y2={FILL_CENTER_Y} />
+          <line className="cost-bar-fill" x1={fillStartX} y1={FILL_CENTER_Y} x2={fillEndX} y2={FILL_CENTER_Y} />
         </>
       )}
       {estPct > 0 && (
-        <rect x={settledPct} y={FILL_CENTER_Y - FILL_HEIGHT / 2} width={estPct} height={FILL_HEIGHT} fill={`url(#${HATCH_PATTERN_ID})`} />
+        <rect
+          x={fillEndX}
+          y={FILL_CENTER_Y - FILL_HEIGHT / 2}
+          width={hatchEndX - fillEndX}
+          height={FILL_HEIGHT}
+          fill={`url(#${HATCH_PATTERN_ID})`}
+        />
       )}
       {targetPct != null && <line className="cost-bar-target" x1={targetPct} y1={TICK_Y1} x2={targetPct} y2={TICK_Y2} />}
     </svg>

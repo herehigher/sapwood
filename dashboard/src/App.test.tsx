@@ -3102,23 +3102,23 @@ test("AC2 gate② finding [1]: every hairline-bar instance's own CSS height matc
 });
 
 /**
- * #924 gate② round 3, PO witness-blocking items 2/3: a real-browser witness pass at 52eca83 found
- * the target tick rendering as a ~4-5px filled block (a VERTICAL line's own `stroke-width` extends
- * in the bar's X axis, which scales by roughly the bar's own width/100 under
- * `preserveAspectRatio="none"` — a ~490px-wide bar scales X by ~4.9x while `.cost-bar`'s 12px
- * height already pins Y at 1x) and the track rendering ~2px tall (`TRACK_Y = 5.5` as a filled
- * RECT's top edge straddled a physical pixel row). Both are fixed by converting the track from a
- * rect to a stroked line and adding `vector-effect: non-scaling-stroke` to both (panels.css) — the
- * SVG-native mechanism that pins a stroke's rendered WIDTH to a real device pixel regardless of
- * the element's own CTM scale, in either axis. happy-dom has no real layout engine (confirmed
- * directly, repeatedly, in this file and hero.test.ts — `getBoundingClientRect()` returns an
- * all-zero box for every element), so the ACTUAL rendered pixel width `vector-effect` produces
- * cannot be measured here — that is a real-browser fact, same ceiling the light-dark()-outline
- * tests above already document. What IS provable in this harness: the declaration cascades onto
- * the real elements at all (a regression that dropped it, or the stroke-width value, would fail
- * this) — the achievable half of the proof, same STYLE-doctrine posture as the rest of this file.
+ * #924 AC2: the target tick is a VERTICAL line whose own `stroke-width` extends in the bar's X
+ * axis, which scales by roughly the bar's own width/100 under `preserveAspectRatio="none"` — a
+ * ~490px-wide bar scales X by ~4.9x while `.cost-bar`'s 12px height already pins Y at 1x; an
+ * unguarded stroke would render as a multi-px filled block rather than a hairline. The track has
+ * the same requirement in the opposite axis (a filled rect's top edge can straddle a physical
+ * pixel row at fractional Y). Both are stroked lines with `vector-effect: non-scaling-stroke`
+ * (panels.css) — the SVG-native mechanism that pins a stroke's rendered WIDTH to a real device
+ * pixel regardless of the element's own CTM scale, in either axis. happy-dom has no real layout
+ * engine (confirmed directly, repeatedly, in this file and hero.test.ts —
+ * `getBoundingClientRect()` returns an all-zero box for every element), so the ACTUAL rendered
+ * pixel width `vector-effect` produces cannot be measured here — that is a real-browser fact, same
+ * ceiling the light-dark()-outline tests above already document. What IS provable in this harness:
+ * the declaration cascades onto the real elements at all (a regression that dropped it, or the
+ * stroke-width value, would fail this) — the achievable half of the proof, same STYLE-doctrine
+ * posture as the rest of this file.
  */
-test("AC2 gate② round 3 (witness-blocking 2/3): the track and target tick both resolve vector-effect: non-scaling-stroke and stroke-width: 1, pinning them against the bar's own non-uniform scale", async () => {
+test("AC2 (track/tick non-scaling-stroke): the track and target tick both resolve vector-effect: non-scaling-stroke and stroke-width: 1, pinning them against the bar's own non-uniform scale", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   try {
     const track = container.querySelector(".cost-bar-track");
@@ -3195,11 +3195,11 @@ test("AC2: .cost-bar-row's label column is minmax(>= 7em, max-content) — a flo
 });
 
 /**
- * #924 gate② round 2 finding [0] (ac2-grid-column-not-style-tested), PO leg-2 adjudication: "Assert
- * the winning grid-template-columns on a rendered .cost-bar-row under the full cascade
- * (getComputedStyle), not the authored rule." The VALUE test above only proves the SOURCE
- * declares the right thing — a later, more-specific, or width/media-scoped rule could still win on
- * the real element while that test stayed green. Verified directly that happy-dom's
+ * #924 AC2: assert the winning `grid-template-columns` on a rendered `.cost-bar-row` under the
+ * full cascade (`getComputedStyle`), not the authored rule — a VALUE test on source alone only
+ * proves the SOURCE declares the right thing; a later, more-specific, or width/media-scoped rule
+ * could still win on the real element while that test stayed green. Verified directly that
+ * happy-dom's
  * `getComputedStyle().gridTemplateColumns` DOES resolve for a real element (unlike the SVG-
  * geometry/`light-dark()` gaps elsewhere in this file) — it echoes the winning declaration's exact
  * text (not a computed max-content pixel value, since happy-dom has no real layout engine for
@@ -3243,15 +3243,13 @@ test("AC2: every rendered cost-bar label, including one longer than the 7em floo
 });
 
 /**
- * #924 gate② round 2 finding [2] (ac3-outline-resolution-unverified), PO leg-2 adjudication
- * (2026-08-18): "The proof is a STYLE test whose expected colour is computed from the token table
- * via contrast.ts (resolve the light-dark() pair yourself for the light theme and compare to the
- * resolved value the outline rule declares) ... light = 1px stroke of that exact colour, dark =
- * none. Comparing the same unresolved light-dark(...) source string in both themes is not the
- * proof." Round 1's version compared the raw unresolved text, which the round-2 finding correctly
- * caught (happy-dom never evaluates `light-dark()` — confirmed directly, twice, both with and
- * without a `var()` indirection). The fix is NOT a different test — `--sap-fill-outline` itself
- * moved to a literal light-theme hex (tokens.css's `:root[data-theme="sapwood"]` /
+ * #924 AC3: the proof is a STYLE test whose expected colour is computed from the token table via
+ * `contrast.ts` (resolve the `light-dark()` pair yourself for the light theme and compare to the
+ * resolved value the outline rule declares) — light = 1px stroke of that exact colour, dark =
+ * none. Comparing the same unresolved `light-dark(...)` source string in both themes is not the
+ * proof; happy-dom never evaluates `light-dark()` (confirmed directly, twice, both with and
+ * without a `var()` indirection). `--sap-fill-outline` itself is a literal light-theme hex
+ * (tokens.css's `:root[data-theme="sapwood"]` /
  * `@media (prefers-color-scheme: light)` rules, pinned against `--sap-text`'s own light value by
  * `tokens.test.ts`), so a REAL resolved hex now reaches `getComputedStyle` to assert against —
  * `parseColorTokens` (this repo's own light/dark token splitter, `contrast.ts`) is what "resolve

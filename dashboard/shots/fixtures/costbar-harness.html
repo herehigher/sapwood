@@ -1,0 +1,19 @@
+<!doctype html>
+<!--
+  #924 AC2 (gate② P2): a real-browser fixture for the pill end-cap containment test in
+  shots.spec.ts. `<CostBar>`'s own settled percentage can't be pinned to exact 0%/partial/100%
+  through the shipped `?demo` fixture (its numbers come from a recorded round, not a test knob),
+  and happy-dom (App.test.tsx's own real-DOM tests) has no real layout engine to measure rendered
+  pixels against. This page mounts the REAL component at three controlled settled percentages and
+  container widths — served by an ad-hoc Vite dev server the test itself starts and stops (see
+  shots.spec.ts), never part of the shipped `dist/` build.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./costbar-harness.tsx"></script>
+  </body>
+</html>
