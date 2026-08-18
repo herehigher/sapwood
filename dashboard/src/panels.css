@@ -753,14 +753,24 @@
   align-items: center;
   justify-content: center;
   padding: 2px var(--space-2);
-  border: 1px solid var(--rust);
+  /* --attention-tone-rust, not --rust — the base (never-JS-rendered) fallback stays consistent
+   * with the SAME literal token the inline per-row `tone` value (NeedsAttention.tsx) draws from. */
+  border: 1px solid var(--attention-tone-rust);
   border-radius: var(--radius-card);
-  color: var(--rust);
+  color: var(--attention-tone-rust);
   font-family: var(--font-data);
   font-size: var(--text-0);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   white-space: nowrap;
+}
+
+/* #925 gate① engine-agent finding [3]: a stable grid cell for the (optional) chip, so a row that
+ * skips it (an unrecognized event kind) still occupies column 2's fixed track — never collapses
+ * the columns after it. */
+.attention-category {
+  display: flex;
+  align-items: center;
 }
 
 .attention-entity {
@@ -785,8 +795,22 @@
   color: var(--sapwood);
 }
 
+/* #925 gate① engine-agent finding [3]: the reason column's own grid cell — holds the sentence
+ * AND the (optional) inspect button together, so App's real onInspect wiring never adds a 6th
+ * direct grid child that would auto-place the age box into a second implicit row. */
+.attention-reason {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* --attention-reason-text, not --bark-text directly — gate① engine-agent finding [0]: same
+ * light-dark()-never-evaluates-in-happy-dom gap as --attention-tone-rust/-review above, applied
+ * to this row's reason colour so an AC1 STYLE test can assert the exact winning computed value. */
 .attention-sentence {
-  color: var(--bark-text);
+  min-width: 0;
+  color: var(--attention-reason-text);
   font-family: var(--font-data);
   font-size: var(--text-0);
 }
@@ -822,6 +846,7 @@
 /* AC7 (#861): a sibling control next to the sentence's own GitHub anchor, never nested inside
  * it — its own hit target and accessible name. */
 .attention-inspect {
+  flex-shrink: 0;
   background: var(--panel);
   border: var(--hairline);
   border-radius: var(--radius-card);

@@ -69,20 +69,35 @@ function AttentionRow({
   // #925 (#729 owner walk, D21/D22): rust for the general escalation class, --sap-text for the
   // review/dissent class (copy.ts's isReviewDissentCategory) — the severity bar below reads this
   // SAME value as the chip's own border colour, so the two can never drift apart per row.
-  const tone = category && isReviewDissentCategory(category) ? "var(--sap-text)" : "var(--rust)";
+  // `--attention-tone-rust`/`--attention-tone-review` (tokens.css), not `--rust`/`--sap-text`
+  // directly — gate① engine-agent finding [0]: those are both `light-dark()`, which happy-dom's
+  // `getComputedStyle` never evaluates for a colour-typed property, making an AC1 STYLE assertion
+  // permanently unprovable against them. The two literal-hex aliases are pinned to --rust/
+  // --sap-text's own per-theme values by tokens.test.ts, so they can never silently drift.
+  const tone = category && isReviewDissentCategory(category) ? "var(--attention-tone-review)" : "var(--attention-tone-rust)";
   const { token, reason } = splitSentence(parts);
   const entityTitle = token ? resolveEntityTitle(token, titles) : undefined;
   const ageClassName = emphasize ? "muted data attention-ts attention-age attention-age-emphasis" : "muted data attention-ts attention-age";
   return (
+    // #925 gate① engine-agent finding [3] (inspect-control-breaks-grid): `.attention-row` is a
+    // 5-track CSS grid — exactly 5 direct children, ALWAYS, regardless of which optional content
+    // a given row carries. The category chip and the inspect button are both conditional, so each
+    // lives inside a stable wrapper cell (`.attention-category`, `.attention-reason`) rather than
+    // being a direct grid child itself — otherwise a row that skips the chip (an unrecognized
+    // kind) or adds the inspect button (App's own onInspect wiring, real production rows like
+    // plan-review-escalated) shifts every column after it, or auto-places the age box into a
+    // second implicit grid row.
     <li className="attention-row recipe-list-entry">
       {/* `backgroundColor` (the longhand), not `background` — a happy-dom quirk (this file's own
        *  #925 AC1 test comment) only echoes the raw inline value back for the longhand. */}
       <span className="attention-severity" aria-hidden="true" style={{ backgroundColor: tone }} />
-      {category && (
-        <span className="attention-chip" style={{ borderColor: tone, color: tone }}>
-          {category}
-        </span>
-      )}
+      <span className="attention-category">
+        {category && (
+          <span className="attention-chip" style={{ borderColor: tone, color: tone }}>
+            {category}
+          </span>
+        )}
+      </span>
       <span className="attention-entity">
         {token && (
           <>
@@ -92,21 +107,23 @@ function AttentionRow({
           </>
         )}
       </span>
-      <span className="attention-sentence">
-        {reason.map((part, i) => (
-          // biome-ignore lint/suspicious/noArrayIndexKey: sentence parts are a fixed-order render list, not reorderable data
-          <span key={i}>
-            <SentencePartView part={part} titles={titles} repoUrl={repoUrl} />
-          </span>
-        ))}
+      <span className="attention-reason">
+        <span className="attention-sentence">
+          {reason.map((part, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: sentence parts are a fixed-order render list, not reorderable data
+            <span key={i}>
+              <SentencePartView part={part} titles={titles} repoUrl={repoUrl} />
+            </span>
+          ))}
+        </span>
+        {/* AC7: a SIBLING of the sentence, never nested inside its own GitHub anchor — each
+         *  independently focusable with its own accessible name. */}
+        {node && onInspect && (
+          <button type="button" className="attention-inspect" aria-label={`inspect ${node}`} onClick={() => onInspect(node)}>
+            inspect
+          </button>
+        )}
       </span>
-      {/* AC7: a SIBLING control, never nested inside the sentence's own GitHub anchor — each
-       *  independently focusable with its own accessible name. */}
-      {node && onInspect && (
-        <button type="button" className="attention-inspect" aria-label={`inspect ${node}`} onClick={() => onInspect(node)}>
-          inspect
-        </button>
-      )}
       <HintTooltip content={title}>
         {/* biome-ignore lint/a11y/noNoninteractiveTabindex: this <span> is a Radix Tooltip
          *  trigger, not a bare non-interactive label — `title` is always a real absolute-time

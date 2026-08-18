@@ -3733,9 +3733,20 @@ async function mountLiveAppWithCascade(byPath: Record<string, { status: number; 
   };
 }
 
-test("#925 AC1: every .attention-row is >=56px with a hairline separator, its severity bar mirrors its chip's own border tone, the chip is >=30px/uppercase/mono, the entity ref is >=14px mono, and the reason is mono", async () => {
+// gate① engine-agent finding [0] (ac1-style-oracle): round 1 compared `severity.style.
+// backgroundColor` against `chip.style.borderColor` (raw, uncascaded inline reads) and checked
+// the reason colour via a regex over CSS source — neither is a computed-style proof. Fixed the
+// doctrine-established way (tokens.css's `--sap-fill-outline`/`--stepper-replay-outline`
+// precedent): `--attention-tone-rust`/`--attention-tone-review`/`--attention-reason-text`
+// (tokens.css) are literal-hex aliases of `--rust`/`--sap-text`/`--bark-text` — pinned against
+// those source tokens by tokens.test.ts so they can't drift — that DO resolve via
+// `getComputedStyle` in happy-dom (unlike the light-dark()-fed originals). Looped over both
+// themes (COVERAGE), same posture the #923 closed-round-stepper STYLE test already takes for the
+// identical happy-dom gap.
+test("#925 AC1: every .attention-row is >=56px with a hairline separator, its severity bar and chip resolve the REAL rust/--sap-text tone in both themes, the chip is >=30px/uppercase/mono, the entity ref is >=14px mono, and the reason resolves the REAL --bark-text colour and is mono", async () => {
   const fontDataStack = parseTokensLocal(tokensCss924)["--font-data"];
   assert.ok(fontDataStack, "tokens.css must still declare --font-data for this test's own oracle");
+  const { light: lightTokens, dark: darkTokens } = parseColorTokens(tokensCss924);
   // Two distinct categories (DECISION/rust, DISSENT/--sap-text) — COVERAGE over both severity
   // tones, not just the default one, and both carry a PR token so the entity-ref cell renders.
   const { container, cleanup } = await mountLiveAppWithCascade({
@@ -3754,62 +3765,65 @@ test("#925 AC1: every .attention-row is >=56px with a hairline separator, its se
   try {
     const rows = [...container.querySelectorAll(".attention-row")];
     assert.ok(rows.length >= 2, "at least two attention rows must render");
-    for (const row of rows) {
-      const rowComputed = getComputedStyle(row as Element);
-      assert.ok(Number.parseFloat(rowComputed.minHeight) >= 56, `each row's min-height (${rowComputed.minHeight}) must be >= 56px`);
-      assert.equal(rowComputed.borderBottomWidth, "1px", "each row must resolve a real 1px hairline, not an unresolved empty value");
-      assert.equal(rowComputed.borderBottomStyle, "solid");
 
-      const severity = row.querySelector(".attention-severity") as HTMLElement | null;
-      assert.ok(severity, "each row must render its severity element");
-      assert.equal(getComputedStyle(severity as Element).width, "4px");
-      assert.equal(severity?.getAttribute("aria-hidden"), "true");
+    for (const themeAttr of ["heartwood", "sapwood"] as const) {
+      document.documentElement.setAttribute("data-theme", themeAttr);
+      const tokens = themeAttr === "heartwood" ? darkTokens : lightTokens;
 
-      const chip = row.querySelector(".attention-chip") as HTMLElement | null;
-      assert.ok(chip, "each row must render its category chip");
-      const chipComputed = getComputedStyle(chip as Element);
-      assert.ok(Number.parseFloat(chipComputed.minHeight) >= 30, `chip min-height (${chipComputed.minHeight}) must be >= 30px`);
-      assert.equal(chipComputed.textTransform, "uppercase");
-      assert.equal(chipComputed.fontFamily, fontDataStack);
+      for (const row of rows) {
+        const rowComputed = getComputedStyle(row as Element);
+        assert.ok(Number.parseFloat(rowComputed.minHeight) >= 56, `each row's min-height (${rowComputed.minHeight}) must be >= 56px`);
+        assert.equal(rowComputed.borderBottomWidth, "1px", "each row must resolve a real 1px hairline, not an unresolved empty value");
+        assert.equal(rowComputed.borderBottomStyle, "solid");
 
-      // happy-dom never resolves a light-dark()-fed COLOUR property, even under the full cascade
-      // (the SAME gap #924 AC3's own `--sap-fill-outline` comment documents — border-color and
-      // background-color both come back an empty string). Both this row's tones are set INLINE
-      // (NeedsAttention.tsx's own `tone` value), so reading the raw `.style` (not
-      // `getComputedStyle`) still proves the two literally share the SAME source value — a real
-      // property this harness CAN read, on a real mounted DOM node, not a stand-in.
-      assert.ok(severity?.style.backgroundColor, "the tone value itself must be non-empty");
-      assert.equal(
-        severity?.style.backgroundColor,
-        chip?.style.borderColor,
-        "the severity bar's background must be set from the SAME tone value as the chip's own border colour",
-      );
+        const severity = row.querySelector(".attention-severity") as HTMLElement | null;
+        assert.ok(severity, "each row must render its severity element");
+        assert.equal(getComputedStyle(severity as Element).width, "4px");
+        assert.equal(severity?.getAttribute("aria-hidden"), "true");
 
-      const entityRef = row.querySelector(".attention-entity .entity-ref") as HTMLElement | null;
-      if (entityRef) {
-        const entityComputed = getComputedStyle(entityRef);
-        assert.ok(Number.parseFloat(entityComputed.fontSize) >= 14, `entity ref font-size (${entityComputed.fontSize}) must be >= 14px`);
-        assert.equal(entityComputed.fontFamily, fontDataStack);
+        const chip = row.querySelector(".attention-chip") as HTMLElement | null;
+        assert.ok(chip, "each row must render its category chip");
+        const chipComputed = getComputedStyle(chip as Element);
+        assert.ok(Number.parseFloat(chipComputed.minHeight) >= 30, `chip min-height (${chipComputed.minHeight}) must be >= 30px`);
+        assert.equal(chipComputed.textTransform, "uppercase");
+        assert.equal(chipComputed.fontFamily, fontDataStack);
+
+        const expectedTone = chip?.textContent === "DISSENT" ? tokens["--sap-text"] : tokens["--rust"];
+        const severityComputed = getComputedStyle(severity as Element);
+        assert.equal(
+          severityComputed.backgroundColor.toUpperCase(),
+          expectedTone,
+          `${themeAttr}: the severity bar's background must resolve to the real ${chip?.textContent === "DISSENT" ? "--sap-text" : "--rust"} hex`,
+        );
+        assert.equal(
+          chipComputed.borderColor.toUpperCase(),
+          expectedTone,
+          `${themeAttr}: the chip's border-colour must resolve to the SAME real hex as the severity bar`,
+        );
+
+        const entityRef = row.querySelector(".attention-entity .entity-ref") as HTMLElement | null;
+        if (entityRef) {
+          const entityComputed = getComputedStyle(entityRef);
+          assert.ok(Number.parseFloat(entityComputed.fontSize) >= 14, `entity ref font-size (${entityComputed.fontSize}) must be >= 14px`);
+          assert.equal(entityComputed.fontFamily, fontDataStack);
+        }
+
+        const reason = row.querySelector(".attention-sentence") as HTMLElement | null;
+        assert.ok(reason, "each row must render its reason cell");
+        const reasonComputed = getComputedStyle(reason as Element);
+        assert.equal(reasonComputed.fontFamily, fontDataStack);
+        assert.equal(
+          reasonComputed.color.toUpperCase(),
+          tokens["--bark-text"],
+          `${themeAttr}: the reason cell's colour must resolve to the real --bark-text hex`,
+        );
       }
-
-      const reason = row.querySelector(".attention-sentence") as HTMLElement | null;
-      assert.ok(reason, "each row must render its reason cell");
-      assert.equal(getComputedStyle(reason as Element).fontFamily, fontDataStack);
     }
     // Both fixture kinds carry a PR token — the `if (entityRef)` guard above would otherwise
     // silently skip its own assertion if wiring ever dropped the token through to the row.
     assert.equal(container.querySelectorAll(".attention-entity .entity-ref").length, 2, "both rows must render an entity ref");
-
-    // The reason cell's `color: var(--bark-text)` hits the SAME light-dark() gap above — proven
-    // the only way this harness can: the declaration exists, and nothing else in the shipped
-    // cascade redeclares `.attention-sentence`'s own `color` to contest which one wins.
-    const sentenceColorRules = [panelsCss924, tokensCss924, heroCss924, appCss924]
-      .join("\n")
-      .match(/\.attention-sentence\s*\{[^}]*\}/g)
-      ?.filter((rule) => /color:/.test(rule));
-    assert.equal(sentenceColorRules?.length, 1, ".attention-sentence's color must be declared exactly once across the shipped cascade");
-    assert.match(sentenceColorRules![0]!, /color:\s*var\(--bark-text\)/);
   } finally {
+    document.documentElement.removeAttribute("data-theme");
     await cleanup();
   }
 });

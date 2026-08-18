@@ -273,10 +273,16 @@ const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
 const FORTY_FIVE_MIN_MS = 45 * 60 * 1000;
 
+// #925 gate① engine-agent finding [1] (ac2-bypasses-fold): a hand-built `toDomainEvent` array
+// fed straight into `<NeedsAttention>` proves the component's own max-age arithmetic but never
+// that a REAL `foldOpenAttention` collection (issue-keyed, `Object.values` order) still carries
+// the ages/positions this test depends on — folded through the SAME production path #893's own
+// tests already use (`foldAt`, above), never a direct construction.
 function attentionRowsByAge(rows: { id: number; ageMs: number }[]) {
-  return rows.map(({ id, ageMs }) =>
-    toDomainEvent(wire(id, new Date(NOW.getTime() - ageMs).toISOString(), "drive-needs-human", { pr: id, issue: id })),
+  const wireEvents: LoopEvent[] = rows.map(({ id, ageMs }) =>
+    wire(id, new Date(NOW.getTime() - ageMs).toISOString(), "drive-needs-human", { pr: id, issue: id }),
   );
+  return Object.values(foldAt(wireEvents));
 }
 
 test("#925 AC2: the row with the greatest age (3d) renders its age box at >=2x the height and font-size of the others (2h, 45m), regardless of render order", async () => {
@@ -422,6 +428,71 @@ test("#925 AC5: every .attention-chip shares the SAME computed width, every enti
       assert.ok(row.querySelector(".attention-entity"), "every row must render its entity-ref cell");
       assert.ok(row.querySelector(".attention-age"), "every row must render its age box");
     }
+  } finally {
+    await cleanup();
+  }
+});
+
+// #925 gate① engine-agent finding [3] (inspect-control-breaks-grid): a mapped kind rendered with
+// `onInspect` (App's own real production wiring for plan-review-escalated/verify-na-proposed/
+// ci-inert-escalated) used to add a 6th direct grid child, auto-placing the age box into a
+// SECOND implicit grid row instead of the fixed right-edge track — invisible to the AC5 test
+// above, which mounts without `onInspect` and never covers this shape. Mixes an unmapped kind
+// (no inspect control, no chip) alongside a mapped one WITH `onInspect` in the SAME fixture, so
+// the fixed-track invariant is proven across every combination of optional content a real row
+// can carry, not just the nominal case.
+test("#925 gate① finding [3]: a row rendered WITH onInspect (a real mapped kind) keeps exactly 5 direct grid children and the SAME grid-template-columns as a row with no chip and no inspect control", async () => {
+  const items = [
+    // Mapped kind + onInspect: severity, category(chip), entity, reason(sentence+button), age.
+    toDomainEvent(wire(1, "2026-08-09T00:00:00.000Z", "plan-review-escalated", { issue: 1 })),
+    // Unmapped kind, no onInspect target, no chip: severity, category(empty), entity(empty),
+    // reason(sentence only), age — still exactly 5 cells.
+    toDomainEvent(wire(2, "2026-08-08T00:00:00.000Z", "some-future-kind-nobody-registered-yet", { pr: 2 })),
+  ];
+  const { container, cleanup } = await mountWithCascade(<NeedsAttention items={items} titles={{}} now={NOW} onInspect={() => {}} />);
+  try {
+    const rows = [...container.querySelectorAll(".attention-row")];
+    assert.equal(rows.length, 2);
+
+    const inspectButton = container.querySelector(".attention-inspect");
+    assert.ok(inspectButton, "the mapped row must render its inspect control");
+    const inspectRow = inspectButton!.closest(".attention-row") as HTMLElement;
+    assert.ok(inspectRow, "the inspect control must live inside an .attention-row");
+
+    for (const row of rows) {
+      assert.equal(
+        [...row.children].length,
+        5,
+        `every .attention-row must have exactly 5 direct children (severity, category, entity, reason, age) — got ${[...row.children].map((c) => c.className).join(", ")}`,
+      );
+    }
+
+    const templates = new Set(rows.map((row) => getComputedStyle(row).gridTemplateColumns));
+    assert.equal(
+      templates.size,
+      1,
+      `the mapped row's grid-template-columns must be IDENTICAL to the unmapped row's, got: ${[...templates].join(" | ")}`,
+    );
+
+    // The inspect button must sit inside the SAME cell as the sentence (the reason column) —
+    // never as its own direct grid child, which is what pushed the age box into a second row.
+    assert.ok(inspectButton!.closest(".attention-reason"), "the inspect control must live inside .attention-reason");
+    assert.equal(
+      inspectButton!.parentElement?.querySelector(".attention-sentence")?.parentElement,
+      inspectButton!.parentElement,
+      "the inspect control and the sentence must share the same parent cell",
+    );
+
+    // The age box of the row WITH the inspect control must still be a direct grid child (Radix's
+    // `asChild` trigger clone leaves no wrapper node) — never nested inside .attention-reason
+    // alongside the button.
+    const inspectRowAge = inspectRow.querySelector(".attention-age");
+    assert.ok(inspectRowAge, "the mapped row must still render its age box");
+    assert.equal(
+      (inspectRowAge as HTMLElement).parentElement,
+      inspectRow,
+      "the age box must be a direct child of .attention-row, not nested inside .attention-reason",
+    );
   } finally {
     await cleanup();
   }
