@@ -3152,24 +3152,34 @@ test("AC2 (pill end caps): the fill pill is a rect with rx=3 (half its own 6px h
   }
 });
 
-// #924 gate② PO item 2: a fixed em floor alone still wrapped a longer label (a by-model row's own
-// model name, e.g. "claude-sonnet-5") — `minmax(7em, max-content)` keeps the >= 7em floor AC2
-// names while growing to fit whatever the longest rendered label actually needs.
-test("AC2: .cost-bar-row's label column is minmax(>= 7em, max-content) — a floor, not a fixed width that can still wrap a longer label", () => {
-  const rowRule = panelsCss924.match(/\.cost-bar-row\s*\{([^}]*)\}/);
-  assert.ok(rowRule, ".cost-bar-row rule must exist");
-  const columns = rowRule![1]!.match(/grid-template-columns:\s*([^;]+);/);
-  assert.ok(columns, ".cost-bar-row must declare grid-template-columns");
+// #924 AC2: a fixed em floor alone still wrapped a longer label (a by-model row's own model
+// name, e.g. "claude-sonnet-5") — `minmax(7em, max-content)` keeps the >= 7em floor while growing
+// to fit whatever the longest rendered label actually needs. Declared on `.cost-bar-list` (the
+// shared grid every `.cost-bar-row` subgrids into, panels.css) — not per-row — so the column is
+// sized ONCE across a whole group, keeping every row's bar starting at the same x.
+test("AC2: .cost-bar-list's label column is minmax(>= 7em, max-content) — a floor, not a fixed width that can still wrap a longer label", () => {
+  const listRule = panelsCss924.match(/\.cost-bar-list\s*\{([^}]*)\}/);
+  assert.ok(listRule, ".cost-bar-list rule must exist");
+  const columns = listRule![1]!.match(/grid-template-columns:\s*([^;]+);/);
+  assert.ok(columns, ".cost-bar-list must declare grid-template-columns");
   // The first grid TRACK is the whole `minmax(...)` call, commas and all — a naive whitespace
   // split would cut it at the comma inside the parens and see only "minmax(7em,".
   const minmax = columns![1]!.trim().match(/^minmax\(([\d.]+)em,\s*max-content\)/);
   assert.ok(minmax, `the label column must start with minmax(<em>, max-content); got "${columns![1]!.trim()}"`);
   const floorEm = Number.parseFloat(minmax![1]!);
   assert.ok(floorEm >= 7, `the label column's floor (${floorEm}em) must be >= 7em`);
+
+  const rowRule = panelsCss924.match(/\.cost-bar-row\s*\{([^}]*)\}/);
+  assert.ok(rowRule, ".cost-bar-row rule must exist");
+  assert.match(
+    rowRule![1]!,
+    /grid-template-columns:\s*subgrid\s*;/,
+    ".cost-bar-row must subgrid into .cost-bar-list's own column tracks, not size its own independent columns",
+  );
 });
 
 /**
- * #924 AC2: assert the winning `grid-template-columns` on a rendered `.cost-bar-row` under the
+ * #924 AC2: assert the winning `grid-template-columns` on a rendered `.cost-bar-list` under the
  * full cascade (`getComputedStyle`), not the authored rule — a VALUE test on source alone only
  * proves the SOURCE declares the right thing; a later, more-specific, or width/media-scoped rule
  * could still win on the real element while that test stayed green. Verified directly that
@@ -3179,13 +3189,25 @@ test("AC2: .cost-bar-row's label column is minmax(>= 7em, max-content) — a flo
  * text (not a computed max-content pixel value, since happy-dom has no real layout engine for
  * that), which is exactly the CASCADE-APPLICATION fact this finding asks for: a competing rule
  * that changed which value wins would show up here even though it can't fail on rendered pixels.
+ * `.cost-bar-row`'s own winning value is checked alongside it — it must actually subgrid into
+ * the list's tracks, not size its own columns independently (the fix for the per-row-drift bug).
  */
-test("AC2: the winning grid-template-columns on a REAL rendered .cost-bar-row, under the full 1440px production cascade, is exactly minmax(7em, max-content) 1fr 4em", async () => {
+test("AC2: the winning grid-template-columns on a REAL rendered .cost-bar-list is exactly minmax(7em, max-content) 1fr 4em, and every .cost-bar-row subgrids into it", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   try {
-    const row = container.querySelector(".cost-bar-row");
-    assert.ok(row, "a real .cost-bar-row must render (the fixture's stage/model bars)");
-    assert.equal(getComputedStyle(row as Element).gridTemplateColumns, "minmax(7em, max-content) 1fr 4em");
+    const list = container.querySelector(".cost-bar-list");
+    assert.ok(list, "a real .cost-bar-list must render (the fixture's stage/model bars)");
+    assert.equal(getComputedStyle(list as Element).gridTemplateColumns, "minmax(7em, max-content) 1fr 4em");
+
+    const rows = [...container.querySelectorAll(".cost-bar-row")];
+    assert.ok(rows.length > 1, "expected multiple rows sharing one list, to prove the subgrid keeps them aligned");
+    for (const row of rows) {
+      assert.equal(
+        getComputedStyle(row as Element).gridTemplateColumns,
+        "subgrid",
+        "every .cost-bar-row must subgrid, never size its own columns",
+      );
+    }
   } finally {
     await cleanup();
   }

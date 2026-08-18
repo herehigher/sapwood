@@ -112,18 +112,16 @@
 }
 
 /*
- * #924 gate② round 2, PO adjudication (leg 2, 2026-08-18): AC3's outline proof needs a STYLE test
- * that reads a REAL resolved colour via `getComputedStyle` — verified directly (twice, for a bare
- * HTML `color` and an SVG `stroke`, each with and without a `var()` indirection) that happy-dom's
- * CSS engine NEVER evaluates `light-dark()` at all, in any form, regardless of theme — it always
- * echoes the raw, unresolved `"light-dark(A, B)"` text back. `--sap-fill-outline` above being
- * `light-dark(var(--sap-text), transparent)` (the prior version) was therefore permanently
- * unprovable in this harness, no matter how the test was written. The fix is NOT a different test
- * — it's this token declaring its light-theme value as a literal hex here instead, so the winning
- * declaration itself never contains a `light-dark()` call for `getComputedStyle` to fail to
- * evaluate. `#8A5A14` is `--sap-text`'s own light-theme hex, duplicated deliberately — `tokens.test.ts`
- * pins it against `parseColorTokens(tokensCss).light["--sap-text"]` so the two can never silently
- * drift apart, the same VALUE-family guarantee `light-dark()` gave for free before this workaround.
+ * #924 AC3: the outline proof needs a STYLE test that reads a REAL resolved colour via
+ * `getComputedStyle` — happy-dom's CSS engine never evaluates `light-dark()` at all, in any form,
+ * regardless of theme; it always echoes the raw, unresolved `"light-dark(A, B)"` text back, so a
+ * `--sap-fill-outline` declared as `light-dark(var(--sap-text), transparent)` is permanently
+ * unprovable in that harness, no matter how the test itself is written. The fix is this token
+ * declaring its light-theme value as a literal hex here instead, so the winning declaration never
+ * contains a `light-dark()` call for `getComputedStyle` to fail to evaluate. `#8A5A14` is
+ * `--sap-text`'s own light-theme hex, duplicated deliberately — `tokens.test.ts` pins it against
+ * `parseColorTokens(tokensCss).light["--sap-text"]` so the two can never silently drift apart, the
+ * same VALUE-family guarantee `light-dark()` gave for free before this workaround.
  */
 :root[data-theme="sapwood"] {
   color-scheme: light;

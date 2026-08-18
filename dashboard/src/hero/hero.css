@@ -170,17 +170,16 @@
   stroke-opacity: 0.25;
 }
 
-/* #924 gate② round 3 finding [0] (ac3-translucent-chip-contrast): this rule used to soften the
- * READY chip to `fill-opacity: 0.22` — a leftover from the pre-#924 `--sap` era. With the flat,
- * opaque `--sap-fill` role now in play, that translucency composited the amber over the panel
- * (~#573F1F in dark theme) instead of painting the real token colour, leaving `--on-sap-fill`'s
- * ink at ~1.7:1 against the ACTUAL rendered surface even though `checkFillTextContrast` (both
- * tokens at full opacity) reports 7.83:1 — the mockup's chip is a fully opaque, high-contrast
- * card. `1` is the SVG initial value, so this rule is behaviourally a no-op — declared explicitly
- * anyway, both to document the choice (opaque is deliberate, not merely "never touched") and
- * because happy-dom's `getComputedStyle` reports an empty string for an SVG presentation property
- * with no matching rule at all, rather than resolving the initial value — an explicit declaration
- * is what makes `hero.test.ts`'s own STYLE assertion able to read a real "1" back. */
+/* #924 AC3: the READY chip must be fully opaque — a translucent `fill-opacity` composites the
+ * flat, opaque `--sap-fill` role over the panel (~#573F1F in dark theme) instead of painting the
+ * real token colour, leaving `--on-sap-fill`'s ink at ~1.7:1 against the ACTUAL rendered surface
+ * even though `checkFillTextContrast` (both tokens at full opacity) reports 7.83:1 — the mockup's
+ * chip is a fully opaque, high-contrast card. `1` is the SVG initial value, so this rule is
+ * behaviourally a no-op — declared explicitly anyway, both to document the choice (opaque is
+ * deliberate, not merely "never touched") and because happy-dom's `getComputedStyle` reports an
+ * empty string for an SVG presentation property with no matching rule at all, rather than
+ * resolving the initial value — an explicit declaration is what makes `hero.test.ts`'s own STYLE
+ * assertion able to read a real "1" back. */
 .hero-pool-chip rect {
   fill-opacity: 1;
 }

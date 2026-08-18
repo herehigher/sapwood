@@ -776,21 +776,53 @@ test("#924 AC2: the pill's round caps stay inside the bar box at 0%/partial/100%
 });
 
 /**
+ * A genuine RENDERED-PIXEL sample at one page coordinate — not a geometry-box comparison (a
+ * `<rect>`'s `getBoundingClientRect()` is verified directly to report the geometry-only box,
+ * excluding its own stroke, so it can't itself prove whether a 1px CENTERED stroke's own 0.5px
+ * straddle past the box edge actually painted or got clipped) and not `elementFromPoint` (a DOM
+ * hit-test, not a paint fact). `page.screenshot({ clip })` captures the SAME rendering the user
+ * sees — real overflow/clip behaviour, real antialiasing — as a PNG; decoding happens back in the
+ * PAGE (via `Image` + `<canvas>`, both standard browser APIs — no new dependency) rather than in
+ * Node, which has no built-in image codec.
+ */
+async function samplePixel(page: Page, x: number, y: number): Promise<[number, number, number, number]> {
+  const crop = 8;
+  const buffer = await page.screenshot({ clip: { x: x - crop / 2, y: y - crop / 2, width: crop, height: crop } });
+  const base64 = buffer.toString("base64");
+  return page.evaluate(async (base64) => {
+    const img = new Image();
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error("failed to decode the cropped screenshot"));
+      img.src = `data:image/png;base64,${base64}`;
+    });
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(img, 0, 0);
+    const center = Math.floor(canvas.width / 2);
+    const d = ctx.getImageData(center, center, 1, 1).data;
+    return [d[0], d[1], d[2], d[3]] as [number, number, number, number];
+  }, base64);
+}
+
+/**
  * Real-pixel proof for one `<CostBar>` instance's own `.cost-bar-fill` rect, checked at whichever
  * end(s) actually sit at the bar's own box edge for that settled percentage (a cap mid-track has
  * nothing edge-specific to prove — a large geometric clearance there is correct, not a defect).
- * Two kinds of evidence: (1) the rect's own bounding box (unaffected by its stroke — a `<rect>`'s
- * `getBoundingClientRect()` is verified directly to report the geometry-only box, matching its own
- * x/y/width/height) never extends past the bar's own box — the P2 regression's own containment
- * half; (2) `elementFromPoint` hit-testing at the pill's own vertical center — outside the box
- * (must not paint, the "never bleeds past its own box" half) and at the box edge itself (the
- * cap's own tip — a true semicircle touches the box there, so it MUST paint, the "never clips
- * short" half; the P2 regression's own failure mode was exactly this — the cap's outer curve
- * clipped away entirely at 100% spend). `rx`'s own genuine roundedness (as opposed to a square
- * end) is a declarative fact, not a pixel one — CostBar.test.tsx's own markup test and
- * App.test.tsx's "AC2 (pill end caps)" STYLE test both pin the `rx` attribute directly; sub-pixel
- * hit-testing to distinguish a curve from a square corner on a 3px radius is dominated by
- * antialiasing noise at this scale, not a reliable real-browser signal.
+ * Three kinds of evidence: (1) the rect's own bounding box (geometry only, excludes the stroke)
+ * never extends past the bar's own box — the P2 regression's own containment half, at the fill
+ * geometry level; (2) `overflow: visible` on the containing `.cost-bar` svg (panels.css) — the
+ * fix for the STROKE's own 0.5px straddle at the box edge (a 1px stroke is centred on its own
+ * path, so it oversteps the box by half its own width; `overflow: hidden`, the SVG default, would
+ * clip that straddle away, thinning the light outline exactly where it matters); (3) a REAL pixel
+ * sample (`samplePixel`) right at the box edge — must differ from the background (paint reaches
+ * there, not clipped short — the P2 regression's own failure mode: the cap's outer curve clipped
+ * away entirely at 100% spend), and 2px further out — must equal the background (nothing bleeds
+ * past). `rx`'s own genuine roundedness (as opposed to a square end) is a declarative fact, not a
+ * pixel one — CostBar.test.tsx's own markup test and App.test.tsx's "AC2 (pill end caps)" STYLE
+ * test both pin the `rx` attribute directly.
  */
 async function assertPillCapsContained(
   page: Page,
@@ -800,8 +832,8 @@ async function assertPillCapsContained(
 ): Promise<void> {
   const fill = svgLocator.locator(".cost-bar-fill");
   await expect(fill, `${label}: a real .cost-bar-fill must render`).toHaveCount(1);
-  // `elementFromPoint` only sees the current viewport — a card scrolled below the fold (this
-  // fixture's third lane card, at 1440x900) would otherwise report every hit-test as null.
+  // Pixel sampling reads the current viewport's own rendered output — a card scrolled below the
+  // fold (this fixture's third lane card, at 1440x900) would sample the wrong content entirely.
   await fill.scrollIntoViewIfNeeded();
 
   const geometry = await fill.evaluate((el: SVGRectElement) => {
@@ -814,39 +846,36 @@ async function assertPillCapsContained(
       centerY: (rect.top + rect.bottom) / 2,
       svgLeft: svgRect.left,
       svgRight: svgRect.right,
+      overflow: getComputedStyle(svgEl).overflow,
     };
   });
 
   const SLACK = 0.5;
   expect(geometry.left, `${label}: the fill must never paint left of the bar's own box`).toBeGreaterThanOrEqual(geometry.svgLeft - SLACK);
   expect(geometry.right, `${label}: the fill must never paint right of the bar's own box`).toBeLessThanOrEqual(geometry.svgRight + SLACK);
-
-  const hitClassAt = (x: number, y: number) =>
-    page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.getAttribute("class") ?? "", { x, y });
+  expect(geometry.overflow, `${label}: the bar's own svg must not clip its own 1px centred outline stroke at the edges`).toBe("visible");
 
   if (ends.left) {
-    expect(
-      await hitClassAt(geometry.left - 1, geometry.centerY),
-      `${label}: 1px outside the left edge must not paint the fill`,
-    ).not.toContain("cost-bar-fill");
-    expect(
-      await hitClassAt(geometry.left + 0.5, geometry.centerY),
-      `${label}: the fill must reach the box's own left edge at vertical center — the cap's own tip`,
-    ).toContain("cost-bar-fill");
+    const atEdge = await samplePixel(page, geometry.left, geometry.centerY);
+    const outside = await samplePixel(page, geometry.left - 2, geometry.centerY);
+    expect(atEdge, `${label}: real paint (fill or its outline) must reach the box's own left edge — the cap's own tip`).not.toEqual(
+      outside,
+    );
+    const farOutside = await samplePixel(page, geometry.left - 4, geometry.centerY);
+    expect(outside, `${label}: nothing may paint left of the bar's own box`).toEqual(farOutside);
   }
   if (ends.right) {
-    expect(
-      await hitClassAt(geometry.right + 1, geometry.centerY),
-      `${label}: 1px outside the right edge must not paint the fill`,
-    ).not.toContain("cost-bar-fill");
-    expect(
-      await hitClassAt(geometry.right - 0.5, geometry.centerY),
-      `${label}: the fill must reach the box's own right edge at vertical center — the cap's own tip`,
-    ).toContain("cost-bar-fill");
+    const atEdge = await samplePixel(page, geometry.right, geometry.centerY);
+    const outside = await samplePixel(page, geometry.right + 2, geometry.centerY);
+    expect(atEdge, `${label}: real paint (fill or its outline) must reach the box's own right edge — the cap's own tip`).not.toEqual(
+      outside,
+    );
+    const farOutside = await samplePixel(page, geometry.right + 4, geometry.centerY);
+    expect(outside, `${label}: nothing may paint right of the bar's own box`).toEqual(farOutside);
   }
 
   // The light outline (AC3) — a plain stroke directly on this same rect (panels.css), so its own
-  // presence is a computed-style fact, not a second pixel probe.
+  // declaration is a computed-style fact, cross-checked against the pixel evidence above.
   const strokeInfo = await fill.evaluate((el) => {
     const computed = getComputedStyle(el);
     return { stroke: computed.stroke, strokeWidth: computed.strokeWidth };

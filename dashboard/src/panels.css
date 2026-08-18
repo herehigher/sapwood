@@ -234,26 +234,31 @@
   padding-left: var(--space-4);
 }
 
+/* AC2: >= 7em is a FLOOR, not a fixed width — `minmax(7em, max-content)` grows the column to fit
+ * whichever label is actually longest ("Goal & align", a by-model row's own model name like
+ * "claude-sonnet-5") rather than a guessed em value that wraps the next label that comes along.
+ * `.cost-bar-label`'s own `white-space: nowrap` (below) is what actually stops the wrap; the grid
+ * column sizing is what gives that nowrap text room to exist without overflowing into the bar
+ * column next to it. Declared HERE (the shared list), not per-row: each `<li>` computing its own
+ * independent `max-content` sized every row to only its OWN label's width, so a longer label (e.g.
+ * "Goal & align", the widest in its group) left every shorter-labeled row's bar starting at a
+ * different x than that row's — a visible misalignment down the column. `grid-template-columns:
+ * subgrid` on `.cost-bar-row` below shares these SAME column tracks across every row instead, so
+ * the label column is sized ONCE, to the group's own widest label, and every bar starts flush. */
 .cost-bar-list {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(7em, max-content) 1fr 4em;
   gap: var(--space-2);
 }
 
-/* AC2 / #924 gate② PO item 2: >= 7em is a FLOOR, not a fixed width — `minmax(7em, max-content)`
- * grows the column to fit whichever label is actually longest ("Goal & align", a by-model row's
- * own model name like "claude-sonnet-5") rather than a guessed em value that wraps the next label
- * that comes along. `.cost-bar-label`'s own `white-space: nowrap` (below) is what actually stops
- * the wrap; the grid column sizing is what gives that nowrap text room to exist without
- * overflowing into the bar column next to it. */
 .cost-bar-row {
   display: grid;
-  grid-template-columns: minmax(7em, max-content) 1fr 4em;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   align-items: center;
-  gap: var(--space-2);
 }
 
 .cost-bar-label {
@@ -267,6 +272,13 @@
 .cost-bar {
   width: 100%;
   height: 12px;
+  /* #924 AC2: a 1px stroke is CENTERED on its own path, so it straddles the box edge by 0.5px at
+   * either end (x=0 always; x=100% at 100% settled) — the default SVG viewport clip would shave
+   * that 0.5px off, thinning the light outline right where it matters most. The pill's own FILL
+   * (the cap itself) never needs this: a `rect`'s `rx` rounds inward, never past its own box, so
+   * the 0.5px overshoot here is the stroke alone, and harmless once nothing else relies on this
+   * SVG clipping its own contents. */
+  overflow: visible;
 }
 
 /* #924 (D29/D30) — the shared hairline-bar grammar `CostBar.tsx` draws: a 1px `--bark` track, an

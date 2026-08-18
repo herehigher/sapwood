@@ -12,18 +12,45 @@ test("settled-only bar draws a solid fill sized to settledUsd/max, no hatch segm
   assert.doesNotMatch(html, new RegExp(`url\\(#${HATCH_PATTERN_ID}\\)`));
 });
 
-test("settled + est draws the est tail immediately after the settled fill, hatched", () => {
+// #924 AC2: the hatch tail's own `x`/`width` are CSS geometry properties (via `style`, not plain
+// attributes — SVG presentation attributes don't support `calc()`), extended `FILL_RADIUS` (3px)
+// px BACKWARD under the pill's own curved cap so the pill (rendered on top — see the DOM-order
+// test below) covers the seam cleanly, with no gap where the cap's `rx` corner recedes inward.
+// Extending backward only moves the LEADING edge; the trailing edge (at the settled+est total)
+// is exactly `width` further right, unaffected — `40% - 3px` to `40% - 3px + (20% + 3px)` = `60%`.
+test("settled + est draws the est tail immediately after the settled fill, hatched, extended 3px back under the pill's own cap", () => {
   const html = renderToStaticMarkup(<CostBar settledUsd={4} estUsd={2} max={10} label="lane" />);
-  // settled: 0 -> 40%; est: 40% -> 60% (width 20%)
+  // settled: 0 -> 40%; est: 40% -> 60% (width 20%), tail's own leading edge pulled back 3px.
   assert.match(html, /class="cost-bar-fill" x="0"[^>]*width="40%"/);
-  assert.match(html, new RegExp(`x="40%"[^>]*width="20%"[^>]*fill="url\\(#${HATCH_PATTERN_ID}\\)"`));
+  assert.match(html, new RegExp(`style="x:calc\\(40% - 3px\\);width:calc\\(20% \\+ 3px\\)"[^>]*fill="url\\(#${HATCH_PATTERN_ID}\\)"`));
 });
 
 test("est is clamped so the total never draws past 100% of the track", () => {
   const html = renderToStaticMarkup(<CostBar settledUsd={9} estUsd={5} max={10} label="lane" />);
   // settled: 90%; est would be 50% more (140% total) -> clamped tail is 10% wide, ending at 100%.
   assert.match(html, /class="cost-bar-fill" x="0"[^>]*width="90%"/);
-  assert.match(html, new RegExp(`x="90%"[^>]*width="10%"[^>]*fill="url\\(#${HATCH_PATTERN_ID}\\)"`));
+  assert.match(html, new RegExp(`style="x:calc\\(90% - 3px\\);width:calc\\(10% \\+ 3px\\)"[^>]*fill="url\\(#${HATCH_PATTERN_ID}\\)"`));
+});
+
+// #924 AC2: at 0% settled (no pill exists to cover a backward extension), the hatch tail's own
+// leading edge stays exactly at 0% — extending it would overshoot the bar's own left edge with
+// nothing hiding the seam (the box is `overflow: visible` now, so an unhidden extension there
+// would be a real, visible defect, not just a harmless 0.5px stroke straddle).
+test("est-only (0% settled, no pill to cover a seam) renders the hatch tail unextended, starting exactly at 0%", () => {
+  const html = renderToStaticMarkup(<CostBar settledUsd={0} estUsd={5} max={10} label="lane" />);
+  assert.doesNotMatch(html, /class="cost-bar-fill"/, "no settled amount -> no pill at all");
+  assert.match(html, new RegExp(`style="x:calc\\(0% - 0px\\);width:calc\\(50% \\+ 0px\\)"[^>]*fill="url\\(#${HATCH_PATTERN_ID}\\)"`));
+});
+
+// #924 AC2: the hatch renders BEFORE the pill in DOM/paint order — SVG paints in document order,
+// so the pill's own opaque fill, painted second, sits ON TOP and covers the seam; the reverse
+// order would let the hatch's flat edge cut a visible notch into the pill's curved cap instead.
+test("AC2: the hatch tail renders before the pill in document order, so the pill's opaque fill paints on top of the seam", () => {
+  const html = renderToStaticMarkup(<CostBar settledUsd={4} estUsd={2} max={10} label="lane" />);
+  const hatchIndex = html.indexOf(HATCH_PATTERN_ID, html.indexOf("</defs>"));
+  const fillIndex = html.indexOf('class="cost-bar-fill"');
+  assert.ok(hatchIndex > -1 && fillIndex > -1, "both the hatch tail and the pill must render");
+  assert.ok(hatchIndex < fillIndex, "the hatch tail must appear before the pill in the rendered markup");
 });
 
 test("zero/absent est renders no hatch rect at all — never a phantom zero-width segment", () => {
