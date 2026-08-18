@@ -290,17 +290,34 @@
   vector-effect: non-scaling-stroke;
 }
 
-/* #924 gate② finding [2]: the REAL rendered `.cost-bar-track` (this fill's own immediate
- * neighbour — `--bark` at 0.4 opacity over `--panel`, `contrast.ts`'s `checkFillTrackContrast`)
- * clears 3:1 against `--sap-fill` in dark theme (4.24:1) but NOT in light (1.15:1) — every use of
- * this fill, not only the header meter, compensates with the same 1px `--sap-text` outline
- * (invisible in dark theme, where it already clears unaided — `--sap-fill-outline`, tokens.css).
- * `vector-effect: non-scaling-stroke` (round 3, witness item 4, nice-to-have) keeps that outline
- * itself crisp under the same non-uniform bar scaling the track/tick fixes below address. */
+/* #924 AC2: the pill body itself, drawn as a STROKED line with a round cap — same fix family as
+ * `.cost-bar-track`/`.cost-bar-target` above/below. A round linecap's own radius (half the
+ * stroke-width) is part of the stroke render, so `vector-effect: non-scaling-stroke` keeps the cap
+ * a true semicircle regardless of the bar's own X-axis stretch, unlike a plain `rx` (fill
+ * geometry, never protected by `vector-effect`), which elongates into an ellipse under the same
+ * scale. `stroke-width: 6` matches `FILL_HEIGHT` (CostBar.tsx) exactly — the pill's rendered
+ * height. */
 .cost-bar-fill {
-  fill: var(--sap-fill);
+  stroke: var(--sap-fill);
+  stroke-width: 6;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+/* #924 AC3: the REAL rendered `.cost-bar-track` (this fill's own immediate neighbour — `--bark` at
+ * 0.4 opacity over `--panel`, `contrast.ts`'s `checkFillTrackContrast`) clears 3:1 against
+ * `--sap-fill` in dark theme (4.24:1) but NOT in light (1.15:1) — every use of this fill, not only
+ * the header meter, compensates with the same 1px `--sap-text` outline (invisible in dark theme,
+ * where it already clears unaided — `--sap-fill-outline`, tokens.css). Drawn as a SEPARATE, WIDER
+ * (`stroke-width: 8` — the pill's own 6, plus 1px on each side), round-capped line UNDERNEATH the
+ * pill (CostBar.tsx renders this one first) — the classic SVG "stroke ring" technique: the pill on
+ * top covers the middle, leaving only this outline's own outer 1px peeking out on every edge,
+ * caps included, exactly where a real `stroke: X` ON the pill itself would show if a single
+ * element could carry two different-width strokes at once. */
+.cost-bar-fill-outline {
   stroke: var(--sap-fill-outline);
-  stroke-width: 1px;
+  stroke-width: 8;
+  stroke-linecap: round;
   vector-effect: non-scaling-stroke;
 }
 
@@ -592,6 +609,9 @@
   background: color-mix(in srgb, var(--bark) 35%, transparent);
 }
 
+/* #924 AC3: a flat --sap-fill surface needs the light-theme 1px --sap-text boundary — the SAME
+ * compensation every other filled --sap-fill surface carries (`--sap-fill-outline`, tokens.css;
+ * transparent/invisible in dark theme). */
 .transport-scrub::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
@@ -599,7 +619,7 @@
   height: 14px;
   margin-top: -5px; /* centers the 14px thumb on the 4px track (webkit doesn't do this itself) */
   border-radius: var(--radius-pill);
-  border: none;
+  border: 1px solid var(--sap-fill-outline);
   background: var(--sap-fill);
 }
 
@@ -607,7 +627,7 @@
   width: 14px;
   height: 14px;
   border-radius: var(--radius-pill);
-  border: none;
+  border: 1px solid var(--sap-fill-outline);
   background: var(--sap-fill);
 }
 

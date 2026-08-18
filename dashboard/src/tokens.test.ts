@@ -160,6 +160,58 @@ test("AC3: --sap-fill-outline's literal light-theme hex is pinned to --sap-text'
   }
 });
 
+/**
+ * #924 AC3 (coverage, not just resolution): "derive the AC3 outline test's covered set from the
+ * production --sap-fill consumers (grep dashboard/src for --sap-fill fills) rather than a
+ * hand-typed list, so a new consumer cannot ship un-outlined." A hand-listed set of shapes
+ * (App.test.tsx's AC3 STYLE test) can miss a real production consumer (e.g. a feed dot or a
+ * range-thumb pseudo-element) that never made the list, leaving a genuinely un-outlined surface
+ * invisible to it. This test is the COVERAGE half of the fix: every `var(--sap-fill)` PAINT site
+ * in production source (never a test file, which may legitimately reference the string in an
+ * assertion) is enumerated here explicitly — adding a new one without updating this list fails
+ * LOUDLY, forcing the same choice every existing site already made: give it
+ * `--sap-fill-outline` or name why it's exempt.
+ */
+test("AC3 COVERAGE: every production var(--sap-fill) paint site is on record", () => {
+  const srcDir = new URL(".", import.meta.url).pathname;
+  const sites: string[] = [];
+  for (const file of listSourceFiles(srcDir)) {
+    if (/\.test\.(ts|tsx)$/.test(file)) continue; // a test file may legitimately quote the string
+    if (!/\.(ts|tsx|css)$/.test(file)) continue;
+    const text = readFileSync(file, "utf8");
+    const rel = file.slice(srcDir.length);
+    text.split("\n").forEach((line, i) => {
+      if (line.includes("var(--sap-fill)")) sites.push(`${rel}:${i + 1}`);
+    });
+  }
+  // Every known production consumer, each verified elsewhere to carry the --sap-fill-outline
+  // compensation (or, for `ActivityFeed.tsx:86`, being the very declaration OF that compensation):
+  // - panels.css .cost-bar-fill (stroke) — App.test.tsx's "AC2" + "AC3" STYLE tests.
+  // - panels.css ::-webkit-slider-thumb / ::-moz-range-thumb (background) — `border: 1px solid
+  //   var(--sap-fill-outline)` on the SAME two rules; a real browser's
+  //   `getComputedStyle(el, pseudo)` cannot query a vendor slider pseudo-element at all
+  //   (`shots.spec.ts`'s own documented Chromium limitation) — this file's own source-text
+  //   presence is the achievable ceiling, same posture as that file's own thumb-rule check.
+  // - ActivityFeed.tsx:82 (dotColor) + :86 (dotBorder — a companion string comparison, not a
+  //   second paint site) — ActivityFeed.test.tsx's own markup test.
+  // - hero/stage.tsx dropletFill's "sap" role + the .hero-pool-chip inline style — hero.css's
+  //   `.hero-droplet-shape`/`.hero-pool-chip rect` outline rules, App.test.tsx's AC3 STYLE test.
+  const knownSites = [
+    "panels.css:301",
+    "panels.css:623",
+    "panels.css:631",
+    "components/ActivityFeed.tsx:82",
+    "components/ActivityFeed.tsx:86",
+    "hero/stage.tsx:596",
+    "hero/stage.tsx:922",
+  ];
+  assert.deepEqual(
+    sites.sort(),
+    knownSites.sort(),
+    `production var(--sap-fill) paint sites changed — add the new site to knownSites above once you've verified it carries --sap-fill-outline (or is exempt and why): ${JSON.stringify(sites)}`,
+  );
+});
+
 /** Every file under `dir`, recursively — excluding `node_modules`/`dist`/generated output dirs. */
 function listSourceFiles(dir: string): string[] {
   const out: string[] = [];

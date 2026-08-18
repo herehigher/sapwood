@@ -112,27 +112,34 @@ test("a lane with neither a settled nor an est figure renders no bar at all — 
 // ── #890: the bar scales against the configured worker soft budget, not the amount it draws —
 // a self-scaled max made every positive figure render 100% full, losing all budget context.
 
+// #924 AC2: the settled fill is a `<line x1="0" x2={settledPct}>` (panels.css's own
+// `stroke-linecap: round` pill), not a `<rect width>` — `x2` carries the same percentage `width`
+// used before.
 test("workerBudgetUsdSoft is the bar's ceiling — a small settled amount against a real budget draws a partial-width fill, never full", () => {
   const html = renderToStaticMarkup(
     <LaneBoard lanesMax={1} lanes={[lane({ costUsd: 2 })]} titles={{}} workerBudgetUsdSoft={10} now={NOW} />,
   );
-  // The background TRACK rect is always width="100" (a fixed full-width reference) — the settled
-  // FILL rect (`class="cost-bar-fill"`, its color resolved through CSS from `--sap-fill`) is the
-  // one whose width must scale against the ceiling.
-  assert.match(html, /class="cost-bar-fill"[^>]*width="20"/, "$2 of a $10 soft budget is a 20%-wide fill");
-  assert.doesNotMatch(html, /class="cost-bar-fill"[^>]*width="100"/, "the settled fill itself must never self-scale to full width");
+  // The background TRACK line is always full-width (x1="0" x2="100", a fixed full-width
+  // reference) — the settled FILL line (`class="cost-bar-fill"`, its colour resolved through CSS
+  // from `--sap-fill`) is the one whose own `x2` must scale against the ceiling.
+  assert.match(html, /class="cost-bar-fill" x1="0"[^>]*x2="20"/, "$2 of a $10 soft budget is a 20%-wide fill");
+  assert.doesNotMatch(html, /class="cost-bar-fill" x1="0"[^>]*x2="100"/, "the settled fill itself must never self-scale to full width");
 });
 
 test("workerBudgetUsdSoft unset (config unreadable) falls back to the self-scaled total, same as before #890", () => {
   const html = renderToStaticMarkup(<LaneBoard lanesMax={1} lanes={[lane({ costUsd: 2 })]} titles={{}} now={NOW} />);
-  assert.match(html, /width="100"/, "with no real ceiling to measure against, the settled figure fills its own bar");
+  assert.match(
+    html,
+    /class="cost-bar-fill" x1="0"[^>]*x2="100"/,
+    "with no real ceiling to measure against, the settled figure fills its own bar",
+  );
 });
 
 test("a lane that overran its soft budget still draws a full (clamped) bar, never off-track", () => {
   const html = renderToStaticMarkup(
     <LaneBoard lanesMax={1} lanes={[lane({ costUsd: 15 })]} titles={{}} workerBudgetUsdSoft={10} now={NOW} />,
   );
-  assert.match(html, /width="100"/);
+  assert.match(html, /class="cost-bar-fill" x1="0"[^>]*x2="100"/);
 });
 
 test("a configured budget never forces an empty lane (no settled, no est) to draw a bar", () => {

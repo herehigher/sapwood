@@ -53,8 +53,7 @@ export interface CostBarProps {
  */
 const TRACK_Y = 5.5;
 const FILL_HEIGHT = 6;
-const FILL_Y = (12 - FILL_HEIGHT) / 2;
-const FILL_RADIUS = FILL_HEIGHT / 2;
+const FILL_CENTER_Y = 6; // the viewBox's own vertical center (0 0 100 12) — symmetric either way
 const TICK_Y1 = 1;
 const TICK_Y2 = 11;
 
@@ -83,8 +82,26 @@ export function CostBar({ settledUsd, estUsd, max, targetPct = null, label, clas
        * scaling, and TRACK_Y's own half-integer value centers that 1px stroke exactly on pixel
        * row 5 (5.0–6.0). */}
       <line className="cost-bar-track" x1="0" y1={TRACK_Y} x2="100" y2={TRACK_Y} />
-      <rect className="cost-bar-fill" x="0" y={FILL_Y} width={settledPct} height={FILL_HEIGHT} rx={FILL_RADIUS} />
-      {estPct > 0 && <rect x={settledPct} y={FILL_Y} width={estPct} height={FILL_HEIGHT} fill={`url(#${HATCH_PATTERN_ID})`} />}
+      {/* #924 AC2/AC3: a filled `rect rx=...` sits inside the SAME non-uniformly scaled viewBox
+       * the tick/track lines address — `rx` is fill geometry, not a stroke, so `vector-effect`
+       * never protects it, and the bar's non-uniform X scale stretches the "circular" pill ends
+       * into ellipses. Same fix family as the tick/track: a STROKED line with
+       * `stroke-linecap: round` (panels.css) — the round cap's own radius (half the stroke-width)
+       * is part of the STROKE render, so `vector-effect: non-scaling-stroke` keeps it a true
+       * circle regardless of the X distortion. Two stacked lines (both suppressed when
+       * `settledPct` is 0 — no phantom dot at the bar's start, same "never a phantom segment"
+       * posture the est hatch tail below already follows): a WIDER outline line drawn first (its
+       * 1px-larger stroke peeks out on light theme only — `--sap-fill-outline`, transparent in
+       * dark — around the whole pill, caps included), then the actual amber pill on top. */}
+      {settledPct > 0 && (
+        <>
+          <line className="cost-bar-fill-outline" x1="0" y1={FILL_CENTER_Y} x2={settledPct} y2={FILL_CENTER_Y} />
+          <line className="cost-bar-fill" x1="0" y1={FILL_CENTER_Y} x2={settledPct} y2={FILL_CENTER_Y} />
+        </>
+      )}
+      {estPct > 0 && (
+        <rect x={settledPct} y={FILL_CENTER_Y - FILL_HEIGHT / 2} width={estPct} height={FILL_HEIGHT} fill={`url(#${HATCH_PATTERN_ID})`} />
+      )}
       {targetPct != null && <line className="cost-bar-target" x1={targetPct} y1={TICK_Y1} x2={targetPct} y2={TICK_Y2} />}
     </svg>
   );

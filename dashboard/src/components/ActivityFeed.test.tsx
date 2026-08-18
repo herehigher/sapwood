@@ -165,6 +165,26 @@ test("attention-class entries render a static fail glyph alongside the rust dot"
   assert.match(html, /var\(--rust\)/);
 });
 
+// #924 AC3: --sap-fill is a FLAT color (never light-dark()), so it alone needs a light-theme
+// outline to clear contrast against its neighbouring surface — --rust/--moss already darken per
+// theme and clear unaided. The routine dot (neither attention nor a gate glyph) is the only one
+// of the three that paints --sap-fill, so it's the only one that should carry the border.
+test("#924 AC3: the routine feed dot (var(--sap-fill)) carries the light-theme outline border; the rust/moss dots do not", () => {
+  const routine = [ev(1, "dispatched", { issue: 1 })];
+  const routineHtml = renderToStaticMarkup(<ActivityFeed events={routine} pinnedAttention={pinnedOf(routine)} titles={{}} now={NOW} />);
+  assert.match(routineHtml, /background:var\(--sap-fill\);border:1px solid var\(--sap-fill-outline\)/);
+
+  const attention = [ev(1, "verify-na-proposed", { issue: 1 })];
+  const attentionHtml = renderToStaticMarkup(
+    <ActivityFeed events={attention} pinnedAttention={pinnedOf(attention)} titles={{}} now={NOW} />,
+  );
+  assert.match(attentionHtml, /background:var\(--rust\);border:none/);
+
+  const glyphOk = [ev(1, "merged", { issue: 1, pr: 10 })];
+  const glyphOkHtml = renderToStaticMarkup(<ActivityFeed events={glyphOk} pinnedAttention={pinnedOf(glyphOk)} titles={{}} now={NOW} />);
+  assert.match(glyphOkHtml, /background:var\(--moss\);border:none/);
+});
+
 test("a later escalation-resolved for the same (source, issue) unpins the escalation it resolves", () => {
   const events = [
     ev(1, "drive-needs-human", { issue: 5, pr: 50 }), // older escalation, issue 5

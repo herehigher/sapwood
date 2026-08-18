@@ -557,13 +557,14 @@ test("#890: a lane's settled cost bar scales against worker.budgetUsdSoft, not i
     html.indexOf('class="cost-bar lane-card-bar"'),
     html.indexOf("</svg>", html.indexOf('class="cost-bar lane-card-bar"')),
   );
-  // The background TRACK rect is always width="100" (a fixed reference) — the settled FILL rect
-  // (`class="cost-bar-fill"`, its color resolved through CSS from `--sap-fill`) is the one that
-  // must scale against the configured ceiling.
-  assert.match(laneBarSvg, /class="cost-bar-fill"[^>]*width="20"/, "$2 against a $10 soft budget must draw a 20%-wide fill");
+  // The background TRACK line is always full-width (x1="0" x2="100", a fixed reference) — the
+  // settled FILL line (`class="cost-bar-fill"`, its colour resolved through CSS from
+  // `--sap-fill`) is the one whose own `x2` must scale against the configured ceiling (#924 AC2:
+  // the fill is a `<line x1="0" x2={settledPct}>`, not a `<rect width>`).
+  assert.match(laneBarSvg, /class="cost-bar-fill" x1="0"[^>]*x2="20"/, "$2 against a $10 soft budget must draw a 20%-wide fill");
   assert.doesNotMatch(
     laneBarSvg,
-    /class="cost-bar-fill"[^>]*width="100"/,
+    /class="cost-bar-fill" x1="0"[^>]*x2="100"/,
     "the settled fill must never self-scale to a full-width bar regardless of the real dollar amount",
   );
 });
@@ -2855,6 +2856,11 @@ function fullCoverageViewModel() {
       isPending: false,
       data: {
         ...LOOP_STATE_OK,
+        // #924: a nonzero settled spend is what makes the header's own spend-meter bar render its
+        // `.cost-bar-fill`/`.cost-bar-fill-outline` lines at all — those are guarded on
+        // `settledPct > 0` (no phantom zero-length round-cap dot), so LOOP_STATE_OK's own
+        // `todayUsd: 0` would silently drop this module out of the "full coverage" fixture.
+        spend: { todayUsd: 4, dailyBudgetUsd: 10, runUsd: null, runBudgetUsd: null, byModel: [] },
         lanes: {
           max: 1,
           items: [
@@ -3139,6 +3145,39 @@ test("AC2 gate② round 3 (witness-blocking 2/3): the track and target tick both
   }
 });
 
+/**
+ * #924 AC2 (pill end caps): the pill's own `rx` on a filled `rect` is FILL geometry, which
+ * `vector-effect` (a STROKE-only property) never protects, so the bar's non-uniform X-axis
+ * stretch elongates a "circular" corner into an ellipse. Drawing the pill as a STROKED line with
+ * `stroke-linecap: round` instead (panels.css) fixes this — a round linecap's own radius (half
+ * the stroke-width) IS part of the stroke render, so `vector-effect: non-scaling-stroke` protects
+ * it exactly like the track/tick strokes. Same STYLE-doctrine ceiling as those: happy-dom cannot
+ * measure the actual rendered cap radius (no real layout engine), so this proves the mechanism is
+ * correctly wired — stroke-width/linecap/vector-effect all resolving on the real element is what
+ * GUARANTEES a true (non-elongated) circular cap in any real browser.
+ */
+test("AC2 (pill end caps): the fill pill resolves stroke-linecap: round, stroke-width: 6, and vector-effect: non-scaling-stroke, pinning its round caps against the bar's own non-uniform scale", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  const { light: lightTokens } = parseColorTokens(tokensCss924);
+  try {
+    const fills = [...container.querySelectorAll(".cost-bar-fill")];
+    assert.ok(fills.length >= 3, `expected fill lines across cost panel/lane card/header meter contexts; found ${fills.length}`);
+    for (const fill of fills) {
+      const computed = getComputedStyle(fill as Element);
+      assert.equal(computed.strokeLinecap, "round", ".cost-bar-fill stroke-linecap — a true circular cap, not a square-ended bar");
+      assert.equal(computed.strokeWidth, "6", ".cost-bar-fill stroke-width — matches FILL_HEIGHT (CostBar.tsx)");
+      assert.equal(
+        computed.vectorEffect,
+        "non-scaling-stroke",
+        ".cost-bar-fill must pin its stroke width/cap radius against the bar's own non-uniform scale",
+      );
+      assert.equal(computed.stroke, lightTokens["--sap-fill"], ".cost-bar-fill stroke must resolve the real --sap-fill hex");
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
 // #924 gate② PO item 2: a fixed em floor alone still wrapped a longer label (a by-model row's own
 // model name, e.g. "claude-sonnet-5") — `minmax(7em, max-content)` keeps the >= 7em floor AC2
 // names while growing to fit whatever the longest rendered label actually needs.
@@ -3218,32 +3257,40 @@ test("AC2: every rendered cost-bar label, including one longer than the 7em floo
  * `parseColorTokens` (this repo's own light/dark token splitter, `contrast.ts`) is what "resolve
  * the light-dark() pair yourself" means here. Every one of the AC's own named shapes is checked
  * individually, not folded into one generic `.cost-bar-fill` query.
+ *
+ * #924 AC3: `CostBar.tsx`'s own three shapes (`.cost-bar` pill, `.lane-card-bar` pill,
+ * `.spend-meter-bar`) carry their outline on a SEPARATE `.cost-bar-fill-outline` element (a wider,
+ * round-capped line drawn UNDER the pill — panels.css's own "stroke ring" doc) — its own
+ * `stroke-width` is 8 (the pill's 6 plus 1px on each side), not the bare 1px `.hero-pool-chip`/
+ * droplet declare directly, since those two never need a second element (their own shapes aren't
+ * independently stroke-width-scaled the way the pill's round cap is).
  */
-test("AC3: every named filled shape (.cost-bar pill, .lane-card-bar pill, .hero-pool-chip, an in-motion droplet, .spend-meter-bar) resolves the REAL --sap-text hex as a 1px outline in light theme, and none in dark", async () => {
+test("AC3: every named filled shape (.cost-bar pill, .lane-card-bar pill, .hero-pool-chip, an in-motion droplet, .spend-meter-bar) resolves the REAL --sap-text hex as a 1px-equivalent outline in light theme, and none in dark", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   const { light: lightTokens } = parseColorTokens(tokensCss924);
   const lightOutlineHex = lightTokens["--sap-text"]!;
   assert.ok(lightOutlineHex, "--sap-text must resolve a light-theme hex via parseColorTokens");
 
-  const namedShapes: [string, () => Element | null][] = [
-    [".cost-bar pill (cost panel)", () => container.querySelector("#cost .cost-bar-fill")],
-    [".lane-card-bar pill", () => container.querySelector("svg.lane-card-bar .cost-bar-fill")],
-    [".hero-pool-chip", () => container.querySelector(".hero-pool-chip rect")],
+  const namedShapes: [string, () => Element | null, string][] = [
+    [".cost-bar pill (cost panel)", () => container.querySelector("#cost .cost-bar-fill-outline"), "8"],
+    [".lane-card-bar pill", () => container.querySelector("svg.lane-card-bar .cost-bar-fill-outline"), "8"],
+    [".hero-pool-chip", () => container.querySelector(".hero-pool-chip rect"), "1px"],
     [
       "an in-motion droplet",
       () => container.querySelector('.hero-droplet:not([data-at="trunk"]):not([data-at="needs-human"]) .hero-droplet-shape'),
+      "1px",
     ],
-    [".spend-meter-bar", () => container.querySelector("svg.spend-meter-bar .cost-bar-fill")],
+    [".spend-meter-bar", () => container.querySelector("svg.spend-meter-bar .cost-bar-fill-outline"), "8"],
   ];
 
   try {
     document.documentElement.setAttribute("data-theme", "sapwood");
-    for (const [label, find] of namedShapes) {
+    for (const [label, find, expectedWidth] of namedShapes) {
       const el = find();
       assert.ok(el, `light theme: ${label} must render`);
       const computed = getComputedStyle(el as Element);
       assert.equal(computed.stroke, lightOutlineHex, `light theme: ${label} outline stroke must resolve the exact --sap-text hex`);
-      assert.equal(computed.strokeWidth, "1px", `light theme: ${label} outline width`);
+      assert.equal(computed.strokeWidth, expectedWidth, `light theme: ${label} outline width`);
     }
 
     document.documentElement.setAttribute("data-theme", "heartwood");

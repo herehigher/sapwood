@@ -80,11 +80,15 @@ function FeedEntry({ event, titles, repoUrl, now }: { event: DomainEvent; titles
   const attention = event.known && hasAttention(event.kind, payload);
   const glyph = event.known ? gateGlyph(event.kind, payload) : null;
   const dotColor = attention ? "var(--rust)" : glyph === true ? "var(--moss)" : "var(--sap-fill)";
+  // #924 AC3: only the --sap-fill dot needs the light-theme 1px --sap-text boundary — --rust/
+  // --moss are both light-dark() (they already darken per theme, clearing 3:1 against the ground
+  // unaided), unlike the flat --sap-fill.
+  const dotBorder = dotColor === "var(--sap-fill)" ? "1px solid var(--sap-fill-outline)" : "none";
   return (
     // #892 AC5: `.recipe-list-entry` (panels.css) is the freshly-appended-row recipe — a feed
     // entry is exactly that (a newest-first row that mounts on every fresh event).
     <li className={attention ? "feed-entry feed-entry-attention recipe-list-entry" : "feed-entry recipe-list-entry"}>
-      <span className="feed-dot" style={{ background: dotColor }} aria-hidden="true" />
+      <span className="feed-dot" style={{ background: dotColor, border: dotBorder }} aria-hidden="true" />
       {glyph !== null && <StateGlyph ok={glyph} className={glyph ? "glyph-ok" : "glyph-fail"} />}
       <span className="feed-sentence">
         {parts.map((part, i) => (
