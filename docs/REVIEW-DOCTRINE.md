@@ -33,9 +33,9 @@ than once, and doctrine for how the loop should treat review findings in general
 
 **Carrier split (#434).** This file governs the **engine's own** reviewer; standing
 review-*discipline* rules for the **external** review bot live in the repo-root
-[`AGENTS.md`](../AGENTS.md), which that bot reads directly, and per-PR context stays in the
-verification plan appended to the review-request comment. The three carriers deliberately do not
-restate each other — a rule belongs to exactly one of them.
+[`AGENTS.md`](../AGENTS.md), which it reads directly; per-PR context lives in the
+review-request comment's own verification plan. The three carriers deliberately do not restate
+each other — a rule belongs to exactly one of them.
 
 ## Technical invariants
 
@@ -57,13 +57,10 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
 - **Safety-layer cross-check rule.** Any new engine state machine or dispatch path must be
   reviewed against each existing safety layer — kill switch, pause, cost/wall-clock ceiling, and
   both drain paths (graceful handoff and hard escalation): what does this mechanism do while that
-  layer is active, and what does that layer's firing do to this mechanism's state? (#168: paid
-  probes running past a breached ceiling, and drains falsely clearing or permanently wedging a
-  canary episode, were both misses of exactly this cross-product.)
+  layer is active, and what does that layer's firing do to this mechanism's state? (#168.)
 - **Unwired-function rule.** A shipped recovery/cleanup function with zero production callers is
   a defect, not a reserve: verify every new cleanup, resume, or clear entry point has a live
-  caller on the path that needs it. (Recurring class: `supervisor.resume()` in #172,
-  `clearEscalationMarker()` in #168's first round.)
+  caller on the path that needs it. (#172, #168.)
 
 ### Is this test real?
 
@@ -71,13 +68,13 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   race between uncontrolled real operations — real work vs. a real timer, no seam controlling
   either side. Reddened `main` three times (#403, #416). For a LOAD-BEARING race, the fix is a
   seam: a fake clock/collaborator, or a fast, deterministic, selectively self-terminating fake
-  (PR #418's fake-git shim). FINE, and a different failure class: an outer hang-guard bounding
-  catastrophe rather than deciding the verdict, or a real passthrough timed against a generous,
-  documented, non-load-bearing margin — PR #418's `REAL_OP_TIMEOUT_MS` widened 500ms→1000ms
-  (#418), then 1000ms→3000ms (#403), each widen stated in-code as measured-cost < margin <
-  guard-ceiling, not chosen by feel. Ask: does the verdict depend on which of two uncontrolled
-  real operations finishes first? If yes, it needs a seam; if it's a documented backstop around a
-  deterministic fake or bounded passthrough, it is compliant.
+  (PR #418's fake-git shim). FINE: an outer hang-guard bounding catastrophe rather than deciding
+  the verdict, or a real passthrough timed against a generous, documented, non-load-bearing
+  margin — PR #418's `REAL_OP_TIMEOUT_MS` widened 500ms→1000ms, then 1000ms→3000ms (#403), each
+  widen stated in-code as measured-cost < margin < guard-ceiling, not chosen by feel. Ask: does
+  the verdict depend on which of two uncontrolled real operations finishes first? If yes, it
+  needs a seam; if it's a documented backstop around a deterministic fake or bounded passthrough,
+  it is compliant.
 - **Test-realism family — prove it against the real thing, not a stand-in for it.** Four variants
   of one failure: an assertion that looks like it proves an acceptance criterion but actually
   proves something else — a copied constant, a fixture's own preset, or an isolated unit — never
@@ -93,19 +90,21 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     (docs/dev-guide/07-dashboard.md) — EXCEPT a computed-style claim itself; see STYLE below.
     Worked example: `textBox()`/`CHAR_ADVANCE` (`dashboard/src/hero/hero.test.ts`) turns
     font-size/char-count into a rendered extent without a browser, tied to the real draw path's
-    own inputs, plus a cascade/source-order assertion instead of hand-copying which rule wins.
-    Three shapes seen (#353, PR #738 (issue #728), PR #737): (1) the test computes its
+    own inputs.
+    Four shapes (#353, #728, #737): (1) the test computes its
     expected value outside the thing it's testing instead of reading/pinning it against the real
     source; (2) the test exercises only the easy/nominal instance while the AC's own wording
     names a combinatorial or boundary case it never constructs; (3) the test asserts identity
     with the very constant that produced the render, so it proves nothing about the render
-    (#936). FINE: a literal that IS the specification — a golden value nothing else in the
-    codebase claims to own.
+    (#936, #922); (4) proxy-shares-assumption: the test's own helper embeds the same
+    simplifying assumption as the code under test, so a wrong assumption in production can't
+    fail its own proxy (#922). FINE: a literal that IS the specification — a golden value
+    nothing else in the codebase claims to own.
   - **DECISION (fake-verdict rule, engine side).** Presetting a fake collaborator to already
     return the acceptance criterion's target decision, then asserting against the fake's own
-    canned value, proves only that the fake echoes what it was told — the real policy function
-    that is supposed to decide that value never runs. Distinct from VALUE (a copied constant
-    drifting from its source): here the deciding code path never executes at all. Worked
+    canned value, proves only that the fake echoes what it was told. Distinct from VALUE (a
+    copied constant drifting from its source): here the deciding code path never executes at
+    all. Worked
     example: PR #835 (issue #824)'s `ac1`/`ac2` fixtures preset
     `FakeSupervisor.reclaimResults` straight to the AC's target `worktreeRetained` value with no
     baseline ever established, so `WorkerSupervisor.reclaim`'s real mtime/ctime policy never ran;
@@ -122,28 +121,36 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     only a unit test of the extracted piece; ACs with no render path (server routes, pure modules)
     are outside this rule. Distinct from VALUE above: that sub-case governs which VALUE an
     assertion checks, this one governs which TREE produces it.
-    **Data-flow sub-shape (#866, #868), one level up.** Real entry-point rendering isn't enough
-    if its props/state are hand-assembled into a combination the real derivation could never
-    produce — mount with real prefetched/settled queries and a stubbed `fetch`, over a fixture
-    building the AC's named boundary case, not just the nominal one. `registerRealDom()`
+    **Data-flow sub-shape (#866, #868, #925), one level up.** Real entry-point rendering isn't
+    enough if its props/state are hand-assembled into a combination the real derivation could
+    never produce — mount with real prefetched/settled queries and a stubbed `fetch`, over a
+    fixture building the AC's named boundary case, not just the nominal one. `registerRealDom()`
     (`docs/dev-guide/07-dashboard.md`) solved this for CLICK wiring (retro #355); QUERY/data-flow
-    wiring has no equivalent shared helper yet.
+    wiring has no equivalent shared helper yet. Same shape at #925: `NeedsAttention` fixtures
+    built `DomainEvent`s via `toDomainEvent` directly instead of folding wire events through
+    `foldOpenAttention`, so its real output combination was never under test.
   - **STYLE (computed-style ACs are VALUE's real-DOM exception).** "Authored" isn't "rendered" —
     a CSS/typography AC needs `registerRealDom()` plus a real `getComputedStyle` read, never a
-    stand-in. Seen twice on #879 / PR #886: a regex on declaration TEXT proves a rule exists, not
-    that it cascades or wins over a later rule; mounting only the ONE stylesheet under test still
-    gets an inherited `em` wrong, since a partial cascade misses the font-size it resolves off.
-    Mount every stylesheet the element inherits, in production order, and assert the exact value —
-    never `notEqual`/existence, which any non-default value satisfies.
+    stand-in. (a) Text vs. cascade (#879 / PR #886): a regex on declaration TEXT proves a rule
+    exists, not that it cascades; mount every inherited stylesheet, in production order, and
+    assert the exact value — never `notEqual`/existence. (b) `light-dark()` is unresolvable here
+    (#924 AC3, #923, #925): happy-dom always echoes the raw unresolved text, either theme. Fix at
+    the token: a literal-hex value pinned to its source by a
+    `tokens.test.ts` assertion (`tokens.css`'s `--sap-fill-outline`/`--attention-tone-*`
+    pattern), never a raw `.style` read.
   - **COLLISION → COVERAGE (any AC/doc's "all/every named set" claim, not only neighbor
     boxes).** `assertNoOverlap`/`boxesOverlap` (`dashboard/src/hero/hero.test.ts`) is sound
     infra, but each PR hand-curates a partial box list, missing neighbors its author forgot —
-    recurring (#728, #745, #891, #901, #902). Include every element sharing the new one's
+    recurring (#728, #745, #891, #892, #901, #902). Include every element sharing the new one's
     region, position read off rendered markup wherever filtering/compaction can diverge — a
-    constant is fine for genuinely static geometry. Same shape, #892 (Playwright covered only
-    `PhaseInspectorDrawer`, not `ConfigDrawer`/`Controls`; `.recipe-list-entry` covered only
-    `NeedsAttention`, not `ActivityFeed`/`LaneBoard`). Derive the covered set from what the
-    AC/doc names, never a hand-typed list.
+    constant is fine for genuinely static geometry. Derive the covered set from what the AC/doc
+    names, never a hand-typed list.
+  - **STRUCTURE-AS-FINISH (design-fidelity ACs need a crop-pair oracle, not element-presence).**
+    Failure: a ledger/AC closes "resolved" because the element exists and its token resolved,
+    while the render is far from mockup finish (#729). Rule: name the visual properties
+    claimed — type family/scale/weight, stroke, contrast, density, size ratio, alignment — against
+    a mockup crop pair; element-present/token-exact alone is never finish evidence, and
+    "resolved" needs the crop pair on record.
 
 ### Documentation claims
 
@@ -168,19 +175,18 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   two structured, provider-authoritative signals first (a rejected `rate_limit_event`, an errored
   result carrying `api_error_status:429`) before falling back to the enumerated pattern list
   (`DEFAULT_LLM_FAILURE_PATTERNS`). The two failure directions are NOT symmetric: a too-wide
-  pattern gives a false POSITIVE that halts a healthy engine immediately and visibly; a too-narrow
-  list gives a false NEGATIVE that — per `DEFAULT_LLM_FAILURE_PATTERNS`'s own accounting — the
-  empty-spin breaker bounds on the peripheral-role path, but nothing in the classifier bounds on
-  the dispatched-WORKER-lane path; only the OUTER safety ceiling (`cost.roundBudgetUsd`/
-  `dailyBudgetUsd`) contains a recurring miss there. Prefer narrow anyway, naming that
-  outer-layer dependency and the residual blind spot explicitly rather than claiming full
-  coverage.
+  pattern gives a false POSITIVE that halts a healthy engine immediately; a too-narrow list gives
+  a false NEGATIVE that — per `DEFAULT_LLM_FAILURE_PATTERNS`'s own accounting — the empty-spin
+  breaker bounds only on the peripheral-role path; the dispatched-WORKER-lane path depends
+  instead on the OUTER safety ceiling (`cost.roundBudgetUsd`/`dailyBudgetUsd`). Prefer narrow
+  anyway, naming that outer-layer dependency and the residual blind spot explicitly rather than
+  claiming full coverage.
 - **Doctrine self-modification rule.** A PR that modifies this review-doctrine file itself must
-  be prominently flagged in review, with a recommendation to route it needs-human rather than
-  auto-merge. The reviewer applies the doctrine loaded at engine construction, never the version
-  on the PR's branch — the change cannot influence the doctrine used for its own review, but it
-  can still pass under the prior rules, so a human should confirm rule changes. This file is
-  deliberately NOT guard-protected (docs/security.md) — this prose IS the enforcement.
+  be prominently flagged in review, recommended needs-human rather than auto-merge. The reviewer
+  applies the doctrine loaded at engine construction, never the version on the PR's branch — the
+  change cannot influence its own review, but can still pass under the prior rules, so a human
+  should confirm rule changes. This file is deliberately NOT guard-protected (docs/security.md)
+  — this prose IS the enforcement.
 - **A tier-C cannot-confirm is not a producer stall signal, and it burns spend twice**
   (#791; #857, #862, #863; #865, #901, #902, #903; #911). `docs/security.md`'s evidence tiers
   make tier-C (human-witnessed probe) producer-unforgeable BY DESIGN — the producer never
@@ -192,9 +198,9 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   comment: a COMMENT-carried record can't reach a later review; a BODY-carried one can, via
   `checkAcDriftBeforeDrive` flagging drift and gated re-entry's `buildAcSnapshot`
   (`ac-snapshot.ts`)/`State.recordAcSnapshotAndReclaimWorker` re-snapshot. #865's unimplemented
-  fix routes an all-operator-owned verdict to `ESCALATE` (mixed: `FIXUP`); until then, closing
-  one needs a human merge decision reading the record, or (body-carried only) that rebaseline.
-  Grounding: `docs/security.md`'s AC-evidence-tier doctrine, Decision #8.
+  fix routes an all-operator-owned verdict to `ESCALATE`; until then, closing one needs a human
+  merge decision reading the record, or a body-carried rebaseline. Grounding: `docs/security.md`'s
+  AC-evidence-tier doctrine, Decision #8.
 
 How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbatim principles):
 
@@ -215,8 +221,8 @@ How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbati
 ## Prompt architecture doctrine (#699)
 
 Three governing principles for what belongs in a role's SHIPPED PROMPT TEXT
-(`engine/prompts/*.md`), owner ruling 2026-08-06. Standing test for gate② on any prompt-touching
-PR; apply clause-by-clause, not file-by-file. Worked example:
+(`engine/prompts/*.md`), owner ruling 2026-08-06. Gate② standard for any prompt-touching PR,
+applied clause-by-clause, not file-by-file. Worked example:
 `docs/design/699-prompt-architecture-audit.md`.
 
 1. **A — legitimate content.** Role definition, duties, scope, goals, deliverables, norms,
@@ -231,10 +237,9 @@ PR; apply clause-by-clause, not file-by-file. Worked example:
 
 **Q3 safety-floor exception.** A rule whose omission produces unsafe output (the AC-evidence-tier
 floor; the human-merge-only-paths enumeration) stays prompt-resident even where a pull-model
-channel — `engine/src/roles/skills-plugin.ts`'s (#639/#640) on-demand skill serving the same
-`docs/security.md` content — also exists: a session must actively invoke a skill, so it is never
-a load-bearing substitute for content that must be unconditionally seen. Where principle 3
-collides with a floor like this, record the tension and the proposed carrier instead of
-deleting — a mechanically-pinned mirror-pair test against the canonical source
-(`engine/src/roles/prompts.test.ts`'s `#628`/`#653` tests) is the shipped answer when a floor has
-more than one hand-maintained carrier.
+channel (`skills-plugin.ts`, #639/#640, serving the same `docs/security.md` content) also
+exists: a session must actively invoke a skill, so it is never a load-bearing substitute for
+content that must be unconditionally seen. Where principle 3 collides with a floor like this,
+record the tension and the proposed carrier instead of deleting — a mechanically-pinned
+mirror-pair test against the canonical source (`prompts.test.ts`'s `#628`/`#653` tests) is the
+shipped answer when a floor has more than one hand-maintained carrier.

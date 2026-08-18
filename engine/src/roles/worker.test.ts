@@ -4020,106 +4020,12 @@ test("#935 AC2: a resumed lane's pre-handoff usage split across THREE lines for 
   }
 });
 
-// #935 AC3 (PO adjudication, PR #939 review thread PRRT_kwDOTFpSsc6ZyTZR, superseding the
-// disputed-scope reasoning from the prior round): two REAL redacted stream-json excerpts captured
-// from the actual dogfood lane #920 this issue's own table cites —
-// engine/src/roles/fixtures/lane-920-leg{2,5}.redacted.jsonl. Tool inputs/text/thinking are
-// scrubbed to same-length filler and session_id reads the literal string "redacted"; `usage`,
-// `message.id`, `model`, block types, and the terminal `result.usage`/`total_cost_usd` are
-// untouched real data. Reference figures (PO adjudication): -1.7% (leg2) / -1.3% (leg5).
-function runAc3Replay(name: string, jsonl: string): void {
-  const lines = jsonl
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.startsWith("{"));
-  const parsed = lines.map((l) => JSON.parse(l) as Record<string, unknown>);
-  const assistantLines = parsed.filter((o) => o.type === "assistant");
-  assert.ok(assistantLines.length >= 20, `${name}: expected >=20 assistant lines, got ${assistantLines.length}`);
-
-  const idCounts = new Map<string, number>();
-  for (const o of assistantLines) {
-    const id = (o.message as Record<string, unknown> | undefined)?.id as string | undefined;
-    if (id) idCounts.set(id, (idCounts.get(id) ?? 0) + 1);
-  }
-  const multiLineIds = [...idCounts.values()].filter((c) => c > 1).length;
-  assert.ok(multiLineIds >= 5, `${name}: expected >=5 message ids with >1 line, got ${multiLineIds}`);
-
-  const result = parsed.find((o) => o.type === "result") as { total_cost_usd: number; usage: Record<string, number> } | undefined;
-  assert.ok(result, `${name}: fixture must carry a terminal result line`);
-  const real = result!;
-
-  const pricing = loadPricingTable(cfg);
-  const deduped = parseAssistantUsageDeltas(jsonl);
-
-  // Exact equality (not a tolerance band): #935's fix should recover every real input/cache
-  // token exactly once — see the file header note above for why this holds on real data.
-  const summed = deduped.reduce(
-    (acc, d) => ({
-      input: acc.input + d.inputTokens,
-      cacheCreate: acc.cacheCreate + d.cacheCreationTokens,
-      cacheRead: acc.cacheRead + d.cacheReadTokens,
-    }),
-    { input: 0, cacheCreate: 0, cacheRead: 0 },
-  );
-  assert.equal(summed.input, real.usage.input_tokens, `${name}: deduped input_tokens must equal the terminal total exactly`);
-  assert.equal(
-    summed.cacheCreate,
-    real.usage.cache_creation_input_tokens,
-    `${name}: deduped cache_creation_input_tokens must equal the terminal total exactly`,
-  );
-  assert.equal(
-    summed.cacheRead,
-    real.usage.cache_read_input_tokens,
-    `${name}: deduped cache_read_input_tokens must equal the terminal total exactly`,
-  );
-
-  const dedupedUsd = deduped.reduce((sum, d) => sum + estimateUsd(d, pricing), 0);
-  // Pre-#935 behavior, reimplemented locally (never re-exported from worker.ts) purely to prove
-  // the class of bug this AC pins: sum every `assistant` line's usage with no de-duplication.
-  const naiveUsd = assistantLines.reduce((sum, o) => {
-    const m = (o.message ?? {}) as Record<string, unknown>;
-    const u = (m.usage ?? {}) as Record<string, number>;
-    return (
-      sum +
-      estimateUsd(
-        {
-          model: typeof m.model === "string" ? m.model : "unknown",
-          inputTokens: u.input_tokens ?? 0,
-          outputTokens: u.output_tokens ?? 0,
-          cacheCreationTokens: u.cache_creation_input_tokens ?? 0,
-          cacheReadTokens: u.cache_read_input_tokens ?? 0,
-        },
-        pricing,
-      )
-    );
-  }, 0);
-
-  // Signed relative error, per the PO adjudication: the tier-aware + chars/4 estimate must land
-  // in [-12%, 0%] of the real terminal total_cost_usd (reference: -1.7% leg2, -1.3% leg5) — an
-  // UNDER-estimate only, never over, matching the chars/4 estimator's documented under-bias.
-  const dedupedSigned = (dedupedUsd - real.total_cost_usd) / real.total_cost_usd;
-  assert.ok(
-    dedupedSigned >= -0.12 && dedupedSigned <= 0,
-    `${name}: deduped estimate ${dedupedUsd} signed error ${dedupedSigned} should be within [-12%, 0%] of real ${real.total_cost_usd}`,
-  );
-  // The naive (pre-#935) per-line sum must fall OUTSIDE that same signed band — pins the +50%
-  // overcount class so it cannot silently come back.
-  const naiveSigned = (naiveUsd - real.total_cost_usd) / real.total_cost_usd;
-  assert.ok(
-    naiveSigned < -0.12 || naiveSigned > 0,
-    `${name}: naive per-line sum ${naiveUsd} signed error ${naiveSigned} should NOT be within [-12%, 0%] of real ${real.total_cost_usd}`,
-  );
-}
-
-test("#935 AC3 (replay, lane-920-leg2.redacted.jsonl)", () => {
-  const jsonl = readFileSync(fileURLToPath(new URL("./fixtures/lane-920-leg2.redacted.jsonl", import.meta.url)), "utf8");
-  runAc3Replay("lane-920-leg2.redacted.jsonl", jsonl);
-});
-
-test("#935 AC3 (replay, lane-920-leg5.redacted.jsonl)", () => {
-  const jsonl = readFileSync(fileURLToPath(new URL("./fixtures/lane-920-leg5.redacted.jsonl", import.meta.url)), "utf8");
-  runAc3Replay("lane-920-leg5.redacted.jsonl", jsonl);
-});
+// #935 AC1/AC2 (the three estimator mechanisms — tiered pricing, dedup-by-message-id, chars/4
+// output fallback) stay covered by synthetic unit fixtures below. AC3 (the real-transcript band
+// check against actual dogfood usage) is not a repo-carried test: real captured transcripts are
+// dev-time artefacts of one dogfood run, not framework fixtures, so they live in the deploy's
+// `data/fixtures/estimator/` and the replay runs as an operator script —
+// `engine/scripts/estimator-replay.ts` (see docs/supervision.md, "Est-vs-real cost method").
 
 test("#155: a DETACHED lane (no in-memory handle) carries no live telemetry — never invents a second baseline", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
