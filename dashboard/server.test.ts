@@ -347,6 +347,7 @@ test("/api/loop/state matches the §8 shape against a seeded DB", async () => {
       "costUsd",
       "endedAt",
       "estCostUsd",
+      "fixRound",
       "issue",
       "lane",
       "pr",
@@ -510,6 +511,7 @@ test("#642 AC1: /api/loop/state, /api/events, /api/spend are byte-identical to t
             endedAt: null,
             costUsd: null, // in flight — the settled bill isn't written until reclaim
             estCostUsd: null,
+            fixRound: 0, // no fix round entered yet
             contextTokens: null,
             tokenComposition: null,
           },

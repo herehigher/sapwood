@@ -286,35 +286,27 @@ code,
 }
 
 /*
- * §3's A→B→C→D→E layout: header and hero always span the full row, same as the cost strip —
- * only the lane board / activity feed share a row (§3's C | D split), which `.stack`'s own
- * auto-fit already gives the two remaining items. #716 gate② P2-7: without this, the hero's fixed
- * 1200×380 stage landed in the SAME minmax(320px, 1fr) cell as a single lane card — live-measured
- * at 374×118px with ~3px labels, instead of the full-width band the design calls for.
+ * §3's A→B→C→D→E layout: header and hero always span the full row, same as the cost strip.
+ * #716 gate② P2-7: without this, the hero's fixed 1200×380 stage landed in the SAME
+ * minmax(320px, 1fr) cell as a single lane card — live-measured at 374×118px with ~3px labels,
+ * instead of the full-width band the design calls for.
  * #892: `.config-drawer` dropped out of this list — now a native `<dialog>` (`.showModal()`),
  * always `position: fixed` (panels.css) and therefore never a participant in this grid at all,
  * same reasoning `.phase-inspector`'s own comment already gives.
+ * #926 (Q3 owner ruling): the lane board and activity feed each now claim a full-width row of
+ * their own, lanes first — superseding #897's shared two-column `.lane-activity-row` row (that
+ * pairing left no room for this issue's head/body card anatomy). `.live-only` is `LiveOnly`'s own
+ * replay-mode placeholder for the lane board slot — it must span the same full width the real
+ * `.lane-board` would, so a replay view's row layout never differs from live's.
  */
 .stack > .app-header,
 .stack > .hero-frame,
 .stack > .cost-strip,
 .stack > .needs-attention,
-.stack > .lane-activity-row {
+.stack > .lane-board,
+.stack > .activity-feed,
+.stack > .live-only {
   grid-column: 1 / -1;
-}
-
-/*
- * #897 AC5: the lane board / activity feed pair's own nested grid — `.stack`'s shared
- * `auto-fit` column template never collapses unused columns in THIS row specifically (see the
- * App.tsx comment on `.lane-activity-row`'s call site for why), which left the row using only
- * half of a 1425px canvas with the rest empty. Scoping the SAME auto-fit pattern to a grid only
- * these two items ever populate restores the full-width split — collapse now has a column
- * template with nothing else claiming its tracks.
- */
-.lane-activity-row {
-  display: grid;
-  gap: var(--space-4);
-  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
 }
 
 /*
@@ -345,6 +337,25 @@ code,
  * this — it can still show two narrow columns above 720px depending on viewport width). */
 @media (max-width: 720px) {
   .stack {
+    grid-template-columns: 1fr;
+  }
+
+  /* #926 AC2: `.lane-board-grid`'s own `auto-fit, minmax(400px, 1fr)` (panels.css) does not
+   * reliably collapse to one column at this width on its own — verified directly (real-browser
+   * `boundingBox()`, shots.spec.ts) that `auto-fit`'s "how many 400px columns fit" resolution can
+   * still land on 2. A plain, non-auto-fit `1fr` sidesteps that resolution entirely, matching
+   * `.stack`'s own explicit override just above — 1 column IS this breakpoint's own target per
+   * AC2 anyway, so there's nothing for `auto-fit` to compute here.
+   *
+   * Investigating this surfaced a SEPARATE, pre-existing bug this issue does NOT fix: at this same
+   * breakpoint (`.app-shell` column-direction), every `.stack` child — including `.hero-frame`,
+   * unrelated to lanes — renders far wider than the 720px viewport (`svg.hero`'s fixed 1200×515
+   * `viewBox`, `stage.tsx`, appears to be the root cause; `min-width: 0` on every ancestor in the
+   * chain did not stop it). Filed for a human to triage — out of #926's own scope (the lane board's
+   * COLUMN COUNT is correct either way, per the AC2 Playwright test; the ABSOLUTE width both that
+   * test and this comment describe is inflated by the same bug across every module, not specific
+   * to lanes). */
+  .lane-board-grid {
     grid-template-columns: 1fr;
   }
 }

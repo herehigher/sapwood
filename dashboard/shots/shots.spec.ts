@@ -240,16 +240,14 @@ test("§889 AC1: the round list never renders inline by default, and hero/lanes/
 });
 
 /**
- * #897 AC5's own verification plan asks for a 1440px viewport measurement of the lanes/activity
- * row's rendered x-extent, proving the mockup's full-width split (no unused trailing region). The
- * component test suite (`App.test.tsx`) can only prove the `.lane-activity-row` wrapper exists in
- * the markup and that its CSS carries the intended `auto-fit` declaration — `happy-dom` (that
- * suite's DOM) has no real CSS Grid layout engine, so it cannot compute what width that grid
- * actually resolves to. A REAL browser is the only thing that can prove the cascade genuinely
- * closes the dead zone the issue reported, the same "real layout, not a stand-in" posture this
- * file's other tests above already apply to click hit-testing and computed style.
+ * #926 AC1/Q3 owner ruling: lanes and activity now each claim a full-width `.stack` row (lanes
+ * first), superseding #897's shared two-column `.lane-activity-row` split — that pairing left no
+ * room for this issue's mockup-scale head/body card anatomy. `App.test.tsx`'s own STYLE test can
+ * only prove the DECLARED `grid-column: 1/-1` (happy-dom has no real CSS Grid layout engine); a
+ * real browser is what proves the cascade actually resolves both modules to the full row width
+ * and stacks them, the same "real layout, not a stand-in" posture this file's other tests apply.
  */
-test("#897 AC5: at 1440px, the lane board and activity feed together span the row's full width — no trailing dead zone", async ({
+test("#926 AC1: at 1440px, the lane board and activity feed each span the row's full width and stack — lanes above activity", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -257,15 +255,13 @@ test("#897 AC5: at 1440px, the lane board and activity feed together span the ro
   await page.locator("#overview").waitFor({ state: "visible" });
   await page.waitForLoadState("networkidle");
 
-  const row = page.locator(".lane-activity-row");
-  const rowBox = await row.boundingBox();
-  expect(rowBox, "the .lane-activity-row wrapper must render with a real bounding box").not.toBeNull();
+  const stackBox = await page.locator("main.stack").boundingBox();
+  expect(stackBox, "the .stack row must render with a real bounding box").not.toBeNull();
 
-  // `?demo` is always replay mode (`App.tsx`'s `DemoApp` doc) — the real `LaneBoard` never
-  // mounts there, so the row's first child is `LiveOnly`'s "live only" placeholder instead. Both
-  // are the SAME panel-shaped element the real split renders (`LiveOnly.tsx`'s own doc: "reads as
-  // the SAME panel, dimmed"), so measuring the placeholder's extent is honest evidence for the
-  // row's actual column split either way.
+  // `?demo` is always replay mode (`App.tsx`'s `DemoApp` doc) — the real `LaneBoard` never mounts
+  // there, so the lane slot is `LiveOnly`'s "live only" placeholder instead, the SAME full-width
+  // panel-shaped element the real board renders (`LiveOnly.tsx`'s own doc: "reads as the SAME
+  // panel, dimmed").
   const laneSlot = (await firstMatch(page, MODULE_SELECTORS.lanes)) ?? page.locator("nonexistent-lanes-anchor");
   const feedSlot = page.locator('section[aria-label="activity"]');
   const laneBox = await laneSlot.boundingBox();
@@ -273,44 +269,62 @@ test("#897 AC5: at 1440px, the lane board and activity feed together span the ro
   expect(laneBox, "the lane board slot must render with a real bounding box").not.toBeNull();
   expect(feedBox, "the activity feed must render with a real bounding box").not.toBeNull();
 
-  // The mockup's split is two side-by-side panels filling the row — proven by the pair's
-  // combined horizontal extent actually reaching the row's own edges, not just existing
-  // somewhere inside it. A tolerance covers the row's own padding/gap, never a half-canvas gap.
   const tolerancePx = 24;
-  const leftmost = Math.min(laneBox!.x, feedBox!.x);
-  const rightmost = Math.max(laneBox!.x + laneBox!.width, feedBox!.x + feedBox!.width);
-  expect(leftmost - rowBox!.x, "the pair's leftmost edge must reach the row's own left edge").toBeLessThan(tolerancePx);
-  expect(
-    rowBox!.x + rowBox!.width - rightmost,
-    "the pair's rightmost edge must reach the row's own right edge — no unused trailing region",
-  ).toBeLessThan(tolerancePx);
-
-  // The two panels must actually be SIDE BY SIDE at this width (the mockup's split), not stacked
-  // — a meaningful overlap in Y with distinct X ranges is what "sharing a row" means.
-  expect(Math.abs(laneBox!.y - feedBox!.y), "lane board and activity feed must sit on the same row, not stacked").toBeLessThan(tolerancePx);
-
-  // #897: the edge-union and same-y checks above also pass if both panels render at the SAME x
-  // range, each spanning the row's full width (full overlap) — neither checks horizontal ordering
-  // or non-overlap. The lane slot renders first in `.lane-activity-row`'s markup (App.tsx) and
-  // this row's own auto-fit grid (app.css) places DOM order left-to-right, so a genuine split
-  // requires the lane slot's right edge to precede the feed's left edge, within the same row-gap
-  // tolerance used above.
-  expect(
-    feedBox!.x - (laneBox!.x + laneBox!.width),
-    "the lane slot's right edge must clear the activity feed's left edge (within the row gap) — proves the panels sit side by side rather than overlapping",
-  ).toBeGreaterThan(-tolerancePx);
-
-  // Each panel must also claim a real share of the row, not a sliver beside a panel that spans
-  // nearly the whole width. `.lane-activity-row` (app.css) is two equal `1fr` auto-fit columns, so
-  // an even split is the design's own target; 20% of the row is a conservative floor only a
-  // genuine two-panel split can clear.
-  const minSharePx = rowBox!.width * 0.2;
-  expect(laneBox!.width, `the lane slot must occupy at least 20% (${minSharePx.toFixed(0)}px) of the row's width`).toBeGreaterThan(
-    minSharePx,
+  // `.stack` (app.css) carries its own `padding: var(--space-4)` (16px each side) — a grid item's
+  // own box sits inside that content box, never spanning the padding, so the target is the
+  // CONTENT width, not `.stack`'s own border-box width `boundingBox()` reports.
+  const stackContentWidth = stackBox!.width - 2 * 16;
+  expect(laneBox!.width, "the lane board must span the .stack row's full content width").toBeGreaterThan(stackContentWidth - tolerancePx);
+  expect(feedBox!.width, "the activity feed must span the .stack row's full content width").toBeGreaterThan(
+    stackContentWidth - tolerancePx,
   );
-  expect(feedBox!.width, `the activity feed must occupy at least 20% (${minSharePx.toFixed(0)}px) of the row's width`).toBeGreaterThan(
-    minSharePx,
+
+  // Stacked, not side by side: activity's top edge must sit at/after the lane board's own bottom
+  // edge — the opposite of #897's same-row check, which asserted an overlapping Y range.
+  expect(feedBox!.y, "activity must render BELOW the lane board, not beside it").toBeGreaterThanOrEqual(
+    laneBox!.y + laneBox!.height - tolerancePx,
   );
+});
+
+/**
+ * #926 AC2: the board's own per-viewport card count/width — genuinely CI-checkable via real
+ * `boundingBox()`es, distinct from AC5's human-witnessed crop-pair comparison. Uses the SAME
+ * live-mocked `#882` fixture (`liveLanesLoopState`, `lanesMax: 4` — 3 real lanes + 1 idle slot) as
+ * `captureLiveLanes` below, so the real `LaneBoard` mounts (never `?demo`'s `LiveOnly` placeholder).
+ */
+test("#926 AC2: the board renders 3 cards per row at 1440px, 2 at 1024px, 1 at 720px, each >= 400px wide", async ({ page }) => {
+  const expectedPerRow: Record<(typeof VIEWPORTS)[number], number> = { 1440: 3, 1024: 2, 720: 1 };
+  for (const width of VIEWPORTS) {
+    await page.setViewportSize({ width, height: 900 });
+    await mockLiveApi(page, liveLanesLoopState());
+    await page.goto("/");
+    const lanes = page.locator('section[aria-label="lanes"]');
+    await lanes.waitFor({ state: "visible" });
+    await page.waitForLoadState("networkidle");
+
+    const cardBoxes = [];
+    const cards = page.locator(".lane-card");
+    for (let i = 0; i < (await cards.count()); i++) {
+      const box = await cards.nth(i).boundingBox();
+      if (box) cardBoxes.push(box);
+    }
+    expect(cardBoxes.length, `at ${width}px expected the fixture's 4 lane-card slots (3 real + 1 idle)`).toBe(4);
+
+    // Group into rows by shared Y (a small tolerance for sub-pixel rounding across a row).
+    const rowTolerancePx = 4;
+    const rows: (typeof cardBoxes)[] = [];
+    for (const box of cardBoxes) {
+      const row = rows.find((r) => Math.abs(r[0]!.y - box.y) < rowTolerancePx);
+      if (row) row.push(box);
+      else rows.push([box]);
+    }
+    const firstRow = rows[0] ?? [];
+    expect(firstRow.length, `at ${width}px expected ${expectedPerRow[width]} cards in the first row`).toBe(expectedPerRow[width]);
+    for (const box of firstRow) {
+      expect(box.width, `at ${width}px each card must be >= 400px wide`).toBeGreaterThanOrEqual(400);
+    }
+    await page.unroute("**/api/**");
+  }
 });
 
 /**
@@ -965,6 +979,7 @@ function liveLanesLoopState() {
           endedAt: null,
           costUsd: null,
           estCostUsd: 0.53,
+          fixRound: 0,
           contextTokens: null,
           tokenComposition: null,
         },
@@ -977,6 +992,9 @@ function liveLanesLoopState() {
           endedAt: null,
           costUsd: null,
           estCostUsd: 1.69,
+          // #926: matches the mockup's "FIXING · ROUND 1/2" (`lanes.prFixCap` config below is
+          // unset, so `resolveFixCap`'s default cap of 2 applies).
+          fixRound: 1,
           contextTokens: null,
           tokenComposition: null,
         },
@@ -989,6 +1007,7 @@ function liveLanesLoopState() {
           endedAt: null,
           costUsd: 1.1,
           estCostUsd: null,
+          fixRound: 0,
           contextTokens: null,
           tokenComposition: null,
         },

@@ -556,42 +556,38 @@ export function appContent(vm: AppViewModel) {
         )}
 
         {/*
-         * #897 AC5: `.stack`'s own `grid-template-columns: repeat(auto-fit, …)` is ONE shared
-         * column template across every row — a `grid-column: 1/-1` item elsewhere (header, hero,
-         * cost strip, …) marks every one of those columns "occupied" for the auto-fit collapse
-         * rule, even in a row where this pair are the only two items actually placed into them.
-         * Result: the columns beyond what this pair needs never collapse, and the row leaves the
-         * canvas's other half empty (the live bug this AC fixes). Wrapping the pair in their own
-         * nested auto-fit grid, itself spanning the full row (`.lane-activity-row` in app.css),
-         * gives auto-fit's collapse rule a column template used ONLY by these two items — it
-         * correctly collapses to exactly what's present, filling the row.
+         * #926 (§729 remainder, D25/D28; Q3 owner ruling 2026-08-17): lanes and activity now each
+         * take their own full-width `.stack` row, lanes first — superseding #897's side-by-side
+         * `.lane-activity-row` pairing, which could never fit the mockup's head/body card anatomy
+         * in half the canvas (this issue's own "Why"). `.stack > .lane-board`/`.activity-feed`
+         * (app.css) carry `grid-column: 1/-1` directly, same list every other full-width module is
+         * already on — no nested row wrapper needed now that each module claims a whole row itself.
          *
          * §11 boundary rule: `workers` is a mutable snapshot, not an append-only source — a lane
          * card's state/PR/elapsed/settled-cost has no replay-reconstructed equivalent today, so
          * the whole board is live-only rather than risk rendering a stale live snapshot under a
          * replay cursor.
          */}
-        <div className="lane-activity-row">
-          <LiveOnly mode={mode}>
-            <LaneBoard
-              lanesMax={loop.data?.lanes.max ?? null}
-              lanes={loop.data?.lanes.items ?? []}
-              titles={activeTitles}
-              repoUrl={repoUrl}
-              disconnected={disconnected}
-              workerBudgetUsdSoft={resolveWorkerBudgetUsdSoft(loop.data?.config)}
-              config={loop.data?.config ?? null}
-            />
-          </LiveOnly>
-
-          <ActivityFeed
-            events={activeEvents}
-            pinnedAttention={activeOpenAttention}
+        <LiveOnly mode={mode}>
+          <LaneBoard
+            lanesMax={loop.data?.lanes.max ?? null}
+            lanes={loop.data?.lanes.items ?? []}
             titles={activeTitles}
             repoUrl={repoUrl}
             disconnected={disconnected}
+            workerBudgetUsdSoft={resolveWorkerBudgetUsdSoft(loop.data?.config)}
+            config={loop.data?.config ?? null}
+            fixCap={fixCap}
           />
-        </div>
+        </LiveOnly>
+
+        <ActivityFeed
+          events={activeEvents}
+          pinnedAttention={activeOpenAttention}
+          titles={activeTitles}
+          repoUrl={repoUrl}
+          disconnected={disconnected}
+        />
 
         <CostStrip today={costToday} round={costRound} />
 

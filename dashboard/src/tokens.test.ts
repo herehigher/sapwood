@@ -226,9 +226,12 @@ test("AC3 COVERAGE: every production var(--sap-fill) paint site is on record", (
   //   `.hero-droplet-shape`/`.hero-pool-chip rect` outline rules, App.test.tsx's AC3 STYLE test.
   // - panels.css .header-back-to-live (background) — #923: its own `border: 1px solid
   //   var(--sap-fill-outline)` on the SAME rule, same compensation shape as `.cost-bar-fill`.
+  // - panels.css .lane-card-state-dot (background) — #926: its own `border: 1px solid
+  //   var(--sap-fill-outline)` on the SAME rule, same compensation shape as `.header-back-to-live`.
   const knownSites = [
     "panels.css:.cost-bar-fill:fill: var(--sap-fill);",
     "panels.css:.header-back-to-live:background: var(--sap-fill);",
+    "panels.css:.lane-card-state-dot:background: var(--sap-fill);",
     "panels.css:.transport-scrub::-webkit-slider-thumb:background: var(--sap-fill);",
     "panels.css:.transport-scrub::-moz-range-thumb:background: var(--sap-fill);",
     'components/ActivityFeed.tsx:const dotColor = attention ? "var(--rust)" : glyph === true ? "var(--moss)" : "var(--sap-fill)";',

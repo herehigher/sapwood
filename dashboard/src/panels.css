@@ -51,9 +51,15 @@
   margin-left: auto;
 }
 
+/* #926 (§729 remainder, D25/D28): 3 cards at 1440px, 2 at 1024px, 1 at 720px — `auto-fit` (not
+ * `auto-fill`) so a board with fewer lanes than fit a row stretches those cards wider rather than
+ * leaving empty tracks; every slot (real or `EmptyLaneCard`) is always populated, so this never
+ * leaves a dangling half-empty column the way a genuinely sparse `auto-fit` grid could. The
+ * ≤720px breakpoint (app.css) overrides this to a plain `1fr` — see that rule's own comment for
+ * why `auto-fit`'s own resolution can't be trusted at that width. */
 .lane-board-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
   gap: var(--space-2);
 }
 
@@ -71,7 +77,20 @@
   justify-content: center;
 }
 
-.lane-card-head,
+/* #926: the head's own closing hairline (`docs/design/mockup/lanes-{dark,light}.png`) — longhand,
+ * not `var(--hairline)`, same happy-dom `color-mix()`-in-a-shorthand gap `.panel-head`'s own
+ * comment above documents. */
+.lane-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+  border-bottom-color: color-mix(in srgb, var(--bark) 25%, transparent);
+}
+
 .lane-card-foot {
   display: flex;
   align-items: center;
@@ -79,20 +98,46 @@
   gap: var(--space-2);
 }
 
-.lane-card-head-left {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
 .lane-card-name {
   font-weight: 600;
 }
 
+/* #926 AC3: uppercase mono state word, dot + word — `.data` (app.css) already supplies
+ * `--font-data`; text-transform is scoped here rather than onto `.data` generally, since other
+ * `.data` consumers (lane id, EntityRef numbers) must keep their own natural case. */
 .lane-card-state {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  text-transform: uppercase;
+}
+
+/* #926: the active-state dot (mockup: amber, next to the uppercase word) — supplementary to the
+ * word itself, never the sole state signal (§5 "never color alone"; the unknown-state branch
+ * already renders `StateGlyph`'s shaped ✕ instead of this dot). Same fill+outline pair
+ * `.header-back-to-live`/`.cost-bar-fill` already carry (tokens.test.ts AC3 COVERAGE) — a filled
+ * `--sap-fill` site is invisible in light theme without its own `--sap-fill-outline` stroke. */
+.lane-card-state-dot {
+  box-sizing: border-box;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--sap-fill);
+  border: 1px solid var(--sap-fill-outline);
+}
+
+/* #926: the body's own droplet + big issue number (`docs/design/mockup/lanes-{dark,light}.png`) —
+ * `EntityRef`'s own small type glyph still renders inline before the number (reused as-is, never
+ * duplicated), the droplet is the card's distinct identity mark alongside it. */
+.lane-card-issue {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.lane-card-issue .entity-ref {
+  font-size: var(--text-4);
+  font-weight: 600;
 }
 
 .entity-ref {

@@ -2794,42 +2794,46 @@ test("#897 AC3: the hero's ring count reaches the rendered stage through the rea
   assert.equal(html.match(/class="hero-ring"/g)?.length, 5, "one drawn ring per real merge, through the real fold");
 });
 
-// ── #897 AC5: the lane board / activity feed row uses the mockup's full-width split ─────────
+// ── #926 AC1: lanes and activity each claim their own full-width .stack row, lanes first ───────
+// (Q3 owner ruling — supersedes #897's shared two-column `.lane-activity-row` row.)
 
-test("#897 AC5: the lane board / activity feed pair renders inside its own full-row-spanning wrapper, not loose siblings sharing .stack's outer column template", () => {
+test("#926 AC1: the lane board and activity feed each render as .stack's direct children, lanes immediately before activity", () => {
   const html = renderToStaticMarkup(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       {appContent(minimalAppViewModel())}
     </QueryClientProvider>,
   );
-  const rowMatch = html.match(/<div class="lane-activity-row">([\s\S]*?)<\/div>\s*<section id="cost" class="cost-strip"/);
-  assert.ok(rowMatch, "LaneBoard/ActivityFeed must render inside a `.lane-activity-row` wrapper, immediately before the cost strip");
+  // No `.lane-activity-row` (or any other) wrapper between them and `.stack` any more — the lane
+  // board (or its `LiveOnly` replay placeholder) must be followed directly by the activity feed,
+  // which itself is followed directly by the cost strip.
   assert.match(
-    rowMatch![1] as string,
-    /class="panel live-only"|class="lane-board-grid"/,
-    "the wrapper carries the lane board (or its live-only placeholder)",
+    html,
+    /(?:class="panel lane-board"[^>]*|class="panel live-only")[\s\S]*?<section class="panel activity-feed"[\s\S]*?<section id="cost" class="cost-strip"/,
+    "lanes must render immediately before activity, immediately before the cost strip — no wrapper between them",
   );
-  assert.match(rowMatch![1] as string, /class="panel activity-feed"/, "the wrapper carries the activity feed");
 });
 
-test("#897 AC5: .lane-activity-row carries its own auto-fit column template and spans the full .stack row", () => {
-  const appCss = readFileSync(new URL("./app.css", import.meta.url), "utf8");
-  // The row must span every column of `.stack`'s own outer grid — same list every other
-  // full-width module (header, hero, cost strip, …) is already on.
-  const spanRule = appCss.match(/\.stack\s*>\s*\.app-header,[\s\S]*?\{([\s\S]*?)\}/);
-  assert.ok(spanRule, ".stack's full-width span rule must exist");
-  assert.match(spanRule![0] as string, /\.stack\s*>\s*\.lane-activity-row/, ".lane-activity-row must be on the full-width span list");
-  assert.match(spanRule![1] as string, /grid-column:\s*1\s*\/\s*-1/);
+test("AC1 (STYLE, registerRealDom() + getComputedStyle, App at 1440 with a real lane rendered): .lane-board and .activity-feed each declare grid-column: 1/-1, and lanes precedes activity in DOM order", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const laneBoard = container.querySelector("section.lane-board");
+    const activityFeed = container.querySelector("section.activity-feed");
+    assert.ok(laneBoard, ".lane-board must render — fullCoverageViewModel's fixture carries a real lane");
+    assert.ok(activityFeed, ".activity-feed must render");
+    assert.equal(getComputedStyle(laneBoard as Element).gridColumn, "1 / -1", ".lane-board's declared grid-column");
+    assert.equal(getComputedStyle(activityFeed as Element).gridColumn, "1 / -1", ".activity-feed's declared grid-column");
 
-  // Its OWN nested grid — a column template used by nothing else, so auto-fit's empty-track
-  // collapse actually applies (the App.tsx call-site comment explains why the outer `.stack`
-  // grid can't give this pair a correct collapse on its own).
-  // Anchored to a line START — never the `.stack > .lane-activity-row {` span-list selector
-  // matched just above, which shares the same trailing text but a different, unrelated rule body.
-  const ownRule = appCss.match(/\n\.lane-activity-row\s*\{([^}]*)\}/);
-  assert.ok(ownRule, ".lane-activity-row must declare its own grid");
-  assert.match(ownRule![1] as string, /display:\s*grid/);
-  assert.match(ownRule![1] as string, /grid-template-columns:\s*repeat\(auto-fit/);
+    // happy-dom has no layout engine (this AC's own scope note — per-viewport card count/width
+    // is AC2's job, proven with a real browser in shots.spec.ts), so DOM order is what stands in
+    // for "lanes above activity" here: both share `.stack`'s own document-order-driven grid flow.
+    const stackChildren = [...(container.querySelector("main.stack")?.children ?? [])];
+    const laneIndex = stackChildren.indexOf(laneBoard as Element);
+    const activityIndex = stackChildren.indexOf(activityFeed as Element);
+    assert.ok(laneIndex >= 0 && activityIndex >= 0, "both must be direct children of .stack");
+    assert.ok(laneIndex < activityIndex, "the lane board must precede the activity feed in .stack's DOM order");
+  } finally {
+    await cleanup();
+  }
 });
 
 // ── #924: one `.panel-head` recipe + one bar grammar + the --sap-text/--sap-fill split ─────────
@@ -2872,6 +2876,7 @@ function fullCoverageViewModel() {
               endedAt: null,
               costUsd: 2,
               estCostUsd: null,
+              fixRound: 0,
               contextTokens: null,
               tokenComposition: null,
             },
@@ -3169,6 +3174,40 @@ test("AC2 (pill end caps): the fill pill is a rect with rx=3 (half its own 6px h
         ".cost-bar-fill stroke-width — the light outline is a plain 1px stroke, no extra element needed",
       );
     }
+  } finally {
+    await cleanup();
+  }
+});
+
+// ── #926 AC3: the lane card's own head/body anatomy — border-bottom, chip casing, issue-number
+// scale — resolved on the real rendered cascade (STYLE doctrine), not the authored source text ──
+
+test("#926 AC3: .lane-card-head resolves a 1px border-bottom, and its state chip resolves uppercase --font-data", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const head = container.querySelector(".lane-card-head");
+    assert.ok(head, "a real .lane-card-head must render — fullCoverageViewModel's fixture carries a real lane");
+    assert.equal(getComputedStyle(head as Element).borderBottomWidth, "1px", ".lane-card-head border-bottom-width");
+
+    const chip = container.querySelector(".lane-card-state");
+    assert.ok(chip, "a real .lane-card-state must render");
+    const chipComputed = getComputedStyle(chip as Element);
+    assert.equal(chipComputed.textTransform, "uppercase", ".lane-card-state text-transform");
+    assert.match(chipComputed.fontFamily, /JetBrains Mono/, ".lane-card-state must resolve --font-data");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("#926 AC3: the body's issue number resolves >= 24px, weight 600 (bold mono, EntityRef reused as-is)", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const issueNumber = container.querySelector(".lane-card-issue .entity-ref");
+    assert.ok(issueNumber, "a real .lane-card-issue .entity-ref must render");
+    const computed = getComputedStyle(issueNumber as Element);
+    const fontSizePx = Number.parseFloat(computed.fontSize);
+    assert.ok(fontSizePx >= 24, `.lane-card-issue's issue number font-size (${computed.fontSize}) must be >= 24px`);
+    assert.equal(computed.fontWeight, "600", ".lane-card-issue's issue number font-weight");
   } finally {
     await cleanup();
   }

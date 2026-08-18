@@ -101,6 +101,8 @@ function laneItem(state: State, w: WorkerRow): Record<string, unknown> {
     endedAt: w.ended_at,
     costUsd: inFlight(w) ? null : state.spentUsdForWorker(w.name),
     estCostUsd: w.est_cost_usd ?? null,
+    // #926: the "FIXING · ROUND n/cap" chip's numerator — `lanes.prFixCap` (config) is the cap.
+    fixRound: w.fix_rounds ?? 0,
     contextTokens: w.context_tokens ?? null,
     tokenComposition,
   };
