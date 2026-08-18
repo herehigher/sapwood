@@ -118,17 +118,46 @@ test("AC3: --on-sap-fill on --sap-fill clears AA (4.5:1) in both themes", () => 
   assert.deepEqual(failures, [], failures.map((f) => `${f.theme} ${f.text} on ${f.ground} = ${f.ratio}`).join("; "));
 });
 
-// #924 gate② finding [2]: modeled against the REAL rendered .cost-bar-track (--bark at its own
-// declared opacity, composited over --panel) — not a bare --heartwood pair that never existed as
-// a rendered surface. Light theme's real composite (1.15:1) is even further below the 3:1
-// boundary than the naive heartwood pairing (1.88:1) suggested.
-test("AC3: --sap-fill vs the real .cost-bar-track composite clears the 3:1 non-text boundary in dark, and the known light-theme shortfall (1.15:1) the outline rule compensates for is on record", () => {
+// #924 gate② round 1 finding [2] (fixed): modeled against the REAL rendered .cost-bar-track
+// (--bark at its own declared opacity, composited over --panel) — not a bare --heartwood pair
+// that never existed as a rendered surface.
+//
+// #924 gate② round 2 finding [1] (ac3-light-track-contrast-fails) — DISPUTED, per the PO's own
+// re-baselined AC3 (issue body edited 2026-08-17, PO adjudication on this PR's leg-2 review
+// thread): AC3 now reads, verbatim, "--sap-fill on the pill track >= 3:1 in the DARK theme; in
+// the LIGHT theme the same pair is physically below 3:1 (measured 1.15:1 with --bark at 0.4 over
+// the panel ... this is expected, not a failure) and the compensation is mandatory: every filled
+// --sap-fill element ... resolves a 1px --sap-text outline/stroke in the light theme". The finding
+// judged this test against the OLD AC3 (both themes must pass unaided) — the PO's own ruling is
+// explicit: do NOT darken/retint --sap-fill or the track to force 3:1 in light (that would break
+// AC5's mockup match); the light-theme 1.15:1 row stays on record as a documented, expected
+// exception the outline rule (not the fill/track colours) compensates for.
+test("AC3 (re-baselined 2026-08-17): --sap-fill vs the real .cost-bar-track composite clears 3:1 in dark; light's 1.15:1 is recorded as the EXPECTED shortfall the outline rule compensates for, never 'fixed' by retinting the fill/track", () => {
   const rows = checkFillTrackContrast(css);
   const dark = rows.find((r) => r.theme === "heartwood");
   const light = rows.find((r) => r.theme === "sapwood");
   assert.ok(dark?.pass, `dark --sap-fill vs .cost-bar-track must clear ${NON_TEXT_AA}:1: ${dark?.ratio}`);
   assert.equal(light?.ratio, 1.15);
-  assert.ok(!light?.pass, "light theme is the documented exception the --sap-text outline compensates for");
+  assert.ok(
+    !light?.pass,
+    "light theme is the documented, EXPECTED exception the --sap-text outline compensates for — not a bug to fix here",
+  );
+});
+
+// #924 gate② round 2 finding [2] (ac3-outline-resolution-unverified) fix, PO leg-2 adjudication:
+// happy-dom never evaluates light-dark() (verified directly, both with and without a var()
+// indirection, on both a bare HTML `color` and an SVG `stroke`) — the STYLE proof this pins
+// therefore needs `--sap-fill-outline`'s WINNING declaration to be a literal hex, not a
+// light-dark() call, in the light theme (tokens.css's `:root[data-theme="sapwood"]` /
+// `@media (prefers-color-scheme: light)` rules). This test is the VALUE-family guarantee that
+// hand-authored literal can never silently drift from --sap-text's own light-theme hex.
+test("AC3: --sap-fill-outline's literal light-theme hex is pinned to --sap-text's own light value — never a hand-copied duplicate that can drift", () => {
+  const { light } = parseColorTokens(css);
+  const outlineDeclarations = [...css.matchAll(/--sap-fill-outline:\s*(#[0-9A-Fa-f]{6})/g)].map((m) => m[1]!.toUpperCase());
+  assert.equal(outlineDeclarations.length, 2, "expected exactly the data-theme override + the prefers-color-scheme override");
+  for (const hex of outlineDeclarations) {
+    assert.equal(hex, light["--sap-text"], "--sap-fill-outline's literal light-theme hex must equal --sap-text's own light value");
+  }
 });
 
 /** Every file under `dir`, recursively — excluding `node_modules`/`dist`/generated output dirs. */

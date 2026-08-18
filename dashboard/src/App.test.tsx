@@ -22,6 +22,7 @@ import type { LoopEvent, Round, SpendRow } from "./api/types.ts";
 import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
 import { NeedsAttention } from "./components/NeedsAttention.tsx";
+import { parseColorTokens } from "./contrast.ts";
 import { buildClosedRoundCostPanel } from "./cost-panel.ts";
 import type { DemoBundle } from "./demo/types.ts";
 import { type DomainEvent, toDomainEvent } from "./domain-event.ts";
@@ -3110,6 +3111,29 @@ test("AC2: .cost-bar-row's label column is minmax(>= 7em, max-content) — a flo
   assert.ok(floorEm >= 7, `the label column's floor (${floorEm}em) must be >= 7em`);
 });
 
+/**
+ * #924 gate② round 2 finding [0] (ac2-grid-column-not-style-tested), PO leg-2 adjudication: "Assert
+ * the winning grid-template-columns on a rendered .cost-bar-row under the full cascade
+ * (getComputedStyle), not the authored rule." The VALUE test above only proves the SOURCE
+ * declares the right thing — a later, more-specific, or width/media-scoped rule could still win on
+ * the real element while that test stayed green. Verified directly that happy-dom's
+ * `getComputedStyle().gridTemplateColumns` DOES resolve for a real element (unlike the SVG-
+ * geometry/`light-dark()` gaps elsewhere in this file) — it echoes the winning declaration's exact
+ * text (not a computed max-content pixel value, since happy-dom has no real layout engine for
+ * that), which is exactly the CASCADE-APPLICATION fact this finding asks for: a competing rule
+ * that changed which value wins would show up here even though it can't fail on rendered pixels.
+ */
+test("AC2: the winning grid-template-columns on a REAL rendered .cost-bar-row, under the full 1440px production cascade, is exactly minmax(7em, max-content) 1fr 4em", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const row = container.querySelector(".cost-bar-row");
+    assert.ok(row, "a real .cost-bar-row must render (the fixture's stage/model bars)");
+    assert.equal(getComputedStyle(row as Element).gridTemplateColumns, "minmax(7em, max-content) 1fr 4em");
+  } finally {
+    await cleanup();
+  }
+});
+
 // #924 gate② finding [1] / PO item 2: a rendered CASCADE fact, not just source text — proves
 // `white-space: nowrap` actually resolves onto a REAL rendered label (including the fixture's own
 // longer-than-7em "claude-sonnet-5" model name), not merely that the source declares it. happy-dom
@@ -3136,54 +3160,53 @@ test("AC2: every rendered cost-bar label, including one longer than the 7em floo
 });
 
 /**
- * #924 gate② finding [3]: the prior version of this test never switched `data-theme` at all —
- * fixed below to loop both themes explicitly, the SAME pattern the pre-existing `#920 gate②
- * finding [1]` active-planning-node test (this file's hero.test.ts counterpart) already
- * establishes for exactly this class of claim. What it can prove, and what it provably cannot,
- * verified directly (a scratch happy-dom probe, both a bare `color: var(--sap-text)` on an HTML
- * element and a nested `stroke: var(--sap-fill-outline)` on an SVG shape, toggling `data-theme`
- * between probes): happy-dom does textual `var()` substitution but NEVER evaluates `light-dark()`
- * — the resolved `stroke` is the SAME raw "light-dark(<raw --sap-text decl>, transparent)" text
- * regardless of `data-theme`, in every theme. This is a confirmed, repo-precedented harness gap
- * (`docs/REVIEW-DOCTRINE.md`'s STYLE family + this file's own #897 finding for the SAME
- * light-dark() function, a different property), not a choice — no test in this suite has ever
- * gotten a per-theme resolved value out of happy-dom for a `light-dark()`-declared property, and
- * a real-browser proof (Playwright, `shots/shots.spec.ts`'s own `§889 AC2` test) already exists
- * for the equivalent per-theme cascade claim on a sibling token. What THIS test still proves, in
- * both themes: the outline rule actually CASCADES onto all three real rendered elements (not just
- * declared in source), at the exact 1px width, referencing the exact `--sap-fill-outline` chain —
- * a regression that dropped the rule, or scoped it to only ONE of the three, would fail this.
- * `stroke-width` itself is a plain 1px in both themes (never `light-dark()`-typed — that function
- * is <color>-only), so it resolves correctly regardless of the gap above.
+ * #924 gate② round 2 finding [2] (ac3-outline-resolution-unverified), PO leg-2 adjudication
+ * (2026-08-18): "The proof is a STYLE test whose expected colour is computed from the token table
+ * via contrast.ts (resolve the light-dark() pair yourself for the light theme and compare to the
+ * resolved value the outline rule declares) ... light = 1px stroke of that exact colour, dark =
+ * none. Comparing the same unresolved light-dark(...) source string in both themes is not the
+ * proof." Round 1's version compared the raw unresolved text, which the round-2 finding correctly
+ * caught (happy-dom never evaluates `light-dark()` — confirmed directly, twice, both with and
+ * without a `var()` indirection). The fix is NOT a different test — `--sap-fill-outline` itself
+ * moved to a literal light-theme hex (tokens.css's `:root[data-theme="sapwood"]` /
+ * `@media (prefers-color-scheme: light)` rules, pinned against `--sap-text`'s own light value by
+ * `tokens.test.ts`), so a REAL resolved hex now reaches `getComputedStyle` to assert against —
+ * `parseColorTokens` (this repo's own light/dark token splitter, `contrast.ts`) is what "resolve
+ * the light-dark() pair yourself" means here. Every one of the AC's own named shapes is checked
+ * individually, not folded into one generic `.cost-bar-fill` query.
  */
-test("AC3: .hero-pool-chip, an in-motion droplet, and every .cost-bar-fill (cost panel, lane card, header meter alike) carry the same real 1px outline stroke, in both theme contexts", async () => {
+test("AC3: every named filled shape (.cost-bar pill, .lane-card-bar pill, .hero-pool-chip, an in-motion droplet, .spend-meter-bar) resolves the REAL --sap-text hex as a 1px outline in light theme, and none in dark", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
-  const expectedOutlineStroke = `light-dark(${parseTokensLocal(tokensCss924)["--sap-text"]}, transparent)`;
+  const { light: lightTokens } = parseColorTokens(tokensCss924);
+  const lightOutlineHex = lightTokens["--sap-text"]!;
+  assert.ok(lightOutlineHex, "--sap-text must resolve a light-theme hex via parseColorTokens");
+
+  const namedShapes: [string, () => Element | null][] = [
+    [".cost-bar pill (cost panel)", () => container.querySelector("#cost .cost-bar-fill")],
+    [".lane-card-bar pill", () => container.querySelector("svg.lane-card-bar .cost-bar-fill")],
+    [".hero-pool-chip", () => container.querySelector(".hero-pool-chip rect")],
+    [
+      "an in-motion droplet",
+      () => container.querySelector('.hero-droplet:not([data-at="trunk"]):not([data-at="needs-human"]) .hero-droplet-shape'),
+    ],
+    [".spend-meter-bar", () => container.querySelector("svg.spend-meter-bar .cost-bar-fill")],
+  ];
+
   try {
-    for (const themeAttr of ["heartwood", "sapwood"] as const) {
-      document.documentElement.setAttribute("data-theme", themeAttr);
+    document.documentElement.setAttribute("data-theme", "sapwood");
+    for (const [label, find] of namedShapes) {
+      const el = find();
+      assert.ok(el, `light theme: ${label} must render`);
+      const computed = getComputedStyle(el as Element);
+      assert.equal(computed.stroke, lightOutlineHex, `light theme: ${label} outline stroke must resolve the exact --sap-text hex`);
+      assert.equal(computed.strokeWidth, "1px", `light theme: ${label} outline width`);
+    }
 
-      const chipRect = container.querySelector(".hero-pool-chip rect");
-      assert.ok(chipRect, `${themeAttr}: a real .hero-pool-chip rect must render (the fixture's backlog pool is non-empty)`);
-      assert.equal(getComputedStyle(chipRect as Element).stroke, expectedOutlineStroke, `${themeAttr}: hero-pool-chip outline stroke`);
-      assert.equal(getComputedStyle(chipRect as Element).strokeWidth, "1px", `${themeAttr}: hero-pool-chip outline width`);
-
-      const droplet = container.querySelector('.hero-droplet:not([data-at="trunk"]):not([data-at="needs-human"]) .hero-droplet-shape');
-      assert.ok(droplet, `${themeAttr}: a real in-motion droplet must render (the fixture dispatches one)`);
-      assert.equal(getComputedStyle(droplet as Element).stroke, expectedOutlineStroke, `${themeAttr}: in-motion droplet outline stroke`);
-      assert.equal(getComputedStyle(droplet as Element).strokeWidth, "1px", `${themeAttr}: in-motion droplet outline width`);
-
-      // Every `.cost-bar-fill` instance now carries the SAME outline rule (#924 gate② finding
-      // [2] fix) — cross-checked across all three real contexts, not just the header meter.
-      const fills = [...container.querySelectorAll(".cost-bar-fill")];
-      assert.ok(
-        fills.length >= 3,
-        `${themeAttr}: expected fill rects across cost panel/lane card/header meter contexts; found ${fills.length}`,
-      );
-      for (const fill of fills) {
-        assert.equal(getComputedStyle(fill as Element).stroke, expectedOutlineStroke, `${themeAttr}: .cost-bar-fill outline stroke`);
-        assert.equal(getComputedStyle(fill as Element).strokeWidth, "1px", `${themeAttr}: .cost-bar-fill outline width`);
-      }
+    document.documentElement.setAttribute("data-theme", "heartwood");
+    for (const [label, find] of namedShapes) {
+      const el = find();
+      assert.ok(el, `dark theme: ${label} must render`);
+      assert.equal(getComputedStyle(el as Element).stroke, "transparent", `dark theme: ${label} outline stroke must resolve to none`);
     }
   } finally {
     document.documentElement.removeAttribute("data-theme");

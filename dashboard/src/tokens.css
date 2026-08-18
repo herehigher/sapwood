@@ -73,11 +73,12 @@
   --hairline: 1px solid color-mix(in srgb, var(--bark) 25%, transparent);
   /* Q5: light theme's --sap-fill vs the cream ground measures 1.88:1, below the 3:1 non-text
      boundary (dark theme clears it at 7.83:1) — every filled chip/droplet/bar-pill compensates
-     with a 1px --sap-text outline in light theme only. `light-dark()` is a <color> function — it
-     cannot apply to stroke-width itself (that stays a constant 1px everywhere), so the toggle
-     lives entirely in the STROKE COLOUR: --sap-text in light theme, transparent (invisible, same
-     effect as 0-width) in dark, where the fill already clears 3:1 unaided. */
-  --sap-fill-outline: light-dark(var(--sap-text), transparent);
+     with a 1px --sap-text outline in light theme only (transparent — invisible, same effect as
+     0-width — in dark, where the fill already clears 3:1 unaided). Dark-theme/no-preference
+     default lives here; the two light-theme trigger conditions (explicit override, system
+     preference with no override) are the two rules below `:root` — see their own doc for why this
+     is NOT `light-dark(var(--sap-text), transparent)` despite being the same effective values. */
+  --sap-fill-outline: transparent;
 
   /* ---- Motion ------------------------------------------------------------ */
   --beat: 240ms; /* state flips */
@@ -110,6 +111,33 @@
   color-scheme: dark;
 }
 
+/*
+ * #924 gate② round 2, PO adjudication (leg 2, 2026-08-18): AC3's outline proof needs a STYLE test
+ * that reads a REAL resolved colour via `getComputedStyle` — verified directly (twice, for a bare
+ * HTML `color` and an SVG `stroke`, each with and without a `var()` indirection) that happy-dom's
+ * CSS engine NEVER evaluates `light-dark()` at all, in any form, regardless of theme — it always
+ * echoes the raw, unresolved `"light-dark(A, B)"` text back. `--sap-fill-outline` above being
+ * `light-dark(var(--sap-text), transparent)` (the prior version) was therefore permanently
+ * unprovable in this harness, no matter how the test was written. The fix is NOT a different test
+ * — it's this token declaring its light-theme value as a literal hex here instead, so the winning
+ * declaration itself never contains a `light-dark()` call for `getComputedStyle` to fail to
+ * evaluate. `#8A5A14` is `--sap-text`'s own light-theme hex, duplicated deliberately — `tokens.test.ts`
+ * pins it against `parseColorTokens(tokensCss).light["--sap-text"]` so the two can never silently
+ * drift apart, the same VALUE-family guarantee `light-dark()` gave for free before this workaround.
+ */
 :root[data-theme="sapwood"] {
   color-scheme: light;
+  --sap-fill-outline: #8A5A14;
+}
+
+/* The other light-theme trigger `light-dark()` used to cover for free: system preference, with NO
+ * explicit override at all (`theme.ts`'s `null` state — a real, common default, not just an edge
+ * case). `:root:not([data-theme])` is what keeps this from firing OVER an explicit `heartwood`
+ * override on a light-preferring system — that combination must stay outline-less, and the
+ * `:root[data-theme="sapwood"]` rule above already covers the explicit-light-override case on its
+ * own regardless of system preference. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --sap-fill-outline: #8A5A14;
+  }
 }
