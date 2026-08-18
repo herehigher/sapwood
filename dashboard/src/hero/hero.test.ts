@@ -1429,6 +1429,18 @@ test("#897 AC4: a candidate card's rect resolves to the EXACT no-fill/visible-st
       "#E8A33D",
       "a filled pool chip must resolve to the EXACT --sap-fill token text, distinguishable from the candidate's exact 'none'",
     );
+    // #924 gate② round 3 finding [0] (ac3-translucent-chip-contrast): the PAINTED surface, not
+    // just the token — a `fill-opacity` regression could leave `fill` correctly resolving to
+    // `--sap-fill`'s own hex while still compositing it translucent over the panel underneath
+    // (measured ~1.7:1 real ink contrast in dark theme, against `checkFillTextContrast`'s
+    // token-only 7.83:1). `--on-sap-fill`'s own AA claim (contrast.ts's checkFillTextContrast) is
+    // only true of the REAL rendered pixels when this is exactly "1" — full opacity, no
+    // compositing.
+    assert.equal(
+      filledComputed.fillOpacity,
+      "1",
+      "a filled pool chip must paint fully opaque — a translucent chip breaks AC3's ink contrast",
+    );
   } finally {
     document.body.removeChild(container);
     document.head.removeChild(style);

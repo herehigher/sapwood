@@ -76,7 +76,13 @@ export function CostBar({ settledUsd, estUsd, max, targetPct = null, label, clas
       aria-label={ariaLabel}
     >
       <HatchDef />
-      <rect className="cost-bar-track" x="0" y={TRACK_Y} width="100" height="1" />
+      {/* #924 gate② round 3 finding (witness-blocking 3): a STROKED line, not a filled rect — a
+       * fill-rect's crispness depends on its Y edges landing on integer pixel rows, which drifted
+       * under real-browser rasterization (rendered ~2px tall); `vector-effect: non-scaling-stroke`
+       * (panels.css) keeps a stroke's WIDTH pinned to exactly 1 device px regardless of any
+       * scaling, and TRACK_Y's own half-integer value centers that 1px stroke exactly on pixel
+       * row 5 (5.0–6.0). */}
+      <line className="cost-bar-track" x1="0" y1={TRACK_Y} x2="100" y2={TRACK_Y} />
       <rect className="cost-bar-fill" x="0" y={FILL_Y} width={settledPct} height={FILL_HEIGHT} rx={FILL_RADIUS} />
       {estPct > 0 && <rect x={settledPct} y={FILL_Y} width={estPct} height={FILL_HEIGHT} fill={`url(#${HATCH_PATTERN_ID})`} />}
       {targetPct != null && <line className="cost-bar-target" x1={targetPct} y1={TICK_Y1} x2={targetPct} y2={TICK_Y2} />}

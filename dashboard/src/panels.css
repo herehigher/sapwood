@@ -277,26 +277,44 @@
  * taller than the pill (`.cost-bar-target`). Geometry (heights/y/rx) is fixed per instance as SVG
  * attributes in `CostBar.tsx` itself, at the SAME 1:1 scale `.cost-bar`'s own 12px height (above)
  * guarantees regardless of which container mounts it. */
+/* #924 gate② round 3 (witness-blocking 3): a STROKE, not a fill — `stroke-width` under
+ * `vector-effect: non-scaling-stroke` stays a real 1 device px regardless of the bar's own X/Y
+ * scale factors (a wide, short SVG under `preserveAspectRatio="none"` scales those independently
+ * — see `.cost-bar-target` below for the same fix on the tick, which suffers the SAME distortion
+ * in the opposite (X) axis). `stroke-width: 1` here is a plain number — 1 LOCAL unit, matching
+ * `.cost-bar`'s own 12px-tall viewBox 1:1, exactly like the tick's own `1` below. */
 .cost-bar-track {
-  fill: var(--bark);
+  stroke: var(--bark);
+  stroke-width: 1;
   opacity: 0.4;
+  vector-effect: non-scaling-stroke;
 }
 
 /* #924 gate② finding [2]: the REAL rendered `.cost-bar-track` (this fill's own immediate
  * neighbour — `--bark` at 0.4 opacity over `--panel`, `contrast.ts`'s `checkFillTrackContrast`)
  * clears 3:1 against `--sap-fill` in dark theme (4.24:1) but NOT in light (1.15:1) — every use of
  * this fill, not only the header meter, compensates with the same 1px `--sap-text` outline
- * (invisible in dark theme, where it already clears unaided — `--sap-fill-outline`, tokens.css). */
+ * (invisible in dark theme, where it already clears unaided — `--sap-fill-outline`, tokens.css).
+ * `vector-effect: non-scaling-stroke` (round 3, witness item 4, nice-to-have) keeps that outline
+ * itself crisp under the same non-uniform bar scaling the track/tick fixes below address. */
 .cost-bar-fill {
   fill: var(--sap-fill);
   stroke: var(--sap-fill-outline);
   stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
 }
 
-/* The by-stage group's shared target/ceiling tick (`cost-panel.ts`'s `tickPositionPct`). */
+/* #924 gate② round 3 (witness-blocking 2): the by-stage group's shared target/ceiling tick
+ * (`cost-panel.ts`'s `tickPositionPct`) — a VERTICAL line, so its own `stroke-width` extends in
+ * the bar's X axis. A ~490px-wide bar built from a 100-unit-wide viewBox scales X by roughly 4.9x
+ * (`preserveAspectRatio="none"`, independent from the ~1x Y scale `.cost-bar`'s 12px height
+ * already pins) — an unguarded `stroke-width: 1` rendered as a ~5px filled block instead of a
+ * hairline. `vector-effect: non-scaling-stroke` is the SVG-native fix: it pins stroke width to a
+ * real device pixel regardless of the CTM's scale, in either axis. */
 .cost-bar-target {
   stroke: var(--sap-text);
   stroke-width: 1;
+  vector-effect: non-scaling-stroke;
 }
 
 /* ---- header: engine state word + spend meter (§3 A, #361) ---------------- */

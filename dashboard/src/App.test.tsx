@@ -3095,6 +3095,50 @@ test("AC2 gate② finding [1]: every hairline-bar instance's own CSS height matc
   }
 });
 
+/**
+ * #924 gate② round 3, PO witness-blocking items 2/3: a real-browser witness pass at 52eca83 found
+ * the target tick rendering as a ~4-5px filled block (a VERTICAL line's own `stroke-width` extends
+ * in the bar's X axis, which scales by roughly the bar's own width/100 under
+ * `preserveAspectRatio="none"` — a ~490px-wide bar scales X by ~4.9x while `.cost-bar`'s 12px
+ * height already pins Y at 1x) and the track rendering ~2px tall (`TRACK_Y = 5.5` as a filled
+ * RECT's top edge straddled a physical pixel row). Both are fixed by converting the track from a
+ * rect to a stroked line and adding `vector-effect: non-scaling-stroke` to both (panels.css) — the
+ * SVG-native mechanism that pins a stroke's rendered WIDTH to a real device pixel regardless of
+ * the element's own CTM scale, in either axis. happy-dom has no real layout engine (confirmed
+ * directly, repeatedly, in this file and hero.test.ts — `getBoundingClientRect()` returns an
+ * all-zero box for every element), so the ACTUAL rendered pixel width `vector-effect` produces
+ * cannot be measured here — that is a real-browser fact, same ceiling the light-dark()-outline
+ * tests above already document. What IS provable in this harness: the declaration cascades onto
+ * the real elements at all (a regression that dropped it, or the stroke-width value, would fail
+ * this) — the achievable half of the proof, same STYLE-doctrine posture as the rest of this file.
+ */
+test("AC2 gate② round 3 (witness-blocking 2/3): the track and target tick both resolve vector-effect: non-scaling-stroke and stroke-width: 1, pinning them against the bar's own non-uniform scale", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  try {
+    const track = container.querySelector(".cost-bar-track");
+    assert.ok(track, "a real .cost-bar-track must render");
+    const trackComputed = getComputedStyle(track as Element);
+    assert.equal(
+      trackComputed.vectorEffect,
+      "non-scaling-stroke",
+      ".cost-bar-track must pin its stroke width against the bar's own non-uniform scale",
+    );
+    assert.equal(trackComputed.strokeWidth, "1", ".cost-bar-track stroke-width");
+
+    const tick = container.querySelector(".cost-bar-target");
+    assert.ok(tick, "a real .cost-bar-target must render (costToday.targetUsd is set)");
+    const tickComputed = getComputedStyle(tick as Element);
+    assert.equal(
+      tickComputed.vectorEffect,
+      "non-scaling-stroke",
+      ".cost-bar-target must pin its stroke width against the bar's own non-uniform scale",
+    );
+    assert.equal(tickComputed.strokeWidth, "1", ".cost-bar-target stroke-width");
+  } finally {
+    await cleanup();
+  }
+});
+
 // #924 gate② PO item 2: a fixed em floor alone still wrapped a longer label (a by-model row's own
 // model name, e.g. "claude-sonnet-5") — `minmax(7em, max-content)` keeps the >= 7em floor AC2
 // names while growing to fit whatever the longest rendered label actually needs.
