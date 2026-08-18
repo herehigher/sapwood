@@ -3517,15 +3517,15 @@ function parseTokensLocal(css: string): Record<string, string> {
   return out;
 }
 
-// ── #923 PO design-witness pass 1: BACK TO LIVE/stepper glyphs, row-1 proportion, replay-tint,
-// BTL position (MARKUP + STYLE + WIRING, real DOM cascade). ──────────────────────────────────
+// ── #923: BACK TO LIVE/stepper glyphs, row-1 proportion, replay-tint, BTL position (MARKUP +
+// STYLE + WIRING, real DOM cascade). ────────────────────────────────────────────────────────
 
-// item 1 (MARKUP): the mockup's "⏩" is a SHAPE (double chevron), not the blue colour-emoji
-// codepoint the earlier hand-typed `<span>⏩</span>` rendered — `lucide-react`'s `FastForward`
-// draws the same shape in `currentColor`, themeable, never a fixed-colour glyph. Same rule for
-// the stepper's own tiny filled ◂▸ characters, which read near-empty at the cell's 40px
-// min-height — `ChevronLeft`/`ChevronRight` stroked glyphs replace them.
-test("#923 PO item 1: BACK TO LIVE renders lucide-react's FastForward (no U+23E9 colour-emoji glyph); the stepper renders lucide ChevronLeft/ChevronRight (no ◂▸ characters)", async () => {
+// MARKUP: the mockup's "⏩" is a SHAPE (double chevron), not the blue colour-emoji codepoint the
+// earlier hand-typed `<span>⏩</span>` rendered — `lucide-react`'s `FastForward` draws the same
+// shape in `currentColor`, themeable, never a fixed-colour glyph. Same rule for the stepper's own
+// tiny filled ◂▸ characters, which read near-empty at the cell's 40px min-height —
+// `ChevronLeft`/`ChevronRight` stroked glyphs replace them.
+test("#923: BACK TO LIVE renders lucide-react's FastForward (no U+23E9 colour-emoji glyph); the stepper renders lucide ChevronLeft/ChevronRight (no ◂▸ characters)", async () => {
   const data = { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "running" } };
   const vm = minimalAppViewModel({ mode: "replay", loop: { data, isPending: false }, rounds: [CLOSED_ROUND], selectedRoundId: 42 });
   const { container, cleanup } = await mountAppWithCascade(vm);
@@ -3545,10 +3545,10 @@ test("#923 PO item 1: BACK TO LIVE renders lucide-react's FastForward (no U+23E9
   }
 });
 
-// item 2 (STYLE): `.app-header-row` — not `.app-header` (the card) — carries the ≥100px floor a
-// LIVE mount (no transport row beneath it) needs to keep its own content centred rather than
+// STYLE: `.app-header-row` — not `.app-header` (the card) — carries the ≥100px floor a LIVE
+// mount (no transport row beneath it) needs to keep its own content centred rather than
 // top-hugging leftover space the card's own min-height otherwise leaves below it.
-test("#923 PO item 2: .app-header-row itself is >= 100px (and <= the issue's own 130px upper bound) with align-items: center — the live state no longer top-hugs the card's min-height", async () => {
+test("#923: .app-header-row itself is >= 100px (and <= the issue's own 130px upper bound) with align-items: center — the live state no longer top-hugs the card's min-height", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   try {
     const row = container.querySelector(".app-header-row");
@@ -3563,22 +3563,21 @@ test("#923 PO item 2: .app-header-row itself is >= 100px (and <= the issue's own
   }
 });
 
-// item 3: replay = amber (`--sap-text`) on the joined stepper's own group border AND each cell's
-// dividing border, on a mount with a CLOSED round actually selected (never asserted against the
-// live/default case). DOM (the closed modifier class actually lands on the rendered stepper) +
-// VALUE (the modifier's own rule reads the real `--sap-text` token) rather than a `getComputedStyle`
-// colour read — `tokens.css`'s own `--sap-fill-outline` comment already documents why: happy-dom's
-// CSS engine never evaluates `light-dark()` for a colour-typed property AT ALL (confirmed directly:
-// unlike `stroke`, which echoes the raw unresolved text back, `border-color`/`color` return an
-// EMPTY string the instant the winning declaration touches a `light-dark()` chain, even before
-// evaluating which branch wins) — the SAME gap that token's own workaround exists for, just hit
-// through a different property this time. `--sap-fill-outline` itself can't stand in here: it's
-// `transparent` in dark theme by design (a different token, a different role), which would make
-// the amber outline this item asks for invisible in exactly the theme half of a witness pass.
-test("#923 PO item 3: a closed round adds .round-nav-stepper-closed to the rendered stepper, and that modifier's own rule (panels.css) borders the group AND each cell in the real --sap-text token, never a color-mix()'d grey", async () => {
+// STYLE: replay = amber on the joined stepper's own group border AND each cell's dividing
+// border, on a mount with a CLOSED round actually selected (never asserted against the
+// live/default case) — the exact resolved `border-color`, in BOTH themes, via `getComputedStyle`
+// on the real mounted cascade (`registerRealDom()`, imported at this file's own top). `--sap-text`
+// itself is `light-dark(...)`, which happy-dom's CSS engine never evaluates for a colour-typed
+// property at all (confirmed directly: unlike `stroke`, which echoes the raw unresolved text
+// back, `border-color`/`color` return an EMPTY string the instant the winning declaration touches
+// a `light-dark()` chain) — `--stepper-replay-outline` (panels.css/tokens.css) is the literal-hex
+// alias that sidesteps this, pinned against `--sap-text`'s own two branches by tokens.test.ts, so
+// this test still proves the REAL resolved colour rather than falling back to source text.
+test("#923: with a closed round selected, .round-nav-stepper's own border AND each cell's border resolve to the real amber in both themes, never the neutral grey group border", async () => {
   const data = { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "running" } };
   const vm = minimalAppViewModel({ mode: "replay", loop: { data, isPending: false }, rounds: [CLOSED_ROUND], selectedRoundId: 42 });
   const { container, cleanup } = await mountAppWithCascade(vm);
+  const { light, dark } = parseColorTokens(tokensCss924);
   try {
     const stepper = container.querySelector(".round-nav-stepper");
     assert.ok(stepper, ".round-nav-stepper must render");
@@ -3587,23 +3586,35 @@ test("#923 PO item 3: a closed round adds .round-nav-stepper-closed to the rende
     const pill = container.querySelector(".round-nav-pill-closed");
     assert.ok(pill, "the closed pill's own pre-existing tint must still render, unchanged by this fix");
 
-    const rule = panelsCss924.match(
-      /\.round-nav-stepper-closed,\s*\n\.round-nav-stepper-closed \.round-nav-arrow,\s*\n\.round-nav-stepper-closed \.round-nav-pill \{([^}]*)\}/,
-    );
-    assert.ok(rule, "the closed-stepper modifier rule (group border + both cell borders) must exist in panels.css");
-    assert.match(
-      rule?.[1] as string,
-      /border-color:\s*var\(--sap-text\)/,
-      "the closed-stepper modifier must set border-color to the real --sap-text token, never a hand-copied hex or a color-mix() blend",
-    );
+    const cells = [...stepper!.querySelectorAll(".round-nav-arrow, .round-nav-pill")];
+    assert.equal(cells.length, 3, "the stepper must carry exactly three cells (chevron | label | chevron)");
+
+    const expectedByTheme = { heartwood: dark["--sap-text"], sapwood: light["--sap-text"] } as const;
+    for (const themeAttr of ["heartwood", "sapwood"] as const) {
+      document.documentElement.setAttribute("data-theme", themeAttr);
+      const expected = expectedByTheme[themeAttr];
+      assert.equal(
+        getComputedStyle(stepper as Element).borderColor.toUpperCase(),
+        expected,
+        `${themeAttr}: .round-nav-stepper's border-color must resolve to the real amber`,
+      );
+      for (const cell of cells) {
+        assert.equal(
+          getComputedStyle(cell as Element).borderColor.toUpperCase(),
+          expected,
+          `${themeAttr}: "${(cell as Element).className}" cell's border-color must resolve to the real amber`,
+        );
+      }
+    }
   } finally {
+    document.documentElement.removeAttribute("data-theme");
     await cleanup();
   }
 });
 
-// A live (non-closed) mount is the CONTROL for item 3 above — proves the amber modifier is
+// A live (non-closed) mount is the CONTROL for the test above — proves the amber modifier is
 // genuinely conditional on replaying a closed round, never present by default.
-test("#923 PO item 3 (control): a live mount (no round selected) never adds .round-nav-stepper-closed", async () => {
+test("#923 (control): a live mount (no round selected) never adds .round-nav-stepper-closed", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   try {
     const stepper = container.querySelector(".round-nav-stepper");
@@ -3614,10 +3625,10 @@ test("#923 PO item 3 (control): a live mount (no round selected) never adds .rou
   }
 });
 
-// item 4 (WIRING): mockup band-2 order is status · stepper · BACK TO LIVE · meter · "?" —
-// proven as DOM order inside `.engine-status` (the header word/navigator/meter's own shared flex
-// row), not just AC2's existing ancestry/non-transport proof.
-test('#923 PO item 4: BACK TO LIVE sits between the round-nav stepper and the spend meter inside .engine-status ("status · stepper · BACK TO LIVE · meter"), still never a descendant of the transport row', async () => {
+// WIRING: mockup band-2 order is status · stepper · BACK TO LIVE · meter · "?" — proven as DOM
+// order inside `.engine-status` (the header word/navigator/meter's own shared flex row), not just
+// AC2's existing ancestry/non-transport proof.
+test('#923: BACK TO LIVE sits between the round-nav stepper and the spend meter inside .engine-status ("status · stepper · BACK TO LIVE · meter"), still never a descendant of the transport row', async () => {
   const data = { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "running" } };
   const vm = minimalAppViewModel({ mode: "replay", loop: { data, isPending: false }, rounds: [CLOSED_ROUND], selectedRoundId: 42 });
   const { container, cleanup } = await mountAppWithCascade(vm);
@@ -3642,5 +3653,31 @@ test('#923 PO item 4: BACK TO LIVE sits between the round-nav stepper and the sp
     assert.equal(btn?.closest("section.transport"), null, "BACK TO LIVE must still NOT be a descendant of the transport row");
   } finally {
     await cleanup();
+  }
+});
+
+// WIRING: Header.tsx's `disconnected`/`isPending` early returns used to discard `replayAction`
+// entirely (returning a bare `<p>`, never rendering `{replayAction}` at all) — a replay viewer
+// who loses the connection, or is still loading, had no way back to live even though App.tsx was
+// still passing the button through. Both early-return branches now render it too.
+test("#923: with a closed round selected, BACK TO LIVE still renders inside .app-header while the engine status is disconnected, and while it is still connecting", async () => {
+  const data = { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "running" } };
+  const cases = [
+    { name: "disconnected", overrides: { disconnected: true } },
+    { name: "connecting", overrides: { loop: { data: undefined, isPending: true } } },
+  ] as const;
+  for (const { name, overrides } of cases) {
+    const vm = {
+      ...minimalAppViewModel({ mode: "replay", loop: { data, isPending: false }, rounds: [CLOSED_ROUND], selectedRoundId: 42 }),
+      ...overrides,
+    };
+    const { container, cleanup } = await mountAppWithCascade(vm);
+    try {
+      const btn = container.querySelector(".header-back-to-live");
+      assert.ok(btn, `${name}: the BACK TO LIVE control must still render`);
+      assert.ok(btn?.closest(".app-header"), `${name}: BACK TO LIVE must still be a descendant of .app-header`);
+    } finally {
+      await cleanup();
+    }
   }
 });

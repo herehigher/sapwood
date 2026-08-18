@@ -134,11 +134,13 @@ export interface HeaderProps {
    *  (`cost-panel.ts`'s `sumEstCostUsd`) — live mode only; `undefined` under replay/demo, where
    *  no lane is actually running. Folded onto the meter's own tier as the hatched est tail. */
   estUsd?: number | undefined;
-  /** #923 PO design-witness item 4: the mockup's band-2 order is status · stepper · BACK TO
-   *  LIVE · meter · "?" — App.tsx's own BACK TO LIVE button renders here (between the round
-   *  navigator and the spend meter) rather than as a later sibling in `.app-header-row`, which
-   *  put it after the meter instead. `undefined` outside replay (App.tsx renders `Controls`
-   *  there instead, in the same row-level slot this used to occupy). */
+  /** #923: the mockup's band-2 order is status · stepper · BACK TO LIVE · meter · "?" — App.tsx's
+   *  own BACK TO LIVE button renders here (between the round navigator and the spend meter)
+   *  rather than as a later sibling in `.app-header-row`, which put it after the meter instead.
+   *  `undefined` outside replay (App.tsx renders `Controls` there instead, in the same row-level
+   *  slot this used to occupy). Rendered by EVERY return below, not just the ready-state one — a
+   *  replay viewer who loses the connection (or is still loading) still needs a way back to live;
+   *  losing it there would strand them on a closed round with no visible escape. */
   replayAction?: ReactNode;
   now?: Date;
 }
@@ -165,13 +167,21 @@ export function Header({
 }: HeaderProps) {
   if (disconnected) {
     return (
-      <p className="muted" style={{ color: "var(--rust)" }}>
-        disconnected — restart sapwood to reconnect
-      </p>
+      <div className="engine-status">
+        <p className="muted" style={{ color: "var(--rust)" }}>
+          disconnected — restart sapwood to reconnect
+        </p>
+        {replayAction}
+      </div>
     );
   }
   if (isPending || !engine || !spend) {
-    return <p className="muted">connecting…</p>;
+    return (
+      <div className="engine-status">
+        <p className="muted">connecting…</p>
+        {replayAction}
+      </div>
+    );
   }
   return (
     <div className="engine-status">
@@ -192,9 +202,9 @@ export function Header({
         engineState={engine.state}
         now={now}
       />
-      {/* #923 PO design-witness item 4: BACK TO LIVE sits between the stepper and the meter
-       *  (status · stepper · BACK TO LIVE · meter · "?") — App.tsx supplies it only in replay
-       *  mode, `undefined` otherwise (live mode's `Controls` stays a row-level sibling, App.tsx). */}
+      {/* #923: BACK TO LIVE sits between the stepper and the meter (status · stepper · BACK TO
+       *  LIVE · meter · "?") — App.tsx supplies it only in replay mode, `undefined` otherwise
+       *  (live mode's `Controls` stays a row-level sibling, App.tsx). */}
       {replayAction}
       <SpendMeter spend={spend} round={round} estUsd={estUsd ?? 0} />
     </div>

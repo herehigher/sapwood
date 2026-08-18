@@ -174,12 +174,12 @@ code,
  * engine word/navigator/meter, the verbs (or, in replay, BACK TO LIVE), and the "?" legend spread
  * across the full width.
  *
- * #923 PO design-witness item 2: `min-height` lives HERE, on the row, not on `.app-header` (the
- * card) — the card's own ≥100px floor (above) was getting satisfied by leftover space below a
- * shorter live-state row (no transport row under it), so the row's own content top-hugged inside
- * that taller card instead of sitting centred. A literal px floor on the row itself, plus
- * `align-items: center` (unchanged), keeps row 1 the mockup's own ~100–130px band regardless of
- * whether a second (transport) row exists beneath it. */
+ * #923: `min-height` lives HERE, on the row, not on `.app-header` (the card) — the card's own
+ * ≥100px floor (above) was getting satisfied by leftover space below a shorter live-state row
+ * (no transport row under it), so the row's own content top-hugged inside that taller card
+ * instead of sitting centred. A literal px floor on the row itself, plus `align-items: center`
+ * (unchanged), keeps row 1 the mockup's own ~100–130px band regardless of whether a second
+ * (transport) row exists beneath it. */
 .app-header-row {
   display: flex;
   align-items: center;

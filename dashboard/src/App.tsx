@@ -480,11 +480,13 @@ export function appContent(vm: AppViewModel) {
               onSelectRound={replay.selectRound}
               liveRoundId={liveRoundId}
               now={clock}
-              // #923 PO design-witness item 4: mockup band-2 order is status · stepper · BACK TO
-              // LIVE · meter · "?" — Header.tsx renders this between its own round navigator and
-              // spend meter, rather than here as a later sibling in `.app-header-row` (which put
-              // it after the meter, ahead of only the "?"). Still a descendant of `.app-header`,
-              // never of the transport row below (AC2's own wiring check).
+              // #923: mockup band-2 order is status · stepper · BACK TO LIVE · meter · "?" —
+              // Header.tsx renders this between its own round navigator and spend meter, rather
+              // than here as a later sibling in `.app-header-row` (which put it after the meter,
+              // ahead of only the "?"). Still a descendant of `.app-header`, never of the
+              // transport row below (AC2's own wiring check), in every one of Header's own
+              // returns — including disconnected/connecting, so a replay viewer never loses the
+              // way back just because the connection did.
               replayAction={
                 mode === "replay" ? (
                   <button type="button" className="header-back-to-live" onClick={() => replay.selectRound(null)}>

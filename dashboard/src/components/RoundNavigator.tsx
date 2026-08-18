@@ -251,11 +251,11 @@ export function RoundNavigator({
        *  buttons, nothing that ever needs to escape it) lets `.round-nav-list-wrap` sit as this
        *  wrapper's own SIBLING instead — a sibling is never subject to an ancestor's overflow
        *  clip, so the dropdown escapes cleanly while the stepper still gets its rounded corners. */}
-      {/* #923 PO design-witness item 1: the mockup's chevrons are STROKED lucide glyphs
-       *  (~8×15px), not the tiny filled ◂▸ characters, which rendered near-empty at the cell's
-       *  40px min-height. #923 PO item 3: a closed (replaying) round tints the whole joined
-       *  stepper's own border amber (`--sap-text`) — `round-nav-stepper-closed` carries that,
-       *  never a per-cell override, so the group still reads as ONE joined outline. */}
+      {/* #923: the mockup's chevrons are STROKED lucide glyphs (~8×15px), not the tiny filled
+       *  ◂▸ characters, which rendered near-empty at the cell's 40px min-height. A closed
+       *  (replaying) round also tints the whole joined stepper's own border amber —
+       *  `round-nav-stepper-closed` carries that, never a per-cell override, so the group still
+       *  reads as ONE joined outline. */}
       <div className={label.closed ? "round-nav-stepper round-nav-stepper-closed" : "round-nav-stepper"}>
         <button
           type="button"
