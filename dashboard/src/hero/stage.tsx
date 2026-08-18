@@ -13,6 +13,7 @@
  * dimmed "reserved" row — issue #144's AC forbids any reserved/dormant slot on the stage.
  */
 
+import { Sprout } from "lucide-react";
 import type { KeyboardEvent, Ref } from "react";
 import { readConfigPath } from "../config-captions.ts";
 import type { DomainEvent } from "../domain-event.ts";
@@ -154,9 +155,11 @@ const LANE_TERMINAL_R = 4;
  * #897: `r` is new — the frozen baseline draws CI/Review as large circular gate nodes (with a
  * hand-drawn gear/eye glyph inside, `gateIcon` below), not the small rects this stage used to
  * draw. 20 keeps the circle's right edge (`GATES.review + r` = 878) well inside the same
- * clearance the old rect already held against the trunk rings' leftmost reach (`TRUNK.x -
- * TRUNK.max * TRUNK.step` = 922) — margin only grows (was 22px at the old rect's 900 edge, now
- * 44px).
+ * clearance the old rect already held against the trunk rings' leftmost reach — margin only
+ * grows (was 22px at the old rect's 900 edge, now 44px). #921: the disc's real leftmost reach is
+ * now the FIXED `TRUNK_DISC_R_MAX` footprint ceiling, not `TRUNK.max * TRUNK.step` (that stopped
+ * being the disc's true reach once pitch could compress) — `TRUNK.x - TRUNK_DISC_R_MAX` = 903,
+ * still clear of `GATES.review + r` (888) by 15px at the CURRENT `r` = 30.
  *
  * #897: `r` shrank from an earlier 26 specifically to make room for the "CI"/"Review" word BELOW
  * the circle without reaching the needs-human cluster's own fixed ceiling (rank 5's droplet label top,
@@ -190,9 +193,10 @@ export const ESCALATION = { x: 810, y: 460 } as const;
 const FIXLOOP_LABEL = { x: 535, y: GATES.y + 100 } as const;
 /**
  * #728 gate② finding [0]: caps the cluster's rightward spread so it stays clear of the trunk
- * rings (leftmost extent `TRUNK.x - TRUNK.max * TRUNK.step` = 922) AND the OUTCOME tally
- * text's actual rendered extent (not just its anchor point) — a wide escalation list wraps
- * into a new row (upward, away from the ESCALATION node) instead of running into either.
+ * rings (leftmost extent `TRUNK.x - TRUNK_DISC_R_MAX` = 903, #921 — the disc's real fixed
+ * ceiling, not `TRUNK.max * TRUNK.step`) AND the OUTCOME tally text's actual rendered extent
+ * (not just its anchor point) — a wide escalation list wraps into a new row (upward, away from
+ * the ESCALATION node) instead of running into either.
  *
  * All three numbers below come from `hero.test.ts`'s bounding-box check, not a guess:
  * - 2 columns, not 3: a droplet's own label ("⤳ 9999") has real rendered width — 3 columns'
@@ -287,26 +291,133 @@ const CHECKPOINT_DRAW_CAP = CHECKPOINT_COLS * CHECKPOINT_ROWS_MAX;
 const CHECKPOINT_OVERFLOW_REAL_CAP = CHECKPOINT_COLS * (CHECKPOINT_ROWS_MAX - 1);
 /**
  * #897 AC3: the frozen baseline's cross-section is dense and fine-grained (many close rings),
- * not the ~12 coarse widely-spaced circles this stage used to draw — `step`/`max` move from
- * 7/12 to 2/42, so the SAME overall reach (`max * step` = 84, unchanged) now packs 42 rings into
- * it instead of 12. Every downstream geometry constant that cites the old `84` reach (the
- * escalation cluster's own doc below, the trunk-droplet clearance doc) stays valid unmodified —
- * only the drawn TEXTURE inside that same footprint gets finer.
+ * not the ~12 coarse widely-spaced circles this stage used to draw. #921: `step` is now the
+ * NOMINAL pitch only (`ringRadii`'s own doc — the real per-ring spacing compresses once the
+ * disc nears `TRUNK_DISC_R_MAX`, the disc's real fixed footprint ceiling that the DOWNSTREAM
+ * fixed layout — `REFLECTION_BAR_Y` etc. — sizes off directly, never `max * step`). Bumped 2 → 3
+ * so the disc actually REACHES `TRUNK_DISC_R_MAX` by the mockup's own N = 24 (issue #921's own
+ * worked example) instead of still growing toward it at a smaller nominal pitch.
  */
-export const TRUNK = { x: 1006, y: 190, step: 2, max: 42 } as const;
+export const TRUNK = { x: 1006, y: 190, step: 3, max: 42 } as const;
 /**
- * #920 gate② finding [0] (reflection-stem-max-envelope-gap): the ring cross-section's own
- * ACTUAL rendered outer radius at a given count — `ringRadii(rings)`'s own last element, without
- * re-drawing it. The reflection stem must attach HERE, not at `TRUNK.max * TRUNK.step` (the max
- * envelope) — that stayed visually correct only once the count saturates the cap; at the shipped
- * demo's 1 ring, the drawn circle's real radius is 2, not 84, leaving an 82-unit undrawn gap
- * before the stem's old fixed start. Floored at `TRUNK.step` (never 0) so a fresh 0-ring state
- * still gets a real, non-degenerate attachment point instead of starting exactly on the ring-count
- * number's own centre.
+ * #921: the 1440px reference width `hero.test.ts`'s own #728 scale-invariance test established —
+ * every element scales UNIFORMLY at any rendered `.hero` container width (`width: 100%` over the
+ * fixed `STAGE` viewBox), so a target render size pinned at this one reference width converts to
+ * every other width through this same ratio.
+ */
+const RENDER_SCALE_1440 = 1440 / STAGE.w;
+/**
+ * #921 AC2: the outcome count's rendered size floor — the frozen mockup's own ~75px cap-height
+ * serif "24" against the old `--text-4` (33px, only ~40px at 1440) sitting well under AC2's 56px
+ * floor. `--text-4` tops out at 33px (its own 1.25-ratio ladder), so this is a literal, not that
+ * token — `hero.test.ts`'s own AC2 reads this exact export back rather than a copied number.
+ * 48 × `RENDER_SCALE_1440` = 57.6px, clearing the floor with a small margin.
+ */
+export const RING_COUNT_FONT_PX = 48;
+/** #921: the same conservative half-width/ascent/descent text-metric shape `hero.test.ts`'s own
+ *  `textBox()`/`CAPTION_SAFE_ASCENT` use, kept independently here since production geometry
+ *  can't import a test module — `ringInnerRadius` below is what actually needs it. */
+const RING_COUNT_CHAR_ADVANCE = 0.62;
+const RING_COUNT_ASCENT = 1.0;
+const RING_COUNT_DESCENT = 0.25;
+/** The numeral's own baseline offset from `TRUNK`'s true centre — the `<text>` element's own
+ *  `TRUNK.y + 11` cap-height centring nudge, below. */
+const RING_COUNT_BASELINE_DY = 11;
+/** The numeral's own rendered-box half-diagonal (from the disc centre) at a given font size and
+ *  digit count — the shared metric both `ringInnerRadius` and `ringCountFontPx` need, so the two
+ *  can never silently diverge on what "fits" means. */
+function ringCountBoxRadius(fontPx: number, digits: number): number {
+  const halfWidth = (digits * fontPx * RING_COUNT_CHAR_ADVANCE) / 2;
+  const above = fontPx * RING_COUNT_ASCENT - RING_COUNT_BASELINE_DY;
+  const below = fontPx * RING_COUNT_DESCENT + RING_COUNT_BASELINE_DY;
+  return Math.hypot(halfWidth, Math.max(above, below));
+}
+/**
+ * #921 gate② round 3 finding [1] (ac3-extreme-footprint): AC3's footprint ceiling must hold at
+ * EVERY count, including scales where the numeral's own box — at the default/AC2 floor
+ * `RING_COUNT_FONT_PX` — would itself exceed `TRUNK_DISC_R_MAX` (7+ digits; the reviewer's own
+ * rings=1,000,000 example: ~110.5 vs the 103-unit ceiling). Since `ringInnerRadius` sizes the
+ * disc's inner clearance directly off the numeral's box, the only way to keep that clearance
+ * inside the ceiling at extreme digit counts is to shrink the numeral itself — binary search
+ * (30 iterations, well past the precision this geometry needs) for the largest font size, never
+ * above `RING_COUNT_FONT_PX`, whose own box still fits inside `TRUNK_DISC_R_MAX`. A no-op for
+ * any realistic count (verified through 6 digits — under one million rings — `hero.test.ts`'s
+ * own AC2/AC3 tests): the numeral stays at exactly `RING_COUNT_FONT_PX`, AC2's own floor, until
+ * scale genuinely forces a trade-off no fixed font size can avoid.
+ *
+ * #921 gate② round 4 finding [0] (ac3-extreme-clearance): searching against the bare
+ * `TRUNK_DISC_R_MAX` let `r0` pin RIGHT AT the ceiling — leaving zero room for even one ring's
+ * own minimum pitch, so `ringsThatFitFootprint` correctly computed zero drawn rings at the
+ * extreme (rings=1,000,000), and the count went undrawn entirely (the disc is JUST the numeral,
+ * no ring texture at all). The search target is now `TRUNK_DISC_R_MAX` minus TWO
+ * `RING_PITCH_MIN` slots — one reserved slot alone risks `ringsThatFitFootprint`'s own
+ * `Math.floor` rounding a hairline-thin remaining gap down to zero on floating-point noise; two
+ * slots is real margin, not just a boundary the solver can land exactly on. The numeral still
+ * shrinks no more than necessary — this only tightens the target the binary search converges to.
+ */
+export function ringCountFontPx(rings: number): number {
+  const digits = String(rings).length;
+  const ceiling = TRUNK_DISC_R_MAX - 2 * RING_PITCH_MIN;
+  if (ringCountBoxRadius(RING_COUNT_FONT_PX, digits) <= ceiling) return RING_COUNT_FONT_PX;
+  let lo = 1;
+  let hi = RING_COUNT_FONT_PX;
+  for (let i = 0; i < 30; i++) {
+    const mid = (lo + hi) / 2;
+    if (ringCountBoxRadius(mid, digits) <= ceiling) lo = mid;
+    else hi = mid;
+  }
+  return lo;
+}
+/**
+ * #921 growth rule (issue anchors: `TRUNK`/`ringRadii`/`TRUNK_DROPLET_OFFSET`): the inner
+ * clearance radius no ring may draw inside of — sized to the numeral's OWN rendered box
+ * (half-diagonal from the disc centre, `ringCountFontPx(rings)` at `rings`' own digit count)
+ * rather than a fixed guess, so a wider running total (more digits) automatically buys more
+ * clearance instead of eventually colliding with a numeral a fixed radius never anticipated —
+ * and, past the point a fixed font size can no longer fit at all, the numeral itself shrinks
+ * (`ringCountFontPx`) rather than let the disc's own inner clearance blow the footprint ceiling.
+ */
+export function ringInnerRadius(rings: number): number {
+  return ringCountBoxRadius(ringCountFontPx(rings), String(rings).length);
+}
+/**
+ * #921: the mockup's own disc footprint — ~128px radius at 1440 (i.e. ~256px disc at 24 rings,
+ * issue #921's "What") — capped at ~40% of the hero band height (the issue's own footprint
+ * ceiling) so a future `STAGE.h` change can't silently push the disc past it; `Math.min` picks
+ * whichever ceiling is tighter, rather than two independent, potentially-disagreeing caps.
+ */
+export const TRUNK_DISC_R_MAX = Math.min(128 / RENDER_SCALE_1440, 0.2 * STAGE.h);
+/** #921: a ring pitch below this compresses past what a hairline stroke can actually resolve —
+ *  the issue's own "≥ 1.5px [at 1440]" floor, converted to this file's SVG-unit space —
+ *  `ringsThatFitFootprint`'s own floor on how many rings the footprint can still fit. Exported so
+ *  `hero.test.ts` (#921 gate② round 4 finding [0]) reads the exact two-slot reservation
+ *  `ringCountFontPx` searches against, rather than a hand-copied literal. */
+export const RING_PITCH_MIN = 1.5 / RENDER_SCALE_1440;
+/**
+ * #921: the sapling glyph's own footprint at zero rings — "≈ 40% of the disc footprint" (the
+ * issue's own sizing), i.e. 40% of the max disc's DIAMETER (`2 * TRUNK_DISC_R_MAX`).
+ */
+const HERO_SAPLING_SIZE = 0.4 * (2 * TRUNK_DISC_R_MAX);
+/** #921 AC3b: a small, deliberate real gap between the sapling glyph's own bounding box and the
+ *  reflection stem's start — unlike a ring (whose disc IS the record and attaches with no gap at
+ *  all, #920 gate② finding [0]), the sapling's box is a generic icon viewport with real ink
+ *  short of its own edges; a stem starting EXACTLY on that box's edge reads as touching it. */
+const SAPLING_STEM_CLEARANCE = 6;
+/**
+ * #920 gate② finding [0] (reflection-stem-max-envelope-gap): the disc's own ACTUAL rendered
+ * outer radius at a given count, without re-drawing it — the reflection stem attaches HERE
+ * (`TRUNK.y + ringOuterRadius(...)`), never at the `TRUNK.max * TRUNK.step` max envelope.
+ * #921: at zero rings there is no ring to measure — the sapling glyph's own box
+ * (`HERO_SAPLING_SIZE`, plus `SAPLING_STEM_CLEARANCE`) is what the stem must actually clear
+ * instead. Past that, floored at `ringInnerRadius(rings)` (never a bare `TRUNK.step`) — the
+ * numeral's own clearance stays the real bottom edge to attach below whenever the footprint-fit
+ * cap (`ringsThatFitFootprint`) leaves zero rings drawn (extreme digit counts, #921 gate② round
+ * 3's AC3 fix).
  */
 export function ringOuterRadius(rings: number): number {
+  if (rings === 0) return HERO_SAPLING_SIZE / 2 + SAPLING_STEM_CLEARANCE;
   const radii = ringRadii(rings);
-  return Math.max(radii[radii.length - 1] ?? 0, TRUNK.step);
+  return Math.max(radii[radii.length - 1] ?? ringInnerRadius(rings), TRUNK.step);
 }
 /**
  * "ring"/"rings" — the unit word under the big display number. #920 gate② finding [0]: now that
@@ -315,24 +426,32 @@ export function ringOuterRadius(rings: number): number {
  * caption without it landing inside the stem's (now much shorter) own path — the fix used for the
  * outcome tally in the SAME situation applies here too: offset OFF the stem's shared x column
  * (`RING_WORD_RIGHT_X`) rather than trying to out-race a shrinking Y gap.
+ *
+ * #921 gate② PO review thread (fixed y `TRUNK.y + 40` still sat ON the ring's lower-left arc at
+ * low counts — text on stroke, a live crop at rings = 1 caught it): `y` is now DYNAMIC, sized off
+ * the disc's own real rendered edge (`ringOuterRadius`, the same source the reflection stem's own
+ * start already reads from) rather than a fixed guess — the caption sits BELOW the disc, in the
+ * same real gap the stem's own top clears (`hero.test.ts`'s AC3b), never on top of a ring's
+ * stroke at any count.
  */
-const RING_WORD_Y = TRUNK.y + 40;
+function ringWordY(rings: number): number {
+  return TRUNK.y + ringOuterRadius(rings) + 14;
+}
 const RING_WORD_RIGHT_X = TRUNK.x - 10;
 /**
  * #886 gate② run 2e566ac9 finding [1]: where the newest-merge droplet parks, offset from
  * `dropletPoint`'s "trunk" case — frees the true trunk CENTER for the outcome number (below).
- * Chosen purely for vertical clearance from the number's own worst-case rendered box (a
- * multi-digit ring count centered at `TRUNK.y + 11`, `hero.css`'s 33px `.hero-ring-count`):
- * the droplet's own label sits 14px above its shape (`hero-droplet`'s own `y=-14` convention),
- * so a -40 vertical offset alone already puts the label's bottom edge (`hero.test.ts`'s stress
- * test: ~104) well clear of the number's top edge (~140) regardless of either string's digit
- * count or the +40 horizontal component — the horizontal offset only keeps the marker visually
- * near "where the merge arm feeds in" (`GATES.review` → `TRUNK`), not load-bearing for the
- * clearance itself. Verified collision-free at a deliberately stressed digit count (3-digit ring
- * total, 6-digit PR number) by `hero.test.ts`'s own test, the same discipline #728's
- * NEEDS_HUMAN_COL_STEP/ROW_STEP doc already uses for its own cluster.
+ * Chosen for vertical clearance from the number's own worst-case rendered box (a multi-digit
+ * ring count centered at `TRUNK.y + 11`, `RING_COUNT_FONT_PX`): the droplet's own label sits 14px
+ * above its shape (`hero-droplet`'s own `y=-14` convention). #921: widened -40 → -48 — growing
+ * `RING_COUNT_FONT_PX` (33 → 48, AC2) grew the numeral's own box upward by the same amount,
+ * eating most of the old offset's margin; -48 restores comparable clearance, verified against a
+ * deliberately stressed digit count (3-digit ring total, 6-digit PR number) by `hero.test.ts`'s
+ * own test, the same discipline #728's NEEDS_HUMAN_COL_STEP/ROW_STEP doc already uses for its own
+ * cluster. The horizontal +40 component only keeps the marker visually near "where the merge arm
+ * feeds in" (`GATES.review` → `TRUNK`), not load-bearing for the clearance itself.
  */
-const TRUNK_DROPLET_OFFSET = { dx: 40, dy: -40 } as const;
+const TRUNK_DROPLET_OFFSET = { dx: 40, dy: -48 } as const;
 /**
  * #897 AC2: the frozen baseline connects Summary/Retro BELOW the outcome disc as a lower
  * reflection tree — not beside the trunk at its own y-band (the old `REFLECTION.x` column
@@ -352,11 +471,15 @@ const TRUNK_DROPLET_OFFSET = { dx: 40, dy: -40 } as const;
  * review thread's own "connect the return path from the tree… from the tally/rule end").
  *
  * `barY`/`y`/`OUTCOME_RULE_Y`/`OUTCOME_TALLY_Y`/`bottom` stay anchored to the disc's own MAX
- * envelope (`TRUNK.max * TRUNK.step`), not the dynamic `ringOuterRadius` — the crossbar/captions/
- * rule/tally are a fixed-size readout regardless of ring count; only the stem's own TOP (how far
- * it has to travel to reach the disc) is what varies with the count.
+ * envelope, not the dynamic `ringOuterRadius` — the crossbar/captions/rule/tally are a
+ * fixed-size readout regardless of ring count; only the stem's own TOP (how far it has to
+ * travel to reach the disc) is what varies with the count. #921: that envelope is now
+ * `TRUNK_DISC_R_MAX` (the disc's real fixed footprint ceiling) rather than `TRUNK.max *
+ * TRUNK.step` — the latter stopped being the disc's true max reach once pitch could compress,
+ * and using it here would keep dragging this whole fixed layout down every time `TRUNK.step`
+ * tunes the (unrelated) nominal ring pitch.
  */
-const REFLECTION_BAR_Y = TRUNK.y + TRUNK.max * TRUNK.step + 60;
+const REFLECTION_BAR_Y = TRUNK.y + TRUNK_DISC_R_MAX + 60;
 const REFLECTION_R = 16;
 /** #920 gate② review thread (PRRT…gJ/…GgK): the Summary/Retro label's own baseline, clear of the
  *  circle's bottom edge (`REFLECTION_R + 12`, not the old `+20` that sat ON the circle's stroke) —
@@ -1159,44 +1282,75 @@ export function HeroStage({
 
       {/* ── Zone 4: trunk cross-section + reflection ── */}
       <g className="hero-trunk" data-rings={state.rings}>
-        {ringRadii(state.rings).map((r, i, all) => {
-          const current = i === all.length - 1;
-          // #716 gate② round 2 P1-3: each drawn ring's real 1-indexed ring NUMBER (not its
-          // draw-order index, which resets every time older rings age out past TRUNK.max) —
-          // lets `Hero.tsx` target the ring a specific `merged` transition actually produced
-          // (`transition.ring`) instead of always hitting the sole `data-current="true"` one,
-          // which two non-coalesced merges in one poll both animated onto the same circle.
-          const ringNumber = state.rings - all.length + 1 + i;
-          return (
-            <circle
-              className="hero-ring"
-              key={r}
-              cx={TRUNK.x}
-              cy={TRUNK.y}
-              r={r}
-              data-current={current ? "true" : "false"}
-              data-ring={ringNumber}
-              style={current ? { stroke: "var(--moss)" } : undefined}
+        {state.rings === 0 ? (
+          // #921 owner ruling (2026-08-17): zero merges is a sapling, not a bare "0" against no
+          // ring — `lucide-react`'s `Sprout` (standard resources first; hand-drawn only what has
+          // no standard equivalent), never a hand-drawn `<path>` here. Colour is set ONCE, on the
+          // wrapper `<g>` — `Sprout`'s own stroke is `currentColor` (lucide-react's default), so
+          // it inherits `--moss` through SVG `color` inheritance rather than a per-path override.
+          <g className="hero-sapling" style={{ color: "var(--moss)" }}>
+            <Sprout
+              x={TRUNK.x - HERO_SAPLING_SIZE / 2}
+              y={TRUNK.y - HERO_SAPLING_SIZE / 2}
+              width={HERO_SAPLING_SIZE}
+              height={HERO_SAPLING_SIZE}
             />
-          );
-        })}
-        {/* #879/#886: dead center — the frozen baseline's bold display number fills the ring
-         * cross-section with nothing else drawn near it. Earlier rounds moved this text itself
-         * off-center to dodge the newest-merge droplet that always parks at the trunk (see
-         * `merged` in state.ts); that read as "floating below the ring" for the realistic
-         * low-ring-count case a live probe actually captures. `TRUNK_DROPLET_OFFSET` (above)
-         * moves the DROPLET out of the way instead, so this can stay truly centered at any ring
-         * count. +11 is a baseline-centering nudge for the display font's cap-height, not a
-         * collision-avoidance number. */}
-        <text className="hero-ring-count" style={{ fontFamily: "var(--font-display)" }} x={TRUNK.x} y={TRUNK.y + 11} textAnchor="middle">
-          {state.rings}
-        </text>
-        {/* #920 gate② finding [0]: right-anchored (`RING_WORD_RIGHT_X`'s own doc) — the stem's
-         * own start now shrinks with the ring count, leaving no safe Y-gap to sit in at a low
-         * count, so this clears the stem's shared x column instead. */}
-        <text className="hero-label" x={RING_WORD_RIGHT_X} y={RING_WORD_Y} textAnchor="end">
-          {state.rings === 1 ? "ring" : "rings"}
-        </text>
+          </g>
+        ) : (
+          <>
+            {ringRadii(state.rings).map((r, i, all) => {
+              const current = i === all.length - 1;
+              // #716 gate② round 2 P1-3: each drawn ring's real 1-indexed ring NUMBER (not its
+              // draw-order index, which resets every time older rings age out past TRUNK.max) —
+              // lets `Hero.tsx` target the ring a specific `merged` transition actually produced
+              // (`transition.ring`) instead of always hitting the sole `data-current="true"` one,
+              // which two non-coalesced merges in one poll both animated onto the same circle.
+              const ringNumber = state.rings - all.length + 1 + i;
+              return (
+                <circle
+                  className="hero-ring"
+                  key={r}
+                  cx={TRUNK.x}
+                  cy={TRUNK.y}
+                  r={r}
+                  data-current={current ? "true" : "false"}
+                  data-ring={ringNumber}
+                  style={current ? { stroke: "var(--moss)" } : undefined}
+                />
+              );
+            })}
+            {/* #879/#886: dead center — the frozen baseline's bold display number fills the ring
+             * cross-section with nothing else drawn near it. Earlier rounds moved this text itself
+             * off-center to dodge the newest-merge droplet that always parks at the trunk (see
+             * `merged` in state.ts); that read as "floating below the ring" for the realistic
+             * low-ring-count case a live probe actually captures. `TRUNK_DROPLET_OFFSET` (above)
+             * moves the DROPLET out of the way instead, so this can stay truly centered at any ring
+             * count. +11 is a baseline-centering nudge for the display font's cap-height, not a
+             * collision-avoidance number. #921 AC2: `fontSize` is now inline (`RING_COUNT_FONT_PX`,
+             * ≥ 56px at 1440 — the frozen mockup's own cap-height "24") rather than `hero.css`'s old
+             * `--text-4` (33px, whose 1.25-ratio ladder tops out short of the floor). #921 gate②
+             * round 3 finding [1]: `ringCountFontPx` (not the bare constant) — a no-op at any
+             * realistic count (stays exactly `RING_COUNT_FONT_PX`), only shrinking the RENDERED
+             * numeral to match what `ringInnerRadius` actually solved for once digit width alone
+             * would otherwise blow the footprint ceiling. */}
+            <text
+              className="hero-ring-count"
+              style={{ fontFamily: "var(--font-display)", fontSize: ringCountFontPx(state.rings) }}
+              x={TRUNK.x}
+              y={TRUNK.y + 11}
+              textAnchor="middle"
+            >
+              {state.rings}
+            </text>
+            {/* #920 gate② finding [0]: right-anchored (`RING_WORD_RIGHT_X`'s own doc) — off the
+             * stem's shared x column. #921 gate② PO review thread: `y` (`ringWordY`) now tracks
+             * the disc's own real rendered edge — below it at every count, never on a ring's own
+             * stroke. */}
+            <text className="hero-label" x={RING_WORD_RIGHT_X} y={ringWordY(state.rings)} textAnchor="end">
+              {state.rings === 1 ? "ring" : "rings"}
+            </text>
+          </>
+        )}
       </g>
 
       <g className="hero-reflection" data-node="reflection">
@@ -1348,13 +1502,56 @@ export function HeroStage({
   );
 }
 
+/** #921 gate② round 3 finding [0] (ac1-min-pitch-crossover): the growth rule's own THIRD limiting
+ *  term (issue's own "What", verbatim: "the pitch compresses … so every ring still draws down to
+ *  a hairline-resolvable pitch (≥ 1.5px), after which the existing TRUNK.max drawn-window cap
+ *  applies and the count is the record") — how many rings the footprint can still fit at the
+ *  hairline-resolvable minimum pitch, given the inner clearance `r0` already claims. Once this is
+ *  SMALLER than `TRUNK.max`, it — not `TRUNK.max` — is the binding cap on how many rings draw;
+ *  the numeral (the real, uncapped `rings` count) stays "the record" for the gap. */
+function ringsThatFitFootprint(r0: number): number {
+  return Math.max(0, Math.floor((TRUNK_DISC_R_MAX - r0) / RING_PITCH_MIN));
+}
 /**
- * Radii for the cross-section, outermost = newest.
+ * Radii for the cross-section, outermost = newest — empty at zero rings (the sapling glyph
+ * draws instead, `HeroStage`'s own trunk group) OR once the footprint-fit cap
+ * (`ringsThatFitFootprint`) itself lands at zero (extreme digit counts).
  *
  * ponytail: capped at TRUNK.max drawn rings — the count text is the real record, and a disc
  * of 400 hairlines is a grey blob. Lift the cap only if the disc ever needs to be exact.
+ *
+ * #921 growth rule: `drawn` is `min(rings, TRUNK.max)`, further capped by `ringsThatFitFootprint`
+ * — the growth rule's own third term (that function's own doc). Pitch stays the nominal
+ * `TRUNK.step` while the whole drawn set still fits inside `TRUNK_DISC_R_MAX` past the inner
+ * clearance (`ringInnerRadius`, sized to `rings`' own digit count — the REAL total, not the
+ * capped `drawn` count, since the numeral shows the real total even once ring-drawing itself
+ * saturates). Once it wouldn't fit at the nominal pitch, EVERY ring's pitch compresses together
+ * (never just the newest ones) so the outermost ring lands exactly on the ceiling instead of
+ * overshooting it — down to `RING_PITCH_MIN`, the hairline floor `ringsThatFitFootprint` itself
+ * enforces by construction (once `drawn` rings fit at that floor, this file never asks for fewer
+ * than the floor pitch to squeeze in more).
+ *
+ * #921 gate② round 2 findings [0]/[1] (ac1-secondary-ring-cap / ac3-wide-count-footprint) vs.
+ * round 3 findings [0]/[1] (ac1-min-pitch-crossover / ac3-extreme-footprint): round 1 had this
+ * same footprint-fit cap; round 2 dropped it, reading AC1's checklist wording ("exactly
+ * min(N, TRUNK.max)") as an unconditional override of the growth rule's own third term — round 3
+ * corrected that misreading (the growth rule's own prose already names the exception: "the count
+ * is the record" once the footprint-fit cap binds, not "exactly min(N, TRUNK.max) always"). The
+ * cap is restored, and `ringInnerRadius` (via `ringCountFontPx`) now ALSO shrinks the numeral
+ * itself for the truly extreme scale (7+ digits, round 3 finding [1]) where even the DEFAULT
+ * font's own box would exceed `TRUNK_DISC_R_MAX` before any ring is drawn — so AC3's footprint
+ * ceiling now holds at every count the growth rule can reach, not just up to a digit-width
+ * boundary. First binding boundary pinned exactly (`hero.test.ts`'s own AC1 test): N = 100 (the
+ * smallest 3-digit total) is the first N where `ringsThatFitFootprint` draws fewer than
+ * `TRUNK.max` — every 1-2 digit N (up to N = 99) still draws exactly `min(N, TRUNK.max)`.
  */
-function ringRadii(rings: number): number[] {
-  const drawn = Math.min(rings, TRUNK.max);
-  return Array.from({ length: drawn }, (_, i) => (drawn - i) * TRUNK.step).reverse();
+export function ringRadii(rings: number): number[] {
+  const capped = Math.min(rings, TRUNK.max);
+  if (capped === 0) return [];
+  const r0 = ringInnerRadius(rings);
+  const drawn = Math.min(capped, ringsThatFitFootprint(r0));
+  if (drawn === 0) return [];
+  const nominalReach = r0 + drawn * TRUNK.step;
+  const pitch = nominalReach <= TRUNK_DISC_R_MAX ? TRUNK.step : (TRUNK_DISC_R_MAX - r0) / drawn;
+  return Array.from({ length: drawn }, (_, i) => r0 + (i + 1) * pitch);
 }

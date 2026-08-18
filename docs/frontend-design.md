@@ -183,6 +183,7 @@ above points at):
 | 2026-08-14 | uPlot / `@tanstack/react-virtual` / motion — **not adopted, adopt-later triggers recorded** | See the adopt-later triggers above for the exact reopening condition per package (time-series spend past ~500 points / the 200-row feed cap ruling overturned / a layout-level shared-element need neither CSS nor anime.js can express) — none is met today. |
 | 2026-08-14 | `@playwright/test` — devDependency, outside the runtime allowlist | `npm run shots`: renders the `?demo` fixture at 1440/1024/720 × both themes into a static side-by-side contact sheet (frozen mockup vs. live capture) — no pixel-diff assertions, evidence for humans and gate② (`docs/dev-guide/07-dashboard.md`). |
 | 2026-08-14 | `@testing-library/react` — devDependency, outside the runtime allowlist | Real interaction testing alongside the existing `registerRealDom()` opt-in pattern (`docs/dev-guide/07-dashboard.md`). |
+| 2026-08-17 | `lucide-react`'s `Sprout` icon (#921, zero-ring sapling glyph) — no new dependency, new import off the existing `lucide-react` allowlist row | Owner ruling: standard resources first — hand-draw only what has no standard equivalent. The sapling is the one exception to the identity-glyph-set's own "hand-drawn permanently" rule (`icons.tsx`'s header, sap droplet/rings/⊙/merge-arrow) — a sapling has no bespoke visual metaphor to protect the way those do, so `Sprout` (`stage.tsx`'s `.hero-sapling`, coloured via `--moss`) is sourced instead of hand-drawn. |
 
 This issue (#876) lands the toolkit and the rules above; applying any of it — module
 restyling, the icon migration, the `<dialog>` migration, attaching the motion recipes — is
@@ -689,11 +690,16 @@ The four zones:
    lane, rust — drops downward to a person node labeled **NEEDS HUMAN**;
    escalated PR droplets park on it. Rust appears nowhere else on the
    stage.
-4. **Rings + reflection**: the trunk cross-section (fine concentric rings
-   filling the disc, no border circle), the big serif ring count, then two
-   small nodes **SUMMARY** (`harvesting`) and **RETRO** (`retro`), and the
-   round's outcome tally (`N merged · N pending · N needs human`) — small
-   numbers, never repeating the all-time ring count.
+4. **Rings + reflection**: the trunk cross-section — strictly one ring per
+   merge, no decorative base grain. At zero merges the disc area shows a
+   small sapling glyph (`lucide-react`'s `Sprout`, §2 adjudication table)
+   instead, with no numeral; once ≥ 1 ring exists, the disc fills with fine
+   concentric rings (no border circle) and the big serif ring count sits at
+   its centre, growing to the disc's own mockup-scale footprint as merges
+   accrue (`stage.tsx`'s `TRUNK`/`ringRadii` growth rule). Then two small
+   nodes **SUMMARY** (`harvesting`) and **RETRO** (`retro`), and the round's
+   outcome tally (`N merged · N pending · N needs human`) — small numbers,
+   never repeating the all-time ring count.
 
 **LLM-backed** stage nodes (the planning trio, lanes, SUMMARY, RETRO) carry
 their configured model·effort caption (§3 C); REVIEW shows the review *mode*

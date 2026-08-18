@@ -153,8 +153,11 @@
   fill: var(--bark-text);
 }
 
+/* #921 AC2: font-size is inline (`stage.tsx`'s `RING_COUNT_FONT_PX`, ≥ 56px at 1440) — `--text-4`
+ * (33px) sat under AC2's floor and its own 1.25-ratio ladder tops out short of it, so this rule
+ * no longer declares font-size at all (inline wins over any cascade rule regardless, but a
+ * redundant, drifted-from value here would mislead a reader of this file alone). */
 .hero-ring-count {
-  font-size: var(--text-4);
   font-weight: 600;
   fill: var(--sapwood);
 }
