@@ -39,6 +39,8 @@ import { renderFactsTemplate } from "../loop/harvest.js";
 import type { PeripheralStub } from "../loop/round.js";
 import { envFailureHook, type RoleRunner, runSessionWithRetry } from "../roles/peripheral.js";
 import { loadRolePromptTemplate } from "../roles/plan-review.js";
+// #964: import ONLY — reviewer.ts is human-merge-only, never edited from here.
+import { changesRequestedOnHead } from "../roles/reviewer.js";
 import { kindsTagged } from "../state/event-kinds/index.js";
 import type { RoundRow, State } from "../state/state.js";
 import { buildRetroDigest, gatherRetroPRLifecycle, PR_TOUCHED_EVENT_KINDS } from "./retro-digest.js";
@@ -319,7 +321,7 @@ export const LANE_SESSION_START_EVENT_KINDS = kindsTagged("lane-session-start");
  *  changes-requested), is round material even with zero fresh dispatch this round — a red retro
  *  PR does not stop being retro's job to notice just because nothing else happened. A
  *  green-and-waiting own PR is NOT material — the quiet skip would otherwise be defeated for as
- *  long as a human hasn't merged it (codex finding 5). Fail-closed on the forge read itself: any
+ *  long as a human hasn't merged it. Fail-closed on the forge read itself: any
  *  read failure (network, auth, a genuinely gone PR) reads as `true` (actionable) here — a wrong
  *  "actionable" costs one session's worth of digest-building; a wrong "quiet" costs a missed
  *  repair, and #964 explicitly takes the cheaper failure direction. Exported so tests assert on
@@ -348,8 +350,11 @@ async function hasActionableOwnPR(forge: IForge, state: State): Promise<boolean>
     if (status.ciRed || status.ciInert || status.mergeable === "CONFLICTING") return true;
     try {
       const review = await forge.getPRReviewData(rec.pr);
-      const last = review.reviews[review.reviews.length - 1];
-      if (last?.state === "CHANGES_REQUESTED") return true;
+      // #964: `changesRequestedOnHead`, not "the last review event" — see retro-digest.ts's
+      // `classifyOutstandingPR` doc for the standing-state/head-pinning bug this closes; reused
+      // (import only, reviewer.ts is human-merge-only) so this signal and the digest's own can
+      // never independently drift.
+      if (changesRequestedOnHead(review.reviews, status.headOid, review.author)) return true;
     } catch {
       return true; // fail-closed, same direction as the status read above
     }

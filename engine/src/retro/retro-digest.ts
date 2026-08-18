@@ -34,6 +34,10 @@
 // `addPRComment(...).catch(() => {})`). A failed item's section says so, in place of its data.
 import type { IForge, PRComment, PRReviewData, PRStatus } from "../forge/forge.js";
 import { findingKeyPath } from "../review/finding-key.js";
+// #964: import ONLY — reviewer.ts is human-merge-only, never edited from here. Reused so this
+// module's and retro.ts's own changes-requested checks can never independently drift from
+// gate②'s real predicate (see classifyOutstandingPR's own doc for the specific bug this closes).
+import { changesRequestedOnHead } from "../roles/reviewer.js";
 import { kindsTagged } from "../state/event-kinds/index.js";
 import type { RoundRow, State } from "../state/state.js";
 
@@ -103,22 +107,34 @@ export interface RetroPRRecord {
   head?: string;
 }
 
+// ponytail: last 5 own PRs is the read bound; add a durable terminal event if retro PRs pile up past that
+export const RETRO_PR_LIFECYCLE_READ_BOUND = 5;
+
 /** Fold retro's WHOLE PR lifecycle (every `retro-pr-opened`/`retro-pr-updated` event ever
- *  appended) down to one row per PR number, latest event wins — `eventsAfterId` returns rows in
- *  ascending id order, so a `Map` overwrite by `pr` is exactly "latest wins" with no extra sort.
- *  A malformed payload (missing `pr`/`branch`) contributes nothing rather than throwing — same
- *  "never fail the whole digest over one bad row" stance the rest of this module takes. Shared
- *  by this module's own outstanding-PR section AND retro.ts's `update` scratch-outcome
- *  verification (`updateProposalPR`) — ONE fold, not two independently-maintained ones. */
+ *  appended) down to one row per PR number, latest event wins, NEWEST-TOUCHED-FIRST, capped at
+ *  `RETRO_PR_LIFECYCLE_READ_BOUND` — `eventsAfterId` returns rows in ascending id order; each PR
+ *  is re-keyed (delete then set) on every touch so a `Map`'s insertion-order iteration reflects
+ *  RECENCY, not first-seen order, and reversing it puts the most recently touched PR first. This
+ *  is the read-cost bound for both consumers below (`gatherOutstandingRetroPRs` and retro.ts's
+ *  `hasActionableOwnPR`): at most `RETRO_PR_LIFECYCLE_READ_BOUND` `getPRStatus` calls per read,
+ *  regardless of how many PRs retro has EVER opened — a MERGED/CLOSED one is simply dropped by
+ *  its caller after a live read (unchanged), never specially remembered. A malformed payload
+ *  (missing `pr`/`branch`) contributes nothing rather than throwing — same "never fail the whole
+ *  digest over one bad row" stance the rest of this module takes. Shared by this module's own
+ *  outstanding-PR section AND retro.ts's `update` scratch-outcome verification
+ *  (`updateProposalPR`) — ONE fold, not two independently-maintained ones; an `update:` scratch
+ *  naming a PR that has aged out of this window degrades the same way as one retro never opened
+ *  — a deliberate, documented consequence of the bound, not a bug. */
 export function gatherRetroPRLifecycle(state: State): RetroPRRecord[] {
   const events = state.eventsAfterId(0, RETRO_PR_LIFECYCLE_EVENT_KINDS);
   const byPr = new Map<number, RetroPRRecord>();
   for (const e of events) {
     const p = e.payload as { pr?: unknown; branch?: unknown; head?: unknown };
     if (typeof p.pr !== "number" || typeof p.branch !== "string") continue;
+    byPr.delete(p.pr); // re-touching an existing PR moves it to the "most recent" end
     byPr.set(p.pr, { pr: p.pr, branch: p.branch, ...(typeof p.head === "string" ? { head: p.head } : {}) });
   }
-  return [...byPr.values()].sort((a, b) => a.pr - b.pr);
+  return [...byPr.values()].reverse().slice(0, RETRO_PR_LIFECYCLE_READ_BOUND);
 }
 
 /** One outstanding PR as the digest renders it. `actionable` names WHY a human (or retro itself,
@@ -173,8 +189,15 @@ async function classifyOutstandingPR(forge: IForge, rec: RetroPRRecord, status: 
   if (status.mergeable === "CONFLICTING") reasons.push("conflicting with the base branch");
   try {
     const review = await forge.getPRReviewData(rec.pr);
-    const last = review.reviews[review.reviews.length - 1];
-    if (last?.state === "CHANGES_REQUESTED") reasons.push(`changes requested by ${last.author}`);
+    // #964: NOT "the last review event is CHANGES_REQUESTED" — that ignores per-reviewer
+    // STANDING state (a later APPROVE from reviewer B would hide reviewer A's still-open
+    // request) and head-pinning (a request left on an OLD head must not read as actionable
+    // after a push superseded it). `changesRequestedOnHead` is reviewer.ts's own gate② predicate
+    // for exactly this question — reused here (import only; reviewer.ts is human-merge-only)
+    // rather than re-derived, so the two callers can never disagree.
+    if (changesRequestedOnHead(review.reviews, status.headOid, review.author)) {
+      reasons.push("changes requested — a standing CHANGES_REQUESTED review on the current head");
+    }
   } catch (e) {
     reasons.push(`review status: unknown — forge read failed (${String(e)})`);
   }
@@ -189,10 +212,11 @@ async function classifyOutstandingPR(forge: IForge, rec: RetroPRRecord, status: 
 }
 
 /** Every PR retro currently has open on the forge, classified. NOT round-scoped (see this
- *  section's own header comment) — reads `gatherRetroPRLifecycle`'s full-history fold, then
- *  drops anything the forge now reports MERGED/CLOSED (no longer outstanding at all) and a
- *  forge-read failure renders `state: "unknown"`, `actionable: true` rather than being dropped
- *  (#964 AC1: never omit a PR whose status could not be read). */
+ *  section's own header comment) — reads `gatherRetroPRLifecycle`'s bounded (at most
+ *  `RETRO_PR_LIFECYCLE_READ_BOUND`) fold, then drops anything the forge now reports MERGED/CLOSED
+ *  (no longer outstanding at all) and a forge-read failure renders `state: "unknown"`,
+ *  `actionable: true` rather than being dropped (#964 AC1: never omit a PR whose status could
+ *  not be read). */
 export async function gatherOutstandingRetroPRs(forge: IForge, state: State): Promise<OutstandingRetroPR[]> {
   const rows: OutstandingRetroPR[] = [];
   for (const rec of gatherRetroPRLifecycle(state)) {

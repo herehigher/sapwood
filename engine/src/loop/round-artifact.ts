@@ -335,10 +335,10 @@ export function assembleRoundArtifact(events: LedgerEvent[], meta: RoundMeta, sp
       case "round-stop":
         roundStops.push({ name: p.name as string, detail: p.detail as string });
         break;
-      // The three retro outcomes are mutually exclusive — LAST event wins outright (Codex P2,
-      // PR #152): a crash-rerun can log retro-pr-opened then retro-pr-degraded (the rerun
-      // fails on the already-existing branch) in the same round's window, and the artifact
-      // must record the later outcome alone, never both.
+      // The three retro outcomes are mutually exclusive — LAST event wins outright (#152): a
+      // crash-rerun can log retro-pr-opened then retro-pr-degraded (the rerun fails on the
+      // already-existing branch) in the same round's window, and the artifact must record the
+      // later outcome alone, never both.
       case "retro-pr-opened":
         retroOpened = { pr: p.pr as number, branch: p.branch as string };
         retroDegraded = null;

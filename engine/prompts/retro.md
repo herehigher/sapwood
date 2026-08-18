@@ -35,8 +35,9 @@ from an incomplete picture.
 
 ## Your outstanding PRs
 
-The digest's `Your outstanding PRs` section lists every PR you have opened, from any prior
-round, that is not yet merged or closed on the forge — not just the ones this round touched.
+The digest's `Your outstanding PRs` section lists your most recently touched PRs, from any
+prior round — not just the ones this round touched — that are not yet merged or closed on the
+forge, capped to a fixed count; an older PR you haven't touched in a while may not appear.
 For each one you get its number, branch, and current state; when the PR is ACTIONABLE (red
 CI with the failing check name and a bounded failure excerpt, CI that concluded without ever
 passing, a conflict with the base branch, a reviewer requesting changes, or its status simply
@@ -145,8 +146,7 @@ so in your proposal rather than writing as if you had looked. You do **not** ope
 pull request yourself — that step belongs to the engine, which verifies your branch actually
 exists on the remote before opening anything on your behalf. Instead, once your branch is
 committed and pushed, write your outcome to the file `.sapwood-retro-pr` at the root of your
-worktree. A NEW proposal is written in EXACTLY this format (two labeled header lines, then the
-body):
+worktree. A NEW proposal is written in EXACTLY this format (two labeled header lines, then the body):
 
 ```
 branch: <the branch name you pushed>

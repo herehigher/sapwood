@@ -21,6 +21,7 @@ import {
   gatherRetroPRLifecycle,
   gatherTouchedPRs,
   PR_TOUCHED_EVENT_KINDS,
+  RETRO_PR_LIFECYCLE_READ_BOUND,
 } from "./retro-digest.js";
 
 // ── A programmable fake IForge — call-recording, per-item response tables ──────────────────
@@ -293,6 +294,61 @@ test("gatherRetroPRLifecycle: events from an EARLIER round still count — a ret
   state.close();
 });
 
+// #964: bound the read set by a constant rather than a durable terminal event.
+test("gatherRetroPRLifecycle: 8 distinct own PRs -> only the newest RETRO_PR_LIFECYCLE_READ_BOUND (5) survive, newest first", () => {
+  const state = new State(":memory:");
+  for (let pr = 1; pr <= 8; pr++) {
+    state.appendEvent("retro-pr-opened", { round_id: 1, pr, branch: `retro/pr-${pr}` });
+  }
+  assert.equal(RETRO_PR_LIFECYCLE_READ_BOUND, 5, "this test's own math assumes the bound is 5");
+  assert.deepEqual(
+    gatherRetroPRLifecycle(state).map((r) => r.pr),
+    [8, 7, 6, 5, 4],
+  );
+  state.close();
+});
+
+test("gatherRetroPRLifecycle: an UPDATE re-touch moves a PR back into the newest-5 window even if it was originally opened long ago", () => {
+  const state = new State(":memory:");
+  for (let pr = 1; pr <= 8; pr++) {
+    state.appendEvent("retro-pr-opened", { round_id: 1, pr, branch: `retro/pr-${pr}` });
+  }
+  // PR 1 (the OLDEST) gets a fresh push — it must re-enter the window, displacing whichever PR
+  // was previously 5th (PR 4).
+  state.appendEvent("retro-pr-updated", { round_id: 2, pr: 1, branch: "retro/pr-1", head: "fresh" });
+  assert.deepEqual(
+    gatherRetroPRLifecycle(state).map((r) => r.pr),
+    [1, 8, 7, 6, 5],
+  );
+  state.close();
+});
+
+test("gatherOutstandingRetroPRs (#964 fix leg): 8 historical retro-pr-opened events -> only the newest 5 PRs are ever read from the forge (scripted call counting)", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  for (let pr = 1; pr <= 8; pr++) {
+    state.appendEvent("retro-pr-opened", { round_id: 1, pr, branch: `retro/pr-${pr}` });
+  }
+  const rows = await gatherOutstandingRetroPRs(forge, state);
+  assert.equal(rows.length, 5);
+  assert.deepEqual(forge.statusCalls, [8, 7, 6, 5, 4], "only the newest 5 PRs are ever read — PRs 1-3 are never touched at all");
+  state.close();
+});
+
+test("gatherOutstandingRetroPRs (#964 fix leg): a legacy history of N (>5) already-merged PRs settles to a FLAT 5 reads, not N — the bound holds regardless of how large N grows", async () => {
+  const forge = new FakeForge();
+  const state = new State(":memory:");
+  // 20 historical PRs, all long since merged — a real legacy history the bound must not choke on.
+  for (let pr = 1; pr <= 20; pr++) {
+    state.appendEvent("retro-pr-opened", { round_id: 1, pr, branch: `retro/pr-${pr}` });
+    forge.statuses.set(pr, { number: pr, headOid: "x", state: "MERGED", mergeable: "MERGEABLE", ciGreen: true });
+  }
+  const rows = await gatherOutstandingRetroPRs(forge, state);
+  assert.deepEqual(rows, [], "every read PR was merged — nothing outstanding");
+  assert.deepEqual(forge.statusCalls, [20, 19, 18, 17, 16], "bounded to the newest 5 — the other 15 are simply never read");
+  state.close();
+});
+
 test("gatherOutstandingRetroPRs (#964 AC1, red-first): a red PR lists state, failing check name, and a bounded excerpt; a merged PR is dropped; a forge-read failure renders status: unknown and is NEVER dropped", async () => {
   const forge = new FakeForge();
   forge.statuses.set(5, {
@@ -312,9 +368,11 @@ test("gatherOutstandingRetroPRs (#964 AC1, red-first): a red PR lists state, fai
   state.appendEvent("retro-pr-opened", { round_id: 1, pr: 6, branch: "retro/merged" });
   state.appendEvent("retro-pr-opened", { round_id: 1, pr: 7, branch: "retro/unreadable" });
   const rows = await gatherOutstandingRetroPRs(forge, state);
+  // #964: gatherRetroPRLifecycle returns NEWEST-TOUCHED-FIRST (pr 7 was opened after pr 5) —
+  // [7, 5], not ascending-by-number.
   assert.deepEqual(
     rows.map((r) => r.pr),
-    [5, 7],
+    [7, 5],
     "the merged PR (#6) is dropped entirely — never listed as outstanding",
   );
   const red = rows.find((r) => r.pr === 5)!;
@@ -371,7 +429,7 @@ test("gatherOutstandingRetroPRs: ciInert names the inert check(s), CONFLICTING i
   state.close();
 });
 
-test("gatherOutstandingRetroPRs: a CHANGES_REQUESTED review is its own actionable reason, naming the reviewer", async () => {
+test("gatherOutstandingRetroPRs: a CHANGES_REQUESTED review standing on the CURRENT head is its own actionable reason", async () => {
   const forge = new FakeForge();
   forge.statuses.set(5, { number: 5, headOid: "aaa", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true, ciRed: false });
   forge.reviews.set(5, {
@@ -389,7 +447,55 @@ test("gatherOutstandingRetroPRs: a CHANGES_REQUESTED review is its own actionabl
   state.appendEvent("retro-pr-opened", { round_id: 1, pr: 5, branch: "retro/x" });
   const [row] = await gatherOutstandingRetroPRs(forge, state);
   assert.equal(row!.actionable, true);
-  assert.ok(row!.reasons.some((r) => r.includes("changes requested by codex")));
+  assert.ok(row!.reasons.some((r) => r.includes("changes requested")));
+  state.close();
+});
+
+// #964: changesRequestedOnHead, not "the last review event" — two mis-cases the old logic got
+// wrong.
+test("gatherOutstandingRetroPRs: a LATER approve from a DIFFERENT reviewer must not hide an earlier reviewer's standing CHANGES_REQUESTED", async () => {
+  const forge = new FakeForge();
+  forge.statuses.set(5, { number: 5, headOid: "aaa", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true, ciRed: false });
+  forge.reviews.set(5, {
+    headOid: "aaa",
+    author: "producer",
+    updatedAt: "2026-01-01T00:00:00Z",
+    isDraft: false,
+    labels: [],
+    state: "OPEN",
+    reactions: [],
+    unresolvedThreads: 1,
+    reviews: [
+      { author: "reviewer-a", commitOid: "aaa", state: "CHANGES_REQUESTED" },
+      { author: "reviewer-b", commitOid: "aaa", state: "APPROVED" }, // a DIFFERENT reviewer approving
+    ],
+  });
+  const state = new State(":memory:");
+  state.appendEvent("retro-pr-opened", { round_id: 1, pr: 5, branch: "retro/x" });
+  const [row] = await gatherOutstandingRetroPRs(forge, state);
+  assert.equal(row!.actionable, true, "reviewer-a's standing request is not cleared by reviewer-b's approval");
+  assert.ok(row!.reasons.some((r) => r.includes("changes requested")));
+  state.close();
+});
+
+test("gatherOutstandingRetroPRs: a CHANGES_REQUESTED left on an OLD head does not stay actionable after a push superseded it", async () => {
+  const forge = new FakeForge();
+  forge.statuses.set(5, { number: 5, headOid: "new-head", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true, ciRed: false });
+  forge.reviews.set(5, {
+    headOid: "old-head",
+    author: "producer",
+    updatedAt: "2026-01-01T00:00:00Z",
+    isDraft: false,
+    labels: [],
+    state: "OPEN",
+    reactions: [],
+    unresolvedThreads: 0,
+    reviews: [{ author: "codex", commitOid: "old-head", state: "CHANGES_REQUESTED" }],
+  });
+  const state = new State(":memory:");
+  state.appendEvent("retro-pr-opened", { round_id: 1, pr: 5, branch: "retro/x" });
+  const [row] = await gatherOutstandingRetroPRs(forge, state);
+  assert.equal(row!.actionable, false, "a request on a superseded head is not a standing request on the CURRENT head");
   state.close();
 });
 

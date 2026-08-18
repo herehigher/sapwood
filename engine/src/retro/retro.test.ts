@@ -373,6 +373,58 @@ test("isQuietRound (#964): a CHANGES_REQUESTED review on an own PR is also actio
   state.close();
 });
 
+// #964: changesRequestedOnHead, not "the last review event" — the same two mis-cases
+// retro-digest.test.ts's classifier tests cover, wired through isQuietRound's own caller
+// (hasActionableOwnPR) so the two consumers can never independently drift.
+test("isQuietRound (#964): a LATER approve from a DIFFERENT reviewer must not hide an earlier reviewer's standing CHANGES_REQUESTED", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 5, branch: "retro/x" });
+  const forge = new MinimalForge();
+  forge.statuses.set(5, { number: 5, headOid: "aaa", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true, ciRed: false });
+  forge.reviews.set(5, {
+    headOid: "aaa",
+    author: "producer",
+    updatedAt: "2026-01-01T00:00:00Z",
+    isDraft: false,
+    labels: [],
+    state: "OPEN",
+    reactions: [],
+    unresolvedThreads: 1,
+    reviews: [
+      { author: "reviewer-a", commitOid: "aaa", state: "CHANGES_REQUESTED" },
+      { author: "reviewer-b", commitOid: "aaa", state: "APPROVED" },
+    ],
+  });
+  assert.equal(await isQuietRound(forge, state, round), false, "reviewer-a's standing request is not cleared by reviewer-b's approval");
+  state.close();
+});
+
+test("isQuietRound (#964): a CHANGES_REQUESTED left on an OLD head does not stay actionable after a push superseded it", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("retro-pr-opened", { round_id: 0, pr: 5, branch: "retro/x" });
+  const forge = new MinimalForge();
+  forge.statuses.set(5, { number: 5, headOid: "new-head", state: "OPEN", mergeable: "MERGEABLE", ciGreen: true, ciRed: false });
+  forge.reviews.set(5, {
+    headOid: "old-head",
+    author: "producer",
+    updatedAt: "2026-01-01T00:00:00Z",
+    isDraft: false,
+    labels: [],
+    state: "OPEN",
+    reactions: [],
+    unresolvedThreads: 0,
+    reviews: [{ author: "codex", commitOid: "old-head", state: "CHANGES_REQUESTED" }],
+  });
+  assert.equal(
+    await isQuietRound(forge, state, round),
+    true,
+    "a request on a superseded head is not a standing request on the CURRENT head",
+  );
+  state.close();
+});
+
 test("isQuietRound (#964): a merged own PR is excluded entirely — no longer outstanding, no forge review-read needed", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
@@ -390,6 +442,20 @@ test("isQuietRound (#964): a forge status-read failure fails CLOSED — reads as
   const forge = new MinimalForge();
   forge.statusErrors.add(5);
   assert.equal(await isQuietRound(forge, state, round), false);
+  state.close();
+});
+
+// #964: the same read-bound retro-digest.test.ts pins for gatherOutstandingRetroPRs, wired
+// through isQuietRound's own caller.
+test("isQuietRound (#964): 8 historical own PRs -> the fourth signal reads AT MOST the newest 5, never all 8", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  for (let pr = 1; pr <= 8; pr++) {
+    state.appendEvent("retro-pr-opened", { round_id: 0, pr, branch: `retro/pr-${pr}` });
+  }
+  const forge = new MinimalForge(); // every status reads OPEN/MERGEABLE/green by default — none actionable
+  await isQuietRound(forge, state, round);
+  assert.deepEqual(forge.statusCalls, [8, 7, 6, 5, 4], "only the newest 5 PRs are ever read — PRs 1-3 are never touched");
   state.close();
 });
 
