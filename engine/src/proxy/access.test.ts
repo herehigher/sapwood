@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { allowedToolsForRole, PROXY_ROLE_TOOL_MATRIX } from "./access.js";
-import { ISSUE_TOOLS, PR_TOOLS, TOOL_NAMES } from "./tools.js";
+import { ISSUE_TOOLS, PR_TOOLS, TOOL_NAMES, TOOL_PR_FAILED_CHECKS } from "./tools.js";
 
 test("allowedToolsForRole: every issue-oriented peripheral role gets exactly ISSUE_TOOLS", () => {
   for (const role of [
@@ -63,4 +63,18 @@ test("PROXY_ROLE_TOOL_MATRIX: every entry is a subset of the fixed tool algebra,
 test("allowedToolsForRole: ISSUE_TOOLS and PR_TOOLS never overlap — no role is simultaneously issue- and PR-scoped by accident", () => {
   const overlap = ISSUE_TOOLS.filter((t) => PR_TOOLS.includes(t));
   assert.deepEqual(overlap, []);
+});
+
+// #975 AC3: pr_failed_checks reaches a fix leg's own PR-facing evidence channel (worker's
+// PR_TOOLS grant) and NOTHING else — extends the matrix pin above (worker gets exactly PR_TOOLS)
+// with the negative half: no OTHER role id in the table picks it up either.
+test("#975 AC3: pr_failed_checks is granted to worker only — every other role in the matrix is denied it", () => {
+  for (const [role, tools] of Object.entries(PROXY_ROLE_TOOL_MATRIX)) {
+    if (role === "worker") {
+      assert.ok(tools.includes(TOOL_PR_FAILED_CHECKS), "worker must be granted pr_failed_checks");
+    } else {
+      assert.ok(!tools.includes(TOOL_PR_FAILED_CHECKS), `role "${role}" must NOT be granted pr_failed_checks`);
+    }
+  }
+  assert.deepEqual(allowedToolsForRole("some-unrecognized-role"), [], "deny-by-default still applies");
 });

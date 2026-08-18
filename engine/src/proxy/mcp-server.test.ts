@@ -69,6 +69,7 @@ function fakeForge(over: Partial<ProxyForge> = {}): ProxyForge {
     getPRReviewThreads: async () => ({ threads, pageCapped: false }),
     getPRChecks: async () => ({ checks, total: checks.length }),
     getPRComments: async () => ({ comments: [], total: 0 }),
+    getFailedCheckSummary: async () => "(no failing check runs found via the checks API)",
     ...over,
   };
 }
@@ -208,11 +209,11 @@ test("initialize echoes the client's protocolVersion and reports serverInfo/capa
   });
 });
 
-test("tools/list returns the 9 fixed tools (including #288 audit transport) with strict object schemas", async () => {
+test("tools/list returns the 10 fixed tools (including #288 audit transport and #975 pr_failed_checks) with strict object schemas", async () => {
   await withServer({}, async (h) => {
     const res = await rpc(h.url, h.token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const json = await readJson(res);
-    assert.equal(json.result.tools.length, 9);
+    assert.equal(json.result.tools.length, 10);
     const names = json.result.tools.map((t: { name: string }) => t.name);
     assert.deepEqual([...names].sort(), [...TOOL_NAMES].sort());
     // #556: literal, not TOOL_NAMES-derived — the registration and the allow-list strings must
@@ -390,6 +391,10 @@ test("tools/call: every PR evidence tool, including #288 audit comments, succeed
       forge: fakeForge({
         getPRComments: async () => ({ comments: [{ id: "IC1", login: "bot", createdAt: "t", body: auditBody }], total: 1 }),
       }),
+      // #975: a 6th PR-facing tool joined this loop (pr_failed_checks) — the suite's default
+      // budget (5 calls/session, withServer's own default) is calibrated for the pre-#975 5-tool
+      // count; this exact test drives every PR-facing tool in one session, so it needs headroom.
+      budget: { maxCallsPerSession: 10, maxBytesPerSession: 1_000_000 },
     },
     async (h, state) => {
       for (const [name, args] of [
@@ -398,6 +403,7 @@ test("tools/call: every PR evidence tool, including #288 audit comments, succeed
         ["pr_review_threads", { pr: 1 }],
         ["pr_checks", { pr: 1 }],
         ["pr_audit_comments", { pr: 1 }],
+        ["pr_failed_checks", { pr: 1 }],
       ] as const) {
         const { body } = await callTool(h.url, h.token, name, args);
         assert.equal(body.result.isError, false, `${name} should succeed`);
@@ -412,9 +418,32 @@ test("tools/call: every PR evidence tool, including #288 audit comments, succeed
         session: "role-architect-abc",
         attempt: 1,
       });
-      assert.equal(rows.length, 5);
-      assert.deepEqual(rows.map((r) => r.tool).sort(), ["pr_audit_comments", "pr_checks", "pr_details", "pr_review_threads", "pr_reviews"]);
+      assert.equal(rows.length, 6);
+      assert.deepEqual(rows.map((r) => r.tool).sort(), [
+        "pr_audit_comments",
+        "pr_checks",
+        "pr_details",
+        "pr_failed_checks",
+        "pr_review_threads",
+        "pr_reviews",
+      ]);
       assert.ok(rows.every((r) => r.status === "delivered" && r.responseCanonical && r.contentHash));
+    },
+  );
+});
+
+// ── #975 AC1 (mcp-server-level): a forge read failure never surfaces as isError for THIS tool —
+//    unlike every other proxy tool, whose fetch throw becomes a journaled upstream_error. ──────
+test("tools/call: pr_failed_checks — a forge read failure degrades to a stated-unavailable excerpt in a SUCCESSFUL result, never isError", async () => {
+  await withServer(
+    { forge: fakeForge({ getFailedCheckSummary: async () => Promise.reject(new Error("gh: connection reset")) }) },
+    async (h) => {
+      const { body } = await callTool(h.url, h.token, "pr_failed_checks", { pr: 1 });
+      assert.equal(body.result.isError, false);
+      const parsed = JSON.parse(body.result.content[0].text);
+      assert.equal(parsed.pr, 1);
+      assert.ok(parsed.excerpt.includes("unavailable"));
+      assert.ok(parsed.excerpt.includes("connection reset"));
     },
   );
 });
@@ -497,11 +526,11 @@ test("tools/call: pr_reviews upstream error is sanitized before reaching the res
 
 // ── #244 role x tool matrix enforcement (deny-by-default) ─────────────────────────────────
 
-test("allowedTools omitted (default) -> every fixed tool callable, tools/list advertises all 9", async () => {
+test("allowedTools omitted (default) -> every fixed tool callable, tools/list advertises all 10", async () => {
   await withServer({}, async (h) => {
     const list = await rpc(h.url, h.token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const listJson = await readJson(list);
-    assert.equal(listJson.result.tools.length, 9);
+    assert.equal(listJson.result.tools.length, 10);
     const { body } = await callTool(h.url, h.token, "pr_details", { pr: 1 });
     assert.equal(body.result.isError, false);
   });
@@ -547,6 +576,7 @@ test("allowedTools = [] (an unlisted role's deny-by-default resolution, proxy/ac
       pr_review_threads: { pr: 1 },
       pr_checks: { pr: 1 },
       pr_audit_comments: { pr: 1 },
+      pr_failed_checks: { pr: 1 },
     };
     for (const name of TOOL_NAMES) {
       const { body } = await callTool(h.url, h.token, name, validArgsByTool[name]);

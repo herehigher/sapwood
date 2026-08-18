@@ -850,13 +850,15 @@ const Roles = z
   .strict();
 
 // #234: engine-hosted read-only forge MCP proxy for role sessions (supersedes #217's two-pass
-// needsDetails protocol). #244 EXTENSION: the tool algebra also carries 5 PR-facing tools
-// (pr_details/pr_reviews/pr_review_threads/pr_checks/pr_audit_comments — proxy/tools.ts),
-// and the proxy MECHANISM extends to worker legs (worker.ts's WorkerSupervisor, mirroring
-// RoleRunner's `proxy` opt)
+// needsDetails protocol). #244 EXTENSION: the tool algebra also carries 6 PR-facing tools
+// (pr_details/pr_reviews/pr_review_threads/pr_checks/pr_audit_comments/pr_failed_checks —
+// proxy/tools.ts), and the proxy MECHANISM extends to worker legs (worker.ts's
+// WorkerSupervisor, mirroring RoleRunner's `proxy` opt)
 // alongside RoleRunner peripheral sessions. `caps.maxReviewThreadsPerCall`/
 // `caps.maxCommentsPerThread` are the PR-tool caps' user-tunable knobs, same convention as every
-// other cap in this section.
+// other cap in this section. #975: `pr_failed_checks` deliberately adds NO cap here — its
+// excerpt is already hard-capped forge-side (`FAILED_CHECK_SUMMARY_CAP`, `forge.ts`), so there
+// is no user-tunable knob to expose without duplicating that cap under a second name.
 //
 // #253: engine startup (cli.ts's runTickEngine/runRoundsEngine, round.ts's buildFixLegResume)
 // reads `enabled` to decide production attachment. #551 deleted the three-state model's middle

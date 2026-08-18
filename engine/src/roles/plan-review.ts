@@ -52,6 +52,7 @@ import {
 } from "../review/comment-cursor-gate.js";
 import type { State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
+import { escapeAngleBrackets } from "../util/markdown.js";
 import {
   CONFIRM_ALLOWED_TOOLS,
   CONFIRM_DISALLOWED_TOOLS,
@@ -168,24 +169,12 @@ export function renderRolePrompt(template: string, issue: Issue, cfg: SapwoodCon
 const COMMENT_DIGEST_COUNT_CAP = 30;
 const COMMENT_DIGEST_BODY_CHAR_CAP = 4000;
 
-/** #672 (Codex gate② P2 on #665): a comment body is untrusted text — anyone who can comment on
- *  the issue authored it, world-writable once the repo is public — and it is about to be
- *  interpolated straight into the `<issue-comments>...</issue-comments>` data block
- *  (renderCommentDigest below) inside the reviewer/confirm prompt. A literal `</issue-comments>`
- *  (or any other tag, e.g. a forged `<issue-body>`) inside a comment would otherwise close/reopen
- *  a block early and hand the reviewer attacker-authored text framed as prompt structure rather
- *  than as quoted comment content — a prompt-injection escape hatch. Escaping every `<` is the
- *  minimal neutralization: it denies the text the one character every one of this codebase's
- *  data-block delimiters opens on, without touching anything else about the comment's readability
- *  as plain text. No matching unescape exists anywhere downstream — this render has exactly one
- *  consumer (a read-only judgment prompt) and nothing here ever reconstitutes or re-emits the
- *  original bytes. Exported (#965): decompose.ts's WIP-pointer render into the po-decompose
- *  prompt reuses this SAME neutralization for the SAME reason — the pointer's `branch`/`headSha`
- *  fields quote engine-composed data, but its comment carrier is still untrusted-data-framed
- *  content by this module's own doctrine, and one implementation is one place to get it right. */
-export function escapeAngleBrackets(text: string): string {
-  return text.replaceAll("<", "&lt;");
-}
+// #975: escapeAngleBrackets moved to util/markdown.ts (a dependency-free leaf module) so
+// proxy/tools.ts can reuse the SAME neutralization for pr_failed_checks' CI-log excerpt without
+// creating an import cycle (proxy/tools.ts -> here -> ./peripheral.js -> proxy/access.ts ->
+// proxy/tools.ts). Re-exported (below renderCommentDigest still calls it locally) so this
+// module's own callers, and decompose.ts's (#965), see no import-path change.
+export { escapeAngleBrackets };
 
 /** #665: render the comment stream `checkGate0CommentCursor`'s pre-spend fetch already paid for
  *  into prompt text — author, id, body, oldest-first (the same stream order GitHub returns and

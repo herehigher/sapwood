@@ -41,6 +41,7 @@ import {
   fetchPRAuditCommentsResponse,
   fetchPRChecksResponse,
   fetchPRDetailsResponse,
+  fetchPRFailedChecksResponse,
   fetchPRReviewsResponse,
   fetchPRReviewThreadsResponse,
   fetchSearchIssuesResponse,
@@ -51,6 +52,7 @@ import {
   type PRAuditCommentsArgs,
   type PRChecksArgs,
   type PRDetailsArgs,
+  type PRFailedChecksArgs,
   PROXY_VERSION,
   type PRReviewsArgs,
   type PRReviewThreadsArgs,
@@ -63,6 +65,7 @@ import {
   TOOL_ISSUE_DETAILS,
   TOOL_ISSUE_RELATIONS,
   TOOL_NAMES,
+  TOOL_PR_AUDIT_COMMENTS,
   TOOL_PR_CHECKS,
   TOOL_PR_DETAILS,
   TOOL_PR_REVIEW_THREADS,
@@ -85,6 +88,7 @@ export type ProxyForge = Pick<
   | "getPRReviewThreads"
   | "getPRChecks"
   | "getPRComments"
+  | "getFailedCheckSummary"
 >;
 
 export interface ForgeProxyDeps {
@@ -383,9 +387,18 @@ export async function startForgeProxyServer(deps: ForgeProxyDeps): Promise<Forge
       const value = await fetchPRChecksResponse(deps.forge, pr, deps.caps);
       return { value, upstreamIds: [pr], counts: { total: value.total, returned: value.returned }, truncated: !value.complete };
     }
-    const { pr, lastN } = args as z.infer<typeof PRAuditCommentsArgs>;
-    const value = await fetchPRAuditCommentsResponse(deps.forge, pr, lastN, deps.caps);
-    return { value, upstreamIds: [pr], counts: { returned: value.returned }, truncated: !value.complete };
+    if (tool === TOOL_PR_AUDIT_COMMENTS) {
+      const { pr, lastN } = args as z.infer<typeof PRAuditCommentsArgs>;
+      const value = await fetchPRAuditCommentsResponse(deps.forge, pr, lastN, deps.caps);
+      return { value, upstreamIds: [pr], counts: { returned: value.returned }, truncated: !value.complete };
+    }
+    // #975: TOOL_PR_FAILED_CHECKS — the only remaining ToolName once every branch above has been
+    // ruled out. fetchPRFailedChecksResponse never throws (AC1: a forge read failure degrades to
+    // an excerpt string, not an upstream_error), so this is a plain, unwrapped fetch, same shape
+    // as pr_details' single-PR-no-cap read above.
+    const { pr } = args as z.infer<typeof PRFailedChecksArgs>;
+    const value = await fetchPRFailedChecksResponse(deps.forge, pr);
+    return { value, upstreamIds: [pr], truncated: value.truncated };
   }
 
   await new Promise<void>((resolve, reject) => {

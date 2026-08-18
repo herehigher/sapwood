@@ -1082,7 +1082,7 @@ separately inherit under host-delegated capability management, see the worker-eg
 | `architect` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
 | `verification-plan-reviewer` / `verification-plan-drafter` / `verification-plan-reviewer-confirm` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
 | `retro` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
-| `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `pr_audit_comments` |
+| `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `pr_audit_comments`, `pr_failed_checks` |
 | *(any other role id)* | none — deny-by-default |
 
 **This ten-role grant is deliberate, not an oversight to narrow.** Every one of these tools is
@@ -1093,8 +1093,9 @@ a prompt gives the role, not the grant it holds.
 
 **`WorkerSupervisor.resume()` also attaches a proxy.** A fix leg is a *resumed* leg (same worker
 row/worktree/branch/session — see
-"Fix-loop `fixing` lane state" below), and it needs `pr_review_threads`/`pr_reviews`/`pr_checks` as
-its evidence channel exactly as much as a fresh dispatch would. `resume()`'s attachment mirrors
+"Fix-loop `fixing` lane state" below), and it needs `pr_review_threads`/`pr_reviews`/`pr_checks`/
+`pr_failed_checks` as its evidence channel exactly as much as a fresh dispatch would. `resume()`'s
+attachment mirrors
 `dispatch()`'s byte-for-byte: mint-before-argv, `--allowedTools` widening with the proxy's own
 tool names, inline `--mcp-config` injection, `credentialFree`'s fail-closed policy, and teardown on
 every exit path (including the two resume-specific spawn-failure branches `dispatch()` doesn't
@@ -1281,9 +1282,11 @@ dispatch or forge credentials:
   avoid the squash-branch-reuse hazard a fresh dispatch against this lane's (possibly-stale,
   possibly-ahead) head would create. The fix leg's prompt (`worker.fixPromptFile`, engine-shipped
   default `prompts/fix.md` — same config pattern as `worker.promptFile`) instructs the
-  worker to pull its own PR's review findings via the PR-facing proxy tools
-  (`pr_review_threads`/`pr_reviews`/`pr_checks`/`pr_details`) — never via findings text relayed
-  through the prompt itself (no prompt-injection transport).
+  worker to pull its own PR's review findings and CI-failure evidence via the PR-facing proxy
+  tools (`pr_review_threads`/`pr_reviews`/`pr_checks`/`pr_details`/`pr_failed_checks`) — never via
+  findings or CI-log text relayed through the prompt itself (no prompt-injection transport;
+  `pr_failed_checks`' response is framed as untrusted CI/log data, same stance as every other
+  externally-influenceable proxy read).
 - **`fix_rounds`** is a new per-PR counter (`workers.fix_rounds`, schema v18→v19), counting
   rework rounds — deliberately independent of `resume_attempts` (the continuation-leg
   counter): one axis is "how many times did this PR need fixing", the other is "how many budget-

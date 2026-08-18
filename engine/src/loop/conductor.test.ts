@@ -26,6 +26,7 @@ import {
   readPrOwner,
 } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
+import { mcpToolFullName, TOOL_PR_FAILED_CHECKS } from "../proxy/tools.js";
 import { hashBody, hashBodyForAcAuthority } from "../review/ac-snapshot.js";
 import type { EngineReviewArtifact } from "../review/audit.js";
 import { classicThreadFindingKey, engineAgentFindingKey } from "../review/finding-key.js";
@@ -40,6 +41,7 @@ import { CAP_SPLIT_ORIGIN_MARKER, findCapSplitWipPointer } from "./cap-split.js"
 import {
   BLOCKER_RECHECK_READS_PER_TICK,
   budgetExceeded,
+  CI_RED_FIX_PRESCRIPTION,
   capHitEscalationNote,
   classifyLane,
   codingFloor,
@@ -4118,6 +4120,16 @@ test("tick DRIVE (#270): conflict FIXABLE uses the existing lane/counter with a 
   st.close();
 });
 
+// #975 AC4: cross-artifact against the real proxy tool constant, not a prose pin — same shape as
+// the #963 pr_audit_comments test in worker.test.ts, but against the exported prescription
+// string directly (the tick() test below additionally proves it reaches a rendered prompt).
+test("#975 (AC4): CI_RED_FIX_PRESCRIPTION names the REAL mcp__forge__ tool name for pr_failed_checks", () => {
+  assert.ok(
+    CI_RED_FIX_PRESCRIPTION.includes(mcpToolFullName(TOOL_PR_FAILED_CHECKS)),
+    "the ci-red prescription string must name the real mcp__forge__ tool name — a renamed proxy tool must be caught here",
+  );
+});
+
 test("tick DRIVE (#503): ci-red FIXABLE uses the existing lane/counter with the CI-red prescription", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
@@ -4137,9 +4149,40 @@ test("tick DRIVE (#503): ci-red FIXABLE uses the existing lane/counter with the 
   const prompt = sup.resumeCalls[0]!.opts?.prompt ?? "";
   assert.match(prompt, /CI-red prescription/);
   assert.match(prompt, /mcp__forge__pr_checks/);
+  // #975 AC4: cross-artifact against the real proxy tool constant, not a prose pin — a renamed
+  // proxy tool must break this assertion.
+  assert.ok(prompt.includes(mcpToolFullName(TOOL_PR_FAILED_CHECKS)), "the ci-red prescription must name the real pr_failed_checks tool");
   assert.match(prompt, /Do not address standing review findings/);
   assert.equal(st.getWorker("lane-a")?.fix_rounds, 1, "shared #246 counter, no ci-red-specific counter");
   assert.equal(r.driven[0]?.kind, "fixup");
+  st.close();
+});
+
+// #975 AC5: FixLegDeps.renderFixPrompt's contract is that a fix leg NEVER receives CI text by
+// prompt injection — it pulls that itself, over the pr_failed_checks proxy tool, once its own
+// session starts. This proves the contract mechanically: even a forge SCRIPTED to return a
+// distinctive sentinel for getFailedCheckSummary never gets that sentinel anywhere near the
+// rendered fix-leg prompt, because startFixLeg's prompt path has no forge access at all.
+test("tick DRIVE (#975 AC5): a forge whose getFailedCheckSummary returns a sentinel never leaks that sentinel into the rendered fix-leg prompt", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const SENTINEL = "SENTINEL-CI-TEXT-DO-NOT-LEAK-INTO-THE-PROMPT";
+  forge.getFailedCheckSummary = async () => SENTINEL;
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55);
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:CI_RED:test@github-actions", prescription: "ci-red" };
+  await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "base fix prompt", mintProxy: async () => ({}) as never },
+  });
+  const prompt = sup.resumeCalls[0]!.opts?.prompt ?? "";
+  assert.ok(!prompt.includes(SENTINEL), "CI-failure text must never reach the fix-leg prompt by prompt injection");
   st.close();
 });
 

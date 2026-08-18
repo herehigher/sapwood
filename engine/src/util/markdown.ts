@@ -51,3 +51,25 @@ export function extractMarkdownSections(body: string, headingPattern: RegExp): s
 
   return sections.map(({ start, end }) => body.slice(start, end).trim());
 }
+
+/** #672 (Codex gate② P2 on #665, moved here #975): untrusted text (an issue/PR comment body, a
+ *  forge-read CI-log excerpt — anyone who can comment or trigger CI authored it) is about to be
+ *  interpolated straight into a `<...>...</...>`-delimited data block inside a role prompt or
+ *  proxy tool response. A literal closing tag (or a forged peer tag) inside that text would
+ *  otherwise close/reopen the block early and hand the reader attacker-authored text framed as
+ *  structure rather than as quoted content — a prompt-injection escape hatch. Escaping every `<`
+ *  is the minimal neutralization: it denies the text the one character every one of this
+ *  codebase's data-block delimiters opens on, without touching anything else about the text's
+ *  readability as plain text. No matching unescape exists anywhere downstream — every consumer of
+ *  this function is a read-only judgment prompt or tool response, never a place that reconstitutes
+ *  or re-emits the original bytes.
+ *
+ *  Lives in this dependency-free leaf module (not `roles/plan-review.ts`, its original #672 home)
+ *  so `proxy/tools.ts` can reuse the SAME neutralization for `pr_failed_checks`' CI-log excerpt
+ *  (#975) without creating an import cycle: `proxy/tools.ts` -> `roles/plan-review.ts` ->
+ *  `roles/peripheral.ts` -> `proxy/access.ts` -> `proxy/tools.ts` would otherwise close a loop.
+ *  `roles/plan-review.ts` re-exports this so its own existing callers (and `loop/decompose.ts`,
+ *  #965) see no import-path change. */
+export function escapeAngleBrackets(text: string): string {
+  return text.replaceAll("<", "&lt;");
+}
