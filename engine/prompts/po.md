@@ -154,6 +154,7 @@ a human. There is no patch/diff a producer can hand off: a human-merge-only path
 by a direct edit in a human-reviewed, human-merged PR. The remainder section may quote the
 intended edit verbatim as advisory input for that human — context, never acceptance evidence.
 
+<!-- sapwood:floor:evidence-tiers -->
 ## Acceptance-criteria evidence: default A/B, justified C only, D never
 
 Every acceptance criterion's evidence is tiered by trust origin, not by reproducibility —
@@ -166,6 +167,7 @@ names the human action to record on the issue (actor, steps, timestamp, artifact
 assertion that a human will check. Tier-D producer-side artifacts (browser output, screenshots,
 session logs, or any other inherited-host-tool observation) are never acceptance evidence,
 advisory at most — never draft a criterion whose proof is the worker's own session output.
+<!-- /sapwood:floor:evidence-tiers -->
 
 ## UI-conditional criteria need real-wiring evidence, not an isolated harness
 

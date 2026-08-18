@@ -553,6 +553,33 @@ test("prompts/retro.md instructs the scratch-file contract at the REAL RETRO_SCR
   assert.ok(!body.includes("gh pr create"), "must not instruct the session to open the PR itself");
 });
 
+test("#963 (PM fix leg, CONVERT): retro.md's OWN shown proposal-format example, fed through the REAL parseRetroScratch, actually parses to a proposal — not a hand-copied header-line pin", () => {
+  const body = readFileSync(defaultRetroPromptPath(), "utf8");
+  const anchor = "in EXACTLY this format (two labeled header lines, then the body):";
+  const anchorIdx = body.indexOf(anchor);
+  assert.ok(anchorIdx >= 0, "retro.md must still introduce the proposal format with this exact anchor sentence");
+  const fenceStart = body.indexOf("```", anchorIdx);
+  assert.ok(fenceStart >= 0, "expected a fenced example immediately after the anchor sentence");
+  const contentStart = body.indexOf("\n", fenceStart) + 1;
+  const fenceEnd = body.indexOf("```", contentStart);
+  assert.ok(fenceEnd > contentStart, "expected a closing fence for the proposal-format example");
+  const rawExample = body.slice(contentStart, fenceEnd);
+
+  // The example shows placeholders in retro.md's own `<...>` convention (e.g. "<the branch name
+  // you pushed>") — substitute each bracketed placeholder with a fixed literal, uniformly and
+  // without guessing field semantics, so what's actually under test is the STRUCTURE (the
+  // "branch:"/"title:" labels, the line order, the body starting on line 3) rather than any
+  // value we chose. A real drift (dropped label, reordered lines, a header no longer matching
+  // "branch:"/"title:") reddens here even though this substitution changes nothing about it.
+  const substituted = rawExample.replace(/<[^>]*>/g, "PLACEHOLDER");
+  const parsed = parseRetroScratch(substituted);
+  assert.equal(
+    parsed.kind,
+    "proposal",
+    `retro.md's own shown example must parse to a proposal via the real parser; got ${JSON.stringify(parsed)} from:\n${substituted}`,
+  );
+});
+
 test("createRetroStub: a failed session is retried once — non-done then done means exactly two sessions, no degradation event", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
@@ -697,6 +724,10 @@ test("#701: createRetroStub renders {{lang.issuesAndPrs}} from cfg.language.issu
 test("#963: createRetroStub renders the REAL shipped retro.md with a distinctive {{lang.issuesAndPrs}} value reaching the dispatched prompt (drops the reference -> reddens)", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
+  // #961 (in flight, PR #968): a round with zero events becomes QUIET and skips the retro
+  // session entirely — seed one event so this test still exercises a real dispatch regardless
+  // of which of #961/#963 lands second.
+  state.appendEvent("dispatched", { worker: "lane-seed", issue: 0 });
   const runner = new ScriptedRunner(doneResult("s1"));
   // No roles.retro.promptFile override — this dispatches against the REAL shipped retro.md.
   const cfg = mkCfg({ language: { issuesAndPrs: "zz-ZZ" } });

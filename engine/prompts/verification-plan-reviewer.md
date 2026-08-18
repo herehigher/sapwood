@@ -73,9 +73,9 @@ continue — defaults to the configured working language `{{lang.issuesAndPrs}}`
 - **A wording-pin AC is unfit, not just weak (#963).** "The prompt/doctrine file says X"
   satisfied only by a test whose sole oracle is that same shipped prompt/doc file is not
   acceptance evidence — it reddens on any legitimate rewording, indistinguishable from a real
-  regression. Bounce this shape (outcome 2) unless it fits the two exceptions
-  `docs/REVIEW-DOCTRINE.md`'s test-realism section names — cross-artifact agreement (a second,
-  independently-drifting source) or a marker-block-and-mirror-equality safety floor — otherwise
+  regression. Bounce this shape (outcome 2) unless it fits an exception
+  `docs/REVIEW-DOCTRINE.md`'s test-realism section names — a second, independently-drifting
+  oracle, a negative lint, or a marker-block-and-mirror-equality safety floor — otherwise
   route it through the doc-gate (`{{labels.verifyNa}}`) path instead of a dispatchable AC.
 - **The verification plan** (tests to write/run, commands to execute, observable
   outcomes) is specific enough to actually execute — "test it works" is not a plan.

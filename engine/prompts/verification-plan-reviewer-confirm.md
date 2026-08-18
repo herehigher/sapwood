@@ -94,8 +94,9 @@ bill of health.
 A fourth standing check (#963): a still-approved plan whose only acceptance evidence is "the
 prompt/doctrine file says X" — a test whose sole oracle is that same shipped file — is
 `invalidate`, with a brief routing it through the doc-gate (`{{labels.verifyNa}}`) instead,
-unless it fits `docs/REVIEW-DOCTRINE.md`'s test-realism exceptions (a second, independently-
-drifting source, or a marker-block-and-mirror-equality safety floor).
+unless it fits an exception `docs/REVIEW-DOCTRINE.md`'s test-realism section names (a second,
+independently-drifting oracle, a negative lint, or a marker-block-and-mirror-equality safety
+floor).
 Read/Glob/Grep are what this role uses
 to check drift — whatever else
 this session's tools turn out to be, nothing here modifies the repo or GitHub, and nothing here

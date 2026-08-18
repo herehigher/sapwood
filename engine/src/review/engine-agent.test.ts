@@ -509,8 +509,6 @@ test("evaluate(): the SNAPSHOTTED issue body reaches the session prompt inside <
 
 test("shipped engine-reviewer prompt (#319, #963): every example sentinel block is plain text (no adjacent markdown fence), balanced, and accepted by the REAL structured-output parser — no test-local expected count", () => {
   const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
-  assert.match(prompt, /Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence\./);
-  assert.match(prompt, /NOTHING — including[\s\S]*— may follow `<<<END_SAPWOOD_RESULT>>>`\./);
 
   const startLine = new RegExp(`^${RESULT_BLOCK_START}[ \\t]*$`, "gm");
   const endLine = new RegExp(`^${RESULT_BLOCK_END}[ \\t]*$`, "gm");

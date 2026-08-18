@@ -152,14 +152,10 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     a mockup crop pair; element-present/token-exact alone is never finish evidence, and
     "resolved" needs the crop pair on record.
   - **PROSE-PIN (a positive assertion whose only oracle is the shipped prompt/doctrine file
-    itself).** `assert.match(<shipped file>, /literal prose/)` reddens on any legitimate
-    rewording — indistinguishable from a real regression, and retro is chartered to reword this
-    exact class of file (#904, #918). Earns a place only via a second, independently-drifting
-    oracle (a code constant/registry), a negative lint over a banned class (`doesNotMatch`,
-    never breaks on rewording), or a safety floor pinned by a `<!-- sapwood:floor:<name> -->`
-    marker block plus mirror-equality across carriers, never by sentence (#653, #672). For a
-    prompt/doctrine issue, an AC satisfiable only by a PROSE-PIN is not acceptance evidence —
-    route it through the doc-gate (`verify:n/a`) instead (#963).
+    itself).** Earns a place only via a second drifting oracle, a negative lint (`doesNotMatch`
+    over a banned class), or a safety floor pinned by a `<!-- sapwood:floor:<name> -->` marker
+    + mirror-equality across carriers — else route the AC through the doc-gate (`verify:n/a`)
+    (#963).
 
 ### Documentation claims
 
@@ -198,14 +194,17 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   — this prose IS the enforcement.
 - **A tier-C cannot-confirm is not a producer stall signal, and it burns spend twice** (#791,
   #865). `docs/security.md`'s evidence tiers make tier-C (human-witnessed probe)
-  producer-unforgeable BY DESIGN — a missing tier-C RECORD stays `cannot-confirm` until posted.
-  Name the gap operator-owned in the finding body — unlabeled, it reads as a producer failure —
-  the gate stays `FIXABLE` regardless: a paid fix leg dispatches, disputes, and escalates with
-  nothing producer-actionable. `evaluate`/`buildPrompt` (`engine-agent.ts`) read only
-  `getAcSnapshot`'s snapshot — a COMMENT-carried record can't reach a later review, only a
-  BODY-carried one (`checkAcDriftBeforeDrive`/`ac-snapshot.ts`). Closing one needs a human merge
-  decision reading the record, or a body-carried rebaseline. Grounding: `docs/security.md`'s
-  AC-evidence-tier doctrine, Decision #8.
+  producer-unforgeable BY DESIGN — the producer never self-executes or self-attests it, so a
+  missing tier-C RECORD stays `cannot-confirm` until posted. Name the gap operator-owned in the
+  finding body — unlabeled, it reads as a producer failure to `review/convergence.ts` and any
+  human — the gate stays `FIXABLE` regardless: a paid fix leg dispatches, disputes, and
+  escalates with nothing producer-actionable. `evaluate`/`buildPrompt` (`engine-agent.ts`) read
+  only `getAcSnapshot`'s snapshot, never a comment: a COMMENT-carried record can't reach a later
+  review; a BODY-carried one can, via `checkAcDriftBeforeDrive` flagging drift and gated
+  re-entry's `buildAcSnapshot` (`ac-snapshot.ts`)/`State.recordAcSnapshotAndReclaimWorker`
+  re-snapshot. #865's unimplemented fix routes an all-operator-owned verdict to `ESCALATE`;
+  until then, closing one needs a human merge decision reading the record, or a body-carried
+  rebaseline. Grounding: `docs/security.md`'s AC-evidence-tier doctrine, Decision #8.
 
 How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbatim principles):
 

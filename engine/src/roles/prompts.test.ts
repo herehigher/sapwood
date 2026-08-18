@@ -389,7 +389,6 @@ test("shipped role prompts (#321, #963): every example sentinel block is plain t
 
   for (const [name, path] of prompts) {
     const prompt = readPrompt(path);
-    assert.match(prompt, /Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence\./, name);
 
     const starts = prompt.match(startLine)?.length ?? 0;
     const ends = prompt.match(endLine)?.length ?? 0;
@@ -560,47 +559,8 @@ test("#605: no shipped prompt (worker.md, fix.md, or any peripheral prompt) inst
 // these assertions pin the AUTHORING-DEFAULT rule's key phrases, not the tier definitions
 // themselves (those live in docs/security.md, outside this test file's scope). ──────────────────
 
-test("#628: the three authoring prompts (po.md, po-decompose.md, verification-plan-drafter.md) carry the identical default-A/B + justified-C + D-ban rule, citing docs/security.md, never restating divergent terminology (mirror-pair discipline)", () => {
-  const EVIDENCE_TIER_HEADING = "## Acceptance-criteria evidence: default A/B, justified C only, D never";
-  const bodies = {
-    "po.md": readPrompt(defaultPoPromptPath()),
-    "po-decompose.md": readPrompt(defaultPoDecomposePromptPath()),
-    "verification-plan-drafter.md": readPrompt(defaultVerificationPlanDrafterPromptPath()),
-  };
-
-  for (const [name, body] of Object.entries(bodies)) {
-    assert.ok(body.includes(EVIDENCE_TIER_HEADING), `${name} carries the evidence-tier authoring-default heading`);
-    assert.ok(
-      body.includes("`docs/security.md`'s \"Doctrine lines\" is the tier definitions' one home"),
-      `${name} cites docs/security.md as the single doctrine home rather than restating the tiers`,
-    );
-    assert.ok(body.includes("Default every criterion to tier A"), `${name} states the default-A/B rule`);
-    assert.ok(
-      body.includes("A\ntier-C human-witnessed probe may be named ONLY when") ||
-        body.includes("A tier-C human-witnessed probe may be named ONLY when"),
-      `${name} states the justified-C-only condition`,
-    );
-    assert.ok(
-      body.includes("Tier-D producer-side artifacts") && body.includes("are never acceptance evidence"),
-      `${name} states the D-ban`,
-    );
-  }
-
-  // Mirror-pair discipline: the shared paragraph's distinctive sentences are BYTE-IDENTICAL
-  // across all three carriers, not merely present — a divergent rewording in one carrier is
-  // exactly the drift #628's "identical terminology" requirement exists to prevent.
-  const sharedSentences = [
-    "Default every criterion to tier A\n(engine-verified) or tier B (CI-executed, no re-run/reproduction requirement) evidence.",
-    "never a bare\nassertion that a human will check.",
-    "Tier-D producer-side artifacts (browser output, screenshots,\nsession logs, or any other inherited-host-tool observation) are never acceptance evidence,\nadvisory at most",
-  ];
-  const [first, ...rest] = Object.values(bodies);
-  for (const sentence of sharedSentences) {
-    assert.ok(first!.includes(sentence), `sanity: po.md itself contains the shared sentence: ${sentence}`);
-    for (const other of rest) {
-      assert.ok(other.includes(sentence), `carrier diverges from po.md's wording for: ${sentence}`);
-    }
-  }
+test("#628 (#963 CONVERT, codex terra fix leg): every one of the three authoring prompts (po.md, po-decompose.md, verification-plan-drafter.md) ships the sapwood:floor:evidence-tiers marker block, byte-equal (whitespace-normalized) across carriers — wording may change freely as long as all carriers change together", () => {
+  assertFloorMirrored("evidence-tiers", EVIDENCE_TIER_CARRIERS);
 });
 
 test("#628: no carrier re-restates the tier A/B/C/D definitions themselves — docs/security.md stays the single doctrine home", () => {
@@ -641,6 +601,15 @@ const FLOOR_CARRIERS: Readonly<Record<string, string>> = {
   "verification-plan-reviewer-confirm.md": defaultVerificationPlanConfirmPromptPath(),
 };
 
+// #628's evidence-tier rule (below) has a DIFFERENT carrier set (the three AC-authoring
+// prompts) — same marker/mirror mechanism, generalized over `carriers` rather than a second
+// hand-copied helper.
+const EVIDENCE_TIER_CARRIERS: Readonly<Record<string, string>> = {
+  "po.md": defaultPoPromptPath(),
+  "po-decompose.md": defaultPoDecomposePromptPath(),
+  "verification-plan-drafter.md": defaultVerificationPlanDrafterPromptPath(),
+};
+
 function extractFloor(body: string, floorName: string): string {
   const startTag = `<!-- sapwood:floor:${floorName} -->`;
   const endTag = `<!-- /sapwood:floor:${floorName} -->`;
@@ -650,8 +619,8 @@ function extractFloor(body: string, floorName: string): string {
   return normalizeWhitespace(body.slice(start + startTag.length, end));
 }
 
-function assertFloorMirrored(floorName: string): void {
-  const blocks = Object.entries(FLOOR_CARRIERS).map(([name, path]) => [name, extractFloor(readPrompt(path), floorName)] as const);
+function assertFloorMirrored(floorName: string, carriers: Readonly<Record<string, string>> = FLOOR_CARRIERS): void {
+  const blocks = Object.entries(carriers).map(([name, path]) => [name, extractFloor(readPrompt(path), floorName)] as const);
   const [[firstName, firstBlock], ...rest] = blocks;
   assert.ok(firstBlock.length > 0, `sanity: ${firstName}'s sapwood:floor:${floorName} block is non-empty`);
   for (const [name, block] of rest) {

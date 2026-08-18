@@ -27,7 +27,7 @@ import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import { estimateUsd, loadPricingTable } from "../config/pricing.js";
 import { closeOutMergedHumanMergeOnlyLanes } from "../loop/conductor.js";
 import { classifyEnvFailure, DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
-import { mcpToolFullName, PR_TOOLS } from "../proxy/tools.js";
+import { mcpToolFullName, PR_TOOLS, TOOL_PR_AUDIT_COMMENTS } from "../proxy/tools.js";
 import { State } from "../state/state.js";
 import {
   buildRenderFixPrompt,
@@ -5886,14 +5886,19 @@ test("#701 (per-surface independence, PM ruling on gate② P2 #2): changing ONLY
 //    issue.title/body/labels — a fix leg's evidence channel is the PR-facing proxy tools, not
 //    issue prose) — and takes a bare issue NUMBER, never a fabricated `Issue` object. ──────────
 
-test("defaultFixPromptPath: resolves to the shipped prompts/fix.md, which exists and mentions pr.number/issue.number", () => {
-  const p = defaultFixPromptPath();
-  assert.ok(existsSync(p));
-  const content = readFileSync(p, "utf8");
-  assert.match(content, /\{\{pr\.number\}\}/);
-  assert.match(content, /\{\{issue\.number\}\}/);
-  assert.match(content, /mcp__forge__pr_audit_comments/);
-  assert.match(content, /findings are carried only by `pr_audit_comments`/);
+test("#963 (codex terra fix leg, CONVERT): fix.md renders {{pr.number}}/{{issue.number}} through the REAL buildRenderFixPrompt render path with distinctive values reaching the output", () => {
+  const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
+  const rendered = buildRenderFixPrompt(scfg)(424242, 777777);
+  assert.ok(rendered.includes("424242"), "the distinctive issue number must reach the rendered shipped fix.md");
+  assert.ok(rendered.includes("777777"), "the distinctive PR number must reach the rendered shipped fix.md");
+});
+
+test("#963 (codex terra fix leg, CONVERT): fix.md names the REAL mcp__forge__ tool name for pr_audit_comments (mcpToolFullName(TOOL_PR_AUDIT_COMMENTS), cross-artifact against proxy/tools.ts)", () => {
+  const content = readFileSync(defaultFixPromptPath(), "utf8");
+  assert.ok(
+    content.includes(mcpToolFullName(TOOL_PR_AUDIT_COMMENTS)),
+    "fix.md must name the real mcp__forge__ tool name — a renamed proxy tool must be caught here",
+  );
 });
 
 test("loadFixPromptTemplate: unset fixPromptFile -> the shipped default (byte-identical)", () => {

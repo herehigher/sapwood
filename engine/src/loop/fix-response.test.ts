@@ -9,10 +9,12 @@
 // receipt-event commits) / F4 (label-before-clear escalation ordering) / F5 (pr in the batch
 // key) — same marking convention.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge } from "../forge/forge.js";
 import { deriveReviewAction } from "../roles/reviewer.js";
+import { defaultFixPromptPath } from "../roles/worker.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import type { EventPayloadFor } from "../state/event-kinds/payloads.js";
 import type { PendingThreadWrite } from "../state/state.js";
@@ -23,6 +25,9 @@ import {
   computeDisputeEscalation,
   computeFindingDisputeEscalation,
   computeFixResponseHarvest,
+  FixFindingResponseEntrySchema,
+  FixResponseMetadataSchema,
+  FixThreadResponseEntrySchema,
   fixLegJournalCursor,
   fixResponseBatchKey,
   journaledAuditRunIds,
@@ -120,13 +125,30 @@ test("validateFixResponseOutput: a mix of addressed + disputed entries, all jour
 // ── D1(b): a resultText following fix.md's DOCUMENTED format flows through the REAL
 //    validateFixResponseOutput -> enqueue -> attemptThreadWrite path end to end ──────────────
 
-// #963: the D1(b) pair that used to live here (a positive assert.match over fix.md's own
-// prose — field names, sentinel literals, phrasing) was a single-file prose pin: the shipped
-// file was its only oracle, so a legitimate rewording of fix.md would redden it exactly like a
-// real regression. validateFixResponseOutput's own unit tests above already prove the real
-// parser/schema accepts the documented shape; the shipped prompt's wording is otherwise
-// unconstrained by any second, independently-drifting source. See docs/REVIEW-DOCTRINE.md's
-// PROSE-PIN sub-case.
+// #963 (PM fix leg, correcting a DELETE that should have been a CONVERT): the D1(b) pair that
+// used to live here hand-copied field names as literals — a single-file prose pin. The REAL
+// oracle is the zod schema behind validateFixResponseOutput: derive the expected key/enum names
+// from FixResponseMetadataSchema/FixThreadResponseEntrySchema/FixFindingResponseEntrySchema
+// (exported from fix-response.ts for exactly this) instead of hand-copying strings, so a renamed
+// schema field is caught here rather than rotting silently out of fix.md's own coverage.
+test("D1(b) (#963 CONVERT): the shipped fix.md documents the sentinel via the REAL RESULT_BLOCK_START/END constants, and every REAL schema field/enum name (threadResponses/findingResponses entry shapes)", () => {
+  const content = readFileSync(defaultFixPromptPath(), "utf8");
+  assert.ok(content.includes(RESULT_BLOCK_START), "fix.md must show the real RESULT_BLOCK_START sentinel");
+  assert.ok(content.includes(RESULT_BLOCK_END), "fix.md must show the real RESULT_BLOCK_END sentinel");
+
+  for (const key of Object.keys(FixResponseMetadataSchema.shape)) {
+    assert.ok(content.includes(key), `fix.md must document the real top-level field ${key}`);
+  }
+  for (const key of Object.keys(FixThreadResponseEntrySchema.shape)) {
+    assert.ok(content.includes(key), `fix.md must document the real threadResponses entry field ${key}`);
+  }
+  for (const key of Object.keys(FixFindingResponseEntrySchema.shape)) {
+    assert.ok(content.includes(key), `fix.md must document the real findingResponses entry field ${key}`);
+  }
+  for (const value of FixThreadResponseEntrySchema.shape.resolution.options) {
+    assert.ok(content.includes(`"${value}"`), `fix.md must document the real resolution enum value ${value}`);
+  }
+});
 
 test("D1(b): a resultText in EXACTLY fix.md's documented shape flows through validateFixResponseOutput -> State.settleTerminalWorker -> attemptThreadWrite", async () => {
   // The literal shape fix.md instructs a fix leg to emit: a single addressed entry.
