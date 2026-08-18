@@ -3660,6 +3660,14 @@ test('#923: BACK TO LIVE sits between the round-nav stepper and the spend meter 
 // entirely (returning a bare `<p>`, never rendering `{replayAction}` at all) — a replay viewer
 // who loses the connection, or is still loading, had no way back to live even though App.tsx was
 // still passing the button through. Both early-return branches now render it too.
+//
+// `minimalAppViewModel`'s own return is cast `as unknown as Parameters<typeof appContent>[0]`
+// (its own doc comment: the full TanStack `UseQueryResult` shape isn't worth hand-implementing) —
+// an override spread OUTSIDE that call loses the cast and gets structurally checked against the
+// real `AppViewModel`, which a bare `{ data, isPending }` stand-in can never satisfy. Re-applying
+// the SAME cast on the merged object is the established pattern this file already uses whenever a
+// test overrides a field after the fact (e.g. the #766 gate② finding [2] tests' own `{ ...vm, mode:
+// "live" } as unknown as Parameters<typeof appContent>[0]`).
 test("#923: with a closed round selected, BACK TO LIVE still renders inside .app-header while the engine status is disconnected, and while it is still connecting", async () => {
   const data = { ...LOOP_STATE_OK, controlsEnabled: true, engine: { ...LOOP_STATE_OK.engine, state: "running" } };
   const cases = [
@@ -3670,7 +3678,7 @@ test("#923: with a closed round selected, BACK TO LIVE still renders inside .app
     const vm = {
       ...minimalAppViewModel({ mode: "replay", loop: { data, isPending: false }, rounds: [CLOSED_ROUND], selectedRoundId: 42 }),
       ...overrides,
-    };
+    } as unknown as Parameters<typeof appContent>[0];
     const { container, cleanup } = await mountAppWithCascade(vm);
     try {
       const btn = container.querySelector(".header-back-to-live");
