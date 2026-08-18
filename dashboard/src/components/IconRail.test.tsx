@@ -248,3 +248,33 @@ test("#727 AC1: the base rail is a 56px sticky sidebar with the config gear pinn
   const gear = cssBlock(css, ".icon-rail-config");
   assert.match(gear, /margin-top:\s*auto/, '§3: "config gear at bottom" — pinned below the anchors/theme switch');
 });
+
+/** Pulls the `.icon-rail-config` button's own markup out of the full rail, mirroring
+ *  hero.test.ts's `trunkGroupInner` extraction pattern used for the analogous Sprout proof. */
+function configButtonMarkup(html: string): string | undefined {
+  return html.match(/<button type="button" class="icon-rail-item icon-rail-config"[^>]*>[\s\S]*?<\/button>/)?.[0];
+}
+
+// #955 AC1: GearGlyph (brightness-lookalike, owner observation #729/#929) is replaced by
+// lucide-react's Settings icon, same proof shape as hero.test.ts's #921 lucide-sprout check.
+test("#955 AC1: the config button renders lucide-react's Settings icon, not the old hand-drawn gear", () => {
+  const html = renderToStaticMarkup(<IconRail onOpenConfig={() => {}} />);
+  const button = configButtonMarkup(html);
+  assert.ok(button, ".icon-rail-config button not found");
+
+  // lucide-react's own `createLucideIcon` class convention — the package's real rendered class.
+  assert.match(button as string, /<svg[^>]*class="lucide lucide-settings"/);
+
+  // No hand-drawn GearGlyph remnants: its 2.4-radius hub circle and its eight-stroke radiating path.
+  assert.doesNotMatch(button as string, /<circle[^>]*r="2\.4"/);
+  assert.doesNotMatch(button as string, /M8 1\.5 V3\.3/);
+
+  // icons.tsx header spec for adopted lucide icons: 1.5 stroke width, not lucide's own 2px default.
+  assert.match(button as string, /<svg[^>]*stroke-width="1\.5"/);
+});
+
+// #955 AC2: source-text assertion — GearGlyph must be gone, not just unused.
+test("#955 AC2: IconRail.tsx no longer defines or references GearGlyph", () => {
+  const source = readFileSync(new URL("./IconRail.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /GearGlyph/);
+});
