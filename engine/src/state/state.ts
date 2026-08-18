@@ -335,7 +335,11 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   },
   // 12 -> 13: graceful-handoff resume (#172). Mirrors gated-PR reentry's worker-row column
   // pattern: `resume_attempts` counts successful handoff -> running reentries for this lane;
-  // `resume_capped` is the one-way latch set after the cap's needs-human label provably lands.
+  // `resume_capped` is the one-way latch set after the CAPPED branch's terminal label provably
+  // lands — needs-human (today's default path) OR, since #965, an engine-applied `labels.split`
+  // when the resume cap's per-round split allowance is not yet exhausted. Either way the row
+  // permanently leaves handoffWorkers()'s candidate pool; which label landed is on the
+  // `resume-capped` event's own `split` field, not this column.
   // Handoff rows predating this migration start eligible with zero attempts. No table/process/
   // side channel: handoff remains the terminal-but-resumable runtime state it already was.
   (db) => {

@@ -582,6 +582,10 @@ gh pr list    --repo OWNER/REPO --label "sapwood:blocked" --state open
 
 # hold:
 gh pr list    --repo OWNER/REPO --label "sapwood:hold" --state open
+
+# split (awaiting po-decompose): human-applied, or engine-applied at the resume cap (#965) —
+# either origin, po-decompose picks it up next round with no other change:
+gh issue list --repo OWNER/REPO --label "sapwood:split" --state open
 ```
 
 `sapwood status`'s `gated PRs (awaiting review gate)` count is the DB-side lane view

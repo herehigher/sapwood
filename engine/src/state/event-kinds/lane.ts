@@ -119,15 +119,33 @@ export const LANE_EVENT_KINDS = defineKinds({
     meaning: "resuming a handed-off lane failed this attempt; eligible for a further retry.",
     actionability: "expected-noise",
   },
+  // #965: NOT tagged `retro` (deliberately) — a split-vs-needs-human round-digest treatment for
+  // this kind is #874's own AC, not this one's. Leave the tag off here; #874 adds it in the same
+  // PR that wires the round-digest consumer, so a tag with no reader never lands ahead of it.
   "resume-capped": {
     tags: ["escalation-source:always"],
-    meaning: "a handed-off lane exhausted its resume-attempt budget (#172); needs-human, always proven by presence.",
+    meaning:
+      "a handed-off lane exhausted its resume-attempt budget (#172). `split: false` (or absent, every pre-#965 " +
+      "event): needs-human, always proven by presence. `split: true` (#965): the engine applied `labels.split` " +
+      "instead — the WIP branch is evidence for po-decompose, not an attention item; escalation-reconcile.ts's " +
+      "resumeCappedNeedsAttention predicate narrows ESCALATION_SOURCES to the non-split occurrences only.",
     actionability: "intervene",
-    see: "#172",
+    see: "#172, #965",
   },
   "resume-capped-label-failed": {
     tags: [],
-    meaning: "the needs-human label write for a resume-capped lane failed; the lane may be escalated with no visible label.",
+    meaning: "the needs-human OR split label write for a resume-capped lane failed; the lane may be escalated with no visible label.",
+    actionability: "investigate",
+  },
+  "resume-cap-split-label-failed": {
+    tags: [],
+    meaning: "the `labels.split` write for an engine-applied resume-cap split (#965) failed; retried next tick.",
+    actionability: "investigate",
+  },
+  "resume-cap-split-comment-failed": {
+    tags: [],
+    meaning:
+      "the WIP-pointer evidence comment for an engine-applied resume-cap split (#965) failed (or the PR/diff read behind it did) — the split itself, its `resume-capped{split:true}` event, and the row's latch already landed and are unaffected; this row is never revisited (same 'the terminal is the row, this is bookkeeping-only retry noise' treatment as its `-label-failed` sibling, except this one never retries — the lane has already left handoffWorkers()).",
     actionability: "investigate",
   },
   "resume-undecidable": {

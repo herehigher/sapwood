@@ -974,7 +974,7 @@ checklist item**):
 | `base-ci-red-escalated` | The default branch's CI is red ({failing.join}, when carried) — no PR can merge until it's fixed · asks: fix the default branch's CI (#893; #502) |
 | `estop-lane-swept` | Lane {worker}'s driving work was killed by EMERGENCY STOP ("— the process couldn't be confirmed dead", when `confirmedDead` is `false`) · asks: check for an orphan process and confirm the PR's state (#893) |
 | `estop-lane-sweep-incapable` | Lane {worker}'s EMERGENCY STOP sweep couldn't verify or signal its process — left unsettled · asks: check the lane by hand (#893) |
-| `resume-capped` | Lane {worker} exhausted its resume attempts ({attempts}, when carried) after a handoff · asks: resume or reassign the lane by hand (#893; #172) |
+| `resume-capped` | Branches on `payload.split` (#965): `split: true` → "Lane {worker} exhausted its resume attempts ({attempts}, when carried) after a handoff — the engine handed the issue to the decomposer for a split" (not an attention item — the engine applied `labels.split`, not a human hold); `split: false`, or the key absent entirely (every pre-#965 event) → "Lane {worker} exhausted its resume attempts ({attempts}, when carried) after a handoff · asks: resume or reassign the lane by hand" (#893; #172) |
 | `resume-undecidable` | Lane {worker}'s resume outcome couldn't be determined from the ledger · asks: check the lane by hand and decide whether to resume (#893; #172) |
 | `orphan-pr-escalated` | PR #{pr} is open but lane {worker} is dead ({via}, when carried) · asks: check the PR and decide whether to retry the issue (#893) |
 | `gated-flag-unprovable` | Lane {worker}'s reentry flag couldn't be found on either carrier · asks: check issue #{issue}'s labels by hand (#893; #391) |

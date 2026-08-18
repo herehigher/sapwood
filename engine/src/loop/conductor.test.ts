@@ -36,6 +36,7 @@ import type { EventKind } from "../state/event-kinds/index.js";
 import { State, type WorkerRow } from "../state/state.js";
 import { RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import { BASE_CI_RED_ESCALATED, BASE_CI_RED_OBSERVED, baseRedPin } from "./base-ci.js";
+import { CAP_SPLIT_ORIGIN_MARKER, findCapSplitWipPointer } from "./cap-split.js";
 import {
   BLOCKER_RECHECK_READS_PER_TICK,
   budgetExceeded,
@@ -9725,10 +9726,14 @@ test("tick dispatch cap 0 is quiet and never fetches Ready issues", async () => 
   st.close();
 });
 
-test("#172 cap latch: a second handoff past maxResumes escalates exactly once and is never selected again", async () => {
+test("#172/#965 cap latch: a second handoff past maxResumes engine-splits exactly once and is never selected again", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
+  // #965: no per-round allowance — a CAPPED lane with no origin marker always splits now, so
+  // this test (about the LATCH mechanics: exactly-once, never-selected-again) asserts the split
+  // outcome directly. The needs-human arm's own mechanics are covered by the #965 AC2
+  // origin-marker test below.
   const cfg = mkCfg({ worker: { maxResumes: 1 } });
   seedRunning(st, "lane-cap", 173);
 
@@ -9739,9 +9744,9 @@ test("#172 cap latch: a second handoff past maxResumes escalates exactly once an
   await tick({ now: realClock, forge, state: st, supervisor: sup, cfg }); // resumed leg -> handoff
 
   const capped = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
-  assert.deepEqual(capped.resumed, [{ kind: "capped", worker: "lane-cap", issue: 173, attempts: 1 }]);
+  assert.deepEqual(capped.resumed, [{ kind: "capped-split", worker: "lane-cap", issue: 173, attempts: 1 }]);
   assert.equal(st.getWorker("lane-cap")?.resume_capped, 1);
-  assert.deepEqual(forge.labelsAdded, [[173, "needs-human"]]);
+  assert.deepEqual(forge.labelsAdded, [[173, "split"]]);
   assert.equal(sup.resumed.length, 1);
 
   const again = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
@@ -9751,7 +9756,7 @@ test("#172 cap latch: a second handoff past maxResumes escalates exactly once an
   st.close();
 });
 
-test("#295 review round 4 (Codex P1): resume-capped preserves a fixing-origin lane's known PR", async () => {
+test("#295/#965 review round 4 (Codex P1): resume-capped preserves a fixing-origin lane's known PR, on the split path too", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
@@ -9764,11 +9769,109 @@ test("#295 review round 4 (Codex P1): resume-capped preserves a fixing-origin la
   await tick({ now: realClock, forge, state: st, supervisor: sup, cfg }); // resume attempt 1
   sup.probes["lane-pr"] = { ...DEFAULT_PROBE, handoff: true, costUsd: 0.5 };
   await tick({ now: realClock, forge, state: st, supervisor: sup, cfg }); // resumed leg -> handoff
-  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg }); // cap
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg }); // cap -> split
 
   const [event] = st.eventsSince("2020-01-01T00:00:00Z", ["resume-capped"]);
-  // Without the PR, escalation-reconcile can never observe an external merge of it.
-  assert.equal((event?.payload as { pr?: number } | undefined)?.pr, 4242);
+  // Without the PR, escalation-reconcile (needs-human arm) or the WIP-pointer comment (split
+  // arm) can never observe/report it — #965 kept this field on both branches.
+  assert.equal((event?.payload as { pr?: number; split?: boolean } | undefined)?.pr, 4242);
+  assert.equal((event?.payload as { split?: boolean } | undefined)?.split, true);
+  st.close();
+});
+
+// ── #965: CAPPED -> engine `split` (default, cap not exhausted) ──────────────────────────────
+
+test("#965 AC1: a capped lane with no PR gets `split` applied, a WIP-pointer comment, split:true, and NO needs-human", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  // maxResumes: 0 -> every handoff is CAPPED on its very first RESUME evaluation (attempts 0 >= cap 0).
+  const cfg = mkCfg({ worker: { maxResumes: 0 } });
+  st.upsertWorker({ name: "lane-split", issue: 965, session_id: "s", state: "handoff", started_at: "t", ended_at: null });
+
+  const result = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+
+  assert.deepEqual(result.resumed, [{ kind: "capped-split", worker: "lane-split", issue: 965, attempts: 0 }]);
+  assert.deepEqual(forge.labelsAdded, [[965, "split"]], "split applied, needs-human never touched");
+  assert.equal(st.getWorker("lane-split")?.resume_capped, 1, "the row still leaves the resume candidate pool");
+  const [event] = st.eventsSince("2020-01-01T00:00:00Z", ["resume-capped"]);
+  assert.equal((event?.payload as { split?: boolean })?.split, true);
+
+  const comments = await forge.getIssueComments(965);
+  const pointer = findCapSplitWipPointer(comments, await forge.getAuthenticatedActor(), 965);
+  assert.ok(pointer, "a WIP-pointer comment landed and parses back");
+  assert.equal(pointer?.pr, undefined, "no PR was ever opened for this WIP");
+  assert.equal(pointer?.branch, undefined);
+  st.close();
+});
+
+test("#965 AC1: a capped lane WITH a PR carries branch/head/diffstat in its WIP pointer, and preserves pr on the resume-capped event", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ worker: { maxResumes: 0 } });
+  st.upsertWorker({ name: "lane-split-pr", issue: 966, session_id: "s", state: "handoff", started_at: "t", ended_at: null, pr: 4243 });
+  forge.prStatus = { ...forge.prStatus, headOid: "deadbeef", headRefName: "sapwood/lane-split-pr-966" };
+  forge.getPRDiff = async () =>
+    ["diff --git a/x.ts b/x.ts", "--- a/x.ts", "+++ b/x.ts", "@@ -1,1 +1,2 @@", "+added line", "+another added line", "-removed line"].join(
+      "\n",
+    );
+
+  const result = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+
+  assert.deepEqual(result.resumed, [{ kind: "capped-split", worker: "lane-split-pr", issue: 966, attempts: 0 }]);
+  const [event] = st.eventsSince("2020-01-01T00:00:00Z", ["resume-capped"]);
+  assert.equal((event?.payload as { split?: boolean; pr?: number })?.split, true);
+  assert.equal((event?.payload as { pr?: number })?.pr, 4243);
+
+  const comments = await forge.getIssueComments(966);
+  const pointer = findCapSplitWipPointer(comments, await forge.getAuthenticatedActor(), 966);
+  assert.equal(pointer?.pr, 4243);
+  assert.equal(pointer?.branch, "sapwood/lane-split-pr-966");
+  assert.equal(pointer?.headSha, "deadbeef");
+  assert.equal(pointer?.diffstat, "1 file changed, 2 insertions(+), 1 deletion(-)");
+  st.close();
+});
+
+// #965: no per-round allowance — cap-splits are already bounded by lane count per round (a
+// cap-split needs a lane to exhaust maxResumes, and at most cfg.lanes.max exist), and the origin
+// marker (AC2 below) prevents chains. There is no "allowance exhausted" arm left to test; every
+// eligible CAPPED lane splits, every tick.
+
+test("#965 AC2: no cap-split of a cap-split — an issue carrying the cap-split origin marker in its body always takes the needs-human path (mutation-kill: removing the check would split it)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ worker: { maxResumes: 0 } });
+  forge.issueBodies[970] = `## Why\n\nchild of a cap-split parent\n\n${CAP_SPLIT_ORIGIN_MARKER}`;
+  st.upsertWorker({ name: "lane-cap-split-child", issue: 970, session_id: "s", state: "handoff", started_at: "t", ended_at: null });
+
+  const result = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+
+  assert.deepEqual(result.resumed, [{ kind: "capped", worker: "lane-cap-split-child", issue: 970, attempts: 0 }]);
+  assert.deepEqual(forge.labelsAdded, [[970, "needs-human"]], "the origin marker refuses a second split");
+  const [event] = st.eventsSince("2020-01-01T00:00:00Z", ["resume-capped"]);
+  assert.equal((event?.payload as { split?: boolean })?.split, false);
+  st.close();
+});
+
+test("#965: ordering — a comment-write failure after the label/latch/event land degrades ONLY the comment, never the split itself", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const cfg = mkCfg({ worker: { maxResumes: 0 } });
+  st.upsertWorker({ name: "lane-comment-fails", issue: 971, session_id: "s", state: "handoff", started_at: "t", ended_at: null });
+  forge.throwOnAddIssueComment = true;
+
+  const result = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg });
+
+  assert.deepEqual(result.resumed, [{ kind: "capped-split", worker: "lane-comment-fails", issue: 971, attempts: 0 }]);
+  assert.deepEqual(forge.labelsAdded, [[971, "split"]], "the label still landed");
+  assert.equal(st.getWorker("lane-comment-fails")?.resume_capped, 1, "the row is still latched out of the candidate pool");
+  const [resumeCapped] = st.eventsSince("2020-01-01T00:00:00Z", ["resume-capped"]);
+  assert.equal((resumeCapped?.payload as { split?: boolean })?.split, true, "the durable origin event still landed");
+  const [commentFailed] = st.eventsSince("2020-01-01T00:00:00Z", ["resume-cap-split-comment-failed"]);
+  assert.equal((commentFailed?.payload as { issue?: number })?.issue, 971);
   st.close();
 });
 

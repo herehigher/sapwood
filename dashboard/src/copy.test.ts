@@ -396,6 +396,15 @@ test("reclaim-done/reclaim-failed are attention items only on their non-DRIVING 
   assert.equal(hasAttention("reclaim-done", {}), true);
 });
 
+test("#965: resume-capped is an attention item unless split:true — the engine handed it to the decomposer, not a person", () => {
+  assert.equal(hasAttention("resume-capped", { worker: "w1", issue: 1, attempts: 2, split: true }), false);
+  assert.equal(hasAttention("resume-capped", { worker: "w1", issue: 1, attempts: 2, split: false }), true);
+  // Fail direction for the pre-#965 payload shape (no `split` key at all): attention, same
+  // "absent must read as false, never as true" fail-safe the engine's own
+  // resumeCappedNeedsAttention predicate takes (escalation-reconcile.ts).
+  assert.equal(hasAttention("resume-capped", { worker: "w1", issue: 1, attempts: 2 }), true);
+});
+
 test("every kind named in §3's flagged-attention list carries the marker", () => {
   const alwaysAttention: EventKind[] = [
     "drive-needs-human",
@@ -425,7 +434,13 @@ test("#715 gate② [2]: attention drift guard — every §7-table kind the engin
   // The two reclaim kinds are PAYLOAD-predicated (#404) — their membership depends on `next`,
   // not unconditional presence, and copy.ts already covers them with `reclaimNeedsAttention`
   // (tested above); this guard only asserts the UNCONDITIONAL sources.
-  const predicated = new Set(["reclaim-done", "reclaim-failed"]);
+  // #965: `resume-capped` joins them — the engine's `escalation-source:always` TAG is unchanged
+  // (a split:false occurrence's needs-human label is still always-proven-by-presence), but a
+  // NEW `resumeCappedNeedsAttention` payload predicate (escalation-reconcile.ts, the same #404
+  // shape reclaim-done/reclaim-failed use) narrows which payloads count at all: split:true is
+  // not an attention item, so this ENGINE-side registry's own membership check no longer sees
+  // `resume-capped` as unconditional — copy.ts's mirror predicate (below) is correct to match.
+  const predicated = new Set(["reclaim-done", "reclaim-failed", "resume-capped"]);
   // #893: dashboard's `EventKind` is now type-derived from the engine's own registry, so this is
   // a genuine subset check rather than a defensive plain-string comparison against a possibly
   // wider/narrower nominal type (the pre-#893 `no-plan-after-draft` drift this comment used to
@@ -816,6 +831,11 @@ const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expec
     "resume-capped",
     { worker: "w1", issue: 1 },
     "Lane w1 exhausted its resume attempts after a handoff · asks: resume or reassign the lane by hand",
+  ],
+  [
+    "resume-capped",
+    { worker: "w1", issue: 1, attempts: 3, split: true },
+    "Lane w1 exhausted its resume attempts (3) after a handoff — the engine handed the issue to the decomposer for a split",
   ],
   [
     "resume-undecidable",

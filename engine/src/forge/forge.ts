@@ -146,6 +146,13 @@ export interface PRStatus {
    *  itself is empty (same "additive, pre-existing callers unaffected" convention as `ciRed`
    *  above — absent on any pre-#797 fixture/fake). */
   ciChecks?: { name: string; conclusion: string }[];
+  /** #965: the PR's head branch name (`gh pr view --json headRefName`), added to the SAME read
+   *  as every other additive field above — the resume-cap -> engine-`split` seam names the WIP
+   *  branch in its pointer comment and this is the one forge-sourced place to get it without a
+   *  local git read (see worker.ts's laneBranch doc for why the engine never execs git inside a
+   *  worker-controlled worktree). ADDITIVE and OPTIONAL, same convention as `title`/`baseOid`
+   *  above: absent on any pre-#965 fixture/fake. */
+  headRefName?: string;
 }
 
 /** #292: one rename-aware entry from GitHub's pull-request files API. The old path is retained
@@ -984,7 +991,8 @@ export class GithubForge implements IForge {
       // #287 (E4b): baseRefOid added — a real `gh pr view --json` field (verified against a live
       // `gh` binary), giving PRStatus.baseOid without switching this call to raw GraphQL.
       // #595: title added to this SAME read (not a new call) — see PRStatus.title's own doc.
-      "number,title,headRefOid,baseRefOid,state,mergeable,statusCheckRollup",
+      // #965: headRefName added to this SAME read — see PRStatus.headRefName's own doc.
+      "number,title,headRefOid,baseRefOid,headRefName,state,mergeable,statusCheckRollup",
     ]);
     return parsePRStatus(out);
   }
@@ -2937,6 +2945,8 @@ export function parsePRStatus(json: string): PRStatus {
     title?: string;
     // #287 (E4b): additive — absent on any pre-#287 fixture (see PRStatus.baseOid's own doc).
     baseRefOid?: string;
+    // #965: additive — absent on any pre-#965 fixture (see PRStatus.headRefName's own doc).
+    headRefName?: string;
     state: string;
     mergeable: string;
     // CheckRun entries carry `name`/`conclusion`; legacy commit StatusContext entries carry
@@ -3034,6 +3044,7 @@ export function parsePRStatus(json: string): PRStatus {
     ciInert,
     ...(d.baseRefOid !== undefined ? { baseOid: d.baseRefOid } : {}),
     ...(d.title !== undefined ? { title: d.title } : {}),
+    ...(d.headRefName !== undefined ? { headRefName: d.headRefName } : {}),
     ...(checks.length > 0 ? { ciChecks } : {}),
   };
 }

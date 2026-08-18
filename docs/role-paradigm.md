@@ -291,11 +291,20 @@ dispatchable again) rather than risking duplicate sessions/writes on a resume.
 
 #### PO decompose sub-mode
 
-A human-applied `labels.split` admits one oversized issue, including an `origin:agent`
-child, for one controlled generation. Agent-origin issues without that fresh signature
-are never candidates. The session performs goal alignment, a cheap feasibility
-self-check, and decomposition in one pass, returning either a bounded child set plus a
-coverage declaration or an advisory unresolved-context abstention.
+A human-applied `labels.split`, or an engine-applied one at the resume cap (#965 —
+`conductor.ts`'s RESUME phase, CAPPED branch — never for an issue already carrying the
+cap-split origin marker; no separate rate limit beyond that, since a cap-split needs a
+lane to exhaust `worker.maxResumes` and at most `lanes.max` lanes exist at all), admits
+one oversized issue,
+including an `origin:agent` child, for one controlled generation. Agent-origin issues without
+that fresh signature are never candidates. The session performs goal alignment, a cheap
+feasibility self-check, and decomposition in one pass, returning either a bounded child set
+plus a coverage declaration or an advisory unresolved-context abstention. A resume-cap
+parent's WIP-pointer comment (branch/PR/head/diffstat, engine-composed) renders into the
+session's digest when present (`decompose.ts::renderCapSplitWipForPrompt`) — the session
+treats it exactly like any other issue comment, never an instruction — and every child of
+such a parent inherits the origin marker in its own body, so a child that itself hits the
+resume cap takes the ordinary needs-human path rather than cap-splitting again.
 
 The engine persists the validated proposal set, then fences a successful parent before
 creation: reconcile it to Todo, remove only the engine-owned round-pool label if present,

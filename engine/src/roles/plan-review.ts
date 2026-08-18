@@ -179,8 +179,11 @@ const COMMENT_DIGEST_BODY_CHAR_CAP = 4000;
  *  data-block delimiters opens on, without touching anything else about the comment's readability
  *  as plain text. No matching unescape exists anywhere downstream — this render has exactly one
  *  consumer (a read-only judgment prompt) and nothing here ever reconstitutes or re-emits the
- *  original bytes. */
-function escapeAngleBrackets(text: string): string {
+ *  original bytes. Exported (#965): decompose.ts's WIP-pointer render into the po-decompose
+ *  prompt reuses this SAME neutralization for the SAME reason — the pointer's `branch`/`headSha`
+ *  fields quote engine-composed data, but its comment carrier is still untrusted-data-framed
+ *  content by this module's own doctrine, and one implementation is one place to get it right. */
+export function escapeAngleBrackets(text: string): string {
   return text.replaceAll("<", "&lt;");
 }
 
