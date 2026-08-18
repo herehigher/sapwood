@@ -199,36 +199,34 @@ async function runRoundsGuarded(deps: RoundDeps): ReturnType<typeof runRounds> {
   return result;
 }
 
-test("defaultHarvestPromptPath: resolves to the shipped prompts/harvest.md, which exists, mentions the round-fact vars, and instructs the #110 structured-output format", () => {
+test("defaultHarvestPromptPath: resolves to the shipped prompts/harvest.md, which exists and instructs the #110 structured-output format (real RESULT_BLOCK_START/END constants — cross-artifact)", () => {
   const p = defaultHarvestPromptPath();
   assert.ok(existsSync(p), `expected shipped prompt at ${p}`);
   const body = readFileSync(p, "utf8");
-  // #123: the shipped prompt consumes the round ARTIFACT block (plus the briefing-target list);
-  // the individual fact vars remain SUPPORTED by factVars for custom promptFiles, but the
-  // shipped template no longer spells each number out.
-  for (const v of [
-    "{{round.id}}",
-    "{{round.artifact}}",
-    "{{round.needsHumanCount}}",
-    "{{round.needsHumanList}}",
-    "{{round.egressSuspectCount}}",
-    "{{round.egressSuspectList}}",
-  ]) {
-    assert.ok(body.includes(v), `harvest.md should reference ${v}`);
-  }
   // #110 PR3: the session has no gh grant it acts on — every comment travels through the
-  // sentinel-delimited structured block, never a direct tool call.
+  // sentinel-delimited structured block, never a direct tool call. RESULT_BLOCK_START/END are the
+  // real structured-output.ts constants, not a hand-copied literal — a rename there fails this.
   assert.ok(
     body.includes(RESULT_BLOCK_START) && body.includes(RESULT_BLOCK_END),
     "harvest.md must instruct the structured-output sentinel format",
   );
-  // #618: reworded from "no GitHub write access" (a tool-inventory-completeness claim #616's
-  // ambient-MCP-tool finding falsifies) to the structural fact — comment writes are engine-
-  // applied from the structured output, regardless of what the session's tools turn out to be.
-  assert.ok(
-    /GitHub comment writes route through the engine/i.test(body),
-    "harvest.md must state comment writes route through the engine, not a tool call",
-  );
+});
+
+test("#963: createHarvestStub renders the REAL shipped harvest.md with a distinctive {{lang.issuesAndPrs}} value reaching the dispatched prompt (drops the reference -> reddens)", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  state.appendEvent("drive-needs-human", { worker: "lane-a", issue: 9, pr: 1, reason: "x" });
+  const resultText = sapwoodResult({ comments: [{ issue: 9, body: "hi" }] });
+  const runner = new ScriptedRunner(doneResult("s1", resultText));
+  // No roles.harvest.promptFile override — this dispatches against the REAL shipped harvest.md.
+  const cfg = mkCfg({ language: { issuesAndPrs: "zz-ZZ" } });
+  await createHarvestStub({ now: realClock, forge: new MinimalForge(), state, cfg, runner }).run({
+    roundId: round.round_id,
+    phase: "harvesting",
+    marker: null,
+  });
+  assert.ok(runner.calls[0]!.prompt.includes("zz-ZZ"), "the distinctive language value must reach the rendered shipped prompt");
+  state.close();
 });
 
 test("renderFactsTemplate: substitutes known vars, throws on an unknown placeholder (#74 fail-closed pattern)", () => {

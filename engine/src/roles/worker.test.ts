@@ -5748,15 +5748,6 @@ test("renderPromptTemplate: fails closed on prototype-chain names — {{construc
   assert.throws(() => renderPromptTemplate("hello {{toString}}", issue), /unknown variable.*toString/i);
 });
 
-test("defaultPromptPath: resolves to the shipped prompts/worker.md, which exists and mentions the vars", () => {
-  const p = defaultPromptPath();
-  assert.ok(existsSync(p), `expected shipped default prompt at ${p}`);
-  const text = readFileSync(p, "utf8");
-  assert.match(text, /\{\{issue\.number\}\}/);
-  assert.match(text, /\{\{issue\.title\}\}/);
-  assert.match(text, /\{\{issue\.body\}\}/);
-});
-
 test("loadWorkerPromptTemplate: unset promptFile -> the shipped default (byte-identical)", () => {
   const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
   assert.equal(loadWorkerPromptTemplate(scfg), readFileSync(defaultPromptPath(), "utf8"));

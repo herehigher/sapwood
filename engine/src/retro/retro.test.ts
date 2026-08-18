@@ -11,7 +11,7 @@
 // grants, cadence, prompt-template rendering) with the digest as one more thing that wiring now
 // produces and substitutes in.
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -547,12 +547,9 @@ test("createRetroStub: malformed scratch on the first attempt, valid on the retr
   state.close();
 });
 
-test("prompts/retro.md instructs the scratch-file contract — fixed path, always written, 'none' for a quiet round — and never a gh command", () => {
+test("prompts/retro.md instructs the scratch-file contract at the REAL RETRO_SCRATCH_FILE path (cross-artifact against retro.ts's own constant), and never a gh command", () => {
   const body = readFileSync(defaultRetroPromptPath(), "utf8");
-  assert.ok(body.includes(RETRO_SCRATCH_FILE), "must name the fixed scratch path");
-  assert.ok(body.includes("branch:") && body.includes("title:"), "must show the two labeled header lines");
-  assert.ok(body.includes("none"), "must name the explicit quiet-round content");
-  assert.ok(/always.{0,20}write/is.test(body), "must require the file be written every session");
+  assert.ok(body.includes(RETRO_SCRATCH_FILE), "must name the fixed scratch path — the real retro.ts constant, not a hand-copied literal");
   assert.ok(!body.includes("gh pr create"), "must not instruct the session to open the PR itself");
 });
 
@@ -697,39 +694,22 @@ test("#701: createRetroStub renders {{lang.issuesAndPrs}} from cfg.language.issu
   }
 });
 
-test("defaultRetroPromptPath: resolves to the shipped prompts/retro.md, which exists and carries the mandatory review-findings-philosophy amendment", () => {
-  const p = defaultRetroPromptPath();
-  assert.ok(existsSync(p), `expected shipped prompt at ${p}`);
-  const body = readFileSync(p, "utf8");
-  // #91 issue comment (CTO + user, 2026-07-10): both points must be in the shipped prompt.
-  assert.ok(/recurring/i.test(body) && /design signal/i.test(body), "must name recurring findings as a design signal");
-  assert.ok(/not a fix queue|point.fix/i.test(body), "must reject a point-fix-queue response to recurring findings");
-  assert.ok(/inputs to judge|evidence to weigh/i.test(body), "must treat findings as evidence to judge");
-  assert.ok(/accepted/i.test(body) && /rejected/i.test(body), "must require an accepted/rejected classification with reasons");
-  for (const v of [
-    "{{round.id}}",
-    "{{round.handoffs}}",
-    "{{round.needsHumanEscalations}}",
-    "{{round.ceilingEscalations}}",
-    "{{round.digest}}",
-  ]) {
-    assert.ok(body.includes(v), `retro.md should reference ${v}`);
-  }
+test("#963: createRetroStub renders the REAL shipped retro.md with a distinctive {{lang.issuesAndPrs}} value reaching the dispatched prompt (drops the reference -> reddens)", async () => {
+  const state = new State(":memory:");
+  const round = state.startRound("2026-07-10T00:00:00.000Z");
+  const runner = new ScriptedRunner(doneResult("s1"));
+  // No roles.retro.promptFile override — this dispatches against the REAL shipped retro.md.
+  const cfg = mkCfg({ language: { issuesAndPrs: "zz-ZZ" } });
+  await createRetroStub({ now: realClock, state, cfg, runner, forge: new MinimalForge() }).run({
+    roundId: round.round_id,
+    phase: "retro",
+    marker: null,
+  });
+  assert.ok(runner.calls[0]!.prompt.includes("zz-ZZ"), "the distinctive language value must reach the rendered shipped prompt");
+  state.close();
 });
 
-test("#453: prompts/retro.md points at the finding-class tendency table, states the design-source rule against it, and names the blind spot", () => {
-  const body = readFileSync(defaultRetroPromptPath(), "utf8");
-  // The section the digest actually renders (retro-digest.ts's formatTendencySection) — the
-  // prompt must name it, or the table ships as data nothing was told to read.
-  assert.ok(body.includes("Finding-class tendency"), "must name the digest's tendency section by its heading");
-  assert.ok(body.includes("roles.retro.tendencyRounds"), "must name the config key that sets the window");
-  assert.ok(/design source/i.test(body), "must state that a recurring class belongs at the design source");
-  assert.ok(/blind spot/i.test(body), "must state the accepted blind spot (a disabled or mis-judging retro notices nothing)");
-  // D5: the prompt must not promise engine-fired issue creation the engine deliberately lacks.
-  assert.ok(/table, not a verdict/i.test(body), "must be explicit that the engine tabulates and judgment is the session's");
-});
-
-test("#453: the tendency table lands inside the substituted {{round.digest}} block, not as a second placeholder", async () => {
+test("#453: the tendency table lands inside the substituted {{round.digest}} block, not as a second placeholder — the engine-rendered table + config-derived window reach the real dispatched prompt (cross-artifact against retro-digest.ts's actual output, not a raw-template pin)", async () => {
   const state = new State(":memory:");
   const round = state.startRound("2026-07-10T00:00:00.000Z");
   const runner = new ScriptedRunner(doneResult("role-retro-1"));
@@ -742,20 +722,11 @@ test("#453: the tendency table lands inside the substituted {{round.digest}} blo
   state.close();
 });
 
-test("prompts/retro.md no longer instructs live gh browsing — it points at the engine-built digest instead", () => {
+test("prompts/retro.md no longer instructs live gh browsing (negative lint — a banned instruction class per #235, mirrored across shipped prompts)", () => {
   const body = readFileSync(defaultRetroPromptPath(), "utf8");
   for (const removed of ["gh pr view", "gh pr list", "gh issue view", "gh issue list"]) {
     assert.ok(!body.includes(removed), `retro.md must not instruct ${removed}`);
   }
-  assert.ok(/digest/i.test(body));
-});
-
-test("prompts/retro.md never instructs a direct merge/approve — the PR-only path is stated as a non-negotiable", () => {
-  const body = readFileSync(defaultRetroPromptPath(), "utf8");
-  assert.ok(body.includes("You never:"));
-  assert.ok(/merge (your own|.{0,20}any)/i.test(body), "must explicitly forbid self-merge");
-  assert.ok(/approve or submit a PR review/i.test(body));
-  assert.ok(/exclusively as a pull request/i.test(body));
 });
 
 // ── Integration: wired as round.ts's real `retro` peripheral ────────────────────────────────

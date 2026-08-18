@@ -21,7 +21,7 @@ import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { ContextManifest } from "../roles/context-manifest.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
 import { PO_ALIGN_ALLOWED_TOOLS, PO_ALLOWED_TOOLS, PO_DISALLOWED_TOOLS, PO_TRIAGE_ALLOWED_TOOLS } from "../roles/peripheral.js";
-import { loadRolePromptTemplate } from "../roles/plan-review.js";
+import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import { State } from "../state/state.js";
 import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
@@ -2453,26 +2453,28 @@ test("createAligningStub P3: a customized labels.originAgent value is what gets 
 
 // ── template rendering + loading (unit) ─────────────────────────────────────────────────────
 
-test("defaultPoPromptPath: resolves to a real shipped file with both align and triage sections", () => {
-  const template = loadRolePromptTemplate(undefined, defaultPoPromptPath());
-  assert.ok(template.includes("{{po.mode}}"));
-  assert.ok(template.includes("{{round.milestone}}"));
-  assert.ok(template.includes("{{plan.md}}"));
-  assert.ok(template.includes("{{issue.number}}"));
-  assert.ok(template.includes("{{issue.body}}"));
-  assert.ok(template.includes("{{round.directive}}"), "#126: the shipped po.md must reference the round directive var");
-  assert.ok(template.includes("{{backlog.digest}}"));
-});
-
-test("po.md #444: the digest is no longer claimed authoritative for open issues, its real scope is named, and pre-filing search is mandated", () => {
+test("po.md #444: never reintroduces the retired overclaim that the digest is authoritative for current open issues (it is milestone-scoped)", () => {
   const template = loadRolePromptTemplate(undefined, defaultPoPromptPath());
   assert.ok(
     !/authoritative for current open issues/.test(template),
     "#444: the overclaim that made the milestone-scoped digest look like the complete dedup surface must be gone",
   );
-  assert.ok(template.includes("outside this round"), "the prompt must name the digest's actual scope annotations");
-  assert.ok(template.includes("mcp__forge__search_issues"), "the prompt must mandate the pre-filing search where the proxy is attached");
-  assert.ok(/propose nothing/.test(template), "the existing 'if overlap is uncertain, propose nothing' rule stays");
+});
+
+test("#963: po.md renders (align AND triage modes) with a distinctive {{lang.issuesAndPrs}} value reaching the output — real shipped file, real renderRolePrompt (drops the reference -> reddens)", () => {
+  const template = loadRolePromptTemplate(undefined, defaultPoPromptPath());
+  const issue: Issue = { number: 1, title: "t", labels: [], body: "b" };
+  const cfg = mkCfg({ language: { issuesAndPrs: "zz-ZZ" } });
+  for (const mode of ["align", "triage"] as const) {
+    const rendered = renderRolePrompt(template, issue, cfg, {
+      "po.mode": mode,
+      "round.milestone": "M1",
+      "plan.md": "plan text",
+      "round.directive": "none",
+      "backlog.digest": "digest",
+    });
+    assert.ok(rendered.includes("zz-ZZ"), `po.md (${mode} mode): the distinctive language value must reach the rendered shipped prompt`);
+  }
 });
 
 test("po.md #528: the prompt explains the recently-closed half of the dedup surface", () => {

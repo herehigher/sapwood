@@ -9,12 +9,10 @@
 // receipt-event commits) / F4 (label-before-clear escalation ordering) / F5 (pr in the batch
 // key) — same marking convention.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { SapwoodConfig } from "../config/config.js";
 import type { IForge } from "../forge/forge.js";
 import { deriveReviewAction } from "../roles/reviewer.js";
-import { defaultFixPromptPath } from "../roles/worker.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import type { EventPayloadFor } from "../state/event-kinds/payloads.js";
 import type { PendingThreadWrite } from "../state/state.js";
@@ -122,16 +120,13 @@ test("validateFixResponseOutput: a mix of addressed + disputed entries, all jour
 // ── D1(b): a resultText following fix.md's DOCUMENTED format flows through the REAL
 //    validateFixResponseOutput -> enqueue -> attemptThreadWrite path end to end ──────────────
 
-test("D1(b): the shipped fix.md documents the sentinel + exact threadResponses/threadId/resolution field names", () => {
-  const content = readFileSync(defaultFixPromptPath(), "utf8");
-  assert.match(content, /<<<SAPWOOD_RESULT>>>/);
-  assert.match(content, /<<<END_SAPWOOD_RESULT>>>/);
-  assert.match(content, /threadResponses/);
-  assert.match(content, /threadId/);
-  assert.match(content, /"addressed"/);
-  assert.match(content, /"disputed"/);
-  assert.match(content, /no forge credentials|NO forge credentials/);
-});
+// #963: the D1(b) pair that used to live here (a positive assert.match over fix.md's own
+// prose — field names, sentinel literals, phrasing) was a single-file prose pin: the shipped
+// file was its only oracle, so a legitimate rewording of fix.md would redden it exactly like a
+// real regression. validateFixResponseOutput's own unit tests above already prove the real
+// parser/schema accepts the documented shape; the shipped prompt's wording is otherwise
+// unconstrained by any second, independently-drifting source. See docs/REVIEW-DOCTRINE.md's
+// PROSE-PIN sub-case.
 
 test("D1(b): a resultText in EXACTLY fix.md's documented shape flows through validateFixResponseOutput -> State.settleTerminalWorker -> attemptThreadWrite", async () => {
   // The literal shape fix.md instructs a fix leg to emit: a single addressed entry.
@@ -1668,11 +1663,4 @@ test("#461: a disputed index outside the artifact's finding range is dropped, ne
   seedFindingResponseQueued(st, [{ runId: "run-1", findingIndex: 5, resolution: "disputed", reply: "disagree" }]);
   assert.equal(computeFindingDisputeEscalation(st, "lane-a", 55, "run-1"), null);
   st.close();
-});
-
-test("#461 D1(b): the shipped fix.md documents findingResponses with runId + findingIndex copied from the audit comment", () => {
-  const content = readFileSync(defaultFixPromptPath(), "utf8");
-  assert.match(content, /findingResponses/);
-  assert.match(content, /findingIndex/);
-  assert.match(content, /runId/);
 });

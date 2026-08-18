@@ -1116,16 +1116,46 @@ test("#701: renderRolePrompt exposes {{lang.issuesAndPrs}} from cfg.language.iss
   assert.equal(jaOut, "ja");
 });
 
-test("defaultVerificationPlanReviewerPromptPath / defaultVerificationPlanDrafterPromptPath: resolve to real shipped files that describe the structured-output contract, not a `gh` command", () => {
+test("verification-plan-reviewer.md / verification-plan-drafter.md: describe the structured-output contract via the REAL RESULT_BLOCK_START/BODY_BLOCK_START constants (cross-artifact), and never instruct a `gh` command (negative lint)", () => {
   const reviewerTemplate = loadRolePromptTemplate(undefined, defaultVerificationPlanReviewerPromptPath());
   const drafterTemplate = loadRolePromptTemplate(undefined, defaultVerificationPlanDrafterPromptPath());
-  assert.ok(reviewerTemplate.includes("{{issue.number}}"));
-  assert.ok(drafterTemplate.includes("{{reviewer.brief}}"));
   assert.ok(reviewerTemplate.includes(RESULT_BLOCK_START) && reviewerTemplate.includes(BODY_BLOCK_START));
   assert.ok(drafterTemplate.includes(RESULT_BLOCK_START) && drafterTemplate.includes(BODY_BLOCK_START));
   for (const template of [reviewerTemplate, drafterTemplate]) {
     assert.ok(!/`gh issue (comment|edit)/.test(template), "the prompt no longer instructs any gh command");
   }
+});
+
+test("#963: verification-plan-reviewer.md / verification-plan-reviewer-confirm.md / verification-plan-drafter.md render with a distinctive {{lang.issuesAndPrs}} value reaching the output — real shipped files, real renderRolePrompt (drops the reference -> reddens)", () => {
+  const issue: Issue = { number: 9, title: "T", labels: [], body: PLAN_BODY };
+  const cfg = mkCfg({ language: { issuesAndPrs: "zz-ZZ" } });
+
+  const reviewerTemplate = loadRolePromptTemplate(undefined, defaultVerificationPlanReviewerPromptPath());
+  const reviewerRendered = renderRolePrompt(reviewerTemplate, issue, cfg, {
+    "comments.digest": "(no comments on this issue)",
+    "comments.digestCap": "30",
+  });
+  assert.ok(
+    reviewerRendered.includes("zz-ZZ"),
+    "verification-plan-reviewer.md: the distinctive language value must reach the rendered shipped prompt",
+  );
+
+  const confirmTemplate = loadRolePromptTemplate(undefined, defaultVerificationPlanConfirmPromptPath());
+  const confirmRendered = renderRolePrompt(confirmTemplate, issue, cfg, {
+    "comments.digest": "(no comments on this issue)",
+    "comments.digestCap": "30",
+  });
+  assert.ok(
+    confirmRendered.includes("zz-ZZ"),
+    "verification-plan-reviewer-confirm.md: the distinctive language value must reach the rendered shipped prompt",
+  );
+
+  const drafterTemplate = loadRolePromptTemplate(undefined, defaultVerificationPlanDrafterPromptPath());
+  const drafterRendered = renderRolePrompt(drafterTemplate, issue, cfg, { "reviewer.brief": "brief text" });
+  assert.ok(
+    drafterRendered.includes("zz-ZZ"),
+    "verification-plan-drafter.md: the distinctive language value must reach the rendered shipped prompt",
+  );
 });
 
 test("loadRolePromptTemplate: configured-but-missing file throws, naming the path (fail-fast, never a silent fallback)", () => {
@@ -2339,12 +2369,10 @@ test("validateConfirmOutput: well-formed 'invalidate' -> ok, carries the body ve
   assert.ok(result.ok && result.decision === "invalidate" && result.body === "drifted: file renamed");
 });
 
-test("defaultVerificationPlanConfirmPromptPath: resolves to a real shipped file describing the confirm/invalidate contract, not a `gh` command", () => {
+test("verification-plan-reviewer-confirm.md: describes the structured-output contract via the REAL RESULT_BLOCK_START/BODY_BLOCK_START constants (cross-artifact), and never instructs a `gh` command (negative lint)", () => {
   const confirmTemplate = loadRolePromptTemplate(undefined, defaultVerificationPlanConfirmPromptPath());
-  assert.ok(confirmTemplate.includes("{{issue.number}}"));
   assert.ok(confirmTemplate.includes(RESULT_BLOCK_START) && confirmTemplate.includes(BODY_BLOCK_START));
   assert.ok(!/`gh issue (comment|edit)/.test(confirmTemplate), "the confirm prompt never instructs a gh command");
-  assert.ok(/confirm/.test(confirmTemplate) && /invalidate/.test(confirmTemplate));
 });
 
 // ── #665 AC2: the comment stream reaches the RENDERED gate⓪ prompt, for BOTH reviewer modes ────

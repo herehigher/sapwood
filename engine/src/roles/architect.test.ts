@@ -764,16 +764,26 @@ test("createArchitectStub: the anchor for the round design note is the LOWEST-nu
 
 // ── prompt shipped + config override (acceptance criterion 3) ──────────────────────────────
 
-test("defaultArchitectPromptPath: resolves to a real shipped file with the expected placeholders", () => {
+test("#963: architect.md renders with every real vars-map key reaching the output, including a distinctive {{lang.docs}}/{{lang.issuesAndPrs}} value — real shipped file, real renderArchitectPrompt (dropping a var reference -> reddens)", () => {
   const template = loadRolePromptTemplate(undefined, defaultArchitectPromptPath());
-  assert.ok(template.includes("{{round.id}}"));
-  assert.ok(template.includes("{{round.marker}}"));
-  assert.ok(template.includes("{{round.designNoteIssue}}"));
-  assert.ok(template.includes("{{plan.architectureChapter}}"));
-  assert.ok(template.includes("{{candidates.summary}}"));
-  assert.ok(template.includes("{{labels.blocked}}"));
-  assert.ok(template.includes("{{round.directive}}"), "#126: the shipped architect.md must reference the round directive var");
-  assert.ok(template.includes("{{round.doctrine}}"), "#167: the shipped architect.md must reference the review-doctrine var");
+  const rendered = renderArchitectPrompt(template, {
+    "round.id": "3",
+    "round.marker": "m-3",
+    "round.designNoteIssue": "7",
+    "round.alignedGoals": "aligned-goals-marker",
+    "round.lastMerged": "last-merged-marker",
+    "round.doctrine": "doctrine-marker",
+    "plan.architectureChapter": "chapter-marker",
+    "candidates.summary": "candidates-marker",
+    "round.pool": "pool-marker",
+    "labels.blocked": "blocked-label-marker",
+    "labels.needsHuman": "needs-human-label-marker",
+    "round.directive": "directive-marker",
+    "lang.docs": "zz-ZZ-docs",
+    "lang.issuesAndPrs": "zz-ZZ-prs",
+  });
+  assert.ok(rendered.includes("zz-ZZ-docs"), "architect.md: the distinctive lang.docs value must reach the rendered shipped prompt");
+  assert.ok(rendered.includes("zz-ZZ-prs"), "architect.md: the distinctive lang.issuesAndPrs value must reach the rendered shipped prompt");
 });
 
 // ── #126: round directive file — human steering injected at round open ─────────────────────
@@ -1680,12 +1690,6 @@ test("createArchitectStub #213 crash-rerun guard: two consecutive runs of the ph
   assert.equal(forge.issueCommentsPosted.filter(([n]) => n === 55).length, 1, "the reason comment was NEVER reposted");
   assert.equal(forge.labelsRemoved.filter(([n]) => n === 55).length, 1, "the label removal was not reapplied a second time");
   state.close();
-});
-
-test("createArchitectStub #213: prompt template ships {{round.pool}} and {{labels.needsHuman}} placeholders", () => {
-  const template = loadRolePromptTemplate(undefined, defaultArchitectPromptPath());
-  assert.ok(template.includes("{{round.pool}}"));
-  assert.ok(template.includes("{{labels.needsHuman}}"));
 });
 
 test("createArchitectStub #213 P2 fix: a transient forge failure on ONE verdict's write is CONTAINED — an `architect-verdict-lost` honesty event lands for it, the REMAINING verdict is still applied, and the phase completes (returns its marker, never throws)", async () => {

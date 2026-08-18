@@ -12,6 +12,7 @@ import { parseConfig } from "../config/config.js";
 import type { IForge, PRReviewData } from "../forge/forge.js";
 import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
 import type { ApprovalResult, ReviewContext } from "../roles/reviewer.js";
+import { parseStructuredBlock, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import type { AcSnapshot } from "./ac-snapshot.js";
 import type { EngineReviewArtifact } from "./audit.js";
 import {
@@ -506,65 +507,28 @@ test("evaluate(): the SNAPSHOTTED issue body reaches the session prompt inside <
 
 // ── prompt template: placeholder completeness + whitespace tolerance (#302 review Codex P1) ──
 
-test("shipped engine-reviewer prompt (#319): forbids markdown fences around the sentinel block and any content after the end sentinel", () => {
+test("shipped engine-reviewer prompt (#319, #963): every example sentinel block is plain text (no adjacent markdown fence), balanced, and accepted by the REAL structured-output parser — no test-local expected count", () => {
   const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
   assert.match(prompt, /Emit the sentinel block as PLAIN TEXT: never wrap it in a markdown code fence\./);
   assert.match(prompt, /NOTHING — including[\s\S]*— may follow `<<<END_SAPWOOD_RESULT>>>`\./);
-  assert.equal(prompt.match(/^<<<SAPWOOD_RESULT>>>[ \t]*$/gm)?.length, 1);
-  assert.equal(prompt.match(/^<<<END_SAPWOOD_RESULT>>>[ \t]*$/gm)?.length, 1);
-  assert.doesNotMatch(prompt, /^```[ \t]*\n<<<SAPWOOD_RESULT>>>/m);
-  assert.doesNotMatch(prompt, /^<<<END_SAPWOOD_RESULT>>>[ \t]*\n```[ \t]*$/m);
-});
 
-test("shipped engine-reviewer prompt (#457, F36): pins the execution-class tiering rule — the engine is the execution authority, and the fail-closed carve-outs stay verbatim", () => {
-  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
-  assert.match(prompt, /Execution-class criteria — the engine, not you, is the execution authority\./);
-  assert.match(prompt, /can never be `confirmed` by a static\s+session, and that inability is NOT a gap in the PR\./);
-  assert.match(prompt, /tier it\s+`claim-accepted` when the tree corroborates the claim/);
-  // The fail-closed carve-outs: these three shapes stay cannot-confirm + finding.
-  assert.match(
-    prompt,
-    /Reserve\s+`cannot-confirm` \(with its finding\) for what the PRODUCER can actually fix in this PR: a missing\s+or vacuous test, an execution claim with no CI coverage at all, or a diff that visibly\s+contradicts the criterion\./,
+  const startLine = new RegExp(`^${RESULT_BLOCK_START}[ \\t]*$`, "gm");
+  const endLine = new RegExp(`^${RESULT_BLOCK_END}[ \\t]*$`, "gm");
+  const starts = prompt.match(startLine)?.length ?? 0;
+  const ends = prompt.match(endLine)?.length ?? 0;
+  assert.ok(starts > 0, "must ship at least one example sentinel block");
+  assert.equal(starts, ends, "every start sentinel must have a matching end sentinel");
+  assert.doesNotMatch(prompt, new RegExp(`^\`\`\`[ \\t]*\\n${RESULT_BLOCK_START}`, "m"));
+  assert.doesNotMatch(prompt, new RegExp(`^${RESULT_BLOCK_END}[ \\t]*\\n\`\`\`[ \\t]*$`, "m"));
+
+  // Real-parser mutation kill: the example span must be something the REAL parser accepts.
+  const s = prompt.indexOf(RESULT_BLOCK_START);
+  const e = prompt.indexOf(RESULT_BLOCK_END, s);
+  assert.ok(e !== -1, "a RESULT_BLOCK_START example has no matching end sentinel");
+  assert.ok(
+    parseStructuredBlock(prompt.slice(s, e + RESULT_BLOCK_END.length)) !== null,
+    "example sentinel block is not accepted by the real parser",
   );
-});
-
-test("shipped engine-reviewer prompt (#457, F36): pins the capability-limit rule — a session's own inability to execute is never itself a finding", () => {
-  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
-  assert.match(prompt, /A capability limit of this review session[\s\S]*is never itself a finding\./);
-  assert.match(prompt, /Every finding must name something the producer\s+\(or a human adjudicator\) can act on IN this PR's content\./);
-});
-
-// #454 (design #402 R6 §6a). These assertions pin the enforced/judged BOUNDARY itself, not the
-// prose around it: every ENFORCED row named in the shipped prompt corresponds to a real check in
-// this repo's source (traced per row in #454's PR body), and the JUDGED half is stated as
-// unverifiable-by-the-engine so a prompt tuner knows which half they are editing. A future edit
-// that moves a row across the boundary reds here — which is the point: the boundary is a claim
-// about the code, and a claim about the code is testable even when the prose around it is not.
-test("shipped engine-reviewer prompt (#454, design #402 R6 §6a): the enforced-vs-judged section names every engine-ENFORCED row", () => {
-  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
-  assert.match(prompt, /## What the engine enforces vs\. what you judge/);
-  for (const row of [
-    // perAC id-set exactness — validateAgentReviewOutput's manifest-id loop (agent-output.ts).
-    /exactly one `perAC` entry per acceptance-criterion id/,
-    // ALLOWED_FINDING_KEYS + FINDING_KINDS closed enums (finding-axes.ts, agent-output.ts).
-    /the finding key allowlist and the closed `severity`\/`kind` enums/,
-    // effectiveSeverity + ADVISORY_ELIGIBLE_KINDS (finding-axes.ts).
-    /`severity: "advisory"` is honored only for the allowlisted kinds/,
-    // deriveApprovalResult's rejected branch (agent-output.ts).
-    /a `rejected` verdict always carries a non-empty findings array/,
-    // modelSeparationUnavailableReason: post-session modelUsage always runs (the binding check);
-    // pre-session config comparison only when configuredReviewerIdentity() is non-null, i.e.
-    // `runner: claude` — it returns null (skipped) for `runner: codex-exec` (engine-agent.ts:454-456,475).
-    /model separation, checked against this session's own recorded model usage after it runs[\s\S]*statically derivable/,
-    // resolveIdentity/hashDiff (drive.ts) + checkAcSnapshotDrift (ac-snapshot.ts).
-    /head\/base\/diff identity, and snapshotted-body drift/,
-    // RoleRunner.run()'s reviewCwd branch (peripheral.ts) — hardcoded, refuses an override — is
-    // the only tool-profile claim made UNIVERSALLY; anything beyond "no writes" is runner-specific
-    // (#512: the codex-exec runner's sandbox does not match the Claude runner's tool grant).
-    /no writes, for every runner/,
-  ]) {
-    assert.match(prompt, row, `enforced row missing from the shipped prompt: ${row}`);
-  }
 });
 
 // #512 (design adjudication 2026-08-01): the shipped prompt named a Claude-only tool surface in
@@ -599,112 +563,39 @@ test("shipped engine-reviewer prompt (#512): does not claim the session has Read
   );
 });
 
-test("shipped engine-reviewer prompt (#512): the enforced containment claim is runner-specific, not a single 'static-only' profile", () => {
-  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
-  assert.match(prompt, /no writes, for every runner/);
-  assert.match(prompt, /containment is runner-specific, not one shared "static" profile/);
-  assert.match(prompt, /codex-exec runner's read-only sandbox blocks writes\s*\n\s*but not shell execution or host-wide file reads/);
-  assert.match(prompt, /never claimed as an engine-enforced fence/);
-});
-
-test("shipped engine-reviewer prompt (#512): 'never execute / never reach the network' survives as an INSTRUCTION, not a claimed engine guarantee", () => {
-  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
-  assert.match(prompt, /Never execute, never reach the network\./);
-  assert.match(prompt, /never to run the producer's code, build\/install\/test it, or make\s*\n\s*any network call/);
-  assert.match(
-    prompt,
-    /This is an INSTRUCTION, not a guarantee every runner mechanically enforces for\s*\n\s*you/,
-    "the non-negotiable must not be phrased as an engine-enforced guarantee — it is an instruction to the session",
-  );
-});
-
 // #512 (PM gate② round 2, P1-1, proven live): the first submitted round missed a FOURTH site — the
 // opening identity paragraph — and it was the BINDING one. "never run a shell command" directly
-// contradicted the "actually inspect the tree" instruction added at the materialized-tree bullet,
-// and it sits in the most authoritative position in the whole prompt. A live three-arm rerun (same
-// fixture, model, effort) showed the first round changed NOTHING observable (0 command_execution
-// items, same as main); fixing this site (plus the model-identity and capability-limit sites below)
-// produced 12 command_execution items and materially different findings. These three tests pin the
-// live-proven fix so a future edit cannot silently reintroduce the contradiction.
-test("shipped engine-reviewer prompt (#512, PM gate② round 2, P1-1): the opening identity paragraph no longer forbids a shell command, and states tree inspection is REQUIRED", () => {
+// contradicted the "actually inspect the tree" instruction added at the materialized-tree bullet.
+// A live three-arm rerun (same fixture, model, effort) showed the first round changed NOTHING
+// observable; fixing this site (plus the model-identity and capability-limit sites below)
+// produced materially different findings. These negatives pin the live-proven fix so the
+// contradictory phrasing cannot silently return.
+test("shipped engine-reviewer prompt (#512, PM gate② round 2, P1-1): never reintroduces the retired shell-forbidding opening paragraph, the Claude-only model-identity claim, or the inability-framed capability-limit paragraph", () => {
   const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
   assert.doesNotMatch(
     prompt,
     /never execute the producer's code, never run a shell command, and/,
     "the opening paragraph must not tell the session it may never run a shell command — that is the codex-exec runner's only tree-inspection tool",
   );
-  assert.match(
-    prompt,
-    /You are a STATIC reviewer: you never execute the producer's code, and you have no write access/,
-    "the identity sentence keeps 'never execute the producer's code' and 'no write access' — both genuinely true for every runner",
-  );
-  assert.match(
-    prompt,
-    /You DO inspect the materialized tree read-only, with whatever means your session has\s*—?\s*\n?\s*that is REQUIRED, not optional/,
-    "the opening paragraph must affirmatively require tree inspection, in the prompt's most authoritative position",
-  );
-});
-
-test("shipped engine-reviewer prompt (#512, PM gate② round 2, P1-1): the model-identity claim is runner-neutral — not one more site claiming 'Claude'", () => {
-  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
   assert.doesNotMatch(
     prompt,
     /You are a different Claude model from/,
     "must not claim the reviewing session is a Claude model — false for codex-exec, and this is exactly the property #443's cross-vendor D5 model separation exists to provide",
   );
-  assert.match(prompt, /You run on a different model from the one that produced this PR/);
-});
-
-test("shipped engine-reviewer prompt (#512, PM gate② round 2, P1-1): the capability-limit paragraph states 'must not execute/reach the network' as a PROHIBITION, and 'cannot read live GitHub state' as the one genuine inability", () => {
-  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
   assert.doesNotMatch(
     prompt,
     /you cannot execute code, reach the network, or read\s*\n\s*live GitHub state/,
     "must not phrase 'must not execute/reach the network' as an inability — for codex-exec it is a prohibition on a tool the session actually has",
   );
-  assert.match(
-    prompt,
-    /you must not execute code or reach the network, and\s*\n\s*cannot read live GitHub state — is never itself a finding\./,
-    "keeps the paragraph's actual point (a capability limit is never itself a finding) while separating the prohibition from the one genuine inability",
-  );
 });
 
-test("shipped engine-reviewer prompt (#454, design #402 R6 §6a): the judged half is stated as unverifiable by the engine, row by row", () => {
+// R1's "Severity and kind" section is the single source of truth for what the engine does with
+// `severity`. §6a's boundary row must POINT AT it rather than restate the eligible-kind list a
+// second time — a second copy is exactly how the two wordings would drift into contradiction.
+test("shipped engine-reviewer prompt (#454, design #402 R6 §6b): the enforced/judged boundary section never restates R1's advisory-eligible kind list", () => {
   const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
-  assert.match(
-    prompt,
-    /Nothing below is checked by the engine[\s\S]*no engine check will catch a bad\s+call/,
-    "the judged half must say, in the prompt itself, that the engine cannot verify it",
-  );
-  for (const row of [
-    /whether a named test is \*substantive\*/,
-    /the evidence-tier choice itself/,
-    /which `severity` and which `kind` a finding deserves/,
-    /whether a finding is worth writing at all/,
-    /the two finding classes named above/,
-    /everything else in this prompt's prose/,
-  ]) {
-    assert.match(prompt, row, `judged row missing from the shipped prompt: ${row}`);
-  }
-});
-
-test("shipped engine-reviewer prompt (#454, design #402 R6 §6b): the triage doctrine ships in full and does not contradict R1's axes wording", () => {
-  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
-  for (const rule of [
-    /\*\*Triage before you write\.\*\*/,
-    /\*\*Name the target\.\*\*/,
-    /\*\*Name the class\.\*\*/,
-    /\*\*Do not re-raise an adjudicated finding\.\*\*/,
-    /\*\*Scope honestly\.\*\*/,
-  ]) {
-    assert.match(prompt, rule, `§6b doctrine rule missing: ${rule}`);
-  }
-  // R1's "Severity and kind" section is the single source of truth for what the engine does with
-  // `severity`. §6a's boundary row must POINT AT it rather than restate the eligible-kind list a
-  // second time — a second copy is exactly how the two wordings would drift into contradiction.
   const boundary = prompt.slice(prompt.indexOf("## What the engine enforces vs. what you judge"));
   assert.ok(boundary.length > 0, "the boundary section must exist");
-  assert.match(boundary, /allowlisted kinds\*\* \("Severity and kind"\s+above\)/, "the advisory row defers to R1's section");
   assert.doesNotMatch(
     boundary,
     /"test-coverage"/,
@@ -712,56 +603,25 @@ test("shipped engine-reviewer prompt (#454, design #402 R6 §6b): the triage doc
   );
 });
 
-// #628 (owner ruling 2026-08-04): docs/security.md's evidence-origin tiers (A/B/C/D) reach gate②
-// as two added constraints on top of the EXISTING, unchanged confirmed/cannot-confirm/
-// claim-accepted mechanics (design #279 §4.1) and the #454 enforced/judged boundary — this test
-// pins that the new rule is additive, not a rewrite of either.
-test("shipped engine-reviewer prompt (#628): tier-D producer-pasted session artifacts never reach `confirmed` (at most `claim-accepted`), and a tier-C probe confirms only against the issue-recorded probe, never PR-body narration", () => {
-  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
-  assert.match(
-    prompt,
-    /Evidence-tier discipline \(docs\/security\.md's tiered doctrine\)/,
-    "names the rule and cites docs/security.md as the tier home",
-  );
-  assert.match(
-    prompt,
-    /is tier D and never raises a criterion to `confirmed`, whatever it claims/,
-    "tier D never yields confirmed, regardless of what the artifact claims",
-  );
-  assert.match(
-    prompt,
-    /at most it supports `claim-accepted` under the existing three-tier mechanics above/,
-    "tier D still fits inside the existing three-tier mechanics — no new status was introduced",
-  );
-  assert.match(
-    prompt,
-    /may reach `confirmed` only against the probe RECORD on the issue itself/,
-    "a tier-C claim confirms only against the recorded probe, not any other artifact",
-  );
-  assert.match(
-    prompt,
-    /never against PR-body narration describing what was\s+supposedly done, which is tier D regardless of how detailed it reads/,
-    "PR-body narration of a probe is itself tier D, however detailed",
-  );
-  // Additive, not a rewrite: the existing three-tier vocabulary and the #454 boundary section
-  // both still appear verbatim, unperturbed by the new paragraph.
-  assert.match(prompt, /\*\*`confirmed`\*\* — the criterion is CODE-VERIFIABLE/);
-  assert.match(prompt, /\*\*`cannot-confirm`\*\* — you looked and could NOT establish/);
-  assert.match(prompt, /\*\*`claim-accepted`\*\* — the criterion is NOT code-verifiable at all/);
-  assert.match(prompt, /## What the engine enforces vs\. what you judge/, "the #454 enforced/judged boundary section is untouched");
+// #512: the runner-honesty rewrite touched several sites in the shipped prompt but must NOT drop
+// a placeholder from the shipped file — loadEngineReviewerPromptTemplate(undefined) runs the REAL
+// completeness check against the REAL REQUIRED_PROMPT_PLACEHOLDERS registry (#74 fail-fast); a
+// dropped placeholder throws here, so this is cross-artifact against production code, not a
+// hand-copied literal list.
+test("loadEngineReviewerPromptTemplate: the shipped default prompt still satisfies every REQUIRED_PROMPT_PLACEHOLDERS entry (real registry, real loader)", () => {
+  assert.doesNotThrow(() => loadEngineReviewerPromptTemplate(undefined));
 });
 
-// #512: the runner-honesty rewrite touched three sites in the shipped prompt but must NOT touch
-// REQUIRED_PROMPT_PLACEHOLDERS or drop a placeholder from the shipped file — loadEngineReviewerPromptTemplate(undefined)
-// runs the SAME completeness check a custom promptFile gets (#74 fail-fast), so a regression here
-// would throw. Every other test in this file already constructs a reviewer against the shipped
-// default and would also throw on a missing placeholder; this test names the contract directly.
-test("loadEngineReviewerPromptTemplate: the shipped default prompt (post-#512 edit) still satisfies every REQUIRED_PROMPT_PLACEHOLDERS entry", () => {
-  assert.doesNotThrow(() => loadEngineReviewerPromptTemplate(undefined));
-  const prompt = readFileSync(defaultEngineReviewerPromptPath(), "utf8");
-  for (const placeholder of ["{{diff}}", "{{issue-body}}", "{{acceptance-criteria}}", "{{doctrine}}"]) {
-    assert.ok(prompt.includes(placeholder), `shipped prompt missing required placeholder ${placeholder}`);
-  }
+test("#963: evaluate() renders the REAL shipped engine-reviewer.md with a distinctive {{lang.issuesAndPrs}} value reaching the dispatched prompt (drops the reference -> reddens)", async () => {
+  const cfg = parseConfig(
+    "board: { owner: a, repo: r, projectNumber: 1 }\n" +
+      `worker: { model: ${WORKER_MODEL} }\n` +
+      `reviewer: { mode: engine-agent, agent: { model: ${AGENT_MODEL}, costCapUsd: 3, effort: high } }\n` +
+      "language: { issuesAndPrs: zz-ZZ }\n",
+  );
+  const { build, runner } = mkDeps({ runnerQueue: [mkSessionResult({ resultText: ALL_CONFIRMED })], cfg });
+  await build().evaluate(ctx());
+  assert.ok(runner.calls[0]!.prompt.includes("zz-ZZ"), "the distinctive language value must reach the rendered shipped prompt");
 });
 
 test("loadEngineReviewerPromptTemplate: a custom template MISSING a required placeholder throws at load, naming the missing one (#74 fail-fast)", () => {
