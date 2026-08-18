@@ -31,7 +31,12 @@
  *  - `merged-witness`   — state.ts's `MERGED_WITNESS_KINDS`: every kind that durably records the
  *    engine having observed a PR's terminal MERGED state (#803). The dashboard's hero tally binds
  *    to this projection instead of inferring from lane-row presence — a kind tagged here MUST
- *    carry the PR number in a `pr` field, same convention `laneEventRecorded` already reads. */
+ *    carry the PR number in a `pr` field, same convention `laneEventRecorded` already reads.
+ *  - `lane-session-start` — retro.ts's `LANE_SESSION_START_EVENT_KINDS` (#961): every kind backed
+ *    by a FRESH `supervisor.dispatch`/`resume()` call this process made (conductor.ts's own
+ *    `spawnFactFrom` call sites) — a worker lane genuinely starting or continuing work this
+ *    round, as opposed to a crash-adoption kind (`lane-adopted`, `fix-leg-adopted`) that only
+ *    reconciles a session resumed by an earlier, now-dead process. */
 export type EventTag =
   | "retro"
   | "pr-touched"
@@ -43,7 +48,8 @@ export type EventTag =
   | "dissent-decision"
   | "dissent-receipt"
   | "fix-leg"
-  | "merged-witness";
+  | "merged-witness"
+  | "lane-session-start";
 
 /** The three `escalation-source:*` tags, as the ONE list `attentionProof`'s derivation walks —
  *  so a new proof mode is a compile error here rather than a silently-unread tag. */

@@ -904,6 +904,7 @@ test("runRounds #211: opening peripheral spend can exhaust the round budget befo
   assert.deepEqual(sup.dispatchedIssues, []);
   assert.deepEqual(overBudgetSkips, [211], "the first executing tick saw the opening session's ledgered spend");
   assert.ok(hits.some((hit) => hit.name === "roundBudgetUsd" && hit.detail === "spent $6.00"));
+  // #961: idle round — the real stub's quiet skip is asserted in retro.test.ts "runRounds integration (#961)"; this fake peripheral logs "retro" either way.
   assert.deepEqual(
     log.map((entry) => entry.phase),
     ["aligning", "architecting", "plan_review", "harvesting", "retro"],
@@ -988,7 +989,7 @@ test("runRounds cost.roundBudgetUsd: recorded once this round's cumulative worke
   stopSafety();
   assert.ok(hits.some((h) => h.name === "roundBudgetUsd" && h.detail === "spent $999.00"));
   // Harvest + retro still ran (never skipped by a round-level cost condition — only KILL_SWITCH
-  // skips peripherals).
+  // skips peripherals). #961: dispatching round (not quiet) — the real stub's non-quiet path is asserted in retro.test.ts "runRounds integration (#961)"; this fake peripheral logs "retro" either way.
   assert.deepEqual(
     log.map((l) => l.phase),
     ["aligning", "architecting", "plan_review", "harvesting", "retro"],
@@ -2689,6 +2690,7 @@ test("runRounds standby: a Ready issue appearing mid-backoff is caught by the NE
   assert.ok(exit, "a standby-exit event was recorded");
   assert.deepEqual(exit![1], { attempts: 1 });
   assert.deepEqual(sup.dispatchedIssues, [1], "the newly-Ready issue got dispatched once standby exited");
+  // #961: idle round — the real stub's quiet skip is asserted in retro.test.ts "runRounds integration (#961)"; this fake peripheral logs "retro" either way.
   assert.deepEqual(
     log.map((l) => l.phase),
     [

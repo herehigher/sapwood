@@ -8,7 +8,7 @@ import { defineKinds } from "./types.js";
 export const LANE_EVENT_KINDS = defineKinds({
   // Dispatch.
   dispatched: {
-    tags: ["round-artifact", "escalation-clear"],
+    tags: ["round-artifact", "escalation-clear", "lane-session-start"],
     meaning: "a worker lane was dispatched for a Ready issue, in its own worktree.",
     actionability: "routine",
   },
@@ -109,7 +109,11 @@ export const LANE_EVENT_KINDS = defineKinds({
       "a worker lane handed off gracefully (soft cost-limit reached): WIP committed+pushed, progress note left, `.handoff` sentinel written.",
     actionability: "routine",
   },
-  resumed: { tags: [], meaning: "a handed-off lane was resumed by a fresh worker session.", actionability: "routine" },
+  resumed: {
+    tags: ["lane-session-start"],
+    meaning: "a handed-off lane was resumed by a fresh worker session.",
+    actionability: "routine",
+  },
   "resume-failed": {
     tags: [],
     meaning: "resuming a handed-off lane failed this attempt; eligible for a further retry.",
