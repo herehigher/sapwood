@@ -700,9 +700,11 @@ function contentChars(content: unknown): number {
  *  malformed lines may omit it).
  *
  *  `usage.output_tokens` is NOT treated the same way: verified against real captured transcripts
- *  (engine/src/roles/fixtures/lane-920-leg{2,5}.redacted.jsonl), it's a START-OF-GENERATION
- *  snapshot, not the message's true output count — de-duplicating it (by any rule) still misses
- *  the real total by roughly 40-50x on those captures. Instead, `outputTokens` is estimated as
+ *  (dogfood lane #920's own logs — replayable via `engine/scripts/estimator-replay.ts` against a
+ *  directory of real stream-json transcripts; the repo itself carries no such transcripts, only
+ *  synthetic unit fixtures), it's a START-OF-GENERATION snapshot, not the message's true output
+ *  count — de-duplicating it (by any rule) still misses the real total by roughly 40-50x on those
+ *  captures. Instead, `outputTokens` is estimated as
  *  `ceil(chars/4)` over the message's streamed `text` and serialized `tool_use.input` content,
  *  ACCUMULATED across every line belonging to that message id (each line is a different content
  *  block, so its chars add rather than overwrite). This is a deliberately UNDER-biased estimate,

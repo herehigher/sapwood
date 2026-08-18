@@ -282,11 +282,10 @@ item becomes a routed page, that is a scope amendment to this section.
   pre-#207 history — simply shows no tooltip; that bounded blind spot is
   accepted, never patched with a live lookup.
 
-  Owner ruling Q3, 2026-08-17 (#729 design review; tracked by #926, not yet landed): lanes take
-  one full-width row above the activity feed (`lanes-dark.png`'s 3-card composition), replacing
-  this section's current C|D half-split — the feed renders full-width below once #926 lands.
-  The diagram and the C/D bullets above are the pre-#926 state; the IA-diagram/boundary edit is
-  #926's own.
+  Owner ruling Q3, 2026-08-17 (#729 design review; implemented by #926): lanes take one
+  full-width row above the activity feed (`lanes-dark.png`'s 3-card composition), replacing
+  this section's C|D half-split — the feed renders full-width below (the C/D diagram above is
+  updated by #926).
 - **D — Activity feed.** The `events` stream through the copy map (§7),
   newest first, relative timestamps; kind-colored dot per entry. Payload
   details (worker, head, mode) collapse behind each entry — never in the
@@ -588,6 +587,12 @@ Rules: amber means "in motion", `--moss` means "done well", `--rust` means
 "a person should look" — never decorative use of any of the three. Rings are
 stroked in `--bark` at 40% alpha; the growing (current) ring in `--sap-text`.
 
+Owner ruling Q5, 2026-08-17 (#729 design review; implemented by #924): `--sap` splits into
+`--sap-text` (stroke/text/outline role) and `--sap-fill` (filled-surface role, flat in both
+themes); light theme adds a `--sap-fill-outline` 1px `--sap-text` outline on every filled
+`.hero-pool-chip`/droplet/`.spend-meter-bar` fill, since the flat `--sap-fill` alone fails the
+3:1 non-text contrast floor there. Detail below.
+
 Amended 2026-08-17 (#924, #729 remainder D32/Q5): `--sap` split into `--sap-text`
 (stroke/text/outline role — unchanged value, `light-dark(#8A5A14, #E8A33D)`, still
 darkening for light theme) and `--sap-fill` (filled-surface role — chips, droplets,
@@ -640,16 +645,15 @@ the dashboard concept renders) both recorded the shipped headers as a deviation 
 baseline mockups render all-mono; both probes filed it as non-blocking and pointed at one
 shared adjudication rather than two. Ruling: the token table stands as specced — Fraunces for
 display headers — and the baseline PNGs are the out-of-date artifact, not the implementation.
-**Scope: FONT FAMILY only** (owner ruling Q2, 2026-08-17, #924/#729 remainder) — this entry
-never spoke to casing, letter-spacing, or scale; those follow the mockups directly (uppercase,
-letter-spaced, ~16–18px at 1440 — `.panel-head`, panels.css) and are #924's own scope, not a
-reopening of this one. No code change follows from this #728 entry itself; it exists so
-#144/#145's "recorded for adjudication" deviation has a resolved answer on file.
+No code change follows from this #728 entry itself; it exists so #144/#145's "recorded for
+adjudication" deviation has a resolved answer on file.
 
-Node labels inside the hero stage — outside #728's own scope too — render `--font-data`
-uppercase below their node (§6 zone descriptions; tracked by #922, not yet landed); every
+Owner ruling Q2, 2026-08-17 (#729 design review; implemented by #924, hero labels by #922):
+narrows the #728 entry above to FONT FAMILY only — casing, letter-spacing, and scale follow
+the mockups (uppercase, letter-spaced, ~16–18px at 1440), not #728's own scope. Hero node
+labels render `--font-data` mono uppercase below their node (§6 zone descriptions). Every
 panel's title row shares one anatomy: title + right-aligned stat cluster + hairline rule
-(`.panel-head`, panels.css — implemented by #924).
+(`.panel-head`, panels.css).
 
 Scale: 13 px base (data-dense surface), 1.25 ratio up to the 33 px display
 size; line-height 1.5 body, 1.2 display. Weights: 400/600 only.
@@ -1453,11 +1457,11 @@ mutable snapshot or outside the engine's own DB is live-only.
   footer note alone is not acceptable — the badge belongs on the panel that
   would otherwise lie.
 
-Owner ruling Q4, 2026-08-17 (#729 design review; tracked by #927, not yet landed): the lane
-board reconstructs a replayed lane NARRATIVE from the event stream (`dispatched`/`handoff`/
+Owner ruling Q4, 2026-08-17 (#729 design review; implemented by #927): the lane board
+reconstructs a replayed lane NARRATIVE from the event stream (`dispatched`/`handoff`/
 `reclaim-done`, incl. cost/est/merged) in replay and `?demo`, labelled **REPLAYED** — never a
-fake live snapshot. This retires the lane board's current "live only" wrap (`App.tsx`'s
-`LiveOnly`) once #927 lands; the boundary table's own row for it is #927's edit.
+fake live snapshot. This retires the lane board's "live only" wrap (`App.tsx`'s `LiveOnly`);
+the boundary table above is updated by #927.
 
 ### Renderer contract
 

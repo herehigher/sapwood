@@ -90,24 +90,27 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     (docs/dev-guide/07-dashboard.md) — EXCEPT a computed-style claim itself; see STYLE below.
     Worked example: `textBox()`/`CHAR_ADVANCE` (`dashboard/src/hero/hero.test.ts`) turns
     font-size/char-count into a rendered extent without a browser, tied to the real draw path's
-    own inputs, plus a cascade/source-order assertion instead of hand-copying which rule wins.
-    Three shapes seen (#353, PR #738 (issue #728), PR #737): (1) the test computes its
+    own inputs.
+    Four shapes (#353, #728, #737): (1) the test computes its
     expected value outside the thing it's testing instead of reading/pinning it against the real
     source; (2) the test exercises only the easy/nominal instance while the AC's own wording
     names a combinatorial or boundary case it never constructs; (3) the test asserts identity
     with the very constant that produced the render, so it proves nothing about the render
-    (#936). FINE: a literal that IS the specification — a golden value nothing else in the
-    codebase claims to own.
+    (#936, #922); (4) proxy-shares-assumption: the test's own helper embeds the same
+    simplifying assumption as the code under test, so a wrong assumption in production can't
+    fail its own proxy (#922). FINE: a literal that IS the specification — a golden value
+    nothing else in the codebase claims to own.
   - **DECISION (fake-verdict rule, engine side).** Presetting a fake collaborator to already
     return the acceptance criterion's target decision, then asserting against the fake's own
-    canned value, proves only that the fake echoes what it was told — the real policy function
-    that is supposed to decide that value never runs. Distinct from VALUE (a copied constant
-    drifting from its source): here the deciding code path never executes at all. Worked
-    example: PR #835 (#824) preset `FakeSupervisor.reclaimResults` straight to the AC's target
-    value with no baseline established, so `WorkerSupervisor.reclaim`'s real mtime/ctime policy
-    never ran; fixed with a real fixture (real directory, `dispatched_at`, a post-baseline write)
-    and letting production decide. If the fake's return value IS the fact the AC asks to prove,
-    the deciding code never ran — run the real function instead.
+    canned value, proves only that the fake echoes what it was told. Distinct from VALUE (a
+    copied constant drifting from its source): here the deciding code path never executes at
+    all. Worked
+    example: PR #835 (issue #824)'s `ac1`/`ac2` fixtures preset
+    `FakeSupervisor.reclaimResults` straight to the AC's target `worktreeRetained` value with no
+    baseline ever established, so `WorkerSupervisor.reclaim`'s real mtime/ctime policy never ran;
+    fixed by building a real fixture (real directory, real `dispatched_at`, a real post-baseline
+    write) and letting production decide. If the fake's return value IS the fact the AC asks to
+    prove, the deciding code never ran — run the real function instead.
   - **WIRING (unwired-test rule).** A dashboard test that renders an extracted pure function, a
     bare component, or a hook in isolation proves that piece correct alone — it does not prove
     the app wires it up. Recurring class (#759, #766): a helper/component test stayed green while
@@ -118,35 +121,36 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
     only a unit test of the extracted piece; ACs with no render path (server routes, pure modules)
     are outside this rule. Distinct from VALUE above: that sub-case governs which VALUE an
     assertion checks, this one governs which TREE produces it.
-    **Data-flow sub-shape (#866, #868), one level up.** Real entry-point rendering isn't enough
-    if props/state are hand-assembled into a combination the real derivation could never produce
-    — mount with real prefetched/settled queries and a stubbed `fetch`, over a fixture building
-    the AC's named boundary case. `registerRealDom()` solved this for CLICK wiring (retro #355);
-    QUERY/data-flow wiring has no equivalent helper yet.
+    **Data-flow sub-shape (#866, #868, #925), one level up.** Real entry-point rendering isn't
+    enough if its props/state are hand-assembled into a combination the real derivation could
+    never produce — mount with real prefetched/settled queries and a stubbed `fetch`, over a
+    fixture building the AC's named boundary case, not just the nominal one. `registerRealDom()`
+    (`docs/dev-guide/07-dashboard.md`) solved this for CLICK wiring (retro #355); QUERY/data-flow
+    wiring has no equivalent shared helper yet. Same shape at #925: `NeedsAttention` fixtures
+    built `DomainEvent`s via `toDomainEvent` directly instead of folding wire events through
+    `foldOpenAttention`, so its real output combination was never under test.
   - **STYLE (computed-style ACs are VALUE's real-DOM exception).** "Authored" isn't "rendered" —
     a CSS/typography AC needs `registerRealDom()` plus a real `getComputedStyle` read, never a
-    stand-in. Seen twice on #879 / PR #886: a regex on declaration TEXT proves a rule exists, not
-    that it cascades or wins over a later rule; mounting only the ONE stylesheet under test still
-    gets an inherited `em` wrong, since a partial cascade misses the font-size it resolves off.
-    Mount every stylesheet the element inherits, in production order, and assert the exact value —
-    never `notEqual`/existence, which any non-default value satisfies.
+    stand-in. (a) Text vs. cascade (#879 / PR #886): a regex on declaration TEXT proves a rule
+    exists, not that it cascades; mount every inherited stylesheet, in production order, and
+    assert the exact value — never `notEqual`/existence. (b) `light-dark()` is unresolvable here
+    (#924 AC3, #923, #925): happy-dom always echoes the raw unresolved text, either theme. Fix at
+    the token: a literal-hex value pinned to its source by a
+    `tokens.test.ts` assertion (`tokens.css`'s `--sap-fill-outline`/`--attention-tone-*`
+    pattern), never a raw `.style` read.
   - **COLLISION → COVERAGE (any AC/doc's "all/every named set" claim, not only neighbor
     boxes).** `assertNoOverlap`/`boxesOverlap` (`dashboard/src/hero/hero.test.ts`) is sound
     infra, but each PR hand-curates a partial box list, missing neighbors its author forgot —
-    recurring (#728, #745, #891, #901, #902). Include every element sharing the new one's
+    recurring (#728, #745, #891, #892, #901, #902). Include every element sharing the new one's
     region, position read off rendered markup wherever filtering/compaction can diverge — a
-    constant is fine for genuinely static geometry. Same shape, #892 (Playwright covered only
-    `PhaseInspectorDrawer`, not `ConfigDrawer`/`Controls`; `.recipe-list-entry` covered only
-    `NeedsAttention`, not `ActivityFeed`/`LaneBoard`). Derive the covered set from what the
-    AC/doc names, never a hand-typed list.
+    constant is fine for genuinely static geometry. Derive the covered set from what the AC/doc
+    names, never a hand-typed list.
   - **STRUCTURE-AS-FINISH (design-fidelity ACs need a crop-pair oracle, not element-presence).**
-    Failure class: a ledger/AC closes "resolved" because the element exists and its token
-    resolved, while the render is nowhere near mockup finish (#729: one row at ~¼ scale in the
-    wrong face, another's meter at ~35% of mockup scale). Rule: a design-fidelity AC must name
-    the visual properties it claims — type family/scale/weight, stroke, contrast, density, size
-    ratio, alignment — and cite a mockup crop pair as the oracle they're checked against;
-    element-present or token-exact alone is never finish evidence. "Resolved" needs the crop
-    pair in the record, not the selector/token passing alone.
+    Failure: a ledger/AC closes "resolved" because the element exists and its token resolved,
+    while the render is far from mockup finish (#729). Rule: name the visual properties
+    claimed — type family/scale/weight, stroke, contrast, density, size ratio, alignment — against
+    a mockup crop pair; element-present/token-exact alone is never finish evidence, and
+    "resolved" needs the crop pair on record.
 
 ### Documentation claims
 
@@ -201,10 +205,11 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
 How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbatim principles):
 
 1. **Review findings are INPUTS, not truth.** Judge each finding against reality before acting;
-   reject low-ROI or misdirecting ones with recorded reasons, not mechanical compliance.
-2. **A recurring finding class belongs at the DESIGN SOURCE.** When the same class keeps coming
-   back, rethink the approach or technical direction — don't keep chasing per-finding patches
-   downward.
+   reject low-ROI or misdirecting findings WITH recorded reasons rather than applying every
+   finding mechanically.
+2. **A recurring finding class belongs at the DESIGN SOURCE.** When the same class of finding
+   keeps coming back, rethink the approach or technical direction — don't keep chasing
+   per-finding patches downward, round after round.
 3. **A reviewer's angle can be wrong.** Divergence between the reviewer's read and the author's
    is signal for adjudication, not automatic compliance — weigh it, don't just apply it.
 4. **Runaway complexity escalates to the top of the loop, not more patches.** When a feature's
