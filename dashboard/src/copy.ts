@@ -801,9 +801,9 @@ const TELEMETRY_KIND_NAMES: readonly EventKind[] = [
   // `resume-capped-label-failed` above (label-first-or-no-event doctrine: the terminal
   // `resume-capped` event is the row, this is bookkeeping-only retry noise).
   "resume-cap-split-label-failed",
-  // #965 (P1 fix leg, codex terra second review): the WIP-pointer comment's own failure
-  // companion — the split/latch/event already landed by the time this can fire, so it is
-  // bookkeeping-only, same as its `-label-failed` sibling above.
+  // #965: the WIP-pointer comment's own failure companion — the split/latch/event already
+  // landed by the time this can fire, so it is bookkeeping-only, same as its `-label-failed`
+  // sibling above.
   "resume-cap-split-comment-failed",
   "resume-undecidable-label-failed",
   "lane-adopted",

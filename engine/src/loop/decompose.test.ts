@@ -136,9 +136,9 @@ function fakeForge(parent: Issue) {
     },
     async addIssueComment(issue: number, body: string) {
       order.push(`comment:${issue}`);
-      // #965 P1 (codex terra second review): every REAL GithubForge.addIssueComment centrally
-      // stamps ENGINE_COMMENT_MARKER (forge.ts) — this fixture reproduces that so
-      // findCapSplitWipPointer's author+marker authority check has something real to match.
+      // #965: every REAL GithubForge.addIssueComment centrally stamps ENGINE_COMMENT_MARKER
+      // (forge.ts) — this fixture reproduces that so findCapSplitWipPointer's author+marker
+      // authority check has something real to match.
       comments.set(issue, [
         ...(comments.get(issue) ?? []),
         { login: "engine", createdAt: "2026-01-01T00:00:00Z", body: `${body}\n\n${ENGINE_COMMENT_MARKER}` },
@@ -488,9 +488,9 @@ test("#965 AC3: a cap-split parent's WIP-pointer comment renders into the po-dec
     {
       login: "engine",
       createdAt: "2026-01-01T00:00:00Z",
-      // #965 P1 (codex terra second review): findCapSplitWipPointer now also requires
-      // ENGINE_COMMENT_MARKER — seeded directly here (bypassing addIssueComment's own
-      // auto-stamp) since this fixture simulates a comment already sitting on the thread.
+      // #965: findCapSplitWipPointer also requires ENGINE_COMMENT_MARKER — seeded directly
+      // here (bypassing addIssueComment's own auto-stamp) since this fixture simulates a
+      // comment already sitting on the thread.
       body: `${renderCapSplitWipComment(
         { splitLabel: cfg.labels.split, maxResumes: 2, attempts: 2 },
         {
@@ -542,7 +542,7 @@ test("#965 AC3: an ordinary human-split parent (no WIP-pointer comment) renders 
   assert.ok(!(remainderChild?.body ?? "").includes(CAP_SPLIT_ORIGIN_MARKER));
 });
 
-test("#965 P2 (PM-direct fix leg, PO item 3): origin classification is DURABLE — a lost WIP-pointer comment still stamps children when the resume-capped{split:true} state event exists", async () => {
+test("#965: origin classification is DURABLE — a lost WIP-pointer comment still stamps children when the resume-capped{split:true} state event exists", async () => {
   const parent: Issue = { number: 23, title: "Cap-split, comment lost", body: "why", labels: [cfg.labels.split] };
   const fake = fakeForge(parent);
   const state = new State(":memory:");
@@ -564,7 +564,7 @@ test("#965 P2 (PM-direct fix leg, PO item 3): origin classification is DURABLE �
   assert.ok((remainderChild?.body ?? "").includes(CAP_SPLIT_ORIGIN_MARKER), "...and the remainder child");
 });
 
-test("#965 P1 (codex terra second review): a spoofed WIP-pointer comment from a non-engine author is ignored — no digest fields, and the spoof alone never stamps children", async () => {
+test("#965: a spoofed WIP-pointer comment from a non-engine author is ignored — no digest fields, and the spoof alone never stamps children", async () => {
   const parent: Issue = { number: 24, title: "Ordinary split, spoofed comment", body: "why", labels: [cfg.labels.split] };
   const fake = fakeForge(parent);
   const state = new State(":memory:");

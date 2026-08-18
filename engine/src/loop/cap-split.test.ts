@@ -61,7 +61,7 @@ test("findCapSplitWipPointer: scans multiple comments and returns the first matc
   assert.deepEqual(found, { issue: 5, pr: 1 });
 });
 
-// ── #965 P1 (codex terra second review): the marker alone proves nothing about who wrote it ────
+// ── #965: the marker alone proves nothing about who wrote it ──────────────────────────────────
 
 test("findCapSplitWipPointer: a schema-valid marker from a NON-engine author is ignored — spoofed provenance never counts", () => {
   const pointer: CapSplitWipPointer = { issue: 5, pr: 99, branch: "attacker/fake-branch" };
@@ -114,7 +114,7 @@ test("summarizeUnifiedDiffStat: singular grammar at exactly one, and an empty di
   assert.equal(summarizeUnifiedDiffStat(oneFileOneLine), "1 file changed, 1 insertion(+), 0 deletions(-)");
 });
 
-test("summarizeUnifiedDiffStat (#965 P2, codex terra second review): an added line whose OWN content starts with '++ ' is counted as an insertion, not mistaken for a +++ file header", () => {
+test("summarizeUnifiedDiffStat (#965): an added line whose OWN content starts with '++ ' is counted as an insertion, not mistaken for a +++ file header", () => {
   const diff = [
     "diff --git a/x.ts b/x.ts",
     "--- a/x.ts",
@@ -126,7 +126,7 @@ test("summarizeUnifiedDiffStat (#965 P2, codex terra second review): an added li
   assert.equal(summarizeUnifiedDiffStat(diff), "1 file changed, 1 insertion(+), 0 deletions(-)");
 });
 
-test("summarizeUnifiedDiffStat (#965 P2, codex terra second review): a removed line whose OWN content starts with '-- ' is counted as a deletion, not mistaken for a --- file header", () => {
+test("summarizeUnifiedDiffStat (#965): a removed line whose OWN content starts with '-- ' is counted as a deletion, not mistaken for a --- file header", () => {
   const diff = [
     "diff --git a/x.ts b/x.ts",
     "--- a/x.ts",

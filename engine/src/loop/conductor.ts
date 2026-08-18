@@ -6066,14 +6066,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // #965: the resume cap used to be a one-way trip to needs-human — a human then did what
       // the engine already knows how to do, decompose. So the FIRST question at CAPPED is now
       // "may the engine split this instead", never assumed: a child of an earlier cap-split
-      // (origin marker in the body) never re-splits (AC2). PO ruling (2026-08-18, PM-direct fix
-      // leg): NO per-round allowance — cap-splits are already bounded by lane count (a cap-split
-      // needs a lane to exhaust maxResumes, and at most cfg.lanes.max exist), and the origin
-      // marker prevents chains; a flat per-tick allowance only bought an ordering asymmetry (two
-      // lanes capping in the same tick getting different treatment) for no real protection.
-      // `labels != []` here (CAPPED is unreachable with `intentState === "confirmed"`, the one
-      // case that would have skipped the labels read above), so a body read is the only extra
-      // forge call this path adds.
+      // (origin marker in the body) never re-splits (AC2). No per-round allowance beyond that:
+      // cap-splits are already bounded by lane count (a cap-split needs a lane to exhaust
+      // maxResumes, and at most cfg.lanes.max exist), and the origin marker prevents chains — a
+      // flat per-tick allowance would only buy an ordering asymmetry (two lanes capping in the
+      // same tick getting different treatment) for no real protection. `labels != []` here
+      // (CAPPED is unreachable with `intentState === "confirmed"`, the one case that would have
+      // skipped the labels read above), so a body read is the only extra forge call this path adds.
       const capSplitBody = await forge.getIssueBody(w.issue);
       if (!capSplitBody.includes(CAP_SPLIT_ORIGIN_MARKER)) {
         // Label-first/latch-second, same pattern as the needs-human arm below: a transient
@@ -6084,14 +6083,14 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           state.appendEvent("resume-cap-split-label-failed", { worker: w.name, issue: w.issue, attempts, error: String(e) });
           continue;
         }
-        // #965 (P1, codex terra second review — ordering window): the latch + durable event land
-        // IMMEDIATELY once the label is provably applied, BEFORE any further forge call that can
-        // throw. Reversing this (as an earlier revision did) left a window where the split label
-        // was live on the forge but the row was still an un-latched handoff — re-entering CAPPED
-        // every tick, relabeling forever, and (worse) leaving decompose.ts with neither a WIP
-        // comment nor a durable `resume-capped{split:true}` origin signal if it ever crashed
-        // mid-window. `cap-split.ts`'s `wasCapSplitByState` reads exactly this event, so ordering
-        // it first is what makes that durable-origin backstop actually durable.
+        // #965: the latch + durable event land IMMEDIATELY once the label is provably applied,
+        // BEFORE any further forge call that can throw — a comment/PR/diff-read failure past
+        // this point must only ever degrade the WIP comment, never leave the split label live
+        // on the forge with the row still an un-latched handoff (re-entering CAPPED every tick,
+        // relabeling forever) or strand decompose.ts with neither a WIP comment nor a durable
+        // `resume-capped{split:true}` origin signal. `cap-split.ts`'s `wasCapSplitByState` reads
+        // exactly this event, so ordering it first is what makes that durable-origin backstop
+        // actually durable.
         state.upsertWorker({ ...w, ended_at: iso(), resume_capped: 1 });
         state.appendEvent("resume-capped", {
           worker: w.name,

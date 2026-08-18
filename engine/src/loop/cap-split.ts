@@ -59,9 +59,8 @@ export function renderCapSplitWipComment(
 }
 
 /** Parse the WIP-pointer comment back out of a comment stream, or `null` if none exists, the
- * marker is malformed, or (#965 P1, codex terra second review) no comment PROVABLY came from
- * the engine — fail-closed to "no pointer" (#965 AC3: absent renders nothing, never a crash or
- * a fabricated value).
+ * marker is malformed, or no comment PROVABLY came from the engine — fail-closed to "no pointer"
+ * (#965 AC3: absent renders nothing, never a crash or a fabricated value).
  *
  * A structured marker SHAPE alone proves nothing about who wrote it: on a public repo, anyone
  * who can comment could post a schema-valid `<!-- sapwood:cap-split-wip:{...} -->` line to
@@ -109,7 +108,7 @@ export function findCapSplitWipPointer(
  * target regardless (worker.ts's laneBranch doc). Output is inherently bounded — three counts,
  * one line — independent of how large the input diff is.
  *
- * #965 (P2, codex terra second review): `---`/`+++` are per-file diff HEADER lines, not content
+ * #965: `---`/`+++` are per-file diff HEADER lines, not content
  * — but only in the narrow window between a `diff --git` line and that file's first `@@` hunk
  * header. An ADDED line whose own text starts with `++ ` renders, prefixed by the unified diff's
  * own leading `+`, as a full `+++ ...` line — indistinguishable from a real file header by a bare
@@ -139,7 +138,7 @@ export function summarizeUnifiedDiffStat(diff: string): string {
   return `${plural(files.size, "file")} changed, ${plural(insertions, "insertion")}(+), ${plural(deletions, "deletion")}(-)`;
 }
 
-/** #965 (P2, PM-direct fix leg): the DURABLE half of "is this parent a cap-split origin" — the
+/** #965: the DURABLE half of "is this parent a cap-split origin" — the
  *  WIP-pointer COMMENT `findCapSplitWipPointer` reads is best-effort (conductor.ts's CAPPED
  *  branch posts it AFTER the label/latch/event already landed, and a write failure there only
  *  ever appends a `resume-cap-split-comment-failed` degrade event — see that branch's own doc).

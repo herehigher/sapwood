@@ -9730,10 +9730,10 @@ test("#172/#965 cap latch: a second handoff past maxResumes engine-splits exactl
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
-  // #965 PO ruling (2026-08-18, PM-direct fix leg): lanes.capSplitPerRound was removed — a
-  // CAPPED lane with no origin marker always splits now, so this test (about the LATCH
-  // mechanics: exactly-once, never-selected-again) asserts the split outcome directly. The
-  // needs-human arm's own mechanics are covered by the #965 AC2 origin-marker test below.
+  // #965: no per-round allowance — a CAPPED lane with no origin marker always splits now, so
+  // this test (about the LATCH mechanics: exactly-once, never-selected-again) asserts the split
+  // outcome directly. The needs-human arm's own mechanics are covered by the #965 AC2
+  // origin-marker test below.
   const cfg = mkCfg({ worker: { maxResumes: 1 } });
   seedRunning(st, "lane-cap", 173);
 
@@ -9833,10 +9833,10 @@ test("#965 AC1: a capped lane WITH a PR carries branch/head/diffstat in its WIP 
   st.close();
 });
 
-// #965 PO ruling (2026-08-18, PM-direct fix leg): lanes.capSplitPerRound was REMOVED — cap-splits
-// are already bounded by lane count per round (a cap-split needs a lane to exhaust maxResumes,
-// and at most cfg.lanes.max exist), and the origin marker (AC2 below) prevents chains. There is
-// no "allowance exhausted" arm left to test; every eligible CAPPED lane splits, every tick.
+// #965: no per-round allowance — cap-splits are already bounded by lane count per round (a
+// cap-split needs a lane to exhaust maxResumes, and at most cfg.lanes.max exist), and the origin
+// marker (AC2 below) prevents chains. There is no "allowance exhausted" arm left to test; every
+// eligible CAPPED lane splits, every tick.
 
 test("#965 AC2: no cap-split of a cap-split — an issue carrying the cap-split origin marker in its body always takes the needs-human path (mutation-kill: removing the check would split it)", async () => {
   const st = new State(":memory:");
@@ -9855,7 +9855,7 @@ test("#965 AC2: no cap-split of a cap-split — an issue carrying the cap-split 
   st.close();
 });
 
-test("#965 (P1, codex terra second review): ordering — a comment-write failure after the label/latch/event land degrades ONLY the comment, never the split itself", async () => {
+test("#965: ordering — a comment-write failure after the label/latch/event land degrades ONLY the comment, never the split itself", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();

@@ -744,18 +744,17 @@ export async function runDecompositionPass(deps: DecomposeDeps, roundId: number,
     if (existingComments.some((comment) => comment.body.includes(firingMarker))) continue;
 
     // #965: a cap-split parent's WIP pointer, if the RESUME phase left one — same comment read
-    // as the firing-marker check above, plus one actor read (#965 P1, codex terra second
-    // review): a schema-valid marker alone proves nothing about who posted it, so
-    // findCapSplitWipPointer additionally requires the comment's author to match the resolved
-    // engine actor AND carry the central ENGINE_COMMENT_MARKER — the same authority check
-    // comment-cursor-gate.ts's engine-comment exemption uses, never a second invented one.
-    // `null` for an ordinary human-`split` parent (or a spoofed comment from anyone else)
-    // renders nothing (renderCapSplitWipForPrompt's own doc). The DIGEST fields come only from
-    // this comment (never fabricated from the state event below, which carries no
-    // branch/PR/head/diffstat at all).
+    // as the firing-marker check above, plus one actor read: a schema-valid marker alone proves
+    // nothing about who posted it, so findCapSplitWipPointer additionally requires the comment's
+    // author to match the resolved engine actor AND carry the central ENGINE_COMMENT_MARKER —
+    // the same authority check comment-cursor-gate.ts's engine-comment exemption uses, never a
+    // second invented one. `null` for an ordinary human-`split` parent (or a spoofed comment
+    // from anyone else) renders nothing (renderCapSplitWipForPrompt's own doc). The DIGEST
+    // fields come only from this comment (never fabricated from the state event below, which
+    // carries no branch/PR/head/diffstat at all).
     const capSplitActor = await deps.forge.getAuthenticatedActor();
     const capSplitWipPointer = findCapSplitWipPointer(existingComments, capSplitActor, parent.number);
-    // #965 (P2, PM-direct fix leg): origin DETECTION is a separate, more durable question than
+    // #965: origin DETECTION is a separate, more durable question than
     // "do we have WIP fields to show" — the comment is best-effort (conductor.ts's CAPPED branch
     // posts it after the label/latch/event already landed; a write failure only degrades the
     // comment), so a lost (or unauthenticated-actor) comment must not silently make a genuine
