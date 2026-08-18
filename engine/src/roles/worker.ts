@@ -43,9 +43,9 @@ import { estimateUsd, loadPricingTable, type PricingTable } from "../config/pric
 import type { Issue, LanePrOutcome } from "../forge/forge.js";
 import type { LaneProbe, ReclaimResult, ResumeIntentState, Supervisor, WorktreeSettleOutcome } from "../loop/conductor.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
-import { sanitizeUpstreamError } from "../proxy/tools.js";
 import type { CategorizedTokenUsage, ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
 import { createHeartbeatGate, type HeartbeatGate } from "../util/heartbeat.js";
+import { sanitizeUpstreamError } from "../util/sanitize.js";
 import { awaitSpawnConfirmation } from "../util/spawn-confirm.js";
 import {
   assembleContextManifest,

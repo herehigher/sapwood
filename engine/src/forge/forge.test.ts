@@ -12,10 +12,12 @@ import {
   ENGINE_COMMENT_MARKER,
   engineOpenedPrMarker,
   extractAcceptanceCriteria,
+  extractActionsRunId,
   extractOrigin,
   extractVerificationPlan,
   extractVerificationSection,
   fetchAllReviewThreads,
+  filterFailureLogLines,
   findItemId,
   findingDigest,
   findLaneOwnedPr,
@@ -23,10 +25,13 @@ import {
   GithubForge,
   hasPrOwnerMarker,
   hasVerificationPlan,
+  isFailedCheckSummaryTruncated,
   OPEN_ISSUES_LIMIT,
+  parseCheckRunAnnotations,
   parseCompareChangedFiles,
   parseDefaultBranchChecksPage,
   parseFailedCheckSummary,
+  parseFailingCheckRuns,
   parseIssueLabels,
   parseIssueMeta,
   parseIssueRelations,
@@ -50,6 +55,8 @@ import {
   projectQuery,
   RECENTLY_CLOSED_ISSUES_LIMIT,
   readPrOwner,
+  renderAnnotationsText,
+  renderFailingCheckRunSection,
   SUB_ISSUE_IDS_QUERY,
   SUB_ISSUES_QUERY,
   selectIssuesAbsentFromBoard,
@@ -2312,6 +2319,287 @@ test("getFailedCheckSummary: re-derives the head via getPRStatus, then reads the
     checksCall!.some((s) => s.includes("deadbeef")),
     "must read off the head getPRStatus just reported, not a stale/caller SHA",
   );
+});
+
+// ── #975 What ⑤/AC6: getFailedCheckSummary's THREE-source render — annotations, Actions log
+// tail, output text — each independently best-effort under the SAME unchanged hard cap ─────────
+
+test("#975: isFailedCheckSummaryTruncated — the marker text is the signal, not a length comparison (an untruncated excerpt can coincidentally equal the cap length)", () => {
+  assert.equal(isFailedCheckSummaryTruncated("short"), false);
+  const capLen50 = "y".repeat(50);
+  assert.equal(isFailedCheckSummaryTruncated(capLen50), false, "length===cap with no marker is NOT truncation");
+  const truncated = parseFailedCheckSummary(
+    JSON.stringify({ check_runs: [{ name: "t", conclusion: "failure", output: { text: "x".repeat(1000) } }] }),
+    50,
+  );
+  assert.equal(isFailedCheckSummaryTruncated(truncated), true);
+});
+
+test("#975 (AC6): parseFailingCheckRuns exposes id/detailsUrl for annotations/log-tail gathering, still filtered to FAILING runs only", () => {
+  const failing = parseFailingCheckRuns(
+    JSON.stringify({
+      check_runs: [
+        { id: 1, name: "unit-tests", conclusion: "failure", details_url: "https://github.com/o/r/actions/runs/9/job/99" },
+        { id: 2, name: "lint", conclusion: "success", details_url: "https://github.com/o/r/actions/runs/9/job/98" },
+      ],
+    }),
+  );
+  assert.equal(failing.length, 1);
+  assert.equal(failing[0]!.id, 1);
+  assert.equal(failing[0]!.detailsUrl, "https://github.com/o/r/actions/runs/9/job/99");
+});
+
+test("#975 (AC6): extractActionsRunId matches an Actions job details_url, returns null for anything else", () => {
+  assert.equal(extractActionsRunId("https://github.com/o/r/actions/runs/123/job/456"), "123");
+  assert.equal(extractActionsRunId("https://github.com/o/r/actions/runs/123/job/456?check_run_id=1"), "123");
+  assert.equal(extractActionsRunId("https://some-other-ci.example/build/42"), null, "a non-Actions provider's URL never matches");
+  assert.equal(extractActionsRunId(null), null);
+  assert.equal(extractActionsRunId(undefined), null);
+});
+
+test("#975 (AC6): parseCheckRunAnnotations parses the bare-array annotations page, dropping entries with no path/message", () => {
+  const annotations = parseCheckRunAnnotations(
+    JSON.stringify([
+      { path: "src/x.ts", start_line: 10, message: "type error here", annotation_level: "failure" },
+      { path: "src/y.ts", message: "no line reported" },
+      { message: "no path at all" },
+      { path: "", message: "blank path" },
+    ]),
+  );
+  assert.equal(annotations.length, 2);
+  assert.deepEqual(annotations[0], { path: "src/x.ts", startLine: 10, message: "type error here", level: "failure" });
+  assert.equal(annotations[1]!.startLine, 0, "a missing start_line defaults to 0, never throws");
+});
+
+test("#975 (AC6): renderAnnotationsText renders 'path:line message' and sorts failure/error levels first (stable within a level)", () => {
+  const text = renderAnnotationsText([
+    { path: "src/warn.ts", startLine: 1, message: "a warning", level: "warning" },
+    { path: "src/fail.ts", startLine: 10, message: "boom", level: "failure" },
+    { path: "src/notice.ts", startLine: 2, message: "fyi", level: "notice" },
+  ]);
+  assert.equal(text, "src/fail.ts:10 boom\nsrc/warn.ts:1 a warning\nsrc/notice.ts:2 fyi");
+});
+
+test("#975 (AC6): filterFailureLogLines keeps only signature-matching lines, LAST maxLines when more match than the ceiling", () => {
+  const log = ["setup ok", "running suite", "AssertionError: expected 1 to equal 2", "not ok 1 - my test", "teardown"].join("\n");
+  const lines = filterFailureLogLines(log, 10);
+  assert.deepEqual(lines, ["AssertionError: expected 1 to equal 2", "not ok 1 - my test"]);
+});
+
+test("#975 (AC6): filterFailureLogLines keeps the LAST N matches, not the first, when over the per-run ceiling", () => {
+  const log = Array.from({ length: 5 }, (_, i) => `Error: failure number ${i}`).join("\n");
+  const lines = filterFailureLogLines(log, 2);
+  assert.deepEqual(lines, ["Error: failure number 3", "Error: failure number 4"]);
+});
+
+test("#975 (AC6): renderFailingCheckRunSection — a run with nothing from any source still names the failing check", () => {
+  const section = renderFailingCheckRunSection(
+    "unit-tests",
+    { ok: true, text: "(no annotations reported by the checks API for this run)" },
+    null,
+    "(no output text reported by the checks API for this run)",
+  );
+  assert.match(section, /^### unit-tests/);
+  assert.ok(section.includes("no annotations reported"));
+  assert.ok(section.includes("no output text reported"));
+  assert.ok(!section.includes("Log tail:"), "log section is OMITTED, not rendered unavailable, when the check isn't an Actions job");
+});
+
+test("#975 (AC6): renderFailingCheckRunSection — a failed fetch states unavailability per source, distinctly, never a silent gap", () => {
+  const section = renderFailingCheckRunSection(
+    "unit-tests",
+    { ok: false, reason: "403 rate limited" },
+    { ok: false, reason: "gh: not found" },
+    "(no output text reported by the checks API for this run)",
+  );
+  assert.ok(section.includes("annotations unavailable: 403 rate limited"));
+  assert.ok(section.includes("log tail unavailable: gh: not found"));
+});
+
+test("#975 (AC6): getFailedCheckSummary gathers annotations + Actions log tail + output, all three sources, under the unchanged hard cap", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const seen: string[][] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seen.push(args);
+    if (args[0] === "pr") {
+      return JSON.stringify({ number: 5, headRefOid: "deadbeef", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] });
+    }
+    if (args.some((a) => a.includes("check-runs?per_page="))) {
+      return JSON.stringify({
+        check_runs: [
+          {
+            id: 42,
+            name: "unit-tests",
+            conclusion: "failure",
+            output: { text: "3 tests failed" },
+            details_url: "https://github.com/o/r/actions/runs/9/job/99",
+          },
+        ],
+      });
+    }
+    if (args.some((a) => a.includes("check-runs/42/annotations"))) {
+      return JSON.stringify([{ path: "src/x.ts", start_line: 7, message: "type mismatch", annotation_level: "failure" }]);
+    }
+    if (args[0] === "run" && args[1] === "view") {
+      assert.equal(args[2], "9", "must call gh run view with the runId extracted from details_url");
+      assert.ok(args.includes("--log-failed"));
+      return ["ok  1", "not ok 2 - broken", "AssertionError: expected true"].join("\n");
+    }
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+  const out = await forge.getFailedCheckSummary(5);
+  assert.match(out, /### unit-tests/);
+  assert.ok(out.includes("src/x.ts:7 type mismatch"), "annotations section present");
+  assert.ok(out.includes("not ok 2 - broken"), "log-tail section present");
+  assert.ok(out.includes("AssertionError: expected true"), "log-tail section present");
+  assert.ok(out.includes("3 tests failed"), "output section present");
+  assert.ok(seen.some((a) => a.some((s) => s.includes("annotations"))));
+  assert.ok(seen.some((a) => a[0] === "run" && a[1] === "view"));
+});
+
+test("#975 (AC6): getFailedCheckSummary — one dead source (annotations fetch throws) never blanks the other two", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[0] === "pr") {
+      return JSON.stringify({ number: 5, headRefOid: "deadbeef", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] });
+    }
+    if (args.some((a) => a.includes("check-runs?per_page="))) {
+      return JSON.stringify({ check_runs: [{ id: 1, name: "unit-tests", conclusion: "failure", output: { text: "boom" } }] });
+    }
+    throw new Error("simulated annotations-fetch failure");
+  };
+  const out = await forge.getFailedCheckSummary(5);
+  assert.ok(out.includes("annotations unavailable: simulated annotations-fetch failure"));
+  assert.ok(out.includes("boom"), "output text still renders even though annotations failed");
+});
+
+// #975 P1 (an embedded per-source failure reason reaches a session WITHOUT ever passing through
+// the proxy's own top-level-throw sanitization — pr_failed_checks deliberately never throws on a
+// forge read failure, so the reason string needed the same scrub at its own embedding point).
+test("#975 P1: a token-bearing annotations-fetch error is sanitized before it reaches the excerpt", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[0] === "pr") {
+      return JSON.stringify({ number: 5, headRefOid: "deadbeef", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] });
+    }
+    if (args.some((a) => a.includes("check-runs?per_page="))) {
+      return JSON.stringify({ check_runs: [{ id: 1, name: "unit-tests", conclusion: "failure", output: { text: "boom" } }] });
+    }
+    throw new Error("gh: HTTP 401 authenticating with token ghp_ABCDEFGHIJ0123456789abcdefghij");
+  };
+  const out = await forge.getFailedCheckSummary(5);
+  assert.ok(!out.includes("ghp_ABCDEFGHIJ0123456789abcdefghij"), "a raw token must never survive into the rendered excerpt");
+  assert.ok(out.includes("[redacted]"));
+});
+
+test("#975 P1: a token-bearing log-tail-fetch error is sanitized before it reaches the excerpt", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[0] === "pr") {
+      return JSON.stringify({ number: 5, headRefOid: "deadbeef", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] });
+    }
+    if (args.some((a) => a.includes("check-runs?per_page="))) {
+      return JSON.stringify({
+        check_runs: [
+          {
+            id: 1,
+            name: "unit-tests",
+            conclusion: "failure",
+            output: { text: "boom" },
+            details_url: "https://github.com/o/r/actions/runs/9/job/99",
+          },
+        ],
+      });
+    }
+    if (args.some((a) => a.includes("annotations"))) return JSON.stringify([]);
+    if (args[0] === "run" && args[1] === "view") {
+      throw new Error("fatal: unable to access 'https://x-access-token:ghp_ABCDEFGHIJ0123456789abcdefghij@github.com/o/r.git/'");
+    }
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+  const out = await forge.getFailedCheckSummary(5);
+  assert.ok(!out.includes("ghp_ABCDEFGHIJ0123456789abcdefghij"), "a raw token must never survive into the rendered excerpt");
+  assert.ok(out.includes("[redacted]"));
+});
+
+test("#975 (AC6): getFailedCheckSummary never exceeds FAILED_CHECK_SUMMARY_CAP even with three sources feeding one excerpt", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[0] === "pr") {
+      return JSON.stringify({ number: 5, headRefOid: "deadbeef", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] });
+    }
+    if (args.some((a) => a.includes("check-runs?per_page="))) {
+      return JSON.stringify({
+        check_runs: [
+          {
+            id: 1,
+            name: "unit-tests",
+            conclusion: "failure",
+            output: { text: "x".repeat(3000) },
+            details_url: "https://github.com/o/r/actions/runs/9/job/99",
+          },
+        ],
+      });
+    }
+    if (args.some((a) => a.includes("annotations"))) {
+      return JSON.stringify(
+        Array.from({ length: 50 }, (_, i) => ({
+          path: `src/f${i}.ts`,
+          start_line: i,
+          message: "y".repeat(50),
+          annotation_level: "failure",
+        })),
+      );
+    }
+    return Array.from({ length: 80 }, (_, i) => `Error: failure ${i} ${"z".repeat(50)}`).join("\n");
+  };
+  const out = await forge.getFailedCheckSummary(5);
+  assert.ok(out.length <= 4_000);
+  assert.ok(out.includes("truncated"));
+});
+
+// #975 P2: the fan-out bound — only the first MAX_EVIDENCE_RUNS (8) failing check runs get real
+// evidence gathered; the rest are named, never dropped, in one overflow line. The Actions
+// log-tail fetch is memoized by runId WITHIN one call, so several check runs sharing one
+// workflow run cost exactly one `gh run view`, not one per check run.
+test("#975 P2: 12 failing runs across 3 distinct runIds -> at most 8 evidence sections + one 'not expanded' line naming the rest, gh run view called at most once per distinct runId", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const runViewCalls: string[] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[0] === "pr") {
+      return JSON.stringify({ number: 5, headRefOid: "deadbeef", state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: [] });
+    }
+    if (args.some((a) => a.includes("check-runs?per_page="))) {
+      return JSON.stringify({
+        check_runs: Array.from({ length: 12 }, (_, i) => ({
+          id: i + 1,
+          name: `run-${i}`,
+          conclusion: "failure",
+          output: { text: `boom${i}` },
+          details_url: `https://github.com/o/r/actions/runs/${(i % 3) + 1}/job/${100 + i}`,
+        })),
+      });
+    }
+    if (args.some((a) => a.includes("annotations"))) return JSON.stringify([]);
+    if (args[0] === "run" && args[1] === "view") {
+      runViewCalls.push(args[2]!);
+      return `Error: log tail for runId ${args[2]}`;
+    }
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+  const out = await forge.getFailedCheckSummary(5);
+  const expandedNames = [...out.matchAll(/### run-(\d+)/g)].map((m) => Number(m[1])).sort((a, b) => a - b);
+  assert.deepEqual(expandedNames, [0, 1, 2, 3, 4, 5, 6, 7], "only the first 8 failing runs (API order) are expanded");
+  assert.ok(out.includes("4 more failing check run(s) not expanded"));
+  for (const overflowIndex of [8, 9, 10, 11]) assert.ok(out.includes(`run-${overflowIndex}`), `overflow name run-${overflowIndex} missing`);
+  assert.equal(runViewCalls.length, 3, "gh run view called at most once per distinct runId among the expanded runs");
+  assert.deepEqual([...new Set(runViewCalls)].sort(), ["1", "2", "3"]);
 });
 
 // ── #13 review-gate data: parsePRReviewView / parsePRReactions / parseUnresolvedThreads ──

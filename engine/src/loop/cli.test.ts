@@ -2211,6 +2211,7 @@ function fakeProxyForgeForCli(): ProxyForge {
     }),
     getPRChecks: async () => ({ checks: [], total: 0 }),
     getPRComments: async () => ({ comments: [], total: 0 }),
+    getFailedCheckSummary: async () => "(no failing check runs found via the checks API)",
   };
 }
 

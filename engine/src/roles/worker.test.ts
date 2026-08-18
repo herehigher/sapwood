@@ -27,7 +27,7 @@ import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import { estimateUsd, loadPricingTable } from "../config/pricing.js";
 import { closeOutMergedHumanMergeOnlyLanes } from "../loop/conductor.js";
 import { classifyEnvFailure, DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
-import { mcpToolFullName, PR_TOOLS, TOOL_PR_AUDIT_COMMENTS } from "../proxy/tools.js";
+import { mcpToolFullName, PR_TOOLS, TOOL_PR_AUDIT_COMMENTS, TOOL_PR_FAILED_CHECKS } from "../proxy/tools.js";
 import { State } from "../state/state.js";
 import {
   buildRenderFixPrompt,
@@ -5897,6 +5897,17 @@ test("#963 (CONVERT): fix.md names the REAL mcp__forge__ tool name for pr_audit_
   const content = readFileSync(defaultFixPromptPath(), "utf8");
   assert.ok(
     content.includes(mcpToolFullName(TOOL_PR_AUDIT_COMMENTS)),
+    "fix.md must name the real mcp__forge__ tool name — a renamed proxy tool must be caught here",
+  );
+});
+
+// #975 AC4: cross-artifact, not a prose pin — asserted against the REAL proxy tool constant
+// (mcpToolFullName(TOOL_PR_FAILED_CHECKS)), same shape as the #963 pr_audit_comments test above,
+// so a future proxy tool rename is caught here rather than silently going stale in prose.
+test("#975 (AC4): fix.md names the REAL mcp__forge__ tool name for pr_failed_checks", () => {
+  const content = readFileSync(defaultFixPromptPath(), "utf8");
+  assert.ok(
+    content.includes(mcpToolFullName(TOOL_PR_FAILED_CHECKS)),
     "fix.md must name the real mcp__forge__ tool name — a renamed proxy tool must be caught here",
   );
 });

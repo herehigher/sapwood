@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import type { SapwoodConfig } from "../config/config.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import { extractMarkdownSections } from "../util/markdown.js";
+import { sanitizeUpstreamError } from "../util/sanitize.js";
 import { ghWithTimeout } from "./gh.js";
 import { createMissingLabels, type LabelSpec, labelsInclude } from "./labels.js";
 
@@ -308,24 +309,26 @@ export interface IForge {
   removePRLabel(pr: number, label: string): Promise<void>;
   openPR(branch: string, title: string, body: string): Promise<number>;
   getPRStatus(pr: number): Promise<PRStatus>;
-  /** #964: a bounded, engine-fetched excerpt of WHY a `ciRed` PR's checks failed — failing check
-   *  names plus whatever GitHub's Checks API `output.summary`/`output.text` fields report for
-   *  them (test names/assertion messages, when the check writer populates them; many CI writers
-   *  don't, and that absence is stated in the returned text rather than silently blank). Read-
-   *  only, off the PR's OWN current head (re-derived here via `getPRStatus`, never a caller-
-   *  supplied SHA — this must describe the SAME head a `ciRed` decision was just made against,
-   *  and a caller-supplied stale SHA could silently describe an older failure). Deliberately the
-   *  CHECKS API (`GET .../commits/{ref}/check-runs`), never `gh run view --log-failed`: raw
-   *  Actions step logs are unbounded free text with no structure and no cross-provider
-   *  equivalent, while every check-run conclusion (any CI provider, not just Actions) carries
-   *  this same `output` shape. Returns a HARD-CAPPED string (deterministic truncation, same
+  /** #964/#975: a bounded, engine-fetched excerpt of WHY a `ciRed` PR's checks failed — for each
+   *  FAILING check run, in order: (a) its Checks-API annotations (`##[error]` lines GitHub
+   *  Actions posts there), (b) when `details_url` points at an Actions job, a failure-signature-
+   *  filtered tail of `gh run view --log-failed`, (c) `output.summary`/`output.text` (#964's
+   *  original source — many CI writers leave it empty, which is stated rather than rendered
+   *  blank). Every one of the three sources is independently best-effort: a source that fails to
+   *  fetch states so (`(... unavailable: <reason>)`) rather than throwing, so one dead source
+   *  never blanks out the other two. Read-only, off the PR's OWN current head (re-derived here
+   *  via `getPRStatus`, never a caller-supplied SHA — this must describe the SAME head a `ciRed`
+   *  decision was just made against, and a caller-supplied stale SHA could silently describe an
+   *  older failure). Returns a HARD-CAPPED string (deterministic truncation, same
    *  marked-cut-never-silent-drop contract as retro-digest.ts's `capDigest`, kept local to this
    *  module rather than imported — retro-digest.ts already imports `IForge` from here, so the
    *  reverse import would cycle) — the retro digest's failure-excerpt source (#964 "Your
-   *  outstanding PRs" section). NOT paginated to exhaustion like `getPRChangedFiles`/
-   *  `getCommitsSince`: this is a best-effort excerpt for a prompt, never a completeness-critical
-   *  read that gates dispatch or merge, so a single `per_page=100` page is enough in practice and
-   *  a page-ceiling event would be noise for a read this advisory. */
+   *  outstanding PRs" section) AND the fix leg's `pr_failed_checks` proxy tool source (#975,
+   *  `proxy/tools.ts`) — ONE implementation, two consumers, never a second fetcher. NOT paginated
+   *  to exhaustion like `getPRChangedFiles`/`getCommitsSince`: this is a best-effort excerpt for
+   *  a prompt, never a completeness-critical read that gates dispatch or merge, so a single
+   *  `per_page=100` page (checks) / `per_page=50` page (annotations) is enough in practice and a
+   *  page-ceiling event would be noise for a read this advisory. */
   getFailedCheckSummary(pr: number): Promise<string>;
   mergePR(pr: number, headOid: string): Promise<void>;
   /** Post a PR comment (e.g. the `@codex review` trigger). #13 reviewer.ts. */
@@ -1019,8 +1022,98 @@ export class GithubForge implements IForge {
   async getFailedCheckSummary(pr: number): Promise<string> {
     // Re-derive the head here (not caller-supplied) — see the interface doc's rationale.
     const status = await this.getPRStatus(pr);
-    const out = await this.gh(["api", `repos/${this.cfg.board.owner}/${this.repo()}/commits/${status.headOid}/check-runs?per_page=100`]);
-    return parseFailedCheckSummary(out, FAILED_CHECK_SUMMARY_CAP);
+    const owner = this.cfg.board.owner;
+    const repo = this.repo();
+    const out = await this.gh(["api", `repos/${owner}/${repo}/commits/${status.headOid}/check-runs?per_page=100`]);
+    const failing = parseFailingCheckRuns(out);
+    if (failing.length === 0) return "(no failing check runs found via the checks API)";
+    // #975 P2: only the first MAX_EVIDENCE_RUNS get real evidence gathered — the rest are named
+    // in one summary line, never silently dropped, just not expanded (see the constant's own
+    // doc for why an unbounded fan-out here is a real resource hazard, not just noise).
+    const expanded = failing.slice(0, MAX_EVIDENCE_RUNS);
+    const overflow = failing.slice(MAX_EVIDENCE_RUNS);
+    // #975 P2: fetched SEQUENTIALLY (never Promise.all) — 8 sequential bounded `gh` reads is fine
+    // for an advisory excerpt; up to 8 CONCURRENT ones (times two calls each) is the unbounded
+    // fan-out this cap and this loop shape exist to avoid. logTailCache memoizes the Actions
+    // log-tail fetch by runId WITHIN this one call — several failing check runs from the SAME
+    // Actions workflow run (distinct jobs, same run) would otherwise re-download the identical
+    // `gh run view --log-failed` output once per check run.
+    const logTailCache = new Map<string, Promise<CheckSourceResult>>();
+    const sections: string[] = [];
+    for (const run of expanded) {
+      sections.push(await this.gatherFailingCheckRunEvidence(run, owner, repo, logTailCache));
+    }
+    if (overflow.length > 0) {
+      const names = overflow.map((r) => (r.name && r.name.trim() !== "" ? r.name : "(unnamed check)"));
+      sections.push(`(${overflow.length} more failing check run(s) not expanded — names: ${names.join(", ")})`);
+    }
+    return hardCapExcerpt(sections.join("\n\n"), FAILED_CHECK_SUMMARY_CAP);
+  }
+
+  /** #975: per-failing-check-run evidence gathering — annotations then (when the check is an
+   *  Actions job) the filtered log tail, both best-effort against the SAME `this.gh` no-shell
+   *  helper every other read in this class uses. Never throws: a source that fails to fetch
+   *  renders its own stated-unavailable text (renderFailingCheckRunSection) rather than
+   *  propagating, so one dead source never blanks the excerpt for every failing check. */
+  private async gatherFailingCheckRunEvidence(
+    run: RawFailingCheckRun,
+    owner: string,
+    repo: string,
+    logTailCache: Map<string, Promise<CheckSourceResult>>,
+  ): Promise<string> {
+    const name = run.name && run.name.trim() !== "" ? run.name : "(unnamed check)";
+    const annotations = await this.fetchAnnotationsResult(run.id, owner, repo);
+    const actionsRunId = extractActionsRunId(run.detailsUrl);
+    const log = actionsRunId === null ? null : await this.fetchLogTailResultCached(actionsRunId, owner, repo, logTailCache);
+    return renderFailingCheckRunSection(name, annotations, log, renderOutputText(run.output));
+  }
+
+  /** #975 P2: the memoized front door to fetchLogTailResult — a `runId` already IN the cache
+   *  returns the SAME in-flight/settled promise rather than issuing a second `gh run view`
+   *  call, so N failing check runs sharing one Actions workflow run cost exactly ONE log-tail
+   *  fetch, not N. Synchronous cache check + set (no `await` in between), so two check runs
+   *  processed back-to-back in the same sequential loop can never race past this check. */
+  private fetchLogTailResultCached(
+    actionsRunId: string,
+    owner: string,
+    repo: string,
+    cache: Map<string, Promise<CheckSourceResult>>,
+  ): Promise<CheckSourceResult> {
+    const cached = cache.get(actionsRunId);
+    if (cached !== undefined) return cached;
+    const fetched = this.fetchLogTailResult(actionsRunId, owner, repo);
+    cache.set(actionsRunId, fetched);
+    return fetched;
+  }
+
+  private async fetchAnnotationsResult(checkRunId: number | undefined, owner: string, repo: string): Promise<CheckSourceResult> {
+    if (checkRunId === undefined) return { ok: false, reason: "no check-run id reported by the checks API" };
+    try {
+      const json = await this.gh(["api", `repos/${owner}/${repo}/check-runs/${checkRunId}/annotations?per_page=50`]);
+      const annotations = parseCheckRunAnnotations(json);
+      return {
+        ok: true,
+        text: annotations.length === 0 ? "(no annotations reported by the checks API for this run)" : renderAnnotationsText(annotations),
+      };
+    } catch (e) {
+      // #975 P1: this reason string reaches a session EMBEDDED in an otherwise-successful
+      // excerpt (renderFailingCheckRunSection) — it never passes through the proxy's own
+      // top-level-throw sanitization (pr_failed_checks deliberately never throws on a forge read
+      // failure, tools.ts's fetchPRFailedChecksResponse), so it needs the same token scrub here,
+      // at its own embedding point, or a raw `gh` error could carry a credential straight through.
+      return { ok: false, reason: sanitizeUpstreamError(e instanceof Error ? e.message : String(e)) };
+    }
+  }
+
+  private async fetchLogTailResult(actionsRunId: string, owner: string, repo: string): Promise<CheckSourceResult> {
+    try {
+      const log = await this.gh(["run", "view", actionsRunId, "--log-failed", "--repo", `${owner}/${repo}`]);
+      const lines = filterFailureLogLines(log, MAX_LOG_TAIL_LINES);
+      return { ok: true, text: lines.length === 0 ? "(no lines matched the failure signature in the log tail)" : lines.join("\n") };
+    } catch (e) {
+      // #975 P1: same rationale as fetchAnnotationsResult's own catch above.
+      return { ok: false, reason: sanitizeUpstreamError(e instanceof Error ? e.message : String(e)) };
+    }
   }
 
   async getPRDiff(pr: number): Promise<string> {
@@ -3080,15 +3173,41 @@ export function parsePRStatus(json: string): PRStatus {
 // excerpt rather than a second unbounded log dump inside the retro digest's own cap.
 const FAILED_CHECK_SUMMARY_CAP = 4_000;
 
+// #975 P2: the FAN-OUT bound — independent of FAILED_CHECK_SUMMARY_CAP (a char cap applied once
+// at the very end, after every source has already been fetched). Without this, a PR with up to
+// 100 failing check runs (the checks-API page size) would issue up to 100 concurrent `gh api`
+// annotations reads AND up to 100 concurrent `gh run view --log-failed` reads, each buffering up
+// to 32 MiB before the excerpt ever gets capped — the excerpt's own bound protects the SESSION
+// reading it, not the engine process doing the fetching. Only the first N failing runs (API
+// order) get real evidence gathered; the rest are named in one summary line so nothing is
+// silently dropped, just not expanded. 8 sequential bounded reads is fine for an advisory
+// excerpt a fix leg reads once per CI-red round.
+const MAX_EVIDENCE_RUNS = 8;
+
+// #975: the deterministic truncation marker's stable substring — asserted against directly by
+// `isFailedCheckSummaryTruncated` below, so the two can never drift apart (the marker's own
+// wording is free to change; this substring is the CONTRACT, not the display text).
+const EXCERPT_TRUNCATION_MARKER_TEXT = "excerpt truncated: exceeded the";
+
 /** Deterministic hard truncation for `getFailedCheckSummary` — same shape as retro-digest.ts's
  *  `capDigest` (a marked cut, never a silent drop, same output for the same input+cap every
  *  time), duplicated in miniature rather than imported: retro-digest.ts already imports `IForge`
  *  from this module, so the reverse import would cycle. */
 function hardCapExcerpt(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
-  const marker = `\n[... excerpt truncated: exceeded the ${maxChars}-char cap — ${text.length - maxChars} chars omitted ...]`;
+  const marker = `\n[... ${EXCERPT_TRUNCATION_MARKER_TEXT} ${maxChars}-char cap — ${text.length - maxChars} chars omitted ...]`;
   if (marker.length >= maxChars) return marker.slice(0, maxChars);
   return text.slice(0, maxChars - marker.length) + marker;
+}
+
+/** #975: whether a `getFailedCheckSummary` excerpt was cut by `hardCapExcerpt`'s own cap — the
+ *  `pr_failed_checks` proxy tool (`proxy/tools.ts`) needs a `truncated` flag without duplicating
+ *  cap arithmetic against a string it never chose the cap for. The marker TEXT, not a length
+ *  comparison, is the authoritative signal: an untruncated excerpt can coincidentally have
+ *  `length === maxChars` too (the `text.length <= maxChars` branch above returns it unchanged),
+ *  so a naive `excerpt.length >= cap` check would misreport that case as truncated. */
+export function isFailedCheckSummaryTruncated(excerpt: string): boolean {
+  return excerpt.includes(EXCERPT_TRUNCATION_MARKER_TEXT);
 }
 
 /** The REST Checks API's own failing-conclusion vocabulary (lowercase — a DIFFERENT transport
@@ -3098,27 +3217,186 @@ function hardCapExcerpt(text: string, maxChars: number): string {
  *  commit-Status API, not a CheckRun. */
 const REST_FAILING_CONCLUSIONS = new Set(["failure", "timed_out", "startup_failure"]);
 
-/** Pure parse of `GET repos/{owner}/{repo}/commits/{ref}/check-runs` (#964). Exported for offline
- *  testing. Only FAILING check runs are rendered — a caller already knows a PR is `ciRed` before
- *  ever calling this (parsePRStatus's own rollup read), so this excerpt's whole job is "why", not
- *  "whether". A check run whose `output.summary`/`output.text` are both empty (many CI writers
- *  never populate them) says so explicitly rather than rendering a blank section — the same
- *  never-a-silent-gap stance capDigest's own doc states. */
-export function parseFailedCheckSummary(json: string, maxChars: number): string {
+/** One failing check run off `GET repos/{owner}/{repo}/commits/{ref}/check-runs` (#964/#975) —
+ *  the fields `getFailedCheckSummary` needs to gather annotations/log/output evidence for it.
+ *  `id`/`detailsUrl` are optional because a hand-built fixture (or a genuinely degraded upstream
+ *  response) may omit them; callers treat their absence as "that source is unavailable for this
+ *  run", never as a parse failure. */
+export interface RawFailingCheckRun {
+  id?: number;
+  name?: string;
+  output?: { summary?: string | null; text?: string | null } | null;
+  detailsUrl?: string | null;
+}
+
+/** Pure parse of `GET repos/{owner}/{repo}/commits/{ref}/check-runs` (#964), filtered to FAILING
+ *  runs only — a caller already knows a PR is `ciRed` before ever calling this (parsePRStatus's
+ *  own rollup read), so this excerpt's whole job is "why", not "whether". Exported for offline
+ *  testing and for `getFailedCheckSummary`'s per-run evidence gathering (#975) — the SAME parse,
+ *  never a second one. */
+export function parseFailingCheckRuns(json: string): RawFailingCheckRun[] {
   const parsed = JSON.parse(json) as {
-    check_runs?: { name?: string; conclusion?: string | null; output?: { summary?: string | null; text?: string | null } | null }[];
+    check_runs?: {
+      id?: number;
+      name?: string;
+      conclusion?: string | null;
+      output?: { summary?: string | null; text?: string | null } | null;
+      details_url?: string | null;
+    }[];
   };
-  const failing = (parsed.check_runs ?? []).filter((c) => typeof c.conclusion === "string" && REST_FAILING_CONCLUSIONS.has(c.conclusion));
+  return (parsed.check_runs ?? [])
+    .filter((c) => typeof c.conclusion === "string" && REST_FAILING_CONCLUSIONS.has(c.conclusion))
+    .map((c) => ({
+      // exactOptionalPropertyTypes: `id`/`name`/`output` are OMITTED (never set to explicit
+      // undefined) when the upstream field itself is absent — same convention as parsePRStatus's
+      // own conditional-spread fields a few hundred lines up in this file.
+      ...(c.id !== undefined ? { id: c.id } : {}),
+      ...(c.name !== undefined ? { name: c.name } : {}),
+      ...(c.output !== undefined ? { output: c.output } : {}),
+      detailsUrl: c.details_url ?? null,
+    }));
+}
+
+/** Pure render of one failing check run's `output.summary`/`output.text` (#964's original, only
+ *  source) — a check run whose output fields are both empty (many CI writers never populate
+ *  them) says so explicitly rather than rendering a blank section, the same never-a-silent-gap
+ *  stance capDigest's own doc states. Factored out of `parseFailedCheckSummary` so #975's
+ *  multi-source render (`renderFailingCheckRunSection`) reuses the exact same text, never a
+ *  second "what does empty output look like" decision. */
+function renderOutputText(output: { summary?: string | null; text?: string | null } | null | undefined): string {
+  const body = [output?.summary, output?.text]
+    .filter((s): s is string => typeof s === "string" && s.trim() !== "")
+    .join("\n")
+    .trim();
+  return body === "" ? "(no output text reported by the checks API for this run)" : body;
+}
+
+/** `getFailedCheckSummary`'s pre-#975 shape, unchanged: only the Checks-API `output.summary`/
+ *  `output.text` fields, per failing check run, hard-capped. Still exported and still used
+ *  standalone by its own fixture tests — #975 extends `getFailedCheckSummary` ITSELF to gather
+ *  two more sources per run (annotations, log tail) via `renderFailingCheckRunSection` below;
+ *  this function's contract (same input, same output, forever) never changed underneath it. */
+export function parseFailedCheckSummary(json: string, maxChars: number): string {
+  const failing = parseFailingCheckRuns(json);
   if (failing.length === 0) return "(no failing check runs found via the checks API)";
   const sections = failing.map((c) => {
     const name = c.name && c.name.trim() !== "" ? c.name : "(unnamed check)";
-    const body = [c.output?.summary, c.output?.text]
-      .filter((s): s is string => typeof s === "string" && s.trim() !== "")
-      .join("\n")
-      .trim();
-    return `### ${name}\n${body === "" ? "(no output text reported by the checks API for this run)" : body}`;
+    return `### ${name}\n${renderOutputText(c.output)}`;
   });
   return hardCapExcerpt(sections.join("\n\n"), maxChars);
+}
+
+// ── #975: getFailedCheckSummary's two NEW evidence sources — annotations + the Actions log tail
+//    — plus the per-run section renderer that combines all three sources. ─────────────────────
+
+/** `GET repos/{owner}/{repo}/check-runs/{id}/annotations` returns a bare JSON array (not wrapped
+ *  in an envelope object) — different shape from the check-runs page above, which is why this
+ *  gets its own parse rather than reusing a shared envelope type. */
+export interface CheckRunAnnotation {
+  path: string;
+  startLine: number;
+  message: string;
+  level: string;
+}
+
+/** Pure parse of the Checks-API annotations page. An entry missing `path`/`message` (either
+ *  field) is dropped rather than rendered with a placeholder — a path-less or message-less
+ *  annotation carries none of the "where/what" this excerpt exists to answer, so it is noise,
+ *  not a degraded-but-useful fact the way a nameless check run (`renderFailingCheckRunSection`'s
+ *  own placeholder) still is. */
+export function parseCheckRunAnnotations(json: string): CheckRunAnnotation[] {
+  const parsed = JSON.parse(json) as { path?: string; start_line?: number; message?: string; annotation_level?: string }[];
+  return parsed
+    .filter((a): a is { path: string; message: string; start_line?: number; annotation_level?: string } => {
+      return typeof a.path === "string" && a.path.trim() !== "" && typeof a.message === "string" && a.message.trim() !== "";
+    })
+    .map((a) => ({ path: a.path, startLine: a.start_line ?? 0, message: a.message, level: a.annotation_level ?? "notice" }));
+}
+
+/** GitHub's own annotation-severity vocabulary that means "this is why the check failed" (as
+ *  opposed to `notice`/`warning`, which can appear on a passing OR failing run) — sorted first
+ *  so the most relevant lines survive `hardCapExcerpt`'s cut when a run reports many. */
+const ANNOTATION_FAILURE_LEVELS = new Set(["failure", "error"]);
+
+/** Pure render of a check run's annotations, failure/error levels first (stable sort — equal-
+ *  priority annotations keep the API's own order). `path:startLine message`, one per line — the
+ *  same shape GitHub's own UI and `##[error]` Actions log lines use, so a fix leg reading this
+ *  recognizes the convention immediately. */
+export function renderAnnotationsText(annotations: readonly CheckRunAnnotation[]): string {
+  return [...annotations]
+    .sort((a, b) => {
+      const pa = ANNOTATION_FAILURE_LEVELS.has(a.level) ? 0 : 1;
+      const pb = ANNOTATION_FAILURE_LEVELS.has(b.level) ? 0 : 1;
+      return pa - pb;
+    })
+    .map((a) => `${a.path}:${a.startLine} ${a.message}`)
+    .join("\n");
+}
+
+/** A check run's `details_url` points at an Actions job iff it matches this shape — GitHub's own
+ *  documented URL form for a check run backed by an Actions workflow job. A non-Actions CI
+ *  provider's `details_url` (or an absent one) never matches, and `getFailedCheckSummary` treats
+ *  a non-match as "log tail not applicable to this run" (no section at all), never as a fetch
+ *  failure to report as unavailable — those are different facts. */
+const ACTIONS_JOB_URL_RE = /\/actions\/runs\/(\d+)\/job\/\d+/;
+
+/** Pure extraction of the Actions run id from a check run's `details_url` — `null` when the URL
+ *  doesn't match an Actions job shape (a different CI provider, or no `details_url` at all).
+ *  Exported for fixture testing independent of a live `gh` call. */
+export function extractActionsRunId(detailsUrl: string | null | undefined): string | null {
+  if (detailsUrl === null || detailsUrl === undefined) return null;
+  const m = ACTIONS_JOB_URL_RE.exec(detailsUrl);
+  return m ? m[1]! : null;
+}
+
+/** A dumb, provider-agnostic failure signature — deliberately NOT a parser for any one test
+ *  runner's output format (this repo runs several: node:test, eslint, tsc), just the handful of
+ *  substrings that show up on a line worth keeping when skimming a failed Actions job's log.
+ *  `##[error]` is Actions' own annotation-marker prefix (the same convention the checks-API
+ *  annotations above surface structurally; a log line can carry it even when the annotations
+ *  endpoint itself came back empty). */
+const FAILURE_LOG_SIGNATURE_RE = /✖|not ok|AssertionError|error TS\d+|##\[error\]|Error:/;
+
+/** #975: the log-tail's own per-run line ceiling — independent of `FAILED_CHECK_SUMMARY_CAP`
+ *  (the overall excerpt's char cap, applied once at the very end): this bounds how much ONE
+ *  check run's log tail can crowd out annotations/output from every OTHER failing run in the
+ *  same excerpt, before the final char cap even runs. */
+const MAX_LOG_TAIL_LINES = 40;
+
+/** Pure filter of a raw `gh run view --log-failed` tail down to lines matching the failure
+ *  signature above, keeping the LAST `maxLines` matches (not the first) — a failure signature
+ *  line near the END of a log is the summary/final-assertion line in practice; the ones near the
+ *  start are usually setup noise that happens to contain, e.g., a stray colon-terminated word
+ *  matching `Error:`. Exported for fixture testing. */
+export function filterFailureLogLines(log: string, maxLines: number): string[] {
+  return log
+    .split("\n")
+    .filter((line) => FAILURE_LOG_SIGNATURE_RE.test(line))
+    .slice(-maxLines);
+}
+
+/** #975: one source's fetch outcome (annotations or log tail — never `output`, which is parsed
+ *  synchronously from data `getFailedCheckSummary` already has in hand and so cannot itself
+ *  "fail" the way a separate network/exec call can). */
+export type CheckSourceResult = { ok: true; text: string } | { ok: false; reason: string };
+
+/** Pure combine of one failing check run's THREE evidence sources, in the order #975 specifies:
+ *  annotations, then the Actions log tail (omitted entirely — not "unavailable" — when `log` is
+ *  `null`, i.e. this run's `details_url` never matched an Actions job in the first place), then
+ *  `output.summary`/`output.text`. Exported for fixture testing independent of a live `gh` call;
+ *  `getFailedCheckSummary` is the only production caller. A run with nothing from any source
+ *  still renders its own `### name` heading — never a check that goes unnamed because every
+ *  source came up empty. */
+export function renderFailingCheckRunSection(
+  name: string,
+  annotations: CheckSourceResult,
+  log: CheckSourceResult | null,
+  outputText: string,
+): string {
+  const lines = [`Annotations: ${annotations.ok ? annotations.text : `(annotations unavailable: ${annotations.reason})`}`];
+  if (log !== null) lines.push(`Log tail: ${log.ok ? log.text : `(log tail unavailable: ${log.reason})`}`);
+  lines.push(`Output: ${outputText}`);
+  return `### ${name}\n${lines.join("\n\n")}`;
 }
 
 /** #449 gate② P1 fix: shared per-entry validation between `parsePRChangedFiles` (a page-array of
