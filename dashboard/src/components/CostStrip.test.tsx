@@ -57,7 +57,10 @@ test("a round with no artifact data still renders all six stage rows, zero-fille
 
 test("renders a second panel only when a round is given, with its CLOSED badge and footer stats", () => {
   const withoutRound = renderToStaticMarkup(<CostStrip today={todayPanel()} round={null} />);
-  assert.doesNotMatch(withoutRound, /closed/i);
+  // #953: a by-model label's tooltip trigger now carries its own `data-state="closed"` (Radix's
+  // own idle-state attribute, unrelated to the CLOSED round badge) — assert the badge class
+  // itself, not a loose /closed/i that now also matches that trigger attribute.
+  assert.doesNotMatch(withoutRound, /cost-panel-badge/);
 
   const withRound = renderToStaticMarkup(
     <CostStrip
