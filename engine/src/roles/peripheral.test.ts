@@ -1360,6 +1360,117 @@ test("run: a per-role allowedTools override reaches the argv (#91 — retro's wi
   }
 });
 
+// ── #1011 AC2: host.permissionMode + bashSandbox reach peripheral role sessions too — retro
+// (Bash-bearing) gets the SAME floor worker.ts's dispatch()/resume() compose; a Bash-less role
+// (e.g. architect) and a gate② review session (reviewCwd) never do. ─────────────────────────
+
+test('run (#1011): retro (Bash-bearing allowedTools) under bashSandbox "required" -> the inline --settings carries the sandbox floor; --permission-mode reflects the configured host.permissionMode', async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const rcfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      host: { permissionMode: "dontAsk" },
+      bashSandbox: "required",
+    });
+    const runner = mkRunner(dir, bin, { cfg: rcfg });
+    await runner.run({
+      roleId: "retro",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      allowedTools: "Read,Write,Edit,Grep,Glob,Bash(git *)",
+    });
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    assert.equal(seen[seen.indexOf("--permission-mode") + 1], "dontAsk");
+    const settings = JSON.parse(seen[seen.indexOf("--settings") + 1]!);
+    assert.deepEqual(settings.sandbox, {
+      enabled: true,
+      autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false,
+      failIfUnavailable: true,
+      network: { strictAllowlist: true },
+      filesystem: { denyRead: ["~/.config/gh", "~/.ssh", "~/.aws", "~/.claude/.credentials.json"] },
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run (#1011): a Bash-less role (architect, ROLE_ALLOWED_TOOLS default) under bashSandbox "required" -> NO sandbox key in the inline --settings — the floor only applies to Bash-bearing sessions', async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const rcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, bashSandbox: "required" });
+    const runner = mkRunner(dir, bin, { cfg: rcfg });
+    await runner.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    const settings = JSON.parse(seen[seen.indexOf("--settings") + 1]!);
+    assert.equal("sandbox" in settings, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run (#1011): a gate② review session (reviewCwd) under bashSandbox "required" -> NO sandbox key — structurally Bash-less, never the floor', async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  const materializedDir = mkdtempSync(join(tmpdir(), "sapwood-materialized-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const rcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, bashSandbox: "required" });
+    const runner = mkRunner(dir, bin, { cfg: rcfg });
+    await runner.run({
+      roleId: "verification-plan-reviewer",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      reviewCwd: materializedDir,
+    });
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    const settings = JSON.parse(seen[seen.indexOf("--settings") + 1]!);
+    assert.equal("sandbox" in settings, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(materializedDir, { recursive: true, force: true });
+  }
+});
+
+test('run (#1011): retro under the default bashSandbox "host-managed" -> NO sandbox key (unchanged from every pre-#1011 caller)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const runner = mkRunner(dir, bin); // default cfg -> bashSandbox: host-managed
+    await runner.run({
+      roleId: "retro",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+      allowedTools: "Read,Write,Edit,Grep,Glob,Bash(git *)",
+    });
+    const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    assert.equal(seen[seen.indexOf("--permission-mode") + 1], "auto"); // default
+    const settings = JSON.parse(seen[seen.indexOf("--settings") + 1]!);
+    assert.equal("sandbox" in settings, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run: the ephemeral worktree is always deleted afterward — a role session never has WIP worth retaining", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {

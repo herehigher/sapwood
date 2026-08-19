@@ -83,6 +83,24 @@ worker:
 #   mode: hard # default: hard — fail-closed PreToolUse enforcement; "soft" only observes and
   #             # logs what would be blocked, never the shipped default
 
+# host: the --permission-mode requested for every claude session the engine spawns (worker legs
+  #       and every peripheral role session alike). See docs/configuration.md's "host and
+  #       bashSandbox" section / docs/security.md's "Execution profiles" section for full
+  #       semantics.
+# host:
+#   permissionMode: auto # default: auto — unchanged classifier-reviewed behavior; "dontAsk"
+    #                      # only runs an explicitly allowed/read-only/guard-approved action;
+    #                      # "bypassPermissions" runs everything unchecked (an operator call the
+    #                      # engine does not gate — triggers one startup WARN, never a refusal)
+
+# bashSandbox: host-managed # default: host-managed — the engine injects nothing, the operator's
+  #                          # own Claude settings decide whether the built-in Bash sandbox
+  #                          # engages. "required" composes DR #1009's floor JSON into the SAME
+  #                          # inline --settings the guard hook rides in on, for every Bash-
+  #                          # bearing session (worker legs + retro; never gate② or codex-exec) —
+  #                          # see docs/security.md's "Execution profiles" section for the exact
+  #                          # floor and its guaranteed-vs-residual lists.
+
 cost:
   roundBudgetUsd: 30 # default: 30 USD
   dailyBudgetUsd: 100 # default: 100 USD

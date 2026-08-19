@@ -807,6 +807,7 @@ const TELEMETRY_KIND_NAMES: readonly EventKind[] = [
   "directive-applied",
   "forge-page-ceiling",
   "web-access-denied-by-operator-settings",
+  "bypass-permissions-mode-configured",
   "user-settings-drift-detected",
   "fix-loop-unattached",
   "labels-reconciled",

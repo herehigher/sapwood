@@ -30,6 +30,7 @@ import { classifyEnvFailure, DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE
 import { mcpToolFullName, PR_TOOLS, TOOL_PR_AUDIT_COMMENTS, TOOL_PR_FAILED_CHECKS } from "../proxy/tools.js";
 import { State } from "../state/state.js";
 import {
+  bashSandboxFloor,
   buildRenderFixPrompt,
   buildRenderPrompt,
   classifyEgressTarget,
@@ -2942,6 +2943,58 @@ test("guardSettings: PreToolUse hook runs `node <hookPath>` and fails closed (ex
   assert.match(cmd, /SAPWOOD_GUARD_MODE.*soft.*exit 0/); // soft mode allows on crash (observe-only)
 });
 
+// ── #1011 AC2: guardSettings()'s bashSandbox floor composition ───────────────────────────────
+
+test("guardSettings (#1011): omitted bashSandbox opt -> no sandbox key at all, byte-identical to every pre-#1011 caller", () => {
+  const s = guardSettings("/x/dist/guard-hook.js") as Record<string, unknown>;
+  assert.equal("sandbox" in s, false);
+});
+
+test('guardSettings (#1011): bashSandbox mode "host-managed" -> no sandbox key, same as omitted', () => {
+  const s = guardSettings("/x/dist/guard-hook.js", { mode: "host-managed", deployKeyConfigured: false }) as Record<string, unknown>;
+  assert.equal("sandbox" in s, false);
+});
+
+test('guardSettings (#1011): bashSandbox mode "required" -> the exact DR #1009 floor JSON, excludedCommands present iff deployKeyConfigured', () => {
+  const withoutKey = guardSettings("/x/dist/guard-hook.js", { mode: "required", deployKeyConfigured: false }) as {
+    sandbox: Record<string, unknown>;
+  };
+  assert.deepEqual(withoutKey.sandbox, {
+    enabled: true,
+    autoAllowBashIfSandboxed: true,
+    allowUnsandboxedCommands: false,
+    failIfUnavailable: true,
+    network: { strictAllowlist: true },
+    filesystem: { denyRead: ["~/.config/gh", "~/.ssh", "~/.aws", "~/.claude/.credentials.json"] },
+  });
+  const withKey = guardSettings("/x/dist/guard-hook.js", { mode: "required", deployKeyConfigured: true }) as {
+    sandbox: Record<string, unknown>;
+  };
+  assert.deepEqual(withKey.sandbox, {
+    ...withoutKey.sandbox,
+    excludedCommands: ["git push *", "git fetch *", "git pull *", "git ls-remote *"],
+  });
+  // The guard hook wiring itself is untouched by the sandbox composition (same object, same keys).
+  assert.equal((withKey as unknown as { disableAllHooks: boolean }).disableAllHooks, false);
+});
+
+test("bashSandboxFloor (#1011): direct unit — same shape guardSettings composes, exported for independent testing", () => {
+  assert.deepEqual(bashSandboxFloor(false), {
+    enabled: true,
+    autoAllowBashIfSandboxed: true,
+    allowUnsandboxedCommands: false,
+    failIfUnavailable: true,
+    network: { strictAllowlist: true },
+    filesystem: { denyRead: ["~/.config/gh", "~/.ssh", "~/.aws", "~/.claude/.credentials.json"] },
+  });
+  assert.deepEqual((bashSandboxFloor(true) as { excludedCommands: string[] }).excludedCommands, [
+    "git push *",
+    "git fetch *",
+    "git pull *",
+    "git ls-remote *",
+  ]);
+});
+
 test("shellSingleQuote: suppresses shell expansion of $, backticks, $()", () => {
   assert.equal(shellSingleQuote("/a/b"), "'/a/b'");
   assert.equal(shellSingleQuote("/p/$(rm -rf x)/h.js"), "'/p/$(rm -rf x)/h.js'"); // $() not expanded
@@ -3004,6 +3057,147 @@ test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_G
     s?.dispose();
     if (previousGhToken === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previousGhToken;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #1011 AC2: dispatch()/resume() thread host.permissionMode + bashSandbox through to the real
+// spawn argv/--settings — end-to-end, not just guardSettings()'s own unit tests above. ─────────
+
+test('dispatch (#1011): host.permissionMode "dontAsk" -> --permission-mode dontAsk in argv; bashSandbox "required" (no deploy key configured) -> the inline --settings sandbox floor with NO excludedCommands', async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nexit 0\n`,
+    );
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      host: { permissionMode: "dontAsk" },
+      bashSandbox: "required",
+    });
+    s = new WorkerSupervisor({ now: realClock, cfg: scfg, stateDir: dir, claudeBin: bin, renderPrompt: () => "p", guardHookPath: hook });
+    await s.dispatch({ number: 41, title: "t", labels: [] }, "lane-1011-dispatch-dontask");
+    await waitForFile(join(dir, "args.seen"), "argv was not published");
+    const argv = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    const modeIdx = argv.indexOf("--permission-mode");
+    assert.ok(modeIdx >= 0);
+    assert.equal(argv[modeIdx + 1], "dontAsk");
+    const settingsIdx = argv.indexOf("--settings");
+    assert.ok(settingsIdx >= 0);
+    const settings = JSON.parse(argv[settingsIdx + 1]!);
+    assert.deepEqual(settings.sandbox, {
+      enabled: true,
+      autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false,
+      failIfUnavailable: true,
+      network: { strictAllowlist: true },
+      filesystem: { denyRead: ["~/.config/gh", "~/.ssh", "~/.aws", "~/.claude/.credentials.json"] },
+    });
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('dispatch (#1011): bashSandbox "host-managed" (default) -> the inline --settings carries NO sandbox key at all', async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nexit 0\n`,
+    );
+    const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } }); // bashSandbox defaults host-managed
+    s = new WorkerSupervisor({ now: realClock, cfg: scfg, stateDir: dir, claudeBin: bin, renderPrompt: () => "p", guardHookPath: hook });
+    await s.dispatch({ number: 42, title: "t", labels: [] }, "lane-1011-dispatch-hostmanaged");
+    await waitForFile(join(dir, "args.seen"), "argv was not published");
+    const argv = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    const modeIdx = argv.indexOf("--permission-mode");
+    assert.equal(argv[modeIdx + 1], "auto"); // default
+    const settingsIdx = argv.indexOf("--settings");
+    const settings = JSON.parse(argv[settingsIdx + 1]!);
+    assert.equal("sandbox" in settings, false);
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('dispatch (#1011): bashSandbox "required" + worker.deployKeyPath configured -> the sandbox floor also carries the four-verb excludedCommands exception', async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nexit 0\n`,
+    );
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { deployKeyPath: "/tmp/fake-deploy-key-1011", deployKeyId: 1 },
+      bashSandbox: "required",
+    });
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg: scfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      probeDeployKeySsh: async () => ({ ok: true }),
+    });
+    await s.dispatch({ number: 43, title: "t", labels: [] }, "lane-1011-dispatch-deploykey");
+    await waitForFile(join(dir, "args.seen"), "argv was not published");
+    const argv = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    const settingsIdx = argv.indexOf("--settings");
+    const settings = JSON.parse(argv[settingsIdx + 1]!);
+    assert.deepEqual(settings.sandbox.excludedCommands, ["git push *", "git fetch *", "git pull *", "git ls-remote *"]);
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resume (#1011): a fix/resume leg gets the SAME bashSandbox "required" floor + configured --permission-mode as dispatch()', async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      host: { permissionMode: "bypassPermissions" },
+      bashSandbox: "required",
+    });
+    s = new WorkerSupervisor({ now: realClock, cfg: scfg, stateDir: dir, claudeBin: bin, renderPrompt: () => "p", guardHookPath: hook });
+    const { name, sessionId } = await s.dispatch({ number: 44, title: "t", labels: [] }, "lane-1011-resume");
+    await waitForFile(join(dir, "args.seen"), "dispatch argv was not published");
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.done.json`)), "driving-lane precondition: dispatch must have reached done");
+    rmSync(join(dir, "args.seen"));
+    // Fix-leg entry (opts.sessionId/opts.prompt) — the shape a driving-lane fix leg actually
+    // uses, never the .handoff-sentinel resume path (A1: resume() no longer requires .handoff).
+    await s.resume({ number: 44, title: "t", labels: [] }, name, { sessionId, prompt: "fix-leg: address review findings" });
+    await waitForFile(join(dir, "args.seen"), "resume argv was not published");
+    const argv = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    const modeIdx = argv.indexOf("--permission-mode");
+    assert.equal(argv[modeIdx + 1], "bypassPermissions");
+    const settingsIdx = argv.indexOf("--settings");
+    const settings = JSON.parse(argv[settingsIdx + 1]!);
+    assert.ok(settings.sandbox, "resume() must compose the SAME bashSandbox floor dispatch() does");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });

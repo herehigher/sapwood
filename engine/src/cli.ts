@@ -29,6 +29,7 @@ import {
 } from "./forge/forge.js";
 import { type BaseRedPin, baseRedPin } from "./loop/base-ci.js";
 import { createBranchProtectionDetector } from "./loop/branch-protection-warning.js";
+import { detectBypassPermissionsMode } from "./loop/bypass-permissions-warning.js";
 import { detectClaudeVersionStartupTier } from "./loop/claude-version-startup-check.js";
 import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop/conductor.js";
 import {
@@ -2928,6 +2929,9 @@ async function runTickEngine(
     // #410 amendment: same best-effort startup-pass stance as the board normalization above —
     // detects, never blocks, never mutates.
     checkWebAccessSettingsDenial(cfg, state, log);
+    // #1011: same disclose-only stance — one WARN (log + event) when host.permissionMode is
+    // configured "bypassPermissions", never a gate. See bypass-permissions-warning.ts's own doc.
+    detectBypassPermissionsMode(cfg, state, log);
     // #385 F10: same stance again — announces the `prFixCap > 0` + unattached-fix-loop
     // combination ONCE here, rather than leaving it to surface per-escalation on an already
     // needs-human PR. See announceFixLoopUnattached's own doc.
@@ -3181,6 +3185,9 @@ async function runRoundsEngine(
     // #410 amendment: same best-effort startup-pass stance as the board normalization above —
     // detects, never blocks, never mutates.
     checkWebAccessSettingsDenial(cfg, state, log);
+    // #1011: same disclose-only stance — one WARN (log + event) when host.permissionMode is
+    // configured "bypassPermissions", never a gate. See bypass-permissions-warning.ts's own doc.
+    detectBypassPermissionsMode(cfg, state, log);
     // #385 F10: same stance again — announces the `prFixCap > 0` + unattached-fix-loop
     // combination ONCE here, rather than leaving it to surface per-escalation on an already
     // needs-human PR. See announceFixLoopUnattached's own doc.

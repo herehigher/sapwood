@@ -259,4 +259,11 @@ export const RUN_EVENT_KINDS = defineKinds({
     actionability: "investigate",
     see: "#410",
   },
+  "bypass-permissions-mode-configured": {
+    tags: [],
+    meaning:
+      "startup detected host.permissionMode: bypassPermissions — every claude session runs unchecked on the operator's own say-so; disclosure only, never a gate (#1011).",
+    actionability: "investigate",
+    see: "#1011",
+  },
 });

@@ -372,8 +372,9 @@ values; only the allow side moves.
   paths](https://code.claude.com/docs/en/permission-modes#protected-paths). **This is an operator
   call the engine does not gate:** whether the operator's own OS-level isolation is adequate is a
   judgment the engine has no way to verify. At startup, when `bypassPermissions` is configured,
-  the engine emits one guidance-carrying WARN (log + event) naming the outer-boundary recipe
-  below. Probed live (#1009 P8): a headless `-p` session under `bypassPermissions` starts with no
+  the engine emits one guidance-carrying WARN (log line + a `bypass-permissions-mode-configured`
+  state event, #1011) naming the outer-boundary recipe below. Probed live (#1009 P8): a headless
+  `-p` session under `bypassPermissions` starts with no
   acceptance dialog, and the engine's deny side still fires — `--disallowedTools`
   (`decision_reason_type: "rule"`) AND an inline PreToolUse guard hook's `exit 2`
   (`PreToolUse:Bash hook error: ...`) both independently blocked a `gh pr merge` attempt,
