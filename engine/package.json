@@ -1,17 +1,25 @@
 {
-  "name": "@sapwood/engine",
+  "name": "sapwood",
   "version": "0.0.0",
   "description": "sapwood orchestration engine (conductor, worker, forge, guard, state)",
   "type": "module",
   "engines": { "node": ">=24.0.0" },
   "main": "dist/index.js",
   "bin": { "sapwood": "dist/cli.js" },
+  "files": ["dist", "prompts", "pricing.yaml"],
   "scripts": {
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "lint": "biome ci src",
     "build": "tsc",
-    "test": "sh scripts/run-tests.sh"
+    "test": "sh scripts/run-tests.sh",
+    "prepublishOnly": "npm run build"
   },
+  "repository": { "type": "git", "url": "git+https://github.com/herehigher/sapwood.git" },
+  "homepage": "https://github.com/herehigher/sapwood",
+  "bugs": { "url": "https://github.com/herehigher/sapwood/issues" },
+  "keywords": ["claude-code", "automation", "github", "governance", "ci"],
+  "license": "MIT",
+  "publishConfig": { "access": "public" },
   "dependencies": {
     "yaml": "^2.5.0",
     "zod": "^3.23.0"

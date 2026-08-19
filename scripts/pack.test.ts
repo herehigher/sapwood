@@ -1,0 +1,62 @@
+// pack.test.ts (#1032): proves the `engine` workspace is actually installable as the bare
+// `sapwood` npm package on a machine with no clone of this repo — the delivery mechanism both
+// `npm i -g sapwood@alpha` and the marketplace plugin's `npx sapwood@<version>` depend on.
+// `npm pack` -> `npm install <tarball>` into a scratch prefix, then the installed binary is
+// exercised exactly as an end user's shell would run it. Only the sapwood tarball itself is
+// installed from a local file path; the two runtime deps (yaml, zod) resolve from npm's local
+// cache in practice (this repo's own `npm ci` already populated it), so the test needs no
+// network access to pass — never asserted here, since npm has no flag that turns a missing-cache
+// miss into a hard local-only failure without also risking spurious failures on a cold cache.
+//
+// Bounded, not timing-dependent: the whole sequence (rebuild + pack + install + two CLI
+// invocations) runs synchronously and finishes in single-digit seconds locally; the explicit
+// timeout below is slack for a slower CI machine, not a race with anything concurrent.
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+test("packed engine tarball installs and runs as the `sapwood` npm package", { timeout: 60_000 }, () => {
+  const packDir = mkdtempSync(join(tmpdir(), "sapwood-pack-"));
+  const installDir = mkdtempSync(join(tmpdir(), "sapwood-install-"));
+  try {
+    // Rebuild first: a stale dist/ from a previous step would make this test pass for the wrong
+    // reason (asserting yesterday's build is installable, not today's source).
+    execFileSync("npm", ["run", "build", "--workspace", "engine"], { cwd: REPO_ROOT, stdio: "pipe" });
+    execFileSync("npm", ["pack", "--workspace", "engine", "--pack-destination", packDir], { cwd: REPO_ROOT, stdio: "pipe" });
+
+    const manifestVersion = (JSON.parse(readFileSync(join(REPO_ROOT, "engine", "package.json"), "utf8")) as { version: string }).version;
+    const tarballPath = join(packDir, `sapwood-${manifestVersion}.tgz`);
+    assert.ok(existsSync(tarballPath), `expected \`npm pack\` to produce ${tarballPath}`);
+
+    execFileSync("npm", ["install", "--prefix", installDir, tarballPath, "--ignore-scripts", "--no-audit", "--no-fund"], {
+      cwd: REPO_ROOT,
+      stdio: "pipe",
+    });
+
+    const installedRoot = join(installDir, "node_modules", "sapwood");
+    const cliPath = join(installedRoot, "dist", "cli.js");
+    assert.ok(existsSync(cliPath), "installed package is missing dist/cli.js (the `sapwood` bin entry)");
+    assert.ok(
+      existsSync(join(installedRoot, "dist", "guard", "guard-hook.js")),
+      "installed package is missing the guard hook — a worker session's PreToolUse guard would silently not run",
+    );
+    assert.ok(existsSync(join(installedRoot, "prompts", "worker.md")), "installed package is missing a shipped role prompt");
+
+    // execFileSync throws on a non-zero exit, so reaching either assertion below already proves
+    // the process exited 0 — a separate status check would only restate that.
+    const versionOut = execFileSync("node", [cliPath, "--version"], { encoding: "utf8" }).trim();
+    assert.equal(versionOut, manifestVersion, "`sapwood --version` must print the packed manifest's version");
+
+    const helpOut = execFileSync("node", [cliPath, "--help"], { encoding: "utf8" });
+    assert.match(helpOut, /usage: sapwood/);
+  } finally {
+    rmSync(packDir, { recursive: true, force: true });
+    rmSync(installDir, { recursive: true, force: true });
+  }
+});

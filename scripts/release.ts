@@ -396,7 +396,25 @@ export const PUBLISH_STEPS: PublishStep[] = [
       }
     },
   },
+  {
+    // Pre-releases must never become `latest` — that's the tag `npm install sapwood` (no
+    // version) and `npx sapwood@latest` resolve, so an alpha landing there would silently
+    // become the default install for everyone. Runs after gh-release: the GitHub Release +
+    // tag are the durable, always-true record of what was cut; if npm ever failed to
+    // publish that record already exists and `publish` is safely re-runnable to retry
+    // just the npm step (npm rejects re-publishing an existing version, but never a retry
+    // of a failed one).
+    name: "npm-publish",
+    describe: (ctx) => `npm publish --workspace engine --tag ${npmDistTag(ctx)}`,
+    run: (ctx, deps) => {
+      deps.exec("npm", ["publish", "--workspace", "engine", "--tag", npmDistTag(ctx)]);
+    },
+  },
 ];
+
+function npmDistTag(ctx: PublishContext): string {
+  return ctx.prerelease ? "alpha" : "latest";
+}
 
 export interface CommandResult {
   code: number;

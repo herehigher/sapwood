@@ -150,7 +150,7 @@ function writeFakeLockfile(repoRoot: string, version: string): void {
     lockfileVersion: 3,
     packages: {
       "": { name: "sapwood-workspace", version },
-      engine: { name: "@sapwood/engine", version },
+      engine: { name: "sapwood", version },
       dashboard: { name: "@sapwood/dashboard", version },
     },
   };
@@ -389,6 +389,7 @@ function fakeExec(opts: { head: string; origin: string; dirty: string; tagOut: s
     }
     if (file === "git" && (args[0] === "tag" || args[0] === "push")) return "";
     if (file === "gh") return "";
+    if (file === "npm" && args[0] === "publish") return "";
     throw new Error(`unexpected exec in test: ${file} ${args.join(" ")}`);
   };
 }
@@ -532,18 +533,20 @@ test("runPublish --dry-run: prints --prerelease for an alpha version, runs nothi
     assert.equal(r.code, 0);
     assert.match(r.output, /--dry-run/);
     assert.match(r.output, /--prerelease/);
+    assert.match(r.output, /npm publish --workspace engine --tag alpha/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("runPublish --dry-run: omits --prerelease for a plain release version", () => {
+test("runPublish --dry-run: omits --prerelease for a plain release version, npm tag is latest", () => {
   const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
   try {
     const deps: Deps = { repoRoot: dir, exec: fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }) };
     const r = runPublish(deps, { dryRun: true });
     assert.equal(r.code, 0);
     assert.doesNotMatch(r.output, /--prerelease/);
+    assert.match(r.output, /npm publish --workspace engine --tag latest/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -588,12 +591,18 @@ test("runPublish (real run, not dry-run): exact tag/push/gh-release argv, --prer
 
     assert.equal(notesFileContents.length, 1);
     assert.equal(notesFileContents[0], extractVersionSection(changelog, version));
+
+    const npmCall = calls.find((c) => c.file === "npm");
+    assert.deepEqual(npmCall?.args, ["publish", "--workspace", "engine", "--tag", "alpha"]);
+    // never `latest` for a pre-release, and the npm step is the LAST step run — it publishes
+    // only once the tag + GitHub Release (the durable "this version shipped" record) exist.
+    assert.ok(calls.indexOf(npmCall!) > calls.indexOf(ghCall!));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("runPublish (real run): --prerelease absent from the gh-release argv for a plain release version", () => {
+test("runPublish (real run): --prerelease absent from the gh-release argv for a plain release version, npm tag is latest", () => {
   const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
   try {
     const { exec, calls } = withRecorder(fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }));
@@ -602,6 +611,9 @@ test("runPublish (real run): --prerelease absent from the gh-release argv for a 
     assert.equal(r.code, 0);
     const ghCall = calls.find((c) => c.file === "gh");
     assert.ok(!ghCall?.args.includes("--prerelease"));
+    const npmCall = calls.find((c) => c.file === "npm");
+    assert.deepEqual(npmCall?.args, ["publish", "--workspace", "engine", "--tag", "latest"]);
+    assert.ok(calls.indexOf(npmCall!) > calls.indexOf(ghCall!));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

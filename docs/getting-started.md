@@ -57,6 +57,32 @@ There is no marketplace coordinate, npm package, or prebuilt `engine/dist`; the 
 plugin wrappers (`/sapwood-run`, `/sapwood-status`, `/sapwood-stop`) additionally require
 `npm ci` at the plugin root and cover only `run`, `status`, and `stop`, not `init` or `validate`.
 
+### Channel C — npm
+
+The engine publishes to npm as the bare package `sapwood` (the `@sapwood` scope is reserved
+for future split packages — see [`10-releasing.md`](dev-guide/10-releasing.md)). This is the
+no-clone path: no build step, nothing to link.
+
+```
+npx sapwood@<version> init
+npx sapwood@<version> validate
+npx sapwood@<version> run --dry-run
+```
+
+Or install it once and use the bare `sapwood` command from then on:
+
+```
+npm i -g sapwood@alpha
+sapwood --version
+sapwood init --help
+```
+
+`alpha` is the pre-release dist-tag (a pre-release version never becomes `latest` — see
+[`10-releasing.md`](dev-guide/10-releasing.md)); drop it once a plain release ships. Every CLI
+verb Channel A lists above is the same binary
+(`dist/cli.js`) either way — Channel A is the contributor path (build from source, iterate on
+the engine itself); Channel C is the consumer path (run a published version, no clone).
+
 ## Bootstrap the target repo, then run `sapwood init`
 
 `init` loads an existing config before it can provision anything. From the repo you want
