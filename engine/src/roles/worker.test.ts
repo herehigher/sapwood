@@ -8736,6 +8736,105 @@ test("resume: a resumed leg's ContextManifest OVERWRITES the prior leg's row und
   }
 });
 
+// #1010 gate② P1 regression: the test above never caught the leg-scoping bug because
+// mkHandoffLane's ORIGINAL leg emits no init line at all — parseSessionInit(wholeJsonl) falling
+// through to the resumed leg's init line looked correct by coincidence. This test gives BOTH
+// legs their own distinct init line so a first-init read (the pre-fix bug) is distinguishable
+// from a leg-scoped read (the fix) — and pins the fix's three guarantees at once: the overwritten
+// manifest's init-derived fields (model/mcpTools/permissionMode) all come from the RESUMED leg,
+// exactly one permission-mode-mismatch event fires (the resumed leg's own, not a phantom off the
+// original leg's "auto"), and the resumed leg's own non-zero exit still settles as failed —
+// the manifest fix never touches lane outcome.
+test("resume (#1010 gate② P1): a resumed leg's OWN init line — never the ORIGINAL leg's — lands in the overwritten manifest; the resumed leg's own permission-mode-mismatch fires exactly once; the lane's failure outcome is unaffected", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const state = new State(join(dir, "state.sqlite"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const ready = join(dir, "stub-ready");
+    const originalInit = JSON.stringify({
+      type: "system",
+      subtype: "init",
+      model: "original-model",
+      permissionMode: "auto",
+      mcp_servers: [{ name: "original-server", status: "pending" }],
+    });
+    const resumedInit = JSON.stringify({
+      type: "system",
+      subtype: "init",
+      model: "resumed-model",
+      permissionMode: "default",
+      mcp_servers: [{ name: "resumed-server", status: "pending" }],
+    });
+    // The resumed leg exits NON-ZERO (no result line at all) so the lane settles `failed` —
+    // proving the manifest leg-scoping fix is orthogonal to the lane's own outcome.
+    const bin = mkStub(
+      dir,
+      [
+        "#!/usr/bin/env bash",
+        `if [[ "$*" == *"--resume"* ]]; then`,
+        `  echo '${resumedInit}'`,
+        `  exit 1`,
+        "fi",
+        `echo '${originalInit}'`,
+        "trap 'exit 0' TERM",
+        `touch "${ready}"`,
+        "for _ in $(seq 1 600); do sleep 1; done",
+        "",
+      ].join("\n"),
+    );
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "issue-rendered-prompt",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+      state,
+      preSpawnCaptureTimeoutMs: 2_000,
+      preSpawnCapturePollMs: 20,
+    });
+    const { name } = await s.dispatch({ number: 1010, title: "t", labels: [] });
+    await waitForFile(ready, "stub installed its TERM trap before handoff");
+    assert.equal(s.requestHandoff(name), true);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "handed off before resuming");
+
+    const resumed = await s.resume({ number: 1010, title: "t", labels: [] }, name);
+    await waitForFile(join(dir, `${name}.failed.json`), "resumed leg exits non-zero -> failed sentinel");
+    const failedSentinel = JSON.parse(readFileSync(join(dir, `${name}.failed.json`), "utf8"));
+    assert.equal(failedSentinel.exit_code, 1, "the manifest leg-scoping fix must never change the lane's own outcome");
+
+    let recorded: { recordedAt: string; json: string } | undefined;
+    for (let i = 0; i < 200 && !recorded; i++) {
+      recorded = state.getContextManifest({ roundId: 0, phase: "worker", role: "worker", session: name, attempt: 1 });
+      if (!recorded) await sleep(20);
+    }
+    assert.ok(recorded, "expected a context_manifests row for the resumed lane");
+    const manifest = JSON.parse(recorded!.json);
+    assert.equal(manifest.model, "resumed-model", "leg-scoped: the RESUMED leg's own init, never the ORIGINAL leg's");
+    assert.equal(manifest.permissionMode, "default");
+    assert.deepEqual(manifest.mcpTools, ["resumed-server:pending"]);
+
+    assert.deepEqual(
+      state.eventsSince("1970-01-01T00:00:00.000Z", ["permission-mode-mismatch"]),
+      [
+        {
+          kind: "permission-mode-mismatch",
+          payload: { worker: name, issue: 1010, session_id: resumed.sessionId, requested: "auto", effective: "default" },
+        },
+      ],
+      "exactly ONE mismatch event — the resumed leg's own divergence, not a phantom off the original leg's auto/auto init",
+    );
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // #245: resume()'s own forge MCP proxy attachment — mirrors dispatch()'s #244 mechanism above,
 // extended to WorkerSupervisor.resume() (the fix-loop worker leg's evidence channel). Every

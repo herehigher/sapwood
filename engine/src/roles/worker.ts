@@ -3879,7 +3879,7 @@ export class WorkerSupervisor implements Supervisor {
     // `.then()` runs whenever the in-flight pre-spawn capture settles, which may be AFTER this
     // synchronous method returns (see scheduleContextManifestRecording's own doc for why this
     // can't simply read a value off `lane` here).
-    this.scheduleContextManifestRecording(name, lane.jsonlPath, lane.prompt, lane.manifestPreSpawnPromise);
+    this.scheduleContextManifestRecording(name, lane.jsonlPath, lane.prompt, lane.manifestPreSpawnPromise, lane.jsonlLegOffset);
     this.lanes.delete(name);
     // #395 (gate② round 3): drop this lane's heartbeat gate along with the lane itself — onExit
     // is the one place a lane truly terminates (this method's own doc), so this is the one
@@ -4036,16 +4036,20 @@ export class WorkerSupervisor implements Supervisor {
    *  perspective — onExit stays synchronous; this method's own promise chain resolves whenever
    *  it resolves, independent of the lane's continued presence in `this.lanes`. `jsonlPath`/
    *  `prompt` are passed explicitly (captured by the caller BEFORE lane deletion) rather than
-   *  re-read off a `Lane` object this method never assumes still exists. */
+   *  re-read off a `Lane` object this method never assumes still exists. `jsonlLegOffset`
+   *  (#1010 gate② P1) is the SAME per-leg start offset onExit() already threads into
+   *  writeTerminalSentinel's own readJsonlFromByte slice — needed here too so the init-derived
+   *  manifest fields land leg-scoped; see recordLaneContextManifest's own doc for why. */
   private scheduleContextManifestRecording(
     name: string,
     jsonlPath: string,
     prompt: string,
     preSpawnPromise: Promise<PreSpawnManifestCapture | undefined> | undefined,
+    jsonlLegOffset: number,
   ): void {
     if (!preSpawnPromise) return; // lane never reached the confirmed-alive gate — capture never started
     preSpawnPromise
-      .then((pre) => this.recordLaneContextManifest(name, jsonlPath, prompt, pre))
+      .then((pre) => this.recordLaneContextManifest(name, jsonlPath, prompt, pre, jsonlLegOffset))
       .catch((e) => this.log(`[sapwood:context-manifest] lane ${name}: pre-spawn capture promise rejected (non-fatal): ${String(e)}`));
   }
 
@@ -4071,13 +4075,33 @@ export class WorkerSupervisor implements Supervisor {
    *  `"worktree-missing"`) — never `"structural-no-write-tools"` — because every worker leg's
    *  `--allowedTools` grant (WORKER_ALLOWED_TOOLS or its NO_GH variant) always carries `Write`/
    *  `Edit`/`Bash(...)`, unlike most peripheral roles: the "no write-capable tool" case this
-   *  engine's dirty-derivation enum also carries structurally cannot apply to a worker lane. */
-  private recordLaneContextManifest(name: string, jsonlPath: string, prompt: string, pre: PreSpawnManifestCapture | undefined): void {
+   *  engine's dirty-derivation enum also carries structurally cannot apply to a worker lane.
+   *
+   *  #1010 gate② P1: the row's documented "most-recent-leg" scope above is a promise about every
+   *  field it carries, not just the overwrite-on-upsert mechanics — so the INIT-DERIVED fields
+   *  (`model`/`cliVersion`/`mcpTools`/`permissionMode`) and `sandboxViolationCount` below are all
+   *  parsed from `legJsonl` (this leg's OWN slice, `jsonlLegOffset` onward — the identical offset
+   *  writeTerminalSentinel's own `readJsonlFromByte` call already uses), never the cumulative
+   *  whole-session `jsonl`. `parseSessionInit` returns only the FIRST init line in whatever
+   *  string it's given; reading it off the full append-only lane jsonl would silently return the
+   *  ORIGINAL leg's init on every resume, even though this row is documented (and, since #1010,
+   *  actually keyed) as the most-recent leg's fingerprint. `toolUsage`/`readPaths` are a
+   *  deliberate exception — left reading the full `jsonl` as before (out of this fix's scope; the
+   *  "what did this session use, cumulative across every leg" framing was never leg-scoped to
+   *  begin with, so leaving it alone here is not a regression). */
+  private recordLaneContextManifest(
+    name: string,
+    jsonlPath: string,
+    prompt: string,
+    pre: PreSpawnManifestCapture | undefined,
+    jsonlLegOffset: number,
+  ): void {
     if (!this.deps.state?.recordContextManifest) return;
     if (!pre) return;
     try {
       const jsonl = this.readJsonl(jsonlPath);
-      const init = parseSessionInit(jsonl);
+      const legJsonl = this.readJsonlFromByte(jsonlPath, jsonlLegOffset);
+      const init = parseSessionInit(legJsonl);
       const worktreePath = join(this.worktreeRoot, name);
       const { toolUsage, readPaths } = parseToolUsage(jsonl, worktreePath);
       const capturedPostExit = this.now().toISOString();
@@ -4106,9 +4130,10 @@ export class WorkerSupervisor implements Supervisor {
         // the other init self-report fields above — same "prefer the session's own report" stance
         // as model/mcpTools, and `null` when the init line carried no such field.
         permissionMode: init.permissionMode,
-        // #1010: same jsonl this whole assembly already scanned above — one extra string match,
-        // no second read of the file.
-        sandboxViolationCount: countSandboxViolations(jsonl),
+        // #1010 gate② P1: `legJsonl`, not the whole-session `jsonl` — a denied command's
+        // <sandbox_violations> block belongs to the LEG that hit it, so a resumed lane's count
+        // must never carry a prior leg's violations forward.
+        sandboxViolationCount: countSandboxViolations(legJsonl),
         worktree: !pre.worktreeAppeared
           ? { path: worktreePath, head: null, headResolution: "unresolved", dirty: true, dirtyBasis: "worktree-missing" }
           : {
