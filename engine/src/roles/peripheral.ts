@@ -43,6 +43,7 @@ import {
 import { shouldInjectSkillsPlugin } from "./skills-plugin.js";
 import {
   claudeArgs,
+  countSandboxViolations,
   discoverClaudeBin,
   EMPTY_MCP_CONFIG_JSON,
   extractFailureText,
@@ -56,6 +57,8 @@ import {
   parseResultText,
   parseSessionInit,
   parseToolUsage,
+  permissionModeMismatched,
+  REQUESTED_PERMISSION_MODE,
   type SpawnedSession,
   scanEgressSuspects,
   spawnClaudeSession,
@@ -1053,6 +1056,7 @@ export class RoleRunner {
       // permission layer then denied — evidence worth surfacing, not a case this scan silently
       // drops. Contained: best-effort, never throws, never affects the session's own outcome.
       this.recordEgressSuspects(name, jsonl);
+      this.recordPermissionModeMismatch(name, sessionId, jsonl);
       // #302 review (Codex P1, cost cap): parse once via the null-honest variant — `costUsd`
       // keeps its 0-fallback shape for spend accounting, `costKnown` records whether a cost
       // record actually existed (see RoleSessionResult.costKnown's doc).
@@ -1326,6 +1330,11 @@ export class RoleRunner {
       toolInventoryTools: init.tools,
       promptTemplateSource: opts.prompt,
       mcpTools: init.mcpServers.map((s) => `${s.name}:${s.status}`),
+      // #1010: same init self-report field worker.ts's recordLaneContextManifest reads.
+      permissionMode: init.permissionMode,
+      // #1010: same jsonl this whole assembly already scans (recordEgressSuspects reads its own
+      // copy above) — one extra string match, no second read of the file.
+      sandboxViolationCount: countSandboxViolations(jsonl),
       worktree,
       settingsJson,
       hookContent: pre.hookContent,
@@ -1378,6 +1387,32 @@ export class RoleRunner {
       }
     } catch (e) {
       (this.deps.log ?? console.error)(`[sapwood:role] session ${name}: egress tripwire failed (non-fatal): ${String(e)}`);
+    }
+  }
+
+  /** #1010: peripheral-session half of the SAME lane-end check worker.ts's
+   *  `WorkerSupervisor.recordPermissionModeMismatch` runs for a worker leg — whether THIS session's
+   *  own init line reported an effective host permission mode different from what the engine
+   *  requested. Same `worker: name` / `issue: 0` round-level-sentinel shape recordEgressSuspects
+   *  above uses (a role session has no single associated issue), plus `session_id` for the
+   *  per-session identity. Fail-safe, allow direction — `permissionModeMismatched` treats a `null`
+   *  effective mode (unparseable/absent field) as no-mismatch, and a scan/event-write failure here
+   *  is logged, never allowed to affect the session's own outcome. */
+  private recordPermissionModeMismatch(name: string, sessionId: string, jsonl: string): void {
+    if (!this.deps.state) return;
+    try {
+      const effective = parseSessionInit(jsonl).permissionMode;
+      if (permissionModeMismatched(effective)) {
+        this.deps.state.appendEvent("permission-mode-mismatch", {
+          worker: name,
+          issue: 0,
+          session_id: sessionId,
+          requested: REQUESTED_PERMISSION_MODE,
+          effective,
+        });
+      }
+    } catch (e) {
+      (this.deps.log ?? console.error)(`[sapwood:role] session ${name}: permission-mode-mismatch check failed (non-fatal): ${String(e)}`);
     }
   }
 

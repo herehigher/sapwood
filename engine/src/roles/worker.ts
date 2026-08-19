@@ -502,17 +502,33 @@ export function parseResultText(jsonl: string): string {
  *  parseResultText — never throws, a missing/malformed line or absent field resolves to
  *  null/[], never a guess. (The init event also carries the session's working directory, but
  *  callers derive that themselves from the lane/worktree name they already know, so it's not
- *  duplicated here.) */
+ *  duplicated here.)
+ *
+ *  #1010: `permissionMode` is the CLI's own report of the EFFECTIVE host permission mode this
+ *  session actually started under — verified present in the init line (`permissionMode:"auto"`)
+ *  against Claude Code CLI 2.1.235. The engine always REQUESTS `auto` (claudeArgs' `--permission-
+ *  mode auto` below), but Claude Code silently falls back to a different mode when auto is
+ *  unavailable (org settings turn it off / model unsupported) — this field is the only way to
+ *  observe that divergence; `null` means the init line carried no such field (an older CLI, or a
+ *  parse miss), never a claim that the mode was unset. */
 export interface SessionInitInfo {
   model: string | null;
   cliVersion: string | null;
   tools: string[];
   mcpServers: { name: string; status: string }[];
   memoryPathAuto: string | null;
+  permissionMode: string | null;
 }
 
 export function parseSessionInit(jsonl: string): SessionInitInfo {
-  const empty: SessionInitInfo = { model: null, cliVersion: null, tools: [], mcpServers: [], memoryPathAuto: null };
+  const empty: SessionInitInfo = {
+    model: null,
+    cliVersion: null,
+    tools: [],
+    mcpServers: [],
+    memoryPathAuto: null,
+    permissionMode: null,
+  };
   for (const line of jsonl.split("\n")) {
     const t = line.trim();
     if (!t.startsWith("{")) continue;
@@ -542,9 +558,81 @@ export function parseSessionInit(jsonl: string): SessionInitInfo {
       tools,
       mcpServers,
       memoryPathAuto,
+      permissionMode: typeof obj.permissionMode === "string" ? obj.permissionMode : null,
     };
   }
   return empty; // no init line found — honest empty, never a thrown error
+}
+
+/** #1010: the shared predicate both WorkerSupervisor's lane-end and peripheral.ts's role-session-
+ *  end read points evaluate before emitting `permission-mode-mismatch`. `effective` is a session's
+ *  own `SessionInitInfo.permissionMode`; `requested` defaults to the one mode the engine ever asks
+ *  for (`REQUESTED_PERMISSION_MODE`, `claudeArgs`' `--permission-mode` flag). `null` — the init
+ *  line carried no such field, or was never observed at all (a parser miss, a crashed-before-init
+ *  session) — is NEVER a mismatch: fail-safe, allow direction, so an unparseable/absent field can
+ *  never manufacture a false positive that then makes its way into the events ledger. */
+export function permissionModeMismatched(effective: string | null, requested: string = REQUESTED_PERMISSION_MODE): boolean {
+  return effective !== null && effective !== requested;
+}
+
+const SANDBOX_VIOLATIONS_TAG = "<sandbox_violations>";
+
+/** Extracts the text a `tool_result` block's own `content` carries — a bare string, or (the
+ *  richer shape) an array of content parts, each contributing its own `text` field when present.
+ *  Never throws; an unrecognized shape contributes no text. */
+function toolResultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((c) =>
+      c && typeof c === "object" && typeof (c as Record<string, unknown>).text === "string" ? (c as Record<string, unknown>).text : "",
+    )
+    .join("\n");
+}
+
+/** #1010: counts `<sandbox_violations>` blocks the CLI appends to a DENIED command's own
+ *  `tool_result` — verified 2026-08-19 that the `system/init` line carries no separate sandbox
+ *  field, so this tag is the only stream-json evidence a Bash-sandbox profile was engaged for a
+ *  given command. ONE STRING MATCH over the already-parsed jsonl (no new scanner module,
+ *  deliberately no richer parse of the block's own contents): counts the literal opening tag,
+ *  scoped to `type:"user"` messages' own `tool_result` content blocks only — never a match
+ *  against `assistant`/`system` text, so a session merely DISCUSSING sandbox violations (in code,
+ *  in commentary) can never inflate this count. Same tolerant parsing as every other scanner in
+ *  this file: a malformed/partial line is skipped, never thrown; no matches -> 0, never a guess.
+ *  Positive attestation that the sandbox was actually engaged (vs. simply absent from a leg with
+ *  no denied commands at all) is explicitly out of scope — left to DR #1009 (P5), per this
+ *  issue's own Why section — this is a COUNT of observed evidence, not a presence claim. */
+export function countSandboxViolations(jsonl: string): number {
+  let count = 0;
+  for (const line of jsonl.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(t) as Record<string, unknown>;
+    } catch {
+      continue; // partial/garbage line — ignore (stream may be mid-write)
+    }
+    if (obj.type !== "user") continue;
+    const message = obj.message;
+    if (!message || typeof message !== "object" || Array.isArray(message)) continue;
+    const content = (message as Record<string, unknown>).content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || typeof block !== "object" || Array.isArray(block)) continue;
+      const b = block as Record<string, unknown>;
+      if (b.type !== "tool_result") continue;
+      const text = toolResultText(b.content);
+      for (
+        let i = text.indexOf(SANDBOX_VIOLATIONS_TAG);
+        i !== -1;
+        i = text.indexOf(SANDBOX_VIOLATIONS_TAG, i + SANDBOX_VIOLATIONS_TAG.length)
+      ) {
+        count++;
+      }
+    }
+  }
+  return count;
 }
 
 /** #236 (Codex F1 residual, R1): a cheap presence check for the SAME init line parseSessionInit
@@ -1350,6 +1438,11 @@ function omitStaleDefaultBranch(env: NodeJS.ProcessEnv, defaultBranch: string | 
   return env;
 }
 
+/** #1010: the ONE mode the engine ever requests via `--permission-mode` — every claude role
+ *  session (worker and peripheral alike; both spawn through claudeArgs). Named so the lane-end
+ *  mismatch check below compares against this constant instead of a second hardcoded literal. */
+export const REQUESTED_PERMISSION_MODE = "auto";
+
 /** The full `claude -p` argv. Pure, so every flag is testable without spawning. NOTE: no
  *  --max-budget-usd — the per-worker budget is SOFT (monitored + graceful handoff), never a
  *  hard mid-step kill (PLAN.md). The hard ceiling is the conductor's, not the CLI's. */
@@ -1367,7 +1460,7 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
     o.name,
     ...(o.resumeSessionId ? ["--resume", o.resumeSessionId] : ["--session-id", o.sessionId]),
     "--permission-mode",
-    "auto",
+    REQUESTED_PERMISSION_MODE,
     // Coarse noise-reduction only — the real boundary is the guard hook (#26).
     "--allowedTools",
     o.allowedTools ?? WORKER_ALLOWED_TOOLS,
@@ -2689,6 +2782,32 @@ export class WorkerSupervisor implements Supervisor {
     }
   }
 
+  /** #1010: the SAME lane-end jsonl read recordEgressSuspects above uses, checking one more thing
+   *  — whether THIS leg's own init line reported an effective host permission mode different from
+   *  what the engine requested. `legJsonl` (not the whole-session jsonl) so a resumed lane's event
+   *  reflects the CURRENT leg's own init line, never a stale one from an earlier leg still sitting
+   *  in the same append-only file. Fail-safe, allow direction: never gates the lane's own outcome
+   *  (the terminal sentinel has already landed by the time this runs), and `permissionModeMismatched`
+   *  itself treats a `null` (unparseable/absent field) as no-mismatch rather than manufacturing a
+   *  false positive. Best-effort, same allow-direction catch as its sibling above. */
+  private recordPermissionModeMismatch(worker: string, issue: number, sessionId: string, legJsonl: string): void {
+    if (!this.deps.state) return;
+    try {
+      const effective = parseSessionInit(legJsonl).permissionMode;
+      if (permissionModeMismatched(effective)) {
+        this.deps.state.appendEvent("permission-mode-mismatch", {
+          worker,
+          issue,
+          session_id: sessionId,
+          requested: REQUESTED_PERMISSION_MODE,
+          effective,
+        });
+      }
+    } catch (e) {
+      this.log(`[sapwood:worker] lane ${worker}: permission-mode-mismatch check failed (non-fatal): ${String(e)}`);
+    }
+  }
+
   /** #244 (Codex sol-high PR #260 review round 2, P2): best-effort removal of a lane's
    *  credentialFree GH_CONFIG_DIR scratch directory — undefined `dir` (the common, non-
    *  credentialFree case) is a no-op. Called from BOTH cleanup paths a lane can exit through
@@ -3983,6 +4102,13 @@ export class WorkerSupervisor implements Supervisor {
         // read empty for a worker leg and silently misrecord "no MCP tools". Same field
         // peripheral.ts's assembleManifest already reads for the identical reason.
         mcpTools: init.mcpServers.map((s) => `${s.name}:${s.status}`),
+        // #1010: the session's own init-reported effective permission mode, recorded alongside
+        // the other init self-report fields above — same "prefer the session's own report" stance
+        // as model/mcpTools, and `null` when the init line carried no such field.
+        permissionMode: init.permissionMode,
+        // #1010: same jsonl this whole assembly already scanned above — one extra string match,
+        // no second read of the file.
+        sandboxViolationCount: countSandboxViolations(jsonl),
         worktree: !pre.worktreeAppeared
           ? { path: worktreePath, head: null, headResolution: "unresolved", dirty: true, dirtyBasis: "worktree-missing" }
           : {
@@ -4087,6 +4213,7 @@ export class WorkerSupervisor implements Supervisor {
     };
     this.writeJsonAtomic(this.path(name, `${tag}.json`), { ...base, exit_code: exitCode });
     this.recordEgressSuspects(name, issue, legJsonl);
+    this.recordPermissionModeMismatch(name, issue, sessionId, legJsonl);
     // A resumed child may terminate before the conductor persists DB=running. Keep its durable
     // adoption marker through that window; probe removes it after the terminal outcome is read
     // on the next ordinary running-lane reclaim tick.

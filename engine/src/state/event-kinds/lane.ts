@@ -344,4 +344,17 @@ export const LANE_EVENT_KINDS = defineKinds({
     actionability: "routine",
     see: "#705",
   },
+
+  // #1010: the shared observability floor the permission-mode/Bash-sandbox profile work (DR
+  // #1009) needs — a worker or peripheral session's own init line reported an effective host
+  // permission mode different from the one the engine requested (today: always `auto`).
+  "permission-mode-mismatch": {
+    tags: [],
+    meaning:
+      "a worker or peripheral session's init line reported an effective host permission mode " +
+      "different from the one the engine requested — informational only, fail-safe in the allow " +
+      "direction, and never affects the lane/session's own outcome.",
+    actionability: "investigate",
+    see: "#1010",
+  },
 });

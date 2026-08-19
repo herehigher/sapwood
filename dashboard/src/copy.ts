@@ -849,6 +849,7 @@ const TELEMETRY_KIND_NAMES: readonly EventKind[] = [
   "role-session-spawn-timeout",
   "role-worktree-retained",
   "lane-spawned",
+  "permission-mode-mismatch",
   // drive.ts
   "drive-thread-writes-pending",
   "gated-reentry-merged",

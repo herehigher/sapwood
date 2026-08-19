@@ -115,6 +115,8 @@ const mkFakeManifest = (tag: string): ContextManifest => ({
   toolInventoryHash: null,
   promptTemplateVersion: null,
   mcpTools: [],
+  permissionMode: null,
+  sandboxViolationCount: 0,
   worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: true, dirtyBasis: "unknown-write-capable-session" },
   settingsHash: "hash",
   hookHash: null,
