@@ -72,7 +72,7 @@ The proxy is a local, per-session, read-only MCP server. `startForgeProxyServer(
 
 ## Config & doctrine (`config/`)
 
-`loadConfig()` in `engine/src/config/config.ts` parses YAML/JSON, applies strict Zod defaults/refinements, resolves file paths, rejects unknown keys/collisions, and returns `SapwoodConfig`. All operator-adjustable policy belongs in this schema and the commented `sapwood.config.yaml`, not as source constants.
+`loadConfig()` in `engine/src/config/config.ts` parses YAML/JSON, applies strict Zod defaults/refinements, resolves file paths, rejects unknown keys/collisions, and returns `SapwoodConfig`. All operator-adjustable policy belongs in this schema and the commented starter `sapwood.config.example.yaml`, not as source constants.
 
 `engine/src/config/doctrine.ts` loads and caps trusted review/escalation prose used in prompts; `directive.ts` ingests and archives one round directive; `pricing.ts` validates model rates/context windows for live estimates. Change a tunable by updating schema, defaults/sample, and `docs/configuration.md` together.
 

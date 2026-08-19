@@ -4,8 +4,10 @@
 # "Human-merge-only paths"). Not a starter for another repository — that is
 # sapwood.config.example.yaml (docs/configuration.md "Two config files").
 #
-# Only non-default values and the values that name this repo's governance are written; every
-# other key is the schema default (engine/src/config/config.ts). Change = PR + engine restart.
+# Written here: (a) every non-default value, and (b) every value that changes authority,
+# merge/review behaviour, a security boundary, or a governance name — pinned even when it equals
+# today's schema default, so a default change in engine/src/config/config.ts can never silently
+# change what governs this repo. Purely operational defaults are omitted. Change = PR + restart.
 
 goal:
   file: docs/PLAN.md # sapwood's goal file (framework default: docs/GOAL.md)
@@ -22,7 +24,7 @@ board:
     done: Done
 
 lanes:
-  roundDispatchCap: 6
+  roundDispatchCap: 6 # two concurrency-wide waves per round, amortising the align/architect/harvest/retro cost
   prFixCap: 4 # explicit on purpose: the fix-leg cap this repo runs with (= schema default, #450)
 
 worker:
@@ -44,6 +46,35 @@ reviewer:
 ci:
   requiredChecks:
     - name: test # .github/workflows/ci.yml job; #784 refuses to start engine-agent review without one
+
+# ── governance pins (equal to today's defaults; see header) ──────────────────────────────────
+guard:
+  mode: hard
+merge:
+  mode: conductor-merge
+proxy:
+  enabled: true
+labels:
+  prefix: "sapwood:"
+  humanMergeOnly: "sapwood:human-merge-only"
+escalation:
+  humanLabels: ["sapwood:needs-human", "sapwood:blocked"]
+  holdLabels: ["sapwood:hold"]
+  instructionPaths:
+    - CLAUDE.md
+    - CLAUDE.local.md
+    - .claude/CLAUDE.md
+    - .claude/rules/**
+    - AGENTS.md
+    - engine/prompts/**
+    - engine/src/review/instruction-path-escalation.ts
+    - engine/src/config/config.ts
+    - sapwood.config.example.yaml
+    - docs/security.md
+    - engine/src/roles/skills-plugin.ts
+    - engine/src/forge/labels.ts
+doctrine:
+  file: docs/REVIEW-DOCTRINE.md
 
 round:
   milestone: "v0.2 — Dashboard (dogfood)"
