@@ -5247,9 +5247,9 @@ test("#906 REPLAY: dispatched -> reclaim-done(DRIVING) -> pr-held folds held:tru
   assert.equal(notHeldLaneView?.held, false, "the untouched lane must never inherit a hold it never received");
 
   const cardsAtHoldCursor = deriveReplayedLanes(held.state.hero);
-  // gate② finding [3] (ac5-pr-source-unasserted): asserting only [issue, held] stays green even
-  // if the (worker, pr) propagation from pr-held's OWN payload broke — pr must land here too, and
-  // ONLY here (w2's reclaim-done carries no pr, so it must still read null at this cursor).
+  // #906: assert pr alongside [issue, held] — the (worker, pr) propagation from pr-held's OWN
+  // payload must land here too, and ONLY here (w2's reclaim-done carries no pr, so it must still
+  // read null at this cursor).
   assert.deepEqual(
     cardsAtHoldCursor.map((c) => [c.issue, c.held, c.pr]).sort((a, b) => (a[0] as number) - (b[0] as number)),
     [
@@ -5293,8 +5293,8 @@ test("#906 REPLAY: dispatched -> reclaim-done(DRIVING) -> pr-held folds held:tru
   assert.match(replayHtml, /lane-card-state-held/, "replay must render the SAME bordered ON HOLD chip class the live path does");
   assert.match(replayHtml, />on hold</, "replay's held lane must read the SAME word the live path renders for held:true");
   assert.match(replayHtml, /PR under review/, "replay's non-held lane must read the SAME word the live path renders for held:false");
-  // gate② finding [3]: the RENDERED card must show the PR learned from pr-held itself — only the
-  // held lane ever learned one at all (w2's own reclaim-done carries no pr field either).
+  // #906: the RENDERED card must show the PR learned from pr-held itself — only the held lane
+  // ever learned one at all (w2's own reclaim-done carries no pr field either).
   assert.equal(
     (replayHtml.match(/class="lane-card-pr"/g) ?? []).length,
     1,

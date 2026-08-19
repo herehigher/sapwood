@@ -1,9 +1,9 @@
-// #906 gate② finding [1] (ac5-wrong-pin-glyph): the ON HOLD chip's own glyph is a standard
-// resource, not a hand-drawn one — `icons.tsx`'s own header reserves that file for the
-// identity set plus glyphs with no standard equivalent; a component reaching for a lucide
-// utility icon imports it directly (§2 adjudication table, same pattern `stage.tsx` already
-// uses for its own utility icons). `Pin`'s real shape (rounded head + crossbar + needle) is
-// what the mockup draws — a hand-guessed SVG (the prior map-pin teardrop) got the shape wrong.
+// #906: the ON HOLD chip's own glyph is a standard resource, not a hand-drawn one —
+// `icons.tsx`'s own header reserves that file for the identity set plus glyphs with no standard
+// equivalent; a component reaching for a lucide utility icon imports it directly (§2 adjudication
+// table, same pattern `stage.tsx` already uses for its own utility icons). `Pin`'s real shape
+// (rounded head + crossbar + needle) is what the mockup draws — a hand-guessed SVG (the prior
+// map-pin teardrop) got the shape wrong.
 import { Pin } from "lucide-react";
 import type { Lane } from "../api/types.ts";
 import { calibrationClause, LANE_HELD_CAPTION, laneStateCaption } from "../copy.ts";
@@ -36,10 +36,10 @@ export function laneHeadStat(config: Record<string, unknown> | null | undefined,
  *  `costEstimated` name a known-real provenance — `costEstimated === false` exactly, absent for
  *  a live card today (no live overlay carries it), so this is a no-op there.
  *
- *  #906 gate② finding [0] (ac5-settled-card-contract): a settled figure with no calibration
- *  clause to append reads " settled" (`lanes-{dark,light}.png` w3: "$1.10 settled") — never a
- *  bare dollar amount, which reads as ambiguous mid-flight progress rather than a closed fact.
- *  A clause already says the same thing in its own words ("→ real $Y"), so it wins alone. */
+ *  #906: a settled figure with no calibration clause to append reads " settled"
+ *  (`lanes-{dark,light}.png` w3: "$1.10 settled") — never a bare dollar amount, which reads as
+ *  ambiguous mid-flight progress rather than a closed fact. A clause already says the same thing
+ *  in its own words ("→ real $Y"), so it wins alone. */
 export function laneCostText(lane: Lane): string {
   if (lane.costUsd !== null) {
     const clause = calibrationClause(lane);
@@ -174,13 +174,12 @@ function LaneCard({
         </div>
       )}
       <div className="data muted lane-card-cost">{laneCostText(lane)}</div>
-      {/* #906 gate② finding [0] (ac5-settled-card-contract), narrowed by gate② round 2 finding
-       *  [0] (held-est-bar-suppressed): the mockup's own held+SETTLED card (lanes-{dark,light}
-       *  .png w3, "$1.10 settled") draws no bar at all — a bar communicates live progress toward
-       *  a ceiling, and a settled held lane's cost is a closed fact waiting on a person, not
-       *  something still accumulating toward one. A held+FIXING lane still mid-round with only a
-       *  live estimate (`costUsd: null`) keeps its est bar — AC2's "cost line/est bar unchanged"
-       *  — since nothing has settled yet for held-ness to freeze. */}
+      {/* #906: the mockup's held+SETTLED card (`lanes-{dark,light}.png` w3, "$1.10 settled")
+       *  draws no bar at all — a bar communicates live progress toward a ceiling, and a settled
+       *  held lane's cost is a closed fact waiting on a person, not something still accumulating
+       *  toward one. A held+FIXING lane still mid-round with only a live estimate
+       *  (`costUsd: null`) keeps its est bar — AC2's "cost line/est bar unchanged" — since
+       *  nothing has settled yet for held-ness to freeze. */}
       {!(lane.held && lane.costUsd !== null) && laneHasCostToShow(lane) && (
         <CostBar
           className="lane-card-bar"

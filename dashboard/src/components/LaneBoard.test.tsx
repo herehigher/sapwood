@@ -314,10 +314,9 @@ test("laneStateChipText: held wins over the fixing round count and every other s
   assert.equal(laneStateChipText(lane({ state: "fixing", fixRound: 1, held: true }), 2), "on hold");
 });
 
-// gate② finding [1] (ac5-wrong-pin-glyph): the glyph is now the real `lucide-react` `Pin` icon
-// (imported directly, standard resources first), never a hand-drawn shape — `lucide-pin` is the
-// class `createLucideIcon` stamps on every instance, so its presence proves the real component
-// rendered, not a look-alike.
+// #906: the glyph is the real `lucide-react` `Pin` icon (imported directly, standard resources
+// first), never a hand-drawn shape — `lucide-pin` is the class `createLucideIcon` stamps on every
+// instance, so its presence proves the real component rendered, not a look-alike.
 test("#906: a held lane's rendered chip carries the bordered ON HOLD class + the real lucide Pin icon, never the plain state dot", () => {
   const html = renderToStaticMarkup(
     <LaneBoard lanesMax={1} lanes={[lane({ state: "driving", pr: 97, held: true })]} titles={{}} now={NOW} />,
@@ -338,12 +337,10 @@ test("#906: held: false renders exactly today's plain caption — no held class,
   assert.match(html, /PR under review/);
 });
 
-// gate② finding [0] (ac5-settled-card-contract), narrowed by gate② round 2 finding [0]
-// (held-est-bar-suppressed): a held lane's SETTLED cost reads "$X settled" (`lanes-{dark,light}
-// .png` w3: "$1.10 settled") and draws NO bar — the mockup's own held card has none, a bar being
-// live-progress language a closed, human-owned fact shouldn't borrow. A held lane that hasn't
-// settled yet (still mid-fix, only a live estimate) keeps its bar — AC2's own "cost line/est bar
-// unchanged" — the suppression is scoped to held+SETTLED, never held alone.
+// #906: the mockup's held+SETTLED card (`lanes-{dark,light}.png` w3, "$1.10 settled") draws no
+// bar — a bar is live-progress language a closed, human-owned fact shouldn't borrow. A held lane
+// that hasn't settled yet (still mid-fix, only a live estimate) keeps its bar — AC2's own "cost
+// line/est bar unchanged" — the suppression is scoped to held+SETTLED, never held alone.
 test("#906: a held lane's settled cost renders '$X.XX settled' and no CostBar at all", () => {
   const html = renderToStaticMarkup(
     <LaneBoard lanesMax={1} lanes={[lane({ state: "driving", pr: 97, held: true, costUsd: 1.1 })]} titles={{}} now={NOW} />,
@@ -359,9 +356,9 @@ test("#906: the SAME settled cost on a NOT-held lane keeps drawing its bar — t
   assert.match(html, /lane-card-bar/);
 });
 
-// gate② round 2 finding [0] (held-est-bar-suppressed): the prior fix over-scoped to "held alone"
-// and would have suppressed the bar on a live `fixing` lane that's ALSO held but hasn't settled
-// (`costUsd: null`, a live `estCostUsd` still accumulating) — AC2 leaves that bar untouched.
+// #906: held alone must not suppress the bar — a live `fixing` lane that's ALSO held but hasn't
+// settled (`costUsd: null`, a live `estCostUsd` still accumulating) keeps drawing it; AC2 leaves
+// that bar untouched. Suppression is scoped to held+SETTLED only (test above).
 test("#906: a held+fixing lane with only a live estimate (not yet settled) still draws its est bar", () => {
   const html = renderToStaticMarkup(
     <LaneBoard lanesMax={1} lanes={[lane({ state: "fixing", held: true, costUsd: null, estCostUsd: 0.75 })]} titles={{}} now={NOW} />,
