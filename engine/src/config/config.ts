@@ -1603,14 +1603,6 @@ const ConfigSchemaRaw = z
       .object({ mentions: z.array(z.string()).optional() })
       .strict()
       .default({}),
-    coverage: z
-      .object({ minPercent: z.number().min(0).max(100).default(0) })
-      .strict()
-      .default({}),
-    optimize: z
-      .object({ recur: z.boolean().default(false) })
-      .strict()
-      .default({}),
     // Milestones `sapwood init` should ensure exist. Empty = create none (the loop needs
     // labels + board lanes, not milestones — those are the user's organizational choice).
     milestones: z.array(z.string()).default([]),

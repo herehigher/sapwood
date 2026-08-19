@@ -1225,18 +1225,6 @@ that failed and degraded to local.
 |---|---|---|
 | `mentions` | `[board.owner]` | Who a PO-dissent concern comment `@`-mentions. A PO/triage session may raise a structured objection (`concerns: [{issue, reason}]`) alongside its normal deliverable; the engine posts it as an idempotent issue comment (never a label, status change, or dispatch effect) `@`-mentioning every entry here. When omitted, derives to the repo owner (`board.owner`). An explicit array is used verbatim, in the given order; entries are `@`-prefixed at render time if not already. |
 
-## `coverage`
-
-| Key | Default | Meaning |
-|---|---|---|
-| `minPercent` | `0` | **Accepted, not yet wired** — no coverage gate is enforced from it yet; setting it does not add a merge check. |
-
-## `optimize`
-
-| Key | Default | Meaning |
-|---|---|---|
-| `recur` | `false` | **Accepted, not yet wired** — the recurring optimization round doesn't exist yet. |
-
 ## `milestones`
 
 | Key | Default | Meaning |

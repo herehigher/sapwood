@@ -1861,7 +1861,11 @@ test("init (R3-1): a post-add id diff yielding ZERO new ids is treated as an ord
     assert.ok(warn, "expected the ordinary provisioning-failure WARN");
     assert.match(warn!, /no new id appeared/i);
     const configText = readFileSync(join(dir, "sapwood.config.yaml"), "utf8");
-    assert.doesNotMatch(configText, /deployKeyPath:/, "no anchor written when the new id couldn't be determined");
+    // #984: the shipped starter itself now carries a COMMENTED `  # deployKeyPath: ...` example
+    // (the complete-reference requirement) — a bare `/deployKeyPath:/` would false-positive on
+    // that line, so this checks for the real anchor's exact uncommented shape instead
+    // (writeDeployKeyConfigIntoYaml always emits it at 2-space indent, no leading `#`).
+    assert.doesNotMatch(configText, /^ {2}deployKeyPath:/m, "no anchor written when the new id couldn't be determined");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1907,7 +1911,7 @@ test("init (R3-1): a post-add id diff yielding MORE THAN ONE new id is treated a
     assert.ok(warn, "expected the ordinary provisioning-failure WARN");
     assert.match(warn!, /2 new ids appeared/i);
     const configText = readFileSync(join(dir, "sapwood.config.yaml"), "utf8");
-    assert.doesNotMatch(configText, /deployKeyPath:/, "no anchor written when the new id is ambiguous");
+    assert.doesNotMatch(configText, /^ {2}deployKeyPath:/m, "no anchor written when the new id is ambiguous");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -2096,7 +2100,7 @@ test("init: without repo-admin (gh repo deploy-key add fails during fresh provis
     assert.match(warn!, /L0/, "states the engine stays functional at L0");
     assert.ok(actions.some((a) => /labels already present|created \d+ label/.test(a)));
     const configText = readFileSync(join(dir, "sapwood.config.yaml"), "utf8");
-    assert.doesNotMatch(configText, /deployKeyPath:/, "no deployKeyPath written when provisioning failed");
+    assert.doesNotMatch(configText, /^ {2}deployKeyPath:/m, "no deployKeyPath written when provisioning failed");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -2127,7 +2131,7 @@ test("init (#554 pattern): fresh provisioning succeeds but the SSH auth prefligh
     assert.match(warn!, /Network is unreachable/);
     assert.match(warn!, /sapwood init/i, "names the re-provision instruction (re-run sapwood init)");
     const configText = readFileSync(join(dir, "sapwood.config.yaml"), "utf8");
-    assert.doesNotMatch(configText, /deployKeyPath:/, "no deployKeyPath written when the preflight fails");
+    assert.doesNotMatch(configText, /^ {2}deployKeyPath:/m, "no deployKeyPath written when the preflight fails");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

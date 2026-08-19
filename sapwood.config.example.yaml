@@ -1,6 +1,8 @@
 # Sapwood configuration example for the repository you want Sapwood to operate on.
-# Copy this file to sapwood.config.yaml, then replace the three board placeholders. The comments
-# state the documented defaults; see docs/configuration.md for the complete reference.
+# Copy this file to sapwood.config.yaml, then replace the three board placeholders. Every schema
+# key appears here — live where sapwood init ships a value, commented (with its current default
+# and a one-line meaning) everywhere else. Sections follow engine/src/config/config.ts's own
+# order; see docs/configuration.md for the full prose reference.
 
 board:
   owner: CHANGEME # required: your GitHub user or organization
@@ -14,9 +16,38 @@ board:
   #   inProgress: In Progress
   #   done: Done
 
-# goal:
-#   file: docs/GOAL.md # default: docs/GOAL.md — the project's north-star goal file (`sapwood init`
-#                        # scaffolds it from the shipped template when missing)
+# engine:
+#   tickIntervalSec: 60 # default: 60 seconds — how often the engine calls tick(); also the
+  #                       # liveness watchdog's window unit
+#   rapidRestart: # the crash-loop detector: this many process starts inside windowSec parks
+  #                # autonomous dispatch with an escalation until a later start observes the
+  #                # window drained. Normal restarts never trip it.
+#     maxBirths: 5 # default: 5
+#     windowSec: 600 # default: 600 seconds
+#   driver: rounds # default: rounds — the round orchestrator (peripherals wrapped around the
+  #                 # tick engine); "tick" is the bare loop driver with no peripherals
+
+# liveness: bounded external awaits + a progress-based stall watchdog, so a host sleeping
+  #          mid-round with a forge/spawn call in flight wakes into a working engine, not a
+  #          silently wedged one.
+# liveness:
+#   forgeCallTimeoutMs: 60000 # default: 60000 — hard ceiling on one gh/git CLI call
+#   spawnConfirmTimeoutMs: 30000 # default: 30000 — hard ceiling waiting for a spawned child's
+  #                               # spawn/error confirmation
+#   watchdogTickMultiplier: 10 # default: 10 — no durable event for tickIntervalSec x this many
+  #                             # seconds trips the stall watchdog
+#   maxConsecutiveStalls: 3 # default: 3 — this many consecutive watchdog stalls with no round
+  #                          # closed between them parks the engine for a human
+
+# logging:
+#   path: data/logs/sapwood.log # default shown — resolves against this config file's directory
+#   teeToStderr: true # default: true — also write each log record to stderr
+#   maxBytes: 10485760 # default: 10485760 (10 MiB) — rotate to <path>.1 before the next append
+  #                     # crosses this size
+
+# dashboard:
+#   controls: true # default: true — shows the dashboard's Operations verbs (start/pause/resume/
+  #                 # stop); false serves a read-only spectator dashboard with no control route
 
 lanes:
   max: 3 # default: 3 concurrent workers
@@ -34,32 +65,268 @@ worker:
   budgetUsdSoft: 10 # default: 10 USD soft per-worker budget
   maxResumes: 2 # default: 2
   heartbeatStaleSecs: 180 # default: 180 seconds
+  # egressSuspectCommands: [curl, wget, nc, ncat, netcat, socat, ssh, scp, sftp, rsync, ftp,
+  #                          telnet] # default shown — monitor-only Bash-call tripwire; an
+  #                          override REPLACES the default array entirely, [] disables it
+  # promptFile: prompts/my-worker.md # default: unset — engine's shipped prompts/worker.md;
+  #                                   # relative paths resolve against this config file's directory
+  # fixPromptFile: prompts/my-fix.md # default: unset — engine's shipped prompts/fix.md, used
+  #                                   # only for fix-leg resumes
+  # pricingFile: pricing/my-rates.yaml # default: unset — engine's shipped pricing.yaml rate
+  #                                     # table; your file REPLACES it entirely, no merging
+  # deployKeyPath: data/worker-deploy-key # default: unset (L0, full credentialed env) — set
+  #                                        # TOGETHER with deployKeyId to activate the L1 scoped
+  #                                        # SSH deploy key; `sapwood init` provisions both
+  # deployKeyId: 12345678 # default: unset — the deploy key's GitHub-assigned numeric id
+
+# guard:
+#   mode: hard # default: hard — fail-closed PreToolUse enforcement; "soft" only observes and
+  #             # logs what would be blocked, never the shipped default
 
 cost:
   roundBudgetUsd: 30 # default: 30 USD
   dailyBudgetUsd: 100 # default: 100 USD
+  # maxWallClockSec: 86400 # default: 86400 seconds (24h) — per-PROCESS attention alarm; any
+  #                         # restart renews the clock, at any gap length
+  # drainWindowSec: 300 # default: 300 seconds (5min) — grace window for a graceful worker
+  #                      # handoff after a ceiling breach, before the hard process-tree kill
 
-reviewer:
-  mode: engine-agent # default: engine-agent
+# stop: goal-based run-completion conditions. All unset = today's behavior (the driver only
+  #      stops on a signal, --once, or --until-idle idleness). Each is a FLOOR, not an exact
+  #      bound — the tick that crosses it still finishes its own dispatch phase.
+# stop:
+#   afterIssuesMerged: 10 # default: unset — stop once this many issues have merged this run
+#   afterPRsOpened: 10 # default: unset — stop once this many PRs have opened this run
+#   onMilestoneComplete: M4 # default: unset — EXACT GitHub milestone title; stop once it has
+  #                          # zero open issues left
+#   afterSpendUsd: 50 # default: unset — stop once THIS run's own spend_ledger total crosses
+  #                    # this many USD (never a cross-restart total)
 
-# ci.requiredChecks is deliberately NOT pre-filled: sapwood cannot know your CI check's name, and a
-# plausible wrong guess would queue every PR forever. With reviewer.mode engine-agent, `sapwood run`
-# refuses to start until you name at least one check-run of your CI (`sapwood validate` tells you
-# the same). Use the exact check-run name GitHub shows on a PR (a workflow job name, e.g. "test").
-# ci:
-#   requiredChecks:
-#     - name: test
+# round: round-loop scoping + pacing. Unset milestone = no scoping (every Ready issue is a
+  #       dispatch candidate).
+# round:
+#   milestone: M4 # default: unset — scope this round's dispatch batch to an exact GitHub
+  #                # milestone title (same matching as stop.onMilestoneComplete)
+#   standby: # pre-round probe + exponential backoff — withhold opening a round once a pure
+    #          # GitHub-API probe shows there is provably nothing to do
+#     enabled: true # default: true
+#     backoffCapSec: 1800 # default: 1800 seconds (30min) — cap on tickIntervalSec * 2^n backoff
+#   emptySpin:
+#     consecutiveDegradedRoundsThreshold: 3 # default: 3 — this many consecutive empty rounds
+    #                                        # that also degraded a peripheral session parks
+    #                                        # the engine
+#   idleChurn:
+#     consecutiveIdenticalRoundsThreshold: 5 # default: 5 — this many consecutive idle,
+    #                                         # state-identical rounds parks the engine
+#   directiveFile: data/DIRECTIVE.md # default shown — human why/what steering read at round
+  #                                   # open; resolved relative to the process cwd, not this
+  #                                   # config file's directory
+#   directiveMaxChars: 20000 # default: 20000 — deterministic-truncation cap on the directive
+  #                           # text substituted into prompts
+#   poolFactor: 1.5 # default: 1.5 — round-pool selection multiplier over lanes.roundDispatchCap,
+  #                  # absorbing gate⓪/architect attrition
+#   maxPoolRemovalAttempts: 5 # default: 5 — deterministic round-pool label-removal failures on
+  #                            # one issue before escalating needs-human
 
-merge:
-  # The schema default is conductor-merge (L3). `sapwood init` deliberately pins this L2
-  # starter default so a new target repository produces a PR and stops for human merge authority.
-  mode: produce-pr-and-stop
+# goal:
+#   file: docs/GOAL.md # default: docs/GOAL.md — the project's north-star goal file (`sapwood init`
+  #                      # scaffolds it from the shipped template when missing)
+
+# doctrine:
+#   file: docs/REVIEW-DOCTRINE.md # default shown — repo-level review invariants +
+  #                                # adjudication doctrine, injected into worker/architect prompts
+#   maxChars: 20000 # default: 20000 — deterministic-truncation cap on the doctrine text
+
+# recovery:
+#   rollbackRetryCap: 5 # default: 5 — bounded retries for a durably-persisted rollback/requeue
+  #                      # (e.g. a dispatch-failed claim rolled back to Ready) before escalating
 
 # These are the documented defaults. Uncomment to override them.
 # language: # default: en for every surface — see docs/configuration.md's "language" section
 #   codeComments: en # BCP-47-ish tag (e.g. ja, zh-Hans, pt-BR); passed through opaquely
 #   issuesAndPrs: en
 #   docs: en
+
+reviewer:
+  mode: engine-agent # default: engine-agent
+  # triggerCommand: "@codex review" # default shown — the PR-comment text that requests a review
+  # deltaChainMax: 3 # default: 3 — consecutive X..Y delta re-reviews before the next head move
+  #                   # requests the full PR diff and resets the chain
+  # trustedReviewers: [octocat] # default: [] — allowlisted logins for the same-model-trusted
+  #                              # reviewer mode
+  # fallback: [same-model-trusted, human] # default: [] — ordered opt-in failover chain when the
+  #                                        # primary mode is unavailable; never silent by default
+  # failoverAfterSec: 1200 # default: 1200 seconds (20min) — how long the primary may stay
+  #                         # non-decisive before gate② hands off to the first fallback entry
+  # escalateAfterSec: 86400 # default: 86400 seconds (24h) — how long a non-decisive review stays
+  #                          # silent before the PR is labeled needs-human
+  # agent: # only meaningful (and only accepted) when mode: engine-agent; omitted -> defaulted
+    #        # for you at load time (model differs from worker.model by construction)
+  #   model: fable # default: fable — must differ from worker.model (gate-at-or-above-producer)
+  #   runner: claude # default: claude — "codex-exec" runs the review through a local
+    #                 # `codex exec` process instead
+  #   effort: high # default: high
+  #   promptFile: prompts/my-engine-reviewer.md # default: unset — engine's shipped
+    #                                            # engine/prompts/engine-reviewer.md
+  #   costCapUsd: 3 # default: 3 — whole-logical-review cost cap; a retry gets only the remainder
+  #   retryAfterSec: 900 # default: 900 seconds (15min) — backoff between paid primary attempts
+    #                     # on the same head
+  #   treeRetentionCap: 10 # default: 10 — materialized review trees retained across non-live heads
+  #   codexPricing: # default: unset — only meaningful for runner: codex-exec (dead config for
+    #                # the claude runner, which reports real dollars)
+  #     inputUsdPerMTok: 1.25
+  #     outputUsdPerMTok: 10
+
+merge:
+  # The schema default is conductor-merge (L3). `sapwood init` deliberately pins this L2
+  # starter default so a new target repository produces a PR and stops for human merge authority.
+  mode: produce-pr-and-stop
+
+# labels omitted: this repo adopts the shipped sapwood:* namespace defaults, all shown below
+# (commented) so every workflow-label key has one documented home.
+# labels:
+#   prefix: "sapwood:" # default shown — namespace for every label below plus the type:*/prio:*
+  #                     # taxonomy; "" selects bare (unprefixed) names
+#   inProgress: sapwood:in-progress # default shown
+#   needsHuman: sapwood:needs-human # default shown — ESCALATE-tier (escalation.humanLabels member)
+#   blocked: sapwood:blocked # default shown — ESCALATE-tier (escalation.humanLabels member)
+#   reserve: sapwood:reserve # default shown
+#   verifyNa: "sapwood:verify:n/a" # default shown — Decision #8: skips the verification-plan gate
+#   planApproved: "sapwood:plan:approved" # default shown — gate⓪'s own approval stamp
+#   originAgent: sapwood:origin:agent # default shown — provenance stamp for agent-created issues
+#   split: sapwood:split # default shown — human firing signal for a decompose pass
+#   decomposed: sapwood:decomposed # default shown — engine's permanent fence on a retired parent
+#   humanMergeOnly: sapwood:human-merge-only # default shown — PR-only; never an
+  #                                           # escalation.humanLabels member
+#   planless: sapwood:planless # default shown — routing fence for a plan-less issue
+#   roundPool: sapwood:round:pool # default shown — round-pool membership; engine-written AND
+  #                                # engine-removed
+#   laneState: sapwood:lane:active # default shown — PR-side mirror of a lane's driving/fixing
+  #                                 # state
+
+# roles: peripheral role sessions (aligning/architecting/gate⓪/harvesting/retro) — cheaper
+# defaults than worker.model/effort (real implementation work); every role is independently
+# tunable and takes `enabled: true` (default) to switch it off for this deployment.
+# roles:
+#   po: # aligning phase: goal alignment/decomposition + round-start plan triage + round-pool
+    #     # selection
+#     model: sonnet # default: sonnet
+#     effort: medium # default: medium
+#     fallbackModel: sonnet # default: sonnet
+#     promptFile: prompts/my-po.md # default: unset — engine's shipped prompts/po.md
+#     decomposePromptFile: prompts/my-po-decompose.md # default: unset — shipped
+      #                                                  # prompts/po-decompose.md
+#     maxChildren: 8 # default: 8 — hard cap on children one split firing may create
+#     acceptanceCriteriaHint: 5 # default: 5 — prompt-only granularity heuristic, never a
+      #                          # dispatch gate
+#     maxConcernPostAttempts: 5 # default: 5 — recorded post failures on a durable PO-dissent
+      #                          # concern before escalating needs-human
+#     poolPromptFile: prompts/my-po-pool.md # default: unset — shipped prompts/po-pool.md
+#     backlogDigestMaxChars: 20000 # default: 20000 — cap on the backlog digest injected into
+      #                             # align mode (also reused for pool-selection candidates)
+#     enabled: true # default: true — false stops decomposition/triage; round-pool selection
+      #               # still runs regardless
+#     poolSelection: false # default: false — opt-in LLM round-pool selector; false keeps the
+      #                     # deterministic top-cap selection
+#   verificationPlanReviewer: # gate⓪ — reviews an issue's verification plan quality before
+    #                          # dispatch
+#     model: sonnet # default: sonnet
+#     effort: medium # default: medium
+#     fallbackModel: sonnet # default: sonnet
+#     promptFile: prompts/my-plan-reviewer.md # default: unset — shipped
+      #                                          # prompts/verification-plan-reviewer.md
+#     confirmPromptFile: prompts/my-plan-reviewer-confirm.md # default: unset — shipped
+      #                                                         # prompts/verification-plan-reviewer-confirm.md
+#     maxDraftCycles: 2 # default: 2 — bounded draft->re-review self-heal cycles per issue
+      #                  # before escalating needs-human
+#     enabled: true # default: true — false turns off the WHOLE gate⓪ unit (reviewer + drafter
+      #               # + confirm)
+#   verificationPlanDrafter: # drafts/repairs an issue's acceptance criteria + verification
+    #                         # plan on a reviewer bounce
+#     model: sonnet # default: sonnet
+#     effort: medium # default: medium
+#     fallbackModel: sonnet # default: sonnet
+#     promptFile: prompts/my-plan-drafter.md # default: unset — shipped
+      #                                         # prompts/verification-plan-drafter.md
+#   architect: # round design/review between goal alignment and dispatch; also batch-reviews
+    #            # this round's pool
+#     model: sonnet # default: sonnet
+#     effort: medium # default: medium
+#     fallbackModel: sonnet # default: sonnet
+#     promptFile: prompts/my-architect.md # default: unset — shipped prompts/architect.md
+#     planMdPath: docs/PLAN.md # DEPRECATED (#128) — use the top-level goal.file above
+      #                           # instead; default: unset
+#     lastMergedMaxChars: 10000 # default: 10000 — cap on the previous round's merged-PR
+      #                          # summary substituted into the prompt
+#     poolDigestMaxChars: 20000 # default: 20000 — cap on this round's pool digest substituted
+      #                          # into the prompt
+#     maxConsecutiveDrops: 2 # default: 2 — same-reason consecutive `drop` verdicts on one
+      #                       # unchanged issue before escalating
+#     enabled: true # default: true — false stops the architecting phase every round
+#   harvest: # round-close summary comments on this round's needs-human issues
+#     model: sonnet # default: sonnet
+#     effort: medium # default: medium
+#     fallbackModel: sonnet # default: sonnet
+#     promptFile: prompts/my-harvest.md # default: unset — shipped prompts/harvest.md
+#     artifactMaxChars: 20000 # default: 20000 — cap on the round artifact markdown substituted
+      #                        # into the prompt
+#     enabled: true # default: true — false stops the harvesting phase every round
+#   retro: # retrospective/self-evolution — proposes prompt/config/docs improvements
+    #        # exclusively as PRs through gate②
+#     model: sonnet # default: sonnet
+#     effort: medium # default: medium
+#     fallbackModel: sonnet # default: sonnet
+#     promptFile: prompts/my-retro.md # default: unset — shipped prompts/retro.md
+#     everyNRounds: 1 # default: 1 — retro cadence; N>1 thins it to every Nth round
+#     digestMaxChars: 60000 # default: 60000 — cap on the engine-built round-scoped read digest
+      #                      # substituted into the prompt
+#     tendencyRounds: 3 # default: 3 — how many rounds the digest's finding-class tendency
+      #                  # table spans
+#     enabled: true # default: true — false stops the retro phase every round
+#   skills:
+#     enabled: false # default: false — attach the docs/security.md marker-delimited skill
+      #                # file to every role session
+
+# proxy: engine-hosted read-only forge MCP proxy for role sessions + the fix-loop worker leg.
+  #        Credentials never leave the engine process.
+# proxy:
+#   enabled: true # default: true — false is fully inert; no production session ever gets a
+    #               # handle
+#   caps:
+#     maxIssuesPerCall: 10 # default: 10 — issue_details: over-cap requests are REJECTED, never
+      #                     # truncated
+#     defaultCommentsPerIssue: 20 # default: 20 — issue_details' default comment view (most
+      #                            # recent N)
+#     maxCommentsPerCall: 100 # default: 100 — issue_comments: max lastN a caller may request
+      #                        # explicitly
+#     maxRelationsPerIssue: 20 # default: 20 (max 100) — issue_relations: cap per connection
+#     maxSearchResults: 20 # default: 20 — search_issues: max matches returned
+#     fullCommentStreamOptIn: false # default: false — true widens the default view's cap to
+      #                              # maxCommentsPerCall
+#     maxReviewThreadsPerCall: 20 # default: 20 — pr_review_threads: max threads a caller may
+      #                            # request explicitly
+#     maxCommentsPerThread: 20 # default: 20 (max 100) — pr_review_threads: cap on EACH
+      #                         # thread's own comment count
+#     maxReviewsPerCall: 50 # default: 50 (max 100) — pr_reviews: GraphQL fetch bound
+#     maxChecksPerCall: 50 # default: 50 (max 100) — pr_checks: GraphQL fetch bound
+#     maxAuditCommentsPerCall: 20 # default: 20 (max 100) — pr_audit_comments: caller-visible
+      #                            # return cap, applied AFTER marker filtering
+#     maxAuditCommentScanWindow: 100 # default: 100 (max 100) — pr_audit_comments: top-level
+      #                               # comment scan window before marker filtering
+#   budget:
+#     maxCallsPerSession: 30 # default: 30 — exhaustion returns an explicit budget_exhausted
+      #                       # tool result, never a transport error
+#     maxBytesPerSession: 2000000 # default: 2000000 — per-session byte budget across every
+      #                            # proxy call
+#   timeoutMs: 30000 # default: 30000 — hard per-call ceiling, independent of worker.timeoutSec
+
+# webAccess:
+#   enabled: true # default: true — built-in WebSearch/WebFetch grant to architect/po-align/
+  #                # po-triage sessions only; the review family never reads this key
+
+# envFailure: an LLM-provider outage and a forge outage are ONE class — never escalate the
+  #             issue, park the engine, and self-heal. Defaults live in env-failure.ts; shown
+  #             here for reference only.
 # envFailure:
 #   llmPatterns: [rate_limit_error, "rate limit exceeded", "usage limit reached",
 #                 "credit balance is too low", insufficient_quota, overloaded_error,
@@ -75,11 +342,35 @@ merge:
 #   probeTimeoutSec: 30 # default: 30 seconds
 #   probeMaxBudgetUsd: 0.05 # default: 0.05 USD
 
+# ci.requiredChecks is deliberately NOT pre-filled: sapwood cannot know your CI check's name, and a
+# plausible wrong guess would queue every PR forever. With reviewer.mode engine-agent, `sapwood run`
+# refuses to start until you name at least one check-run of your CI (`sapwood validate` tells you
+# the same). Use the exact check-run name GitHub shows on a PR (a workflow job name, e.g. "test");
+# app defaults to "github-actions" when a check entry omits it.
+# ci:
+#   pendingEscalateAfterSec: 21600 # default: 21600 seconds (6h) — how long gate① may stay
+  #                                 # PENDING behind a decisive gate② verdict before escalating
+#   inertEscalateAfterSec: 900 # default: 900 seconds (15min) — the shorter bound for a rollup
+  #                             # that CONCLUDED without ever going green
+#   requiredChecks:
+#     - name: test
+
 # escalation:
 #   # Defaults are canonical paths relative to YOUR target repository. `engine/prompts/**`
 #   # matters only when that target repository is Sapwood's engine source tree; it is otherwise
 #   # inert self-hosting coverage, not a path your repository is expected to contain.
+#   humanLabels: [sapwood:needs-human, sapwood:blocked] # default shown — derives from
+  #                                                       # labels.prefix when omitted
+#   holdLabels: [sapwood:hold] # default shown — the human-applied WAIT-tier hold; derives from
+  #                             # labels.prefix when omitted
 #   instructionPaths: [CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md, .claude/rules/**, AGENTS.md,
 #                      engine/prompts/**, engine/src/review/instruction-path-escalation.ts,
 #                      engine/src/config/config.ts, sapwood.config.example.yaml, docs/security.md, engine/src/roles/skills-plugin.ts,
 #                      engine/src/forge/labels.ts]
+
+# notify:
+#   mentions: [octocat] # default: [board.owner] — who a posted PO-dissent concern comment
+  #                       # @-mentions; derives to the repo owner when omitted
+
+# milestones: [] # default: [] — milestones `sapwood init` should ensure exist; empty creates
+  #                # none (the loop needs labels + board lanes, not milestones)
