@@ -54,18 +54,28 @@ const MODULE_SELECTORS: Record<string, string[]> = {
 const CANONICAL_WIDTH = 1440;
 
 // #956 AC4: the three live-mocked capture families (D13/D19/D23), each paired against its own
-// named mockup crop. Module-scoped (not local to `buildContactSheet()`) so the main test's own
-// content assertions on the generated `contact-sheet.html` (engine audit run 19432fa1 finding
-// [0], ac4-contact-sheet-unverified) read the SAME single source `buildContactSheet()` renders
-// from, rather than a hand-typed duplicate of the slug/mockup naming that could silently drift
-// from it. `fixing` needs BOTH its own hero-panel AND lanes mockup; `live-header`/`attention3`
-// each pair against one file.
+// named mockup crop — `buildContactSheet()`'s own generation source. `fixing` needs BOTH its own
+// hero-panel AND lanes mockup; `live-header`/`attention3` each pair against one file.
 const D956_FAMILIES = [
   { slug: "fixing-hero-panel", mockup: (t: string) => `hero-panel-${t}.png`, label: "fixing (hero panel)" },
   { slug: "fixing-lanes", mockup: (t: string) => `lanes-${t}.png`, label: "fixing (lanes)" },
   { slug: "live-header", mockup: (t: string) => `header-${t}.png`, label: "live header" },
   { slug: "attention3-needs-attention", mockup: (t: string) => `needs-attention-${t}.png`, label: "attention (review silence)" },
 ] as const;
+
+// #956 AC4 (engine audit run 44d80339 finding [0], ac4-attention-light-unpaired): a SEPARATE,
+// hand-typed literal — deliberately NOT `D956_FAMILIES` above, and never derived from it. AC4's
+// own wording names exactly these four families; pinning that set here, independently of
+// whatever `D956_FAMILIES` currently contains, is what lets the main test's content assertions
+// below catch a family silently dropped from the GENERATOR itself — sharing one array would let
+// a future edit remove an entry from both the render and its own check in the same stroke, so
+// nothing would ever notice. Read `buildContactSheet()`'s own doc for what "no mockup" renders.
+const REQUIRED_D956_ROWS: readonly { slug: string; label: string; mockup: (t: string) => string }[] = [
+  { slug: "fixing-hero-panel", label: "fixing (hero panel)", mockup: (t) => `hero-panel-${t}.png` },
+  { slug: "fixing-lanes", label: "fixing (lanes)", mockup: (t) => `lanes-${t}.png` },
+  { slug: "live-header", label: "live header", mockup: (t) => `header-${t}.png` },
+  { slug: "attention3-needs-attention", label: "attention (review silence)", mockup: (t) => `needs-attention-${t}.png` },
+];
 
 // A stale capture left over from a PREVIOUS run would let `missingCaptures()` below pass on a
 // selector that matches nothing THIS run — the presence assertion is only honest evidence if
@@ -206,11 +216,10 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
     await captureLiveHeaderFamily(page, theme);
     await captureAttentionFamily(page, theme);
   }
-  const d956Slugs = ["fixing-hero-panel", "fixing-lanes", "live-header", "attention3-needs-attention"];
   for (const theme of THEMES) {
-    for (const slug of d956Slugs) {
-      const file = `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-${slug}.png`;
-      expect(existsSync(file), `#956 ${slug} capture must exist: ${file}`).toBe(true);
+    for (const row of REQUIRED_D956_ROWS) {
+      const file = `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-${row.slug}.png`;
+      expect(existsSync(file), `#956 ${row.slug} capture must exist: ${file}`).toBe(true);
     }
   }
 
@@ -226,35 +235,39 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
   buildContactSheet();
   expect(existsSync(`${OUTPUT_DIR}/contact-sheet.html`)).toBe(true);
 
-  // #956 AC4 (engine audit run 19432fa1 finding [0], ac4-contact-sheet-unverified): a
-  // presence-of-file check on `contact-sheet.html` alone never reads what the file actually
-  // says — it would stay green even if `buildContactSheet()` silently dropped a family/theme row
-  // (exactly finding [1] on the PREVIOUS head, before that fix). This reads the real generated
-  // HTML and asserts its own content directly, against `D956_FAMILIES` — the SAME single source
-  // `buildContactSheet()` itself renders from (module scope, never a hand-typed duplicate that
-  // could drift from it): every one of the 4 families × 2 themes must reference its own capture,
-  // and — independently, straight off the real filesystem, never a second copy of the mockup
-  // filename logic — either the real mockup that exists on disk, or the explicit no-baseline note
-  // when it doesn't (`needs-attention-light.png`, today's one genuine gap).
+  // #956 AC4 (engine audit run 19432fa1 finding [0], ac4-contact-sheet-unverified, and run
+  // 44d80339 finding [0], ac4-attention-light-unpaired): a presence-of-file check on
+  // `contact-sheet.html` alone never reads what the file actually says — it would stay green even
+  // if `buildContactSheet()` silently dropped a family/theme row (finding [1] on an EARLIER head).
+  // Reads the real generated HTML and asserts its own content directly, against
+  // `REQUIRED_D956_ROWS` — deliberately NOT `D956_FAMILIES` (`buildContactSheet()`'s own
+  // generation source), so a family accidentally dropped from the GENERATOR fails HERE instead of
+  // silently vanishing from both the render and its own check at once. Every one of the 4
+  // families × 2 themes must reference its own capture, and — independently, straight off the
+  // real filesystem, never a second copy of the mockup filename logic — either the real mockup
+  // that exists on disk, or the explicit no-baseline note when it doesn't
+  // (`needs-attention-light.png`, today's one genuine gap: no source design crop exists in this
+  // repo to pair against, so the honest render is this visible, named gap, not a fabricated
+  // asset).
   const contactSheetHtml = readFileSync(`${OUTPUT_DIR}/contact-sheet.html`, "utf8");
-  for (const family of D956_FAMILIES) {
+  for (const row of REQUIRED_D956_ROWS) {
     for (const theme of THEMES) {
-      const captureFile = `captures/${CANONICAL_WIDTH}-${theme.key}-${family.slug}.png`;
-      expect(contactSheetHtml, `#956 contact sheet must reference the ${family.slug}/${theme.key} capture (${captureFile})`).toContain(
+      const captureFile = `captures/${CANONICAL_WIDTH}-${theme.key}-${row.slug}.png`;
+      expect(contactSheetHtml, `#956 contact sheet must reference the ${row.slug}/${theme.key} capture (${captureFile})`).toContain(
         `src="${captureFile}"`,
       );
 
-      const mockupFile = `mockups/${family.mockup(theme.key)}`;
+      const mockupFile = `mockups/${row.mockup(theme.key)}`;
       if (existsSync(`${OUTPUT_DIR}/${mockupFile}`)) {
         expect(
           contactSheetHtml,
-          `#956 contact sheet must pair the ${family.slug}/${theme.key} capture with its real mockup (${mockupFile})`,
+          `#956 contact sheet must pair the ${row.slug}/${theme.key} capture with its real mockup (${mockupFile})`,
         ).toContain(`src="${mockupFile}"`);
       } else {
         expect(
           contactSheetHtml,
-          `#956 contact sheet must show an explicit no-baseline note for ${family.slug}/${theme.key}, never silently omit the row`,
-        ).toContain(`No frozen mockup exists yet for ${family.label} · ${theme.key}`);
+          `#956 contact sheet must show an explicit no-baseline note for ${row.slug}/${theme.key}, never silently omit the row`,
+        ).toContain(`No frozen mockup exists yet for ${row.label} · ${theme.key}`);
       }
     }
   }
