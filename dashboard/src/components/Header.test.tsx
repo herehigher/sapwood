@@ -407,13 +407,11 @@ test("#1025 AC1: .round-nav-pill resolves white-space: nowrap at 995px and 1024p
 });
 
 // #1025: a multi-line flex container decides which line an item lands on using that item's flex
-// BASE size, not its shrunk result — shrinking only happens AFTER placement. A 400px base size
-// (the first cut) meant the meter never even got considered for line 2 at 995px replay (stepper +
-// gap + a 400px base already didn't fit) — it landed on a needless third line regardless of how
-// far it could shrink. 200px is a base size small enough that the meter DOES get placed on line 2
-// alongside the stepper + BACK TO LIVE; `flex-grow: 1` then expands it back out from there
-// (panels.css's own comment has the full page-measured numbers). `.spend-meter-bar` follows its
-// now-flexible parent (`width: 100%`, capped at its authored `max-width: 400px`).
+// BASE size, not its shrunk result — shrinking only happens AFTER placement. 200px is a base size
+// small enough that stepper + BACK TO LIVE + the meter fit together on line 2 at 995px replay;
+// `flex-grow: 1` then expands the meter back out from there (panels.css's own comment has the
+// full page-measured numbers). `.spend-meter-bar` follows its now-flexible parent (`width: 100%`,
+// capped at its authored `max-width: 400px`).
 test("#1025: at 995px the meter is a genuinely shrinkable flex item with a 200px base size — flex: 1 1 200px, min-width: 0, bar width: 100%/max-width: 400px", () => {
   const style = document.createElement("style");
   style.textContent = `${tokensCss}\n${panelsCss}\n${appCss}`;
