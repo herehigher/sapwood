@@ -147,20 +147,72 @@ test("marketplaceRefFor: 0.0.0 (pre-first-release) is main, everything else is v
   assert.equal(marketplaceRefFor("0.3.0-alpha.1"), "v0.3.0-alpha.1");
 });
 
-test("writeMarketplaceRef: edits only plugins[0].source.ref, formatting otherwise untouched", () => {
+test("writeMarketplaceRef: rewrites only plugins[0].source.ref — every sibling field, at every level, survives untouched", () => {
   const dir = tmpRepo();
   try {
     const path = join(dir, "marketplace.json");
-    const original =
-      '{\n  "name": "sapwood",\n  "plugins": [\n    { "name": "sapwood", "source": { "source": "github", "repo": "x/x", "ref": "main" } }\n  ]\n}\n';
-    writeFileSync(path, original);
+    const original = {
+      name: "sapwood",
+      owner: { name: "herehigher", url: "https://github.com/herehigher" },
+      description: "the loop",
+      plugins: [
+        {
+          name: "sapwood",
+          source: { source: "github", repo: "x/x", ref: "main" },
+          description: "plugin-level description",
+          keywords: ["a", "b"],
+        },
+      ],
+    };
+    writeFileSync(path, `${JSON.stringify(original, null, 2)}\n`);
     writeMarketplaceRef(path, "v0.3.0-alpha.1");
-    const updated = readFileSync(path, "utf8");
-    assert.equal(
-      updated,
-      '{\n  "name": "sapwood",\n  "plugins": [\n    { "name": "sapwood", "source": { "source": "github", "repo": "x/x", "ref": "v0.3.0-alpha.1" } }\n  ]\n}\n',
-    );
+
+    const expected = structuredClone(original);
+    expected.plugins[0].source.ref = "v0.3.0-alpha.1";
+    // The write's output is byte-identical to re-serializing the mutated object in the same
+    // canonical form — not just "parses to the same data" — so a rewrite really is a one-line
+    // diff on disk, never a silent reformat of the rest of the file.
+    assert.equal(readFileSync(path, "utf8"), `${JSON.stringify(expected, null, 2)}\n`);
     assert.equal(readMarketplaceRef(path), "v0.3.0-alpha.1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('writeMarketplaceRef: a "ref" string elsewhere in the file (a second plugin\'s own ref, a same-named sibling field) is left alone', () => {
+  const dir = tmpRepo();
+  try {
+    const path = join(dir, "marketplace.json");
+    const original = {
+      name: "sapwood",
+      plugins: [
+        { name: "sapwood", source: { source: "github", repo: "x/x", ref: "main" }, ref: "not-the-real-one" },
+        { name: "other-plugin", source: { source: "github", repo: "y/y", ref: "v9.9.9" } },
+      ],
+    };
+    writeFileSync(path, `${JSON.stringify(original, null, 2)}\n`);
+    writeMarketplaceRef(path, "v0.3.0");
+
+    const written = JSON.parse(readFileSync(path, "utf8"));
+    assert.equal(written.plugins[0].source.ref, "v0.3.0");
+    // Neither the sibling "ref" field on plugins[0] itself nor the second plugin's own ref were
+    // touched — only plugins[0].source.ref, the one path writeMarketplaceRef is contracted to.
+    assert.equal(written.plugins[0].ref, "not-the-real-one");
+    assert.equal(written.plugins[1].source.ref, "v9.9.9");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeMarketplaceRef: round-trip idempotent — writing the same ref twice produces byte-identical output", () => {
+  const dir = tmpRepo();
+  try {
+    writeFakeMarketplace(dir, "main");
+    const path = join(dir, MARKETPLACE_PATH);
+    writeMarketplaceRef(path, "v0.3.0");
+    const firstWrite = readFileSync(path, "utf8");
+    writeMarketplaceRef(path, "v0.3.0");
+    assert.equal(readFileSync(path, "utf8"), firstWrite);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

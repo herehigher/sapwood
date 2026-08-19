@@ -39,11 +39,16 @@ test("sapwood-plugin.sh: a local engine/dist/cli.js is preferred — argv passed
 });
 
 test("sapwood-plugin.sh: no local dist falls back to `npx --yes sapwood@<plugin.json version>`", () => {
-  const pluginRoot = tmpDir("sapwood-plugin-wrapper-npx-");
-  const fakeBinDir = tmpDir("sapwood-plugin-wrapper-npx-bin-");
+  // One fixture root, allocated before the try — both subdirectories below are plain mkdirSync
+  // calls under it, so there is only ever one tmpDir() that can fail to be cleaned up, and the
+  // single `finally` below always covers whatever got created.
+  const root = tmpDir("sapwood-plugin-wrapper-npx-");
   try {
+    const pluginRoot = join(root, "plugin");
+    const fakeBinDir = join(root, "bin");
     const manifestDir = join(pluginRoot, ".claude-plugin");
     mkdirSync(manifestDir, { recursive: true });
+    mkdirSync(fakeBinDir, { recursive: true });
     writeFileSync(join(manifestDir, "plugin.json"), JSON.stringify({ name: "sapwood", version: "9.9.9-test.1" }, null, 2));
 
     // A fake npx on PATH, ahead of any real one, that just echoes its argv — no network, no
@@ -59,8 +64,31 @@ test("sapwood-plugin.sh: no local dist falls back to `npx --yes sapwood@<plugin.
     });
     assert.equal(out.trim(), "--yes sapwood@9.9.9-test.1 status --foo");
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("sapwood-plugin.sh: plugin.json at 0.0.0 (unreleased checkout) with no local dist refuses instead of calling npx", () => {
+  const pluginRoot = tmpDir("sapwood-plugin-wrapper-unreleased-");
+  try {
+    const manifestDir = join(pluginRoot, ".claude-plugin");
+    mkdirSync(manifestDir, { recursive: true });
+    writeFileSync(join(manifestDir, "plugin.json"), JSON.stringify({ name: "sapwood", version: "0.0.0" }, null, 2));
+
+    // Deliberately no fake npx on PATH: the 0.0.0 guard must exit before the script's `exec npx`
+    // line ever runs, so this test doesn't need to intercept that call — if the guard has a bug
+    // and falls through anyway, the real `npx` on PATH (if any) would attempt a real network
+    // fetch or fail differently, and the predicate below would not match either way.
+    const env = { ...process.env, CLAUDE_PLUGIN_ROOT: pluginRoot };
+    assert.throws(
+      () => runWrapper(["status"], env),
+      (e: unknown) => {
+        const err = e as { status?: number | null; stderr?: string };
+        return err.status === 1 && (err.stderr ?? "").includes("unreleased checkout (version 0.0.0)");
+      },
+    );
+  } finally {
     rmSync(pluginRoot, { recursive: true, force: true });
-    rmSync(fakeBinDir, { recursive: true, force: true });
   }
 });
 

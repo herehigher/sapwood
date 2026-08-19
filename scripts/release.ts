@@ -19,7 +19,9 @@ export const MANIFEST_PATHS = ["package.json", "engine/package.json", "dashboard
 // four: written only as a side effect of a prepare bump, never hand-edited. "main" is the
 // pre-first-release placeholder (see marketplaceRefFor below); once a version ships, ref must
 // equal that tag for the marketplace's `npx sapwood@<version>` pin to resolve the version the
-// slash commands actually invoked.
+// slash commands actually invoked. The committed file's bytes are the exact
+// `JSON.stringify(data, null, 2) + "\n"` canonical form writeMarketplaceFile below produces, so
+// every rewrite stays a minimal one-line diff instead of reformatting the whole file.
 export const MARKETPLACE_PATH = ".claude-plugin/marketplace.json";
 
 const UNRELEASED_HEADING = "## [Unreleased]";
@@ -139,20 +141,58 @@ export function marketplaceRefFor(version: string): string {
   return version === "0.0.0" ? "main" : `v${version}`;
 }
 
-// Edits only `plugins[0].source.ref`'s value in place, mirroring `writeManifestVersion` — the
-// rest of marketplace.json's formatting/key order/other plugin fields are untouched by a bump.
+// Unlike the four manifests' bare `"version"` line, `"ref"` is not a key `marketplace.json`
+// carries only once — a source object can legitimately have sibling fields, and a future
+// multi-plugin entry could carry its own `"ref"` elsewhere in the file. A text-regex rewrite (the
+// approach `writeManifestVersion` uses, safe there because `"version"` really is unique per
+// manifest) risks touching the wrong occurrence, so this walks the parsed structure to
+// `plugins[0].source.ref` specifically instead of pattern-matching the raw text.
+interface MarketplaceSource {
+  ref?: string;
+  [key: string]: unknown;
+}
+interface MarketplacePlugin {
+  source: MarketplaceSource | string;
+  [key: string]: unknown;
+}
+interface MarketplaceFile {
+  plugins: MarketplacePlugin[];
+  [key: string]: unknown;
+}
+
+function readMarketplaceFile(path: string): MarketplaceFile {
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+
+// `JSON.stringify(data, null, 2) + "\n"` is the canonical on-disk form the committed
+// marketplace.json is written to match exactly — see MARKETPLACE_PATH's own comment — so a
+// rewrite here is always a minimal, one-line diff on `ref`, never a reformat of the whole file.
+function writeMarketplaceFile(path: string, data: MarketplaceFile): void {
+  writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`);
+}
+
+function marketplaceSourceObject(data: MarketplaceFile, path: string): MarketplaceSource {
+  const source = data.plugins[0]?.source;
+  if (typeof source !== "object" || source === null) {
+    throw new Error(`no plugins[0].source object found in ${path}`);
+  }
+  return source;
+}
+
+// Edits only `plugins[0].source.ref`'s value, mirroring `writeManifestVersion`'s "touch one
+// field, leave everything else alone" contract — but structurally, so a `"ref"` string anywhere
+// else in the file (a sibling plugin, a differently-shaped source) is never at risk of being hit.
 export function writeMarketplaceRef(path: string, ref: string): void {
-  const text = readFileSync(path, "utf8");
-  const re = /("ref"\s*:\s*")([^"]*)(")/;
-  if (!re.test(text)) throw new Error(`no plugins[0].source.ref field found in ${path}`);
-  writeFileSync(path, text.replace(re, `$1${ref}$3`));
+  const data = readMarketplaceFile(path);
+  marketplaceSourceObject(data, path).ref = ref;
+  writeMarketplaceFile(path, data);
 }
 
 export function readMarketplaceRef(path: string): string {
-  const text = readFileSync(path, "utf8");
-  const m = text.match(/"ref"\s*:\s*"([^"]*)"/);
-  if (!m) throw new Error(`no plugins[0].source.ref field found in ${path}`);
-  return m[1];
+  const data = readMarketplaceFile(path);
+  const ref = marketplaceSourceObject(data, path).ref;
+  if (typeof ref !== "string") throw new Error(`no plugins[0].source.ref field found in ${path}`);
+  return ref;
 }
 
 export type MarketplaceRefCheckResult = { ok: true } | { ok: false; message: string };

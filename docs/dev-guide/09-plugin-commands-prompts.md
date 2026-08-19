@@ -25,7 +25,13 @@ engine CLI:
   marketplace install only runs `npm ci --ignore-scripts` at the plugin root, so
   `engine/dist` is never built there. The working directory stays the *target* repo in
   both branches, so `sapwood.config.yaml` and `data/` resolve where the operator runs
-  the command.
+  the command. Their `allowed-tools` is `Bash(sh:*)`, not a narrower pin on the wrapper's
+  own path: permission-rule matching is a literal-text prefix match against the command
+  string as written (`$CLAUDE_PLUGIN_ROOT` unexpanded), and the docs give no example of a
+  shell-variable reference inside a specifier, so a pinned pattern risks silently denying
+  the command instead of narrowing it. `Bash(sh:*)` is the same breadth class the prior
+  `Bash(node:*)` already had — it authorizes the interpreter, not an arbitrary command —
+  and the wrapper script itself is the actual boundary on what runs.
 - `sapwood-run.md` → `run` (rounds driver by default; `--once`/`--until-idle`
   are tick-driver-only). `sapwood-status.md` → `status` (reads SQLite without
   an engine). `sapwood-stop.md` manages the `data/EMERGENCY_STOP` /

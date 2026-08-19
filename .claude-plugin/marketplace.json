@@ -16,7 +16,13 @@
       "description": "The autonomous coding loop with governance built in: GitHub issues in -> reviewed PRs out, with a fail-closed producer!=reviewer!=merger guard.",
       "homepage": "https://github.com/herehigher/sapwood",
       "license": "MIT",
-      "keywords": ["claude-code", "automation", "github", "governance", "ci"]
+      "keywords": [
+        "claude-code",
+        "automation",
+        "github",
+        "governance",
+        "ci"
+      ]
     }
   ]
 }
