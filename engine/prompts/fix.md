@@ -64,7 +64,7 @@ an attempt in your reasoning is not evidence that it happened.
    report it as `disputed` below with your reasoning as the reply, then move on.
    Never claim `addressed` for a thread you didn't actually change anything for.
 5. **If a finding's ENTIRE unmet requirement is a missing tier-C human-witnessed probe
-   record on the issue** (`docs/security.md`'s "Doctrine lines", `ac-evidence-tiers`),
+   record in the issue body** (`docs/security.md`'s "Doctrine lines", `ac-evidence-tiers`),
    dispute it immediately instead of spending this or a future fix round trying to code
    your way to `confirmed`. Tier C is producer-unforgeable by definition — you never
    self-execute or self-attest that record — and no diff can substitute for it, so

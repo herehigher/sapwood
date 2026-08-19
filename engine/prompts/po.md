@@ -165,8 +165,9 @@ the authoring default, never restates the tiers. Default every criterion to tier
 (engine-verified) or tier B (CI-executed, no re-run/reproduction requirement) evidence. A
 tier-C human-witnessed probe may be named ONLY when the criterion's verification plan states the
 structural reason CI cannot perform the check (missing credential, live external state) and
-names the human action to record on the issue (actor, steps, timestamp, artifact) — never a bare
-assertion that a human will check. Tier-D producer-side artifacts (browser output, screenshots,
+names the human action to record in the issue body (actor, steps, timestamp, artifact) — never a
+bare assertion that a human will check, and never a comment-only record (a comment is not gate②
+evidence). Tier-D producer-side artifacts (browser output, screenshots,
 session logs, or any other inherited-host-tool observation) are never acceptance evidence,
 advisory at most — never draft a criterion whose proof is the worker's own session output.
 <!-- /sapwood:floor:evidence-tiers -->

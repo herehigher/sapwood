@@ -384,13 +384,24 @@ Before ending a supervision session:
       (`<!-- sapwood:comments-adjudicated-through: <comment-id> -->`) to the ruling
       comment or later, so gate⓪ and dispatch see the body as current rather than stale.
    4. **Remove `needs-human`**, if it was applied for this reason.
-3. **Evidence posting.** Where a decision or intervention isn't self-evident from the
+3. **Tier-C probe record.** When you personally run a tier-C human-witnessed probe
+   (`docs/security.md`'s `ac-evidence-tiers`), the record only reaches gate② if it lands
+   in the issue **body** — a comment is an operator inbox item, not evidence
+   (`docs/REVIEW-DOCTRINE.md`'s tier-C doctrine), and gate② never reads one. Fold the
+   record into the body and advance the [adjudication
+   cursor](security.md#the-comment-adjudication-cursor) in the same action — the same two
+   steps as the owner-ruling recovery ritual above — so the resulting body drift carries
+   through `checkAcDriftBeforeDrive` into rebaseline/re-snapshot ahead of the next
+   `evaluate()`. Never post the probe record as a comment only: it stays invisible to
+   gate②, the criterion stays `cannot-confirm`, and that gap is the operator's, not the
+   producer's.
+4. **Evidence posting.** Where a decision or intervention isn't self-evident from the
    event ledger alone (a `park clear --reason`, a manual label change, a judgment call
    the ledger can't express), post it as a comment on the issue/PR it concerns. GitHub is
    the audit trail for *process* — this durable-knowledge doc is not where a single
    session's blow-by-blow belongs (see this repo's own `CLAUDE.md`, "Documentation
    principle").
-4. **Dashboard rebuild.** If this session merged any dashboard-touching PR, rebuild
+5. **Dashboard rebuild.** If this session merged any dashboard-touching PR, rebuild
    before the next viewing (`npm run build -w dashboard`) and restart the running
    `sapwood dashboard` process (stop it, then re-run `sapwood dashboard`) rather than
    leaving the old one up. An in-place rebuild alone already reaches the build-identity
