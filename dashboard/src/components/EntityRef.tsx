@@ -4,9 +4,8 @@ import { HintTooltip } from "./HintTooltip.tsx";
 import { IssueGlyph, PrGlyph } from "./icons.tsx";
 
 /** The folded title for one issue/PR token, if `foldEntityTitles` has captured one yet — the ONE
- *  place this lookup is written, shared by `EntityRef` itself and any caller (e.g.
- *  `NeedsAttention.tsx`'s entity-ref cell) that needs the title as plain text rather than inside
- *  this component's own tooltip-wrapped render. */
+ *  place this lookup is written, shared by `EntityRef` itself and any future caller that needs
+ *  the title as plain text rather than inside this component's own tooltip-wrapped render. */
 export function resolveEntityTitle(token: EntityToken, titles: EntityTitles): string | undefined {
   const known = token.kind === "issue" ? titles[token.number] : token.issue !== undefined ? titles[token.issue] : undefined;
   return token.kind === "issue" ? known?.issueTitle : known?.prTitle;

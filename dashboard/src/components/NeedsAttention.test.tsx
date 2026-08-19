@@ -52,66 +52,6 @@ test("#924 AC1: the populated strip's head carries .panel-head, with the summary
   );
 });
 
-// ── #1018 (owner ruling, reverses #925 AC4's inline "PR #NNN — title" composition): the visible
-// entity cell is the glyph + ONE `.attention-entity-ref` element carrying the REF ALONE — no
-// title text, no sibling "PR " literal. The full "PR #NNN — title" string moves to the tooltip
-// (C1 below still proves that reveal path).
-
-test('#1018: the entity cell is exactly [glyph, ONE .attention-entity-ref element] carrying the REF ALONE — no inline title, no sibling "PR " text', () => {
-  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
-  const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} />);
-  // C1: the glyph lives INSIDE `.attention-entity-ref` (a Radix `HintTooltip` trigger clones
-  // exactly one child, so glyph+ref share the one composed element) — still the ONLY styled
-  // element in the cell, no sibling "PR " text or title span.
-  assert.match(
-    html,
-    /<span class="attention-entity"><span class="attention-entity-ref data"[^>]*><svg[^>]*>[\s\S]*?<\/svg>PR #9202<\/span><\/span>/,
-    "the glyph must render INSIDE the one .attention-entity-ref element, nothing else in the cell",
-  );
-  assert.doesNotMatch(
-    html,
-    /PR #9202 — fix rounding/,
-    "AC1: the visible entity cell must never contain the title — it moved to the tooltip",
-  );
-});
-
-test("#1018: with a repoUrl, the SAME ref-only string renders inside the anchor, not split around it", () => {
-  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
-  const html = renderToStaticMarkup(
-    <NeedsAttention items={[event]} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} repoUrl="https://github.com/o/r" />,
-  );
-  assert.match(
-    html,
-    /<span class="attention-entity"><a class="attention-entity-ref data" href="https:\/\/github\.com\/o\/r\/pull\/9202"[^>]*><svg[^>]*>[\s\S]*?<\/svg>PR #9202<\/a><\/span>/,
-  );
-});
-
-// ── #1018 AC1/AC2: exact visible-label shape and the no-title unchanged path ─────────────────
-
-test("#1018 AC1: with a resolvable title, the visible entity text equals exactly 'PR #N' — never the title, whether the token is a PR or an issue", () => {
-  const prEvent = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
-  const prHtml = renderToStaticMarkup(<NeedsAttention items={[prEvent]} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} />);
-  assert.match(prHtml, />PR #9202<\/span>/, "a PR token's visible text must be exactly 'PR #N'");
-
-  const issueEvent = toDomainEvent(wire(2, "2026-08-10T11:59:00.000Z", "rollback-escalated", { issue: 5 }));
-  const issueHtml = renderToStaticMarkup(<NeedsAttention items={[issueEvent]} titles={{ 5: { issueTitle: "fix rounding" } }} now={NOW} />);
-  assert.match(issueHtml, />#5<\/span>/, "an issue token's visible text must be exactly '#N' — no 'PR ' prefix, no title");
-});
-
-test("#1018 AC2: without a title, behaviour is unchanged — no tooltip content, not focusable", () => {
-  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
-  const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
-  assert.match(html, />PR #9202<\/span>/, "the ref alone still renders when no title resolves");
-  // Scoped to the entity-ref element specifically — the age box has its own, ALWAYS-focusable
-  // tooltip (an absolute timestamp is always available), so a bare `tabindex="0"` doesNotMatch
-  // over the whole row would false-positive on that unrelated element.
-  assert.match(
-    html,
-    /<span class="attention-entity"><span class="attention-entity-ref data"><svg/,
-    "a titleless entity-ref renders with no tabindex attribute at all — nothing to reveal, no tab stop",
-  );
-});
-
 // ── #881: category chip + reason/ask row shape (needs-attention-dark.png fidelity) ───────────
 
 test("renders the row's category chip, matching the mockup's taxonomy", () => {
@@ -462,7 +402,7 @@ test("#925 AC3: a DECISION row (--rust tone) still names its category in the chi
   assert.match(html, /class="attention-severity" aria-hidden="true"/);
 });
 
-// ── #925 AC5: fixed chip/entity/age tracks — FAST STRUCTURAL GUARD only; the actual geometry ──
+// ── #925/#1024 AC5: fixed chip/age tracks — FAST STRUCTURAL GUARD only; the actual geometry ──
 // proof is dashboard/shots/shots.spec.ts's Playwright spec (real Chromium layout, real
 // boundingBox()/scrollWidth/clientWidth reads at the ?demo fixture's real >=3 rows). This test
 // exists to fail FAST, on every `npm test`, before a PR ever reaches the slower `npm run shots`
@@ -477,20 +417,19 @@ test("#925 AC3: a DECISION row (--rust tone) still names its category in the chi
  * runner can perform — adding one would mean a second, browser-backed test harness (Playwright/a
  * real headless browser) for one file, which is new machinery a vitest-only fix would want to
  * avoid; `dashboard/shots/shots.spec.ts` already IS that browser-backed harness for this repo, so
- * the real measurement lives there instead (its own "#925 AC5 (REAL measurement...)" test).
+ * the real measurement lives there instead (its own "#925/#1024 AC5 (REAL measurement...)" test).
  *
  * What happy-dom DOES resolve faithfully is the CASCADE: which declaration wins, verbatim, on
  * every element. That is provably sufficient for a FAST guard, not a fallback for the real proof:
  * CSS Grid's column-sizing algorithm is DETERMINISTIC — a track's start/end offset depends only on
  * the tracks strictly before it, never on that track's own or a later track's content.
- * `.attention-row`'s template is `4px | <chip, fixed> | <entity, minmax(112px, max-content)> |
- * <reason, 1fr> | <age, 96px fixed>` (#1018: entity/reason swapped roles — the visible entity
- * text is now the short "PR #N" ref alone, so IT is (floor-)content-sized and the reason column
- * takes the freed `1fr`):
- *   - the entity cell's LEFT edge depends only on the severity (4px) and chip tracks, both fixed,
+ * `.attention-row`'s template is `4px | <chip, fixed> | <reason, 1fr> | <age, 96px fixed>` (#1024:
+ * the dedicated entity-ref track is gone — the reason cell is now directly after the two fixed
+ * tracks):
+ *   - the reason cell's LEFT edge depends only on the severity (4px) and chip tracks, both fixed,
  *     literal, and — proven below — IDENTICAL across every row's own template string. Two rows
- *     sharing that identical prefix cannot start their entity cell at different x-offsets in any
- *     real layout engine, regardless of how the entity/reason split resolves afterward.
+ *     sharing that identical prefix cannot start their reason cell at different x-offsets in any
+ *     real layout engine, regardless of how much of the flexible `1fr` it ends up filling.
  *   - the age box's RIGHT edge is the row's own right edge, because age is the LAST track and a
  *     fixed 96px (never `fr`/`%`/`auto`) — it never participates in free-space distribution, so
  *     its right edge is always exactly 96px + the row's own padding/border in from the row's own
@@ -500,7 +439,7 @@ test("#925 AC3: a DECISION row (--rust tone) still names its category in the chi
  * A regression that broke any of these would ALSO fail the real Playwright measurement, but this
  * catches it on every `npm test` run, seconds instead of the shots suite's tens of seconds.
  */
-test("#925 AC5 fast structural guard (see shots.spec.ts for the real geometry measurement): chip width, entity-cell left edge, and age-box right edge are all fixed-track invariants, plus the longest category word structurally fits its chip", async () => {
+test("#925/#1024 AC5 fast structural guard (see shots.spec.ts for the real geometry measurement): chip width, reason-cell left edge, and age-box right edge are all fixed-track invariants, plus the longest category word structurally fits its chip", async () => {
   // Three categories spanning ATTENTION_CATEGORY's own extremes: "REVIEW SILENCE" (the longest
   // word) and "CI" (the shortest) — read from the real fixture kinds, never a hand-picked pair
   // that happens to match today's longest/shortest.
@@ -522,22 +461,13 @@ test("#925 AC5 fast structural guard (see shots.spec.ts for the real geometry me
     );
     const template = [...rowTemplates][0]!;
     const tracks = template.trim().split(/\s+(?![^(]*\))/); // split on top-level whitespace only, not inside minmax()/calc()
-    assert.equal(tracks.length, 5, `expected exactly 5 tracks (severity/chip/entity/reason/age), got: ${template}`);
-    const [severityTrack, chipTrack, entityTrack, reasonTrack, ageTrack] = tracks;
+    assert.equal(tracks.length, 4, `expected exactly 4 tracks (severity/chip/reason/age), got: ${template}`);
+    const [severityTrack, chipTrack, reasonTrack, ageTrack] = tracks;
 
-    // Severity + chip precede the entity cell — both fixed, neither `fr`/`%`/`auto` on their own,
-    // so the entity cell's left edge is pinned by construction (the argument above).
+    // Severity + chip precede the reason cell — both fixed, neither `fr`/`%`/`auto` on their own,
+    // so the reason cell's left edge is pinned by construction (the argument above).
     assert.equal(severityTrack, "4px", "the severity bar must be a literal fixed width");
     assert.doesNotMatch(chipTrack!, /^(auto|.*fr$)/, "the chip track must be a fixed, non-flexible size");
-    // #1018 AC3: entity has a floor-content-sized track (the visible "PR #N" ref never needs free
-    // space, but a shared floor keeps rows with/without a wide ref left-aligned);
-    // reason is now the row's ONE flexible track, taking the width the inline title used to
-    // consume.
-    assert.equal(
-      entityTrack,
-      "minmax(112px, max-content)",
-      "the entity cell must be a 112px-floored, content-growable track, never flexible",
-    );
     assert.equal(reasonTrack, "1fr", "the reason column must be the row's sole flexible track");
     // Age is the LAST track and fixed — its right edge is always the row's own right edge.
     assert.equal(ageTrack, "96px", "the age box must be a literal fixed width, and the row's trailing track");
@@ -575,11 +505,10 @@ test("#925 AC5 fast structural guard (see shots.spec.ts for the real geometry me
       }", ${longestCategoryWord} chars) — a future category addition longer than this must bump the CSS constant too`,
     );
 
-    // Both the entity-ref cell (severity/chip tracks precede it) and the age box (the age track
-    // itself is fixed and trailing) are governed by that SAME shared, content-independent
-    // template — proven above — so their left/right x-offsets are identical across rows.
+    // The age box (the age track itself is fixed and trailing) is governed by that SAME shared,
+    // content-independent template — proven above — so its right x-offset is identical across
+    // rows.
     for (const row of rows) {
-      assert.ok(row.querySelector(".attention-entity"), "every row must render its entity-ref cell");
       assert.ok(row.querySelector(".attention-age"), "every row must render its age box");
     }
   } finally {
@@ -587,9 +516,9 @@ test("#925 AC5 fast structural guard (see shots.spec.ts for the real geometry me
   }
 });
 
-// #1018: this AC5 mutation-check anchor must stay in step with the entity/reason track SWAP — a
-// regression that dropped the flexible split entirely (e.g. reverting both to fixed pixel tracks)
-// would still pass a template-equality-only check.
+// #1024: this AC5 mutation-check anchor must stay in step with the row's flexible track — a
+// regression that dropped it entirely (e.g. reverting to all-fixed pixel tracks) would still pass
+// a template-equality-only check.
 test("#925/#1018 AC5 mutation-anchor: the reason track is the row's ONLY `1fr` track — asserts the flex split is exactly one track wide, not zero or two", async () => {
   const items = [toDomainEvent(wire(1, "2026-08-05T00:00:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }))];
   const { container, cleanup } = await mountWithCascade(<NeedsAttention items={items} titles={{}} now={NOW} />);
@@ -603,20 +532,20 @@ test("#925/#1018 AC5 mutation-anchor: the reason track is the row's ONLY `1fr` t
   }
 });
 
-// #925 gate① engine-agent finding [3] (inspect-control-breaks-grid): a mapped kind rendered with
-// `onInspect` (App's own real production wiring for plan-review-escalated/verify-na-proposed/
-// ci-inert-escalated) used to add a 6th direct grid child, auto-placing the age box into a
+// #925/#1024 gate① engine-agent finding [3] (inspect-control-breaks-grid): a mapped kind rendered
+// with `onInspect` (App's own real production wiring for plan-review-escalated/verify-na-proposed/
+// ci-inert-escalated) used to add an extra direct grid child, auto-placing the age box into a
 // SECOND implicit grid row instead of the fixed right-edge track — invisible to the AC5 test
 // above, which mounts without `onInspect` and never covers this shape. Mixes an unmapped kind
 // (no inspect control, no chip) alongside a mapped one WITH `onInspect` in the SAME fixture, so
 // the fixed-track invariant is proven across every combination of optional content a real row
 // can carry, not just the nominal case.
-test("#925 gate① finding [3]: a row rendered WITH onInspect (a real mapped kind) keeps exactly 5 direct grid children and the SAME grid-template-columns as a row with no chip and no inspect control", async () => {
+test("#925/#1024 gate① finding [3]: a row rendered WITH onInspect (a real mapped kind) keeps exactly 4 direct grid children and the SAME grid-template-columns as a row with no chip and no inspect control", async () => {
   const items = [
-    // Mapped kind + onInspect: severity, category(chip), entity, reason(sentence+button), age.
+    // Mapped kind + onInspect: severity, category(chip), reason(sentence+button), age.
     toDomainEvent(wire(1, "2026-08-09T00:00:00.000Z", "plan-review-escalated", { issue: 1 })),
-    // Unmapped kind, no onInspect target, no chip: severity, category(empty), entity(empty),
-    // reason(sentence only), age — still exactly 5 cells.
+    // Unmapped kind, no onInspect target, no chip: severity, category(empty), reason(sentence
+    // only), age — still exactly 4 cells.
     toDomainEvent(wire(2, "2026-08-08T00:00:00.000Z", "some-future-kind-nobody-registered-yet", { pr: 2 })),
   ];
   const { container, cleanup } = await mountWithCascade(<NeedsAttention items={items} titles={{}} now={NOW} onInspect={() => {}} />);
@@ -632,8 +561,8 @@ test("#925 gate① finding [3]: a row rendered WITH onInspect (a real mapped kin
     for (const row of rows) {
       assert.equal(
         [...row.children].length,
-        5,
-        `every .attention-row must have exactly 5 direct children (severity, category, entity, reason, age) — got ${[...row.children].map((c) => c.className).join(", ")}`,
+        4,
+        `every .attention-row must have exactly 4 direct children (severity, category, reason, age) — got ${[...row.children].map((c) => c.className).join(", ")}`,
       );
     }
 
@@ -723,7 +652,7 @@ test('gate① finding "ac4-age-box": the emphasis box resolves --attention-empha
   }
 });
 
-// ── #925 AC4: B1 compact emphasis age, B2 styled entity ref, C1 entity tooltip ───────────────
+// ── #925 AC4: B1 compact emphasis age ─────────────────────────────────────────────────────────
 
 test("B1: the emphasis box's text always matches /^\\d+[smhd]$/ — the bare compact age, never the small boxes' ' ago' full form", async () => {
   const items = attentionRowsByAge([
@@ -745,149 +674,79 @@ test("B1: the emphasis box's text always matches /^\\d+[smhd]$/ — the bare com
   }
 });
 
-test("B2: .attention-entity-ref (both the <span> and <a> variants) resolves the SAME cream --attention-emphasis-text colour and is never underlined, in both themes", async () => {
-  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
-  // `--attention-emphasis-text` itself is declared as 3 separate literal-hex overrides (never a
-  // single `light-dark()` call — same happy-dom-testability posture as --attention-tone-rust/
-  // -review/-reason-text above), so `parseColorTokensLocal` can't split IT into dark/light (it
-  // only splits genuine `light-dark(...)` values). `--sapwood` is the token it MIRRORS
-  // (tokens.css's own comment on `--attention-emphasis-text`, and `tokens.test.ts`'s "AC1/AC4"
-  // pin) — read the expected per-theme hexes from that source of truth instead.
-  const { light, dark } = parseColorTokensLocal(tokensCssRow);
-  const expectedDark = dark["--sapwood"]!;
-  const expectedLight = light["--sapwood"]!;
+// ── #1024 AC1/AC2: the dedicated entity-ref column is gone; the reason sentence's own inline
+// `EntityRef` (glyph + number + title tooltip) is the only place a row's entity ref renders. ──
 
-  for (const repoUrl of [undefined, "https://github.com/o/r"] as const) {
-    const { container, cleanup } = await mountWithCascade(
-      <NeedsAttention items={[event]} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} repoUrl={repoUrl} />,
-    );
-    try {
-      const ref = container.querySelector(".attention-entity-ref") as HTMLElement;
-      assert.ok(ref, "the entity-ref element must render");
-      assert.equal(ref.tagName, repoUrl ? "A" : "SPAN", "element kind must match whether a repoUrl is present");
+test("#1024 AC1: no .attention-entity element renders anywhere, and every row (with or without an entity token) is a 4-track grid of exactly 4 direct children", async () => {
+  const items = [
+    // Carries a PR token in its sentence (previously also drove the dedicated entity cell).
+    toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 })),
+    // #1024 AC3: `worktree-retained` — no entity token at all (copy.ts's own sentence never
+    // names an issue/PR) — must render identically to before, minus the now-empty column.
+    toDomainEvent(wire(2, "2026-08-09T00:00:00.000Z", "worktree-retained", { worker: "w1", worktreePath: "/tmp/w1" })),
+  ];
+  const { container, cleanup } = await mountWithCascade(
+    <NeedsAttention items={items} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} />,
+  );
+  try {
+    assert.equal(container.querySelector(".attention-entity"), null, "no .attention-entity cell may render, token or not");
 
-      document.documentElement.setAttribute("data-theme", "heartwood");
-      let computed = getComputedStyle(ref);
+    const rows = [...container.querySelectorAll(".attention-row")];
+    assert.equal(rows.length, 2);
+    for (const row of rows) {
       assert.equal(
-        computed.color.toUpperCase(),
-        expectedDark,
-        `dark theme (${ref.tagName}): must resolve the row's own cream primary-text colour, not a UA link colour`,
+        [...row.children].length,
+        4,
+        `every row must have exactly 4 direct children (severity, category, reason, age) — got ${[...row.children].map((c) => c.className).join(", ")}`,
       );
-      assert.equal(computed.textDecoration, "none", `dark theme (${ref.tagName}): must never underline`);
-
-      document.documentElement.setAttribute("data-theme", "sapwood");
-      computed = getComputedStyle(ref);
-      assert.equal(
-        computed.color.toUpperCase(),
-        expectedLight,
-        `light theme (${ref.tagName}): must resolve the row's own cream primary-text colour, not a UA link colour`,
-      );
-      assert.equal(computed.textDecoration, "none", `light theme (${ref.tagName}): must never underline`);
-    } finally {
-      document.documentElement.removeAttribute("data-theme");
-      await cleanup();
-    }
-  }
-});
-
-// #1018: the repoUrl branch renders an `<a>`, the no-repoUrl branch a bare `<span>` —
-// two DIFFERENT elements, each wrapped in its OWN `HintTooltip` call in NeedsAttention.tsx. A
-// regression that moved `HintTooltip` into only ONE branch (e.g. span-only) would pass every
-// markup-shape assertion elsewhere in this file (they don't exercise focus/tooltip) while
-// silently dropping title disclosure for every REAL linked row (repoUrl is always set in
-// production, App.tsx's own wiring) — so this test parameterizes across BOTH variants, proving
-// the tooltip reveal path independently on each, not just once on whichever renders by default.
-for (const repoUrl of [undefined, "https://github.com/o/r"] as const) {
-  test(`C1 (${repoUrl ? "anchor, repoUrl set" : "span, no repoUrl"}): the composed entity trigger (glyph + ref) is Tab-reachable, its VISIBLE text stays "PR #N", and its tooltip reveals the FULL "PR #N — title" label`, async () => {
-    const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    try {
-      await act(async () => {
-        root.render(<NeedsAttention items={[event]} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} repoUrl={repoUrl} />);
-      });
-      const trigger = container.querySelector(".attention-entity-ref") as HTMLElement;
-      assert.ok(trigger, "the entity trigger renders");
-      assert.equal(trigger.tagName, repoUrl ? "A" : "SPAN", "element kind must match whether a repoUrl is present");
-      assert.equal(
-        trigger.textContent?.trim(),
-        "PR #9202",
-        "AC1: the visible trigger text stays the ref alone, never the title, in either variant",
-      );
-      assert.equal(trigger.tabIndex, 0, "must be a real tab stop — a folded title needs a keyboard path, not hover-only");
-      assert.equal(container.querySelector('[role="tooltip"]'), null, "not open before any interaction");
-
-      await act(async () => {
-        trigger.focus();
-      });
-
-      const tooltip = container.querySelector('[role="tooltip"]');
-      assert.ok(tooltip, "focusing the trigger opens the tooltip");
       assert.match(
-        tooltip?.textContent ?? "",
-        /PR #9202 — fix rounding/,
-        "the tooltip must carry the FULL composed label in this variant too — a HintTooltip regression scoped to only the other branch would miss this",
+        getComputedStyle(row).gridTemplateColumns,
+        /^4px .+ 1fr 96px$/,
+        "the row must be the 4-track severity/chip/reason/age grid",
       );
-      assert.equal(trigger.getAttribute("aria-describedby"), tooltip?.id);
-    } finally {
-      await act(async () => {
-        root.unmount();
-      });
-      container.remove();
     }
-  });
-}
-
-// ── #1018 (supersedes gate① round-3 finding "ac4-entity-clipping"): the entity cell no longer
-// carries the title at all, so there is nothing left to clip — a long title stays confined to the
-// tooltip regardless of its length, and the visible ref never grows past "PR #N". The CSS ellipsis
-// mechanism the round-3 finding needed is dead code, dropped in panels.css alongside this test. ──
-
-test("#1018: a long title never reaches the visible entity cell — the ref alone renders, regardless of title length", async () => {
-  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
-  const longTitle = "a substantially long PR title meant to exceed the entity column's own available space by a wide margin";
-  const { container, cleanup } = await mountWithCascade(
-    <NeedsAttention items={[event]} titles={{ 9102: { prTitle: longTitle } }} now={NOW} />,
-  );
-  try {
-    const entity = container.querySelector(".attention-entity") as HTMLElement;
-    assert.ok(entity, "the entity cell must render");
-    assert.equal(
-      entity.textContent,
-      "PR #9202",
-      "the visible entity cell is always just the ref — the title never lands here, however long",
-    );
-
-    // #1018 AC3: the reason column's `1fr` track is now the row's flexible one — it takes the
-    // width an inline title used to eat, so the reason cell is never squeezed by title length.
-    const row = container.querySelector(".attention-row") as HTMLElement;
-    assert.match(
-      getComputedStyle(row).gridTemplateColumns,
-      /minmax\(112px, max-content\) 1fr 96px$/,
-      "reason must be the row's flexible track, entity a floored-content-sized track",
-    );
-    const reason = container.querySelector(".attention-reason") as HTMLElement;
-    assert.ok(reason?.textContent && reason.textContent.length > 0, "the reason cell must still render its own content");
   } finally {
     await cleanup();
   }
 });
 
-test("#1018: a short title ALSO never reaches the visible entity cell — same ref-only rendering, no title-length branch", async () => {
+test("#1024 AC2: a row whose sentence names a PR exposes the title on hover/focus via the sentence's own EntityRef, and the visible sentence text is unchanged", async () => {
   const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
-  const shortTitle = "fix typo";
-  const { container, cleanup } = await mountWithCascade(
-    <NeedsAttention items={[event]} titles={{ 9102: { prTitle: shortTitle } }} now={NOW} />,
-  );
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
   try {
-    const entity = container.querySelector(".attention-entity") as HTMLElement;
+    await act(async () => {
+      root.render(<NeedsAttention items={[event]} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} />);
+    });
+
+    // The visible sentence text stays exactly what copy.ts composes — the token's own "#9202"
+    // label, never a composed "PR #9202 — title" string (that composition is tooltip-only,
+    // EntityRef.tsx's own posture, unchanged by dropping the dedicated column).
+    const sentence = container.querySelector(".attention-sentence") as HTMLElement;
+    assert.ok(sentence, "the reason sentence must render");
     assert.equal(
-      entity.textContent,
-      "PR #9202",
-      "the ref alone renders — NeedsAttention.tsx has no title-length branch that would need its own coverage",
+      sentence.textContent,
+      "PR #9202 needs a human decision — reason not recorded · asks: decide the PR's next step",
+      "the visible sentence text must be unchanged by dropping the entity column",
     );
+
+    const trigger = sentence.querySelector(".entity-ref") as HTMLElement;
+    assert.ok(trigger, "the sentence's own EntityRef trigger must render");
+    assert.equal(container.querySelector('[role="tooltip"]'), null, "not open before any interaction");
+
+    await act(async () => {
+      trigger.focus();
+    });
+
+    const tooltip = container.querySelector('[role="tooltip"]');
+    assert.ok(tooltip, "focusing the sentence's own entity ref must open its tooltip");
+    assert.match(tooltip?.textContent ?? "", /fix rounding/, "the tooltip must carry the folded title");
+    assert.equal(trigger.getAttribute("aria-describedby"), tooltip?.id);
   } finally {
-    await cleanup();
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
   }
 });

@@ -426,6 +426,13 @@ others' height and numeral size, with a heavier border — the mockup's bold
 "3d" emphasis — so "how long has this waited" stays legible at a glance
 instead of every age box reading the same weight.
 
+*2026-08-19 (#1024) amendment:* the dedicated entity-ref column described
+above is dropped — it only duplicated the ref the reason clause's own
+inline `EntityRef` (glyph, `#NNN`, and the title tooltip) already carries.
+The row is now a 4-track grid (severity / chip / reason / age); the chip
+and age tracks stay fixed-width, the reason track is the row's sole
+flexible one.
+
 Membership is carried by the copy map, not a second list — and it is
 defined **semantically, not by sentence wording**: a kind whose event
 *leaves work waiting on a person* carries an `attention` field on its
