@@ -185,15 +185,23 @@ export function Header({
   }
   return (
     <div className="engine-status">
-      {/* §5: --moss is "healthy engine dot" — every earlier return above (disconnected,
-       *  connecting) has already exited by the time this renders, so reaching here always means
-       *  a live, reachable engine (#895 item 3: this was hard-wired to --sap, the "in motion"
-       *  token, which is the wrong semantic for a plain presence dot). */}
-      <span className="feed-dot" style={{ background: "var(--moss)" }} aria-hidden="true" />
-      <span className="data engine-word">{engine.state}</span>
-      <span className="muted engine-caption"> — {engineStateCaption(engine.state, engine.standbyNextCheckSec)}</span>
-      {engine.state === "standby" && parked && <span className="muted engine-park-caption">park</span>}
-      {showsPauseChip(engine.state, engine.pauseActive) && <span className="muted data engine-pause-chip">PAUSE set</span>}
+      {/* #1025: the dot/word/caption/chips used to be individually-gapped `.engine-status` flex
+       *  items — at a mid viewport width that let the browser wrap the row anywhere among them
+       *  (owner walk 2026-08-19: one browser broke reading order stepper-before-status, another
+       *  folded the caption itself onto three lines). One wrapper turns the whole status group
+       *  into a SINGLE flex item, so the mid-width rule below (panels.css) can force it onto its
+       *  own line as a unit rather than leaving the browser to pick a break point inside it. */}
+      <span className="engine-status-line">
+        {/* §5: --moss is "healthy engine dot" — every earlier return above (disconnected,
+         *  connecting) has already exited by the time this renders, so reaching here always means
+         *  a live, reachable engine (#895 item 3: this was hard-wired to --sap, the "in motion"
+         *  token, which is the wrong semantic for a plain presence dot). */}
+        <span className="feed-dot" style={{ background: "var(--moss)" }} aria-hidden="true" />
+        <span className="data engine-word">{engine.state}</span>
+        <span className="muted engine-caption"> — {engineStateCaption(engine.state, engine.standbyNextCheckSec)}</span>
+        {engine.state === "standby" && parked && <span className="muted engine-park-caption">park</span>}
+        {showsPauseChip(engine.state, engine.pauseActive) && <span className="muted data engine-pause-chip">PAUSE set</span>}
+      </span>
       <RoundNavigator
         rounds={rounds}
         selectedRoundId={selectedRoundId}

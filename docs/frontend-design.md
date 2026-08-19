@@ -69,6 +69,22 @@ rounded-rect grammar, today and round panels alike; the header's #923 outlined c
 around the same primitive remains the real budget reference. Supersedes the 2026-08-14
 entry's target-tick clause.
 
+Amended 2026-08-19 (#1025): two owner rulings from the same walk. First, §3 A's header
+band-2 row (`status · stepper · [BACK TO LIVE] · meter`, plus §3 Operations' verbs/"?" as
+row-level siblings) gains a deterministic **mid-width stacking rule**: below ~1100px
+(the row's own natural width no longer fits unbroken; #895/#972 already own the
+narrower 720px floor) the status word/caption/chip group wraps as ONE unit onto its
+own full-width first line, with the stepper + BACK TO LIVE + meter following on a
+second line — never an unscoped `flex-wrap` left to the browser's own arbitrary break
+point (the prior gap: two browsers picked two different, both-wrong points at the same
+width). The round-nav stepper's own label never wraps at any width. Second, #923 D16's
+outlined ~400×20 capsule around the header spend meter is dropped outright — with
+#1020's full-length pill track now drawing the SAME rounded shape the outline used to
+frame, the outline was a redundant third layer; the track pill alone is the capsule
+now. Supersedes the 2026-08-14 entry's "#923 outlined capsule ... remains the real
+budget reference" clause for the header instance specifically (the by-stage cost-panel
+bars #1020 describes were never outlined and are unaffected).
+
 ---
 
 ## 1. Goals & audiences

@@ -312,6 +312,82 @@ test("#879 gate② run 2e566ac9 finding [3]: the spend meter value renders bold 
   assert.match(body, /letter-spacing:\s*0\.02em\b/, "pin the exact shipped value — not a wildcard letter-spacing check");
 });
 
+// ── #1025: mid-width deterministic stacking + dropped spend-meter capsule outline ──────────────
+
+/** Shared setup for the two viewport tests below — real cascade (tokens + panels + app), a real
+ *  happy-dom viewport, `.engine-status`'s own flex-wrap and `.round-nav-pill`'s white-space, at a
+ *  given width. STYLE doctrine (docs/REVIEW-DOCTRINE.md): needs a real viewport + getComputedStyle
+ *  read against the full production cascade, never a regex read of the source text — same posture
+ *  Controls.test.tsx's own #895 item 6 test already established for the sibling 720px floor. */
+function readHeaderLayout(viewportWidth: number): { flexWrap: string; lineFlexBasis: string; pillWhiteSpace: string } {
+  (window as unknown as { happyDOM: { setViewport: (v: { width: number }) => void } }).happyDOM.setViewport({
+    width: viewportWidth,
+  });
+  const container = document.createElement("div");
+  container.innerHTML = renderToStaticMarkup(
+    <Header disconnected={false} isPending={false} engine={engine("running")} spend={SPEND_OK} parked={false} />,
+  );
+  document.body.appendChild(container);
+  try {
+    const status = container.querySelector(".engine-status");
+    const line = container.querySelector(".engine-status-line");
+    const pill = container.querySelector(".round-nav-pill");
+    assert.ok(status && line && pill, ".engine-status, .engine-status-line, and .round-nav-pill must all render");
+    return {
+      flexWrap: getComputedStyle(status as Element).flexWrap,
+      lineFlexBasis: getComputedStyle(line as Element).flexBasis,
+      pillWhiteSpace: getComputedStyle(pill as Element).whiteSpace,
+    };
+  } finally {
+    document.body.removeChild(container);
+  }
+}
+
+test("#1025 AC1/AC2: .engine-status wraps with .engine-status-line as its own full-width line at/below the 1100px floor; the row stays unbroken above it", () => {
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${appCss}`;
+  document.head.appendChild(style);
+  try {
+    // Above the floor: happy-dom's CSSOM-only getComputedStyle reports an undeclared property as
+    // "", not the resolved initial value — this only confirms the media rule hasn't fired early
+    // (same posture Controls.test.tsx's #895 item 6 test documents for its own 720px sibling).
+    assert.notEqual(readHeaderLayout(1440).flexWrap, "wrap", "well above the floor (AC2), the mid-width rule must not have fired early");
+    assert.notEqual(readHeaderLayout(1101).flexWrap, "wrap", "one px above the floor (AC2), the media query must not have fired yet");
+
+    // 995/1024 are the issue's own two named widths (owner walk broke at ~995) — both sit inside
+    // the wrapped range this rule now covers.
+    for (const width of [1100, 1024, 995]) {
+      const layout = readHeaderLayout(width);
+      assert.equal(layout.flexWrap, "wrap", `at ${width}px, .engine-status must wrap`);
+      assert.equal(layout.lineFlexBasis, "100%", `at ${width}px, .engine-status-line must claim the full first line`);
+    }
+  } finally {
+    document.head.removeChild(style);
+  }
+});
+
+test("#1025 AC1: .round-nav-pill resolves white-space: nowrap at 995px and 1024px — the stepper label never wraps", () => {
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${appCss}`;
+  document.head.appendChild(style);
+  try {
+    for (const width of [995, 1024]) {
+      assert.equal(readHeaderLayout(width).pillWhiteSpace, "nowrap", `at ${width}px, .round-nav-pill must resolve white-space: nowrap`);
+    }
+  } finally {
+    document.head.removeChild(style);
+  }
+});
+
+// AC3: the outlined capsule border (superseded #923 D16) is gone from source, not merely
+// unasserted — VALUE-family check, same posture the `.spend-meter-value` source check above uses.
+test("#1025 AC3: .spend-meter-bar declares no border/outline of its own — the CostBar track pill is the capsule now", () => {
+  const match = panelsCss.match(/\.spend-meter-bar\s*\{([^}]*)\}/);
+  assert.ok(match, ".spend-meter-bar rule must exist");
+  const ruleBody = match?.[1] as string;
+  assert.doesNotMatch(ruleBody, /border/, ".spend-meter-bar must declare no border property at all");
+});
+
 // ── #889: Header wires the round navigator's own props straight through, unedited ─────────────
 
 test("Header wires selectedRoundId/liveRoundId through to the round navigator pill", () => {

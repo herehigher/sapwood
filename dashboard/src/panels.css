@@ -439,6 +439,18 @@
   gap: var(--space-2);
 }
 
+/* #1025: the dot/word/caption/chips as ONE flex item (Header.tsx wraps them in this span) — same
+ * `align-items`/`gap` the outer `.engine-status` row used to apply to each of them individually,
+ * reproduced here so grouping them changes nothing above the mid-width breakpoint below (AC2:
+ * byte-identical one-row layout at ≥ the breakpoint). Below it, `.engine-status` wrapping this as
+ * a single unit is what lets the mid-width rule give it a deterministic, full-width first line
+ * instead of the browser choosing an arbitrary break point inside the group. */
+.engine-status-line {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .engine-word {
   text-transform: lowercase;
 }
@@ -471,24 +483,22 @@
   gap: 4px;
 }
 
-/* #923 AC1 (D16): the mockup's outlined ~400×20 capsule — width is a literal px (25% of the
- * issue's own 1440 normalization width is 360px; 400px is the mockup's own figure and clears that
- * floor), never a computed percentage happy-dom's STYLE tests can't resolve (no real layout
- * engine — see this file's own AC1 comment on `.app-header`). Height/border make this instance a
- * genuinely bordered capsule, distinct from the shared 12px internal bars (cost panels, lane
- * cards) — `CostBar.tsx`'s own `height` prop (Header.tsx passes 20) scales the track/fill/tick
- * geometry to match, so this isn't the old fixed 12px drawing floating in extra blank space.
- * Border is longhand, not `var(--hairline)` — `.panel-head`'s own comment above documents happy-
- * dom returning an EMPTY computed string for every longhand of a `color-mix()`-bearing border
- * shorthand; longhands sidestep that without changing what a real browser renders. */
+/* #923 AC1 (D16): width is a literal px (25% of the issue's own 1440 normalization width is
+ * 360px; 400px is the mockup's own figure and clears that floor), never a computed percentage
+ * happy-dom's STYLE tests can't resolve (no real layout engine — see this file's own AC1 comment
+ * on `.app-header`). Height also makes this instance a taller capsule than the shared 12px
+ * internal bars (cost panels, lane cards) — `CostBar.tsx`'s own `height` prop (Header.tsx passes
+ * 20) scales the track/fill geometry to match, so this isn't the old fixed 12px drawing floating
+ * in extra blank space.
+ *
+ * #1025 (owner ruling, supersedes D16's own outline): #1020 made `.cost-bar-track` a full-width
+ * pill in the SAME rounded geometry this rule used to also draw a border around — a third visible
+ * layer (outline + light pill + amber fill) on top of what was already the capsule shape. The
+ * outline is dropped outright, not restyled: the track pill IS the capsule now, no second
+ * bordered box drawn around it. */
 .spend-meter-bar {
   width: 400px;
   height: 20px;
-  border-width: 1px;
-  border-style: solid;
-  border-color: color-mix(in srgb, var(--bark) 25%, transparent);
-  border-radius: var(--radius-pill);
-  overflow: hidden;
 }
 
 /* #890: the lane card's own settled/est bar — full card width, flush with the foot row above it.
@@ -589,13 +599,17 @@
 }
 
 /* #923 AC1: the mockup's 16px "ROUND 9 · CLOSED" label — `--text-1` (16px), not `--text-0`
- * (13px, the previous chip's undersized figure). */
+ * (13px, the previous chip's undersized figure).
+ * #1025 AC1: `white-space: nowrap` — below the mid-width breakpoint (below) the stepper is a flex
+ * item free to shrink, and an un-nowrapped label folded onto multiple lines inside the pill's own
+ * fixed `min-height` (owner walk 2026-08-19) instead of the group wrapping as a whole. */
 .round-nav-pill {
   padding: 2px var(--space-3);
   font-family: var(--font-data);
   font-size: var(--text-1);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 
 /* §3 A: "a persistent tinted 'ROUND N · CLOSED' badge" — the pill itself carries the badge
@@ -818,22 +832,51 @@
   cursor: pointer;
 }
 
-/* #972 (#729/#928 remainder, 720 reflow): at 720 the row `status · stepper · BACK TO LIVE ·
- * meter · "?"` no longer fits unbroken — BTL's own label used to wrap mid-word onto three clipped
- * lines, and the meter's fixed 400px capsule (`.spend-meter-bar` above, unchanged at 1024/1440 —
- * AC3) ran past the panel's right edge. Two independent fixes, not one: `.engine-status` gains
- * `flex-wrap` so the meter (its own last child) drops to a line of its own below the stepper/BTL
- * instead of overflowing beside them — `flex-basis: 100%` makes that deterministic rather than
- * relying on exactly how much row-1 width happens to be left over; BTL's own text collapses to
+/* #1025 (owner walk 2026-08-19, ~995px): between 720px (#972 below) and full width, `.engine-
+ * status` declared NO wrap rule at all — the row `status · stepper · BACK TO LIVE · meter`
+ * (App.tsx's `.app-header-row` adds the verbs/"?" alongside it) still had to fit somewhere, so the
+ * browser picked an arbitrary break point inside it once it stopped fitting unbroken, and two
+ * browsers picked two different, both-wrong ones (one wrapped the status word/caption group under
+ * the stepper — broken reading order vs #923's own "status · stepper · …"; the other folded the
+ * status caption itself onto three lines).
+ *
+ * Breakpoint is a summed-token estimate, not a measured real-browser value — this repo's test
+ * harness has no real layout engine (`.app-header`'s own AC1 comment) and there is no
+ * real-browser CI to run one against (this file's own verification plan: the PO renders 995/1024/
+ * 1440 on the branch build before merge). Roughly: status group ≈ 230px (8px dot + 8px gap +
+ * "running" in `--font-data` + " — actively working" in body text) + 8px gap + the round-nav
+ * stepper ≈ 260px (two 32px arrow cells + a `--font-data` `--text-1` pill, `.round-nav-pill`
+ * above) + 8px gap + the 400px spend-meter capsule, before even reaching `.app-header-row`'s own
+ * Controls verbs / "?" legend past it — comfortably past 1000px on its own, matching this issue's
+ * own ~1100px ballpark with room for the verbs. 1100px is the chosen floor; `.engine-status-line`
+ * (above) is what lets the status group drop to its own full-width line as a single unit instead
+ * of the browser choosing a break point inside it — the stepper + BACK TO LIVE + meter (still
+ * separate flex items) wrap together onto the line below by ordinary flow, no rule of their own
+ * needed for that half. `.round-nav-pill`'s own `white-space: nowrap` (above) is what keeps the
+ * stepper's text on one line once it's a shrinkable flex item on that second line. */
+@media (max-width: 1100px) {
+  .engine-status {
+    flex-wrap: wrap;
+  }
+
+  .engine-status-line {
+    flex-basis: 100%;
+  }
+}
+
+/* #972 (#729/#928 remainder, 720 reflow): at 720 the row no longer fits even on ITS OWN second
+ * line (#1025 above already put the status group on its own first line) — BTL's own label used to
+ * wrap mid-word onto three clipped lines, and the meter's fixed 400px capsule (`.spend-meter-bar`
+ * above, unchanged at 1024/1440 — AC3) ran past the panel's right edge. `.engine-status`'s own
+ * `flex-wrap` is already set by #1025's mid-width rule above (720px is a subset of that range) —
+ * this block only adds what's specific to the narrower floor: the meter drops to a line of its
+ * own below the stepper/BTL (`flex-basis: 100%` makes that deterministic rather than relying on
+ * exactly how much line-2 width happens to be left over), and BTL's own text collapses to
  * icon-only (`aria-label` on the button below carries the accessible name the hidden label would
  * otherwise supply — AC's own "icon-only with an accessible name" allowance) so its single line
  * never has a word left to wrap. The meter's own capsule also narrows to fit the now-single-
  * column row instead of keeping its 400px authored width. */
 @media (max-width: 720px) {
-  .engine-status {
-    flex-wrap: wrap;
-  }
-
   .spend-meter {
     flex-basis: 100%;
   }

@@ -4677,7 +4677,7 @@ const CLOSED_ROUND = {
 // now compares the FULL resolved stack against the real `--font-data` token (not a partial regex
 // match on one family name in it), and the caption-below-the-bar claim is backed by an explicit
 // `.spend-meter` `flex-direction: column` assertion, not DOM order alone.
-test("#923 AC1: .app-header ≥100px, the round-nav stepper's three cells ≥40px each with a resolved 1px border, the pill's font/case/size, and the spend capsule's width/height/border/centred caption", async () => {
+test("#923/#1025 AC1: .app-header ≥100px, the round-nav stepper's three cells ≥40px each with a resolved 1px border, the pill's font/case/size, and the spend capsule's width/height/no-border/centred caption", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   const fontDataStack = parseTokensLocal(tokensCss924)["--font-data"];
   assert.ok(fontDataStack, "tokens.css must still declare --font-data for this test's own oracle");
@@ -4718,8 +4718,14 @@ test("#923 AC1: .app-header ≥100px, the round-nav stepper's three cells ≥40p
       `.spend-meter-bar's declared width (${barComputed.width}) must be >= 360px (25% of the issue's 1440 normalization width)`,
     );
     assert.ok(Number.parseFloat(barComputed.height) >= 16, `.spend-meter-bar's declared height (${barComputed.height}) must be >= 16px`);
-    assert.equal(barComputed.borderWidth, "1px", ".spend-meter-bar must resolve a real 1px border, not an unresolved empty value");
-    assert.equal(barComputed.borderStyle, "solid", ".spend-meter-bar border-style");
+    // #1025 (supersedes #923 D16): the outlined capsule border is dropped — `.cost-bar-track`
+    // (the full-width pill #1020 already draws) is the capsule now, not a second bordered box
+    // around it. happy-dom's CSSOM-only getComputedStyle reports an UNDECLARED property as "",
+    // not the browser-resolved initial value (this file's own documented gap, elsewhere) — proof
+    // enough here since the point is "no rule sets this at all", corroborated by the source-level
+    // check in Header.test.tsx's own #1025 AC3 test (`.spend-meter-bar` has no border property in
+    // panels.css, full stop).
+    assert.equal(barComputed.borderWidth, "", ".spend-meter-bar must resolve no declared border at all");
 
     const caption = container.querySelector(".spend-meter-value");
     assert.ok(caption, ".spend-meter-value caption must render");
