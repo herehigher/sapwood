@@ -367,9 +367,10 @@ function readHeaderLayout(viewportWidth: number): {
   }
 }
 
-// #1025: the first cut's 1100px floor left LIVE mode's Controls verbs + "?" legend unstacked past
-// their own natural fit (see panels.css's own arithmetic comment) — 1300px is the corrected floor.
-test("#1025 AC1/AC2: .engine-status wraps with .engine-status-line as its own full-width line at/below the 1300px floor; the row stays unbroken above it", () => {
+// #1025: LIVE mode's own Controls verbs (up to and including EMERGENCY STOP) + "?" legend push
+// the row's real natural width close to 1400px (see panels.css's own arithmetic comment) — 1400px
+// is the floor.
+test("#1025 AC1/AC2: .engine-status wraps with .engine-status-line as its own full-width line at/below the 1400px floor; the row stays unbroken above it", () => {
   const style = document.createElement("style");
   style.textContent = `${tokensCss}\n${panelsCss}\n${appCss}`;
   document.head.appendChild(style);
@@ -378,11 +379,11 @@ test("#1025 AC1/AC2: .engine-status wraps with .engine-status-line as its own fu
     // "", not the resolved initial value — this only confirms the media rule hasn't fired early
     // (same posture Controls.test.tsx's #895 item 6 test documents for its own 720px sibling).
     assert.notEqual(readHeaderLayout(1440).flexWrap, "wrap", "well above the floor (AC2), the mid-width rule must not have fired early");
-    assert.notEqual(readHeaderLayout(1301).flexWrap, "wrap", "one px above the floor (AC2), the media query must not have fired yet");
+    assert.notEqual(readHeaderLayout(1401).flexWrap, "wrap", "one px above the floor (AC2), the media query must not have fired yet");
 
-    // 995/1024/1200 are all inside the wrapped range this rule now covers — 1200 is the owner
-    // walk's own live-mode reference width from panels.css's own breakpoint arithmetic.
-    for (const width of [1300, 1200, 1024, 995]) {
+    // 995/1024/1200/1300 are all inside the wrapped range this rule now covers — 1200 is the
+    // owner walk's own live-mode reference width from panels.css's own breakpoint arithmetic.
+    for (const width of [1400, 1300, 1200, 1024, 995]) {
       const layout = readHeaderLayout(width);
       assert.equal(layout.flexWrap, "wrap", `at ${width}px, .engine-status must wrap`);
       assert.equal(layout.lineFlexBasis, "100%", `at ${width}px, .engine-status-line must claim the full first line`);

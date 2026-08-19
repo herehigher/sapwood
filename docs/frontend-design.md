@@ -71,10 +71,10 @@ entry's target-tick clause.
 
 Amended 2026-08-19 (#1025): two owner rulings from the same walk. First, §3 A's header
 band-2 row (`status · stepper · [BACK TO LIVE] · meter`, plus §3 Operations' verbs/"?" as
-row-level siblings) gains a deterministic **mid-width stacking rule**: below 1300px
-(the row's own natural width no longer fits unbroken — re-measured against LIVE mode's
-own Controls verbs, which pushed the floor up from a first cut's 1100px; #895/#972
-already own the narrower 720px floor) the status word/caption/chip
+row-level siblings) gains a deterministic **mid-width stacking rule**: below 1400px
+(the row's own natural width, including LIVE mode's own Controls verbs up through
+EMERGENCY STOP, no longer fits unbroken; #895/#972 already own the narrower 720px
+floor) the status word/caption/chip
 group wraps as ONE unit onto its own full-width first line, with the stepper + BACK TO
 LIVE + meter following on a second line — never an unscoped `flex-wrap` left to the
 browser's own arbitrary break point (the prior gap: two browsers picked two different,
