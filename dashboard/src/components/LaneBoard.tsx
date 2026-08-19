@@ -1,3 +1,10 @@
+// #906 gate② finding [1] (ac5-wrong-pin-glyph): the ON HOLD chip's own glyph is a standard
+// resource, not a hand-drawn one — `icons.tsx`'s own header reserves that file for the
+// identity set plus glyphs with no standard equivalent; a component reaching for a lucide
+// utility icon imports it directly (§2 adjudication table, same pattern `stage.tsx` already
+// uses for its own utility icons). `Pin`'s real shape (rounded head + crossbar + needle) is
+// what the mockup draws — a hand-guessed SVG (the prior map-pin teardrop) got the shape wrong.
+import { Pin } from "lucide-react";
 import type { Lane } from "../api/types.ts";
 import { calibrationClause, LANE_HELD_CAPTION, laneStateCaption } from "../copy.ts";
 import type { EntityTitles } from "../entities.ts";
@@ -5,7 +12,7 @@ import { formatElapsed, formatUsd } from "../format.ts";
 import { modelEffortCaption } from "../hero/stage.tsx";
 import { CostBar } from "./CostBar.tsx";
 import { EntityRef } from "./EntityRef.tsx";
-import { DropletGlyph, PinGlyph, StateGlyph } from "./icons.tsx";
+import { DropletGlyph, StateGlyph } from "./icons.tsx";
 
 /** #924: the lanes panel-head's own stat cluster ("model · effort · soft budget $N") —
  *  `modelEffortCaption` is the SAME `worker.*` config reader the hero's own lane captions use
@@ -27,9 +34,17 @@ export function laneHeadStat(config: Record<string, unknown> | null | undefined,
  *  (`copy.ts` — the SAME gate the reclaim-done feed sentence already uses, never a second
  *  hand-copied implementation) appends the recorded est→real reading when `lane.estCostUsd`/
  *  `costEstimated` name a known-real provenance — `costEstimated === false` exactly, absent for
- *  a live card today (no live overlay carries it), so this is a no-op there. */
+ *  a live card today (no live overlay carries it), so this is a no-op there.
+ *
+ *  #906 gate② finding [0] (ac5-settled-card-contract): a settled figure with no calibration
+ *  clause to append reads " settled" (`lanes-{dark,light}.png` w3: "$1.10 settled") — never a
+ *  bare dollar amount, which reads as ambiguous mid-flight progress rather than a closed fact.
+ *  A clause already says the same thing in its own words ("→ real $Y"), so it wins alone. */
 export function laneCostText(lane: Lane): string {
-  if (lane.costUsd !== null) return `${formatUsd(lane.costUsd)}${calibrationClause(lane)}`;
+  if (lane.costUsd !== null) {
+    const clause = calibrationClause(lane);
+    return clause ? `${formatUsd(lane.costUsd)}${clause}` : `${formatUsd(lane.costUsd)} settled`;
+  }
   if (lane.estCostUsd !== null) return `${formatUsd(lane.estCostUsd)} est`;
   return "—, settles when the lane ends";
 }
@@ -140,7 +155,7 @@ function LaneCard({
          *  color alone, carries the meaning). */}
         <span className={`data muted lane-card-state${lane.held ? " lane-card-state-held" : ""}`}>
           {lane.held ? (
-            <PinGlyph />
+            <Pin size={14} strokeWidth={1.5} aria-hidden="true" />
           ) : KNOWN_ACTIVE_LANE_STATES.has(lane.state) ? (
             <span className="lane-card-state-dot" aria-hidden="true" />
           ) : (
@@ -159,7 +174,11 @@ function LaneCard({
         </div>
       )}
       <div className="data muted lane-card-cost">{laneCostText(lane)}</div>
-      {laneHasCostToShow(lane) && (
+      {/* #906 gate② finding [0] (ac5-settled-card-contract): the mockup's own held card
+       *  (lanes-{dark,light}.png w3, "$1.10 settled") draws no bar at all — a bar communicates
+       *  live progress toward a ceiling, and a held lane's cost is a closed fact waiting on a
+       *  person, not something still accumulating toward one. */}
+      {!lane.held && laneHasCostToShow(lane) && (
         <CostBar
           className="lane-card-bar"
           settledUsd={lane.costUsd ?? 0}

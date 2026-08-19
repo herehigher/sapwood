@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Lane } from "../api/types.ts";
-import { LaneBoard, laneHeadStat, laneStateChipText } from "./LaneBoard.tsx";
+import { LaneBoard, laneCostText, laneHeadStat, laneStateChipText } from "./LaneBoard.tsx";
 
 // ── #924: the lanes panel-head's own stat cluster ───────────────────────────────────────────────
 
@@ -314,11 +314,16 @@ test("laneStateChipText: held wins over the fixing round count and every other s
   assert.equal(laneStateChipText(lane({ state: "fixing", fixRound: 1, held: true }), 2), "on hold");
 });
 
-test("#906: a held lane's rendered chip carries the bordered ON HOLD class + pin glyph, never the plain state dot", () => {
+// gate② finding [1] (ac5-wrong-pin-glyph): the glyph is now the real `lucide-react` `Pin` icon
+// (imported directly, standard resources first), never a hand-drawn shape — `lucide-pin` is the
+// class `createLucideIcon` stamps on every instance, so its presence proves the real component
+// rendered, not a look-alike.
+test("#906: a held lane's rendered chip carries the bordered ON HOLD class + the real lucide Pin icon, never the plain state dot", () => {
   const html = renderToStaticMarkup(
     <LaneBoard lanesMax={1} lanes={[lane({ state: "driving", pr: 97, held: true })]} titles={{}} now={NOW} />,
   );
   assert.match(html, /class="data muted lane-card-state lane-card-state-held"/);
+  assert.match(html, /class="lucide lucide-pin/);
   assert.match(html, />on hold</);
   assert.doesNotMatch(html, /lane-card-state-dot/);
   assert.doesNotMatch(html, /PR under review/);
@@ -331,6 +336,33 @@ test("#906: held: false renders exactly today's plain caption — no held class,
   assert.doesNotMatch(html, /lane-card-state-held/);
   assert.doesNotMatch(html, /on hold/);
   assert.match(html, /PR under review/);
+});
+
+// gate② finding [0] (ac5-settled-card-contract): a held lane's settled cost reads "$X settled"
+// (`lanes-{dark,light}.png` w3: "$1.10 settled") and draws NO bar — the mockup's own held card
+// has none, a bar being live-progress language a closed, human-owned fact shouldn't borrow.
+test("#906: a held lane's settled cost renders '$X.XX settled' and no CostBar at all", () => {
+  const html = renderToStaticMarkup(
+    <LaneBoard lanesMax={1} lanes={[lane({ state: "driving", pr: 97, held: true, costUsd: 1.1 })]} titles={{}} now={NOW} />,
+  );
+  assert.match(html, /\$1\.10 settled/);
+  assert.doesNotMatch(html, /lane-card-bar/, "a held lane must never draw a cost bar, settled or not");
+});
+
+test("#906: the SAME settled cost on a NOT-held lane keeps drawing its bar — today's behavior, untouched", () => {
+  const html = renderToStaticMarkup(
+    <LaneBoard lanesMax={1} lanes={[lane({ state: "driving", pr: 97, held: false, costUsd: 1.1 })]} titles={{}} now={NOW} />,
+  );
+  assert.match(html, /lane-card-bar/);
+});
+
+test("laneCostText: a plain settled figure with no calibration clause reads '$X.XX settled'; a calibration clause wins alone, unchanged", () => {
+  assert.equal(laneCostText(lane({ costUsd: 1.1 })), "$1.10 settled");
+  assert.equal(
+    laneCostText(lane({ costUsd: 1.1, estCostUsd: 1.05, costEstimated: false })),
+    "$1.10 · est $1.05 → real $1.10",
+    "a calibration clause already says 'settled' in its own words — never a doubled suffix",
+  );
 });
 
 // ── #926 AC3: the state chip's own uppercase/font-data + the head's closing hairline ───────────

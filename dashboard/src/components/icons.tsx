@@ -65,25 +65,6 @@ export function DropletGlyph({ className, size = 32 }: { className?: string; siz
   );
 }
 
-/** #906 (§294 follow-up #7): the ON HOLD chip's own glyph (`docs/design/mockup/
- *  lanes-{dark,light}.png`) — a map-pin outline, `currentColor` stroke like the other state
- *  glyphs in this file, so the chip reads as a distinct shape (§5 "never color as the sole
- *  carrier"), not just a colored dot. */
-export function PinGlyph({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" className={className}>
-      <path
-        d="M8 1.5c-2.49 0-4.5 2-4.5 4.47C3.5 9.5 8 14.5 8 14.5s4.5-5 4.5-8.53C12.5 3.5 10.49 1.5 8 1.5z"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinejoin="round"
-      />
-      <circle cx="8" cy="6" r="1.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
-    </svg>
-  );
-}
-
 /**
  * #922 owner ruling (2026-08-17): the CI gate's icon — standard resources first, hand-drawing a
  * gear was the thing to replace. Verbatim path data from the devicon/techicons GitHub Actions SVG

@@ -106,12 +106,13 @@ export const DEMO_SOURCE: DemoBundle = {
       // #906 gate② (§927 witness gap, PO 2026-08-18): `costUsd`/`costEstimated` now match this
       // lane's own spend row (id 1, ts 09:18, $2.10, `estimated: false`) — without them the
       // replayed card fell back to "—, settles when the lane ends", contradicting the COST panel
-      // on the same page.
+      // on the same page. gate② finding [2] (ac5-demo-event-shape): no `pr` field — the real
+      // engine never emits one on `reclaim-done` (AC5's own stated real shape); the droplet
+      // learns 9201 from `merged` (below) instead, same as production would.
       payload: {
         worker: "lane-a",
         issue: 9101,
         next: "DRIVING",
-        pr: 9201,
         prTitle: "feat(dashboard): scrub bar chapter marks",
         costUsd: 2.1,
         costEstimated: false,
@@ -121,12 +122,14 @@ export const DEMO_SOURCE: DemoBundle = {
       id: 7,
       ts: "2026-08-09T09:20:00Z",
       kind: "reclaim-done",
-      // Same #906 gate② fix as lane-a above, matching THIS lane's own spend row (id 2, ts 09:20).
+      // Same #906 gate② fixes as lane-a above (costUsd/costEstimated matching THIS lane's own
+      // spend row, id 2, ts 09:20; no `pr` field) — lane-b's droplet learns 9202 from `pr-held`
+      // below instead, witnessing the (worker, pr) pair coming from `pr-held` itself, matching
+      // `lastHoldEvent`'s own server-side scoping (AC5).
       payload: {
         worker: "lane-b",
         issue: 9102,
         next: "DRIVING",
-        pr: 9202,
         prTitle: "fix(dashboard): header spend meter rounding",
         costUsd: 2.1,
         costEstimated: false,
