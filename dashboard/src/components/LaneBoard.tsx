@@ -1,11 +1,11 @@
 import type { Lane } from "../api/types.ts";
-import { calibrationClause, laneStateCaption } from "../copy.ts";
+import { calibrationClause, LANE_HELD_CAPTION, laneStateCaption } from "../copy.ts";
 import type { EntityTitles } from "../entities.ts";
 import { formatElapsed, formatUsd } from "../format.ts";
 import { modelEffortCaption } from "../hero/stage.tsx";
 import { CostBar } from "./CostBar.tsx";
 import { EntityRef } from "./EntityRef.tsx";
-import { DropletGlyph, StateGlyph } from "./icons.tsx";
+import { DropletGlyph, PinGlyph, StateGlyph } from "./icons.tsx";
 
 /** #924: the lanes panel-head's own stat cluster ("model · effort · soft budget $N") —
  *  `modelEffortCaption` is the SAME `worker.*` config reader the hero's own lane captions use
@@ -57,8 +57,12 @@ function laneCostBarMax(lane: Lane, workerBudgetUsdSoft: number | null): number 
  *  `lane.fixRound`, the cap = `lanes.prFixCap` config, same denominator the hero stage's own
  *  fixing droplet label uses, `stage.tsx`'s `FIXING · round ${lane.fixRound} of ${fixCap}`) —
  *  every other known state keeps its plain `laneStateCaption` word, never a fabricated round
- *  count on a lane that was never fixing. */
+ *  count on a lane that was never fixing.
+ *
+ *  #906 (§294 follow-up #7): `held: true` wins over every other branch — a lane on hold is
+ *  never mid-fix-round from the reader's point of view, it's waiting on a person. */
 export function laneStateChipText(lane: Lane, fixCap: number): string {
+  if (lane.held) return LANE_HELD_CAPTION;
   if (lane.state === "fixing") return `FIXING · ROUND ${lane.fixRound}/${fixCap}`;
   return laneStateCaption(lane.state);
 }
@@ -130,8 +134,14 @@ function LaneCard({
          *  to cross-reference a card against the same lane's own mentions elsewhere (activity feed
          *  sentences, `docs/design/mockup/lanes-{dark,light}.png`'s own per-card header). */}
         <span className="data lane-card-name">{lane.lane}</span>
-        <span className="data muted lane-card-state">
-          {KNOWN_ACTIVE_LANE_STATES.has(lane.state) ? (
+        {/* #906 (§294 follow-up #7): the ON HOLD chip is the mockup's bordered-pill form (hairline
+         *  border, no fill), not the plain dot+word chip every other state renders — a distinct
+         *  class carries the border, and the pin glyph replaces the state dot/✕ (§5: shape, not
+         *  color alone, carries the meaning). */}
+        <span className={`data muted lane-card-state${lane.held ? " lane-card-state-held" : ""}`}>
+          {lane.held ? (
+            <PinGlyph />
+          ) : KNOWN_ACTIVE_LANE_STATES.has(lane.state) ? (
             <span className="lane-card-state-dot" aria-hidden="true" />
           ) : (
             <StateGlyph ok={false} className="glyph-fail" />

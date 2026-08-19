@@ -281,8 +281,12 @@ item becomes a routed page, that is a scope amendment to this section.
   lane is capacity, not absence"). Card anatomy is head over body, split by a
   hairline: **head** — lane id left, a state chip right (a dot + the
   uppercase mono state word; a `fixing` lane reads `FIXING · ROUND n/cap`,
-  `n` from `workers.fix_rounds`, cap from `lanes.prFixCap`); **body** — a
-  droplet identity glyph + the issue number at the mockup's own bold/large
+  `n` from `workers.fix_rounds`, cap from `lanes.prFixCap`). A `driving`/
+  `fixing` lane whose row carries `held: true` (§8) renders **ON HOLD**
+  instead — the mockup's bordered chip (uppercase mono, pin glyph, hairline
+  border, no fill), winning over every other state word since a held PR is
+  waiting on a person, not mid-review or mid-fix (#906, §294 follow-up #7);
+  **body** — a droplet identity glyph + the issue number at the mockup's own bold/large
   mono scale (linking to GitHub), a title line, a PR line when driving, a
   cost line, a hairline spend bar, and elapsed time at the foot. Cost is the
   engine's in-flight **estimate** (marked `est`, #33) while running, settling
@@ -1181,6 +1185,13 @@ mirror what `StatusSnapshot` (`engine/src/cli.ts`) already computes for
       "lane": "w1", "issue": 86,    // numbers link out to GitHub; titles come from the
                                     // entity's title-bearing events (#207, §3 C), not from here
       "state": "driving", "pr": 97,
+      "held": false,                // #906 (§294 follow-up #7): State.lastHoldEvent(lane, pr)
+                                    // === "pr-held" — the SAME event-log-as-memory read the
+                                    // conductor uses to dedupe its own hold/release announcement.
+                                    // false when there's no PR yet, or the latest hold event for
+                                    // (lane, pr) is "pr-released"/absent. A driving/fixing lane
+                                    // card renders ON HOLD (§3 C) in place of its normal state
+                                    // word while this is true.
       "startedAt": "…", "endedAt": null,
       "costUsd": null,              // SUM(spend_ledger) per worker — real cost, written at
                                     // reclaim; null while in flight
@@ -1433,8 +1444,9 @@ runs both. The CI gap noted above applies to it unchanged.
 - **Scrubbing within the open round** — a "cursor behind HEAD" mode with
   its own rules for control visibility, est overlays, and auto-follow;
   deferred to v0.3 (§11). A round is fully replayable the moment it closes.
-- **Honest "On hold" rendering** — blocked on the hold-visibility events
-  (#294, §11 follow-up #7); until then held PRs render as waiting.
+- ~~Honest "On hold" rendering~~ — **un-deferred**: `held` on the served lane
+  row (§8) and the replay fold both render the ON HOLD chip (§3 C), landed by
+  #906 (§11 follow-up #7).
 - **Config replay** — unblocked by #206 (`run-started` now carries the
   allowlisted snapshot, §11), but still deferred: v0.2 keeps the config
   drawer live-only.
@@ -1457,7 +1469,7 @@ mutable snapshot or outside the engine's own DB is live-only.
 | `events` | append-only, id-ordered | **Yes** — the replay stream itself |
 | `spend_ledger` | append-only, id-ordered | **Yes** — settled cost at any cursor is `SUM(usd)` up to it |
 | `rounds.phase` | in-place UPDATE, mirrored by an append-only `round-phase` event (#206) | **Yes** — fold the events, never read the mutable row |
-| lane narrative (state/PR/settled cost/elapsed — `dispatched`, `handoff`, `reclaim-done` incl. cost/est/merged, `fix-leg-started`/`-resumed`) | folded onto `hero/state.ts`'s `LaneView`, the SAME append-only `events` stream every other replayable panel reads | **Yes** (#927) — the lane card itself, labelled **REPLAYED**; superseded `workers`-as-mutable-snapshot reasoning, which never had its own row here |
+| lane narrative (state/PR/held/settled cost/elapsed — `dispatched`, `handoff`, `reclaim-done` incl. cost/est/merged, `fix-leg-started`/`-resumed`, `pr-held`/`pr-released`) | folded onto `hero/state.ts`'s `LaneView`, the SAME append-only `events` stream every other replayable panel reads | **Yes** (#927; `held` by #906) — the lane card itself, labelled **REPLAYED**; superseded `workers`-as-mutable-snapshot reasoning, which never had its own row here |
 | live telemetry (`est_cost_usd`, `contextTokens`, token split) | overwritten per probe, cleared when the lane leaves `running` (#155) | **Never** — the history never existed. Est never replays; settled only (§3 E's settled/est grammar is the same line) |
 | resolved config | read at startup, snapshotted (allowlisted subset + hash) into `run-started` (#206) | **Yes**, for the allowlisted keys — anything outside that list stays live-only |
 | backlog / board | external GitHub state | Live-only |
@@ -1616,8 +1628,9 @@ the overlay is the named boundary.
    (`escalation.holdLabels`) is indistinguishable from "waiting on review"
    in persisted data: the gate observes the label live and appends nothing.
    #294 adds transition-only events (dedupe-flag paradigm, gate behavior
-   untouched) — the hard prerequisite for the lanes panel's ON HOLD card
-   and the hero hold pin; until it lands, held PRs render as waiting.
+   untouched). The lanes panel's ON HOLD card (§3 C, §8 `held`) landed on
+   top of it via #906, live and replay alike — the hero hold pin this
+   follow-up also named has no §6 spec and stays out of scope, un-invented.
 
 New event kinds must land in the §7 copy map in the same PR (gate②
 checklist); payload-only additions like #3 need no copy entry.

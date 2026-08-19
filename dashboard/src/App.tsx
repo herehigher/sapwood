@@ -119,6 +119,7 @@ export function deriveReplayedLanes(hero: HeroState): Lane[] {
       issue: l.issue,
       state,
       pr: droplet?.pr ?? null,
+      held: l.held,
       // `l.startedAt` is always set once a lane is occupied — every claim path (`dispatched`,
       // a released lane's `fix-leg-started`/`-resumed`) stamps it before this filter admits the
       // lane at all (`hero/state.ts`'s own doc).

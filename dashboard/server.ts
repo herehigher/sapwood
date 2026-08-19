@@ -92,11 +92,17 @@ function laneItem(state: State, w: WorkerRow): Record<string, unknown> {
       /* engine-written, should never happen — a display field degrades to null, never a 500 */
     }
   }
+  const pr = w.pr ?? null;
   return {
     lane: w.name,
     issue: w.issue,
     state: w.state,
-    pr: w.pr ?? null,
+    pr,
+    // #906 (§294 follow-up #7): the SAME event-log-as-memory read the conductor uses to dedupe
+    // its own hold/release announcement (`conductor.ts`'s `lastHold` check) — never a second,
+    // independently-derived signal. No PR, or the latest hold event for (lane, pr) being
+    // `pr-released`/absent, both read `false`.
+    held: pr !== null && state.lastHoldEvent(w.name, pr) === "pr-held",
     startedAt: w.started_at,
     endedAt: w.ended_at,
     costUsd: inFlight(w) ? null : state.spentUsdForWorker(w.name),

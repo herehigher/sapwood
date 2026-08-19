@@ -41,6 +41,7 @@ function lane(overrides: Partial<Lane> = {}): Lane {
     issue: 1,
     state: "running",
     pr: null,
+    held: false,
     startedAt: "2026-08-14T00:00:00Z",
     endedAt: null,
     costUsd: null,

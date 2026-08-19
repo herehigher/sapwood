@@ -81,6 +81,7 @@ const lane = (overrides: Partial<Lane> = {}): Lane => ({
   issue: 86,
   state: "running",
   pr: null,
+  held: false,
   startedAt: "2026-08-06T11:50:00.000Z",
   endedAt: null,
   costUsd: null,
@@ -304,6 +305,32 @@ test("#926 AC4: a running lane shows the est cost line and never a PR line", () 
   );
   assert.match(html, /\$0\.53 est/);
   assert.doesNotMatch(html, /lane-card-pr/);
+});
+
+// ── #906 (§294 follow-up #7): a held lane's chip wins over every other state word ──────────────
+
+test("laneStateChipText: held wins over the fixing round count and every other state's plain caption", () => {
+  assert.equal(laneStateChipText(lane({ state: "driving", held: true }), 2), "on hold");
+  assert.equal(laneStateChipText(lane({ state: "fixing", fixRound: 1, held: true }), 2), "on hold");
+});
+
+test("#906: a held lane's rendered chip carries the bordered ON HOLD class + pin glyph, never the plain state dot", () => {
+  const html = renderToStaticMarkup(
+    <LaneBoard lanesMax={1} lanes={[lane({ state: "driving", pr: 97, held: true })]} titles={{}} now={NOW} />,
+  );
+  assert.match(html, /class="data muted lane-card-state lane-card-state-held"/);
+  assert.match(html, />on hold</);
+  assert.doesNotMatch(html, /lane-card-state-dot/);
+  assert.doesNotMatch(html, /PR under review/);
+});
+
+test("#906: held: false renders exactly today's plain caption — no held class, no chip text change", () => {
+  const html = renderToStaticMarkup(
+    <LaneBoard lanesMax={1} lanes={[lane({ state: "driving", pr: 97, held: false })]} titles={{}} now={NOW} />,
+  );
+  assert.doesNotMatch(html, /lane-card-state-held/);
+  assert.doesNotMatch(html, /on hold/);
+  assert.match(html, /PR under review/);
 });
 
 // ── #926 AC3: the state chip's own uppercase/font-data + the head's closing hairline ───────────

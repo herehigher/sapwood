@@ -20,6 +20,7 @@ import {
   isDissentSignal,
   isKnownKind,
   isReviewDissentCategory,
+  LANE_HELD_CAPTION,
   type SentencePart,
   TELEMETRY_KINDS,
 } from "./copy.ts";
@@ -1171,4 +1172,10 @@ test("engineStateCaption: standby with no countdown known yet renders the base c
 
 test("engineStateCaption: an unrecognized state falls back to itself, the same honest-unknown laneStateCaption uses", () => {
   assert.equal(engineStateCaption("some-future-state", null), "some-future-state");
+});
+
+// #906 (§294 follow-up #7): the ON HOLD lane state's own caption is present and non-empty.
+test("LANE_HELD_CAPTION is a real, non-empty caption", () => {
+  assert.equal(typeof LANE_HELD_CAPTION, "string");
+  assert.ok(LANE_HELD_CAPTION.length > 0);
 });
