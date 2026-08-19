@@ -459,6 +459,13 @@ test("#923 AC4: at 1440px, .spend-meter-bar's live width is >= 25% of .app-heade
  * — the same COLLISION -> COVERAGE gap `assertPillCapsContained`'s own doc names elsewhere in this
  * file. Every visible interactive descendant is derived from the rendered markup below instead of
  * a hand-curated partial set.
+ *
+ * engine-agent audit run 8a872400-ad0b-4138-85ae-f95c21c823f2 finding [0]: the button/input/
+ * a[href]/[role="button"] locator above STILL missed `.spend-meter` itself — `SpendMeter`
+ * (Header.tsx) renders it as a focusable `<div tabIndex={0}>` (a Radix `Tooltip.Trigger asChild`
+ * target, never a native interactive tag), so the meter — this issue's own primary overflow
+ * defect — never got measured. `[tabindex]` catches that shape too, closing the gap without
+ * naming `.spend-meter` as a second hand-picked exception.
  */
 test("#972 AC1: at 720px replay, every visible header control stays inside .app-header's content box and BACK TO LIVE renders on one unclipped line", async ({
   page,
@@ -481,7 +488,7 @@ test("#972 AC1: at 720px replay, every visible header control stays inside .app-
   });
 
   const controls = page.locator(
-    '.app-header button:visible, .app-header input:visible, .app-header a[href]:visible, .app-header [role="button"]:visible',
+    '.app-header button:visible, .app-header input:visible, .app-header a[href]:visible, .app-header [role="button"]:visible, .app-header [tabindex]:visible',
   );
   const controlCount = await controls.count();
   expect(controlCount, "COVERAGE: the header must render >= 1 visible interactive control at 720px").toBeGreaterThan(0);
