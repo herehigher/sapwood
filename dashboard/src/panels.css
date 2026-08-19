@@ -868,7 +868,7 @@
  * that actually wraps onto multiple cramped lines — becomes the row's flexible `1fr`, taking the
  * width the title used to eat.
  *
- * #1018 gate② P3 (each `<li>` is its own independent grid, so a bare `max-content` lets the
+ * #1018 (each `<li>` is its own independent grid, so a bare `max-content` lets the
  * reason column's LEFT edge go ragged across rows — a production INSPECT row with no entity
  * token starts its reason ~109px left of a `PR #1016` row): `minmax(112px, max-content)` gives
  * the entity track a floor sized to the common case — 24px glyph + 8px gap + eight 16px-mono

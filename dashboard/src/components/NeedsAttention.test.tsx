@@ -530,7 +530,7 @@ test("#925 AC5 fast structural guard (see shots.spec.ts for the real geometry me
     assert.equal(severityTrack, "4px", "the severity bar must be a literal fixed width");
     assert.doesNotMatch(chipTrack!, /^(auto|.*fr$)/, "the chip track must be a fixed, non-flexible size");
     // #1018 AC3: entity has a floor-content-sized track (the visible "PR #N" ref never needs free
-    // space, but a shared floor keeps rows with/without a wide ref left-aligned — gate② P3);
+    // space, but a shared floor keeps rows with/without a wide ref left-aligned);
     // reason is now the row's ONE flexible track, taking the width the inline title used to
     // consume.
     assert.equal(
@@ -790,7 +790,7 @@ test("B2: .attention-entity-ref (both the <span> and <a> variants) resolves the 
   }
 });
 
-// #1018 gate② P3: the repoUrl branch renders an `<a>`, the no-repoUrl branch a bare `<span>` —
+// #1018: the repoUrl branch renders an `<a>`, the no-repoUrl branch a bare `<span>` —
 // two DIFFERENT elements, each wrapped in its OWN `HintTooltip` call in NeedsAttention.tsx. A
 // regression that moved `HintTooltip` into only ONE branch (e.g. span-only) would pass every
 // markup-shape assertion elsewhere in this file (they don't exercise focus/tooltip) while
