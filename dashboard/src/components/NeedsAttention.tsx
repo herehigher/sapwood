@@ -9,7 +9,7 @@ import { HintTooltip } from "./HintTooltip.tsx";
 import { IssueGlyph, PrGlyph } from "./icons.tsx";
 
 /** #925 gate① engine-agent finding [3] (sentence-prefix-dropped): the entity token drives the
- *  row's dedicated entity-ref cell ("PR #212 — title"), but the FULL original sentence still
+ *  row's dedicated entity-ref cell ("PR #212", #1018), but the FULL original sentence still
  *  renders in the reason cell — never sliced. An earlier version dropped every `SentencePart`
  *  before the token, assuming it was always a redundant "PR "/"Issue " prefix; `copy.ts`'s own
  *  shapes disprove that (`gated-flag-unprovable`: `["Lane ", worker, "'s reentry flag couldn't be
@@ -85,13 +85,13 @@ function AttentionRow({
   const tone = category && isReviewDissentCategory(category) ? "var(--attention-tone-review)" : "var(--attention-tone-rust)";
   const token = findEntityToken(parts);
   const entityTitle = token ? resolveEntityTitle(token, titles) : undefined;
-  // #925 AC4 gate① engine-agent finding [0] (ac4-entity-composition): ONE string, "PR #9202 —
-  // <title>" (or "#9202 — <title>" for an issue token) — never a "PR " literal composed outside
-  // the styled element the way `EntityRef` alone would leave it. `EntityRef` itself stays
-  // untouched (it also renders at the feed/lane-card inline scale elsewhere, #892) — this row's
-  // own entity cell builds its own single label instead of reusing that component's narrower
-  // glyph+number-only contract.
-  const entityLabel = token ? `${token.kind === "pr" ? "PR " : ""}#${token.number}${entityTitle ? ` — ${entityTitle}` : ""}` : undefined;
+  // #1018 (owner ruling, reverses #925 AC4's inline "PR #N — <title>" composition): the VISIBLE
+  // label is the ref alone — the title crowded the reason column and was truncated anyway, while
+  // the exact same string was already available on hover/focus. `entityRef` is what renders in
+  // the cell; `entityLabel` (ref + title, when a title resolves) moves to being tooltip-only
+  // content below — never composed into the visible DOM text.
+  const entityRef = token ? `${token.kind === "pr" ? "PR " : ""}#${token.number}` : undefined;
+  const entityLabel = entityTitle ? `${entityRef} — ${entityTitle}` : undefined;
   // gate① engine-agent finding [1] (ac4-age-box): `.muted` (app.css) and `.attention-age-emphasis`
   // (panels.css) carry EQUAL selector specificity, and `.muted` loads LATER in the production
   // cascade (tokens.css -> panels.css -> hero.css -> app.css) — a `.muted`-carrying emphasis box
@@ -125,20 +125,19 @@ function AttentionRow({
           </span>
         )}
       </span>
-      {/* #925 AC4: the glyph renders FIRST (≥24px, to the
+      {/* #1018: the glyph renders FIRST (≥24px, to the
        *  label's left — `.attention-entity svg`, panels.css), then ONE `--font-data` ≥14px element
-       *  carrying the complete "PR #9202 — <title>" string on a single baseline — never a glyph
-       *  wrapped mid-string or a title split into its own separately-sized span. `overflow: hidden`
-       *  + `text-overflow: ellipsis` live on `.attention-entity` itself (panels.css): the title
-       *  consumes whatever free space the grid's `1fr` entity track has and truncates exactly where
-       *  the reason column's own track begins — never earlier, never by JS string-slicing.
-       *  The glyph lives INSIDE `.attention-entity-ref` (not a preceding sibling) so the WHOLE
-       *  composed trigger — glyph + label — is the one element `HintTooltip` clones via Radix's
-       *  `asChild` (a single-child contract); reusing `EntityRef`/the age box's own tooltip
-       *  mechanism, never a second hover/focus implementation. */}
+       *  carrying JUST "PR #9202" (or "#9202") on a single baseline — never a glyph wrapped
+       *  mid-string. The full "PR #9202 — <title>" composition (#925 AC4) is now tooltip-ONLY
+       *  content (`entityLabel`, above) — never rendered as visible DOM text, which is what let
+       *  the title crowd the reason column and get truncated regardless (the owner ruling this
+       *  issue implements). The glyph lives INSIDE `.attention-entity-ref` (not a preceding
+       *  sibling) so the WHOLE composed trigger — glyph + ref — is the one element `HintTooltip`
+       *  clones via Radix's `asChild` (a single-child contract); reusing `EntityRef`/the age box's
+       *  own tooltip mechanism, never a second hover/focus implementation. */}
       <span className="attention-entity">
         {token && (
-          <HintTooltip content={entityTitle ? entityLabel : undefined}>
+          <HintTooltip content={entityLabel}>
             {repoUrl ? (
               <a
                 className="attention-entity-ref data"
@@ -147,14 +146,14 @@ function AttentionRow({
                 rel="noreferrer"
               >
                 {token.kind === "issue" ? <IssueGlyph /> : <PrGlyph />}
-                {entityLabel}
+                {entityRef}
               </a>
             ) : (
               // tabIndex: only when there's a tooltip to reveal — same rule EntityRef.tsx's own
               // no-repoUrl branch uses (#892 AC1) — a titleless entity has nothing to Tab to.
               <span className="attention-entity-ref data" tabIndex={entityTitle ? 0 : undefined}>
                 {token.kind === "issue" ? <IssueGlyph /> : <PrGlyph />}
-                {entityLabel}
+                {entityRef}
               </span>
             )}
           </HintTooltip>
