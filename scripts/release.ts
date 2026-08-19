@@ -1,5 +1,5 @@
 // sapwood release script — `npm run release -- <prepare|publish|stamp> ...`.
-// Node built-ins + `git`/`gh` via child_process only, no dependency. Plain Node 24
+// Node built-ins + `git`/`gh`/`npm` via child_process only, no dependency. Plain Node 24
 // type-stripped TypeScript: erasable syntax only (no enums/namespaces/parameter
 // properties), local imports carry an explicit `.ts` extension.
 //
@@ -61,10 +61,17 @@ function parseSemver(version: string): ParsedSemver {
 // SemVer 2.0.0 §11 precedence: numeric identifiers compare numerically, alphanumeric
 // identifiers lexically (ASCII), a numeric identifier always has lower precedence than an
 // alphanumeric one, and a larger set of pre-release fields wins once every shared field ties.
+// Numeric identifiers compare by LENGTH first, then lexically — never via `Number()`, which
+// silently loses precision past 2^53 and would misorder a pre-release field with enough digits.
+// The grammar above already forbids leading zeros on a numeric identifier, so equal-length
+// numeric strings compare correctly by ordinary string comparison.
 function compareIdentifier(a: string, b: string): number {
   const aNumeric = /^\d+$/.test(a);
   const bNumeric = /^\d+$/.test(b);
-  if (aNumeric && bNumeric) return Number(a) - Number(b);
+  if (aNumeric && bNumeric) {
+    if (a.length !== b.length) return a.length - b.length;
+    return a < b ? -1 : a > b ? 1 : 0;
+  }
   if (aNumeric) return -1;
   if (bNumeric) return 1;
   return a < b ? -1 : a > b ? 1 : 0;
@@ -120,19 +127,73 @@ export function checkManifestLockstep(paths: string[]): LockstepResult {
   return { ok: true, version: first.version };
 }
 
-// ── CHANGELOG ────────────────────────────────────────────────────────────────────────
+// `package-lock.json` is not a fifth place a human (or this script) sets a version — its
+// root/`engine`/`dashboard` `packages[...]` entries are DERIVED from the four manifests by
+// `npm install --package-lock-only` (see `runPrepare`), so this only ever reads them back to
+// confirm that derivation actually landed, never writes them directly.
+const LOCKFILE_PACKAGE_KEYS = ["", "engine", "dashboard"];
 
-function sectionBody(changelog: string, headingStart: number, headingLength: number): { body: string; nextHeadingIndex: number } {
-  const bodyStart = headingStart + headingLength;
-  const nextHeadingIndex = changelog.indexOf("\n## ", bodyStart);
-  const body = nextHeadingIndex === -1 ? changelog.slice(bodyStart) : changelog.slice(bodyStart, nextHeadingIndex);
-  return { body: body.replace(/^\s+|\s+$/g, ""), nextHeadingIndex };
+export type LockfileCheckResult = { ok: true } | { ok: false; message: string };
+
+export function checkLockfileVersions(repoRoot: string, version: string): LockfileCheckResult {
+  const lockPath = join(repoRoot, "package-lock.json");
+  let lock: { packages?: Record<string, { version?: string }> };
+  try {
+    lock = JSON.parse(readFileSync(lockPath, "utf8"));
+  } catch (e) {
+    return { ok: false, message: `package-lock.json could not be read: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  const packages = lock.packages ?? {};
+  const mismatched = LOCKFILE_PACKAGE_KEYS.filter((key) => packages[key]?.version !== version);
+  if (mismatched.length > 0) {
+    const found = mismatched.map((key) => `${key === "" ? "(root)" : key}=${packages[key]?.version ?? "missing"}`).join(", ");
+    return { ok: false, message: `package-lock.json disagrees with version ${version}: ${found}` };
+  }
+  return { ok: true };
+}
+
+// ── CHANGELOG ────────────────────────────────────────────────────────────────────────
+// Headings are recognized only when they begin a line (never inside prose, an inline code
+// span, or an indented example) so a stray "## [Unreleased]" mentioned in passing elsewhere
+// in the file can never be mistaken for the real section marker. Input is normalized to LF
+// first so a CRLF-saved file (a Windows editor, a stray `git config core.autocrlf`) still
+// matches — every heading offset downstream is computed against the normalized text.
+
+function normalizeNewlines(text: string): string {
+  return text.replace(/\r\n/g, "\n");
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// `[ \t]*$` (not `\s*$`): `\s` matches `\n` too, so a greedy `\s*` would swallow the blank
+// line separator that follows a heading and throw off every downstream offset.
+const UNRELEASED_HEADING_RE = /^## \[Unreleased\][ \t]*$/m;
+
+function versionHeadingRe(version: string): RegExp {
+  return new RegExp(`^## \\[${escapeRegExp(version)}\\]`, "m");
+}
+
+function nextHeadingIndex(text: string, fromIndex: number): number {
+  const m = /^## /m.exec(text.slice(fromIndex));
+  return m ? fromIndex + m.index : -1;
+}
+
+function sectionBody(text: string, headingIndex: number, headingMatchLength: number): { body: string; nextIdx: number } {
+  const afterHeading = headingIndex + headingMatchLength;
+  const lineEnd = text.indexOf("\n", afterHeading);
+  const bodyStart = lineEnd === -1 ? text.length : lineEnd + 1;
+  const nextIdx = nextHeadingIndex(text, bodyStart);
+  const body = nextIdx === -1 ? text.slice(bodyStart) : text.slice(bodyStart, nextIdx);
+  return { body: body.replace(/^\s+|\s+$/g, ""), nextIdx };
 }
 
 export function extractUnreleasedBody(changelog: string): string {
-  const start = changelog.indexOf(UNRELEASED_HEADING);
-  if (start === -1) throw new Error(`CHANGELOG.md has no "${UNRELEASED_HEADING}" heading`);
-  return sectionBody(changelog, start, UNRELEASED_HEADING.length).body;
+  const text = normalizeNewlines(changelog);
+  const m = UNRELEASED_HEADING_RE.exec(text);
+  if (!m) throw new Error(`CHANGELOG.md has no "${UNRELEASED_HEADING}" heading (it must begin its own line)`);
+  return sectionBody(text, m.index, m[0].length).body;
 }
 
 export function formatChangelogVersionHeading(version: string, date: string): string {
@@ -143,28 +204,28 @@ export function formatChangelogVersionHeading(version: string, date: string): st
 // leaves a fresh, empty Unreleased section above it — everything else in the file
 // (older version sections) is passed through unchanged.
 export function moveUnreleasedToVersion(changelog: string, version: string, date: string): string {
-  const start = changelog.indexOf(UNRELEASED_HEADING);
-  if (start === -1) throw new Error(`CHANGELOG.md has no "${UNRELEASED_HEADING}" heading`);
-  const { body, nextHeadingIndex } = sectionBody(changelog, start, UNRELEASED_HEADING.length);
-  const before = changelog.slice(0, start);
-  const after = nextHeadingIndex === -1 ? "" : changelog.slice(nextHeadingIndex + 1);
+  const text = normalizeNewlines(changelog);
+  const m = UNRELEASED_HEADING_RE.exec(text);
+  if (!m) throw new Error(`CHANGELOG.md has no "${UNRELEASED_HEADING}" heading (it must begin its own line)`);
+  const { body, nextIdx } = sectionBody(text, m.index, m[0].length);
+  const before = text.slice(0, m.index);
+  const after = nextIdx === -1 ? "" : text.slice(nextIdx);
   const replacement = `${UNRELEASED_HEADING}\n\n${formatChangelogVersionHeading(version, date)}\n\n${body}\n\n`;
   return `${before}${replacement}${after}`;
 }
 
 export function extractVersionSection(changelog: string, version: string): string | null {
-  const heading = `## [${version}]`;
-  const start = changelog.indexOf(heading);
-  if (start === -1) return null;
-  const lineEnd = changelog.indexOf("\n", start);
-  const headingLength = (lineEnd === -1 ? changelog.length : lineEnd + 1) - start;
-  return sectionBody(changelog, start, headingLength).body;
+  const text = normalizeNewlines(changelog);
+  const m = versionHeadingRe(version).exec(text);
+  if (!m) return null;
+  return sectionBody(text, m.index, m[0].length).body;
 }
 
 // Lockstep test's other half (docs/dev-guide/10-releasing.md): "0.0.0" is the
 // never-yet-released state, where Unreleased is the section of record.
 export function changelogHasSection(changelog: string, version: string): boolean {
-  return version === "0.0.0" ? changelog.includes(UNRELEASED_HEADING) : changelog.includes(`## [${version}]`);
+  const text = normalizeNewlines(changelog);
+  return version === "0.0.0" ? UNRELEASED_HEADING_RE.test(text) : versionHeadingRe(version).test(text);
 }
 
 // ── Build stamp ──────────────────────────────────────────────────────────────────────
@@ -210,6 +271,33 @@ export function checkHeadMatchesOriginMain(deps: Deps): HeadCheckResult {
   return { ok: true };
 }
 
+// ── tag existence: local ref cache + the actual remote ──────────────────────────────
+// A local `git tag -l` only ever proves a tag doesn't exist here — the deciding question is
+// whether `origin` has it. `git ls-remote --exit-code` answers that without a local fetch:
+// exit 0 = at least one matching ref (tag exists), exit 2 = no matching ref (definitively
+// absent), anything else = a real error (network, auth) that must not be read as "absent".
+// `execFileSync` communicates a non-zero exit by throwing, so the exit code arrives on the
+// thrown error's `.status`, never as a return value.
+
+function isExecExitStatus(e: unknown, status: number): boolean {
+  return typeof e === "object" && e !== null && "status" in e && (e as { status?: unknown }).status === status;
+}
+
+function tagExistsOnRemote(deps: Deps, tag: string): boolean {
+  try {
+    deps.exec("git", ["ls-remote", "--exit-code", "--tags", "origin", `refs/tags/${tag}`]);
+    return true;
+  } catch (e) {
+    if (isExecExitStatus(e, 2)) return false;
+    throw e;
+  }
+}
+
+export function checkTagExists(deps: Deps, tag: string): boolean {
+  if (deps.exec("git", ["tag", "-l", tag]).trim() !== "") return true;
+  return tagExistsOnRemote(deps, tag);
+}
+
 // ── publish preconditions ───────────────────────────────────────────────────────────
 
 export type PublishPrecondition = { ok: true; version: string } | { ok: false; reason: string };
@@ -228,12 +316,14 @@ export function checkPublishPreconditions(deps: Deps): PublishPrecondition {
   if (lockstep.version === "0.0.0") {
     return { ok: false, reason: "manifests are still at 0.0.0 — nothing prepared to publish yet." };
   }
+  const lockfileCheck = checkLockfileVersions(deps.repoRoot, lockstep.version);
+  if (!lockfileCheck.ok) return { ok: false, reason: lockfileCheck.message };
   const changelog = readFileSync(join(deps.repoRoot, "CHANGELOG.md"), "utf8");
   if (!changelogHasSection(changelog, lockstep.version)) {
     return { ok: false, reason: `CHANGELOG.md has no "## [${lockstep.version}]" section.` };
   }
   const tag = `v${lockstep.version}`;
-  if (deps.exec("git", ["tag", "-l", tag]).trim() !== "") {
+  if (checkTagExists(deps, tag)) {
     return { ok: false, reason: `tag ${tag} already exists — see rollback in docs/dev-guide/10-releasing.md.` };
   }
   return { ok: true, version: lockstep.version };
@@ -346,12 +436,23 @@ export function runPrepare(deps: Deps, version: string): CommandResult {
     actions.push(`bumped ${p} -> ${version}`);
   }
 
+  // package-lock.json's root/engine/dashboard entries are DERIVED from the four manifests
+  // just bumped above, never hand-set — `--package-lock-only` skips reinstalling
+  // node_modules (this only needs to happen once, at publish time, not on every prepare) and
+  // `--ignore-scripts` keeps a version bump from ever running arbitrary package lifecycle code.
+  deps.exec("npm", ["install", "--package-lock-only", "--ignore-scripts"]);
+  actions.push("regenerated package-lock.json (npm install --package-lock-only --ignore-scripts)");
+  const lockfileCheck = checkLockfileVersions(deps.repoRoot, version);
+  if (!lockfileCheck.ok) {
+    return { code: 1, output: `release prepare: ${lockfileCheck.message}\n` };
+  }
+
   const date = formatChangelogDate(new Date());
   const updatedChangelog = moveUnreleasedToVersion(changelog, version, date);
   writeFileSync(changelogPath, updatedChangelog);
   actions.push(`moved CHANGELOG Unreleased -> [${version}] - ${date}`);
 
-  deps.exec("git", ["add", ...MANIFEST_PATHS, "CHANGELOG.md"]);
+  deps.exec("git", ["add", ...MANIFEST_PATHS, "package-lock.json", "CHANGELOG.md"]);
   deps.exec("git", ["commit", "-m", `release: v${version}`]);
   actions.push(`committed "release: v${version}"`);
 

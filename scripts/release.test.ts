@@ -6,8 +6,10 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   changelogHasSection,
+  checkLockfileVersions,
   checkManifestLockstep,
   checkPublishPreconditions,
+  checkTagExists,
   compareSemver,
   type Deps,
   type Exec,
@@ -28,6 +30,17 @@ const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 function tmpRepo(): string {
   return mkdtempSync(join(tmpdir(), "sapwood-release-test-"));
+}
+
+// Mirrors what `execFileSync` actually throws on a non-zero exit — a fake `Exec` that needs to
+// simulate `git ls-remote --exit-code`'s exit-code-as-signal contract raises this instead of
+// returning a string, exactly like the real child_process call would.
+class FakeExecError extends Error {
+  status: number;
+  constructor(status: number) {
+    super(`fake exec exited with status ${status}`);
+    this.status = status;
+  }
 }
 
 // ── semver validation ───────────────────────────────────────────────────────────────
@@ -66,6 +79,33 @@ test("formatBuildStamp: version+date.sha", () => {
   assert.equal(formatBuildStamp("0.3.0-alpha.1", "20260819", "a1b2c3d"), "0.3.0-alpha.1+20260819.a1b2c3d");
 });
 
+// ── compareSemver ───────────────────────────────────────────────────────────────────
+
+test("compareSemver: the pre-1.0 ladder orders as alpha.1 < alpha.2 < beta.1 < release < patch < minor", () => {
+  const order = ["0.3.0-alpha.1", "0.3.0-alpha.2", "0.3.0-beta.1", "0.3.0", "0.3.1", "0.10.0"];
+  for (let i = 0; i < order.length - 1; i++) {
+    assert.ok(compareSemver(order[i], order[i + 1]) < 0, `expected ${order[i]} < ${order[i + 1]}`);
+    assert.ok(compareSemver(order[i + 1], order[i]) > 0, `expected ${order[i + 1]} > ${order[i]}`);
+  }
+});
+
+test("compareSemver: equal versions compare to 0", () => {
+  assert.equal(compareSemver("0.3.0", "0.3.0"), 0);
+  assert.equal(compareSemver("0.3.0-alpha.1", "0.3.0-alpha.1"), 0);
+});
+
+test("compareSemver: numeric pre-release identifiers compare by length then lexically, not via Number() — correct even past 2^53", () => {
+  const a = "0.3.0-alpha.12345678901234567890";
+  const b = "0.3.0-alpha.12345678901234567891";
+  // Number(a) and Number(b) both round to the same imprecise float past 2^53; a correct
+  // implementation still tells them apart because it never converts to Number at all.
+  assert.notEqual(Number(a.split(".").pop()), undefined);
+  assert.ok(compareSemver(a, b) < 0, "a should be < b despite exceeding Number.MAX_SAFE_INTEGER");
+  assert.ok(compareSemver(b, a) > 0);
+  // a shorter numeric identifier is always less than a longer one, regardless of leading digit
+  assert.ok(compareSemver("0.3.0-alpha.9", "0.3.0-alpha.10") < 0);
+});
+
 // ── manifest read/write + lockstep ─────────────────────────────────────────────────
 
 test("writeManifestVersion: edits only the version line, formatting otherwise untouched", () => {
@@ -90,6 +130,22 @@ function writeFakeManifests(dir: string, versions: string[]): string[] {
     writeFileSync(p, JSON.stringify({ name: "x", version: versions[i] }, null, 2) + "\n");
   });
   return paths;
+}
+
+// A minimal but structurally real lockfile — only the three `packages[...]` entries
+// `checkLockfileVersions` actually reads, not a full `npm install` output.
+function writeFakeLockfile(repoRoot: string, version: string): void {
+  const lock = {
+    name: "sapwood-workspace",
+    version,
+    lockfileVersion: 3,
+    packages: {
+      "": { name: "sapwood-workspace", version },
+      engine: { name: "@sapwood/engine", version },
+      dashboard: { name: "@sapwood/dashboard", version },
+    },
+  };
+  writeFileSync(join(repoRoot, "package-lock.json"), `${JSON.stringify(lock, null, 2)}\n`);
 }
 
 test("checkManifestLockstep: ok when all four agree", () => {
@@ -124,7 +180,42 @@ test("lockstep: the repo's own four manifests agree, and CHANGELOG has a matchin
   assert.equal(changelogHasSection(changelog, version), true, `CHANGELOG.md has no section for manifest version ${version}`);
 });
 
-// ── CHANGELOG section move ──────────────────────────────────────────────────────────
+// ── checkLockfileVersions ───────────────────────────────────────────────────────────
+
+test("checkLockfileVersions: ok when root/engine/dashboard entries all match", () => {
+  const dir = tmpRepo();
+  try {
+    writeFakeLockfile(dir, "0.3.0");
+    assert.deepEqual(checkLockfileVersions(dir, "0.3.0"), { ok: true });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("checkLockfileVersions: fails when one of the three entries disagrees", () => {
+  const dir = tmpRepo();
+  try {
+    const lock = { packages: { "": { version: "0.3.0" }, engine: { version: "0.2.9" }, dashboard: { version: "0.3.0" } } };
+    writeFileSync(join(dir, "package-lock.json"), JSON.stringify(lock));
+    const r = checkLockfileVersions(dir, "0.3.0");
+    assert.equal(r.ok, false);
+    assert.match((r as { message: string }).message, /engine/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("checkLockfileVersions: fails when package-lock.json is missing or unreadable", () => {
+  const dir = tmpRepo();
+  try {
+    const r = checkLockfileVersions(dir, "0.3.0");
+    assert.equal(r.ok, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── CHANGELOG section parsing (line-anchored headings, CRLF-normalized) ────────────
 
 const SAMPLE_CHANGELOG = `# Changelog
 
@@ -157,26 +248,138 @@ test("extractUnreleasedBody / extractVersionSection / changelogHasSection", () =
   assert.equal(changelogHasSection("## [Unreleased]\n", "0.0.0"), true);
 });
 
+const PROSE_ONLY_CHANGELOG = `# Changelog
+
+Some notes mention \`## [Unreleased]\` inline, and this paragraph talks about
+the ## [Unreleased] heading without it ever starting its own line.
+
+    ## [Unreleased]
+    (a 4-space-indented example inside this doc — still not a real heading line)
+`;
+
+test("changelog heading matching: a heading mentioned in prose, inline code, or an indented block never counts — missing heading throws/reports false", () => {
+  assert.throws(() => extractUnreleasedBody(PROSE_ONLY_CHANGELOG), /has no/);
+  assert.equal(changelogHasSection(PROSE_ONLY_CHANGELOG, "0.0.0"), false);
+});
+
+const MULTI_SECTION_CHANGELOG = `# Changelog
+
+## [Unreleased]
+
+### Added
+- first-section thing
+
+## [0.2.0] - 2026-01-01
+
+### Added
+- middle thing
+
+## [0.1.0] - 2026-01-01
+
+### Added
+- last thing
+`;
+
+test("changelog: extracts the first section (Unreleased) and the last section (nothing follows it) correctly", () => {
+  assert.match(extractUnreleasedBody(MULTI_SECTION_CHANGELOG), /first-section thing/);
+  assert.match(extractVersionSection(MULTI_SECTION_CHANGELOG, "0.2.0") ?? "", /middle thing/);
+  const last = extractVersionSection(MULTI_SECTION_CHANGELOG, "0.1.0");
+  assert.match(last ?? "", /last thing/);
+  assert.doesNotMatch(last ?? "", /middle thing|first-section thing/);
+});
+
+test("changelog parsing normalizes CRLF to LF before matching headings or extracting bodies", () => {
+  const crlf = SAMPLE_CHANGELOG.replace(/\n/g, "\r\n");
+  assert.match(extractUnreleasedBody(crlf), /^### Added\n- new thing$/);
+  assert.match(extractVersionSection(crlf, "0.2.0") ?? "", /^### Added\n- old thing$/);
+  assert.equal(changelogHasSection(crlf, "0.2.0"), true);
+  const moved = moveUnreleasedToVersion(crlf, "0.3.0", "2026-08-19");
+  assert.match(moved, /## \[Unreleased\]\n\n## \[0\.3\.0\] - 2026-08-19\n\n### Added\n- new thing/);
+});
+
+// ── checkTagExists: local cache + the actual remote ─────────────────────────────────
+
+test("checkTagExists: true from the local cache alone — never calls the remote", () => {
+  const exec: Exec = (file, args) => {
+    if (file === "git" && args[0] === "tag" && args[1] === "-l") return "v0.3.0\n";
+    throw new Error(`should not reach the remote when the local cache already has it: ${file} ${args.join(" ")}`);
+  };
+  assert.equal(checkTagExists({ repoRoot: "/unused", exec }, "v0.3.0"), true);
+});
+
+test("checkTagExists: false when both the local cache and the remote lack it (ls-remote exit 2)", () => {
+  const exec: Exec = (file, args) => {
+    if (file === "git" && args[0] === "tag" && args[1] === "-l") return "";
+    if (file === "git" && args[0] === "ls-remote") throw new FakeExecError(2);
+    throw new Error(`unexpected exec in test: ${file} ${args.join(" ")}`);
+  };
+  assert.equal(checkTagExists({ repoRoot: "/unused", exec }, "v0.3.0"), false);
+});
+
+test("checkTagExists: true when the remote has it even though the local cache doesn't (ls-remote exit 0)", () => {
+  const exec: Exec = (file, args) => {
+    if (file === "git" && args[0] === "tag" && args[1] === "-l") return "";
+    if (file === "git" && args[0] === "ls-remote") return "abc123def\trefs/tags/v0.3.0\n";
+    throw new Error(`unexpected exec in test: ${file} ${args.join(" ")}`);
+  };
+  assert.equal(checkTagExists({ repoRoot: "/unused", exec }, "v0.3.0"), true);
+});
+
+test("checkTagExists: a non-2 exit from ls-remote propagates as a real error, never silently read as absent", () => {
+  const exec: Exec = (file, args) => {
+    if (file === "git" && args[0] === "tag" && args[1] === "-l") return "";
+    if (file === "git" && args[0] === "ls-remote") throw new FakeExecError(1);
+    throw new Error(`unexpected exec in test: ${file} ${args.join(" ")}`);
+  };
+  assert.throws(
+    () => checkTagExists({ repoRoot: "/unused", exec }, "v0.3.0"),
+    (e: unknown) => e instanceof FakeExecError && e.status === 1,
+  );
+});
+
 // ── publish preconditions (fake exec) ───────────────────────────────────────────────
 
 function setupPublishRepo(version: string, changelog: string): string {
   const dir = tmpRepo();
   writeFakeManifests(dir, [version, version, version, version]);
   writeFileSync(join(dir, "CHANGELOG.md"), changelog);
+  writeFakeLockfile(dir, version);
   return dir;
 }
 
-function fakeExec(opts: { head: string; origin: string; dirty: string; tagOut: string }): Exec {
+function fakeExec(opts: { head: string; origin: string; dirty: string; tagOut: string; remoteTagExists?: boolean }): Exec {
   return (file, args) => {
     if (file === "git" && args[0] === "fetch") return "";
     if (file === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return opts.head;
     if (file === "git" && args[0] === "rev-parse" && args[1] === "origin/main") return opts.origin;
     if (file === "git" && args[0] === "status") return opts.dirty;
     if (file === "git" && args[0] === "tag" && args[1] === "-l") return opts.tagOut;
+    if (file === "git" && args[0] === "ls-remote") {
+      if (opts.remoteTagExists) return "abc123def\trefs/tags/v0.3.0\n";
+      throw new FakeExecError(2);
+    }
     if (file === "git" && (args[0] === "tag" || args[0] === "push")) return "";
     if (file === "gh") return "";
     throw new Error(`unexpected exec in test: ${file} ${args.join(" ")}`);
   };
+}
+
+// Wraps any Exec fake to also record every (file, args) call, in order, and to snapshot the
+// content of any `--notes-file` argument at call time — the real gh-release step deletes that
+// file in its own `finally` immediately after the exec call returns, so it must be read here,
+// synchronously, before control returns to the caller.
+function withRecorder(inner: Exec): { exec: Exec; calls: Array<{ file: string; args: string[] }>; notesFileContents: string[] } {
+  const calls: Array<{ file: string; args: string[] }> = [];
+  const notesFileContents: string[] = [];
+  const exec: Exec = (file, args) => {
+    calls.push({ file, args: [...args] });
+    const notesIdx = args.indexOf("--notes-file");
+    if (file === "gh" && notesIdx !== -1) {
+      notesFileContents.push(readFileSync(args[notesIdx + 1], "utf8"));
+    }
+    return inner(file, args);
+  };
+  return { exec, calls, notesFileContents };
 }
 
 const READY_CHANGELOG = "## [Unreleased]\n\n## [0.3.0] - 2026-08-19\n\n### Added\n- x\n";
@@ -219,6 +422,19 @@ test("checkPublishPreconditions: fails when manifests disagree", () => {
   }
 });
 
+test("checkPublishPreconditions: fails when package-lock.json disagrees with the manifests", () => {
+  const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
+  try {
+    writeFakeLockfile(dir, "0.2.9"); // overwrite with a stale lockfile
+    const deps: Deps = { repoRoot: dir, exec: fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }) };
+    const r = checkPublishPreconditions(deps);
+    assert.equal(r.ok, false);
+    assert.match((r as { reason: string }).reason, /package-lock/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("checkPublishPreconditions: fails when CHANGELOG has no section for the manifest version", () => {
   const dir = setupPublishRepo("0.3.0", "## [Unreleased]\n\nnothing shipped yet\n");
   try {
@@ -231,10 +447,22 @@ test("checkPublishPreconditions: fails when CHANGELOG has no section for the man
   }
 });
 
-test("checkPublishPreconditions: fails when the tag already exists", () => {
+test("checkPublishPreconditions: fails when the tag already exists locally", () => {
   const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
   try {
     const deps: Deps = { repoRoot: dir, exec: fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "v0.3.0\n" }) };
+    const r = checkPublishPreconditions(deps);
+    assert.equal(r.ok, false);
+    assert.match((r as { reason: string }).reason, /already exists/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("checkPublishPreconditions: fails when the tag exists only on the remote, not in the local cache", () => {
+  const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
+  try {
+    const deps: Deps = { repoRoot: dir, exec: fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "", remoteTagExists: true }) };
     const r = checkPublishPreconditions(deps);
     assert.equal(r.ok, false);
     assert.match((r as { reason: string }).reason, /already exists/);
@@ -255,7 +483,7 @@ test("checkPublishPreconditions: fails at 0.0.0 (nothing prepared yet)", () => {
   }
 });
 
-test("checkPublishPreconditions: succeeds when everything lines up", () => {
+test("checkPublishPreconditions: succeeds when everything lines up (tag absent both locally and on the remote)", () => {
   const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
   try {
     const deps: Deps = { repoRoot: dir, exec: fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }) };
@@ -304,19 +532,50 @@ test("runPublish: a failed precondition is a non-zero exit with one clear line, 
   }
 });
 
-// ── compareSemver ───────────────────────────────────────────────────────────────────
+test("runPublish (real run, not dry-run): exact tag/push/gh-release argv, --prerelease present, notes file = CHANGELOG section", () => {
+  const version = "0.3.0-alpha.1";
+  const changelog = `## [Unreleased]\n\n## [${version}] - 2026-08-19\n\n### Added\n- first public early-access cut\n`;
+  const dir = setupPublishRepo(version, changelog);
+  try {
+    const { exec, calls, notesFileContents } = withRecorder(fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }));
+    const deps: Deps = { repoRoot: dir, exec };
+    const r = runPublish(deps, { dryRun: false });
+    assert.equal(r.code, 0);
 
-test("compareSemver: the pre-1.0 ladder orders as alpha.1 < alpha.2 < beta.1 < release < patch < minor", () => {
-  const order = ["0.3.0-alpha.1", "0.3.0-alpha.2", "0.3.0-beta.1", "0.3.0", "0.3.1", "0.10.0"];
-  for (let i = 0; i < order.length - 1; i++) {
-    assert.ok(compareSemver(order[i], order[i + 1]) < 0, `expected ${order[i]} < ${order[i + 1]}`);
-    assert.ok(compareSemver(order[i + 1], order[i]) > 0, `expected ${order[i + 1]} > ${order[i]}`);
+    const tagCall = calls.find((c) => c.file === "git" && c.args[0] === "tag" && c.args[1] === "-a");
+    assert.deepEqual(tagCall?.args, ["tag", "-a", `v${version}`, "-m", `v${version}`]);
+
+    const pushCall = calls.find((c) => c.file === "git" && c.args[0] === "push");
+    assert.deepEqual(pushCall?.args, ["push", "origin", `v${version}`]);
+
+    const ghCall = calls.find((c) => c.file === "gh");
+    assert.equal(ghCall?.args[0], "release");
+    assert.equal(ghCall?.args[1], "create");
+    assert.equal(ghCall?.args[2], `v${version}`);
+    assert.ok(ghCall?.args.includes("--title"));
+    assert.ok(ghCall?.args.includes("--notes-file"));
+    assert.ok(ghCall?.args.includes("--generate-notes"));
+    assert.ok(ghCall?.args.includes("--prerelease"));
+
+    assert.equal(notesFileContents.length, 1);
+    assert.equal(notesFileContents[0], extractVersionSection(changelog, version));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("compareSemver: equal versions compare to 0", () => {
-  assert.equal(compareSemver("0.3.0", "0.3.0"), 0);
-  assert.equal(compareSemver("0.3.0-alpha.1", "0.3.0-alpha.1"), 0);
+test("runPublish (real run): --prerelease absent from the gh-release argv for a plain release version", () => {
+  const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
+  try {
+    const { exec, calls } = withRecorder(fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }));
+    const deps: Deps = { repoRoot: dir, exec };
+    const r = runPublish(deps, { dryRun: false });
+    assert.equal(r.code, 0);
+    const ghCall = calls.find((c) => c.file === "gh");
+    assert.ok(!ghCall?.args.includes("--prerelease"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── runPrepare preconditions ────────────────────────────────────────────────────────
@@ -328,12 +587,19 @@ function setupPrepareRepo(version: string, changelog: string): string {
   return dir;
 }
 
-function fakePrepareExec(opts: { head: string; origin: string; dirty: string }): Exec {
+// `npm install --package-lock-only` is simulated by writing a lockfile matching `version` at
+// the moment it's invoked — the same "the fake produces the side effect the real command
+// would" pattern the other fakes use, not a special case for this one command.
+function fakePrepareExec(opts: { head: string; origin: string; dirty: string; repoRoot: string; version: string }): Exec {
   return (file, args) => {
     if (file === "git" && args[0] === "fetch") return "";
     if (file === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return opts.head;
     if (file === "git" && args[0] === "rev-parse" && args[1] === "origin/main") return opts.origin;
     if (file === "git" && args[0] === "status") return opts.dirty;
+    if (file === "npm" && args[0] === "install") {
+      writeFakeLockfile(opts.repoRoot, opts.version);
+      return "";
+    }
     if (file === "git" && ["checkout", "add", "commit", "push"].includes(args[0])) return "";
     if (file === "gh") return "";
     throw new Error(`unexpected exec in test: ${file} ${args.join(" ")}`);
@@ -345,7 +611,10 @@ const UNRELEASED_WITH_CONTENT = "## [Unreleased]\n\n### Added\n- x\n";
 test("runPrepare: (a) fails when HEAD is not origin/main, before touching anything", () => {
   const dir = setupPrepareRepo("0.0.0", UNRELEASED_WITH_CONTENT);
   try {
-    const deps: Deps = { repoRoot: dir, exec: fakePrepareExec({ head: "aaa", origin: "bbb", dirty: "" }) };
+    const deps: Deps = {
+      repoRoot: dir,
+      exec: fakePrepareExec({ head: "aaa", origin: "bbb", dirty: "", repoRoot: dir, version: "0.3.0-alpha.1" }),
+    };
     const r = runPrepare(deps, "0.3.0-alpha.1");
     assert.equal(r.code, 1);
     assert.match(r.output, /not origin\/main/);
@@ -359,7 +628,10 @@ test("runPrepare: (a) fails when HEAD is not origin/main, before touching anythi
 test("runPrepare: (b) fails when the Unreleased body is empty", () => {
   const dir = setupPrepareRepo("0.0.0", "## [Unreleased]\n\n");
   try {
-    const deps: Deps = { repoRoot: dir, exec: fakePrepareExec({ head: "aaa", origin: "aaa", dirty: "" }) };
+    const deps: Deps = {
+      repoRoot: dir,
+      exec: fakePrepareExec({ head: "aaa", origin: "aaa", dirty: "", repoRoot: dir, version: "0.3.0-alpha.1" }),
+    };
     const r = runPrepare(deps, "0.3.0-alpha.1");
     assert.equal(r.code, 1);
     assert.match(r.output, /Unreleased/);
@@ -372,7 +644,7 @@ test("runPrepare: (b) fails when the Unreleased body is empty", () => {
 test("runPrepare: (c) fails when the new version equals the current one", () => {
   const dir = setupPrepareRepo("0.3.0", UNRELEASED_WITH_CONTENT);
   try {
-    const deps: Deps = { repoRoot: dir, exec: fakePrepareExec({ head: "aaa", origin: "aaa", dirty: "" }) };
+    const deps: Deps = { repoRoot: dir, exec: fakePrepareExec({ head: "aaa", origin: "aaa", dirty: "", repoRoot: dir, version: "0.3.0" }) };
     const r = runPrepare(deps, "0.3.0");
     assert.equal(r.code, 1);
     assert.match(r.output, /not greater than/);
@@ -384,7 +656,7 @@ test("runPrepare: (c) fails when the new version equals the current one", () => 
 test("runPrepare: (c) fails when the new version is below the current one", () => {
   const dir = setupPrepareRepo("0.3.0", UNRELEASED_WITH_CONTENT);
   try {
-    const deps: Deps = { repoRoot: dir, exec: fakePrepareExec({ head: "aaa", origin: "aaa", dirty: "" }) };
+    const deps: Deps = { repoRoot: dir, exec: fakePrepareExec({ head: "aaa", origin: "aaa", dirty: "", repoRoot: dir, version: "0.2.9" }) };
     const r = runPrepare(deps, "0.2.9");
     assert.equal(r.code, 1);
     assert.match(r.output, /not greater than/);
@@ -393,13 +665,74 @@ test("runPrepare: (c) fails when the new version is below the current one", () =
   }
 });
 
+test("runPrepare: fails if npm install didn't actually bring the lockfile to the new version", () => {
+  const dir = setupPrepareRepo("0.0.0", UNRELEASED_WITH_CONTENT);
+  writeFakeLockfile(dir, "0.0.0"); // stale — the fake npm install below is a deliberate no-op
+  try {
+    const exec: Exec = (file, args) => {
+      if (file === "git" && args[0] === "fetch") return "";
+      if (file === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return "aaa";
+      if (file === "git" && args[0] === "rev-parse" && args[1] === "origin/main") return "aaa";
+      if (file === "git" && args[0] === "status") return "";
+      if (file === "git" && args[0] === "checkout") return "";
+      if (file === "npm" && args[0] === "install") return "";
+      throw new Error(`unexpected exec in test: ${file} ${args.join(" ")}`);
+    };
+    const r = runPrepare({ repoRoot: dir, exec }, "0.3.0-alpha.1");
+    assert.equal(r.code, 1);
+    assert.match(r.output, /package-lock/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runPrepare: succeeds end-to-end from a 0.0.0 baseline — anything valid is greater", () => {
+  const version = "0.3.0-alpha.1";
   const dir = setupPrepareRepo("0.0.0", UNRELEASED_WITH_CONTENT);
   try {
-    const deps: Deps = { repoRoot: dir, exec: fakePrepareExec({ head: "aaa", origin: "aaa", dirty: "" }) };
-    const r = runPrepare(deps, "0.3.0-alpha.1");
+    const deps: Deps = { repoRoot: dir, exec: fakePrepareExec({ head: "aaa", origin: "aaa", dirty: "", repoRoot: dir, version }) };
+    const r = runPrepare(deps, version);
     assert.equal(r.code, 0);
-    assert.equal(readManifestVersion(join(dir, "package.json")), "0.3.0-alpha.1");
+    assert.equal(readManifestVersion(join(dir, "package.json")), version);
+    assert.deepEqual(checkLockfileVersions(dir, version), { ok: true });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runPrepare (real run): exact argv sequence — checkout -b, npm install, add (incl. package-lock.json), commit, push -u, gh pr create", () => {
+  const version = "0.3.0-alpha.1";
+  const dir = setupPrepareRepo("0.0.0", UNRELEASED_WITH_CONTENT);
+  try {
+    const { exec, calls } = withRecorder(fakePrepareExec({ head: "aaa", origin: "aaa", dirty: "", repoRoot: dir, version }));
+    const deps: Deps = { repoRoot: dir, exec };
+    const r = runPrepare(deps, version);
+    assert.equal(r.code, 0);
+
+    const checkoutCall = calls.find((c) => c.file === "git" && c.args[0] === "checkout");
+    assert.deepEqual(checkoutCall?.args, ["checkout", "-b", `release/v${version}`]);
+
+    const npmCall = calls.find((c) => c.file === "npm");
+    assert.deepEqual(npmCall?.args, ["install", "--package-lock-only", "--ignore-scripts"]);
+
+    const addCall = calls.find((c) => c.file === "git" && c.args[0] === "add");
+    assert.ok(addCall);
+    assert.deepEqual([...(addCall?.args.slice(1) ?? [])].sort(), [...MANIFEST_PATHS, "package-lock.json", "CHANGELOG.md"].sort());
+
+    const commitCall = calls.find((c) => c.file === "git" && c.args[0] === "commit");
+    assert.deepEqual(commitCall?.args, ["commit", "-m", `release: v${version}`]);
+
+    const pushCall = calls.find((c) => c.file === "git" && c.args[0] === "push");
+    assert.deepEqual(pushCall?.args, ["push", "-u", "origin", `release/v${version}`]);
+
+    const ghCall = calls.find((c) => c.file === "gh");
+    assert.equal(ghCall?.args[0], "pr");
+    assert.equal(ghCall?.args[1], "create");
+
+    // argv order matters for the mechanical steps (branch first, npm before staging), but the
+    // exact call ORDER isn't re-asserted beyond that — each step's own argv is the contract.
+    assert.ok(calls.findIndex((c) => c.file === "git" && c.args[0] === "checkout") < calls.findIndex((c) => c.file === "npm"));
+    assert.ok(calls.findIndex((c) => c.file === "npm") < calls.findIndex((c) => c.file === "git" && c.args[0] === "add"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

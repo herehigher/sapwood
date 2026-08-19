@@ -19,9 +19,12 @@ version, held in lockstep across exactly four files:
 - `dashboard/package.json`
 - `.claude-plugin/plugin.json`
 
-These are written **only** by `scripts/release.ts` — never by hand. A lockstep test
-(`scripts/release.test.ts`) fails the build the moment any one of them drifts from
-the others.
+These are written **only** by `scripts/release.ts` — never by hand. `package-lock.json`'s
+own root/`engine`/`dashboard` entries agree with them too, but not because anyone edits
+a fifth place: the script runs `npm install --package-lock-only --ignore-scripts`
+immediately after bumping the four manifests, and those entries are simply what that
+step derives from them. A lockstep test (`scripts/release.test.ts`) fails the build the
+moment any manifest, or the lockfile's derived entries, drifts from the rest.
 
 **Three layers, one truth:**
 
