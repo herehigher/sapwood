@@ -129,14 +129,16 @@ npm view sapwood dist-tags
 # 5. Rollback, if needed.
 gh release delete v0.3.0-alpha.1 --yes
 git push origin :refs/tags/v0.3.0-alpha.1
+# then ship a patch through the same runbook.
 # npm never lets a version be re-published or removed after ~72h (unpublish policy);
 # ship a corrected version instead — see npm's own unpublish policy for the narrow
 # window in which `npm unpublish` still applies.
 
 # 5b. Retry, if only the npm step failed (tag + GitHub Release already exist —
 #     `publish` itself refuses to re-run once the tag exists, so retry this one
-#     step by hand from the tagged commit):
+#     step by hand from the tagged commit). <dist-tag> is whatever
+#     `npm run release -- publish --dry-run` printed for this version (see "npm
+#     publish dist-tag" above — latest / alpha / beta / rc / next):
 git checkout v0.3.0-alpha.1
-npm publish --workspace engine --tag alpha
-# then ship a patch through the same runbook.
+npm publish --workspace engine --tag <dist-tag>
 ```

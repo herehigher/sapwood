@@ -3,14 +3,16 @@
 // `npm i -g sapwood@alpha` and the marketplace plugin's `npx sapwood@<version>` depend on.
 // `npm pack` -> `npm install <tarball>` into a scratch prefix, then the installed binary is
 // exercised exactly as an end user's shell would run it. Only the sapwood tarball itself is
-// installed from a local file path; the two runtime deps (yaml, zod) resolve from npm's local
-// cache in practice (this repo's own `npm ci` already populated it), so the test needs no
-// network access to pass — never asserted here, since npm has no flag that turns a missing-cache
-// miss into a hard local-only failure without also risking spurious failures on a cold cache.
+// installed from a local file path; `--prefer-offline` keeps the two runtime deps (yaml, zod)
+// from a redundant registry round-trip when they're already in npm's local cache — which they
+// are here, since `npm ci` at the start of the same job/session already populated it. A truly
+// cold cache (no prior `npm ci`) would still need network for those two deps; this test does
+// not attempt to guarantee offline-from-scratch, only that it adds no NEW network dependency
+// beyond what the surrounding job already pays for.
 //
-// Bounded, not timing-dependent: the whole sequence (rebuild + pack + install + two CLI
-// invocations) runs synchronously and finishes in single-digit seconds locally; the explicit
-// timeout below is slack for a slower CI machine, not a race with anything concurrent.
+// Bounded, not timing-dependent: every subprocess call below carries its own `timeout` so one
+// hung step fails fast and named, instead of the whole test silently riding out its own overall
+// timeout with no indication of which step wedged.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -21,23 +23,28 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
-test("packed engine tarball installs and runs as the `sapwood` npm package", { timeout: 60_000 }, () => {
+test("packed engine tarball installs and runs as the `sapwood` npm package", { timeout: 300_000 }, () => {
   const packDir = mkdtempSync(join(tmpdir(), "sapwood-pack-"));
   const installDir = mkdtempSync(join(tmpdir(), "sapwood-install-"));
   try {
     // Rebuild first: a stale dist/ from a previous step would make this test pass for the wrong
     // reason (asserting yesterday's build is installable, not today's source).
-    execFileSync("npm", ["run", "build", "--workspace", "engine"], { cwd: REPO_ROOT, stdio: "pipe" });
-    execFileSync("npm", ["pack", "--workspace", "engine", "--pack-destination", packDir], { cwd: REPO_ROOT, stdio: "pipe" });
+    execFileSync("npm", ["run", "build", "--workspace", "engine"], { cwd: REPO_ROOT, stdio: "pipe", timeout: 120_000 });
+    execFileSync("npm", ["pack", "--workspace", "engine", "--pack-destination", packDir], {
+      cwd: REPO_ROOT,
+      stdio: "pipe",
+      timeout: 60_000,
+    });
 
     const manifestVersion = (JSON.parse(readFileSync(join(REPO_ROOT, "engine", "package.json"), "utf8")) as { version: string }).version;
     const tarballPath = join(packDir, `sapwood-${manifestVersion}.tgz`);
     assert.ok(existsSync(tarballPath), `expected \`npm pack\` to produce ${tarballPath}`);
 
-    execFileSync("npm", ["install", "--prefix", installDir, tarballPath, "--ignore-scripts", "--no-audit", "--no-fund"], {
-      cwd: REPO_ROOT,
-      stdio: "pipe",
-    });
+    execFileSync(
+      "npm",
+      ["install", "--prefix", installDir, tarballPath, "--ignore-scripts", "--no-audit", "--no-fund", "--prefer-offline"],
+      { cwd: REPO_ROOT, stdio: "pipe", timeout: 60_000 },
+    );
 
     const installedRoot = join(installDir, "node_modules", "sapwood");
     const cliPath = join(installedRoot, "dist", "cli.js");
@@ -60,10 +67,10 @@ test("packed engine tarball installs and runs as the `sapwood` npm package", { t
 
     // execFileSync throws on a non-zero exit, so reaching either assertion below already proves
     // the process exited 0 — a separate status check would only restate that.
-    const versionOut = execFileSync("node", [cliPath, "--version"], { encoding: "utf8" }).trim();
+    const versionOut = execFileSync("node", [cliPath, "--version"], { encoding: "utf8", timeout: 15_000 }).trim();
     assert.equal(versionOut, manifestVersion, "`sapwood --version` must print the packed manifest's version");
 
-    const helpOut = execFileSync("node", [cliPath, "--help"], { encoding: "utf8" });
+    const helpOut = execFileSync("node", [cliPath, "--help"], { encoding: "utf8", timeout: 15_000 });
     assert.match(helpOut, /usage: sapwood/);
   } finally {
     rmSync(packDir, { recursive: true, force: true });

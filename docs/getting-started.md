@@ -53,7 +53,7 @@ see `sapwood estop --help`).
 
 ### Channel B — Claude Code plugin/marketplace install: not yet available
 
-There is no marketplace coordinate, npm package, or prebuilt `engine/dist`; the three shipped
+There is no marketplace coordinate or prebuilt `engine/dist`; the three shipped
 plugin wrappers (`/sapwood-run`, `/sapwood-status`, `/sapwood-stop`) additionally require
 `npm ci` at the plugin root and cover only `run`, `status`, and `stop`, not `init` or `validate`.
 

@@ -6,5 +6,10 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts", "src/**/*.test-support.ts"]
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.test-support.ts",
+    "src/**/fixtures/**",
+    "src/state/event-kinds/generate-glossary.ts"
+  ]
 }
