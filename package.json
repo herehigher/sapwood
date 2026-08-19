@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "description": "sapwood — the autonomous coding loop with governance built in",
+  "type": "module",
   "workspaces": [
     "engine",
     "dashboard"
@@ -13,8 +14,9 @@
   "scripts": {
     "typecheck": "npm run -ws typecheck",
     "lint": "biome ci .",
-    "test": "npm run -ws test",
-    "build": "npm run -ws build"
+    "test": "npm run -ws test && node --test scripts/*.test.ts",
+    "build": "npm run -ws build",
+    "release": "node scripts/release.ts"
   },
   "license": "MIT",
   "devDependencies": {

@@ -115,6 +115,35 @@ const require = createRequire(import.meta.url);
 // ponytail: runtime require avoids JSON-import assertion syntax differences across Node versions
 const { version } = require("../package.json") as { version: string };
 
+/** CI's `release -- stamp` (docs/dev-guide/10-releasing.md) writes this JSON file as a sibling of
+ *  the compiled `cli.js`, never of `cli.ts` — resolved via `import.meta.url` so the same code path
+ *  finds it under `dist/` and correctly finds nothing under `src/` (a dev/test run is unstamped by
+ *  construction, not by a special case here). */
+interface BuildStamp {
+  date: string;
+  sha: string;
+}
+
+function readBuildStamp(): BuildStamp | undefined {
+  const stampPath = join(dirname(fileURLToPath(import.meta.url)), "build-stamp.json");
+  if (!existsSync(stampPath)) return undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(stampPath, "utf8"));
+    if (parsed && typeof parsed.date === "string" && typeof parsed.sha === "string") {
+      return { date: parsed.date, sha: parsed.sha };
+    }
+  } catch {
+    // Malformed stamp: fall back to the unstamped version rather than fail --version.
+  }
+  return undefined;
+}
+
+/** Pure formatting half of the three-layer version scheme (docs/dev-guide/10-releasing.md) — the
+ *  manifest version alone when no build stamp is present, `<version>+<date>.<sha>` when it is. */
+export function formatVersionString(baseVersion: string, stamp: BuildStamp | undefined): string {
+  return stamp ? `${baseVersion}+${stamp.date}.${stamp.sha}` : baseVersion;
+}
+
 /** #403 (F25): the ONE place the real wall clock enters the engine's production wiring. Every
  *  module's `now` dependency is REQUIRED, not optional — so a fixture that seeds a date cannot
  *  silently fall back to the real clock (the compiler refuses), and every real-clock read is
@@ -2018,7 +2047,7 @@ export interface CliResult {
 export function runCli(argv: string[]): CliResult {
   const arg = argv[2];
   if (arg === "--version" || arg === "-v") {
-    return { stdout: version + "\n", stderr: "", code: 0 };
+    return { stdout: formatVersionString(version, readBuildStamp()) + "\n", stderr: "", code: 0 };
   }
   if (arg === "--help" || arg === "-h" || arg === undefined) {
     return { stdout: USAGE, stderr: "", code: 0 };

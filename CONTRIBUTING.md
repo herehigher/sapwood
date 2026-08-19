@@ -27,6 +27,11 @@ itself.
   the relevant `docs/` page (or `docs/configuration.md` for config keys) in the
   same PR. GitHub issues/PRs record process; docs record what is true now.
 
+## Cutting a release
+
+Versioning policy and the exact release commands live in
+[dev-guide 10 — Releasing](docs/dev-guide/10-releasing.md).
+
 ## Working on the code
 
 Start with the [development guide](docs/dev-guide/README.md):
