@@ -235,42 +235,67 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
   buildContactSheet();
   expect(existsSync(`${OUTPUT_DIR}/contact-sheet.html`)).toBe(true);
 
-  // #956 AC4 (engine audit run 19432fa1 finding [0], ac4-contact-sheet-unverified, and run
-  // 44d80339 finding [0], ac4-attention-light-unpaired): a presence-of-file check on
-  // `contact-sheet.html` alone never reads what the file actually says — it would stay green even
-  // if `buildContactSheet()` silently dropped a family/theme row (finding [1] on an EARLIER head).
-  // Reads the real generated HTML and asserts its own content directly, against
-  // `REQUIRED_D956_ROWS` — deliberately NOT `D956_FAMILIES` (`buildContactSheet()`'s own
-  // generation source), so a family accidentally dropped from the GENERATOR fails HERE instead of
-  // silently vanishing from both the render and its own check at once. Every one of the 4
-  // families × 2 themes must reference its own capture, and — independently, straight off the
-  // real filesystem, never a second copy of the mockup filename logic — either the real mockup
-  // that exists on disk, or the explicit no-baseline note when it doesn't
-  // (`needs-attention-light.png`, today's one genuine gap: no source design crop exists in this
-  // repo to pair against, so the honest render is this visible, named gap, not a fabricated
-  // asset).
+  // #956 AC4 (engine audit run 19432fa1 finding [0], ac4-contact-sheet-unverified; run 44d80339
+  // finding [0], ac4-attention-light-unpaired; run 0b620f8c finding [0], ac4-row-pairing-unverified):
+  // three rounds of the same underlying gap, each narrower than the last. A presence-of-file check
+  // on `contact-sheet.html` alone never reads what the file actually says (round 1). A document-wide
+  // `.toContain()` for a capture src and a document-wide `.toContain()` for a mockup src each pass
+  // independently even when the two never share a ROW — the mockup filenames (`hero-panel-*.png`
+  // etc) are ALSO referenced by the earlier per-module table above, so a #956 row with the WRONG
+  // mockup, or none at all, would still pass a whole-document substring search (round 3's own
+  // finding). This version scopes every check to the dedicated `#956` section first, then to the
+  // OWN `<tr>` surrounding that row's unique capture src (capture filenames — `-fixing-hero-panel`
+  // etc — are unique to this section, unlike the mockup names): each row must carry its capture
+  // PLUS exactly one of {its real mockup, the exact no-baseline note} — never both, never neither —
+  // and the section's total note count is compared exactly against the filesystem-derived count of
+  // themes with no baseline (today: 1, `needs-attention-light.png`), closing the "duplicate/spurious
+  // note" gap round 3 named. `needs-attention-light.png` itself still doesn't exist anywhere in this
+  // repo — no source design crop for a producer session to derive one from — so that one row's own
+  // no-baseline note is the correct, honest render, not a defect to keep chasing.
   const contactSheetHtml = readFileSync(`${OUTPUT_DIR}/contact-sheet.html`, "utf8");
+  const D956_SECTION_HEADING = "<h2>Fixing / live header / attention capture families (#956)";
+  const sectionStart = contactSheetHtml.indexOf(D956_SECTION_HEADING);
+  expect(sectionStart, "contact sheet must contain the #956 section heading").toBeGreaterThanOrEqual(0);
+  const nextHeadingIndex = contactSheetHtml.indexOf("<h2>", sectionStart + D956_SECTION_HEADING.length);
+  const d956SectionHtml =
+    nextHeadingIndex === -1 ? contactSheetHtml.slice(sectionStart) : contactSheetHtml.slice(sectionStart, nextHeadingIndex);
+
+  let expectedNoBaselineCount = 0;
   for (const row of REQUIRED_D956_ROWS) {
     for (const theme of THEMES) {
       const captureFile = `captures/${CANONICAL_WIDTH}-${theme.key}-${row.slug}.png`;
-      expect(contactSheetHtml, `#956 contact sheet must reference the ${row.slug}/${theme.key} capture (${captureFile})`).toContain(
-        `src="${captureFile}"`,
-      );
+      const anchor = `src="${captureFile}"`;
+      const anchorIndex = d956SectionHtml.indexOf(anchor);
+      expect(anchorIndex, `#956 section must reference the ${row.slug}/${theme.key} capture (${captureFile})`).toBeGreaterThanOrEqual(0);
+      const rowStart = d956SectionHtml.lastIndexOf("<tr>", anchorIndex);
+      const rowEnd = d956SectionHtml.indexOf("</tr>", anchorIndex);
+      expect(rowStart, `#956 ${row.slug}/${theme.key}: no <tr> found around its own capture`).toBeGreaterThanOrEqual(0);
+      expect(rowEnd, `#956 ${row.slug}/${theme.key}: no </tr> found around its own capture`).toBeGreaterThanOrEqual(0);
+      const rowHtml = d956SectionHtml.slice(rowStart, rowEnd + "</tr>".length);
 
       const mockupFile = `mockups/${row.mockup(theme.key)}`;
+      const noBaselineNote = `No frozen mockup exists yet for ${row.label} · ${theme.key}`;
       if (existsSync(`${OUTPUT_DIR}/${mockupFile}`)) {
-        expect(
-          contactSheetHtml,
-          `#956 contact sheet must pair the ${row.slug}/${theme.key} capture with its real mockup (${mockupFile})`,
-        ).toContain(`src="${mockupFile}"`);
+        expect(rowHtml, `#956 ${row.slug}/${theme.key}'s OWN row must pair its capture with its real mockup (${mockupFile})`).toContain(
+          `src="${mockupFile}"`,
+        );
+        expect(rowHtml, `#956 ${row.slug}/${theme.key} has a real mockup — its row must not ALSO carry a no-baseline note`).not.toContain(
+          "No frozen mockup exists yet for",
+        );
       } else {
-        expect(
-          contactSheetHtml,
-          `#956 contact sheet must show an explicit no-baseline note for ${row.slug}/${theme.key}, never silently omit the row`,
-        ).toContain(`No frozen mockup exists yet for ${row.label} · ${theme.key}`);
+        expect(rowHtml, `#956 ${row.slug}/${theme.key}'s OWN row must carry the exact no-baseline note`).toContain(noBaselineNote);
+        expect(rowHtml, `#956 ${row.slug}/${theme.key} has no mockup — its row must not ALSO reference a mockup image`).not.toMatch(
+          /<img src="mockups\//,
+        );
+        expectedNoBaselineCount++;
       }
     }
   }
+  const actualNoBaselineCount = (d956SectionHtml.match(/No frozen mockup exists yet for/g) ?? []).length;
+  expect(
+    actualNoBaselineCount,
+    `#956 section's total no-baseline note count (${actualNoBaselineCount}) must exactly match the filesystem-derived expectation (${expectedNoBaselineCount}) — no duplicate or spurious note anywhere in the section`,
+  ).toBe(expectedNoBaselineCount);
 });
 
 /**
