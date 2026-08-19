@@ -171,7 +171,7 @@ export function ActivityFeed({ events, round, titles, repoUrl, disconnected, now
         <h2>activity</h2>
       </div>
       {round && (
-        <p className="muted data feed-round-divider">
+        <p className="feed-round-divider">
           ROUND {round.roundId} · {formatAbsoluteTime(round.startedAt)} · {round.eventCount} events
         </p>
       )}

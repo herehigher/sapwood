@@ -182,8 +182,9 @@
   fill: var(--panel);
 }
 
-/* #934: the round-in-view divider — "ROUND N · started · n events", `--font-data` (`.data`,
- * app.css) per the issue's own spec. */
+/* #934: the round-in-view divider — "ROUND N · started · n events". Layout only here; its
+ * typography (mono/uppercase/tracked/muted) is the shared chapter-mark idiom declared alongside
+ * `.cost-panel-group h4` below, not a second copy. */
 .feed-round-divider {
   margin-bottom: var(--space-2);
 }
@@ -260,8 +261,12 @@
 
 /* #924: the by-stage/by-model GROUP header ("BY STAGE"/"BY MODEL") is deliberately NOT the
  * `.panel-head` title treatment — `cost-dark.png` draws it uppercase MONO muted, a sub-level
- * label, not a second Fraunces module title. */
-.cost-panel-group h4 {
+ * label, not a second Fraunces module title. #934 gate② finding [0] (ac2-divider-sub-label-style):
+ * the activity feed's round-in-view divider (`.feed-round-divider`) is the SAME chapter-mark
+ * sub-label idiom — sharing this selector, rather than a second copy of the same declarations,
+ * is what keeps the two from silently drifting apart. */
+.cost-panel-group h4,
+.feed-round-divider {
   font-family: var(--font-data);
   font-weight: 400;
   color: var(--bark-text);

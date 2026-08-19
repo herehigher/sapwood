@@ -3955,6 +3955,52 @@ test("AC1: every panel-head title resolves Fraunces/uppercase, the mockup-scale 
   }
 });
 
+// engine-agent finding [0] (ac2-divider-sub-label-style, run 80282f81): the round-in-view
+// divider's own tests (`ActivityFeed.test.tsx`) only ever asserted markup/text — the `.data`/
+// `.muted` classes it used to carry supplied SOME of the shared chapter-mark idiom
+// (`.cost-panel-group h4`, "BY STAGE"/"BY MODEL") but not `text-transform: uppercase` or
+// `letter-spacing: 0.04em`, leaving it at the inherited 13px body-caption styling — a cascade gap
+// no markup-only test could ever catch. `panels.css` now declares `.feed-round-divider` alongside
+// `.cost-panel-group h4` in one shared rule (never two independently-value-pinned copies that
+// could drift); this test proves the REAL rendered result, not just the source rule text.
+test("#934 gate② finding [0]: the round-in-view divider resolves the SAME chapter-mark sub-label styling as BY STAGE/BY MODEL — mono, uppercase, tracked, muted — never the inherited body-caption default", async () => {
+  const round: Round = {
+    roundId: 42,
+    status: "in_progress",
+    startedAt: "2026-08-06T09:15:00Z",
+    endedAt: null,
+    startEventId: 0,
+    startSpendId: 0,
+    eventCount: 3,
+    schemaVersion: null,
+    artifact: null,
+  };
+  const { container, cleanup } = await mountAppWithCascade(minimalAppViewModel({ feedRound: round, feedEvents: [] }));
+  try {
+    const divider = container.querySelector(".feed-round-divider");
+    assert.ok(divider, "the round-in-view divider must render");
+    const groupHeading = container.querySelector(".cost-panel-group h4");
+    assert.ok(groupHeading, "the BY STAGE/BY MODEL sub-label must render as the sibling idiom to compare against");
+    const dividerComputed = getComputedStyle(divider as Element);
+    const groupComputed = getComputedStyle(groupHeading as Element);
+    assert.match(dividerComputed.fontFamily, /JetBrains Mono/, "divider font-family must actually resolve the mono stack");
+    assert.equal(dividerComputed.fontFamily, groupComputed.fontFamily, "divider font-family must match the chapter-mark idiom");
+    assert.equal(dividerComputed.textTransform, "uppercase", "divider text-transform");
+    assert.equal(dividerComputed.letterSpacing, groupComputed.letterSpacing, "divider letter-spacing must match the chapter-mark idiom");
+    assert.notEqual(dividerComputed.letterSpacing, "normal", "letter-spacing must actually resolve a tracked value, not the CSS default");
+    // `--bark-text` is `light-dark()` (tokens.css) — happy-dom echoes it unresolved for both
+    // sides equally, so this proves the divider and the sub-label reference the SAME color
+    // source, not that either one's real pixel color has been independently verified here.
+    assert.equal(
+      dividerComputed.color,
+      groupComputed.color,
+      "divider color must reference the same --bark-text source as the chapter-mark idiom",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
 test("AC1: where a panel-head carries a stat cluster, it is the head's last child with margin-left: auto", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   try {
