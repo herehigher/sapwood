@@ -1,0 +1,55 @@
+name: Release
+# Runs once per pushed release tag (docs/dev-guide/10-releasing.md's `publish` step pushes the
+# tag). Rebuilds with a CI build stamp, reruns the full quality gate against the exact tagged
+# commit, and attaches the verified `--version` output as release evidence. The GitHub Release
+# itself is normally already created by the human's `publish`; this job creates it only if that
+# step's own `gh release create` hasn't landed yet, so a tag pushed by any other path still gets
+# a Release. No publish secrets — `GITHUB_TOKEN` only.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  attach-evidence:
+    # Tags are pushed only by someone with push access, unlike ci.yml's PR-triggered jobs (which
+    # must stay off the self-hosted runner pre-public — see that file's own note): an
+    # ordinary GitHub-hosted runner is safe here regardless of the repo's public/private state.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      # `scripts/release.ts`'s `stamp` subcommand ships in the companion release-policy PR
+      # (#1030) — this job depends on it already being on the tagged commit.
+      - run: npm run release -- stamp
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run lint
+      - name: Record the built, stamped --version as release evidence
+        run: node engine/dist/cli.js --version > release-evidence.txt
+      - name: Ensure the GitHub Release exists, then attach evidence
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release-evidence.txt --clobber
+          else
+            args=(--generate-notes)
+            if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+              args+=(--prerelease)
+            fi
+            gh release create "$GITHUB_REF_NAME" "${args[@]}"
+            gh release upload "$GITHUB_REF_NAME" release-evidence.txt --clobber
+          fi
