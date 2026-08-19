@@ -66,6 +66,12 @@ jobs:
       # (setsid) escapes either form — that is the test-side half of #691, not this file's.
       - run: timeout --kill-after=30s 600 npm --workspace engine test
       - run: timeout --kill-after=30s 300 npm --workspace dashboard test
+      # #1030/#1032: the root `scripts/*.test.ts` suite (release-manifest lockstep,
+      # publish-step argv, and the packed-tarball install/run check) was never wired into
+      # CI — only the two workspace `test` scripts above were. It builds the engine itself
+      # (scripts/pack.test.ts), hence its own `run` step rather than folding into the
+      # engine job above.
+      - run: timeout --kill-after=30s 300 node --test scripts/*.test.ts
 
   # #799 (PLAN.md:129's CI-enforcement half — the engine-side half ships in ordinary commits, this
   # job is the human-merge-only remainder on this human-merge-only `.github/workflows/**` path):
