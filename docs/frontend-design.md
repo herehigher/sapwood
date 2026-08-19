@@ -62,6 +62,13 @@ single-strip by-model/by-lane first pass. §11's "Cost strip: round tier" text i
 superseded — the round panel is now a closed round's frozen summary, never
 cursor-truncated by the scrub position.
 
+Amended 2026-08-19 (#1020): §3 E's by-stage bars drop the shared target-tick marker (the
+`roundBudgetUsd / 6` derivation was a guess — no per-phase budget exists to draw one
+against); every cost bar's track is now a full-length light pill in the fill's own
+rounded-rect grammar, today and round panels alike; the header's #923 outlined capsule
+around the same primitive remains the real budget reference. Supersedes the 2026-08-14
+entry's target-tick clause.
+
 ---
 
 ## 1. Goals & audiences
