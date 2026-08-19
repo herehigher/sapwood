@@ -14,6 +14,19 @@ re-evaluate them on the resolved head. Otherwise, follow the findings workflow b
 Write code comments in `{{lang.codeComments}}` — a BCP-47-ish tag configured in
 `sapwood.config.yaml` (`language.codeComments`), `en` by default.
 
+## Review doctrine (this repo's own review history)
+
+The engine-assembled text below is this repo's own accumulated review knowledge — technical
+invariants (recurring failure classes) and adjudication doctrine (how findings get treated) —
+distilled from past rounds so it doesn't live only in a human's memory. The findings below name
+what's wrong on THIS PR; this doctrine names the CLASS of failure they belong to. Re-check every
+test you touch against it, not only the finding's own wording — the same reviewer applies the
+same block at gate②, and catching a same-class gap here is a rewrite instead of another round.
+
+<review-doctrine>
+{{doctrine}}
+</review-doctrine>
+
 ## Fetch the findings yourself
 
 Use the read-only, PR-facing forge tools attached to this session

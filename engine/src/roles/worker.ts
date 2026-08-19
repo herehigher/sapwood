@@ -5232,6 +5232,12 @@ export function buildRenderFixPrompt(cfg: SapwoodConfig): (issueNumber: number, 
     // #701: same working-language default as buildRenderPrompt's CONFIG_VARS above — a fix leg
     // still writes code comments.
     "lang.codeComments": () => cfg.language.codeComments,
+    // The A7 narrowing above excludes issue.title/body/labels because those are UNTRUSTED issue
+    // prose; doctrine is the same trusted, engine-loaded config file already injected into
+    // worker.md's CONFIG_VARS — A7's rationale never applied to it, it was just never threaded
+    // through. Without it, a fix leg sees only the previous review's specific finding text, not
+    // the doctrine explaining the failure CLASS behind it (retro #424).
+    doctrine: () => loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars),
   };
   for (const [, raw] of template.matchAll(/\{\{([^{}]*)\}\}/g)) {
     const name = raw!.trim();
