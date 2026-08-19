@@ -451,8 +451,16 @@ test("#923 AC4: at 1440px, .spend-meter-bar's live width is >= 25% of .app-heade
  * as a single unclipped line — the exact defect this issue's "Why" names against the #928
  * close-out witness (`720-dark-idle-full.png`): BTL wrapping onto three clipped lines
  * ("BACK / TO / LIVE"), and the meter's fixed-width capsule running past the panel's right edge.
+ *
+ * engine-agent audit run 9afc5c2a-8a5f-4f3b-a849-be2b7f7ee234 finding [0]: a hand-typed selector
+ * list (the previous version of this test — `.round-nav-stepper`/`.header-back-to-live`/
+ * `.spend-meter` only) omitted `.hero-legend-trigger` and the transport row's own controls
+ * (`.transport-play`/`.transport-speed`/`.transport-scrub`), all real descendants of `.app-header`
+ * — the same COLLISION -> COVERAGE gap `assertPillCapsContained`'s own doc names elsewhere in this
+ * file. Every visible interactive descendant is derived from the rendered markup below instead of
+ * a hand-curated partial set.
  */
-test("#972 AC1: at 720px replay, every header control stays inside .app-header's content box and BACK TO LIVE renders on one unclipped line", async ({
+test("#972 AC1: at 720px replay, every visible header control stays inside .app-header's content box and BACK TO LIVE renders on one unclipped line", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 720, height: 1024 });
@@ -472,34 +480,45 @@ test("#972 AC1: at 720px replay, every header control stays inside .app-header's
     };
   });
 
-  for (const selector of [".round-nav-stepper", ".header-back-to-live", ".spend-meter"]) {
-    const box = await page.locator(selector).boundingBox();
-    expect(box, `${selector} must render with a real bounding box`).not.toBeNull();
+  const controls = page.locator(
+    '.app-header button:visible, .app-header input:visible, .app-header a[href]:visible, .app-header [role="button"]:visible',
+  );
+  const controlCount = await controls.count();
+  expect(controlCount, "COVERAGE: the header must render >= 1 visible interactive control at 720px").toBeGreaterThan(0);
+
+  for (let i = 0; i < controlCount; i++) {
+    const control = controls.nth(i);
+    const label = await control.evaluate((el) => `${el.tagName.toLowerCase()}.${Array.from(el.classList).join(".")}`);
+    const box = await control.boundingBox();
+    expect(box, `${label} must render with a real bounding box`).not.toBeNull();
     expect(
       box!.x,
-      `${selector}'s left edge (${box!.x}px) must sit inside the header's content box (${content.left}px)`,
+      `${label}'s left edge (${box!.x}px) must sit inside the header's content box (${content.left}px)`,
     ).toBeGreaterThanOrEqual(content.left - 1);
     expect(
       box!.x + box!.width,
-      `${selector}'s right edge (${box!.x + box!.width}px) must sit inside the header's content box (${content.right}px)`,
+      `${label}'s right edge (${box!.x + box!.width}px) must sit inside the header's content box (${content.right}px)`,
     ).toBeLessThanOrEqual(content.right + 1);
-    expect(
-      box!.y,
-      `${selector}'s top edge (${box!.y}px) must sit inside the header's content box (${content.top}px)`,
-    ).toBeGreaterThanOrEqual(content.top - 1);
+    expect(box!.y, `${label}'s top edge (${box!.y}px) must sit inside the header's content box (${content.top}px)`).toBeGreaterThanOrEqual(
+      content.top - 1,
+    );
     expect(
       box!.y + box!.height,
-      `${selector}'s bottom edge (${box!.y + box!.height}px) must sit inside the header's content box (${content.bottom}px)`,
+      `${label}'s bottom edge (${box!.y + box!.height}px) must sit inside the header's content box (${content.bottom}px)`,
     ).toBeLessThanOrEqual(content.bottom + 1);
   }
 
-  const backToLive = page.locator(".header-back-to-live");
-  const [scrollHeight, clientHeight] = await backToLive.evaluate((el) => [el.scrollHeight, el.clientHeight]);
-  expect(scrollHeight, "BACK TO LIVE must not overflow/clip its own single-line box at 720px").toBeLessThanOrEqual(clientHeight);
+  // engine-agent audit finding [0]: a `scrollHeight`/`clientHeight` comparison alone can still
+  // pass for multiple lines that happen to fit the box — it never proves there is exactly ONE
+  // line. The direct proof is the label's own `display: none` at 720px (panels.css) — nothing
+  // renders to wrap in the first place.
+  const labelDisplay = await page.locator(".header-back-to-live-label").evaluate((el) => getComputedStyle(el).display);
+  expect(labelDisplay, "the BACK TO LIVE text label must be hidden at 720px — icon-only, never a wrapped multi-line label").toBe("none");
 
   // The visible label collapses to icon-only at 720 (panels.css's `.header-back-to-live-label`
   // media rule) — the button's own explicit `aria-label` is what carries the accessible name once
   // that text is gone, the AC's own "icon-only with an accessible name" allowance.
+  const backToLive = page.locator(".header-back-to-live");
   const accessibleName = await backToLive.evaluate((el) => el.getAttribute("aria-label"));
   expect(accessibleName, "BACK TO LIVE must keep an explicit accessible name once its visible label collapses at 720px").toBe(
     "back to live",
