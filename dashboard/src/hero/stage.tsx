@@ -978,6 +978,19 @@ function reviewCaption(config: Record<string, unknown> | null | undefined): stri
   return typeof mode === "string" && mode !== "engine-agent" ? mode : null;
 }
 
+/** #1019 owner ruling (:4517 walk): the reflection pair draws its glyph at 14px inside a 32px
+ *  ring (ratio 14/32) while the planning trio/gates drew a fixed 16px glyph inside their bigger
+ *  60px rings (ratio 0.27) — visibly emptier next to the small ones. Deriving every node's glyph
+ *  size from its OWN ring radius at the reflection pair's ratio means a future ring-radius growth
+ *  (like #920's PLANNING_NODE_R/GATES.r bump to 30) keeps the same glyph density with no second
+ *  literal to remember to update by hand. */
+export function nodeIconSizeFor(r: number): number {
+  return Math.round((2 * r * 14) / 32);
+}
+
+const PLANNING_ICON_SIZE = nodeIconSizeFor(PLANNING_NODE_R);
+const GATE_ICON_SIZE = nodeIconSizeFor(GATES.r);
+
 /** #922 AC6: every hero UTILITY glyph (planning trio, gates, reflection pair, escalation) sources
  *  from `lucide-react` — standard resources first, per the owner ruling; the hero's own IDENTITY
  *  set (droplet, rings) stays hand-drawn. One shared size/placement helper so every node icon is
@@ -985,16 +998,15 @@ function reviewCaption(config: Record<string, unknown> | null | undefined): stri
  *  never set per-icon: `className` carries `.hero-planning-icon`/`.hero-gate-icon`, whose `color`
  *  (hero.css) every lucide icon's own `currentColor` stroke/fill inherits — the SAME mechanism
  *  the sapling already validates, extended to a class instead of an inline style so
- *  `[data-active="true"]` can still switch it. */
-const NODE_ICON_SIZE = 16;
-
+ *  `[data-active="true"]` can still switch it. `size` has no default — #1019 made every caller's
+ *  size a function of its own ring radius, so a silently-wrong default can no longer hide. */
 function nodeIcon(
   Icon: ComponentType<{ x: number; y: number; width: number; height: number; strokeWidth?: number }>,
   cx: number,
   cy: number,
   className: string,
   dataIcon: string,
-  size: number = NODE_ICON_SIZE,
+  size: number,
 ) {
   return (
     <g className={className} data-icon={dataIcon}>
@@ -1013,11 +1025,11 @@ function nodeHalo(cx: number, cy: number, r: number) {
 function planningIcon(node: (typeof PLANNING_NODES)[number]["node"], cx: number, cy: number) {
   switch (node) {
     case "goal-align":
-      return nodeIcon(Target, cx, cy, "hero-planning-icon", "target");
+      return nodeIcon(Target, cx, cy, "hero-planning-icon", "target", PLANNING_ICON_SIZE);
     case "arch-review":
-      return nodeIcon(GitFork, cx, cy, "hero-planning-icon", "git-fork");
+      return nodeIcon(GitFork, cx, cy, "hero-planning-icon", "git-fork", PLANNING_ICON_SIZE);
     case "verify":
-      return nodeIcon(Check, cx, cy, "hero-planning-icon", "check");
+      return nodeIcon(Check, cx, cy, "hero-planning-icon", "check", PLANNING_ICON_SIZE);
   }
 }
 
@@ -1032,11 +1044,11 @@ function gateIcon(gate: "ci" | "review", cx: number, cy: number) {
     case "ci":
       return (
         <g className="hero-gate-icon" data-icon="github-actions">
-          <GithubActionsGlyph x={cx - NODE_ICON_SIZE / 2} y={cy - NODE_ICON_SIZE / 2} width={NODE_ICON_SIZE} height={NODE_ICON_SIZE} />
+          <GithubActionsGlyph x={cx - GATE_ICON_SIZE / 2} y={cy - GATE_ICON_SIZE / 2} width={GATE_ICON_SIZE} height={GATE_ICON_SIZE} />
         </g>
       );
     case "review":
-      return nodeIcon(Eye, cx, cy, "hero-gate-icon", "eye");
+      return nodeIcon(Eye, cx, cy, "hero-gate-icon", "eye", GATE_ICON_SIZE);
   }
 }
 
@@ -1593,14 +1605,16 @@ export function HeroStage({
               {active && nodeHalo(n.x, REFLECTION.y, REFLECTION.r)}
               <circle className="hero-planning-node" cx={n.x} cy={REFLECTION.y} r={REFLECTION.r} />
               {/* #922 AC6: bar-chart (Summary) / trend-arrow (Retro) — every reflection/escalation
-               * node carries a glyph now, matching the planning trio and gates. */}
+               * node carries a glyph now, matching the planning trio and gates. #1019: sourced
+               * from `nodeIconSizeFor` (not a standalone `14` literal) — this IS the ratio every
+               * other node's glyph now matches, so it stays the one place the ratio is defined. */}
               {nodeIcon(
                 n.node === "summary" ? ChartNoAxesColumn : TrendingUp,
                 n.x,
                 REFLECTION.y,
                 "hero-planning-icon",
                 n.node === "summary" ? "chart-no-axes-column" : "trending-up",
-                14,
+                nodeIconSizeFor(REFLECTION.r),
               )}
               {/* #920 gate② review thread (PRRT…gJ/…GgK): the label used to sit ON the circle's
                * own bottom arc (`REFLECTION.y + 20` vs a circle bottom of `REFLECTION.y + r` =
