@@ -50,31 +50,25 @@ Rationale for keeping these three layers distinct:
 - `main` is green (CI passing on the commit `prepare` will branch from).
 - The milestone is cleared, or its remainder has been moved to a later milestone.
 - The CHANGELOG has content to promote (an `## [Unreleased]` section that isn't empty).
-- The getting-started install path has been walked end-to-end on the version about to
-  ship (#338) — not just unit-tested.
+- The getting-started install path has been walked end-to-end on a clean machine,
+  for the version about to ship — not just unit-tested.
 
 **Who publishes.** A human. The loop may *prepare* a release — bump the four
 manifests and open the CHANGELOG PR — but it cannot *publish* one: the guard denies
-`gh release` from any session it governs, and #679 denies a direct push to the
-default branch. Publishing is a human running `scripts/release.ts publish` from
-their own machine or an authorized CI job triggered by a human-pushed tag.
+`gh release` and a direct push to the default branch from any session it governs.
+Publishing is a human running `scripts/release.ts publish` from their own machine
+or an authorized CI job triggered by a human-pushed tag.
 
 **Rollback.** Versions never go backwards. If a release is bad: delete the tag and
 the GitHub Release, then ship a patch. Don't reuse or force-move a tag that was
 ever pushed.
 
-**Delivery channels.** The first public release ships three ways at once, all keyed
-to the same tag:
-
-- git tag + GitHub Release — this issue (#1030).
-- npm package — #1032, adds the publish step to `scripts/release.ts publish`.
-- the Claude Code marketplace plugin, whose slash commands run `npx sapwood@<version>`
-  — #1031, depends on #1032.
-
-The marketplace `ref` and the npx pin move in lockstep with the tag; none of that is
-designed here. `publish`'s step list is written as an explicit ordered sequence
-specifically so #1032 has a clear, named place to append the npm step (see
-`PUBLISH_STEPS` in `scripts/release.ts`).
+**Delivery channels.** A release ships as (1) a git tag + GitHub Release, (2) the
+`sapwood` npm package, and (3) the Claude Code marketplace plugin, whose slash
+commands run `npx sapwood@<version>` — all three keyed to the same tag, with the
+marketplace `ref` and the npx pin moving in lockstep with it. Today `publish`
+performs (1); the npm and marketplace steps are appended to `PUBLISH_STEPS` when
+they land.
 
 **Pre-releases always pass `--prerelease`.** `gh release create` does not infer
 pre-release status from a `-` in the tag name, so `publish` passes `--prerelease`

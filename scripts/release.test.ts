@@ -8,6 +8,7 @@ import {
   changelogHasSection,
   checkManifestLockstep,
   checkPublishPreconditions,
+  compareSemver,
   type Deps,
   type Exec,
   extractUnreleasedBody,
@@ -17,6 +18,7 @@ import {
   MANIFEST_PATHS,
   moveUnreleasedToVersion,
   readManifestVersion,
+  runPrepare,
   runPublish,
   validateReleaseVersion,
   writeManifestVersion,
@@ -297,6 +299,107 @@ test("runPublish: a failed precondition is a non-zero exit with one clear line, 
     const r = runPublish(deps, { dryRun: false });
     assert.equal(r.code, 1);
     assert.equal(r.output.split("\n").filter(Boolean).length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── compareSemver ───────────────────────────────────────────────────────────────────
+
+test("compareSemver: the pre-1.0 ladder orders as alpha.1 < alpha.2 < beta.1 < release < patch < minor", () => {
+  const order = ["0.3.0-alpha.1", "0.3.0-alpha.2", "0.3.0-beta.1", "0.3.0", "0.3.1", "0.10.0"];
+  for (let i = 0; i < order.length - 1; i++) {
+    assert.ok(compareSemver(order[i], order[i + 1]) < 0, `expected ${order[i]} < ${order[i + 1]}`);
+    assert.ok(compareSemver(order[i + 1], order[i]) > 0, `expected ${order[i + 1]} > ${order[i]}`);
+  }
+});
+
+test("compareSemver: equal versions compare to 0", () => {
+  assert.equal(compareSemver("0.3.0", "0.3.0"), 0);
+  assert.equal(compareSemver("0.3.0-alpha.1", "0.3.0-alpha.1"), 0);
+});
+
+// ── runPrepare preconditions ────────────────────────────────────────────────────────
+
+function setupPrepareRepo(version: string, changelog: string): string {
+  const dir = tmpRepo();
+  writeFakeManifests(dir, [version, version, version, version]);
+  writeFileSync(join(dir, "CHANGELOG.md"), changelog);
+  return dir;
+}
+
+function fakePrepareExec(opts: { head: string; origin: string; dirty: string }): Exec {
+  return (file, args) => {
+    if (file === "git" && args[0] === "fetch") return "";
+    if (file === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return opts.head;
+    if (file === "git" && args[0] === "rev-parse" && args[1] === "origin/main") return opts.origin;
+    if (file === "git" && args[0] === "status") return opts.dirty;
+    if (file === "git" && ["checkout", "add", "commit", "push"].includes(args[0])) return "";
+    if (file === "gh") return "";
+    throw new Error(`unexpected exec in test: ${file} ${args.join(" ")}`);
+  };
+}
+
+const UNRELEASED_WITH_CONTENT = "## [Unreleased]\n\n### Added\n- x\n";
+
+test("runPrepare: (a) fails when HEAD is not origin/main, before touching anything", () => {
+  const dir = setupPrepareRepo("0.0.0", UNRELEASED_WITH_CONTENT);
+  try {
+    const deps: Deps = { repoRoot: dir, exec: fakePrepareExec({ head: "aaa", origin: "bbb", dirty: "" }) };
+    const r = runPrepare(deps, "0.3.0-alpha.1");
+    assert.equal(r.code, 1);
+    assert.match(r.output, /not origin\/main/);
+    assert.match(r.output, /up-to-date main/);
+    assert.equal(readManifestVersion(join(dir, "package.json")), "0.0.0");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runPrepare: (b) fails when the Unreleased body is empty", () => {
+  const dir = setupPrepareRepo("0.0.0", "## [Unreleased]\n\n");
+  try {
+    const deps: Deps = { repoRoot: dir, exec: fakePrepareExec({ head: "aaa", origin: "aaa", dirty: "" }) };
+    const r = runPrepare(deps, "0.3.0-alpha.1");
+    assert.equal(r.code, 1);
+    assert.match(r.output, /Unreleased/);
+    assert.match(r.output, /empty/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runPrepare: (c) fails when the new version equals the current one", () => {
+  const dir = setupPrepareRepo("0.3.0", UNRELEASED_WITH_CONTENT);
+  try {
+    const deps: Deps = { repoRoot: dir, exec: fakePrepareExec({ head: "aaa", origin: "aaa", dirty: "" }) };
+    const r = runPrepare(deps, "0.3.0");
+    assert.equal(r.code, 1);
+    assert.match(r.output, /not greater than/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runPrepare: (c) fails when the new version is below the current one", () => {
+  const dir = setupPrepareRepo("0.3.0", UNRELEASED_WITH_CONTENT);
+  try {
+    const deps: Deps = { repoRoot: dir, exec: fakePrepareExec({ head: "aaa", origin: "aaa", dirty: "" }) };
+    const r = runPrepare(deps, "0.2.9");
+    assert.equal(r.code, 1);
+    assert.match(r.output, /not greater than/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runPrepare: succeeds end-to-end from a 0.0.0 baseline — anything valid is greater", () => {
+  const dir = setupPrepareRepo("0.0.0", UNRELEASED_WITH_CONTENT);
+  try {
+    const deps: Deps = { repoRoot: dir, exec: fakePrepareExec({ head: "aaa", origin: "aaa", dirty: "" }) };
+    const r = runPrepare(deps, "0.3.0-alpha.1");
+    assert.equal(r.code, 0);
+    assert.equal(readManifestVersion(join(dir, "package.json")), "0.3.0-alpha.1");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

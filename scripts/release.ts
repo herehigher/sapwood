@@ -44,6 +44,52 @@ export function isPrerelease(version: string): boolean {
   return version.includes("-");
 }
 
+interface ParsedSemver {
+  major: number;
+  minor: number;
+  patch: number;
+  prerelease: string[];
+}
+
+function parseSemver(version: string): ParsedSemver {
+  const m = SEMVER_RE.exec(version);
+  if (!m) throw new Error(`"${version}" is not a valid SemVer 2.0.0 version`);
+  const [, major, minor, patch, prerelease] = m;
+  return { major: Number(major), minor: Number(minor), patch: Number(patch), prerelease: prerelease ? prerelease.split(".") : [] };
+}
+
+// SemVer 2.0.0 §11 precedence: numeric identifiers compare numerically, alphanumeric
+// identifiers lexically (ASCII), a numeric identifier always has lower precedence than an
+// alphanumeric one, and a larger set of pre-release fields wins once every shared field ties.
+function compareIdentifier(a: string, b: string): number {
+  const aNumeric = /^\d+$/.test(a);
+  const bNumeric = /^\d+$/.test(b);
+  if (aNumeric && bNumeric) return Number(a) - Number(b);
+  if (aNumeric) return -1;
+  if (bNumeric) return 1;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+// A pre-release version has lower precedence than the release it precedes
+// (`0.3.0-alpha.1` < `0.3.0`) — the one asymmetry the field-by-field comparison above can't
+// express on its own, since an absent prerelease field isn't a shorter list, it's a different rank.
+export function compareSemver(a: string, b: string): number {
+  const pa = parseSemver(a);
+  const pb = parseSemver(b);
+  if (pa.major !== pb.major) return pa.major - pb.major;
+  if (pa.minor !== pb.minor) return pa.minor - pb.minor;
+  if (pa.patch !== pb.patch) return pa.patch - pb.patch;
+  if (pa.prerelease.length === 0 && pb.prerelease.length === 0) return 0;
+  if (pa.prerelease.length === 0) return 1;
+  if (pb.prerelease.length === 0) return -1;
+  const len = Math.min(pa.prerelease.length, pb.prerelease.length);
+  for (let i = 0; i < len; i++) {
+    const c = compareIdentifier(pa.prerelease[i], pb.prerelease[i]);
+    if (c !== 0) return c;
+  }
+  return pa.prerelease.length - pb.prerelease.length;
+}
+
 // ── Manifest lockstep ───────────────────────────────────────────────────────────────
 
 export function readManifestVersion(path: string): string {
@@ -148,16 +194,30 @@ function realExec(repoRoot: string): Exec {
   return (file, args) => execFileSync(file, args, { cwd: repoRoot, encoding: "utf8" });
 }
 
+// ── shared precondition: HEAD must be exactly origin/main ──────────────────────────
+// Both `prepare` (branches from it) and `publish` (tags it) need this same freshness
+// check, so it lives once here rather than as two copies that could drift apart.
+
+export type HeadCheckResult = { ok: true } | { ok: false; reason: string };
+
+export function checkHeadMatchesOriginMain(deps: Deps): HeadCheckResult {
+  deps.exec("git", ["fetch", "origin", "main"]);
+  const head = deps.exec("git", ["rev-parse", "HEAD"]).trim();
+  const mainHead = deps.exec("git", ["rev-parse", "origin/main"]).trim();
+  if (head !== mainHead) {
+    return { ok: false, reason: `HEAD (${head}) is not origin/main (${mainHead})` };
+  }
+  return { ok: true };
+}
+
 // ── publish preconditions ───────────────────────────────────────────────────────────
 
 export type PublishPrecondition = { ok: true; version: string } | { ok: false; reason: string };
 
 export function checkPublishPreconditions(deps: Deps): PublishPrecondition {
-  deps.exec("git", ["fetch", "origin", "main"]);
-  const head = deps.exec("git", ["rev-parse", "HEAD"]).trim();
-  const mainHead = deps.exec("git", ["rev-parse", "origin/main"]).trim();
-  if (head !== mainHead) {
-    return { ok: false, reason: `HEAD (${head}) is not origin/main (${mainHead}) — publish only runs from a fully-merged main.` };
+  const headCheck = checkHeadMatchesOriginMain(deps);
+  if (!headCheck.ok) {
+    return { ok: false, reason: `${headCheck.reason} — publish only runs from a fully-merged main.` };
   }
   const dirty = deps.exec("git", ["status", "--porcelain"]).trim();
   if (dirty !== "") {
@@ -254,8 +314,26 @@ export function runPublish(deps: Deps, opts: { dryRun: boolean }): CommandResult
 export function runPrepare(deps: Deps, version: string): CommandResult {
   const validation = validateReleaseVersion(version);
   if (!validation.ok) return { code: 1, output: `release prepare: ${validation.message}\n` };
+
+  const headCheck = checkHeadMatchesOriginMain(deps);
+  if (!headCheck.ok) {
+    return { code: 1, output: `release prepare: ${headCheck.reason} — prepare only runs from an up-to-date main.\n` };
+  }
+
   const dirty = deps.exec("git", ["status", "--porcelain"]).trim();
   if (dirty !== "") return { code: 1, output: "release prepare: working tree is dirty — commit or stash first.\n" };
+
+  const changelogPath = join(deps.repoRoot, "CHANGELOG.md");
+  const changelog = readFileSync(changelogPath, "utf8");
+  if (extractUnreleasedBody(changelog) === "") {
+    return { code: 1, output: "release prepare: CHANGELOG.md's Unreleased section is empty — nothing to release.\n" };
+  }
+
+  const lockstep = checkManifestLockstep(MANIFEST_PATHS.map((p) => join(deps.repoRoot, p)));
+  if (!lockstep.ok) return { code: 1, output: `release prepare: ${lockstep.message}\n` };
+  if (lockstep.version !== "0.0.0" && compareSemver(version, lockstep.version) <= 0) {
+    return { code: 1, output: `release prepare: ${version} is not greater than the current version ${lockstep.version}.\n` };
+  }
 
   const branch = `release/v${version}`;
   const actions: string[] = [];
@@ -268,9 +346,8 @@ export function runPrepare(deps: Deps, version: string): CommandResult {
     actions.push(`bumped ${p} -> ${version}`);
   }
 
-  const changelogPath = join(deps.repoRoot, "CHANGELOG.md");
   const date = formatChangelogDate(new Date());
-  const updatedChangelog = moveUnreleasedToVersion(readFileSync(changelogPath, "utf8"), version, date);
+  const updatedChangelog = moveUnreleasedToVersion(changelog, version, date);
   writeFileSync(changelogPath, updatedChangelog);
   actions.push(`moved CHANGELOG Unreleased -> [${version}] - ${date}`);
 
