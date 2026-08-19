@@ -143,6 +143,7 @@ const laneFixture: Lane = {
   issue: 86,
   state: "running",
   pr: null,
+  held: false,
   startedAt: "2026-08-06T11:50:00.000Z",
   endedAt: null,
   costUsd: null,

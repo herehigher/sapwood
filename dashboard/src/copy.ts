@@ -1069,6 +1069,13 @@ export function laneStateCaption(state: string): string {
   return LANE_STATE_CAPTION[state] ?? state;
 }
 
+/** #906 (§294 follow-up #7): the ON HOLD state word — a `driving`/`fixing` lane whose row
+ *  carries `held: true` renders this in place of its normal `laneStateCaption` word (§7);
+ *  sourced here, next to the state caption map above, per "the same module captions lane
+ *  states". `LaneBoard.tsx`'s chip renders it uppercase via CSS, matching every other lane
+ *  caption's own casing convention. */
+export const LANE_HELD_CAPTION = "on hold";
+
 /** #922 owner ruling (2026-08-17): the CI gate's small-print caption — a constant, not a config
  *  read, since the CI provider isn't configurable in v0.2 (unlike REVIEW's model·effort caption,
  *  which genuinely varies per deployment). */

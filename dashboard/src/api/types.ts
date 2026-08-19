@@ -15,6 +15,11 @@ export type Lane = {
   pr: number | null;
   startedAt: string;
   endedAt: string | null;
+  /** #906 (§294 follow-up #7): whether a person has put this lane's PR on hold —
+   *  `State.lastHoldEvent(lane, pr) === "pr-held"` server-side; `deriveReplayedLanes` (App.tsx)
+   *  folds the same `pr-held`/`pr-released` events for the replayed reading. `false` when there's
+   *  no PR yet or the latest hold event was `pr-released`. */
+  held: boolean;
   /** SUM(spend_ledger) — the real bill, written at reclaim; null while in flight. */
   costUsd: number | null;
   /** #33 priced estimate while running; cleared to null the instant the lane stops. */

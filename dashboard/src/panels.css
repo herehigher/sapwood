@@ -140,6 +140,16 @@
   border: 1px solid var(--sap-fill-outline);
 }
 
+/* #906 (§294 follow-up #7): the ON HOLD chip — the mockup's own bordered-pill form
+ * (`docs/design/mockup/lanes-{dark,light}.png`), hairline border and NO fill (distinct from
+ * `.lane-board-replayed-chip`'s own font/border rule, which this mirrors, but scoped to the
+ * per-card state chip rather than the panel head). */
+.lane-card-state-held {
+  padding: 2px var(--space-2);
+  border: var(--hairline);
+  border-radius: var(--radius-pill);
+}
+
 /* #926: the body's own droplet + big issue number (`docs/design/mockup/lanes-{dark,light}.png`) —
  * `EntityRef`'s own small type glyph still renders inline before the number (reused as-is, never
  * duplicated), the droplet is the card's distinct identity mark alongside it. */

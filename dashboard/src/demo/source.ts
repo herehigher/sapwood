@@ -51,7 +51,7 @@ export const DEMO_SOURCE: DemoBundle = {
       // first real row (id 1), not the first included row's own id.
       startEventId: 0,
       startSpendId: 0,
-      eventCount: 12,
+      eventCount: 13,
       schemaVersion: 1,
       // #880: `roundBudgetUsd` here (not just `loopState.config` above) — the ROUND N panel's own
       // target tick reads the round's OWN persisted artifact (`readSummary`), never today's live
@@ -103,14 +103,42 @@ export const DEMO_SOURCE: DemoBundle = {
       id: 6,
       ts: "2026-08-09T09:18:00Z",
       kind: "reclaim-done",
-      payload: { worker: "lane-a", issue: 9101, next: "DRIVING", pr: 9201, prTitle: "feat(dashboard): scrub bar chapter marks" },
+      // #906: `costUsd`/`costEstimated` match this lane's own spend row (id 1, ts 09:18, $2.10,
+      // `estimated: false`) — without them the replayed card fell back to "—, settles when the
+      // lane ends", contradicting the COST panel on the same page. No `pr` field — the real
+      // engine never emits one on `reclaim-done` (AC5's own stated real shape); the droplet
+      // learns 9201 from `merged` (below) instead, same as production would.
+      payload: {
+        worker: "lane-a",
+        issue: 9101,
+        next: "DRIVING",
+        prTitle: "feat(dashboard): scrub bar chapter marks",
+        costUsd: 2.1,
+        costEstimated: false,
+      },
     },
     {
       id: 7,
       ts: "2026-08-09T09:20:00Z",
       kind: "reclaim-done",
-      payload: { worker: "lane-b", issue: 9102, next: "DRIVING", pr: 9202, prTitle: "fix(dashboard): header spend meter rounding" },
+      // #906: same shape as lane-a above (costUsd/costEstimated matching THIS lane's own spend
+      // row, id 2, ts 09:20; no `pr` field) — lane-b's droplet learns 9202 from `pr-held` below
+      // instead, witnessing the (worker, pr) pair coming from `pr-held` itself, matching
+      // `lastHoldEvent`'s own server-side scoping (AC5).
+      payload: {
+        worker: "lane-b",
+        issue: 9102,
+        next: "DRIVING",
+        prTitle: "fix(dashboard): header spend meter rounding",
+        costUsd: 2.1,
+        costEstimated: false,
+      },
     },
+    // #906 (§294 follow-up #7): a person puts lane-b's PR on hold shortly after it opens — the
+    // ?demo fixture's own witness for the ON HOLD chip (crop-pair evidence, 1440-{dark,light}-
+    // idle-lanes.png). No matching `pr-released` — the hold is still open at the fixture's own
+    // idle end-state (id 13, 15:00).
+    { id: 8, ts: "2026-08-09T09:25:00Z", kind: "pr-held", payload: { worker: "lane-b", issue: 9102, pr: 9202, label: "sapwood:hold" } },
     // #925 AC4: the needs-attention strip's own crop-pair oracle needs >= 3 open rows across
     // >= 2 categories with distinct ages to demonstrate the fixed chip/entity/age tracks, the
     // oldest-age emphasis box, and the rust/--sap-text tone split side by side — a single
@@ -118,26 +146,26 @@ export const DEMO_SOURCE: DemoBundle = {
     // this round also ran into trouble, told the same lean way #886's 9103 already is (an
     // escalation-only event, no full dispatched/reclaim-done pair spelled out for it).
     //
-    // B3 (#925 AC4): these three attention events (8/10/11) sit hours apart, not minutes —
-    // `?demo`'s idle end-state clock is THIS round's own last event ts (id 12, `App.tsx`'s
+    // B3 (#925 AC4): these three attention events (9/11/12) sit hours apart, not minutes —
+    // `?demo`'s idle end-state clock is THIS round's own last event ts (id 13, `App.tsx`'s
     // `replay.asOf`, #895 item 1's own mechanism), so the strip's ages are "3h"/"1h"/"10m": three
     // rows a viewer can tell apart at a glance, spanning hours vs minutes like the mockup's own
     // "greatest age" emphasis calls for — not three renders of the same rounded day figure.
     {
-      id: 8,
+      id: 9,
       ts: "2026-08-09T12:00:00Z",
       kind: "fix-rounds-capped",
       payload: { issue: 9104, pr: 9204, fixRounds: 3, cap: 3 },
     },
-    { id: 9, ts: "2026-08-09T12:05:00Z", kind: "merged", payload: { issue: 9101, pr: 9201, worker: "lane-a" } },
-    { id: 10, ts: "2026-08-09T14:00:00Z", kind: "drive-needs-human", payload: { issue: 9102, pr: 9202 } },
+    { id: 10, ts: "2026-08-09T12:05:00Z", kind: "merged", payload: { issue: 9101, pr: 9201, worker: "lane-a" } },
+    { id: 11, ts: "2026-08-09T14:00:00Z", kind: "drive-needs-human", payload: { issue: 9102, pr: 9202 } },
     {
-      id: 11,
+      id: 12,
       ts: "2026-08-09T14:50:00Z",
       kind: "review-silence-escalated",
       payload: { worker: "lane-a", issue: 9105, pr: 9205, silenceSec: 900 },
     },
-    { id: 12, ts: "2026-08-09T15:00:00Z", kind: "round-stop", payload: { detail: "issue cap reached" } },
+    { id: 13, ts: "2026-08-09T15:00:00Z", kind: "round-stop", payload: { detail: "issue cap reached" } },
   ],
   spend: [
     {

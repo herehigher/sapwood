@@ -1,5 +1,12 @@
+// #906: the ON HOLD chip's own glyph is a standard resource, not a hand-drawn one —
+// `icons.tsx`'s own header reserves that file for the identity set plus glyphs with no standard
+// equivalent; a component reaching for a lucide utility icon imports it directly (§2 adjudication
+// table, same pattern `stage.tsx` already uses for its own utility icons). `Pin`'s real shape
+// (rounded head + crossbar + needle) is what the mockup draws — a hand-guessed SVG (the prior
+// map-pin teardrop) got the shape wrong.
+import { Pin } from "lucide-react";
 import type { Lane } from "../api/types.ts";
-import { calibrationClause, laneStateCaption } from "../copy.ts";
+import { calibrationClause, LANE_HELD_CAPTION, laneStateCaption } from "../copy.ts";
 import type { EntityTitles } from "../entities.ts";
 import { formatElapsed, formatUsd } from "../format.ts";
 import { modelEffortCaption } from "../hero/stage.tsx";
@@ -27,9 +34,17 @@ export function laneHeadStat(config: Record<string, unknown> | null | undefined,
  *  (`copy.ts` — the SAME gate the reclaim-done feed sentence already uses, never a second
  *  hand-copied implementation) appends the recorded est→real reading when `lane.estCostUsd`/
  *  `costEstimated` name a known-real provenance — `costEstimated === false` exactly, absent for
- *  a live card today (no live overlay carries it), so this is a no-op there. */
+ *  a live card today (no live overlay carries it), so this is a no-op there.
+ *
+ *  #906: a settled figure with no calibration clause to append reads " settled"
+ *  (`lanes-{dark,light}.png` w3: "$1.10 settled") — never a bare dollar amount, which reads as
+ *  ambiguous mid-flight progress rather than a closed fact. A clause already says the same thing
+ *  in its own words ("→ real $Y"), so it wins alone. */
 export function laneCostText(lane: Lane): string {
-  if (lane.costUsd !== null) return `${formatUsd(lane.costUsd)}${calibrationClause(lane)}`;
+  if (lane.costUsd !== null) {
+    const clause = calibrationClause(lane);
+    return clause ? `${formatUsd(lane.costUsd)}${clause}` : `${formatUsd(lane.costUsd)} settled`;
+  }
   if (lane.estCostUsd !== null) return `${formatUsd(lane.estCostUsd)} est`;
   return "—, settles when the lane ends";
 }
@@ -57,8 +72,12 @@ function laneCostBarMax(lane: Lane, workerBudgetUsdSoft: number | null): number 
  *  `lane.fixRound`, the cap = `lanes.prFixCap` config, same denominator the hero stage's own
  *  fixing droplet label uses, `stage.tsx`'s `FIXING · round ${lane.fixRound} of ${fixCap}`) —
  *  every other known state keeps its plain `laneStateCaption` word, never a fabricated round
- *  count on a lane that was never fixing. */
+ *  count on a lane that was never fixing.
+ *
+ *  #906 (§294 follow-up #7): `held: true` wins over every other branch — a lane on hold is
+ *  never mid-fix-round from the reader's point of view, it's waiting on a person. */
 export function laneStateChipText(lane: Lane, fixCap: number): string {
+  if (lane.held) return LANE_HELD_CAPTION;
   if (lane.state === "fixing") return `FIXING · ROUND ${lane.fixRound}/${fixCap}`;
   return laneStateCaption(lane.state);
 }
@@ -130,8 +149,14 @@ function LaneCard({
          *  to cross-reference a card against the same lane's own mentions elsewhere (activity feed
          *  sentences, `docs/design/mockup/lanes-{dark,light}.png`'s own per-card header). */}
         <span className="data lane-card-name">{lane.lane}</span>
-        <span className="data muted lane-card-state">
-          {KNOWN_ACTIVE_LANE_STATES.has(lane.state) ? (
+        {/* #906 (§294 follow-up #7): the ON HOLD chip is the mockup's bordered-pill form (hairline
+         *  border, no fill), not the plain dot+word chip every other state renders — a distinct
+         *  class carries the border, and the pin glyph replaces the state dot/✕ (§5: shape, not
+         *  color alone, carries the meaning). */}
+        <span className={`data muted lane-card-state${lane.held ? " lane-card-state-held" : ""}`}>
+          {lane.held ? (
+            <Pin size={14} strokeWidth={1.5} aria-hidden="true" />
+          ) : KNOWN_ACTIVE_LANE_STATES.has(lane.state) ? (
             <span className="lane-card-state-dot" aria-hidden="true" />
           ) : (
             <StateGlyph ok={false} className="glyph-fail" />
@@ -149,7 +174,13 @@ function LaneCard({
         </div>
       )}
       <div className="data muted lane-card-cost">{laneCostText(lane)}</div>
-      {laneHasCostToShow(lane) && (
+      {/* #906: the mockup's held+SETTLED card (`lanes-{dark,light}.png` w3, "$1.10 settled")
+       *  draws no bar at all — a bar communicates live progress toward a ceiling, and a settled
+       *  held lane's cost is a closed fact waiting on a person, not something still accumulating
+       *  toward one. A held+FIXING lane still mid-round with only a live estimate
+       *  (`costUsd: null`) keeps its est bar — AC2's "cost line/est bar unchanged" — since
+       *  nothing has settled yet for held-ness to freeze. */}
+      {!(lane.held && lane.costUsd !== null) && laneHasCostToShow(lane) && (
         <CostBar
           className="lane-card-bar"
           settledUsd={lane.costUsd ?? 0}

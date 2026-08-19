@@ -33,7 +33,7 @@ import {
   toggleConfigOpen,
 } from "./App.tsx";
 import { demoFixtureQuery, eventsQuery, loopStateQuery, MAX_EVENT_HISTORY, POLL_MS, roundsQuery, spendQuery } from "./api/queries.ts";
-import type { LoopEvent, Round, SpendRow } from "./api/types.ts";
+import type { Lane, LoopEvent, Round, SpendRow } from "./api/types.ts";
 import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
 import { laneCostText, laneStateChipText } from "./components/LaneBoard.tsx";
@@ -5181,4 +5181,124 @@ test("#925 AC1: every .attention-row is >=56px with a hairline separator, its se
     document.documentElement.removeAttribute("data-theme");
     await cleanup();
   }
+});
+
+// ── #906 (§294 follow-up #7): ON HOLD lane card, LIVE + REPLAY parity ──────────────────────────
+
+const heldLaneFixture = (overrides: Partial<Lane> = {}): Lane => ({
+  lane: "w1",
+  issue: 86,
+  state: "driving",
+  pr: 97,
+  held: true,
+  startedAt: "2026-08-06T11:50:00.000Z",
+  endedAt: null,
+  costUsd: null,
+  estCostUsd: null,
+  fixRound: 0,
+  contextTokens: null,
+  tokenComposition: null,
+  ...overrides,
+});
+
+test("#906 LIVE: fixture lane rows differing ONLY in held, both driving, render distinguishably through the real appContent/LaneBoard wiring", () => {
+  const held = heldLaneFixture();
+  const notHeld = heldLaneFixture({ lane: "w2", issue: 87, pr: 98, held: false });
+  const loopData = { ...LOOP_STATE_OK, lanes: { max: 2, items: [held, notHeld] } };
+  const vm = minimalAppViewModel({ mode: "live", loop: { data: loopData, isPending: false } });
+  const html = renderToStaticMarkup(appContent(vm));
+  assert.match(html, /lane-card-state-held/, "the held lane's chip must carry the bordered ON HOLD class");
+  assert.match(html, />on hold</, "the held lane's chip word");
+  assert.match(html, /PR under review/, "the non-held lane keeps today's plain caption, unchanged");
+});
+
+test("#906 REPLAY: dispatched -> reclaim-done(DRIVING) -> pr-held folds held:true through the real fold (deriveReplayedLanes), a further pr-released clears it, and BOTH lanes render distinguishably through the real replay appContent entry point — matching the LIVE path's own wording", () => {
+  const heldEvents: DomainEvent[] = [
+    { known: false, id: 1, ts: "2026-08-10T09:00:00.000Z", kind: "dispatched", payload: { worker: "w1", issue: 86 } },
+    // No `pr` field — the engine never emits one on reclaim-done (AC5's own stated real shape).
+    {
+      known: false,
+      id: 2,
+      ts: "2026-08-10T09:10:00.000Z",
+      kind: "reclaim-done",
+      payload: { worker: "w1", issue: 86, next: "DRIVING", costUsd: 1.1 },
+    },
+    {
+      known: true,
+      id: 3,
+      ts: "2026-08-10T09:11:00.000Z",
+      kind: "pr-held",
+      payload: { worker: "w1", issue: 86, pr: 97, label: "sapwood:hold" },
+    },
+    { known: false, id: 4, ts: "2026-08-10T09:00:00.000Z", kind: "dispatched", payload: { worker: "w2", issue: 87 } },
+    {
+      known: false,
+      id: 5,
+      ts: "2026-08-10T09:10:00.000Z",
+      kind: "reclaim-done",
+      payload: { worker: "w2", issue: 87, next: "DRIVING", costUsd: 1.2 },
+    },
+  ];
+  const held = foldReplay(initialReplayState(2), heldEvents);
+
+  const heldLaneView = held.state.hero.lanes.find((l) => l.issue === 86);
+  const notHeldLaneView = held.state.hero.lanes.find((l) => l.issue === 87);
+  assert.equal(heldLaneView?.held, true, "pr-held must fold onto the (worker, pr)-carrying worker's own lane");
+  assert.equal(notHeldLaneView?.held, false, "the untouched lane must never inherit a hold it never received");
+
+  const cardsAtHoldCursor = deriveReplayedLanes(held.state.hero);
+  // #906: assert pr alongside [issue, held] — the (worker, pr) propagation from pr-held's OWN
+  // payload must land here too, and ONLY here (w2's reclaim-done carries no pr, so it must still
+  // read null at this cursor).
+  assert.deepEqual(
+    cardsAtHoldCursor.map((c) => [c.issue, c.held, c.pr]).sort((a, b) => (a[0] as number) - (b[0] as number)),
+    [
+      [86, true, 97],
+      [87, false, null],
+    ],
+    "the held card's PR must be 97 — learned from pr-held's own payload, since reclaim-done here carries none",
+  );
+
+  // A subsequent pr-released clears it back to false — the reducer's own reversibility.
+  const releasedEvents: DomainEvent[] = [
+    { known: true, id: 6, ts: "2026-08-10T09:12:00.000Z", kind: "pr-released", payload: { worker: "w1", issue: 86, pr: 97 } },
+  ];
+  const released = foldReplay(held.state, releasedEvents);
+  assert.equal(released.state.hero.lanes.find((l) => l.issue === 86)?.held, false, "pr-released must clear the SAME lane pr-held set");
+
+  // Render BOTH still-held lanes through the REAL replay entry point (appContent, mode: "replay")
+  // — never a hand-built LaneBoard — same self-consistent "a real useReplay could produce this"
+  // fixture shape the #920 AC1 test above uses (rounds/selectedRoundId/replayPosition together).
+  const closedRound = {
+    roundId: 5001,
+    status: "done" as const,
+    startedAt: heldEvents[0]!.ts,
+    endedAt: heldEvents[heldEvents.length - 1]!.ts,
+    startEventId: 0,
+    startSpendId: 0,
+    eventCount: heldEvents.length,
+    schemaVersion: 1,
+    artifact: null,
+  };
+  const replayData = { ...LOOP_STATE_OK, lanes: { max: 2, items: [] } };
+  const replayVm = minimalAppViewModel({
+    mode: "replay",
+    loop: { data: replayData, isPending: false },
+    activeHero: held.state.hero,
+    rounds: [closedRound],
+    selectedRoundId: closedRound.roundId,
+    replayPosition: { state: held.state, cursorId: heldEvents[heldEvents.length - 1]!.id, cursorIndex: heldEvents.length },
+  });
+  const replayHtml = renderToStaticMarkup(appContent(replayVm));
+  assert.match(replayHtml, /lane-card-state-held/, "replay must render the SAME bordered ON HOLD chip class the live path does");
+  assert.match(replayHtml, />on hold</, "replay's held lane must read the SAME word the live path renders for held:true");
+  assert.match(replayHtml, /PR under review/, "replay's non-held lane must read the SAME word the live path renders for held:false");
+  // #906: the RENDERED card must show the PR learned from pr-held itself — only the held lane
+  // ever learned one at all (w2's own reclaim-done carries no pr field either).
+  assert.equal(
+    (replayHtml.match(/class="lane-card-pr"/g) ?? []).length,
+    1,
+    "only the held lane's card renders a PR line — the non-held lane never learned a PR at this cursor",
+  );
+  assert.match(replayHtml, /class="lane-card-pr">[\s\S]*?#97/, "the held card's own PR ref must read #97, sourced from pr-held's payload");
 });

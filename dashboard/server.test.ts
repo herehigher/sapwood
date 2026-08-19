@@ -352,6 +352,7 @@ test("/api/loop/state matches the §8 shape against a seeded DB", async () => {
       "endedAt",
       "estCostUsd",
       "fixRound",
+      "held",
       "issue",
       "lane",
       "pr",
@@ -513,6 +514,7 @@ test("#642 AC1: /api/loop/state, /api/events, /api/spend are byte-identical to t
             issue: 10,
             state: "running",
             pr: null,
+            held: false, // #906: no PR yet, so no hold episode can exist
             startedAt: "2026-07-24T11:00:00.000Z",
             endedAt: null,
             costUsd: null, // in flight — the settled bill isn't written until reclaim
@@ -579,6 +581,56 @@ test("#642 AC1: /api/loop/state, /api/events, /api/spend are byte-identical to t
       ],
       lastId: 1,
     });
+  } finally {
+    fx.close();
+  }
+});
+
+// ── #906 (§294 follow-up #7): `held` on served lane rows ────────────────────────────────────
+
+test("#906: a lane row's held field is State.lastHoldEvent(lane, pr) === 'pr-held' — true/false/false for a held, a released, and a PR-less lane", async () => {
+  const fx = await fixture((s) => {
+    s.upsertWorker({
+      name: "w-held",
+      issue: 1,
+      session_id: "s1",
+      state: "driving",
+      started_at: "2026-07-24T11:00:00.000Z",
+      ended_at: null,
+      pr: 101,
+    });
+    s.appendEvent("pr-held", { worker: "w-held", issue: 1, pr: 101, label: "sapwood:hold" });
+
+    s.upsertWorker({
+      name: "w-released",
+      issue: 2,
+      session_id: "s2",
+      state: "driving",
+      started_at: "2026-07-24T11:00:00.000Z",
+      ended_at: null,
+      pr: 102,
+    });
+    s.appendEvent("pr-held", { worker: "w-released", issue: 2, pr: 102, label: "sapwood:hold" });
+    s.appendEvent("pr-released", { worker: "w-released", issue: 2, pr: 102 });
+
+    s.upsertWorker({
+      name: "w-nopr",
+      issue: 3,
+      session_id: "s3",
+      state: "running",
+      started_at: "2026-07-24T11:00:00.000Z",
+      ended_at: null,
+    });
+  });
+  try {
+    const loop = await getJson(fx, "/api/loop/state");
+    const held = Object.fromEntries(loop.lanes.items.map((l: { lane: string; held: boolean }) => [l.lane, l.held]));
+    assert.deepEqual(held, { "w-held": true, "w-released": false, "w-nopr": false });
+
+    // The route's own read-only-handle posture extends to this new read: `lastHoldEvent` (a
+    // SELECT) succeeds through the same handle a write against is rejected on.
+    assert.equal(fx.state.lastHoldEvent("w-held", 101), "pr-held");
+    assert.throws(() => fx.state.appendEvent("merged", { pr: 1 }), /readonly|read-only|attempt to write/i);
   } finally {
     fx.close();
   }

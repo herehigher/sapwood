@@ -105,6 +105,11 @@ export type LaneView = {
    *  it (unknown provenance), never coerced to a guessed boolean (same posture `copy.ts`'s
    *  `calibrationClause` already takes for the identical field). */
   costEstimated: boolean | null;
+  /** #906 (§294 follow-up #7): whether a person currently has this lane's PR on hold — folded
+   *  from `pr-held`/`pr-released`, the SAME durable events `State.lastHoldEvent` reads live
+   *  (§11's one-code-path renderer contract). Reset on release, same as every other per-episode
+   *  lane field. */
+  held: boolean;
 };
 
 export type HeroState = {
@@ -218,6 +223,7 @@ export function initialHeroState(lanesMax: number | null): HeroState {
       costUsd: null,
       estCostUsd: null,
       costEstimated: null,
+      held: false,
     })),
     droplets: [],
     pool: [],
@@ -271,6 +277,7 @@ export function withLaneCount(state: HeroState, lanesMax: number | null): HeroSt
       costUsd: null,
       estCostUsd: null,
       costEstimated: null,
+      held: false,
     });
   return { ...state, lanes, laneCountUnknown: unknown };
 }
@@ -465,6 +472,7 @@ function claimLane(draft: Draft, worker: string): LaneView {
     costUsd: null,
     estCostUsd: null,
     costEstimated: null,
+    held: false,
   };
   draft.lanes.push(extra);
   return extra;
@@ -484,6 +492,7 @@ function releaseLane(lane: LaneView | undefined): void {
   lane.costUsd = null;
   lane.estCostUsd = null;
   lane.costEstimated = null;
+  lane.held = false;
 }
 
 /**
@@ -609,6 +618,7 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
       lane.costUsd = null;
       lane.estCostUsd = null;
       lane.costEstimated = null;
+      lane.held = false;
       moveDroplet(draft, issue, id, { lane: worker, at: "lane", failed: false, handedOff: false });
       draft.pool = draft.pool.filter((i) => i !== issue);
       return { kind: "dispatch", id, issue, lane: worker };
@@ -636,6 +646,26 @@ function apply(draft: Draft, e: DomainEvent): Transition | null {
         lane.costEstimated = typeof p.costEstimated === "boolean" ? p.costEstimated : null;
       }
       return toCheckpoint(draft, id, issue, worker, pr);
+    }
+
+    // #906 (§294 follow-up #7): the SAME durable events `State.lastHoldEvent` reads live,
+    // folded onto the worker's own lane — `pr-held`/`pr-released` always carry BOTH `worker`
+    // and `pr` (unlike `reclaim-done`), so looking the lane up by worker alone matches the
+    // server's (worker, pr)-scoped read: a worker's lane only ever rides one PR at a time in a
+    // real event sequence, and `releaseLane` already clears `held` the moment that PR's episode
+    // ends (merge/handoff/fail), so a later, unrelated PR on the same worker name never inherits
+    // a stale `held: true`. §6 gives neither kind a stage animation of its own — no droplet
+    // moves, only the lane card's own chip changes.
+    case "pr-held": {
+      const lane = laneOf(draft, worker);
+      if (lane) lane.held = true;
+      return null;
+    }
+
+    case "pr-released": {
+      const lane = laneOf(draft, worker);
+      if (lane) lane.held = false;
+      return null;
     }
 
     case "drive-fixup": {

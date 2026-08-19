@@ -279,6 +279,34 @@ test("§6 `reclaim-done` without a PR frees the lane and stages nothing", () => 
   assert.equal(state.lanes[0]?.phase, "idle");
 });
 
+// ── #906 (§294 follow-up #7): pr-held/pr-released fold onto the lane's own `held` field ────────
+
+test("#906: dispatched -> reclaim-done(DRIVING) -> pr-held sets held true on the lane; a further pr-released clears it", () => {
+  const dispatchEv = ev("dispatched", { worker: "w1", issue: 86 });
+  const reclaimEv = ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING", costUsd: 1.1, estCostUsd: 1.05, costEstimated: false });
+  const heldEv = ev("pr-held", { worker: "w1", issue: 86, pr: 97, label: "sapwood:hold" });
+
+  const afterHold = run([dispatchEv, reclaimEv, heldEv]).state;
+  assert.equal(afterHold.lanes[0]?.held, true);
+  // §6 gives this kind no stage animation of its own — no droplet moves.
+  assert.deepEqual(kinds(run([dispatchEv, reclaimEv, heldEv]).transitions), ["dispatch", "to-checkpoint"]);
+
+  const releasedEv = ev("pr-released", { worker: "w1", issue: 86, pr: 97 });
+  const afterRelease = foldEvents(afterHold, [releasedEv]).state;
+  assert.equal(afterRelease.lanes[0]?.held, false);
+});
+
+test("#906: a released, then re-dispatched lane starts fresh — held never leaks across episodes on a reused channel", () => {
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 86 }),
+    ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING" }),
+    ev("pr-held", { worker: "w1", issue: 86, pr: 97, label: "sapwood:hold" }),
+    ev("merged", { worker: "w1", issue: 86, pr: 97 }),
+    ev("dispatched", { worker: "w1", issue: 55 }),
+  ]);
+  assert.equal(state.lanes[0]?.held, false, "a fresh dispatch on the SAME reused channel must not inherit the prior PR's hold");
+});
+
 test("§6 `drive-fixup` (assumed order, reason already known) → `fix-leg-started`: droplet returns into its own lane with the send-back reason", () => {
   // This is the ASSUMED order — `drive-fixup` names the reason before the lane starts fixing.
   // It's a real, still-supported path (e.g. a mid-fix handoff/resume, covered below), but it
@@ -1782,6 +1810,7 @@ const laneAt = (channel: number, phase: LaneView["phase"] = "idle", worker: stri
   costUsd: null,
   estCostUsd: null,
   costEstimated: null,
+  held: false,
 });
 
 test("#716 gate② P1-9: visibleLanes caps at lanesMax, prioritizing active lanes over idle overflow", () => {
