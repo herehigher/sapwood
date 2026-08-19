@@ -48,6 +48,16 @@ test("packed engine tarball installs and runs as the `sapwood` npm package", { t
     );
     assert.ok(existsSync(join(installedRoot, "prompts", "worker.md")), "installed package is missing a shipped role prompt");
 
+    // `prepack` (engine/package.json) copies the repo-root example in before packing —
+    // byte-equal, not just present, so a stale/hand-edited package-local copy would fail loud.
+    const installedExample = join(installedRoot, "sapwood.config.example.yaml");
+    assert.ok(existsSync(installedExample), "installed package is missing sapwood.config.example.yaml (prepack should have copied it in)");
+    assert.equal(
+      readFileSync(installedExample, "utf8"),
+      readFileSync(join(REPO_ROOT, "sapwood.config.example.yaml"), "utf8"),
+      "installed sapwood.config.example.yaml must be byte-equal to the repo-root source of truth",
+    );
+
     // execFileSync throws on a non-zero exit, so reaching either assertion below already proves
     // the process exited 0 — a separate status check would only restate that.
     const versionOut = execFileSync("node", [cliPath, "--version"], { encoding: "utf8" }).trim();

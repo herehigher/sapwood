@@ -333,7 +333,7 @@ function ensureConfig(cwd: string): string | null {
 }
 
 function sampleConfig(): string {
-  // Ship the target-repository example (repo root) with the package.
+  // Ship the target-repository example with the package.
   //
   // #801: neither this fallback's own inline text below NOR the shipped example.yaml sets
   // ci.requiredChecks — deliberately: init cannot know a real CI check name for an arbitrary
@@ -341,9 +341,16 @@ function sampleConfig(): string {
   // startup refusal (the check would pass, but no real CheckRun would ever match, so PRs would
   // still queue forever — just without the loud warning). init()'s own caller surfaces this gap
   // as an explicit WARN action instead — see init()'s own comment at its `ensureConfig` call site.
+  //
+  // #1032: two on-disk locations, tried in order — an npm install only ever has the first.
+  // `engine/`'s own copy is `prepack`-derived from the second (the monorepo's canonical file,
+  // one level above `engine/`) so a clone-and-build checkout still finds it via the second
+  // candidate even though `prepack` never ran there.
   const here = dirname(fileURLToPath(import.meta.url));
-  const sample = join(here, "..", "..", "..", "sapwood.config.example.yaml");
-  if (existsSync(sample)) return readFileSync(sample, "utf8");
+  const packageLocal = join(here, "..", "..", "sapwood.config.example.yaml");
+  if (existsSync(packageLocal)) return readFileSync(packageLocal, "utf8");
+  const repoRoot = join(here, "..", "..", "..", "sapwood.config.example.yaml");
+  if (existsSync(repoRoot)) return readFileSync(repoRoot, "utf8");
   return "board:\n  owner: CHANGEME\n  repo: CHANGEME\n  projectNumber: 0\n";
 }
 
