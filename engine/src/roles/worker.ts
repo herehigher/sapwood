@@ -4037,7 +4037,7 @@ export class WorkerSupervisor implements Supervisor {
    *  it resolves, independent of the lane's continued presence in `this.lanes`. `jsonlPath`/
    *  `prompt` are passed explicitly (captured by the caller BEFORE lane deletion) rather than
    *  re-read off a `Lane` object this method never assumes still exists. `jsonlLegOffset`
-   *  (#1010 gate② P1) is the SAME per-leg start offset onExit() already threads into
+   *  (#1010) is the SAME per-leg start offset onExit() already threads into
    *  writeTerminalSentinel's own readJsonlFromByte slice — needed here too so the init-derived
    *  manifest fields land leg-scoped; see recordLaneContextManifest's own doc for why. */
   private scheduleContextManifestRecording(
@@ -4077,7 +4077,7 @@ export class WorkerSupervisor implements Supervisor {
    *  `Edit`/`Bash(...)`, unlike most peripheral roles: the "no write-capable tool" case this
    *  engine's dirty-derivation enum also carries structurally cannot apply to a worker lane.
    *
-   *  #1010 gate② P1: the row's documented "most-recent-leg" scope above is a promise about every
+   *  #1010: the row's documented "most-recent-leg" scope above is a promise about every
    *  field it carries, not just the overwrite-on-upsert mechanics — so the INIT-DERIVED fields
    *  (`model`/`cliVersion`/`mcpTools`/`permissionMode`) and `sandboxViolationCount` below are all
    *  parsed from `legJsonl` (this leg's OWN slice, `jsonlLegOffset` onward — the identical offset
@@ -4130,7 +4130,7 @@ export class WorkerSupervisor implements Supervisor {
         // the other init self-report fields above — same "prefer the session's own report" stance
         // as model/mcpTools, and `null` when the init line carried no such field.
         permissionMode: init.permissionMode,
-        // #1010 gate② P1: `legJsonl`, not the whole-session `jsonl` — a denied command's
+        // #1010: `legJsonl`, not the whole-session `jsonl` — a denied command's
         // <sandbox_violations> block belongs to the LEG that hit it, so a resumed lane's count
         // must never carry a prior leg's violations forward.
         sandboxViolationCount: countSandboxViolations(legJsonl),

@@ -8736,7 +8736,7 @@ test("resume: a resumed leg's ContextManifest OVERWRITES the prior leg's row und
   }
 });
 
-// #1010 gate② P1 regression: the test above never caught the leg-scoping bug because
+// #1010 regression: the test above never caught the leg-scoping bug because
 // mkHandoffLane's ORIGINAL leg emits no init line at all — parseSessionInit(wholeJsonl) falling
 // through to the resumed leg's init line looked correct by coincidence. This test gives BOTH
 // legs their own distinct init line so a first-init read (the pre-fix bug) is distinguishable
@@ -8745,7 +8745,7 @@ test("resume: a resumed leg's ContextManifest OVERWRITES the prior leg's row und
 // exactly one permission-mode-mismatch event fires (the resumed leg's own, not a phantom off the
 // original leg's "auto"), and the resumed leg's own non-zero exit still settles as failed —
 // the manifest fix never touches lane outcome.
-test("resume (#1010 gate② P1): a resumed leg's OWN init line — never the ORIGINAL leg's — lands in the overwritten manifest; the resumed leg's own permission-mode-mismatch fires exactly once; the lane's failure outcome is unaffected", async () => {
+test("resume (#1010): a resumed leg's OWN init line — never the ORIGINAL leg's — lands in the overwritten manifest; the resumed leg's own permission-mode-mismatch fires exactly once; the lane's failure outcome is unaffected", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const state = new State(join(dir, "state.sqlite"));
   let s: WorkerSupervisor | undefined;
