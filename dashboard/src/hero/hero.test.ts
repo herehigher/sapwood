@@ -28,9 +28,12 @@ import {
   dropletRadius,
   ESCALATION,
   ESCALATION_R,
+  FIXLOOP_RETURN_DY,
   GATES,
   HeroStage,
+  LANE_TERMINAL_R,
   LANES,
+  laneY,
   NODE_CAPTION_OFFSET,
   NODE_LABEL_OFFSET,
   nodeIconSizeFor,
@@ -88,6 +91,14 @@ const run = (events: DomainEvent[], lanesMax: number | null = 3) => foldEvents(i
 
 const kinds = (ts: Transition[]) => ts.map((t) => t.kind);
 const droplet = (state: HeroState, issue: number) => state.droplets.find((d) => d.issue === issue);
+/** #1026: every `M`/`L` command in a fix-loop `d` string carries exactly one x,y pair — pairing
+ *  the flat number list up is enough, no real SVG path parser needed for this shape's own oracle. */
+const fixLoopPoints = (d: string): [number, number][] => {
+  const nums = (d.match(/-?[\d.]+/g) ?? []).map(Number);
+  const points: [number, number][] = [];
+  for (let i = 0; i + 1 < nums.length; i += 2) points.push([nums[i] as number, nums[i + 1] as number]);
+  return points;
+};
 // `lanesMax: 3` matches `run()`'s own default — every call site whose state was built with a
 // different lanesMax passes it explicitly via `extra` (`withVisibleLanes` only ever CAPS from
 // above, so a state with fewer lanes than the default is unaffected either way).
@@ -386,7 +397,7 @@ test("#728: the fix-return arc mounts only for an active fix loop and unmounts o
   // No fixing lane at all — not just the label, the arc PATH element itself must be absent
   // (the AC's own wording: "render only during an active fix loop"), never a labelless arc
   // left drawn as visual debris.
-  assert.doesNotMatch(markup(initialHeroState(3)), /<path id="hero-fixloop-path"/);
+  assert.doesNotMatch(markup(initialHeroState(3)), /<path id="hero-fixloop-path-w1"/);
 
   const fixing = run([
     ev("dispatched", { worker: "w1", issue: 86 }),
@@ -395,14 +406,14 @@ test("#728: the fix-return arc mounts only for an active fix loop and unmounts o
     ev("fix-leg-started", { worker: "w1", issue: 86, pr: 97, fixRounds: 1 }),
   ]);
   const fixingHtml = markup(fixing.state);
-  assert.match(fixingHtml, /<path id="hero-fixloop-path"/);
+  assert.match(fixingHtml, /<path id="hero-fixloop-path-w1"/);
   assert.match(fixingHtml, /<text class="hero-fixloop-label"[^>]*>merge conflict<\/text>/);
 
   // The fix loop ends — the lane merges straight out of `fixing` — and folding that event
   // must fold the arc itself away, not just its label.
   const folded = foldEvents(fixing.state, [ev("merged", { worker: "w1", issue: 86, pr: 97 })]);
   const foldedHtml = markup(folded.state);
-  assert.doesNotMatch(foldedHtml, /<path id="hero-fixloop-path"/);
+  assert.doesNotMatch(foldedHtml, /<path id="hero-fixloop-path-w1"/);
   assert.doesNotMatch(foldedHtml, /hero-fixloop-label/);
 });
 
@@ -431,7 +442,7 @@ test("#716 gate②: the fix-return arrow carries the send-back reason as its own
     ev("fix-leg-started", { worker: "w1", issue: 86, pr: 97, fixRounds: 1 }),
   ]);
   const html = markup(state);
-  assert.match(html, /<path id="hero-fixloop-path"/);
+  assert.match(html, /<path id="hero-fixloop-path-w1"/);
   assert.match(html, /<text class="hero-fixloop-label"[^>]*>merge conflict<\/text>/);
 
   // No fixing lane at all — no label on the arrow.
@@ -447,18 +458,123 @@ test("#897 AC1: the fix-loop label renders as plain upright text below the retur
   ]);
   const html = markup(state);
 
-  // Plain text, not a textPath riding the arrow's own (right-to-left, at this stretch) curve —
-  // no `<textPath>` element at all, so there is no path direction for the label to inherit a
-  // rotation from.
+  // Plain text, not a textPath riding the arrow's own path — no `<textPath>` element at all,
+  // so there is no path direction for the label to inherit a rotation from.
   assert.doesNotMatch(html, /<textPath/);
 
   const labelMatch = html.match(/<text class="hero-fixloop-label" x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>merge conflict<\/text>/);
   assert.ok(labelMatch, "the label must render as a plain <text> element carrying its own x/y");
   assert.doesNotMatch(labelMatch![0], /rotate\(/, "no rotation transform on the label");
 
-  // Below the return leg's own deepest dip (the arc's control-point y, `GATES.y + 78`) —
-  // distinct from the arrow's own path, which the label no longer rides.
-  assert.ok(Number(labelMatch![2]) > GATES.y + 78, "the label must sit below the return leg's deepest point");
+  // #1026: the label sits under lane w1's (channel 0) own horizontal run — below its own
+  // return leg, distinct from the arrow's own path, which the label no longer rides.
+  assert.equal(Number(labelMatch![2]), laneY(0) + FIXLOOP_RETURN_DY + 12);
+});
+
+test("#1026 AC1: with W2 fixing and W1 idle, W2's return path ends at W2's own start terminal, not W1's", () => {
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 1 }),
+    ev("dispatched", { worker: "w2", issue: 86 }),
+    ev("reclaim-done", { worker: "w2", issue: 86, next: "DRIVING", pr: 97 }),
+    // W1 merges out (its lane goes idle) — leaving W2 the only lane fixing, on channel 1.
+    ev("merged", { worker: "w1", issue: 1, pr: 10 }),
+    ev("drive-fixup", { worker: "w2", issue: 86, pr: 97, fixRounds: 1, reason: "gate:FIXABLE:merge-conflict" }),
+    ev("fix-leg-started", { worker: "w2", issue: 86, pr: 97, fixRounds: 1 }),
+  ]);
+  assert.equal(state.lanes[0]?.phase, "idle", "sanity: W1 (channel 0) is idle, not fixing");
+  assert.equal(state.lanes[1]?.phase, "fixing", "sanity: W2 (channel 1) is the one fixing");
+
+  const html = markup(state);
+  assert.doesNotMatch(html, /id="hero-fixloop-path-w1"/, "an idle lane must not draw a return path of its own");
+  const pathMatch = html.match(/<path id="hero-fixloop-path-w2" class="hero-fixloop"[^>]*d="([^"]+)"/);
+  assert.ok(pathMatch, "W2's own fix-loop path must render");
+  const [endX, endY] = fixLoopPoints(pathMatch![1] as string).at(-1) as [number, number];
+  assert.ok(Number.isFinite(endX));
+  assert.ok(
+    Math.abs(endY - laneY(1)) <= LANE_TERMINAL_R,
+    `endpoint y (${endY}) must land within ${LANE_TERMINAL_R}px of W2's own terminal (laneY(1) = ${laneY(1)})`,
+  );
+  assert.ok(Math.abs(endY - laneY(0)) > LANE_TERMINAL_R, "must NOT land at W1's (lane 0's) terminal instead");
+});
+
+test("#1026 AC2: the fix-loop return path is orthogonal (M + axis-aligned L segments only, no free curve), amber, with a marker", () => {
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 86 }),
+    ev("reclaim-done", { worker: "w1", issue: 86, next: "DRIVING", pr: 97 }),
+    ev("drive-fixup", { worker: "w1", issue: 86, pr: 97, fixRounds: 1, reason: "gate:FIXABLE:merge-conflict" }),
+    ev("fix-leg-started", { worker: "w1", issue: 86, pr: 97, fixRounds: 1 }),
+  ]);
+  const html = markup(state);
+  const pathMatch = html.match(/<path id="hero-fixloop-path-w1" class="hero-fixloop" marker-end="url\(#hero-fixloop-arrow\)" d="([^"]+)"/);
+  assert.ok(pathMatch, "the fix-loop path must render carrying the fix-loop arrow marker");
+  const d = pathMatch![1] as string;
+
+  // Only M/L commands — no C/S/Q/T/A curve command between CI and the lane.
+  assert.doesNotMatch(d, /[CSQTA]/, "no curve command — the path must be orthogonal segments only");
+  assert.match(d, /^M -?[\d.]+ -?[\d.]+(?: L -?[\d.]+ -?[\d.]+)+$/, "only M followed by one or more L segments");
+
+  // Every segment axis-aligned: consecutive points share EITHER x or y, never neither.
+  const points = fixLoopPoints(d);
+  assert.ok(points.length >= 2, "the path must carry at least one segment");
+  for (let i = 1; i < points.length; i++) {
+    const [x0, y0] = points[i - 1] as [number, number];
+    const [x1, y1] = points[i] as [number, number];
+    assert.ok(x0 === x1 || y0 === y1, `segment ${i} (${x0},${y0}) -> (${x1},${y1}) is not axis-aligned`);
+  }
+
+  // The amber in-motion token — the fixing lane's own dashed channel uses it too — never the
+  // idle black `--sapwood` the old shared bezier drew in.
+  const fixloopRule = heroCss.match(/\.hero-fixloop\s*\{([^}]*)\}/);
+  assert.ok(fixloopRule, ".hero-fixloop rule must exist");
+  assert.match(fixloopRule![1] as string, /stroke:\s*var\(--sap-text\)/);
+  assert.doesNotMatch(fixloopRule![1] as string, /--sapwood/, "never the idle black token");
+});
+
+test("#1026 AC3: with W1 + W2 both fixing, two return paths render — each ending at its own lane's start — and exactly one reason label, under the first fixing lane", () => {
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 1 }),
+    ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 10 }),
+    ev("dispatched", { worker: "w2", issue: 86 }),
+    ev("reclaim-done", { worker: "w2", issue: 86, next: "DRIVING", pr: 97 }),
+    ev("drive-fixup", { worker: "w1", issue: 1, pr: 10, fixRounds: 1, reason: "gate:FIXABLE:merge-conflict" }),
+    ev("fix-leg-started", { worker: "w1", issue: 1, pr: 10, fixRounds: 1 }),
+    ev("drive-fixup", {
+      worker: "w2",
+      issue: 86,
+      pr: 97,
+      fixRounds: 1,
+      reason: "gate:FIXABLE:REQUEST_CHANGES:unresolvedThreads=0:ciRed=true",
+    }),
+    ev("fix-leg-started", { worker: "w2", issue: 86, pr: 97, fixRounds: 1 }),
+  ]);
+  assert.equal(state.lanes[0]?.phase, "fixing");
+  assert.equal(state.lanes[1]?.phase, "fixing");
+
+  const html = markup(state);
+  for (const [id, channel] of [
+    ["hero-fixloop-path-w1", 0],
+    ["hero-fixloop-path-w2", 1],
+  ] as const) {
+    const pathMatch = html.match(new RegExp(`<path id="${id}" class="hero-fixloop"[^>]*d="([^"]+)"`));
+    assert.ok(pathMatch, `${id} must render`);
+    const [, endY] = fixLoopPoints(pathMatch![1] as string).at(-1) as [number, number];
+    assert.ok(
+      Math.abs(endY - laneY(channel)) <= LANE_TERMINAL_R,
+      `${id} must end at its own lane's terminal (laneY(${channel}) = ${laneY(channel)}), got y=${endY}`,
+    );
+  }
+
+  // Exactly one label — the FIRST fixing lane (channel order) wins, not a concatenated list.
+  const labelMatches = [...html.matchAll(/<text class="hero-fixloop-label"[^>]*>([^<]*)<\/text>/g)];
+  assert.equal(labelMatches.length, 1, "exactly one reason label, never one per lane");
+  assert.equal(labelMatches[0]?.[1], "merge conflict", "the FIRST fixing lane's (w1, channel 0) reason wins");
+});
+
+test("#1026 AC4: no fix-loop path renders when no lane is fixing", () => {
+  const html = markup(initialHeroState(3));
+  assert.doesNotMatch(html, /id="hero-fixloop-path-w\d+"/);
+  assert.doesNotMatch(html, /class="hero-fixloop"/);
+  assert.doesNotMatch(html, /hero-fixloop-label/);
 });
 
 test("sendBackReason maps the engine's gate reason to the three §6/§7 words", () => {
@@ -1543,6 +1659,7 @@ test("#922 AC6 (mutation-kill): no hand-drawn <path> for a utility glyph remains
   assert.ok(pathBlocks.length > 0, "sanity: stage.tsx must still draw at least one <path>");
   const allowed = new Set([
     "hero-arrowhead", // the return path's arrowhead marker
+    "hero-fixloop-arrowhead", // #1026: the per-lane fix-loop return path's own arrowhead marker
     "hero-lane-connector", // a lane channel's curve into the CI node
     "hero-fixloop", // the fix-return arc
     "hero-branch", // the escalation branch's stem

@@ -169,8 +169,12 @@ const PLANNING_NODES = [
  * GATES.r` = 732) rather than growing into it now that `x` moved right by the same 50 units.
  */
 export const LANES = { x: 380, w: 320, top: 150, gap: 44 } as const;
-/** #920 AC3: the small hollow-circle terminal drawn at BOTH ends of every lane channel. */
-const LANE_TERMINAL_R = 4;
+/**
+ * #920 AC3: the small hollow-circle terminal drawn at BOTH ends of every lane channel.
+ * #1026: exported — `hero.test.ts`'s fix-loop shape oracle reads a lane's start terminal
+ * against this same constant rather than a copied literal.
+ */
+export const LANE_TERMINAL_R = 4;
 /**
  * #897: `r` is new — the frozen baseline draws CI/Review as large circular gate nodes (with a
  * hand-drawn gear/eye glyph inside, `gateIcon` below), not the small rects this stage used to
@@ -207,14 +211,23 @@ export const ESCALATION = { x: 810, y: 460 } as const;
  *  `REFLECTION_R`, the stage's other small icon-bearing node. */
 export const ESCALATION_R = 16;
 /**
- * #897 AC1: the fix-loop return arrow's own send-back-reason label — plain upright text, not a
- * `textPath` riding the arrow's own (right-to-left, at this stretch) curve, which rendered the
- * word rotated ~180°. Sits below the arc's own deepest dip (the curve's control-point y,
- * `GATES.y + 78`) with clearance from both the curve above and `LANES` row captions below it —
- * distinct from the arrow's own path direction, per the mockup (`hero-panel-{dark,light}.png`:
- * the label sits upright on its own baseline under the return leg, not painted along it).
+ * #1026: where a per-lane fix-loop return path leaves the CI node — its lower-left edge, at 45°
+ * down-left from the node's own centre (the corner the mockup's amber return line departs from).
+ * Every fixing lane's path shares this one exit point and only splits toward its own row once it
+ * drops past the lanes (`fixLoopPath` below) — the same "one shared approach, many destinations"
+ * shape `laneCiConnector` already draws in reverse for lanes converging INTO this node.
  */
-const FIXLOOP_LABEL = { x: 535, y: GATES.y + 100 } as const;
+export const FIXLOOP_EXIT = { x: GATES.ci - GATES.r * Math.SQRT1_2, y: GATES.y + GATES.r * Math.SQRT1_2 } as const;
+/**
+ * #1026: how far BELOW a lane's own channel line the fix-loop return path's horizontal run
+ * sits — the midpoint of the gap between this lane's own caption (`.hero-node-caption`, drawn at
+ * `laneY + 12`) and the NEXT lane's `w{n+1}` label (drawn at `laneY(next) - 10`, i.e.
+ * `laneY + LANES.gap - 10`): the run clears both by 11px on either side. Fixed relative to any
+ * channel's own row, so it holds for every lane, including the last (nothing draws in the space
+ * below it there, so the same clearance is harmless). Exported so `hero.test.ts`'s shape oracle
+ * derives the expected row/label y from this same constant, never a copied literal.
+ */
+export const FIXLOOP_RETURN_DY = (12 + (LANES.gap - 10)) / 2;
 /**
  * #728 gate② finding [0]: caps the cluster's rightward spread so it stays clear of the trunk
  * rings (leftmost extent `TRUNK.x - TRUNK_DISC_R_MAX` = 903, #921 — the disc's real fixed
@@ -585,6 +598,21 @@ const REFLECTION_NODES = [
 export const laneY = (index: number) => LANES.top + index * LANES.gap;
 
 /**
+ * #1026: the return path for ONE fixing lane — orthogonal segments only (no free curve), so it
+ * reads as "this specific lane's own wire back to CI", not a shared sweep every lane's send-back
+ * has to detour under. From `FIXLOOP_EXIT`: straight down (or up — sign depends on the lane's own
+ * row relative to CI) to this lane's horizontal run (`FIXLOOP_RETURN_DY` below its channel line),
+ * left to just past the lane's start terminal, then straight up into that terminal's own edge.
+ * Multiple fixing lanes share the vertical segment off `FIXLOOP_EXIT` visually and split only at
+ * their own row — same idea as `laneCiConnector` letting several lanes converge on one CI point.
+ */
+export function fixLoopPath(channel: number): string {
+  const rowY = laneY(channel) + FIXLOOP_RETURN_DY;
+  const armX = LANES.x + LANE_TERMINAL_R + 4;
+  return `M ${FIXLOOP_EXIT.x} ${FIXLOOP_EXIT.y} L ${FIXLOOP_EXIT.x} ${rowY} L ${armX} ${rowY} L ${armX} ${laneY(channel)}`;
+}
+
+/**
  * #920 AC3: a lane channel no longer stops short of CI with no visible convergence — a curved
  * connector carries it the rest of the way, ending exactly ON the CI node's own circle (not at
  * an arbitrary point near it), so every lane visibly joins the same gate regardless of which row
@@ -600,8 +628,7 @@ function laneCiConnector(startY: number): { end: { x: number; y: number }; d: st
   const dist = Math.hypot(dx, dy);
   const end = { x: GATES.ci - (dx / dist) * GATES.r, y: GATES.y - (dy / dist) * GATES.r };
   // A gentle bezier: the curve travels mostly horizontal off the terminal, then bends into the
-  // node along its own approach angle — the same "ease into the target" shape `hero-fixloop`'s
-  // own curve already uses elsewhere on this stage.
+  // node along its own approach angle.
   const c1 = { x: startX + (end.x - startX) * 0.6, y: startY };
   const c2 = { x: end.x - (end.x - startX) * 0.2, y: end.y };
   return { end, d: `M ${startX} ${startY} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${end.x} ${end.y}` };
@@ -1146,9 +1173,13 @@ export function HeroStage({
     windowedCount > 0
       ? `${state.roundMerged} merged · ${pendingCount} pending (${windowedCount} ${windowedWord}) · ${openAttentionCount} needs human`
       : `${state.roundMerged} merged · ${pendingCount} pending · ${openAttentionCount} needs human`;
-  // #716 gate② round 2 P2-5: the fix-return arrow's own label (§6: "labeled with the send-back
-  // reason") — the first currently-fixing lane, in channel order.
-  const fixingReason = state.lanes.find((l) => l.phase === "fixing")?.reason ?? null;
+  // #1026: every currently-fixing lane draws its OWN return path — gated on phase (the real
+  // "is this lane fixing" fact), not on whether a reason has arrived yet (`lane.reason` can
+  // still be null for a beat after `fix-leg-started`, before `drive-fixup` names it — see the
+  // production-order test in hero.test.ts). `state.lanes` is already channel-ordered, so index 0
+  // here is "first in channel order" for the shared label below.
+  const fixingLanes = state.lanes.filter((l) => l.phase === "fixing");
+  const firstFixingLane = fixingLanes[0];
   // Cap the checkpoint zone's DRAWN chips — never let a rank grow the grid above the viewBox.
   // At or under `CHECKPOINT_DRAW_CAP`, every droplet draws normally (unchanged). Past it, only
   // `CHECKPOINT_OVERFLOW_REAL_CAP` real chips draw — one row short of the grid's capacity — so
@@ -1190,6 +1221,12 @@ export function HeroStage({
       <defs>
         <marker id="hero-return-arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path className="hero-arrowhead" d="M 0 0 L 10 5 L 0 10 Z" />
+        </marker>
+        {/* #1026: a sibling marker, same triangle — the shared `hero-return-arrow` above stays
+         * `--bark` (the big dashed close-the-loop-into-planning return, unrelated to this one);
+         * the fix loop's own arrowhead is the amber in-motion ink, never that muted black. */}
+        <marker id="hero-fixloop-arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path className="hero-fixloop-arrowhead" d="M 0 0 L 10 5 L 0 10 Z" />
         </marker>
         {/* #922 AC8: the active-node halo's own blur — stdDeviation ≈ 3, per the AC's own wording;
          * `x`/`y`/`width`/`height` widen the filter region past its 10% default margin so the
@@ -1400,27 +1437,36 @@ export function HeroStage({
           ));
         })()}
 
-        {/* The fix loop, drawn as the engine's true shape: back into the lane itself.
-         * #728: mounted only while a lane is actually fixing — an unlabeled arc left drawn
-         * after the fix loop ends read as stray, unexplained stage furniture. */}
-        {fixingReason && (
-          <>
-            <path
-              id="hero-fixloop-path"
-              className="hero-fixloop"
-              d={`M ${GATES.ci - 30} ${GATES.y + 26} C ${640} ${GATES.y + 78}, ${430} ${GATES.y + 78}, ${LANES.x + 40} ${laneY(0) + 12}`}
-            />
-            {/* #897 AC1: the send-back reason renders as plain upright text below the return
-             * leg — the per-lane caption flash (above) narrates WHICH lane, this narrates WHAT
-             * the loop is doing. A `textPath` riding the arrow's own curve rendered the word
-             * rotated ~180° at this stretch (the curve runs right-to-left here); plain text has
-             * no path to inherit a direction from. One shared label; when several lanes are
-             * fixing at once, the first (channel order) wins rather than concatenating an
-             * ambiguous list. */}
-            <text className="hero-fixloop-label" x={FIXLOOP_LABEL.x} y={FIXLOOP_LABEL.y} textAnchor="middle">
-              {fixingReason}
-            </text>
-          </>
+        {/* #1026: one return path PER fixing lane, back into THAT lane's own start — replacing
+         * the old single shared bezier hard-coded to lane 0 (drew one arc under every other lane
+         * whenever a lower channel was the one actually fixing). #728: mounted only while a lane
+         * is actually fixing — an unlabeled arc left drawn after the fix loop ends read as stray,
+         * unexplained stage furniture. */}
+        {fixingLanes.map((lane) => (
+          <path
+            key={lane.channel}
+            id={`hero-fixloop-path-w${lane.channel + 1}`}
+            className="hero-fixloop"
+            markerEnd="url(#hero-fixloop-arrow)"
+            d={fixLoopPath(lane.channel)}
+          />
+        ))}
+        {firstFixingLane?.reason && (
+          /* #897 AC1: the send-back reason renders as plain upright text below the return leg —
+           * the per-lane caption flash (above) narrates WHICH lane, this narrates WHAT the loop
+           * is doing. One shared label, centered under the FIRST fixing lane's own horizontal
+           * run; when several lanes are fixing at once, the first (channel order) wins rather
+           * than concatenating an ambiguous list. Conditioned on `reason` (not just phase): a
+           * lane can be `fixing` for a beat with `reason` still null (see `fixingLanes`'s own
+           * doc above) — the paths still draw, the label just waits for a real word to show. */
+          <text
+            className="hero-fixloop-label"
+            x={(FIXLOOP_EXIT.x + LANES.x + LANE_TERMINAL_R + 4) / 2}
+            y={laneY(firstFixingLane.channel) + FIXLOOP_RETURN_DY + 12}
+            textAnchor="middle"
+          >
+            {firstFixingLane.reason}
+          </text>
         )}
       </g>
 

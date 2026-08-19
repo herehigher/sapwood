@@ -787,6 +787,18 @@ The four zones:
    lane, rust — drops downward to a person node labeled **NEEDS HUMAN**;
    escalated PR droplets park on it. Rust appears nowhere else on the
    stage.
+
+   Amended 2026-08-19 (#1026): the fix loop's return arrow is drawn PER
+   fixing lane, not as one shared curve terminating at lane 0 regardless of
+   which lane is actually fixing. Each fixing lane's own return path leaves
+   the CI node at the same exit point, then runs in orthogonal (H/V)
+   segments down to a row below that lane's own channel, left, then back up
+   into that lane's own start terminal — never a free bezier. Multiple
+   lanes fixing at once each draw their own path; the send-back reason
+   label stays singular, sitting under the first (channel-order) fixing
+   lane's own horizontal run. The arrow's ink is the amber in-motion token
+   the fixing lane's own dashed channel already uses, not the idle black
+   the rest of the stage's structural lines draw in.
 4. **Rings + reflection**: the trunk cross-section — strictly one ring per
    merge, no decorative base grain. At zero merges the disc area shows a
    small sapling glyph (`lucide-react`'s `Sprout`, §2 adjudication table)
