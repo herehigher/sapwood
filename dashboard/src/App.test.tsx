@@ -32,7 +32,7 @@ import {
   resolveWorkerBudgetUsdSoft,
   toggleConfigOpen,
 } from "./App.tsx";
-import { demoFixtureQuery, eventsQuery, loopStateQuery, MAX_EVENT_HISTORY, roundsQuery, spendQuery } from "./api/queries.ts";
+import { demoFixtureQuery, eventsQuery, loopStateQuery, MAX_EVENT_HISTORY, POLL_MS, roundsQuery, spendQuery } from "./api/queries.ts";
 import type { LoopEvent, Round, SpendRow } from "./api/types.ts";
 import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
@@ -1485,6 +1485,28 @@ test("#934: resolveLiveFeedRound picks the open round when one exists, else the 
   assert.equal(resolveLiveFeedRound([], null), null, "fresh DB: no round at all");
 });
 
+test("#934 (reverse-round-snapshot-skew): resolveLiveFeedRound prefers the newest in_progress row over the last CLOSED round when liveRoundId hasn't caught up (or is null) — the newest open round always beats a stale closed fallback", () => {
+  const closed = { roundId: 1, status: "done" } as Round;
+  const open = { roundId: 2, status: "in_progress" } as Round;
+  assert.equal(
+    resolveLiveFeedRound([closed, open], null),
+    open,
+    "liveRoundId hasn't caught up yet (still null) — /api/rounds already knows round 2 is open, so it wins over the last closed round",
+  );
+  const olderOpen = { roundId: 5, status: "in_progress" } as Round;
+  const newerOpen = { roundId: 6, status: "in_progress" } as Round;
+  assert.equal(
+    resolveLiveFeedRound([closed, olderOpen, newerOpen], null),
+    newerOpen,
+    "more than one in_progress row (shouldn't normally happen, but the fallback picks the newest, same tie-break findLastClosedRound already uses)",
+  );
+  assert.equal(
+    resolveLiveFeedRound([closed], null),
+    closed,
+    "no in_progress row at all — falls through to the last CLOSED round exactly as before",
+  );
+});
+
 test("#934: eventsUpToCursor filters a round's own full log to only ids <= cursorId; cursorId 0 (nothing folded yet) shows nothing", () => {
   const events = [domainEvent(1, "dispatched"), domainEvent(2, "dispatched"), domainEvent(3, "dispatched")];
   assert.deepEqual(eventsUpToCursor(events, 0), [], "cursorId 0 (player.ts's own 'nothing folded yet') means as-of-cursor is empty");
@@ -1733,6 +1755,176 @@ test("#934 gate② finding [0] (WIRING via App): a freshly-opened round reported
     assert.match(feed.innerHTML, /#702/);
   } finally {
     await unmount();
+  }
+});
+
+// #934 (reverse-round-snapshot-skew): the SAME independent-poll skew as the
+// forward case above, but the OTHER direction — `/api/rounds` already lists the fresh round
+// `in_progress` while the still-cached `/api/loop/state` snapshot hasn't caught up (`round: null`).
+// Falling straight through to `findLastClosedRound` there showed the LAST CLOSED round while an
+// open round was already available, violating AC2's LIVE = open-round rule.
+test("#934 (WIRING via App, reverse-round-snapshot-skew): /api/rounds already lists the fresh round in_progress while /api/loop/state (not yet caught up) still reports no open round — the feed shows the OPEN round, never the stale last-CLOSED fallback", async () => {
+  const rounds = [
+    {
+      roundId: 1,
+      status: "done",
+      startedAt: "2026-08-10T09:00:00Z",
+      endedAt: "2026-08-10T09:02:00Z",
+      startEventId: 0,
+      startSpendId: 0,
+      eventCount: 2,
+      schemaVersion: 1,
+      artifact: { prsMerged: 0, spendUsd: 0 },
+    },
+    // Round 2 is already `in_progress` per /api/rounds — the still-cached /api/loop/state snapshot
+    // below just hasn't caught up to it yet (`round: null`, LOOP_STATE_OK's own default).
+    {
+      roundId: 2,
+      status: "in_progress",
+      startedAt: "2026-08-10T09:03:00Z",
+      endedAt: null,
+      startEventId: 2,
+      startSpendId: 0,
+      eventCount: 2,
+      schemaVersion: null,
+      artifact: null,
+    },
+  ];
+  const { container, unmount } = await mountSettledApp({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/rounds": { status: 200, body: { rounds } },
+    "/api/events": {
+      status: 200,
+      body: {
+        events: [
+          { id: 3, ts: "2026-08-10T09:03:00Z", kind: "dispatched", payload: { issue: 801 } },
+          { id: 4, ts: "2026-08-10T09:03:30Z", kind: "dispatched", payload: { issue: 802 } },
+        ],
+        lastId: 4,
+      },
+    },
+  });
+  try {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const feed = container.querySelector('[aria-label="activity"]');
+    assert.ok(feed, "the activity feed must render");
+    assert.doesNotMatch(
+      feed.innerHTML,
+      /ROUND 1/,
+      "must not show the stale last-CLOSED round while a genuinely open round (2) is already known to /api/rounds",
+    );
+    assert.match(
+      feed.innerHTML,
+      /ROUND 2/,
+      "the newest in_progress row is the honest middle read between the live id match and the closed fallback",
+    );
+    assert.match(feed.innerHTML, /2 events/);
+    assert.match(feed.innerHTML, /#801/);
+    assert.match(feed.innerHTML, /#802/);
+  } finally {
+    await unmount();
+  }
+});
+
+// #934 (feed-fetch-rejection): the live per-round fetch behind the
+// feed had no rejection handling at all — a failed page fetch left `events` wherever the LAST
+// successful poll left it, forever (the effect's own deps never change just because a fetch
+// failed). mock.timers is the seam (review doctrine's "no timing-dependent assertions" rule) for
+// the retry's own setTimeout — a fake clock this test ticks deterministically, never a real
+// elapsed-wall-clock wait racing anything (Controls.test.tsx's EMERGENCY STOP hold tests use the
+// same seam for their own component-owned setTimeout).
+test("#934 (WIRING via App, feed-fetch-rejection): a rejected round-scoped fetch degrades the feed to the SAME disconnected treatment a transport failure already gets, and the next retry tick recovers the rows", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const round = {
+    roundId: 1,
+    status: "in_progress",
+    startedAt: "2026-08-10T09:00:00Z",
+    endedAt: null,
+    startEventId: 0,
+    startSpendId: 0,
+    eventCount: 2,
+    schemaVersion: null,
+    artifact: null,
+  };
+  let roundFetchAttempts = 0;
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const parsed = new URL(url, "http://localhost");
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (parsed.pathname === "/api/loop/state") return json({ ...LOOP_STATE_OK, round: { id: 1, phase: "executing" } });
+    if (parsed.pathname === "/api/rounds") return json({ rounds: [round] });
+    if (parsed.pathname === "/api/spend") return json({ spend: [], lastId: 0 });
+    if (parsed.pathname === "/api/events") {
+      // `loadRoundEvents`'s own default page size (500, round-log.ts) is what distinguishes the
+      // feed's round-scoped fetch from `useEventHistory`'s bounded global-tail poll (`EVENTS_PAGE`
+      // = 200, queries.ts) — the one fetch this test rejects once, then recovers.
+      if (parsed.searchParams.get("limit") === "500") {
+        roundFetchAttempts += 1;
+        if (roundFetchAttempts === 1) return json({ error: "boom" }, 500);
+        return json({
+          events: [
+            { id: 1, ts: "2026-08-10T09:00:00Z", kind: "dispatched", payload: { issue: 901 } },
+            { id: 2, ts: "2026-08-10T09:01:00Z", kind: "dispatched", payload: { issue: 902 } },
+          ],
+          lastId: 2,
+        });
+      }
+      return json({ events: [], lastId: 0 });
+    }
+    throw new Error(`unstubbed fetch: ${url}`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await Promise.allSettled([
+    client.prefetchQuery(loopStateQuery()),
+    client.prefetchQuery(eventsQuery(0)),
+    client.prefetchQuery(spendQuery(0)),
+    client.prefetchQuery(roundsQuery()),
+  ]);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={client}>
+          <App />
+        </QueryClientProvider>,
+      );
+    });
+    // Drain the round-scoped fetch's own rejection — a handful of microtask turns, no timer
+    // involved (the rejection itself is a Promise reaction, not a scheduled callback).
+    await act(async () => {
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+    let feed = container.querySelector('[aria-label="activity"]');
+    assert.ok(feed, "the activity feed must render");
+    assert.match(
+      feed.textContent ?? "",
+      /disconnected/i,
+      "a rejected round-scoped fetch must degrade the feed to the SAME disconnected treatment a transport failure already gets — never a silently empty list under a nonzero divider",
+    );
+    assert.equal(roundFetchAttempts, 1, "exactly one attempt so far — the retry must not fire before its own scheduled delay");
+
+    // Advance past the retry's own scheduled delay (POLL_MS — the SAME cadence every other live
+    // query here already polls at) and drain the retried fetch's resolution.
+    await act(async () => {
+      mock.timers.tick(POLL_MS);
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+    feed = container.querySelector('[aria-label="activity"]');
+    assert.ok(feed);
+    assert.equal(roundFetchAttempts, 2, "the retry actually re-fetched, rather than staying stuck forever");
+    assert.doesNotMatch(feed.textContent ?? "", /disconnected/i, "the retry recovers — the feed is no longer degraded");
+    assert.match(feed.innerHTML, /#901/);
+    assert.match(feed.innerHTML, /#902/);
+  } finally {
+    mock.timers.reset();
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
   }
 });
 
