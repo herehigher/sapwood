@@ -367,9 +367,8 @@ function readHeaderLayout(viewportWidth: number): {
   }
 }
 
-// gate② round 2 (P2): the first cut's 1100px floor left LIVE mode's Controls verbs + "?" legend
-// unstacked past their own natural fit (see panels.css's own arithmetic comment) — 1300px is the
-// corrected floor.
+// #1025: the first cut's 1100px floor left LIVE mode's Controls verbs + "?" legend unstacked past
+// their own natural fit (see panels.css's own arithmetic comment) — 1300px is the corrected floor.
 test("#1025 AC1/AC2: .engine-status wraps with .engine-status-line as its own full-width line at/below the 1300px floor; the row stays unbroken above it", () => {
   const style = document.createElement("style");
   style.textContent = `${tokensCss}\n${panelsCss}\n${appCss}`;
@@ -382,7 +381,7 @@ test("#1025 AC1/AC2: .engine-status wraps with .engine-status-line as its own fu
     assert.notEqual(readHeaderLayout(1301).flexWrap, "wrap", "one px above the floor (AC2), the media query must not have fired yet");
 
     // 995/1024/1200 are all inside the wrapped range this rule now covers — 1200 is the owner
-    // walk's own live-mode reference width from the gate② round 2 arithmetic (panels.css).
+    // walk's own live-mode reference width from panels.css's own breakpoint arithmetic.
     for (const width of [1300, 1200, 1024, 995]) {
       const layout = readHeaderLayout(width);
       assert.equal(layout.flexWrap, "wrap", `at ${width}px, .engine-status must wrap`);
@@ -406,21 +405,27 @@ test("#1025 AC1: .round-nav-pill resolves white-space: nowrap at 995px and 1024p
   }
 });
 
-// gate② round 2 (P2): at 995px replay, the second line's own natural width (stepper + BACK TO
-// LIVE + meter) is close enough to fit that letting the meter shrink a little keeps it off a
-// THIRD line — `.spend-meter` becomes a genuinely flexible item (`flex: 1 1 400px` + `min-width:
-// 0`) instead of the 400px SVG being a hard floor; `.spend-meter-bar` switches from a fixed
-// 400px to `width: 100%` of that now-shrinkable box (still capped at its authored `max-width:
-// 400px`).
-test("#1025 (gate② P2): at 995px the meter is a genuinely shrinkable flex item — flex: 1 1 400px, min-width: 0, bar width: 100%/max-width: 400px", () => {
+// #1025: a multi-line flex container decides which line an item lands on using that item's flex
+// BASE size, not its shrunk result — shrinking only happens AFTER placement. A 400px base size
+// (the first cut) meant the meter never even got considered for line 2 at 995px replay (stepper +
+// gap + a 400px base already didn't fit) — it landed on a needless third line regardless of how
+// far it could shrink. 200px is a base size small enough that the meter DOES get placed on line 2
+// alongside the stepper + BACK TO LIVE; `flex-grow: 1` then expands it back out from there
+// (panels.css's own comment has the full page-measured numbers). `.spend-meter-bar` follows its
+// now-flexible parent (`width: 100%`, capped at its authored `max-width: 400px`).
+test("#1025: at 995px the meter is a genuinely shrinkable flex item with a 200px base size — flex: 1 1 200px, min-width: 0, bar width: 100%/max-width: 400px", () => {
   const style = document.createElement("style");
   style.textContent = `${tokensCss}\n${panelsCss}\n${appCss}`;
   document.head.appendChild(style);
   try {
     const layout = readHeaderLayout(995);
     assert.equal(layout.meterFlexGrow, "1", "at 995px, .spend-meter must be allowed to grow");
-    assert.equal(layout.meterFlexShrink, "1", "at 995px, .spend-meter must be allowed to shrink below its 400px basis");
-    assert.equal(layout.meterFlexBasis, "400px", "at 995px, .spend-meter's STARTING size is still the authored 400px");
+    assert.equal(layout.meterFlexShrink, "1", "at 995px, .spend-meter must be allowed to shrink below its base size");
+    assert.equal(
+      layout.meterFlexBasis,
+      "200px",
+      "at 995px, .spend-meter's flex BASE size must be small enough for the item to land on line 2 at all",
+    );
     assert.equal(layout.meterMinWidth, "0", "at 995px, .spend-meter must not have an implicit shrink floor");
     assert.equal(layout.barWidth, "100%", "at 995px, .spend-meter-bar tracks its now-flexible parent, not a fixed 400px");
     assert.equal(layout.barMaxWidth, "400px", "at 995px, .spend-meter-bar still never exceeds its authored 400px when there's room");

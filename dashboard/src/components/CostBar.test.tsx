@@ -203,7 +203,7 @@ test("#923: a taller height scales every coordinate proportionally, not just the
   assert.equal(Number(fillMatch?.[3]), Number(fillMatch?.[2]) / 2, "rx stays half the (now taller) fill height");
 });
 
-// ── #1025 (gate② P3): `flush` — the header capsule fills its own box, no centered-pill margin ──
+// ── #1025: `flush` — the header capsule fills its own box, no centered-pill margin ─────────────
 
 // Omitting `flush` must render BYTE-IDENTICAL geometry to #923's own scaled-centered-pill grammar
 // above — this prop is opt-in, every pre-#1025 call site (cost panels, lane cards) never passes it.

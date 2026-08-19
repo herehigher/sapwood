@@ -69,7 +69,7 @@ export interface CostBarProps {
    *  geometry below scales proportionally off this so a taller box is a genuinely bigger capsule,
    *  not the same 12px drawing floating in extra blank space. */
   height?: number;
-  /** #1025 (gate② P3): with #923 D16's outer capsule OUTLINE dropped (panels.css), the header
+  /** #1025: with #923 D16's outer capsule OUTLINE dropped (panels.css), the header
    *  spend meter's only remaining visible shape is this primitive's own track/fill/hatch — the
    *  shared centered-pill geometry (a `BASE_FILL_HEIGHT`-tall pill floating inside a taller
    *  `height` box, `fillY`/`fillHeight` below) left 5px of transparent canvas above and below it
