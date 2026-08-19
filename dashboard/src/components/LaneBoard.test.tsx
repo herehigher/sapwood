@@ -338,15 +338,18 @@ test("#906: held: false renders exactly today's plain caption — no held class,
   assert.match(html, /PR under review/);
 });
 
-// gate② finding [0] (ac5-settled-card-contract): a held lane's settled cost reads "$X settled"
-// (`lanes-{dark,light}.png` w3: "$1.10 settled") and draws NO bar — the mockup's own held card
-// has none, a bar being live-progress language a closed, human-owned fact shouldn't borrow.
+// gate② finding [0] (ac5-settled-card-contract), narrowed by gate② round 2 finding [0]
+// (held-est-bar-suppressed): a held lane's SETTLED cost reads "$X settled" (`lanes-{dark,light}
+// .png` w3: "$1.10 settled") and draws NO bar — the mockup's own held card has none, a bar being
+// live-progress language a closed, human-owned fact shouldn't borrow. A held lane that hasn't
+// settled yet (still mid-fix, only a live estimate) keeps its bar — AC2's own "cost line/est bar
+// unchanged" — the suppression is scoped to held+SETTLED, never held alone.
 test("#906: a held lane's settled cost renders '$X.XX settled' and no CostBar at all", () => {
   const html = renderToStaticMarkup(
     <LaneBoard lanesMax={1} lanes={[lane({ state: "driving", pr: 97, held: true, costUsd: 1.1 })]} titles={{}} now={NOW} />,
   );
   assert.match(html, /\$1\.10 settled/);
-  assert.doesNotMatch(html, /lane-card-bar/, "a held lane must never draw a cost bar, settled or not");
+  assert.doesNotMatch(html, /lane-card-bar/, "a held+settled lane must never draw a cost bar");
 });
 
 test("#906: the SAME settled cost on a NOT-held lane keeps drawing its bar — today's behavior, untouched", () => {
@@ -354,6 +357,17 @@ test("#906: the SAME settled cost on a NOT-held lane keeps drawing its bar — t
     <LaneBoard lanesMax={1} lanes={[lane({ state: "driving", pr: 97, held: false, costUsd: 1.1 })]} titles={{}} now={NOW} />,
   );
   assert.match(html, /lane-card-bar/);
+});
+
+// gate② round 2 finding [0] (held-est-bar-suppressed): the prior fix over-scoped to "held alone"
+// and would have suppressed the bar on a live `fixing` lane that's ALSO held but hasn't settled
+// (`costUsd: null`, a live `estCostUsd` still accumulating) — AC2 leaves that bar untouched.
+test("#906: a held+fixing lane with only a live estimate (not yet settled) still draws its est bar", () => {
+  const html = renderToStaticMarkup(
+    <LaneBoard lanesMax={1} lanes={[lane({ state: "fixing", held: true, costUsd: null, estCostUsd: 0.75 })]} titles={{}} now={NOW} />,
+  );
+  assert.match(html, /\$0\.75 est/);
+  assert.match(html, /lane-card-bar/, "a held lane that hasn't settled yet must keep its live est bar");
 });
 
 test("laneCostText: a plain settled figure with no calibration clause reads '$X.XX settled'; a calibration clause wins alone, unchanged", () => {

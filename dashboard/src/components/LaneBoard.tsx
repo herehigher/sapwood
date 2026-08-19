@@ -174,11 +174,14 @@ function LaneCard({
         </div>
       )}
       <div className="data muted lane-card-cost">{laneCostText(lane)}</div>
-      {/* #906 gate② finding [0] (ac5-settled-card-contract): the mockup's own held card
-       *  (lanes-{dark,light}.png w3, "$1.10 settled") draws no bar at all — a bar communicates
-       *  live progress toward a ceiling, and a held lane's cost is a closed fact waiting on a
-       *  person, not something still accumulating toward one. */}
-      {!lane.held && laneHasCostToShow(lane) && (
+      {/* #906 gate② finding [0] (ac5-settled-card-contract), narrowed by gate② round 2 finding
+       *  [0] (held-est-bar-suppressed): the mockup's own held+SETTLED card (lanes-{dark,light}
+       *  .png w3, "$1.10 settled") draws no bar at all — a bar communicates live progress toward
+       *  a ceiling, and a settled held lane's cost is a closed fact waiting on a person, not
+       *  something still accumulating toward one. A held+FIXING lane still mid-round with only a
+       *  live estimate (`costUsd: null`) keeps its est bar — AC2's "cost line/est bar unchanged"
+       *  — since nothing has settled yet for held-ness to freeze. */}
+      {!(lane.held && lane.costUsd !== null) && laneHasCostToShow(lane) && (
         <CostBar
           className="lane-card-bar"
           settledUsd={lane.costUsd ?? 0}
