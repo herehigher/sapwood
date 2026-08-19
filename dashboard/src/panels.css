@@ -814,6 +814,36 @@
   cursor: pointer;
 }
 
+/* #972 (#729/#928 remainder, 720 reflow): at 720 the row `status · stepper · BACK TO LIVE ·
+ * meter · "?"` no longer fits unbroken — BTL's own label used to wrap mid-word onto three clipped
+ * lines, and the meter's fixed 400px capsule (`.spend-meter-bar` above, unchanged at 1024/1440 —
+ * AC3) ran past the panel's right edge. Two independent fixes, not one: `.engine-status` gains
+ * `flex-wrap` so the meter (its own last child) drops to a line of its own below the stepper/BTL
+ * instead of overflowing beside them — `flex-basis: 100%` makes that deterministic rather than
+ * relying on exactly how much row-1 width happens to be left over; BTL's own text collapses to
+ * icon-only (`aria-label` on the button below carries the accessible name the hidden label would
+ * otherwise supply — AC's own "icon-only with an accessible name" allowance) so its single line
+ * never has a word left to wrap. The meter's own capsule also narrows to fit the now-single-
+ * column row instead of keeping its 400px authored width. */
+@media (max-width: 720px) {
+  .engine-status {
+    flex-wrap: wrap;
+  }
+
+  .spend-meter {
+    flex-basis: 100%;
+  }
+
+  .spend-meter-bar {
+    width: 100%;
+    max-width: 400px;
+  }
+
+  .header-back-to-live-label {
+    display: none;
+  }
+}
+
 /* ---- needs-attention strip (§3, #361, row anatomy #925) -------------------- */
 
 /* #925: severity bar | chip | entity ref (glyph+number+title) | reason · asks | age — every
