@@ -14,6 +14,10 @@ board:
   #   inProgress: In Progress
   #   done: Done
 
+# goal:
+#   file: docs/GOAL.md # default: docs/GOAL.md — the project's north-star goal file (`sapwood init`
+#                        # scaffolds it from the shipped template when missing)
+
 lanes:
   max: 3 # default: 3 concurrent workers
   roundDispatchCap: 2 # default: 2 new dispatches per round/tick
