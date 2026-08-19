@@ -483,9 +483,10 @@ test("#925 AC3: a DECISION row (--rust tone) still names its category in the chi
  * every element. That is provably sufficient for a FAST guard, not a fallback for the real proof:
  * CSS Grid's column-sizing algorithm is DETERMINISTIC — a track's start/end offset depends only on
  * the tracks strictly before it, never on that track's own or a later track's content.
- * `.attention-row`'s template is `4px | <chip, fixed> | <entity, max-content> | <reason, 1fr>
- * | <age, 96px fixed>` (#1018: entity/reason swapped roles — the visible entity text is now the
- * short "PR #N" ref alone, so IT is content-sized and the reason column takes the freed `1fr`):
+ * `.attention-row`'s template is `4px | <chip, fixed> | <entity, minmax(112px, max-content)> |
+ * <reason, 1fr> | <age, 96px fixed>` (#1018: entity/reason swapped roles — the visible entity
+ * text is now the short "PR #N" ref alone, so IT is (floor-)content-sized and the reason column
+ * takes the freed `1fr`):
  *   - the entity cell's LEFT edge depends only on the severity (4px) and chip tracks, both fixed,
  *     literal, and — proven below — IDENTICAL across every row's own template string. Two rows
  *     sharing that identical prefix cannot start their entity cell at different x-offsets in any
@@ -528,9 +529,15 @@ test("#925 AC5 fast structural guard (see shots.spec.ts for the real geometry me
     // so the entity cell's left edge is pinned by construction (the argument above).
     assert.equal(severityTrack, "4px", "the severity bar must be a literal fixed width");
     assert.doesNotMatch(chipTrack!, /^(auto|.*fr$)/, "the chip track must be a fixed, non-flexible size");
-    // #1018 AC3: entity is content-sized (the visible "PR #N" ref never needs free space); reason
-    // is now the row's ONE flexible track, taking the width the inline title used to consume.
-    assert.equal(entityTrack, "max-content", "the entity cell must be sized to its own ref-only content, never flexible");
+    // #1018 AC3: entity has a floor-content-sized track (the visible "PR #N" ref never needs free
+    // space, but a shared floor keeps rows with/without a wide ref left-aligned — gate② P3);
+    // reason is now the row's ONE flexible track, taking the width the inline title used to
+    // consume.
+    assert.equal(
+      entityTrack,
+      "minmax(112px, max-content)",
+      "the entity cell must be a 112px-floored, content-growable track, never flexible",
+    );
     assert.equal(reasonTrack, "1fr", "the reason column must be the row's sole flexible track");
     // Age is the LAST track and fixed — its right edge is always the row's own right edge.
     assert.equal(ageTrack, "96px", "the age box must be a literal fixed width, and the row's trailing track");
@@ -783,39 +790,54 @@ test("B2: .attention-entity-ref (both the <span> and <a> variants) resolves the 
   }
 });
 
-test('C1: the composed entity trigger (glyph + label) is Tab-reachable and its tooltip reveals the FULL "PR #N — title" label', async () => {
-  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
-  const container = document.createElement("div");
-  document.body.appendChild(container);
-  const root = createRoot(container);
-  try {
-    await act(async () => {
-      root.render(<NeedsAttention items={[event]} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} />);
-    });
-    const trigger = container.querySelector(".attention-entity-ref") as HTMLElement;
-    assert.ok(trigger, "the entity trigger renders");
-    assert.equal(trigger.tabIndex, 0, "must be a real tab stop — a folded title needs a keyboard path, not hover-only");
-    assert.equal(container.querySelector('[role="tooltip"]'), null, "not open before any interaction");
+// #1018 gate② P3: the repoUrl branch renders an `<a>`, the no-repoUrl branch a bare `<span>` —
+// two DIFFERENT elements, each wrapped in its OWN `HintTooltip` call in NeedsAttention.tsx. A
+// regression that moved `HintTooltip` into only ONE branch (e.g. span-only) would pass every
+// markup-shape assertion elsewhere in this file (they don't exercise focus/tooltip) while
+// silently dropping title disclosure for every REAL linked row (repoUrl is always set in
+// production, App.tsx's own wiring) — so this test parameterizes across BOTH variants, proving
+// the tooltip reveal path independently on each, not just once on whichever renders by default.
+for (const repoUrl of [undefined, "https://github.com/o/r"] as const) {
+  test(`C1 (${repoUrl ? "anchor, repoUrl set" : "span, no repoUrl"}): the composed entity trigger (glyph + ref) is Tab-reachable, its VISIBLE text stays "PR #N", and its tooltip reveals the FULL "PR #N — title" label`, async () => {
+    const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<NeedsAttention items={[event]} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} repoUrl={repoUrl} />);
+      });
+      const trigger = container.querySelector(".attention-entity-ref") as HTMLElement;
+      assert.ok(trigger, "the entity trigger renders");
+      assert.equal(trigger.tagName, repoUrl ? "A" : "SPAN", "element kind must match whether a repoUrl is present");
+      assert.equal(
+        trigger.textContent?.trim(),
+        "PR #9202",
+        "AC1: the visible trigger text stays the ref alone, never the title, in either variant",
+      );
+      assert.equal(trigger.tabIndex, 0, "must be a real tab stop — a folded title needs a keyboard path, not hover-only");
+      assert.equal(container.querySelector('[role="tooltip"]'), null, "not open before any interaction");
 
-    await act(async () => {
-      trigger.focus();
-    });
+      await act(async () => {
+        trigger.focus();
+      });
 
-    const tooltip = container.querySelector('[role="tooltip"]');
-    assert.ok(tooltip, "focusing the trigger opens the tooltip");
-    assert.match(
-      tooltip?.textContent ?? "",
-      /PR #9202 — fix rounding/,
-      "the tooltip must carry the FULL composed label — replacing EntityRef dropped this reveal path, C1's own regression",
-    );
-    assert.equal(trigger.getAttribute("aria-describedby"), tooltip?.id);
-  } finally {
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
-  }
-});
+      const tooltip = container.querySelector('[role="tooltip"]');
+      assert.ok(tooltip, "focusing the trigger opens the tooltip");
+      assert.match(
+        tooltip?.textContent ?? "",
+        /PR #9202 — fix rounding/,
+        "the tooltip must carry the FULL composed label in this variant too — a HintTooltip regression scoped to only the other branch would miss this",
+      );
+      assert.equal(trigger.getAttribute("aria-describedby"), tooltip?.id);
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+}
 
 // ── #1018 (supersedes gate① round-3 finding "ac4-entity-clipping"): the entity cell no longer
 // carries the title at all, so there is nothing left to clip — a long title stays confined to the
@@ -842,8 +864,8 @@ test("#1018: a long title never reaches the visible entity cell — the ref alon
     const row = container.querySelector(".attention-row") as HTMLElement;
     assert.match(
       getComputedStyle(row).gridTemplateColumns,
-      /max-content 1fr 96px$/,
-      "reason must be the row's flexible track, entity content-sized",
+      /minmax\(112px, max-content\) 1fr 96px$/,
+      "reason must be the row's flexible track, entity a floored-content-sized track",
     );
     const reason = container.querySelector(".attention-reason") as HTMLElement;
     assert.ok(reason?.textContent && reason.textContent.length > 0, "the reason cell must still render its own content");

@@ -864,15 +864,22 @@
 
 /* #1018 (owner ruling, reverses #925 AC4's inline title composition and the entity track's `1fr`
  * flex it needed): the entity cell's visible text is now just "PR #N"/"#N" (NeedsAttention.tsx) —
- * a short, content-sized string that never needs to consume free space or clip, so the entity
- * track drops to `max-content` and the reason track — the thing that actually wraps onto
- * multiple cramped lines — becomes the row's flexible `1fr`, taking the width the title used to
- * eat. AC5's "entity-ref cell same left edge" still holds: that edge is determined entirely by the
- * FIXED tracks before it (severity/chip), never by this column's own resolved width — see
- * NeedsAttention.test.tsx's AC5 geometry oracle for the full argument. */
+ * a short string that never needs to consume free space or clip, so the reason track — the thing
+ * that actually wraps onto multiple cramped lines — becomes the row's flexible `1fr`, taking the
+ * width the title used to eat.
+ *
+ * #1018 gate② P3 (each `<li>` is its own independent grid, so a bare `max-content` lets the
+ * reason column's LEFT edge go ragged across rows — a production INSPECT row with no entity
+ * token starts its reason ~109px left of a `PR #1016` row): `minmax(112px, max-content)` gives
+ * the entity track a floor sized to the common case — 24px glyph + 8px gap + eight 16px-mono
+ * glyphs at ≈9.6px each covers a typical 4-digit "PR #NNNN" ref — so those rows align, while an
+ * unusually wide ref (5+ digits) still grows past the floor via `max-content` rather than
+ * clipping. AC5's "entity-ref cell same left edge" still holds regardless: that edge is determined
+ * entirely by the FIXED tracks before it (severity/chip), never by this column's own resolved
+ * width — see NeedsAttention.test.tsx's AC5 geometry oracle for the full argument. */
 .attention-row {
   display: grid;
-  grid-template-columns: 4px var(--attention-chip-w) max-content 1fr 96px;
+  grid-template-columns: 4px var(--attention-chip-w) minmax(112px, max-content) 1fr 96px;
   align-items: center;
   column-gap: var(--space-2);
   min-height: 56px;
@@ -941,8 +948,8 @@
   align-items: center;
 }
 
-/* #1018: the entity track is now `max-content` (above) — the visible "PR #N"/"#N" ref never
- * exceeds it, so there is nothing left to clip. The #925-era `overflow: hidden` +
+/* #1018: the entity track is now `minmax(112px, max-content)` (above) — the visible "PR #N"/"#N"
+ * ref never exceeds it, so there is nothing left to clip. The #925-era `overflow: hidden` +
  * `text-overflow: ellipsis` + `min-width: 0` truncation mechanism is dropped as dead: it only
  * ever fired against the inline title this issue moved to the tooltip. `white-space: nowrap`
  * stays — the glyph + ref still render on a single baseline, never wrapping onto a second line. */
