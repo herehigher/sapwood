@@ -1239,6 +1239,64 @@ test("#928 AC2: at 720px, lanes and activity stack (no horizontal overlap), and 
 });
 
 /**
+ * #954 AC2: the real-layout companion to `ActivityFeed.test.tsx`'s AC1 structural proof (happy-dom
+ * performs no layout, so it can prove the grid's declared tracks/containment but never real boxes).
+ * At 1024/720, both themes, over every rendered `.feed-entry` in the `?demo` fixture: the dot never
+ * orphans onto its own line above the sentence, and the meta cell (timestamp + "▶ details") never
+ * strands below it — the exact defect `1024-dark-idle-full.png` recorded (#729 D33, #929).
+ */
+test("#954 AC2: at 1024/720, both themes, every .feed-entry's dot sits within the sentence's first line and .feed-meta sits beside it, never below", async ({
+  page,
+}) => {
+  for (const width of [1024, 720] as const) {
+    for (const theme of THEMES) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto("/?demo");
+      await page.evaluate((attr) => document.documentElement.setAttribute("data-theme", attr), theme.attr);
+      await page.locator("#overview").waitFor({ state: "visible" });
+      await page.waitForLoadState("networkidle");
+
+      const entries = page.locator(".feed-entry");
+      const entryCount = await entries.count();
+      expect(entryCount, `${width}/${theme.key}: COVERAGE: the ?demo fixture must render >= 1 .feed-entry`).toBeGreaterThan(0);
+
+      const geometries = await entries.evaluateAll((els) =>
+        els.map((el) => {
+          const dot = el.querySelector(".feed-dot")!.getBoundingClientRect();
+          const sentenceEl = el.querySelector(".feed-sentence")!;
+          const sentence = sentenceEl.getBoundingClientRect();
+          const meta = el.querySelector(".feed-meta")!.getBoundingClientRect();
+          const cs = getComputedStyle(sentenceEl);
+          const fontSize = Number.parseFloat(cs.fontSize);
+          const lineHeight = cs.lineHeight.endsWith("px") ? Number.parseFloat(cs.lineHeight) : Number.parseFloat(cs.lineHeight) * fontSize;
+          return { dot, sentence, meta, sentenceLineHeight: lineHeight };
+        }),
+      );
+
+      const tolerancePx = 1;
+      for (const [i, g] of geometries.entries()) {
+        expect(
+          g.dot.top,
+          `${width}/${theme.key} entry #${i}: .feed-dot top (${g.dot.top}) must not sit above the sentence's first line (${g.sentence.top})`,
+        ).toBeGreaterThanOrEqual(g.sentence.top - tolerancePx);
+        expect(
+          g.dot.bottom,
+          `${width}/${theme.key} entry #${i}: .feed-dot bottom (${g.dot.bottom}) must stay within the sentence's first line (${g.sentence.top + g.sentenceLineHeight})`,
+        ).toBeLessThanOrEqual(g.sentence.top + g.sentenceLineHeight + tolerancePx);
+        expect(
+          Math.abs(g.meta.top - g.sentence.top),
+          `${width}/${theme.key} entry #${i}: .feed-meta top (${g.meta.top}) must equal .feed-sentence top (${g.sentence.top}), never stranded below`,
+        ).toBeLessThanOrEqual(tolerancePx);
+        expect(
+          g.meta.left,
+          `${width}/${theme.key} entry #${i}: .feed-meta left (${g.meta.left}) must sit to the right of .feed-sentence left (${g.sentence.left})`,
+        ).toBeGreaterThan(g.sentence.left);
+      }
+    }
+  }
+});
+
+/**
  * A genuine RENDERED-PIXEL sample at one page coordinate — not a geometry-box comparison (a
  * `<rect>`'s `getBoundingClientRect()` is verified directly to report the geometry-only box,
  * excluding its own stroke, so it can't itself prove whether a 1px CENTERED stroke's own 0.5px

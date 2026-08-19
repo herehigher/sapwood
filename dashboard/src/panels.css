@@ -205,15 +205,26 @@
   gap: var(--space-2);
 }
 
+/* #954 (#729 D33, #929): grid, not flex — a fixed [lead | sentence | meta] track set so a long
+ * sentence wraps only inside its own column, never pushing the dot onto an orphaned line above or
+ * stranding "▶ details" below the sentence at 1024/720. */
 .feed-entry {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
   gap: var(--space-2);
 }
 
 .feed-entry-attention {
   font-weight: 600;
+}
+
+/* #954: the dot and the optional StateGlyph share this one lead cell — the glyph's presence must
+ * never add a 4th track. */
+.feed-lead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
 }
 
 /* #715 gate② [0]: engine-review-containment-gap's per-gap lines use embedded "\n" sentence
@@ -230,12 +241,29 @@
   display: inline-block;
 }
 
-.feed-ts {
-  margin-left: auto;
+/* #954: the timestamp and the details toggle share one meta cell, kept on one line — "▶ details"
+ * can never wrap away from the time it belongs to. */
+.feed-meta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  white-space: nowrap;
 }
 
 .feed-details summary {
   cursor: pointer;
+}
+
+/* #954: the open payload is a direct grid sibling spanning the full row instead of a `.feed-meta`
+ * descendant — an `auto`-sized meta column would otherwise widen to fit the JSON's widest line.
+ * `:has()` ties its visibility to `.feed-details`' own native [open] state, no JS required. */
+.feed-payload {
+  display: none;
+  grid-column: 1 / -1;
+}
+
+.feed-entry:has(.feed-details[open]) .feed-payload {
+  display: block;
 }
 
 /* #880: "COST · TODAY" / "COST · ROUND N" — two independently framed `.cost-panel` cards (each
