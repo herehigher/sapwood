@@ -15,6 +15,7 @@ import {
   formatStatus,
   formatStopConditionLine,
   formatTickSummary,
+  formatVersionString,
   normalizeUnplacedBoardItems,
   parseMilestoneFlag,
   parseRunConfigFlag,
@@ -54,6 +55,14 @@ test("-v is alias for --version", () => {
   const r = runCli(["node", "sapwood", "-v"]);
   assert.equal(r.code, 0);
   assert.match(r.stdout, /^\d+\.\d+\.\d+\n$/);
+});
+
+test("formatVersionString: unstamped returns the bare manifest version", () => {
+  assert.equal(formatVersionString("0.3.0-alpha.1", undefined), "0.3.0-alpha.1");
+});
+
+test("formatVersionString: stamped appends +<date>.<sha>", () => {
+  assert.equal(formatVersionString("0.3.0-alpha.1", { date: "20260819", sha: "a1b2c3d" }), "0.3.0-alpha.1+20260819.a1b2c3d");
 });
 
 test("--help prints usage and exits 0", () => {

@@ -52,6 +52,7 @@ skim it if a term below reads opaque.
 | [07 — Dashboard](07-dashboard.md) | **TODO (v0.2)** — designed, not yet built; what exists today |
 | [08 — Change-risk map](08-change-risk.md) | Human-merge-only surface, high-risk seams, rules that must survive any refactor |
 | [09 — Plugin, commands & prompts](09-plugin-commands-prompts.md) | Plugin packaging, slash commands, role prompt assets |
+| [10 — Releasing](10-releasing.md) | Versioning policy, the four-manifest lockstep rule, and the `scripts/release.ts` runbook |
 
 ## Reading paths by task
 
