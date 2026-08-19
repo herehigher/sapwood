@@ -200,10 +200,16 @@ export function resolveInspectorRound(rounds: readonly Round[], liveRoundId: num
  * effect — factored out (the same treatment `replay/useReplay.ts`'s `loadRoundLog` already gets)
  * so a test can call it directly instead of mounting a component to reach an effect's inline
  * promise. Delegates straight to `replay/round-log.ts`'s `loadRoundEvents` — the SAME mechanism
- * replay's one-time full-round load already uses — with `ceilingId: null`: this only ever loads
- * the CURRENT open round (a closed round's own events already flow through `useReplay`'s
- * round-scoped `roundEvents`, wired in below), and an open round has no NEXT round yet to bound
- * it, so "no ceiling" is the honest boundary, not a missing one.
+ * replay's one-time full-round load already uses. `ceilingId` defaults `null` — the drawer's own
+ * caller always passes the genuinely CURRENT open round (a closed round's own events already flow
+ * through `useReplay`'s round-scoped `roundEvents` instead), which has no NEXT round yet to bound
+ * it, so "no ceiling" is the honest boundary there. #934 gate② finding [1]
+ * (feed-loader-overcollects-round): the activity feed's own caller can land on a CLOSED round
+ * (`resolveLiveFeedRound`'s idle/skew fallback) that DOES have a real next round — it passes
+ * `roundEventCeiling`'s own id explicitly rather than relying on this default. Either way,
+ * `loadRoundEvents` itself now also hard-clamps to `round.eventCount` regardless of `ceilingId`
+ * (that function's own doc) — belt-and-braces once an id-based ceiling isn't available yet either
+ * (a round newer than `ceilingId` can bound hasn't appeared in `/api/rounds` at all).
  *
  * Unlike `useEventHistory`'s `events` (window-capped at `MAX_EVENT_HISTORY`, `api/queries.ts`),
  * `loadRoundEvents` takes no window parameter at all — it keeps paging `/api/events` until
@@ -213,36 +219,40 @@ export function resolveInspectorRound(rounds: readonly Round[], liveRoundId: num
 export function loadInspectorRoundEvents(
   round: Round,
   fetchEventsPage: (after: number, limit: number) => Promise<EventsPage> = (after, limit) => fetchEvents({ after, limit }),
+  ceilingId: number | null = null,
 ): Promise<DomainEvent[]> {
-  return loadRoundEvents(round, null, fetchEventsPage);
+  return loadRoundEvents(round, ceilingId, fetchEventsPage);
 }
 
 /**
- * #868 gate② finding [1]: the drawer's own live-round-scoped event source. `round: null` (drawer
- * closed, or the live round hasn't appeared in `/api/rounds` yet) returns `[]` without fetching —
- * the same "nothing to load" posture `useReplay`'s own load effect takes for
- * `selectedRoundId === null`. Re-fetches whenever the round's identity OR its own `eventCount`
- * changes — `/api/rounds`' 3 s poll recomputes `eventCount` live for the currently open round
- * (`engine/src/state/state.ts`'s `listRounds` doc), so the drawer's counts keep pace with a round
- * still in progress while it's open. Mirrors `useReplay.ts`'s `resolveActiveLog`: a result whose
- * OWN round no longer matches the round CURRENTLY requested reads as absent (empty), never a
- * stale prior round's counts shown under a freshly-opened round's drawer.
+ * #868 gate② finding [1]: the drawer's own live-round-scoped event source, also reused by #934's
+ * activity feed for its own live per-round fetch. `round: null` (drawer closed, or the round
+ * hasn't appeared in `/api/rounds` yet) returns `[]` without fetching — the same "nothing to load"
+ * posture `useReplay`'s own load effect takes for `selectedRoundId === null`. Re-fetches whenever
+ * the round's identity, its own `eventCount`, OR `ceilingId` changes — `/api/rounds`' 3 s poll
+ * recomputes `eventCount` live for the currently open round (`engine/src/state/state.ts`'s
+ * `listRounds` doc), so a still-in-progress round's counts keep pace with it. Mirrors
+ * `useReplay.ts`'s `resolveActiveLog`: a result whose OWN round no longer matches the round
+ * CURRENTLY requested reads as absent (empty), never a stale prior round's counts shown under a
+ * freshly-opened round's drawer/feed. `ceilingId` defaults `null` — see `loadInspectorRoundEvents`'s
+ * own doc for when a caller supplies one instead.
  */
-export function useInspectorRoundEvents(round: Round | null): DomainEvent[] {
+export function useInspectorRoundEvents(round: Round | null, ceilingId: number | null = null): DomainEvent[] {
   const [state, setState] = useState<{ roundId: number | null; events: DomainEvent[] }>({ roundId: null, events: [] });
   // `round` itself is a fresh object reference every `/api/rounds` poll — its own `roundId`/
-  // `eventCount` are the only two fields that decide whether a re-fetch is warranted.
+  // `eventCount` (plus the caller-supplied `ceilingId`) are the only fields that decide whether a
+  // re-fetch is warranted.
   // biome-ignore lint/correctness/useExhaustiveDependencies: see the comment above.
   useEffect(() => {
     if (!round) return;
     let cancelled = false;
-    loadInspectorRoundEvents(round).then((events) => {
+    loadInspectorRoundEvents(round, undefined, ceilingId).then((events) => {
       if (!cancelled) setState({ roundId: round.roundId, events });
     });
     return () => {
       cancelled = true;
     };
-  }, [round?.roundId, round?.eventCount]);
+  }, [round?.roundId, round?.eventCount, ceilingId]);
   return round && state.roundId === round.roundId ? state.events : [];
 }
 
@@ -261,9 +271,23 @@ export function findLastClosedRound(rounds: readonly Round[]): Round | null {
  * the last CLOSED round, matching whatever the header's round navigator's own LIVE slot already
  * falls back to (`RoundNavigator.tsx`'s `roundNavLabel`) rather than a second, independently
  * decided round pick. `null` only once no round exists at all (fresh DB).
+ *
+ * #934 gate② finding [0] (live-round-snapshot-skew): `/api/loop/state` and `/api/rounds` poll
+ * independently — a freshly-opened round can appear in the FIRST (`liveRoundId`) before its own
+ * row has landed in the SECOND (`rounds`), a real (if brief) skew window, not a fresh-DB case.
+ * Falling straight through to `null` there used to misrender the feed's idle "Waiting for the
+ * first dispatch" caption while the header navigator, reading the very same live snapshot,
+ * already said "round N · live" — a live contradiction between the two panels. Falling back to
+ * the last CLOSED round instead is the honest "keep showing whatever was already in view": the
+ * round that just closed to make room for the new one is, by construction, already the newest
+ * closed row by the time the new one opens, so this is never a stale guess — only a genuinely
+ * fresh database (no round has EVER closed) still falls through to `null` here.
  */
 export function resolveLiveFeedRound(rounds: readonly Round[], liveRoundId: number | null): Round | null {
-  if (liveRoundId !== null) return rounds.find((r) => r.roundId === liveRoundId) ?? null;
+  if (liveRoundId !== null) {
+    const open = rounds.find((r) => r.roundId === liveRoundId);
+    if (open) return open;
+  }
   return findLastClosedRound(rounds);
 }
 
@@ -882,7 +906,15 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
   // filtered to the replay cursor (`eventsUpToCursor`) — never `resolveActiveFold`'s own `events`,
   // the shared process-wide, window-bounded display tail (`ActivityFeed.tsx`'s own doc).
   const feedRound = mode === "live" ? resolveLiveFeedRound(allRounds, loop.data?.round?.id ?? null) : selectedRound;
-  const feedLiveEvents = useInspectorRoundEvents(mode === "live" ? feedRound : null);
+  // #934 gate② finding [1] (feed-loader-overcollects-round): UNLIKE the drawer's own caller above
+  // (always the genuinely-open round, honestly ceiling-less), `feedRound` can resolve to a CLOSED
+  // fallback round (`resolveLiveFeedRound`'s idle/skew branch) — one that DOES have a real next
+  // round. `roundEventCeiling` bounds the fetch at that next round's own `startEventId` whenever
+  // `allRounds` already knows about it; `loadRoundEvents`'s own `eventCount` clamp (that
+  // function's doc) is the remaining backstop for the narrower window where the next round hasn't
+  // appeared in `/api/rounds` yet either.
+  const feedCeilingId = mode === "live" && feedRound ? roundEventCeiling(feedRound, allRounds) : null;
+  const feedLiveEvents = useInspectorRoundEvents(mode === "live" ? feedRound : null, feedCeilingId);
   const feedEvents = mode === "live" ? feedLiveEvents : eventsUpToCursor(replay.roundEvents, replay.position?.cursorId ?? 0);
 
   return appContent({

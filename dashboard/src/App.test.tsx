@@ -1675,6 +1675,67 @@ test("#934 AC2 (WIRING via App, live: stubbed /api/rounds + events for two round
   }
 });
 
+// engine-agent finding [0] (live-round-snapshot-skew, run e4213ded): `/api/loop/state` and
+// `/api/rounds` poll independently — a freshly-opened round can appear in the FIRST before its
+// own row has landed in the SECOND, a real (if brief) live skew window, not a fresh-DB case.
+test("#934 gate② finding [0] (WIRING via App): a freshly-opened round reported by /api/loop/state, not yet caught up in /api/rounds, falls back to the last CLOSED round's divider — never the idle 'fresh DB' caption while the navigator already reads the new round as live", async () => {
+  const rounds = [
+    {
+      roundId: 1,
+      status: "done",
+      startedAt: "2026-08-10T09:00:00Z",
+      endedAt: "2026-08-10T09:02:00Z",
+      startEventId: 0,
+      startSpendId: 0,
+      eventCount: 2,
+      schemaVersion: 1,
+      artifact: { prsMerged: 0, spendUsd: 0 },
+    },
+    // Round 2 is the OPEN round per /api/loop/state below — its own row has NOT yet landed here.
+  ];
+  const { container, unmount } = await mountSettledApp({
+    "/api/loop/state": { status: 200, body: { ...LOOP_STATE_OK, round: { id: 2, phase: "executing" } } },
+    "/api/rounds": { status: 200, body: { rounds } },
+    "/api/events": {
+      status: 200,
+      body: {
+        events: [
+          { id: 1, ts: "2026-08-10T09:00:00Z", kind: "dispatched", payload: { issue: 701 } },
+          { id: 2, ts: "2026-08-10T09:01:00Z", kind: "dispatched", payload: { issue: 702 } },
+        ],
+        lastId: 2,
+      },
+    },
+  });
+  try {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // The header navigator reads `liveRoundId` straight off the SAME `/api/loop/state` snapshot,
+    // independent of whether `/api/rounds` has caught up — it already (honestly) says round 2.
+    const pill = container.querySelector(".round-nav-pill");
+    assert.ok(pill, "the round navigator pill must render");
+    assert.match(pill.textContent ?? "", /round 2/, "the navigator's own LIVE slot reads the new round straight from /api/loop/state");
+    const feed = container.querySelector('[aria-label="activity"]');
+    assert.ok(feed, "the activity feed must render");
+    assert.doesNotMatch(
+      feed.innerHTML,
+      /Waiting for the first dispatch/,
+      "the skew window must never render the fresh-DB idle caption — round 1 genuinely closed already",
+    );
+    assert.match(
+      feed.innerHTML,
+      /ROUND 1/,
+      "falls back to the last CLOSED round (1) — the honest 'keep showing what was already in view' read, not a fabricated round 2",
+    );
+    assert.match(feed.innerHTML, /2 events/);
+    assert.match(feed.innerHTML, /#701/);
+    assert.match(feed.innerHTML, /#702/);
+  } finally {
+    await unmount();
+  }
+});
+
 test("#934 AC3 (replay, WIRING via App): entering replay for a round starts the feed at the as-of-cursor rule's own 'nothing folded yet' state — the divider shows the round's full count, but zero rows render until the cursor advances (never the whole round dumped at once)", async () => {
   const rounds = [
     {
@@ -3963,6 +4024,17 @@ test("AC1: every panel-head title resolves Fraunces/uppercase, the mockup-scale 
 // no markup-only test could ever catch. `panels.css` now declares `.feed-round-divider` alongside
 // `.cost-panel-group h4` in one shared rule (never two independently-value-pinned copies that
 // could drift); this test proves the REAL rendered result, not just the source rule text.
+//
+// engine-agent finding [2] (divider-spacing-oracle, run e4213ded): the first version of this test
+// only compared the divider against `.cost-panel-group h4` — since both resolve through the SAME
+// shared selector, that comparison stays equal under ANY mutation to the shared declaration (e.g.
+// 0.04em -> 0.05em), never catching a wrong value. `DIVIDER_LETTER_SPACING_PX`/`DIVIDER_FONT_SIZE_PX`
+// below are the AC's own golden values (0.04em resolved at the real 13px body-caption size this
+// component inherits — the exact figures a probe render confirmed), asserted directly rather than
+// re-derived from the rule under test.
+const DIVIDER_FONT_SIZE_PX = 13;
+const DIVIDER_LETTER_SPACING_PX = 0.52; // 0.04em at 13px
+
 test("#934 gate② finding [0]: the round-in-view divider resolves the SAME chapter-mark sub-label styling as BY STAGE/BY MODEL — mono, uppercase, tracked, muted — never the inherited body-caption default", async () => {
   const round: Round = {
     roundId: 42,
@@ -3986,8 +4058,18 @@ test("#934 gate② finding [0]: the round-in-view divider resolves the SAME chap
     assert.match(dividerComputed.fontFamily, /JetBrains Mono/, "divider font-family must actually resolve the mono stack");
     assert.equal(dividerComputed.fontFamily, groupComputed.fontFamily, "divider font-family must match the chapter-mark idiom");
     assert.equal(dividerComputed.textTransform, "uppercase", "divider text-transform");
+    // finding [2]: exact golden values, not a same-rule self-comparison — a mutation to the shared
+    // declaration's own numbers now fails this assertion directly.
+    assert.equal(dividerComputed.fontSize, `${DIVIDER_FONT_SIZE_PX}px`, "divider font-size (scale)");
+    assert.equal(
+      Number.parseFloat(dividerComputed.letterSpacing),
+      DIVIDER_LETTER_SPACING_PX,
+      "divider letter-spacing must resolve the AC's exact 0.04em (0.52px at 13px), not just 'not normal'",
+    );
+    // Kept alongside the exact pin above as a residual safety net: proves the divider and the
+    // sub-label still share ONE declaration rather than two independently-maintained copies that
+    // could diverge from each other even if a future refactor keeps each individually correct.
     assert.equal(dividerComputed.letterSpacing, groupComputed.letterSpacing, "divider letter-spacing must match the chapter-mark idiom");
-    assert.notEqual(dividerComputed.letterSpacing, "normal", "letter-spacing must actually resolve a tracked value, not the CSS default");
     // `--bark-text` is `light-dark()` (tokens.css) — happy-dom echoes it unresolved for both
     // sides equally, so this proves the divider and the sub-label reference the SAME color
     // source, not that either one's real pixel color has been independently verified here.

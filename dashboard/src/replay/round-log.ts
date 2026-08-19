@@ -18,7 +18,16 @@ export function roundEventCeiling(round: Round, allRounds: readonly Round[]): nu
 }
 
 /** Pages events from `round.startEventId` until `round.eventCount` have been collected (or the
- *  server stops returning fresh rows) — sorted ascending by id, ready for `buildCheckpoints`. */
+ *  server stops returning fresh rows) — sorted ascending by id, ready for `buildCheckpoints`.
+ *
+ *  #934 gate② finding [1] (feed-loader-overcollects-round): the outer `while` only checked
+ *  `collected.length < round.eventCount` BETWEEN pages — a single fetched page whose own content
+ *  overshoots that count (real when `ceilingId` is `null` and `/api/events` has already advanced
+ *  past a round's own snapshot, e.g. a fresh NEXT round's events landing before its `/api/rounds`
+ *  row does) used to get appended in full. `round.eventCount` is the round's own authoritative
+ *  total (fixed once `done`, live-recomputed by `/api/rounds`' poll while `in_progress` —
+ *  `engine/src/state/state.ts`'s `listRounds` doc) — clamping the inner loop to it is a correct
+ *  hard stop independent of whether an id-based `ceilingId` happens to be available yet. */
 export async function loadRoundEvents(
   round: Round,
   ceilingId: number | null,
@@ -32,6 +41,7 @@ export async function loadRoundEvents(
     if (page.events.length === 0 || page.lastId === after) break;
     for (const e of page.events) {
       if (ceilingId !== null && e.id > ceilingId) continue;
+      if (collected.length >= round.eventCount) break;
       collected.push(toDomainEvent(e));
     }
     after = page.lastId;
