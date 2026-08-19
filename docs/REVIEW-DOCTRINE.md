@@ -207,16 +207,14 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   re-snapshot. #865's unimplemented fix routes an all-operator-owned verdict to `ESCALATE`;
   until then, closing one needs a human merge decision reading the record, or a body-carried
   rebaseline. Grounding: `docs/security.md`'s AC-evidence-tier doctrine, Decision #8.
-- **A tier-C comment is an operator inbox item, not gate② evidence** (2026-08-19 architecture
-  panel, batch-18 dogfood). Author association (`OWNER`, etc.) authenticates who posted a
-  comment, never what it claims — it is not attestation. Folding the record into the issue
-  **body** IS the attestation: the maintainer vouching that the observation belongs in the
-  contract gate② reads. Post the record into the body and advance the [comment adjudication
-  cursor](security.md#the-comment-adjudication-cursor) in the SAME action, never comment-only —
-  the resulting body drift is what lets `checkAcDriftBeforeDrive` carry it into rebaseline/
-  re-snapshot and a later `evaluate()`, exactly as the bullet above describes. A comment-only
-  record never reaches that path; it just burns the fix-round cost the bullet above names, for
-  nothing.
+- **A tier-C comment is an operator inbox item, not gate② evidence.** Author association
+  (`OWNER`, etc.) authenticates the poster, never the claim — it is not attestation; folding
+  the record into the issue **body** IS the attestation. Post the record into the body; if a
+  comment also carried it, advance the [comment adjudication
+  cursor](security.md#the-comment-adjudication-cursor) past it in that SAME body edit — the
+  cursor adjudicates comments, so a body-only path has nothing to advance past. Never
+  comment-only, for the same reasons the bullet above already gives
+  (`checkAcDriftBeforeDrive`, `needs-human`, rebaseline).
 
 How the loop treats review findings (distilled CTO guidance, 2026-07-13, verbatim principles):
 

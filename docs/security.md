@@ -196,7 +196,7 @@ in-engine *tool-permission* management for producer legs is abandoned. Five mech
     cannot be treated as evidence of anything the engine did not independently verify.
 
   The repo already practices non-CI trusted evidence below tier A/B (the `verify:n/a` doc-gate;
-  an operator-run probe recorded on an issue) — this doctrine names that existing practice's
+  an operator-run probe recorded in the issue **body**) — this doctrine names that existing practice's
   rules instead of contradicting it with an absolute CI-only form.
 <!-- sapwood:skill:ac-evidence-tiers:end -->
 - **Hosts lacking a veto-hook + sealed-session primitive run `produce-PR-and-stop` only.**
