@@ -33,6 +33,7 @@ import {
   LANES,
   NODE_CAPTION_OFFSET,
   NODE_LABEL_OFFSET,
+  nodeIconSizeFor,
   PHASE_X,
   PLANNING,
   PLANNING_NODE_R,
@@ -1445,6 +1446,85 @@ test("#922 AC6 (COVERAGE): every rendered reflection + escalation node group car
   const escalationIconBlock = escalationGroup.match(/data-icon="user-round">([\s\S]*?)<\/g>/);
   assert.ok(escalationIconBlock, "the user-round icon group must render");
   assert.match(escalationIconBlock?.[1] as string, /class="lucide lucide-user-round"/);
+});
+
+// #1019 AC1: the reflection pair draws its glyph at 14px inside a 32px-diameter ring (14/32); the
+// planning trio/gates drew a FIXED 16px glyph inside their bigger 60px rings (ratio 0.27) —
+// visibly emptier next to the small ones. Owner: match the reflection ratio, rings unchanged. This
+// reads each glyph's RENDERED lucide/GithubActionsGlyph `<svg>` width/height (never a re-derived
+// literal) and checks it against `nodeIconSizeFor` — the same helper stage.tsx itself now sources
+// every node's glyph size from, so a drifted ratio in EITHER place fails this test.
+test("#1019 AC1: planning trio and gate glyphs scale to the reflection pair's own icon-to-ring ratio", () => {
+  const html = markup(initialHeroState(3));
+  const expectedPlanning = nodeIconSizeFor(PLANNING_NODE_R);
+  const expectedGate = nodeIconSizeFor(GATES.r);
+  // Sanity anchors from the issue body itself — catch a `nodeIconSizeFor` regression that still
+  // passes the relative comparisons below by coincidence.
+  assert.equal(expectedPlanning, 26, "r=30 at the reflection ratio (14/32) rounds to 26px");
+  assert.equal(expectedGate, 26, "GATES.r=30 at the reflection ratio rounds to 26px, same as the planning trio");
+
+  const planningGroup = html.match(/<g class="hero-planning" data-node="planning">([\s\S]*?)<g class="hero-lanes">/)?.[1] as string;
+  assert.ok(planningGroup, "the planning group must render");
+  for (const icon of ["target", "git-fork", "check"]) {
+    const iconBlock = planningGroup.match(new RegExp(`data-icon="${icon}">([\\s\\S]*?)<\\/g>`));
+    assert.ok(iconBlock, `data-icon="${icon}" group must render`);
+    const iconMarkup = iconBlock?.[1] as string;
+    const width = Number(iconMarkup.match(/<svg[^>]*\swidth="([\d.]+)"/)?.[1]);
+    const height = Number(iconMarkup.match(/<svg[^>]*\sheight="([\d.]+)"/)?.[1]);
+    assert.equal(width, expectedPlanning, `${icon}'s rendered <svg> width must equal nodeIconSizeFor(PLANNING_NODE_R)`);
+    assert.equal(height, expectedPlanning, `${icon}'s rendered <svg> height must equal nodeIconSizeFor(PLANNING_NODE_R)`);
+  }
+
+  const ciGate = html.match(
+    /<g class="hero-gate" data-gate="ci"[^>]*>([\s\S]*?)<\/g>\s*<g class="hero-gate" data-gate="review"/,
+  )?.[1] as string;
+  assert.ok(ciGate, "the CI gate group must render");
+  const ciIconBlock = ciGate.match(/data-icon="github-actions">([\s\S]*?)<\/g>/);
+  assert.ok(ciIconBlock, "the github-actions icon group must render");
+  const ciIconMarkup = ciIconBlock?.[1] as string;
+  const ciWidth = Number(ciIconMarkup.match(/<svg[^>]*\swidth="([\d.]+)"/)?.[1]);
+  assert.equal(ciWidth, expectedGate, "CI's GithubActionsGlyph <svg> width must equal nodeIconSizeFor(GATES.r)");
+
+  const reviewGate = html.match(/<g class="hero-gate" data-gate="review"[^>]*>([\s\S]*?)<\/g>\s*<line/)?.[1] as string;
+  assert.ok(reviewGate, "the Review gate group must render");
+  const reviewIconBlock = reviewGate.match(/data-icon="eye">([\s\S]*?)<\/g>/);
+  assert.ok(reviewIconBlock, "the eye icon group must render");
+  const reviewIconMarkup = reviewIconBlock?.[1] as string;
+  const reviewWidth = Number(reviewIconMarkup.match(/<svg[^>]*\swidth="([\d.]+)"/)?.[1]);
+  assert.equal(reviewWidth, expectedGate, "Review's Eye <svg> width must equal nodeIconSizeFor(GATES.r)");
+});
+
+// #1019 AC2: the reflection pair and escalation node are explicitly OUT of scope for the ratio
+// change (their own ring, 16, already sits at the reflection ratio — nothing to derive) — proves
+// their rendered glyph sizes stay the pre-#1019 14px, not merely that they still equal
+// `nodeIconSizeFor` (which the reflection pair now calls internally; escalation stays a literal).
+test("#1019 AC2: reflection-pair and escalation glyph sizes are unchanged at 14px", () => {
+  const { state } = run([
+    ev("dispatched", { worker: "w1", issue: 1 }),
+    ev("reclaim-done", { worker: "w1", issue: 1, next: "DRIVING", pr: 10 }),
+    ev("drive-needs-human", { worker: "w1", issue: 1, pr: 10 }),
+  ]);
+  const html = markup(state);
+
+  const reflectionGroup = html.match(
+    /<g class="hero-reflection" data-node="reflection">([\s\S]*)<\/g>\s*<path\s+class="hero-return"/,
+  )?.[1] as string;
+  assert.ok(reflectionGroup, "the reflection group must render");
+  for (const icon of ["chart-no-axes-column", "trending-up"]) {
+    const iconBlock = reflectionGroup.match(new RegExp(`data-icon="${icon}">([\\s\\S]*?)<\\/g>`));
+    assert.ok(iconBlock, `data-icon="${icon}" group must render`);
+    const iconMarkup = iconBlock?.[1] as string;
+    const width = Number(iconMarkup.match(/<svg[^>]*\swidth="([\d.]+)"/)?.[1]);
+    assert.equal(width, 14, `${icon}'s rendered <svg> width must stay 14px — unchanged by #1019`);
+  }
+
+  const escalationGroup = html.match(/<g class="hero-escalation"[^>]*>([\s\S]*?)<\/g>\s*<g class="hero-trunk"/)?.[1] as string;
+  assert.ok(escalationGroup, "the escalation group must render");
+  const escalationIconBlock = escalationGroup.match(/data-icon="user-round">([\s\S]*?)<\/g>/);
+  assert.ok(escalationIconBlock, "the user-round icon group must render");
+  const escalationIconMarkup = escalationIconBlock?.[1] as string;
+  const escalationWidth = Number(escalationIconMarkup.match(/<svg[^>]*\swidth="([\d.]+)"/)?.[1]);
+  assert.equal(escalationWidth, 14, "the escalation glyph's rendered <svg> width must stay 14px — unchanged by #1019");
 });
 
 // #922 AC6 (mutation-kill, source-level): every hand-authored <path> in stage.tsx must be one of
