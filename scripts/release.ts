@@ -44,7 +44,7 @@ export function isPrerelease(version: string): boolean {
   return version.includes("-");
 }
 
-interface ParsedSemver {
+export interface ParsedSemver {
   major: string;
   minor: string;
   patch: string;
@@ -54,7 +54,7 @@ interface ParsedSemver {
 // major/minor/patch stay strings, same as the prerelease identifiers below — `compareSemver`
 // runs them through the identical length-then-lexical numeric compare rather than `Number()`,
 // so a 20-digit major component orders correctly instead of silently losing precision.
-function parseSemver(version: string): ParsedSemver {
+export function parseSemver(version: string): ParsedSemver {
   const m = SEMVER_RE.exec(version);
   if (!m) throw new Error(`"${version}" is not a valid SemVer 2.0.0 version`);
   const [, major, minor, patch, prerelease] = m;
@@ -396,7 +396,36 @@ export const PUBLISH_STEPS: PublishStep[] = [
       }
     },
   },
+  {
+    // Pre-releases must never become `latest` — that's the tag `npm install sapwood` (no
+    // version) and `npx sapwood@latest` resolve, so a pre-release landing there would
+    // silently become the default install for everyone. Runs after gh-release: the tag +
+    // GitHub Release are the durable, always-true record of what was cut, so a step that
+    // can still fail for reasons outside this script's control (an npm outage, a stale
+    // local `npm login`) runs last, after everything durable already exists. If it does
+    // fail, `publish` itself is NOT safely re-runnable — `checkPublishPreconditions`
+    // refuses once the tag exists — see docs/dev-guide/10-releasing.md's Rollback section
+    // for the manual one-line retry instead.
+    name: "npm-publish",
+    describe: (ctx) => `npm publish --workspace engine --tag ${npmDistTag(ctx)}`,
+    run: (ctx, deps) => {
+      deps.exec("npm", ["publish", "--workspace", "engine", "--tag", npmDistTag(ctx)]);
+    },
+  },
 ];
+
+// npm's own dist-tag equivalent of gh-release's `--prerelease` flag: a plain release always
+// publishes `latest`. A pre-release uses its own first identifier as the tag (`alpha`/`beta`/
+// `rc`, matching the pre-1.0 ladder in docs/dev-guide/10-releasing.md) when that identifier is
+// purely alphabetic, so distinct pre-release tracks (`0.3.0-beta.1` vs `0.3.0-rc.1`) install
+// side by side under their own tags rather than colliding on a single hardcoded `alpha`. A
+// non-alphabetic first identifier (`0.3.0-1`) has no name to reuse as a tag, so it falls back
+// to the generic `next` — never `latest`, which is the one invariant that actually matters here.
+export function npmDistTag(ctx: PublishContext): string {
+  if (!ctx.prerelease) return "latest";
+  const [firstIdentifier] = parseSemver(ctx.version).prerelease;
+  return firstIdentifier !== undefined && /^[a-zA-Z]+$/.test(firstIdentifier) ? firstIdentifier.toLowerCase() : "next";
+}
 
 export interface CommandResult {
   code: number;

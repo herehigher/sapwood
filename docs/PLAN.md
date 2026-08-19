@@ -133,8 +133,8 @@ sapwood/
 Zero-runtime-dependency-where-possible, fail-closed-by-default:
 
 - **Build/runtime:** npm workspaces (`engine` now; `dashboard` slots in at v0.2),
-  strict NodeNext TypeScript, **Node ≥ 24** (floor declared on both root and
-  `@sapwood/engine`). Runtime deps: `yaml` + `zod` only.
+  strict NodeNext TypeScript, **Node ≥ 24** (floor declared on both root and the
+  `engine` workspace, published to npm as bare `sapwood`). Runtime deps: `yaml` + `zod` only.
 - **State = built-in `node:sqlite`** (WAL), not `better-sqlite3` — zero native build.
   Schema versioning via `PRAGMA user_version` + ordered, append-only migrations in a
   transaction. `workers` table carries the `handoff` terminal state.
