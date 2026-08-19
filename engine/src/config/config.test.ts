@@ -1667,10 +1667,10 @@ test("round.directiveMaxChars: zero/negative rejected (same positive-int contrac
 // ── #128: goal.file (top-level north-star goal file, promoted out of the #104-era
 // roles.architect.planMdPath) — precedence, deprecation, config-file-relative resolution ───────
 
-test("goal.file: defaults to docs/PLAN.md when neither key is set", () => {
+test("goal.file: defaults to docs/GOAL.md when neither key is set", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.goal.file, DEFAULT_GOAL_FILE);
-  assert.equal(cfg.goal.file, "docs/PLAN.md");
+  assert.equal(cfg.goal.file, "docs/GOAL.md");
 });
 
 test("goal.file: only the new key set — it wins, no error, no deprecation noise", () => {
@@ -1738,7 +1738,7 @@ test("goal.file: the DEFAULT value is also resolved relative to the config file'
     const cfgPath = join(dir, "sapwood.config.yaml");
     writeFileSync(cfgPath, "board: { owner: a, repo: r, projectNumber: 1 }\n");
     const cfg = loadConfig(cfgPath);
-    assert.equal(cfg.goal.file, join(dir, "docs", "PLAN.md"));
+    assert.equal(cfg.goal.file, join(dir, "docs", "GOAL.md"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

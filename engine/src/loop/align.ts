@@ -30,7 +30,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import type { SapwoodConfig } from "../config/config.js";
+import { DEFAULT_GOAL_FILE, type SapwoodConfig } from "../config/config.js";
 import { resolveRoundDirective } from "../config/directive.js";
 import type { IForge, Issue } from "../forge/forge.js";
 import { extractOrigin, extractVerificationPlan } from "../forge/forge.js";
@@ -87,7 +87,7 @@ export function defaultPoPromptPath(): string {
   return join(here, "..", "..", "prompts", "po.md");
 }
 
-const DEFAULT_PLAN_MD_PATH = "docs/PLAN.md";
+const DEFAULT_PLAN_MD_PATH = DEFAULT_GOAL_FILE;
 
 /** #231: the goal file's read result, EXPLICIT — never a silent empty string. The PO's
  *  alignment context is substituted into the prompt (the sandboxed session has no Read tool,
@@ -1799,7 +1799,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       }
 
       // ── Alignment/decomposition pass: at most ONE session, dispatched even with an unscoped
-      // fresh round (round.milestone unset) — decomposition still has docs/PLAN.md to work from
+      // fresh round (round.milestone unset) — decomposition still has the goal file to work from
       // alone. A persisted proposal set bypasses the session entirely on a crash rerun.
       // #104: ported to peripheral.ts's shared runSessionWithRetry (outcome-check -> retry-once
       // -> visible-degradation). Same retry-once stance as plan-review.ts's reviewer sessions;
@@ -1932,7 +1932,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           );
           const alignPrompt = renderRolePrompt(template, NO_ISSUE, deps.cfg, {
             "po.mode": "align",
-            "round.milestone": deps.cfg.round.milestone ?? "(none configured for this round — decompose against docs/PLAN.md alone)",
+            "round.milestone": deps.cfg.round.milestone ?? "(none configured for this round — decompose against the goal file alone)",
             "plan.md": planRead.content,
             "round.directive": directive,
             "backlog.digest": backlogDigest.text,

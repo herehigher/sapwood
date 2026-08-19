@@ -573,7 +573,7 @@ default); see
 ### The goal file is the project's spec
 
 sapwood treats the north-star goal file (`goal.file` in `sapwood.config.yaml`, default
-`docs/PLAN.md`) as the project's spec, not a second copy of one that lives somewhere else. Its
+`docs/GOAL.md`) as the project's spec, not a second copy of one that lives somewhere else. Its
 five sections — Goal, Non-goals, Constraints, Architecture, Current milestone (see
 `engine/prompts/goal-template.md` for the scaffold every new project fills in) — are what an
 issue is checked against, not decoration: the architect peripheral flags an issue that

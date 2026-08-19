@@ -1,6 +1,6 @@
 ---
 name: Docs
-about: A documentation-only change (README, docs/PLAN.md, usage/config guides)
+about: A documentation-only change (README, the goal file, usage/config guides)
 title: "docs: "
 labels: type:docs
 ---

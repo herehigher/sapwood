@@ -43,7 +43,7 @@ Exactly one of the two jobs below applies to this session — the value above te
 Round context:
 
 - Round milestone/theme: {{round.milestone}}
-- The project's **north-star goal file** (`goal.file` in config; `docs/PLAN.md` by default) —
+- The project's **north-star goal file** (`goal.file` in config; `docs/GOAL.md` by default) —
   its durable goal, non-goals, constraints, and current milestone, verbatim between the tags
   below:
 
@@ -296,7 +296,7 @@ round, emit an empty array and NO BODY block:
 With a concern and no proposals:
 
 <<<SAPWOOD_RESULT>>>
-{"issues": [], "concerns": [{"issue": 42, "reason": "This issue's why/what contradicts the goal file's stated non-goal — see docs/PLAN.md's Decision #3."}]}
+{"issues": [], "concerns": [{"issue": 42, "reason": "This issue's why/what contradicts the goal file's stated non-goal — see the goal file's Decision #3."}]}
 <<<END_SAPWOOD_RESULT>>>
 
 Otherwise, the BODY block carries EVERY issue's full body, each wrapped in its own

@@ -1,6 +1,6 @@
 // architect.ts — implements PeripheralStub for the `architecting` phase (#90, #77's round
 // model): a round design/review pass between goal alignment and dispatch. The architect reads
-// this round's candidate issues + the docs/PLAN.md architecture chapter (+ the PO/goal-
+// this round's candidate issues + the goal file's architecture chapter (+ the PO/goal-
 // alignment peripheral's output, when #89 ships one), produces/updates a round design note —
 // cross-issue consistency, interface boundaries, risks — and flags any candidate issue whose
 // approach contradicts the locked architecture (comment; `blocked` label if severe).
@@ -635,7 +635,7 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
 
       const template = loadRolePromptTemplate(deps.cfg.roles.architect.promptFile, defaultArchitectPromptPath());
       // #128: deps.planMdPath is a TEST override only now — a real caller omits it and gets
-      // cfg.goal.file (config-file-relative resolved, default "docs/PLAN.md"; was a hardcoded
+      // cfg.goal.file (config-file-relative resolved, default DEFAULT_GOAL_FILE; was a hardcoded
       // <cwd>/docs/PLAN.md, then roles.architect.planMdPath (#104), which broke for any target
       // repo keeping its architecture doc elsewhere).
       const architecturePath = deps.planMdPath ?? deps.cfg.goal.file;
@@ -695,7 +695,7 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         "labels.needsHuman": deps.cfg.labels.needsHuman,
         "round.directive": directive,
         // #701: the architect touches both a docs surface (the architecture-chapter reads/
-        // proposals it drafts against docs/PLAN.md) and an issues/PRs surface (contradiction
+        // proposals it drafts against the goal file) and an issues/PRs surface (contradiction
         // findings, drop/needs-human comments) — see config.ts's `language` section doc comment.
         "lang.docs": deps.cfg.language.docs,
         "lang.issuesAndPrs": deps.cfg.language.issuesAndPrs,

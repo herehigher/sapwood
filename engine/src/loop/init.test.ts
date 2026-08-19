@@ -585,7 +585,7 @@ test("init scaffolds the goal-file template when the resolved path is missing", 
   const dir = tmpCwd();
   try {
     const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir, ...nonInteractive });
-    const goalPath = join(dir, "docs", "PLAN.md"); // cfg.goal.file defaults to docs/PLAN.md
+    const goalPath = join(dir, "docs", "GOAL.md"); // cfg.goal.file defaults to docs/GOAL.md
     assert.ok(existsSync(goalPath), "goal file was scaffolded");
     const scaffolded = readFileSync(goalPath, "utf8");
     assert.match(scaffolded, /^# Goal/m);
@@ -607,7 +607,7 @@ test("init never overwrites an existing goal file — byte-for-byte untouched, e
   });
   const dir = tmpCwd();
   try {
-    const goalPath = join(dir, "docs", "PLAN.md");
+    const goalPath = join(dir, "docs", "GOAL.md");
     mkdirSync(join(dir, "docs"), { recursive: true });
     const userContent = "# My own plan\n\nThis is a user's real document, not a template.\n";
     writeFileSync(goalPath, userContent);
@@ -630,7 +630,7 @@ test("init: a second run against a repo where init itself scaffolded the goal fi
   const dir = tmpCwd();
   try {
     await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir, ...nonInteractive });
-    const goalPath = join(dir, "docs", "PLAN.md");
+    const goalPath = join(dir, "docs", "GOAL.md");
     const firstWrite = readFileSync(goalPath, "utf8");
 
     const { actions } = await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir, ...nonInteractive });

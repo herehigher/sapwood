@@ -361,7 +361,7 @@ basis.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `file` | `docs/PLAN.md` | Path to the project's north-star goal file. The same relative-path resolution as `worker.promptFile`: a relative path resolves against **the config file's own directory**, not the CLI's cwd. `sapwood init` scaffolds a starter template here — Goal / Non-goals / Constraints / Current milestone, each a short commented section — **iff the resolved path is missing**; it never overwrites an existing file (a second `init` run, or a crash-rerun, is a byte-for-byte no-op once the file exists). For the aligning phase's goal-decomposition pass specifically, a missing/unreadable file is an **explicit, fail-closed failure** — no `po-align` session is spawned, no issues are created that pass, and a durable `goal-file-unreadable` event + a `tick-error` are recorded. This never wedges the round or blocks anything else: the round-start triage pass (which never reads this file) and every other peripheral proceed unaffected, and the next round's own aligning phase retries the read fresh. (The architecting peripheral's own, independent read of this file for its architecture-chapter excerpt is unchanged — it already degrades to a visible placeholder string, never a blank one, on the same failure.) |
+| `file` | `docs/GOAL.md` | Path to the project's north-star goal file (not to be confused with sapwood's own `docs/PLAN.md`, a different file). The same relative-path resolution as `worker.promptFile`: a relative path resolves against **the config file's own directory**, not the CLI's cwd. `sapwood init` scaffolds a starter template here — Goal / Non-goals / Constraints / Current milestone, each a short commented section — **iff the resolved path is missing**; it never overwrites an existing file (a second `init` run, or a crash-rerun, is a byte-for-byte no-op once the file exists). For the aligning phase's goal-decomposition pass specifically, a missing/unreadable file is an **explicit, fail-closed failure** — no `po-align` session is spawned, no issues are created that pass, and a durable `goal-file-unreadable` event + a `tick-error` are recorded. This never wedges the round or blocks anything else: the round-start triage pass (which never reads this file) and every other peripheral proceed unaffected, and the next round's own aligning phase retries the read fresh. (The architecting peripheral's own, independent read of this file for its architecture-chapter excerpt is unchanged — it already degrades to a visible placeholder string, never a blank one, on the same failure.) |
 
 **Deprecated back-compat key:** `roles.architect.planMdPath` was the prior home for
 this same path — it is still accepted, and the two keys are reconciled at config load into the
@@ -369,7 +369,7 @@ single resolved `cfg.goal.file` every consumer reads (align.ts's goal-alignment 
 architect.ts's architecture-chapter extraction no longer read `roles.architect.planMdPath`
 directly):
 
-- Only `goal.file` set (or neither, defaulting to `docs/PLAN.md`) — nothing to reconcile.
+- Only `goal.file` set (or neither, defaulting to `docs/GOAL.md`) — nothing to reconcile.
 - Only `roles.architect.planMdPath` set — it wins (unbroken), and
   config load logs exactly **one** deprecation line pointing at `goal.file`.
 - Both set and they **agree** — resolves cleanly, no error, no deprecation noise.
@@ -413,7 +413,7 @@ PRs are English" without hand-writing that as `CLAUDE.md` prose:
 |---|---|---|
 | `codeComments` | `en` | Working language for comments and identifier-adjacent prose the worker/fix-leg producer writes into code. |
 | `issuesAndPrs` | `en` | Working language for issue bodies, proposal/triage text, and review-comment prose the engine's peripheral roles (PO, verification-plan reviewer/drafter, architect, harvest, retro, the engine-agent reviewer) compose. |
-| `docs` | `en` | Working language for documentation files/chapters a role edits (e.g. the architect's `docs/PLAN.md` architecture-chapter proposals). |
+| `docs` | `en` | Working language for documentation files/chapters a role edits (e.g. the architect's goal-file architecture-chapter proposals). |
 
 ```yaml
 # language:
