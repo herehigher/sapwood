@@ -126,7 +126,7 @@ const routineEvent: KnownDomainEvent = {
 
 test("#892 AC4: the activity feed — BOTH an attention row and an ordinary row carry .recipe-list-entry, not just one", () => {
   const html = renderToStaticMarkup(
-    <ActivityFeed events={[attentionEvent, routineEvent]} pinnedAttention={[]} titles={{}} now={new Date("2026-08-06T12:00:00Z")} />,
+    <ActivityFeed events={[attentionEvent, routineEvent]} round={null} titles={{}} now={new Date("2026-08-06T12:00:00Z")} />,
   );
   const rows = html.match(/<li class="[^"]*\bfeed-entry\b[^"]*"/g) ?? [];
   assert.equal(rows.length, 2, "expected exactly one attention row and one ordinary row");

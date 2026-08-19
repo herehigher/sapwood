@@ -108,6 +108,25 @@ test("loadRoundEvents stops once the server stops returning fresh rows (no infin
   );
 });
 
+// #934 gate② finding [1] (feed-loader-overcollects-round): a real live-poll skew shape — the
+// round's own snapshot claims 2 events, but `/api/events` has ALREADY advanced past it (e.g. a
+// later round's own rows landing before that round's `/api/rounds` row does), and no ceiling id
+// is available yet to stop them at the id level. `eventCount` must still be a hard clamp.
+test("loadRoundEvents clamps to eventCount even when a single fetched page overshoots it and no ceiling is supplied", async () => {
+  const r = round({ startEventId: 100, eventCount: 2 });
+  const allEvents = [101, 102, 103, 104].map(loopEvent); // 103/104 belong to a not-yet-known round
+  const fetchPage = async (after: number, limit: number): Promise<EventsPage> => {
+    const page = allEvents.filter((e) => e.id > after).slice(0, limit);
+    return { events: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after };
+  };
+  const result = await loadRoundEvents(r, null, fetchPage, 10);
+  assert.deepEqual(
+    result.map((e) => e.id),
+    [101, 102],
+    "the round's own eventCount is the hard ceiling when no id-based ceiling is available yet",
+  );
+});
+
 test("loadRoundEvents returns events sorted ascending by id even if pages arrive out of order", async () => {
   const r = round({ startEventId: 100, eventCount: 3 });
   const events = [103, 101, 102].map(loopEvent); // deliberately unsorted server response
