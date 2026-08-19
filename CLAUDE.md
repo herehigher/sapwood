@@ -73,7 +73,8 @@ JSON also accepted) · TDD/two-gate method as overridable defaults.
 
 ## This repo's own governance
 
-- Work is tracked as GitHub issues on **Project #4**, grouped by milestones
+- Work is tracked as GitHub issues on **Project #4** (human board; the loop's own board is
+  Project #6, `board.projectNumber` in `sapwood.config.yaml`), grouped by milestones
   `M0 → M0.5 → M1 → M2 → M3 → M4 → v0.2`. Labels: `type:*`, `prio:0-3`,
   `in-progress`, `needs-human`, `blocked`, `reserve`.
 - **Never push directly to `main`** — branch + PR. (The repo dogfoods its own model.)

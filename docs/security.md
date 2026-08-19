@@ -1729,7 +1729,10 @@ and review is not something the conductor should be configured to auto-merge.
 ### The protected live config and shipped starter are separate
 
 The path-based denial protects this repository's root `sapwood.config.yaml`: it is the
-live dogfood configuration, and changing it remains human-merge-only through the guard.
+configuration the autonomous loop on this repository actually runs from (`sapwood run` from
+the repo root, no `--config` — see [configuration.md "Two config files"](configuration.md#two-config-files)),
+so its PR history is the audit trail of the governing values, and changing it remains
+human-merge-only through the guard.
 `sapwood init` instead ships `sapwood.config.example.yaml` as the starter template
 (`engine/src/loop/init.ts`'s `sampleConfig()`/`ensureConfig()`). That template belongs
 to the default `escalation.instructionPaths` surface, so edits to it route to human merge

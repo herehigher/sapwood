@@ -1,633 +1,97 @@
-# sapwood's live dogfood configuration — non-default values for this repository only.
-# It is not a copy source for another repository; use sapwood.config.example.yaml instead.
+# sapwood's own live configuration — the file the autonomous loop on THIS repository runs from
+# (`sapwood run` from the repo root, no `--config`). Committed so that every governing value
+# has a PR-shaped audit trail; the whole file is human-merge-only (guard rule + docs/security.md
+# "Human-merge-only paths"). Not a starter for another repository — that is
+# sapwood.config.example.yaml (docs/configuration.md "Two config files").
 #
-# sapwood configuration — hand-edited, inline comments. Validated by a Zod schema
-# (engine/src/config.ts) after parse. This file is YAML, but the parser also accepts
-# JSON (YAML ⊃ JSON), so a sapwood.config.json works with zero extra code.
-#
-# Only `board.owner`, `board.repo`, and `board.projectNumber` are required; everything
-# else has a default shown below.
+# Written here: (a) every non-default value, and (b) every value that changes authority,
+# merge/review behaviour, a security boundary, or a governance name — pinned even when it equals
+# today's schema default, so a default change in engine/src/config/config.ts can never silently
+# change what governs this repo. Purely operational defaults are omitted. Change = PR + restart.
+
+goal:
+  file: docs/PLAN.md # sapwood's goal file (framework default: docs/GOAL.md)
 
 board:
-  owner: herehigher # GitHub user or org that owns the repo + ProjectV2 board
-  repo: sapwood # the repository name (every gh call targets owner/repo)
-  # ownerKind: user           # auto-detected at init (user | org) if omitted
-  projectNumber: 4 # the ProjectV2 board number
-  statusField: Status # the board's single-select field used as the work queue
-  status: # lane names on that field (no literals baked into code)
-    backlog: Todo # intake; startup normalizes No-Status issue items here (not dispatchable)
+  owner: herehigher
+  repo: sapwood
+  projectNumber: 6 # the dogfood board the loop drives; Project #4 is the human board, no engine runs on it
+  statusField: Status
+  status:
+    backlog: Todo
     ready: Ready
     inProgress: In Progress
     done: Done
 
-# engine:
-#   tickIntervalSec: 60 # how often the engine calls tick() (the inter-tick sleep and the
-#                        # liveness watchdog window)
-#   rapidRestart:        # #431: crash-loop detector - counts this engine's own process starts
-#     maxBirths: 5       # (run-started events) at startup; maxBirths starts within windowSec
-#     windowSec: 600     # parks autonomous dispatch with an escalation until a later start
-#                        # observes the window drained. Normal restarts (manual, script, or a
-#                        # supervisor) never trip it; a supervisor's OWN crash-loop breaker
-#                        # (e.g. systemd StartLimitBurst) is still a prerequisite for
-#                        # unattended runs - see docs/security.md.
-#   driver: rounds       # #106: "rounds" (default) - the round orchestrator (aligning/
-#                        # architecting/dispatch/harvesting/retro peripherals wrapped
-#                        # around the tick engine, one round at a time). "tick" - the
-#                        # bare M4 loop driver (no peripherals; --once/--until-idle
-#                        # apply), kept as an explicit escape hatch.
-
-# liveness: #395 — bounded external awaits + a PROGRESS-based stall watchdog (armed for BOTH
-#           # engine.driver values, tick and rounds). A host sleeping mid-round with a forge/
-#           # spawn call in flight must never wedge the engine with zero events; every duration
-#           # below exists to bound exactly that.
-#   forgeCallTimeoutMs: 60000     # hard per-call ceiling on a single `gh`/`git` CLI invocation
-#                                 # (raised from an initial 30s: some reads are gh api --paginate
-#                                 # over potentially large pages and need headroom)
-#   spawnConfirmTimeoutMs: 30000  # hard ceiling on waiting for a spawned child's spawn/error
-#                                 # confirmation (a role session or a worker leg)
-#   watchdogTickMultiplier: 10    # the watchdog treats no DURABLE EVENT being appended within
-#                                 # tickIntervalSec * this many as wedged — never tick duration
-#                                 # (a long-but-healthy inline review session self-kills the
-#                                 # engine under a duration-based trigger; see watchdog.ts) —
-#                                 # durable engine-stalled event + nonzero exit
-#   maxConsecutiveStalls: 3       # #407: this many CONSECUTIVE runs all ending in a watchdog
-#                                 # stall with no round closed between them = a deterministic
-#                                 # wedge — the next start parks dispatch + escalates to a human
-#                                 # instead of blind-retrying (a transient wedge closes rounds
-#                                 # between stalls and never trips this; see stall-breaker.ts)
-
-# logging:
-#   path: data/logs/sapwood.log # disposable run narrative; relative paths resolve against
-#                                # this config file's directory
-#   teeToStderr: true           # also emit each log record to stderr
-#   maxBytes: 10485760          # rotate to <path>.1 before the next append crosses this size
-
 lanes:
-  max: 3 # max CONCURRENT workers (the lane ceiling; never a per-round quota)
-  roundDispatchCap: 6 # #124: total dispatch QUOTA for one round, refilled in waves as lanes
-  #                     free (never a single one-shot batch) — a round can dispatch up to this
-  #                     many issues total, `lanes.max` at a time. This repo deliberately sets 6
-  #                     (two full concurrency-wide waves) to amortize peripheral
-  #                     (aligning/architect/harvest/retro) cost; the schema default is the more
-  #                     conservative 2. Raise it for bigger, less-frequently-reviewed rounds;
-  #                     lower it for tighter retro loops.
-  reserveCap: 1 # lanes held back as reserve
-  prFixCap: 2 # #246: max fix-leg rounds (review findings / CI-red) before escalating to
-  #             needs-human for adjudication. 0 disables the FIXABLE gate outright — every
-  #             finding/CI-red PR folds straight to today's pre-#246 behavior (HUMAN/WAIT).
-  frictionMin: 0 # min minutes between dispatches (rate limit; 0 = off)
-  gatedReentryCap: 2 # #147: max gated-PR reentry attempts (human removes needs-human on an
-  #                    escalated PR -> reclaimed back to driving, re-driven on the SAME branch,
-  #                    no new worker) before a further removal re-escalates and is permanently
-  #                    capped (manual merge required). 0 disables automatic reentry outright.
+  roundDispatchCap: 6 # two concurrency-wide waves per round, amortising the align/architect/harvest/retro cost
+  prFixCap: 4 # explicit on purpose: the fix-leg cap this repo runs with (= schema default, #450)
 
 worker:
-  model: opus
-  effort: high # low | medium | high
-  # fallbackModel: sonnet # Default fallback when the primary model is unavailable. Set to
-  #                       # "none" to omit --fallback-model and fail loud instead of silently
-  #                       # downgrading quality; see #168 for the environment-failure path.
-  timeoutSec: 3600 # wall-clock hard cap (safety bound)
-  budgetUsdSoft: 10 # SOFT per-worker budget: auto-enforced via a live TOKEN-ESTIMATE (#33) —
-  #                   crossing it triggers a graceful handoff (commit+push WIP, progress note,
-  #                   .handoff sentinel, clean exit — never a mid-work kill). The estimate is a
-  #                   rate-table approximation (see pricingFile below), not the real billed
-  #                   cost; it's reconciled against the real total_cost_usd (logged) once the
-  #                   worker finishes.
-  #                   CALIBRATION (#386, dogfood 2026-07-24): this default suits SMALL-to-
-  #                   MEDIUM work. With the shipped opus/high profile above, one leg of a
-  #                   substantive implementation issue costs ~$8-20 — at 10, every substantive
-  #                   first leg handed off before opening a PR (3/3 observed); 20 carried them
-  #                   through in one go. Nothing broke: the handoff is graceful and maxResumes
-  #                   resumes the same branch — a low cap costs re-priming, not work. It does
-  #                   NOT move alone: budgetUsdSoft x lanes.max should stay under
-  #                   cost.roundBudgetUsd (10 x 3 = exactly the shipped 30), or the round
-  #                   throttle just becomes the new bottleneck. See docs/configuration.md
-  #                   "Calibrating budgetUsdSoft".
-  # maxResumes: 2   # Fresh budgeted legs allowed after the initial leg hands off. 0 disables
-  #                   automatic resume; exhaustion latches the lane + adds needs-human once.
-  # pricingFile: pricing/my-rates.yaml
-  #                   Override the model rate table the soft-budget estimator prices against.
-  #                   Relative paths resolve against THIS config file's directory (like
-  #                   promptFile). Unset = the engine's shipped pricing.yaml (commented copy of
-  #                   the current per-model USD/MTok rates — input/output/cacheWrite/cacheRead
-  #                   per model alias; your file REPLACES it entirely, no merging). Missing/
-  #                   malformed file = startup error, never a silent fallback.
-  heartbeatStaleSecs: 180 # heartbeat older than this => worker considered dead
-  # egressSuspectCommands: [curl, wget, nc, ncat, netcat, socat, ssh, scp, sftp, rsync, ftp, telnet]
-  #                   Monitor-only lexical tripwire over completed worker Bash calls. Matches
-  #                   executable position and records an event; never blocks. An override
-  #                   REPLACES the defaults (no merging); [] disables the tripwire. git, gh,
-  #                   and package managers are deliberately absent: they are loop-owned or
-  #                   governed flows, not useful default signals. See docs/security.md.
-  # promptFile: prompts/my-worker.md
-  #                   #74: override the worker prompt with your own template file. Relative
-  #                   paths resolve against THIS config file's directory. Supported {{vars}}:
-  #                   issue.number, issue.title, issue.body, issue.labels, labels.verifyNa.
-  #                   Missing/unreadable/empty file or an unknown {{var}} = startup error,
-  #                   never a silent fallback. Unset = the engine's shipped prompts/worker.md
-  #                   (TDD + two-gate method).
-  # fixPromptFile: prompts/my-fix.md
-  #                   #245: override the FIX-LEG prompt (a `fixing`-state resume addressing its
-  #                   own PR's review findings — same worker row/worktree/branch/session, never
-  #                   a new dispatch). Relative paths resolve against THIS config file's
-  #                   directory. Supported {{vars}}: issue.number, pr.number, labels.verifyNa
-  #                   ONLY (round-2 fix A7: deliberately NOT issue.title/body/labels — a fix
-  #                   leg's evidence channel is the PR-facing proxy tools, not issue prose).
-  #                   Missing/unreadable/empty file or an unknown {{var}} = startup error, never
-  #                   a silent fallback. Unset = the engine's shipped prompts/fix.md (fetch
-  #                   findings via the PR-facing proxy tools, address them, push to the same
-  #                   branch).
+  model: sonnet
+  budgetUsdSoft: 30
+  maxResumes: 4
 
-cost: # engine-enforced HARD ceiling (safety boundary, drains before killing)
-  roundBudgetUsd: 30
-  dailyBudgetUsd: 100
-  # maxWallClockSec: 86400 # #431: per-PROCESS attention alarm (default 24h) - breached when
-  #                        # THIS engine process has been alive longer than this; a restart at
-  #                        # any gap length starts a fresh clock. Not a security boundary:
-  #                        # dailyBudgetUsd above + guard/gates/kill-switch are the durable
-  #                        # cross-restart bounds. Note a 24h life can straddle UTC midnight
-  #                        # and thus two dailyBudgetUsd periods (docs/configuration.md).
-
-# dashboard:
-#   controls: true # v0.2 dashboard operations verbs (start/pause/resume/stop) and the
-#                  # POST /api/control route (frontend-design.md 3/8, key added by #210's
-#                  # schema work on PR #366). false = pure-spectator dashboard: the control
-#                  # route is not registered (404) and no control buttons render.
+cost:
+  roundBudgetUsd: 180
+  dailyBudgetUsd: 300
 
 reviewer:
-  # engine-agent: a static, different-Claude-model review session the engine runs locally,
-  # on the same Claude CLI sapwood itself needs — default (#501, 2026-08-01). No extra
-  # install: a fresh sapwood user already has everything this kind requires.
-  # different-model-codex: gate② instead — a fresh non-author review from the
-  # hosted `@codex review` GitHub App. Requires that App installed on this repo; was the
-  # default before #501. same-model-trusted | human are the other reviewer kinds.
-  # produce-pr-and-stop is configured separately at merge.mode.
   mode: engine-agent
-  # mode: different-model-codex  # the pre-#501 hosted-Codex default; see the comment above.
-  # triggerCommand: "@codex review"
-  #                   #156: the PR-comment text that requests a review. Default = Codex's
-  #                   PR-comment trigger (shown, commented, per the promptFile pattern). Point
-  #                   this at any bot/reviewer entry point instead — the verdict PARSER stays
-  #                   Codex-shaped regardless (COMMENTED/APPROVED states, Codex-bot identity), so
-  #                   a custom trigger with a different verdict format is out of scope here
-  #                   (v1.x reviewer adapters).
-  # deltaChainMax: 3  # Consecutive X..Y re-review requests allowed before the next head move
-  #                   # requests a full-PR review and resets the delta chain.
-  trustedReviewers: [] # allowlisted reviewer logins (public-repo hardening, v1.1)
-  # fallback: ordered, opt-in reviewer failover (empty by default = queue forever, unchanged
-  # behavior — falling back to a weaker trust mode is NEVER silent). Each entry keeps its own
-  # mode semantics (identity allowlist / any-non-author-approval), and the always-blocking
-  # signals (unresolved threads, a standing CHANGES_REQUESTED) block regardless of failover.
-  # NOTE: same-model-trusted here REQUIRES a non-empty trustedReviewers list above — the
-  # combination with an empty list is rejected at parse (it could never produce a verdict).
-  # Example:
-  # fallback: [same-model-trusted, human]
-  fallback: []
-  # How long (seconds, since the last review trigger) the primary may stay unavailable before
-  # gate② hands off to the first fallback entry that itself reaches a decisive verdict.
-  failoverAfterSec: 1200
-  # How long a current-head review may stay non-decisive before sapwood labels the PR
-  # needs-human and emits an event. Visibility only: the lane stays driving and gate② stays firm.
-  escalateAfterSec: 86400
-  # engine-agent only: this block is rejected with every other reviewer mode (dead config).
-  # With mode: engine-agent, it is OPTIONAL — omitted (as here) resolves a default for you at
-  # config-load time: model: sonnet (differs from worker.model's own "opus" default, D5's
-  # model-separation rule), effort/costCapUsd/retryAfterSec/treeRetentionCap at the values shown
-  # below. Set it explicitly to override any of those; a set model must still differ from
-  # worker.model — actual session/worker model usage is checked again at runtime. There is
-  # deliberately no fallbackModel.
-  # agent:
-  #   model: sonnet     # if set, must differ from worker.model (D5); unset -> defaulted to this
-  #   effort: high      # low | medium | high
-  #   promptFile: prompts/engine-reviewer.md
-  #                     # optional; unset uses engine/prompts/engine-reviewer.md. Relative paths
-  #                     # resolve against this config file's directory; invalid files fail fast.
-  #   costCapUsd: 3     # whole-logical-review cap; one retry receives only the remainder.
-  #                     # #501: this default makes gate② a PAID local Claude session — budget
-  #                     # roughly this much per review at effort: high (docs/configuration.md's
-  #                     # reviewer.agent.costCapUsd row has the full cost note).
-  #   retryAfterSec: 900 # backoff between paid attempts on the same head after unavailable
-  #   treeRetentionCap: 10 # retained review trees; in-flight/escalated heads are excluded
+  agent:
+    model: gpt-5.6-sol
+    runner: codex-exec
+    effort: high
 
-# CI signal handling: how long gate① may stay PENDING, and (engine-agent only) which CheckRuns
-# count as trusted execution evidence — every requiredChecks pair must match a SUCCESS CheckRun on
-# the reviewed head from the named owning GitHub App; a same-named check from another app is not
-# evidence. An empty requiredChecks list is legal at parse time, but `sapwood run` with
-# mode: engine-agent refuses to start on it (#784) — configure the checks below or change
-# reviewer.mode.
 ci:
-#   pendingEscalateAfterSec: 21600
-#                     # how long gate① may stay PENDING (neither green nor red) behind a decisive
-#                     # gate② verdict before sapwood labels the PR needs-human, comments naming the
-#                     # stuck check(s), and treats the lane as terminal for the bounded drain. The
-#                     # clock is a durable pin: it survives a restart, and only gate① actually
-#                     # resolving (green or red) or a new head cancels it — a check that concludes
-#                     # WITHOUT passing (cancelled/skipped/neutral) keeps it aging, since gate① is
-#                     # still not green and the lane still cannot progress.
   requiredChecks:
-    - name: test
-#       app: github-actions # default when omitted
+    - name: test # .github/workflows/ci.yml job; #784 refuses to start engine-agent review without one
 
-# labels omitted: this repo adopts the shipped sapwood:* namespace defaults. Shown here (all
-# commented) so every workflow-label key has ONE documented home; see docs/configuration.md's
-# `labels` table for the full description of each.
-# labels:
-#   prefix: "sapwood:"        # namespace for every omitted default below + the type:*/prio:*
-#                              # taxonomy. "" selects bare (unprefixed) names.
-#   inProgress: sapwood:in-progress
-#   needsHuman: sapwood:needs-human
-#   blocked: sapwood:blocked
-#   reserve: sapwood:reserve
-#   verifyNa: "sapwood:verify:n/a"
-#   planApproved: "sapwood:plan:approved"
-#   originAgent: sapwood:origin:agent
-#   split: sapwood:split       # human firing signal; the engine only reads it
-#   decomposed: sapwood:decomposed # engine fence on a retired tracking parent; human removal only
-#   humanMergeOnly: sapwood:human-merge-only
-#                              # #397 bucket 2: the gate verdict "a human must MERGE this
-#                              # PR". Engine-written on the PR, exactly once, never removed
-#                              # or re-decided by the loop. Deliberately NOT an
-#                              # escalation.humanLabels member — see docs/configuration.md.
-#   planless: sapwood:planless # #397: NOT an escalation — a routing fence for an issue with
-#                              # no verification plan yet. Excluded from the pool, plan
-#                              # review, plan triage, and the standby probe, exactly as
-#                              # needsHuman is; nobody owes a decision on it.
-#   roundPool: sapwood:round:pool
-#                              # #212: round-pool membership (applied by the aligning phase's
-#                              # selection pass, cleared by the engine at round close — see
-#                              # round.poolFactor below). MUST be distinct from every other
-#                              # label above and from every escalation.humanLabels entry — round
-#                              # close auto-removes labels.roundPool, so aliasing it to a
-#                              # protected label (e.g. needsHuman) would let the engine silently
-#                              # strip that label too. Config load rejects the collision.
-#                              # NOTE: there is no `labels.hold` key here — the human-applied hold
-#                              # label is configured via `escalation.holdLabels` below instead
-#                              # (a list, like escalation.humanLabels), because the engine never
-#                              # writes it (see that section's own comment).
-
-# #87/#104: peripheral role sessions — the round orchestrator's aligning (PO)/architecting/
-# plan_review (gate⓪)/harvesting/retro phases, each a role-scoped session wired into runRounds's
-# default peripherals map by round-defaults.ts. Never code, never PR review/approve/merge except
-# retro (proposals land exclusively as PRs through gate②, never a direct write). Cheaper defaults
-# than worker.model/effort (real implementation work): every role defaults to sonnet/medium,
-# fully overridable.
-# #127: every role below also takes `enabled: true` (the default) — set `enabled: false` to
-# switch that peripheral role off for this deployment. round-defaults.ts's factory simply
-# OMITS a disabled role's stub from the peripherals map; round.ts's own existing default for
-# an unset phase (noopPeripheralStub) takes over, so the phase no-ops (marker set) rather than
-# wedging the round. planDrafter has no toggle of its own — it rides along with planReviewer
-# (gate⓪ is one unit, `roles.planReviewer.enabled` switches both off together).
-# roles:
-#   po: # aligning phase — goal alignment (decomposition) + round-start plan triage +
-#       # round-pool selection (#212)
-#     # promptFile: prompts/my-po.md
-#     #                   Unset = the engine's shipped prompts/po.md (align + triage).
-#     # decomposePromptFile: prompts/my-po-decompose.md
-#     #                   Unset = the engine's shipped prompts/po-decompose.md.
-#     maxChildren: 8      # hard cap per human split firing, including coarse remainders
-#     acceptanceCriteriaHint: 5 # prompt-only per-child AC-count heuristic; not a dispatch gate
-#     maxConcernPostAttempts: 5 # #432 round 5: dissent's durable-concern retry sweep escalates
-#                        # needs-human after this many recorded post failures (a permanently
-#                        # unreadable issue), same degrade-to-human bound as maxDraftCycles below.
-#     # poolPromptFile: prompts/my-po-pool.md
-#     #                   #212: a SEPARATE prompt for the round-pool SELECTION session (choosing
-#     #                   which of this round's top candidate issues actually belong in the
-#     #                   pool). Unset = the engine's shipped prompts/po-pool.md.
-#     backlogDigestMaxChars: 20000 # Max chars for the milestone-scoped open-issue digest
-#                                  # injected into align mode; deterministic cuts are marked.
-#                                  # #212: also reused, unmodified, as the pool-selection
-#                                  # candidate digest's cap. That digest now carries each
-#                                  # candidate's FULL body, not just title/number, so it is a
-#                                  # REAL budget on that path too, not the "naturally far
-#                                  # smaller" knob it once was.
-#     model: sonnet
-#     effort: medium
-#     # fallbackModel: sonnet # Every role accepts this key too. Set "none" to fail loud rather
-#                           # than silently downgrade quality; see #168's environment-failure path.
-#     enabled: true      # #127: false -> the aligning phase's decomposition/triage session
-#                        # no-ops every round. WARNING: with the PO off, plan-less issues are
-#                        # never triaged into gate⓪ — they need a verification plan from a
-#                        # human/external process instead. #212: round-pool selection is the
-#                        # ONE exception — it still runs every round (deterministically by
-#                        # default, or via the poolSelection session below) regardless of this
-#                        # flag, since the selection bound must not depend on an optional role.
-#     poolSelection: false # #233: opt-in experiment, DECOUPLED from `enabled` above. Default
-#                        # false = the round-pool is the deterministic top-cap Ready set every
-#                        # round (poolFactor below), no session spawned. `true` restores the
-#                        # #212 session (poolPromptFile) that picks a SUBSET of the engine's
-#                        # candidate digest. Benchmark finding: controlled testing across model
-#                        # tiers — against the THEN title/number-only session, before it was
-#                        # given each candidate's full body — showed this session selects EVERY
-#                        # candidate at every tier: it had no evidentiary basis to narrow the
-#                        # reservoir, so it just paid for a session to reproduce the same
-#                        # deterministic fallback. `poolFactor` deliberately over-selects to
-#                        # absorb architect/gate⓪ attrition AFTER selection; a session that DOES
-#                        # narrow the reservoir pre-gates risks underfilling the round instead.
-#                        # This finding was never re-run against today's body-bearing digest, so
-#                        # it remains the reason the default stays false, not a description of
-#                        # what the opt-in session sees now. If you re-run this experiment,
-#                        # isolate worktree/code reads for that run — production sessions may
-#                        # read the repo, but that is an uncontrolled signal for THIS experiment
-#                        # (this session's intended input is each candidate's title/number/
-#                        # labels/body, not a repo read).
-#   planReviewer: # #214: gate⓪ is scoped to the ROUND POOL — every pool entry, a PRIOR-round
-#     #             plan:approved gets a lightweight confirm pass (below), not skipped outright;
-#     #             plan:approved now means "approved when granted, re-endorsed at every pool
-#     #             entry before dispatch", not "approved forever".
-#     # promptFile: prompts/my-plan-reviewer.md
-#     #                   #74-style override; relative paths resolve against THIS config file's
-#     #                   directory. Unset = the engine's shipped prompts/plan-reviewer.md.
-#     # confirmPromptFile: prompts/my-plan-reviewer-confirm.md
-#     #                   #214: the freshness re-confirm prompt for a pool member that ALREADY
-#     #                   carries plan:approved from a prior round — one question ("does this plan
-#     #                   still hold against current main?"), zero forge writes on confirm; an
-#     #                   invalidate enters the ordinary draft->re-review cycle below. Unset = the
-#     #                   engine's shipped prompts/plan-reviewer-confirm.md.
-#     model: sonnet
-#     effort: medium
-#     maxDraftCycles: 2  # #77 Amendment 2: bounded draft->re-review self-heal cycles per issue
-#                        # before the loop gives up and applies needs-human with the attempt
-#                        # trail. Positive int only (0 would disable the self-heal path). Also the
-#                        # cap for a confirm-pass invalidate's own draft cycle (#214).
-#     enabled: true      # #127: false -> the WHOLE gate⓪ unit (reviewer + drafter + confirm) no-ops.
-#                        # WARNING: dispatch still requires plan:approved (or verify:n/a) on
-#                        # every issue (PLAN Decision #8) and ONLY the plan-reviewer applies
-#                        # plan:approved — with gate⓪ off a human/external process must label
-#                        # issues, or nothing is ever dispatched.
-#   planDrafter:
-#     # promptFile: prompts/my-plan-drafter.md
-#     #                   Unset = the engine's shipped prompts/plan-drafter.md.
-#     model: sonnet
-#     effort: medium
-#   architect: # #90: round design/review between goal alignment and dispatch — issues-only
-#     #          writes (comments a round design note; flags contradicting issues); #213:
-#     #          ALSO batch-reviews this round's actual pool (labels.roundPool members),
-#     #          returning a pass/drop/needs-human verdict per pool member (see below).
-#     # promptFile: prompts/my-architect.md
-#     #                   Unset = the engine's shipped prompts/architect.md.
-#     model: sonnet
-#     effort: medium
-#     # planMdPath: docs/PLAN.md
-#                        # DEPRECATED (#128): use the top-level `goal.file` above instead. Still
-#                        # accepted for back-compat: if only this key is set, it wins (one
-#                        # deprecation line logged at config load); if goal.file is ALSO set and
-#                        # disagrees, config load is a hard error naming both keys.
-#     lastMergedMaxChars: 10000 # #132: cap on the {{round.lastMerged}} text substituted into the
-#                               # architect prompt (the previous round's merged-PR outcomes, read
-#                               # from the persisted round artifact, never a live forge read).
-#                               # Numbers-only content, so smaller than the sibling caps below.
-#     poolDigestMaxChars: 20000 # #213: cap on the {{round.pool}} text substituted into the
-#                               # architect prompt — number/title/body for every labels.roundPool
-#                               # member, engine-assembled at invocation time from a live forge
-#                               # read. Full issue bodies (like candidates.summary), so sized like
-#                               # po.backlogDigestMaxChars below rather than lastMergedMaxChars
-#                               # above. Same deterministic-truncation, marked-cut contract.
-#     enabled: true      # #127: false -> the architecting phase no-ops every round
-#   harvest: # #91: round-close summary — comments round context onto this round's
-#     #        needs-human issues. Issue-comment writes only (no labels, no body edits).
-#     # promptFile: prompts/my-harvest.md
-#     #                   Unset = the engine's shipped prompts/harvest.md.
-#     model: sonnet
-#     effort: medium
-#     artifactMaxChars: 20000 # #123: cap on the {{round.artifact}} markdown block substituted
-#                             # into the harvest prompt (deterministic truncation, same contract
-#                             # as retro's digestMaxChars). A safety valve — the artifact is
-#                             # naturally small (bounded by the round's own dispatch cap).
-#     enabled: true      # #127: false -> the harvesting phase no-ops every round
-#   retro: # #91: retrospective/self-evolution — analyzes the round and proposes
-#     #      prompt/config/docs improvements EXCLUSIVELY as PRs through gate②
-#     #      (#77 decision 6); it can never write main/docs directly.
-#     # promptFile: prompts/my-retro.md
-#     #                   Unset = the engine's shipped prompts/retro.md.
-#     model: sonnet
-#     effort: medium
-#     everyNRounds: 1    # #104: retro cadence — 1 (default) runs every round; N>1 thins it to
-#                        # every Nth round (by round id). Positive int only.
-#     enabled: true      # #127: false -> the retro phase no-ops every round
-
-# round-loop scoping (#86 skeleton). Unset = no scoping (every Ready issue is a candidate).
-# round:
-#   milestone: M4 # exact GitHub milestone title (same matching as stop.onMilestoneComplete).
-#                 # Scopes this round's dispatch batch to that milestone's issues, and ends
-#                 # the round's dispatch early once it has zero open issues left.
-#   standby: # #125: pre-round probe + exponential backoff — before opening a NEW round,
-#            # check (pure GitHub API, no LLM) whether there's provably anything to do: a
-#            # Ready issue, a plan-review candidate, an open plan-less issue awaiting PO
-#            # triage, or (with round.milestone set above) an open issue still left in it.
-#            # All empty => wait instead of spinning up all five peripheral role sessions
-#            # for nothing; any hit opens the round immediately. Only engages after a fully
-#            # idle round (the first round of a run always opens, so the PO can decompose
-#            # the plan doc into a first backlog). Note: a plan-doc edit made DURING standby
-#            # is invisible to the probe — file an issue, or restart the run, to wake the PO.
-#     enabled: true
-#     backoffCapSec: 1800 # cap on engine.tickIntervalSec * 2^n (n = consecutive empty
-#                         # probes); any probe hit resets the exponent. Default 30min.
-#   directiveFile: data/DIRECTIVE.md # #126: drop a short round directive (human why/what
-#                         # steering, never how/execution) here before or during a round; the
-#                         # engine reads it at round open, injects it into the aligning +
-#                         # architecting prompts as {{round.directive}}, then archives it to
-#                         # data/directives/round-N.md so it never silently re-applies to a
-#                         # later round. Absent -> prompts render an explicit 'none' placeholder,
-#                         # behavior unchanged. Relative to the process cwd, like the engine's
-#                         # own data/sapwood.sqlite (NOT resolved relative to this config file).
-#   directiveMaxChars: 20000 # deterministic truncation cap on the directive text (same
-#                         # marked-cut-never-silent-drop contract as roles.harvest.artifactMaxChars
-#                         # / roles.retro.digestMaxChars).
-#   poolFactor: 1.5 # #212: the aligning phase selects up to ceil(lanes.roundDispatchCap *
-#                    # poolFactor) issues from Ready (milestone-scoped when `milestone` above is
-#                    # set), ordered by prio label then issue number, and labels them this
-#                    # round's dispatch-eligible pool — the executing phase only dispatches pool
-#                    # members. >1 so the pool absorbs gate⓪/review attrition (a member that
-#                    # later escalates or never gets plan:approved must not starve dispatch below
-#                    # what roundDispatchCap could otherwise fill). Runs every round regardless of
-#                    # roles.po.enabled — with the PO off, selection is still engine-computed
-#                    # (no session).
-#   maxPoolRemovalAttempts: 5 # #432 round 5: after this many deterministic failures removing a
-#                    # stale roundPool label from the SAME issue, escalate needs-human instead of
-#                    # retrying forever (same degrade-to-human bound as roles.po.maxDraftCycles).
-
-# #128: the loop's north-star goal file — the alignment yardstick the aligning (PO) and
-# architecting peripherals read every round, and the entry retro proposals must cite as their
-# basis. Same #74-style resolution as promptFile: a relative path resolves against THIS config
-# file's directory, not the CLI's cwd. `sapwood init` scaffolds a starter template (Goal /
-# Non-goals / Constraints / Current milestone) at this path iff it's missing — never overwrites
-# an existing file. Supersedes the deprecated roles.architect.planMdPath (still accepted for
-# back-compat — see that key's own comment below).
-goal:
-  file: docs/PLAN.md # sapwood's own goal file; the framework default is docs/GOAL.md
-
-# #167/#411: repo-level review doctrine — recurring technical invariants + adjudication doctrine
-# (how the loop treats review findings), prose for LLM readers, never a lint/DSL. Same #74-style
-# resolution as promptFile: a relative path resolves against THIS config file's directory.
-# `sapwood init` scaffolds a starter template (seeded from the loop's own distilled review
-# history) at this path iff it's missing — never overwrites an existing file. UNLIKE goal.file /
-# promptFile, a missing file is not an error: prompts render an explicit "no doctrine available"
-# placeholder, behavior otherwise unchanged. Injected into the worker brief and the architect
-# pass, and cited by name in the gated-PR-reentry-cap escalation comment. Named explicitly (not
-# left to the default) so the path this repo actually loads is unambiguous in this file.
+# ── governance pins (equal to today's defaults; see header) ──────────────────────────────────
+guard:
+  mode: hard
+merge:
+  mode: conductor-merge
+proxy:
+  enabled: true
+labels:
+  prefix: "sapwood:"
+  humanMergeOnly: "sapwood:human-merge-only"
+escalation:
+  humanLabels: ["sapwood:needs-human", "sapwood:blocked"]
+  holdLabels: ["sapwood:hold"]
+  instructionPaths:
+    - CLAUDE.md
+    - CLAUDE.local.md
+    - .claude/CLAUDE.md
+    - .claude/rules/**
+    - AGENTS.md
+    - engine/prompts/**
+    - engine/src/review/instruction-path-escalation.ts
+    - engine/src/config/config.ts
+    - sapwood.config.example.yaml
+    - docs/security.md
+    - engine/src/roles/skills-plugin.ts
+    - engine/src/forge/labels.ts
 doctrine:
   file: docs/REVIEW-DOCTRINE.md
-  maxChars: 20000 # deterministic truncation cap (same marked-cut-never-silent-drop contract
-                   # as round.directiveMaxChars / roles.architect.lastMergedMaxChars).
 
-# #701: the development-language policy — the working language every role composes free text
-# in, per surface (code comments, issue/PR prose, docs). Every key defaults to `en`; this
-# repo's own working language is English, so the section is left commented — equivalent to
-# leaving `language` unset (the schema default resolves every surface to `en`), not a claim
-# that applying this patch is byte-identical either way. Uncomment and set a BCP-47-ish tag
-# per surface to change it — see docs/configuration.md's "language" section for the full
-# mechanics, the #167 CLAUDE.md fallback precedence, and the #591 issues/PRs-surface interplay.
-# language:
-#   codeComments: en
-#   issuesAndPrs: en
-#   docs: en
+round:
+  milestone: "v0.2 — Dashboard (dogfood)"
 
-# #168: environment-failure park — an LLM-provider outage (429/usage-limit/credit-exhausted) or
-# a forge outage (GitHub down, network partition, gh token expiry) is ONE class: never escalate
-# the issue, never spend a gated-reentry attempt, park the engine (no new dispatch; one episode
-# per source, resume only when every episode clears) and self-heal. Signature matching is
-# deterministic (regex over a FAILED lane's STRUCTURED error output — stderr + errored result
-# records, never the worker's own message content) — patterns are validated (compiled) at load;
-# a malformed regex or an empty array is a startup error. Recovery: a forge episode clears on a
-# successful read-only probe; an llm episode clears only when a single CANARY lane (one per
-# backoff step, gated on a minimal stripped inference ping on probeModel — ~$0.016/ping
-# measured) completes without env-failing — a green ping alone is never trusted as recovery,
-# since the WORKER's model/tier can still be capped while the cheapest model answers fine.
-# envFailure:
-#   llmPatterns: [rate_limit_error, "rate limit exceeded", "usage limit reached",
-#                 "credit balance is too low", insufficient_quota, overloaded_error,
-#                 "429 too many requests", "hit your (?:session|weekly|5-hour) limit"]
-#                 # ^ #394: the Claude CLI's own plan-quota-exhaustion message family
-#                 # ("You've hit your session/weekly/5-hour limit · resets ..."). Deliberately an
-#                 # ENUMERATED tier alternation, not a "hit your \S+ limit" wildcard (gate②
-#                 # round 3 retraction) — a wildcard also matches an UNRELATED "hit your <X>
-#                 # limit" line from some other component (a storage/disk-quota error, say) and
-#                 # would park the engine against a healthy provider; a too-narrow list only ever
-#                 # costs money, a too-wide one halts the engine — not symmetric, so this list
-#                 # stays narrow. This is the THIRD, last-resort line of defense: classifyEnvFailure
-#                 # checks two structured, text-free signals FIRST — a rejected `rate_limit_event`
-#                 # and an errored result with `api_error_status:429` (gate② round 3, both
-#                 # provider-authoritative, neither config-driven) — this list only matters when
-#                 # BOTH are absent. That is a genuinely narrow residual gap, not "nothing gets
-#                 # through" — see env-failure.ts's own module doc for the honest accounting of
-#                 # what does and doesn't bound a miss. Ordinary double-quoting here (no backslash-
-#                 # escaping needed — this pattern has none). If you uncomment this block to add
-#                 # your OWN pattern, copy the FULL list above first — uncommenting replaces every
-#                 # default at once, not just the ones you're adding to (the exact #374/#394
-#                 # incident: an earlier partial copy here silently dropped quota-tier coverage for
-#                 # months).
-#   forgePatterns: ["could not resolve host", "connection refused", "network is unreachable",
-#                   "temporary failure in name resolution", "bad gateway", "gateway timeout",
-#                   "service unavailable", "bad credentials", "401 unauthorized",
-#                   "gh auth login", "saml enforcement"]
-#   parkEscalateAfterSec: 3600 # episode DURATION (not probe count; never reset by failed
-#                              # canaries) past which a human is notified — additive, never
-#                              # stops probing/auto-resume
-#   probeBackoffBaseSec: 30    # bounded exponential backoff for probes/canaries while parked
-#   probeBackoffMaxSec: 1800   # cap; must be >= probeBackoffBaseSec (validated at load)
-#   probeModel: haiku          # model for the llm ping probe — the cheapest tier you have,
-#                              # independent of worker.model
-#   probeTimeoutSec: 30        # hard timeout per ping (kill + count as a failed probe)
-#   probeMaxBudgetUsd: 0.05    # --max-budget-usd per ping. Floor is >$0.01 (~$0.016 measured:
-#                              # the CLI sends ~7.4k scaffolding tokens even fully stripped) —
-#                              # setting this at/below the floor fails EVERY probe with
-#                              # "Exceeded USD budget" and keeps the engine parked.
-
-# #234/#244: engine-hosted, read-only forge MCP proxy for role sessions and worker legs
-# (supersedes #217). #253/#551: engine startup reads `enabled` as a two-state model (#551
-# deleted the earlier `shadow` middle state, which never had distinct runtime semantics) —
-# enabled: false is fully inert (nothing constructed, no production session ever gets a
-# handle); enabled: true (the #551 default) attaches a real handle everywhere: the live
-# fix-loop worker leg AND every peripheral role session. Ordinary (non-fix-loop) worker
-# dispatch remains unwired regardless of enabled (out of #253's/#551's scope). Review
-# sessions never get a handle regardless of enabled (peripheral.ts refuses proxy+reviewCwd
-# together and never attaches the RoleRunner-wide default in review mode).
-# Credentials never leave the engine process: a session gets a role-scoped subset of a fixed tool
-# set over a bearer-token-authenticated local HTTP server, minted per session, revoked at
-# teardown — issue-oriented tools (issue_details/issue_comments/issue_relations/search_issues,
-# #234) for peripheral roles, PR-facing tools (pr_details/pr_reviews/pr_review_threads/pr_checks/
-# pr_audit_comments, #244 — the fix-loop worker leg's PR-review evidence channel) for the
-# `worker` role. No gate/verdict logic lives in any tool; that stays in reviewer.ts/
-# merge-driver.ts.
-# proxy:
-#   enabled: true  # #551 default; set to false to opt out (fully inert)
-#   caps:
-#     maxIssuesPerCall: 10        # issue_details: over-cap requests are REJECTED, never truncated
-#     defaultCommentsPerIssue: 20 # issue_details' default view: most-recent-N comments (fail
-#                                 # toward inclusion of the comments most likely to carry an
-#                                 # amendment to a stale body)
-#     maxCommentsPerCall: 100     # issue_comments: max lastN a caller may request explicitly
-#     maxRelationsPerIssue: 20    # issue_relations: cap per connection (linked PRs, cross-refs),
-#                                 # max 100 (fed straight into a GraphQL first:/last: argument)
-#     maxSearchResults: 20        # search_issues: max matches returned
-#     fullCommentStreamOptIn: false # true widens the default view's comment cap to
-#                                    # maxCommentsPerCall instead of defaultCommentsPerIssue
-#     maxReviewThreadsPerCall: 20 # pr_review_threads: max lastN threads a caller may request
-#                                 # explicitly (or the default cap when omitted)
-#     maxCommentsPerThread: 20    # pr_review_threads: cap on EACH thread's own comment count,
-#                                 # max 100 (fed straight into a GraphQL first: argument)
-#     maxReviewsPerCall: 50       # pr_reviews: fetch bound (GraphQL reviews(last: cap)) — no
-#                                 # client-supplied lastN exists, so this cap alone determines
-#                                 # completeness; max 100
-#     maxChecksPerCall: 50        # pr_checks: fetch bound (GraphQL contexts(first: cap)) — same
-#                                 # no-lastN/completeness stance as maxReviewsPerCall; max 100
-#   budget:
-#     maxCallsPerSession: 30      # exhaustion -> explicit budget_exhausted tool result, never a
-#                                 # transport error; the session can still abstain
-#     maxBytesPerSession: 2000000
-#   timeoutMs: 30000              # hard per-call ceiling, independent of worker.timeoutSec
-
-# #410: built-in WebSearch/WebFetch grant to architect/po-align/po-triage (no other role — the
-# review family, plan-reviewer/plan-drafter/plan-reviewer-confirm and every gate② reviewer
-# session, never reads this key at all, so no value here ever reaches them). Ships enabled BY
-# DEFAULT, same as proxy above (#551 flipped proxy.enabled to true too): the capability is
-# read-only, carries no credential into any project system, is strictly weaker than the worker's
-# own unrestricted Bash egress, and every call is journalled through the same egress-suspect
-# ledger event the worker's own tripwire uses.
-# webAccess:
-#   enabled: true   # false falls all three roles back to the base Read/Grep/Glob allow-list
-
-# escalation omitted: humanLabels/holdLabels derive from the default labels.prefix, and
-# instructionPaths uses the reviewer-authority trust-chain defaults shown below.
-# escalation:
-#   humanLabels: [sapwood:needs-human, sapwood:blocked]
-#   # #292: reviewer instruction files are human-vetted authority. A PR changing any old or
-#   # new path matched here receives labels.humanMergeOnly (#397) before either review gate
-#   # can proceed.
-#   # Matching is case-insensitive; supported glob subset: `*` within one path segment and
-#   # recursive `**`. Paths must be trimmed canonical repo-relative forms (no ./, /, .. segment,
-#   # //, or trailing /). A list at GitHub's 3,000-file ceiling escalates as unverifiable. Set
-#   # to [] to deliberately disable the mechanism (then sapwood does not fetch changed files).
-#   # #527/#549: the reviewer's OWN carriers are covered too, DERIVED from doctrine.file and
-#   # reviewer.agent.promptFile (so a repointed path stays covered) — neither is listed here.
-#   # engine/prompts/** covers the shipped reviewer prompt; inert unless the target repo IS the
-#   # engine's source tree. A derived path outside the repo (absolute or ..-escaping) is skipped
-#   # rather than smuggled in (docs/security.md, "Which carriers are covered").
-#   instructionPaths: [CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md, .claude/rules/**, AGENTS.md, engine/prompts/**]
-#   holdLabels: [sapwood:hold]  # #248: human-applied WAIT-tier hold (three-tier escalation
-#                                # model: hold/needs-human/blocked, each one fact). Matched by
-#                                # EXACT case-insensitive identity everywhere (never substring —
-#                                # unlike humanLabels above); entries are trimmed and must be
-#                                # non-empty. `sapwood init` provisions the repo-level label
-#                                # itself. Two carriers, each its own surface: a PR-level hold is
-#                                # checked in deriveGate BEFORE review signals and FIXABLE (no
-#                                # merge, no new fix-leg dispatch, #170 review-silence suppressed
-#                                # — the lane just stays driving/fixing, holding its slot); an
-#                                # issue-level hold is also checked by #147's GATED RECLAIM (SKIPs
-#                                # reentry for an already-escalated lane without burning an
-#                                # attempt). The engine NEVER writes this label (only a human
-#                                # applies/removes it); removing it resumes the ordinary gate/
-#                                # reentry path next tick. See docs/PLAN.md's escalation-model
-#                                # section for the full handshake protocol.
-
-coverage:
-  minPercent: 0 # test-coverage gate (0 = off for M0)
-
-optimize:
-  recur: false # enable the recurring optimization round
-
-# Milestones `sapwood init` ensures exist (idempotent). Empty = create none — the loop
-# needs labels + board lanes, not milestones (those are your organizational choice).
-milestones: []
-# milestones: [M0, M1, v1.0]
+roles:
+  po:
+    model: fable
+    effort: high
+  architect:
+    model: fable
+    effort: high
+  verificationPlanReviewer:
+    model: sonnet
+    effort: high
+  harvest:
+    model: sonnet
+    effort: high
+  retro:
+    model: sonnet
+    effort: high

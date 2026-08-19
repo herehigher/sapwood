@@ -42,6 +42,14 @@ cost:
 reviewer:
   mode: engine-agent # default: engine-agent
 
+# ci.requiredChecks is deliberately NOT pre-filled: sapwood cannot know your CI check's name, and a
+# plausible wrong guess would queue every PR forever. With reviewer.mode engine-agent, `sapwood run`
+# refuses to start until you name at least one check-run of your CI (`sapwood validate` tells you
+# the same). Use the exact check-run name GitHub shows on a PR (a workflow job name, e.g. "test").
+# ci:
+#   requiredChecks:
+#     - name: test
+
 merge:
   # The schema default is conductor-merge (L3). `sapwood init` deliberately pins this L2
   # starter default so a new target repository produces a PR and stops for human merge authority.

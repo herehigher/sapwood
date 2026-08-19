@@ -15,6 +15,22 @@ configuration. `sapwood init` writes that same starter with its safe merge-mode 
 sapwood validate [path]
 ```
 
+## Two config files
+
+This repository carries two config files with different roles, and they never merge:
+
+- **`sapwood.config.yaml` (repo root)** — sapwood's *own* live configuration: the file the
+  autonomous loop on this repository runs from (`sapwood run` from the repo root, no
+  `--config`). Committed on purpose: every governing value (board, budgets, reviewer, roles,
+  `ci.requiredChecks`) changes only through a human-merged PR, so its history is the audit
+  trail. Only non-default values are written; it is not a template for another repo.
+- **`sapwood.config.example.yaml`** — the shipped starter that `sapwood init` copies verbatim
+  into a target repository as that repository's `sapwood.config.yaml`.
+
+Both are guard-protected and human-merge-only ([security.md](security.md) "The protected live
+config and shipped starter are separate"). An operator-local run config passed via
+`--config` is neither audited nor guarded — this repository does not use one.
+
 The loader probes, in order: `sapwood.config.yaml`, `sapwood.config.yml`,
 `sapwood.config.json`. An explicit path from `sapwood run --config <path>` (including
 `--dry-run`), `sapwood status --config <path>`, `sapwood events --config <path>`, `sapwood

@@ -10,7 +10,7 @@ Risk labels below mean **CORE** (central behavior; review carefully), **NORMAL**
 | `commands/` | NORMAL | Claude Code slash-command definitions that invoke the engine CLI or manage control sentinels. |
 | `docs/` | NORMAL | Durable architecture, configuration, security, usage, and contributor knowledge. Security-policy edits require elevated review. |
 | `data/` | runtime | SQLite, logs, session streams/sentinels, round artifacts, and operator control files. Never edit runtime state by hand except the documented control/directive files. |
-| `sapwood.config.yaml` | CORE | Shipped, commented configuration for this repository; security-relevant keys are human-merge-only. |
+| `sapwood.config.yaml` | CORE | This repository's live configuration — the loop runs from it (no `--config`); the whole file is human-merge-only. Starter for other repos: `sapwood.config.example.yaml`. |
 | `biome.json` | NORMAL | Formatting and lint policy for TypeScript sources. |
 | `tsconfig.base.json` | NORMAL | Shared strict TypeScript/NodeNext compiler policy. |
 | `package.json` | NORMAL | Private npm workspace root and root quality scripts. |
