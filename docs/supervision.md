@@ -384,13 +384,29 @@ Before ending a supervision session:
       (`<!-- sapwood:comments-adjudicated-through: <comment-id> -->`) to the ruling
       comment or later, so gate⓪ and dispatch see the body as current rather than stale.
    4. **Remove `needs-human`**, if it was applied for this reason.
-3. **Evidence posting.** Where a decision or intervention isn't self-evident from the
+3. **Tier-C probe record.** When you personally run a tier-C human-witnessed probe
+   (`docs/security.md`'s `ac-evidence-tiers`), the record only reaches gate② if it lands
+   in the issue **body** — a comment is an operator inbox item, not evidence
+   (`docs/REVIEW-DOCTRINE.md`'s tier-C doctrine), and gate② never reads one. Same
+   record/cursor sub-steps as the owner-ruling recovery ritual above (steps 1-3): fold the
+   record into the body, and if you also posted it — or anything else — as a comment,
+   advance the adjudication cursor past it in that SAME body edit. That edit does not
+   walk straight into a rebaseline: it is a body drift the engine fails closed on, exactly
+   like any other. On this lane's next drive attempt, `checkAcDriftBeforeDrive`
+   (`engine/src/loop/conductor.ts`) detects the drift, applies `needs-human`, and marks
+   the row rebaseline-eligible — expect that label, don't treat its absence as "nothing
+   happened." Review the new body, then remove `needs-human` (ritual step 4) to authorize
+   GATED RECLAIM, which is what actually rebaselines and re-snapshots the AC authority
+   ahead of the next `evaluate()`. Never post the probe record as a comment only: it stays
+   invisible to gate②, the criterion stays `cannot-confirm`, and that gap is the
+   operator's, not the producer's.
+4. **Evidence posting.** Where a decision or intervention isn't self-evident from the
    event ledger alone (a `park clear --reason`, a manual label change, a judgment call
    the ledger can't express), post it as a comment on the issue/PR it concerns. GitHub is
    the audit trail for *process* — this durable-knowledge doc is not where a single
    session's blow-by-blow belongs (see this repo's own `CLAUDE.md`, "Documentation
    principle").
-4. **Dashboard rebuild.** If this session merged any dashboard-touching PR, rebuild
+5. **Dashboard rebuild.** If this session merged any dashboard-touching PR, rebuild
    before the next viewing (`npm run build -w dashboard`) and restart the running
    `sapwood dashboard` process (stop it, then re-run `sapwood dashboard`) rather than
    leaving the old one up. An in-place rebuild alone already reaches the build-identity
@@ -760,8 +776,9 @@ describes, not a moving target.
 That path lives inside the engine's runtime `data/` directory, gitignored repo-wide by design — the
 ledger is an operator-side artifact, never a tracked file a PR tree could contain. A reviewer
 cannot confirm a walk by inspecting the tree; the reviewable evidence for any given session is the
-operator's witness record posted on the relevant PR/issue (actor, steps, timestamp, findings
-summary, artifact path), per the tier-C human-witnessed-probe doctrine below.
+operator's witness record folded into the relevant issue **body** (actor, steps, timestamp,
+findings summary, artifact path) — a PR or issue comment is an operator inbox/audit item, never
+gate② evidence — per the tier-C human-witnessed-probe doctrine below.
 
 **Evidence class.** Per [`docs/security.md`](security.md)'s evidence tiers, the simulated user's
 report is producer-side session output — **trust-origin evidence class C at best** (a

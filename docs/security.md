@@ -184,8 +184,9 @@ in-engine *tool-permission* management for producer legs is abandoned. Five mech
     CONTENT (the PR contains the tests — it can weaken them); mitigations: gate② reviews test
     diffs, `ci.requiredChecks` is config-pinned (not PR-editable).
   - **C — human-witnessed probe.** An operator personally runs the check and records actor +
-    steps + timestamp + artifact on the issue. Non-reproducible but producer-unforgeable; costs
-    human attention. Accepted ONLY when the plan names a structural reason CI cannot perform the
+    steps + timestamp + artifact in the issue **body** (the dispatch snapshot is what gate② reads;
+    a comment is not evidence). Non-reproducible but producer-unforgeable; costs human attention.
+    Accepted ONLY when the plan names a structural reason CI cannot perform the
     check (missing credential, live external state), the reason is independently verified at
     gate⓪ (true, not merely present), CI/engine-checkable sub-facts are decomposed OUT of the
     probe into A/B, and the producer never self-executes or self-attests it.
@@ -195,7 +196,7 @@ in-engine *tool-permission* management for producer legs is abandoned. Five mech
     cannot be treated as evidence of anything the engine did not independently verify.
 
   The repo already practices non-CI trusted evidence below tier A/B (the `verify:n/a` doc-gate;
-  an operator-run probe recorded on an issue) — this doctrine names that existing practice's
+  an operator-run probe recorded in the issue **body**) — this doctrine names that existing practice's
   rules instead of contradicting it with an absolute CI-only form.
 <!-- sapwood:skill:ac-evidence-tiers:end -->
 - **Hosts lacking a veto-hook + sealed-session primitive run `produce-PR-and-stop` only.**
