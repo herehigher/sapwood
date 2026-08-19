@@ -65,10 +65,12 @@ there. `/sapwood-run` and `/sapwood-status` resolve this by falling back to
 first call downloads the package (**Node.js ≥ 24 required**), and subsequent calls reuse
 npm's local cache. A checkout that already has a local `engine/dist` build — Channel A,
 or this repo's own dogfood checkout — is used instead when present, no npx involved.
-The marketplace entry itself pins a released tag, so a `/plugin install` always resolves
-a published version with a real npm package behind it; a checkout of `main` between
-releases has no such package yet, and its `/sapwood-run`/`/sapwood-status` need a local
-`engine/dist` build (`npm --workspace engine run build`) until the next release ships.
+The marketplace entry pins a released tag once the first release is cut (before that
+the entry points at `main`, and the wrapper refuses the unreleased `0.0.0` rather than
+guessing at a package that doesn't exist yet). A checkout of `main` between releases has
+no published package to fall back to either way, so its `/sapwood-run`/`/sapwood-status`
+need a local `engine/dist` build (`npm --workspace engine run build`) until the next
+release ships.
 Only the three shipped plugin wrappers (`/sapwood-run`, `/sapwood-status`,
 `/sapwood-stop`) are plugin-only; they cover `run`, `status`, and the three stop-control
 tiers, not `init` or `validate` — those still need Channel A or C.
