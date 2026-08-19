@@ -1,6 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { expect, type Locator, type Page, test } from "@playwright/test";
+import type { LoopEvent } from "../src/api/types.ts";
 import { contrastRatio, NON_TEXT_AA } from "../src/contrast.ts";
 import { buildRoundLog } from "../src/demo/build-round-log.ts";
 import type { DemoBundle } from "../src/demo/types.ts";
@@ -180,6 +181,25 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
     expect(existsSync(mockupZone), `mockup OUTCOME right-zone crop must exist: ${mockupZone}`).toBe(true);
   }
 
+  // #956 D13/D19/D23: three fixture moments the audit could not judge because no capture
+  // exercised them at all — the hero's fix loop, the live header's PAUSE/STOP/EMERGENCY STOP
+  // verbs, and a dimmed review-silence attention row. All three go through the real production
+  // `App` -> `LiveApp` tree via `mockLiveApi` (never a hand-painted state), same discipline
+  // `captureLiveOverlayLanes`/`captureRingsHero` above already apply — each function asserts the
+  // fixture's own real content BEFORE its screenshot.
+  for (const theme of THEMES) {
+    await captureFixingFamily(page, theme);
+    await captureLiveHeaderFamily(page, theme);
+    await captureAttentionFamily(page, theme);
+  }
+  const d956Slugs = ["fixing-hero-panel", "fixing-lanes", "live-header", "attention3-needs-attention"];
+  for (const theme of THEMES) {
+    for (const slug of d956Slugs) {
+      const file = `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-${slug}.png`;
+      expect(existsSync(file), `#956 ${slug} capture must exist: ${file}`).toBe(true);
+    }
+  }
+
   // Every module's selector chain (the `lanes` fallback included — the chain only guarantees
   // "one of these matched", not which one) must have matched SOMETHING at every
   // viewport/theme/state combination. A selector miss here (a renamed aria-label, a removed id) is
@@ -299,7 +319,7 @@ test("§889 AC1 (cost's bound readjudicated by #927 — see doc comment): the ro
 
   const modules: [string, Locator, number][] = [
     ["hero", page.locator("svg.hero"), ONE_SCROLL_BOUNDARY_PX],
-    ["lanes", (await firstMatch(page, MODULE_SELECTORS.lanes)) ?? page.locator("nonexistent-lanes-anchor"), ONE_SCROLL_BOUNDARY_PX],
+    ["lanes", (await firstMatch(page, MODULE_SELECTORS.lanes ?? [])) ?? page.locator("nonexistent-lanes-anchor"), ONE_SCROLL_BOUNDARY_PX],
     ["feed", page.locator('section[aria-label="activity"]'), ONE_SCROLL_BOUNDARY_PX],
     ["cost", page.locator("#cost"), COST_READJUDICATED_BOUNDARY_PX],
   ];
@@ -335,7 +355,7 @@ test("#926 AC1: at 1440px, the lane board and activity feed each span the row's 
   // #927: `?demo` is always replay mode (`App.tsx`'s `DemoApp` doc), but the real `LaneBoard`
   // mounts there now too (`deriveReplayedLanes`) — this is the SAME full-width panel-shaped
   // section every other module already renders, not a placeholder stand-in.
-  const laneSlot = (await firstMatch(page, MODULE_SELECTORS.lanes)) ?? page.locator("nonexistent-lanes-anchor");
+  const laneSlot = (await firstMatch(page, MODULE_SELECTORS.lanes ?? [])) ?? page.locator("nonexistent-lanes-anchor");
   const feedSlot = page.locator('section[aria-label="activity"]');
   const laneBox = await laneSlot.boundingBox();
   const feedBox = await feedSlot.boundingBox();
@@ -1220,7 +1240,7 @@ test("#928 AC2: at 720px, lanes and activity stack (no horizontal overlap), and 
   await page.locator("#overview").waitFor({ state: "visible" });
   await page.waitForLoadState("networkidle");
 
-  const laneSlot = (await firstMatch(page, MODULE_SELECTORS.lanes)) ?? page.locator("nonexistent-lanes-anchor");
+  const laneSlot = (await firstMatch(page, MODULE_SELECTORS.lanes ?? [])) ?? page.locator("nonexistent-lanes-anchor");
   const feedSlot = page.locator('section[aria-label="activity"]');
   const laneBox = await laneSlot.boundingBox();
   const feedBox = await feedSlot.boundingBox();
@@ -1473,27 +1493,51 @@ function liveLanesLoopState() {
   };
 }
 
-/** #882: intercepts every `/api/*` call the production `LiveApp` route makes (`api/client.ts`'s
- *  four endpoints) and fulfills it with fixture data, in-browser — the real-Chromium-page
- *  equivalent of `App.test.tsx`'s `stubFetch` (`byPath` -> `{status, body}`), which only works
- *  against that file's Node `fetch` mock. Takes the loop-state payload as a parameter (rather than
- *  building its own) so the caller can derive fixture markers from the SAME object being served,
- *  never a hand-copied duplicate of it. */
-async function mockLiveApi(page: Page, loopState: unknown): Promise<void> {
-  const byPath: Record<string, unknown> = {
-    "/api/loop/state": loopState,
-    "/api/events": { events: [], lastId: 0 },
-    "/api/spend": { spend: [], lastId: 0 },
-    "/api/rounds": { rounds: [] },
-  };
+/** #956: the shared `/api/*` route registration every live-mocked capture below routes through —
+ *  a static JSON body per path, except `/api/events`, which respects its own `after` cursor (real
+ *  API paging semantics, `queries.ts`'s `eventsQuery`): a poll past `after=lastId` returns nothing
+ *  fresh, so a capture slower than `POLL_MS` (3s) can't re-fold the same fixture events twice and
+ *  change the folded state out from under the screenshot. Originally `mockRingsApi`'s own private
+ *  paging logic; factored out so `mockLiveApi` below can carry real events too, once, without every
+ *  caller re-implementing the same cursor arithmetic. */
+async function registerApiMocks(page: Page, byPath: Record<string, unknown>, events: readonly LoopEvent[] = []): Promise<void> {
+  const lastId = events.reduce((max, e) => Math.max(max, e.id), 0);
   await page.route("**/api/**", async (route) => {
-    const body = byPath[new URL(route.request().url()).pathname];
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/events") {
+      const after = Number(url.searchParams.get("after") ?? "0");
+      const fresh = events.filter((e) => e.id > after);
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ events: fresh, lastId }) });
+      return;
+    }
+    const body = byPath[url.pathname];
     if (body === undefined) {
       await route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
       return;
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
   });
+}
+
+/** #882: intercepts every `/api/*` call the production `LiveApp` route makes (`api/client.ts`'s
+ *  four endpoints) and fulfills it with fixture data, in-browser — the real-Chromium-page
+ *  equivalent of `App.test.tsx`'s `stubFetch` (`byPath` -> `{status, body}`), which only works
+ *  against that file's Node `fetch` mock. Takes the loop-state payload as a parameter (rather than
+ *  building its own) so the caller can derive fixture markers from the SAME object being served,
+ *  never a hand-copied duplicate of it. #956: `events` is optional (defaults to none, `/api/events`
+ *  then serves an always-empty page, unchanged from before this parameter existed) — a caller that
+ *  needs a real folded hero/attention state (the fixing/attention capture families below) passes
+ *  its own real `LoopEvent`s instead. */
+async function mockLiveApi(page: Page, loopState: unknown, events: readonly LoopEvent[] = []): Promise<void> {
+  await registerApiMocks(
+    page,
+    {
+      "/api/loop/state": loopState,
+      "/api/spend": { spend: [], lastId: 0 },
+      "/api/rounds": { rounds: [] },
+    },
+    events,
+  );
 }
 
 /**
@@ -1547,7 +1591,7 @@ async function captureLiveOverlayLanes(page: Page, theme: { key: string; attr: s
 /** #921 AC4: `rings` real `merged` events, real `LoopEvent` shape (`api/types.ts`) — the moment
  *  needed to judge the ring disc at a specific scale, which `?demo`'s own demo bundle (1 merge,
  *  its own idle end-state) can't show for any OTHER count on demand. Empty at `rings === 0`. */
-function ringsMergedEvents(rings: number): { id: number; ts: string; kind: string; payload: Record<string, unknown> }[] {
+function ringsMergedEvents(rings: number): LoopEvent[] {
   const now = Date.now();
   return Array.from({ length: rings }, (_, i) => {
     const n = i + 1;
@@ -1563,9 +1607,8 @@ function ringsMergedEvents(rings: number): { id: number; ts: string; kind: strin
 /** #921 AC4: mocks `/api/loop/state` (`rings`) and `/api/events` (the same `rings` real merges,
  *  none at `rings === 0`) so the capture comes from the REAL production fold (`useEventHistory`
  *  -> `foldReplay`), never a prop override — same posture as `mockLiveApi`/`captureLiveOverlayLanes`
- *  above. `/api/events` respects its own `after` cursor (real API paging semantics): a poll past
- *  `after=rings` returns nothing fresh, so a capture slower than `POLL_MS` (3s) can't re-fold the
- *  same merges twice and change the ring count out from under the screenshot. */
+ *  above. #956: the `after`-cursor paging this used to implement privately now lives in
+ *  `registerApiMocks`, shared with `mockLiveApi`. */
 async function mockRingsApi(page: Page, rings: number): Promise<void> {
   const events = ringsMergedEvents(rings);
   const loopState = {
@@ -1579,26 +1622,15 @@ async function mockRingsApi(page: Page, rings: number): Promise<void> {
     config: { board: { owner: "herehigher", repo: "sapwood" } },
     controlsEnabled: true,
   };
-  const byPath: Record<string, unknown> = {
-    "/api/loop/state": loopState,
-    "/api/spend": { spend: [], lastId: 0 },
-    "/api/rounds": { rounds: [] },
-  };
-  await page.route("**/api/**", async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname === "/api/events") {
-      const after = Number(url.searchParams.get("after") ?? "0");
-      const fresh = events.filter((e) => e.id > after);
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ events: fresh, lastId: rings }) });
-      return;
-    }
-    const body = byPath[url.pathname];
-    if (body === undefined) {
-      await route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
-      return;
-    }
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
-  });
+  await registerApiMocks(
+    page,
+    {
+      "/api/loop/state": loopState,
+      "/api/spend": { spend: [], lastId: 0 },
+      "/api/rounds": { rounds: [] },
+    },
+    events,
+  );
 }
 
 /** #921 AC4: navigates the real production `App` -> `LiveApp` tree (never `?demo`, and never a
@@ -1628,6 +1660,198 @@ async function captureRingsHero(page: Page, theme: { key: string; attr: string }
   // #921 AC4/gate② finding [1]: the OUTCOME right-zone crop, so the disc footprint/count scale
   // can be judged against the mockup's own right zone directly, not the whole panel.
   await captureOutcomeZone(page, hero, `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-${slug}-hero-panel-outcome-zone.png`);
+  await page.unroute("**/api/**");
+}
+
+/**
+ * #956 D13: the minimal real `LoopEvent` sequence `hero/state.ts`'s fold needs to put w2's droplet
+ * on the fix leg wearing its PR — production order, per `state.ts`'s own `#716 gate② P2-6` note:
+ * `dispatched` (w2 claims issue 90) -> `reclaim-done` (PR 99 opens, `next: "DRIVING"`) ->
+ * `fix-leg-started` (`fixRounds: 2` — the round number the "FIXING · round n of cap" text reads;
+ * the cap denominator itself comes from `config.lanes.prFixCap`, not this payload) -> `drive-fixup`
+ * (re-labels the reason in place, since the lane is already fixing by the time this lands — the
+ * SAME already-fixing branch that note describes).
+ */
+function fixingHeroEvents(): LoopEvent[] {
+  const now = Date.now();
+  const minutesAgo = (m: number) => new Date(now - m * 60_000).toISOString();
+  return [
+    { id: 1, ts: minutesAgo(40), kind: "dispatched", payload: { worker: "w2", issue: 90 } },
+    {
+      id: 2,
+      ts: minutesAgo(30),
+      kind: "reclaim-done",
+      payload: { worker: "w2", issue: 90, pr: 99, next: "DRIVING", costUsd: null, estCostUsd: 1.69, costEstimated: null },
+    },
+    { id: 3, ts: minutesAgo(20), kind: "fix-leg-started", payload: { worker: "w2", issue: 90, pr: 99, fixRounds: 2, cap: 3 } },
+    { id: 4, ts: minutesAgo(19), kind: "drive-fixup", payload: { worker: "w2", issue: 90, pr: 99 } },
+  ];
+}
+
+/** #956 D13: `/api/loop/state`'s own lanes payload for the fixing family — `LaneBoard` (live mode)
+ *  reads its cards straight from here, never from the event fold `fixingHeroEvents` above drives
+ *  (that fold is what the HERO panel reads instead, `App.tsx`'s live-mode wiring for each). Kept in
+ *  sync by hand with `fixingHeroEvents` (same worker/issue/pr/round), the same relationship
+ *  `liveLanesLoopState`/`captureLiveOverlayLanes` already have. `lanes.prFixCap: 3` is what makes
+ *  the hero's "round 2 of 3" cap denominator legible — unset, `resolveFixCap`'s default of 2 would
+ *  render "round 2 of 2" instead. */
+function fixingLoopState() {
+  const now = Date.now();
+  const minutesAgo = (m: number) => new Date(now - m * 60_000).toISOString();
+  return {
+    engine: { state: "running", reasons: [], lastTickAt: null, pauseActive: false, estopActive: false, standbyNextCheckSec: null },
+    lanes: {
+      max: 3,
+      items: [
+        {
+          lane: "w2",
+          issue: 90,
+          state: "fixing",
+          pr: 99,
+          startedAt: minutesAgo(40),
+          endedAt: null,
+          costUsd: null,
+          estCostUsd: 1.69,
+          fixRound: 2,
+          contextTokens: null,
+          tokenComposition: null,
+        },
+      ],
+    },
+    round: null,
+    spend: { todayUsd: 1.69, dailyBudgetUsd: null, runUsd: null, runBudgetUsd: null, byModel: [] },
+    rings: 0,
+    mergedPrs: [],
+    logPath: null,
+    config: { board: { owner: "herehigher", repo: "sapwood" }, worker: { budgetUsdSoft: 10 }, lanes: { prFixCap: 3 } },
+    controlsEnabled: true,
+  };
+}
+
+/**
+ * #956 AC1: navigates the real production `App` -> `LiveApp` tree with `/api/*` mocked to
+ * `fixingLoopState`/`fixingHeroEvents` — same "real fold, not a prop override" discipline
+ * `captureLiveOverlayLanes`/`captureRingsHero` above already apply. Asserts the hero SVG actually
+ * folded the real `FIXING · round 2 of 3` label and the lanes section actually renders the real
+ * `w2`/`#90` fixture content (retrying locators) BEFORE either screenshot.
+ */
+async function captureFixingFamily(page: Page, theme: { key: string; attr: string }): Promise<void> {
+  await mockLiveApi(page, fixingLoopState(), fixingHeroEvents());
+  await page.setViewportSize({ width: CANONICAL_WIDTH, height: 900 });
+  await page.goto("/");
+  await page.evaluate((attr) => document.documentElement.setAttribute("data-theme", attr), theme.attr);
+  const lanes = page.locator('section[aria-label="lanes"]');
+  await lanes.waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  const hero = page.locator("svg.hero");
+  await expect(hero, "AC1: the fixing fixture's real event fold must render w2 on the fix leg").toContainText("FIXING · round 2 of 3");
+  await expect(lanes, "AC1: the fixing fixture's lanes section must render fixture lane w2").toContainText("w2");
+  await expect(lanes, "AC1: the fixing fixture's lanes section must render fixture issue #90").toContainText("#90");
+
+  await hero.screenshot({ path: `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-fixing-hero-panel.png` });
+  await lanes.screenshot({ path: `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-fixing-lanes.png` });
+  await page.unroute("**/api/**");
+}
+
+/** #956: the minimal live-mocked `/api/loop/state` shared by the live-header and attention capture
+ *  families below — no lanes, no spend, just the engine/controls fields each family's own
+ *  assertions actually read. `engine.state: "running"` + `controlsEnabled: true` is what AC2 needs
+ *  to reach every control verb (`Controls.tsx` renders `null` entirely while `!enabled`). */
+function minimalLoopState() {
+  return {
+    engine: { state: "running", reasons: [], lastTickAt: null, pauseActive: false, estopActive: false, standbyNextCheckSec: null },
+    lanes: { max: 1, items: [] },
+    round: null,
+    spend: { todayUsd: 0, dailyBudgetUsd: null, runUsd: null, runBudgetUsd: null, byModel: [] },
+    rings: 0,
+    mergedPrs: [],
+    logPath: null,
+    config: { board: { owner: "herehigher", repo: "sapwood" } },
+    controlsEnabled: true,
+  };
+}
+
+/**
+ * #956 AC2: the live header family — `#overview` (the `header` module's own anchor,
+ * `MODULE_SELECTORS`) with a real, live-mocked, `controlsEnabled`/`running` engine so
+ * `Controls.tsx` actually renders every verb, `CONTROL_COPY`'s own label casing (`Pause`/`Stop`
+ * title-case, `EMERGENCY STOP` genuinely upper-case — `.controls` carries no `text-transform` of
+ * its own). Asserts all three, plus that `LiveOnly`'s placeholder never leaked in (live mode, so it
+ * structurally can't — `LiveOnly.tsx`'s own doc — checked directly anyway, same proof
+ * `captureLiveOverlayLanes` already gives its own live-mocked capture).
+ */
+async function captureLiveHeaderFamily(page: Page, theme: { key: string; attr: string }): Promise<void> {
+  await mockLiveApi(page, minimalLoopState());
+  await page.setViewportSize({ width: CANONICAL_WIDTH, height: 900 });
+  await page.goto("/");
+  await page.evaluate((attr) => document.documentElement.setAttribute("data-theme", attr), theme.attr);
+  const overview = page.locator("#overview");
+  await overview.waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  await expect(overview, "AC2: the live header must render the Pause verb").toContainText("Pause");
+  await expect(overview, "AC2: the live header must render the Stop verb").toContainText("Stop");
+  await expect(overview, "AC2: the live header must render the EMERGENCY STOP verb").toContainText("EMERGENCY STOP");
+  await expect(
+    page.locator('[aria-label="live only"]'),
+    "AC2: a live-mocked capture must never fall back to the LiveOnly placeholder",
+  ).toHaveCount(0);
+
+  await overview.screenshot({ path: `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-live-header.png` });
+  await page.unroute("**/api/**");
+}
+
+/**
+ * #956 D23: three real, open, attention-class `LoopEvent`s spanning three of `copy.ts`'s
+ * `ATTENTION_CATEGORY` chips — FIX CAP (`fix-rounds-capped`), REVIEW SILENCE
+ * (`review-silence-escalated`, the dimmed row this issue names — payload shape confirmed at
+ * `copy.ts`'s own entry: `{worker, issue, pr, head, silenceSec}`), and CEILING (`ceiling-escalated`)
+ * — the same three-chip pattern `needs-attention-dark.png` shows. Distinct issue numbers so
+ * `entities.ts`'s `foldOpenAttention` never dedups or clears one against another.
+ */
+function attentionEvents(): LoopEvent[] {
+  const now = Date.now();
+  const minutesAgo = (m: number) => new Date(now - m * 60_000).toISOString();
+  return [
+    { id: 1, ts: minutesAgo(180), kind: "ceiling-escalated", payload: { reasons: ["dailyBudgetUsd"] } },
+    {
+      id: 2,
+      ts: minutesAgo(90),
+      kind: "review-silence-escalated",
+      payload: { worker: "w1", issue: 202, pr: 302, head: "a1b2c3d", silenceSec: 5400 },
+    },
+    {
+      id: 3,
+      ts: minutesAgo(30),
+      kind: "fix-rounds-capped",
+      payload: { worker: "w2", issue: 201, pr: 301, fixRounds: 3, cap: 3 },
+    },
+  ];
+}
+
+/**
+ * #956 AC3: navigates the real production `App` -> `LiveApp` tree with `/api/*` mocked to
+ * `attentionEvents` above (never a hand-painted `NeedsAttention` prop set), so the row set comes
+ * from the real `useEventHistory` -> `foldOpenAttention` fold — same "real fold, not a prop
+ * override" discipline the fixing/live-header families above apply. Asserts the real REVIEW
+ * SILENCE chip and three distinct rows spanning three categories BEFORE the screenshot.
+ */
+async function captureAttentionFamily(page: Page, theme: { key: string; attr: string }): Promise<void> {
+  await mockLiveApi(page, minimalLoopState(), attentionEvents());
+  await page.setViewportSize({ width: CANONICAL_WIDTH, height: 900 });
+  await page.goto("/");
+  await page.evaluate((attr) => document.documentElement.setAttribute("data-theme", attr), theme.attr);
+  const attention = page.locator('section[aria-label="needs attention"]');
+  await attention.waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  await expect(attention, "AC3: the attention fixture's real fold must render a REVIEW SILENCE chip").toContainText("REVIEW SILENCE");
+  await expect(page.locator(".attention-row"), "AC3: the attention fixture must render 3 distinct rows").toHaveCount(3);
+  const categories = new Set(await page.locator(".attention-chip").allTextContents());
+  expect(categories.size, "AC3: the attention fixture's rows must span >= 3 distinct chip categories").toBeGreaterThanOrEqual(3);
+
+  await attention.screenshot({ path: `${CAPTURES_DIR}/${CANONICAL_WIDTH}-${theme.key}-attention3-needs-attention.png` });
   await page.unroute("**/api/**");
 }
 
@@ -1850,6 +2074,37 @@ function buildContactSheet(): void {
     }),
   ).join("");
 
+  // #956 AC4: the three live-mocked capture families (D13/D19/D23), each paired against its own
+  // named mockup crop — same "missing capture is an invariant violation, missing mockup is an
+  // honest not-yet-baselined gap" split `AC4_MOMENTS` above already applies. `fixing` needs BOTH
+  // its own hero-panel AND lanes mockup; `live-header`/`attention3` each pair against one file.
+  const D956_FAMILIES = [
+    { slug: "fixing-hero-panel", mockup: (t: string) => `hero-panel-${t}.png`, label: "fixing (hero panel)" },
+    { slug: "fixing-lanes", mockup: (t: string) => `lanes-${t}.png`, label: "fixing (lanes)" },
+    { slug: "live-header", mockup: (t: string) => `header-${t}.png`, label: "live header" },
+    { slug: "attention3-needs-attention", mockup: (t: string) => `needs-attention-${t}.png`, label: "attention (review silence)" },
+  ] as const;
+  const d956RowsHtml = D956_FAMILIES.flatMap((family) =>
+    THEMES.map((t) => {
+      const mockupFile = `mockups/${family.mockup(t.key)}`;
+      const captureFile = `captures/${CANONICAL_WIDTH}-${t.key}-${family.slug}.png`;
+      // No frozen baseline for this theme yet (e.g. `needs-attention-light.png` doesn't exist on
+      // disk) — an honest gap, same as `modulesWithNoMockup` above, never a failure.
+      if (!existsSync(`${OUTPUT_DIR}/${mockupFile}`)) return "";
+      if (!existsSync(`${OUTPUT_DIR}/${captureFile}`)) {
+        // The main test's own presence assertions (before `buildContactSheet()` ever runs) already
+        // guarantee every #956 capture exists — reaching here means that invariant broke.
+        throw new Error(`invariant violated: capture missing for an existing mockup pairing (${captureFile})`);
+      }
+      return `
+      <tr>
+        <td class="label">${family.label} · ${t.key}<br><span class="tag">mockup vs. a real fold</span></td>
+        <td><img src="${mockupFile}" alt="${family.label} ${t.key} mockup"></td>
+        <td><img src="${captureFile}" alt="${family.label} ${t.key} live capture"></td>
+      </tr>`;
+    }),
+  ).join("");
+
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -1878,6 +2133,9 @@ ${noMockupNote}
 
 <h2>OUTCOME right-zone crop pairs at rings = 0, 1, 24 (#921 AC4) — Tier-C: record the witnessed crop comparison on the issue</h2>
 <table>${outcomeZoneRowsHtml || "<tr><td>No OUTCOME-zone capture/mockup pair found.</td></tr>"}</table>
+
+<h2>Fixing / live header / attention capture families (#956) — Tier-C: record the witnessed crop comparison on the issue</h2>
+<table>${d956RowsHtml || "<tr><td>No #956 capture/mockup pair found.</td></tr>"}</table>
 
 <h2>Full-page captures — every viewport × theme combination</h2>
 <table>${fullPageRowsHtml}</table>
