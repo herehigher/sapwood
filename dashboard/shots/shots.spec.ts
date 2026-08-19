@@ -53,6 +53,20 @@ const MODULE_SELECTORS: Record<string, string[]> = {
 // per-module comparison rows pair against.
 const CANONICAL_WIDTH = 1440;
 
+// #956 AC4: the three live-mocked capture families (D13/D19/D23), each paired against its own
+// named mockup crop. Module-scoped (not local to `buildContactSheet()`) so the main test's own
+// content assertions on the generated `contact-sheet.html` (engine audit run 19432fa1 finding
+// [0], ac4-contact-sheet-unverified) read the SAME single source `buildContactSheet()` renders
+// from, rather than a hand-typed duplicate of the slug/mockup naming that could silently drift
+// from it. `fixing` needs BOTH its own hero-panel AND lanes mockup; `live-header`/`attention3`
+// each pair against one file.
+const D956_FAMILIES = [
+  { slug: "fixing-hero-panel", mockup: (t: string) => `hero-panel-${t}.png`, label: "fixing (hero panel)" },
+  { slug: "fixing-lanes", mockup: (t: string) => `lanes-${t}.png`, label: "fixing (lanes)" },
+  { slug: "live-header", mockup: (t: string) => `header-${t}.png`, label: "live header" },
+  { slug: "attention3-needs-attention", mockup: (t: string) => `needs-attention-${t}.png`, label: "attention (review silence)" },
+] as const;
+
 // A stale capture left over from a PREVIOUS run would let `missingCaptures()` below pass on a
 // selector that matches nothing THIS run — the presence assertion is only honest evidence if
 // this run's files are the only files it can see. Wipe captures/mockups before every run;
@@ -211,6 +225,39 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
 
   buildContactSheet();
   expect(existsSync(`${OUTPUT_DIR}/contact-sheet.html`)).toBe(true);
+
+  // #956 AC4 (engine audit run 19432fa1 finding [0], ac4-contact-sheet-unverified): a
+  // presence-of-file check on `contact-sheet.html` alone never reads what the file actually
+  // says — it would stay green even if `buildContactSheet()` silently dropped a family/theme row
+  // (exactly finding [1] on the PREVIOUS head, before that fix). This reads the real generated
+  // HTML and asserts its own content directly, against `D956_FAMILIES` — the SAME single source
+  // `buildContactSheet()` itself renders from (module scope, never a hand-typed duplicate that
+  // could drift from it): every one of the 4 families × 2 themes must reference its own capture,
+  // and — independently, straight off the real filesystem, never a second copy of the mockup
+  // filename logic — either the real mockup that exists on disk, or the explicit no-baseline note
+  // when it doesn't (`needs-attention-light.png`, today's one genuine gap).
+  const contactSheetHtml = readFileSync(`${OUTPUT_DIR}/contact-sheet.html`, "utf8");
+  for (const family of D956_FAMILIES) {
+    for (const theme of THEMES) {
+      const captureFile = `captures/${CANONICAL_WIDTH}-${theme.key}-${family.slug}.png`;
+      expect(contactSheetHtml, `#956 contact sheet must reference the ${family.slug}/${theme.key} capture (${captureFile})`).toContain(
+        `src="${captureFile}"`,
+      );
+
+      const mockupFile = `mockups/${family.mockup(theme.key)}`;
+      if (existsSync(`${OUTPUT_DIR}/${mockupFile}`)) {
+        expect(
+          contactSheetHtml,
+          `#956 contact sheet must pair the ${family.slug}/${theme.key} capture with its real mockup (${mockupFile})`,
+        ).toContain(`src="${mockupFile}"`);
+      } else {
+        expect(
+          contactSheetHtml,
+          `#956 contact sheet must show an explicit no-baseline note for ${family.slug}/${theme.key}, never silently omit the row`,
+        ).toContain(`No frozen mockup exists yet for ${family.label} · ${theme.key}`);
+      }
+    }
+  }
 });
 
 /**
@@ -2075,20 +2122,14 @@ function buildContactSheet(): void {
   ).join("");
 
   // #956 AC4: the three live-mocked capture families (D13/D19/D23), each paired against its own
-  // named mockup crop — same "missing capture is an invariant violation" posture `AC4_MOMENTS`
-  // above already applies, EVERY family/theme combination gets its own row unconditionally (engine
-  // audit run a086a92a finding [1], attention-light-pair-omitted: an EARLIER version of this
-  // function returned "" — a silently omitted row — whenever a theme's mockup file was absent,
-  // e.g. `needs-attention-light.png` doesn't exist on disk; AC4's own "the three families ... under
-  // a section of their own" names every family/theme pair, so a missing mockup baseline must render
-  // as an EXPLICIT, visible gap in that section, never a row that just isn't there). `fixing` needs
-  // BOTH its own hero-panel AND lanes mockup; `live-header`/`attention3` each pair against one file.
-  const D956_FAMILIES = [
-    { slug: "fixing-hero-panel", mockup: (t: string) => `hero-panel-${t}.png`, label: "fixing (hero panel)" },
-    { slug: "fixing-lanes", mockup: (t: string) => `lanes-${t}.png`, label: "fixing (lanes)" },
-    { slug: "live-header", mockup: (t: string) => `header-${t}.png`, label: "live header" },
-    { slug: "attention3-needs-attention", mockup: (t: string) => `needs-attention-${t}.png`, label: "attention (review silence)" },
-  ] as const;
+  // named mockup crop (`D956_FAMILIES`, module scope) — same "missing capture is an invariant
+  // violation" posture `AC4_MOMENTS` above already applies, EVERY family/theme combination gets
+  // its own row unconditionally (engine audit run a086a92a finding [1],
+  // attention-light-pair-omitted: an EARLIER version of this function returned "" — a silently
+  // omitted row — whenever a theme's mockup file was absent, e.g. `needs-attention-light.png`
+  // doesn't exist on disk; AC4's own "the three families ... under a section of their own" names
+  // every family/theme pair, so a missing mockup baseline must render as an EXPLICIT, visible gap
+  // in that section, never a row that just isn't there).
   const d956RowsHtml = D956_FAMILIES.flatMap((family) =>
     THEMES.map((t) => {
       const mockupFile = `mockups/${family.mockup(t.key)}`;
