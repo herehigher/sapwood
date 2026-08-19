@@ -18,6 +18,7 @@ import { ActivityFeed, FEED_RENDER_CAP } from "./ActivityFeed.tsx";
 registerRealDom();
 
 const panelsCss = readFileSync(new URL("../panels.css", import.meta.url), "utf8");
+const tokensCss = readFileSync(new URL("../tokens.css", import.meta.url), "utf8");
 
 const NOW = new Date("2026-08-06T12:00:00.000Z");
 
@@ -90,9 +91,20 @@ test("payload details collapse behind each entry, never inline in the sentence",
   const html = renderToStaticMarkup(<ActivityFeed events={events} round={null} titles={{}} now={NOW} />);
   assert.match(html, /<details/);
   assert.match(html, /<summary/);
-  // the sentence itself never leaks the raw worker field
-  const sentenceOnly = html.split("<details")[0] ?? "";
-  assert.doesNotMatch(sentenceOnly, /"worker"/);
+  // the sentence itself never leaks the raw worker field — before the FIRST tag of either the
+  // toggle or the payload, since #954 moved `.feed-payload` out to a sibling of `.feed-details`.
+  const detailsIndex = html.indexOf("<details");
+  const payloadIndex = html.indexOf('class="feed-payload');
+  const sentenceOnly = html.slice(0, Math.min(detailsIndex, payloadIndex));
+  assert.doesNotMatch(sentenceOnly, /worker/);
+  // #954 gate② finding [3] (ac3-payload-assertion-vacuous): the prior version of this test never
+  // asserted the payload `<pre>` actually exists or carries the real serialized JSON — it would
+  // have stayed green even with an empty/removed `.feed-payload`. React's static-markup renderer
+  // HTML-escapes quotes in text content, so the fixture's own field/value land as `&quot;`-quoted
+  // substrings, not raw `"worker"`.
+  assert.match(html, /<pre class="feed-payload data">/);
+  assert.match(html, /&quot;issue&quot;: 1/);
+  assert.match(html, /&quot;worker&quot;: &quot;w1&quot;/);
 });
 
 // ── #934: chronology only — no pinned rows, the strip is the sole "open items" surface ──────────
@@ -432,4 +444,111 @@ test("#890: a lane-settlement event with no est/real figures on the payload rend
   const events = [ev(1, "reclaim-done", { worker: "w1", issue: 90, next: "DRIVING" })];
   const html = renderToStaticMarkup(<ActivityFeed events={events} round={null} titles={{}} now={NOW} />);
   assert.doesNotMatch(html, /est \$/);
+});
+
+// ── #954 (#729 D33, #929): `.feed-entry` becomes a [lead | sentence | meta] grid ────────────────
+
+const heroCss = readFileSync(new URL("../hero/hero.css", import.meta.url), "utf8");
+// `@import` lines resolve under Vite's bundler only — happy-dom's plain <style> injection can't
+// follow them (same posture App.test.tsx's own `appCss924` concatenation takes, #924 gate②
+// finding [0]).
+const appCss = readFileSync(new URL("../app.css", import.meta.url), "utf8").replace(/^@import.*$/gm, "");
+
+/** #954 gate② finding [0] (ac1-incomplete-cascade-coverage): the FULL production cascade —
+ *  `tokens.css` → `panels.css` → `hero.css` → `app.css`, `app.css`'s own `@import` order — not
+ *  just tokens+panels; `app.css` sets inherited base rules (e.g. `body`'s line-height) that a
+ *  real page load always applies before `.feed-entry` ever renders. Same helper shape as
+ *  `App.test.tsx`'s own `mountAppWithCascade`. Viewport forced to 1440 (this component's own
+ *  production width, no width-scoped rule in play here, but matching the established convention
+ *  rather than trusting happy-dom's default). */
+async function mountFeedWithCascade(events: KnownDomainEvent[]) {
+  (window as unknown as { happyDOM: { setViewport: (v: { width: number }) => void } }).happyDOM.setViewport({ width: 1440 });
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${appCss}`;
+  document.head.appendChild(style);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ActivityFeed events={events} round={null} titles={{}} now={NOW} />);
+  });
+  const cleanup = async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    document.head.removeChild(style);
+  };
+  return { container, cleanup };
+}
+
+/** Counts top-level (paren-depth-0) whitespace-separated tracks in a `grid-template-columns`
+ *  computed value. happy-dom performs no layout (STYLE doctrine's own note), so it echoes the
+ *  authored text (`"auto minmax(0, 1fr) auto"`) rather than resolving to px — a naive
+ *  `.split(/\s+/)` miscounts `minmax(0, 1fr)`'s internal comma-space as track boundaries. */
+function countGridTracks(value: string): number {
+  let depth = 0;
+  let count = 0;
+  let inToken = false;
+  for (const ch of value.trim()) {
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    if (/\s/.test(ch) && depth === 0) {
+      inToken = false;
+    } else if (!inToken) {
+      inToken = true;
+      count++;
+    }
+  }
+  return count;
+}
+
+test("#954 AC1: every rendered .feed-entry resolves a 3-track grid, exactly one .feed-lead and one .feed-meta (nowrap) — COVERAGE incl. an attention row and a StateGlyph row", async () => {
+  const events = [
+    ev(1, "dispatched", { issue: 1 }), // routine dot, no glyph
+    ev(2, "verify-na-proposed", { issue: 2 }), // attention row (rust dot + fail glyph)
+    ev(3, "merged", { issue: 3, pr: 10 }), // ok glyph, non-attention
+  ];
+  const { container, cleanup } = await mountFeedWithCascade(events);
+  try {
+    const entries = Array.from(container.querySelectorAll(".feed-entry"));
+    // COVERAGE (doctrine): assert over every rendered entry the fixture produced, never a
+    // hand-picked subset — and confirm the fixture actually produced all 3 fixture rows.
+    assert.equal(entries.length, 3, "COVERAGE: the fixture's own 3 rows must all render");
+    for (const entry of entries) {
+      const computed = getComputedStyle(entry as Element);
+      assert.equal(computed.display, "grid", "each .feed-entry must resolve display: grid");
+      assert.equal(
+        countGridTracks(computed.gridTemplateColumns),
+        3,
+        `expected exactly 3 grid tracks, got "${computed.gridTemplateColumns}"`,
+      );
+
+      const leads = entry.querySelectorAll(".feed-lead");
+      assert.equal(leads.length, 1, "exactly one .feed-lead per entry");
+      assert.ok(leads[0]!.querySelector(".feed-dot"), ".feed-lead must hold .feed-dot");
+
+      const metas = entry.querySelectorAll(".feed-meta");
+      assert.equal(metas.length, 1, "exactly one .feed-meta per entry");
+      assert.ok(metas[0]!.querySelector(".feed-ts"), ".feed-meta must hold .feed-ts");
+      assert.ok(metas[0]!.querySelector(".feed-details"), ".feed-meta must hold .feed-details");
+      assert.equal(getComputedStyle(metas[0] as Element).whiteSpace, "nowrap", ".feed-meta must resolve white-space: nowrap");
+
+      // #954 gate② finding [0]: checked for EVERY entry that actually carries a glyph, not just
+      // the first one found across the fixture — a glyph rendered outside its own entry's
+      // `.feed-lead` on entry #3 must fail even if entry #2's glyph is correctly placed.
+      const glyph = entry.querySelector(".glyph-ok, .glyph-fail");
+      if (glyph) {
+        assert.ok(
+          entry.querySelector(".feed-lead")!.contains(glyph),
+          "the StateGlyph must render inside its OWN entry's .feed-lead — its presence must never add a 4th track",
+        );
+      }
+    }
+
+    const glyphEntryCount = entries.filter((e) => e.querySelector(".glyph-ok, .glyph-fail")).length;
+    assert.equal(glyphEntryCount, 2, "COVERAGE: fixture must include both StateGlyph rows (attention fail glyph + merged ok glyph)");
+  } finally {
+    await cleanup();
+  }
 });

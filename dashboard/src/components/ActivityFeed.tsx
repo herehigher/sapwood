@@ -99,8 +99,10 @@ function FeedEntry({ event, titles, repoUrl, now }: { event: DomainEvent; titles
     // #892 AC5: `.recipe-list-entry` (panels.css) is the freshly-appended-row recipe — a feed
     // entry is exactly that (a newest-first row that mounts on every fresh event).
     <li className={attention ? "feed-entry feed-entry-attention recipe-list-entry" : "feed-entry recipe-list-entry"}>
-      <span className="feed-dot" style={{ background: dotColor, border: dotBorder }} aria-hidden="true" />
-      {glyph !== null && <StateGlyph ok={glyph} className={glyph ? "glyph-ok" : "glyph-fail"} />}
+      <span className="feed-lead">
+        <span className="feed-dot" style={{ background: dotColor, border: dotBorder }} aria-hidden="true" />
+        {glyph !== null && <StateGlyph ok={glyph} className={glyph ? "glyph-ok" : "glyph-fail"} />}
+      </span>
       <span className="feed-sentence">
         {parts.map((part, i) => (
           // biome-ignore lint/suspicious/noArrayIndexKey: sentence parts are a fixed-order render list, not reorderable data
@@ -109,11 +111,13 @@ function FeedEntry({ event, titles, repoUrl, now }: { event: DomainEvent; titles
           </span>
         ))}
       </span>
-      <span className="muted data feed-ts">{formatRelative(event.ts, now)}</span>
-      <details className="feed-details">
-        <summary className="muted">details</summary>
-        <pre className="data">{JSON.stringify(event.payload, null, 2)}</pre>
-      </details>
+      <span className="feed-meta">
+        <span className="muted data feed-ts">{formatRelative(event.ts, now)}</span>
+        <details className="feed-details">
+          <summary className="muted">details</summary>
+        </details>
+      </span>
+      <pre className="feed-payload data">{JSON.stringify(event.payload, null, 2)}</pre>
     </li>
   );
 }
