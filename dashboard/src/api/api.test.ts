@@ -328,7 +328,7 @@ test("#740: accumulateEventsPage's hero/titles/openAttention exactly match the p
 // must match independently-expected values, not just the internal hero/titles/openAttention
 // fields a prior round's test stopped at.
 
-test("#740 gate① [2]: the props Hero/LaneBoard/ActivityFeed/NeedsAttention actually receive from EventHistory match independent expectations", () => {
+test("#740 gate① [2]: the props Hero/LaneBoard/NeedsAttention actually receive from EventHistory match independent expectations", () => {
   const wire1: LoopEvent[] = [
     { id: 1, ts: "2026-08-06T00:00:00Z", kind: "dispatched", payload: { worker: "w1", issue: 5, issueTitle: "Widget" } },
   ];
@@ -337,11 +337,12 @@ test("#740 gate① [2]: the props Hero/LaneBoard/ActivityFeed/NeedsAttention act
   let history = accumulateEventsPage(EMPTY_EVENT_HISTORY, { events: wire1, lastId: 1 }, MAX_EVENT_HISTORY, 2);
   history = accumulateEventsPage(history, { events: wire2, lastId: 2 }, MAX_EVENT_HISTORY, 2);
 
-  // What `App.tsx` actually hands each panel.
+  // What `App.tsx` actually hands each panel. #934: `ActivityFeed` no longer sources from this
+  // `EventHistory` fold at all — its `events`/`round` props come from App.tsx's own round-scoped
+  // fetch (`feedEvents`/`feedRound`, `App.tsx`'s own doc), covered by `App.test.tsx` instead.
   const heroProps = { heroState: history.hero, steps: history.steps };
   const laneBoardProps = { titles: history.titles };
   const openAttentionList = Object.values(history.openAttention);
-  const activityFeedProps = { events: history.events, pinnedAttention: openAttentionList, titles: history.titles };
   const needsAttentionProps = { items: openAttentionList, titles: history.titles };
 
   // Independently-expected values — folded straight from the wire, not through `accumulateEventsPage`.
@@ -356,16 +357,10 @@ test("#740 gate① [2]: the props Hero/LaneBoard/ActivityFeed/NeedsAttention act
   assert.deepEqual(heroProps.heroState, expectedHero);
   assert.deepEqual(heroProps.steps, expectedStepsFinal);
   assert.deepEqual(laneBoardProps.titles, expectedTitles);
-  assert.deepEqual(activityFeedProps.titles, expectedTitles);
   assert.deepEqual(
-    activityFeedProps.events.map((e) => e.id),
-    [1, 2],
-  );
-  assert.deepEqual(
-    activityFeedProps.pinnedAttention.map((e) => e.id),
+    needsAttentionProps.items.map((e) => e.id),
     Object.values(expectedOpenAttention).map((e) => e.id),
   );
-  assert.deepEqual(needsAttentionProps.items, activityFeedProps.pinnedAttention);
   assert.deepEqual(needsAttentionProps.titles, expectedTitles);
 });
 

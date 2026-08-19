@@ -21,16 +21,18 @@ import {
   App,
   appContent,
   deriveReplayedLanes,
+  eventsUpToCursor,
   loadInspectorRoundEvents,
   resolveActiveFold,
   resolveFixCap,
   resolveInspectorArtifact,
   resolveInspectorRound,
+  resolveLiveFeedRound,
   resolveRoundSpend,
   resolveWorkerBudgetUsdSoft,
   toggleConfigOpen,
 } from "./App.tsx";
-import { demoFixtureQuery, eventsQuery, loopStateQuery, MAX_EVENT_HISTORY, roundsQuery, spendQuery } from "./api/queries.ts";
+import { demoFixtureQuery, eventsQuery, loopStateQuery, MAX_EVENT_HISTORY, POLL_MS, roundsQuery, spendQuery } from "./api/queries.ts";
 import type { LoopEvent, Round, SpendRow } from "./api/types.ts";
 import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
@@ -117,6 +119,10 @@ function minimalAppViewModel(
     // to `[]` (no windows), same "nothing selected" posture every other replay field starts in; a
     // test proving `roundPhase={mode === "live" ? ... : phaseAtCursor(...)}` sets this explicitly.
     phaseWindows?: { phase: string; startTs: string; endTs: string | null }[];
+    // #934: the activity feed's own round-in-view + events — default `null`/`[]` (no round in
+    // view), same "nothing selected" posture every other feed-adjacent field above starts in.
+    feedRound?: unknown;
+    feedEvents?: unknown[];
   } = {},
 ) {
   return {
@@ -167,6 +173,8 @@ function minimalAppViewModel(
     activeEvents: overrides.activeEvents ?? [],
     activeTitles: overrides.activeTitles ?? {},
     activeOpenAttention: overrides.activeOpenAttention ?? [],
+    feedRound: overrides.feedRound ?? null,
+    feedEvents: overrides.feedEvents ?? [],
     // Mirrors real `App()`: `spendFacts` is always `loop.data?.spend`, straight through.
     spendFacts: (overrides.loop as { data?: { spend?: unknown } } | undefined)?.data?.spend,
     roundSpend: overrides.roundSpend,
@@ -1460,6 +1468,602 @@ test("#766 gate② finding [0]: /api/rounds data flows through fetchRounds/round
     await unmount();
   }
 });
+
+// ── #934: chronology only — the feed scopes to the round in view, the strip is the sole "open
+// items" surface, no pinned rows ────────────────────────────────────────────────────────────────
+
+test("#934: resolveLiveFeedRound picks the open round when one exists, else the last CLOSED round (idle/standby), else null (fresh DB)", () => {
+  const open = { roundId: 2, status: "in_progress" } as Round;
+  const closedOlder = { roundId: 1, status: "done" } as Round;
+  const closedNewer = { roundId: 3, status: "done" } as Round;
+  assert.equal(resolveLiveFeedRound([closedOlder, open], 2), open, "an open round always wins, regardless of order");
+  assert.equal(
+    resolveLiveFeedRound([closedOlder, closedNewer], null),
+    closedNewer,
+    "no open round (idle/standby) falls back to the last CLOSED round",
+  );
+  assert.equal(resolveLiveFeedRound([], null), null, "fresh DB: no round at all");
+});
+
+test("#934 (reverse-round-snapshot-skew): resolveLiveFeedRound prefers the newest in_progress row over the last CLOSED round when liveRoundId hasn't caught up (or is null) — the newest open round always beats a stale closed fallback", () => {
+  const closed = { roundId: 1, status: "done" } as Round;
+  const open = { roundId: 2, status: "in_progress" } as Round;
+  assert.equal(
+    resolveLiveFeedRound([closed, open], null),
+    open,
+    "liveRoundId hasn't caught up yet (still null) — /api/rounds already knows round 2 is open, so it wins over the last closed round",
+  );
+  const olderOpen = { roundId: 5, status: "in_progress" } as Round;
+  const newerOpen = { roundId: 6, status: "in_progress" } as Round;
+  assert.equal(
+    resolveLiveFeedRound([closed, olderOpen, newerOpen], null),
+    newerOpen,
+    "more than one in_progress row (shouldn't normally happen, but the fallback picks the newest, same tie-break findLastClosedRound already uses)",
+  );
+  assert.equal(
+    resolveLiveFeedRound([closed], null),
+    closed,
+    "no in_progress row at all — falls through to the last CLOSED round exactly as before",
+  );
+});
+
+test("#934: eventsUpToCursor filters a round's own full log to only ids <= cursorId; cursorId 0 (nothing folded yet) shows nothing", () => {
+  const events = [domainEvent(1, "dispatched"), domainEvent(2, "dispatched"), domainEvent(3, "dispatched")];
+  assert.deepEqual(eventsUpToCursor(events, 0), [], "cursorId 0 (player.ts's own 'nothing folded yet') means as-of-cursor is empty");
+  assert.deepEqual(
+    eventsUpToCursor(events, 2).map((e) => e.id),
+    [1, 2],
+    "only events up to and including the cursor's own id",
+  );
+  assert.deepEqual(
+    eventsUpToCursor(events, 99).map((e) => e.id),
+    [1, 2, 3],
+    "a cursor past the round's last event shows the whole round",
+  );
+});
+
+// gate② finding-shaped: every AC1 assertion below reads the REAL rendered `App` tree
+// (`mountSettledApp` — a real DOM, real `useEventHistory`/round-scoped fetch, real click) rather
+// than a hand-injected `appContent` prop, per the review doctrine's WIRING rule — a component-only
+// proof (`ActivityFeed.test.tsx`'s own AC1 test) cannot show `App` actually stopped passing
+// `pinnedAttention` at all, or that the strip and feed both still read the SAME fold.
+test("#934 AC1 (WIRING via App): an open attention item renders in the strip AND, in the feed, only in chronological position — never pinned above a newer routine event, and the feed's disclosures never say 'pinned'", async () => {
+  const { container, unmount } = await mountSettledApp({
+    "/api/loop/state": { status: 200, body: { ...LOOP_STATE_OK, round: { id: 1, phase: "executing" } } },
+    "/api/rounds": {
+      status: 200,
+      body: {
+        rounds: [
+          {
+            roundId: 1,
+            status: "in_progress",
+            startedAt: "2026-08-10T09:00:00Z",
+            endedAt: null,
+            startEventId: 0,
+            startSpendId: 0,
+            eventCount: 2,
+            schemaVersion: null,
+            artifact: null,
+          },
+        ],
+      },
+    },
+    "/api/events": {
+      status: 200,
+      body: {
+        events: [
+          { id: 1, ts: "2026-08-10T09:00:00Z", kind: "drive-needs-human", payload: { issue: 401, pr: 40 } },
+          { id: 2, ts: "2026-08-10T09:01:00Z", kind: "dispatched", payload: { issue: 402 } },
+        ],
+        lastId: 2,
+      },
+    },
+  });
+  try {
+    // The feed's own round-scoped fetch (`useInspectorRoundEvents`) is async — flush its
+    // effect+promise chain (same posture the drawer's own round-scoped-fetch tests above take)
+    // before reading the rendered content.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const strip = container.querySelector('[aria-label="needs attention"]');
+    assert.ok(strip, "the strip must still render the open item — #934 leaves it the sole 'open items' surface");
+    const feed = container.querySelector('[aria-label="activity"]');
+    assert.ok(feed, "the activity feed must render");
+    assert.doesNotMatch(feed.innerHTML, /pinned/i, "no 'pinned' string may appear anywhere in the feed's disclosures");
+    const routineIdx = feed.innerHTML.indexOf("Started work on issue");
+    const attentionIdx = feed.innerHTML.indexOf("needs a human decision");
+    assert.ok(routineIdx !== -1 && attentionIdx !== -1);
+    assert.ok(
+      routineIdx < attentionIdx,
+      "newest-first: the routine #402 entry (id 2) must render above the older attention #401 entry (id 1) — never pinned to the top",
+    );
+  } finally {
+    await unmount();
+  }
+});
+
+test("#934 AC2 (WIRING via App, live: stubbed /api/rounds + events for two rounds): the feed lists only the round-in-view's events under one ROUND N … n events divider; stepping the header navigator ◀ re-renders the feed for the previous round; the divider's count is the round's own full eventCount, never the bounded live tail's total", async () => {
+  const LEDGER = [
+    { id: 1, ts: "2026-08-10T09:00:00Z", kind: "dispatched", payload: { issue: 301 } },
+    { id: 2, ts: "2026-08-10T09:01:00Z", kind: "dispatched", payload: { issue: 302 } },
+    { id: 3, ts: "2026-08-10T09:02:00Z", kind: "dispatched", payload: { issue: 303 } },
+    { id: 4, ts: "2026-08-10T09:03:00Z", kind: "dispatched", payload: { issue: 401 } },
+    { id: 5, ts: "2026-08-10T09:04:00Z", kind: "dispatched", payload: { issue: 402 } },
+  ];
+  const rounds = [
+    {
+      roundId: 1,
+      status: "done",
+      startedAt: "2026-08-10T09:00:00Z",
+      endedAt: "2026-08-10T09:02:30Z",
+      startEventId: 0,
+      startSpendId: 0,
+      eventCount: 3,
+      schemaVersion: 1,
+      artifact: { prsMerged: 0, spendUsd: 0 },
+    },
+    {
+      roundId: 2,
+      status: "in_progress",
+      startedAt: "2026-08-10T09:03:00Z",
+      endedAt: null,
+      startEventId: 3,
+      startSpendId: 0,
+      eventCount: 2,
+      schemaVersion: null,
+      artifact: null,
+    },
+  ];
+  // `mountSettledApp`'s stub always returns the SAME static body regardless of `after`/`limit` —
+  // this test needs the real per-round `after`-based paging semantics (`round-log.ts`'s
+  // `loadRoundEvents`), the same reason the drawer's own round-scoping tests above build their
+  // own inline `mock.method` rather than using that shared helper.
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const parsed = new URL(url, "http://localhost");
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (parsed.pathname === "/api/loop/state") return json({ ...LOOP_STATE_OK, round: { id: 2, phase: "executing" } });
+    if (parsed.pathname === "/api/rounds") return json({ rounds });
+    if (parsed.pathname === "/api/spend") return json({ spend: [], lastId: 0 });
+    if (parsed.pathname === "/api/events") {
+      const after = Number(parsed.searchParams.get("after") ?? 0);
+      const limit = Number(parsed.searchParams.get("limit") ?? 200);
+      const page = LEDGER.filter((e) => e.id > after).slice(0, limit);
+      return json({ events: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
+    }
+    throw new Error(`unstubbed fetch: ${url}`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await Promise.allSettled([
+    client.prefetchQuery(loopStateQuery()),
+    client.prefetchQuery(eventsQuery(0)),
+    client.prefetchQuery(spendQuery(0)),
+    client.prefetchQuery(roundsQuery()),
+  ]);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+  });
+  try {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    let feed = container.querySelector('[aria-label="activity"]');
+    assert.ok(feed, "the activity feed must render");
+    assert.match(feed.innerHTML, /ROUND 2/, "the LIVE slot's open round (2) is the round in view");
+    assert.match(feed.innerHTML, /2 events/, "round 2's own eventCount, not the 5-event combined ledger");
+    assert.match(feed.innerHTML, /#401/);
+    assert.match(feed.innerHTML, /#402/);
+    assert.doesNotMatch(feed.innerHTML, /#301|#302|#303/, "round 1's events must not leak into round 2's view");
+
+    const prevRound = container.querySelector('[aria-label="previous round"]');
+    assert.ok(prevRound, "the header round navigator's ◀ must render");
+    await act(async () => {
+      prevRound.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    feed = container.querySelector('[aria-label="activity"]');
+    assert.ok(feed);
+    assert.match(feed.innerHTML, /ROUND 1/, "stepping ◀ re-renders the feed for the previous round");
+    assert.match(feed.innerHTML, /3 events/, "round 1's own full eventCount — never a bounded-tail total like 5");
+    // engine-agent finding [0] (ac2-post-navigation-feed-unasserted): the divider text alone
+    // would still read "ROUND 1 · 3 events" even if the row CONTENT stayed stuck on round 2's own
+    // rows (or on nothing) — a bug that changed the divider without actually re-scoping `events`
+    // would slip past the assertions above. Round 1's freshly-selected replay starts at cursorId 0
+    // (nothing folded yet, `eventsUpToCursor`'s own contract), so the row list must be genuinely
+    // EMPTY — never round 2's stale #401/#402 rows lingering, and not round 1's own #301/#302/#303
+    // either (those only appear once the cursor actually advances past them — proven separately by
+    // the interior-cursor scrub test below).
+    assert.equal(
+      feed.querySelectorAll(".feed-entry").length,
+      0,
+      "round 1's replay starts at cursor 0 (nothing folded yet) — zero rows, never a leftover round 2 row",
+    );
+    assert.doesNotMatch(feed.innerHTML, /#401|#402/, "round 2's rows must not linger after switching to round 1's replay");
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+});
+
+// engine-agent finding [0] (live-round-snapshot-skew, run e4213ded): `/api/loop/state` and
+// `/api/rounds` poll independently — a freshly-opened round can appear in the FIRST before its
+// own row has landed in the SECOND, a real (if brief) live skew window, not a fresh-DB case.
+test("#934 gate② finding [0] (WIRING via App): a freshly-opened round reported by /api/loop/state, not yet caught up in /api/rounds, falls back to the last CLOSED round's divider — never the idle 'fresh DB' caption while the navigator already reads the new round as live", async () => {
+  const rounds = [
+    {
+      roundId: 1,
+      status: "done",
+      startedAt: "2026-08-10T09:00:00Z",
+      endedAt: "2026-08-10T09:02:00Z",
+      startEventId: 0,
+      startSpendId: 0,
+      eventCount: 2,
+      schemaVersion: 1,
+      artifact: { prsMerged: 0, spendUsd: 0 },
+    },
+    // Round 2 is the OPEN round per /api/loop/state below — its own row has NOT yet landed here.
+  ];
+  const { container, unmount } = await mountSettledApp({
+    "/api/loop/state": { status: 200, body: { ...LOOP_STATE_OK, round: { id: 2, phase: "executing" } } },
+    "/api/rounds": { status: 200, body: { rounds } },
+    "/api/events": {
+      status: 200,
+      body: {
+        events: [
+          { id: 1, ts: "2026-08-10T09:00:00Z", kind: "dispatched", payload: { issue: 701 } },
+          { id: 2, ts: "2026-08-10T09:01:00Z", kind: "dispatched", payload: { issue: 702 } },
+        ],
+        lastId: 2,
+      },
+    },
+  });
+  try {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // The header navigator reads `liveRoundId` straight off the SAME `/api/loop/state` snapshot,
+    // independent of whether `/api/rounds` has caught up — it already (honestly) says round 2.
+    const pill = container.querySelector(".round-nav-pill");
+    assert.ok(pill, "the round navigator pill must render");
+    assert.match(pill.textContent ?? "", /round 2/, "the navigator's own LIVE slot reads the new round straight from /api/loop/state");
+    const feed = container.querySelector('[aria-label="activity"]');
+    assert.ok(feed, "the activity feed must render");
+    assert.doesNotMatch(
+      feed.innerHTML,
+      /Waiting for the first dispatch/,
+      "the skew window must never render the fresh-DB idle caption — round 1 genuinely closed already",
+    );
+    assert.match(
+      feed.innerHTML,
+      /ROUND 1/,
+      "falls back to the last CLOSED round (1) — the honest 'keep showing what was already in view' read, not a fabricated round 2",
+    );
+    assert.match(feed.innerHTML, /2 events/);
+    assert.match(feed.innerHTML, /#701/);
+    assert.match(feed.innerHTML, /#702/);
+  } finally {
+    await unmount();
+  }
+});
+
+// #934 (reverse-round-snapshot-skew): the SAME independent-poll skew as the
+// forward case above, but the OTHER direction — `/api/rounds` already lists the fresh round
+// `in_progress` while the still-cached `/api/loop/state` snapshot hasn't caught up (`round: null`).
+// Falling straight through to `findLastClosedRound` there showed the LAST CLOSED round while an
+// open round was already available, violating AC2's LIVE = open-round rule.
+test("#934 (WIRING via App, reverse-round-snapshot-skew): /api/rounds already lists the fresh round in_progress while /api/loop/state (not yet caught up) still reports no open round — the feed shows the OPEN round, never the stale last-CLOSED fallback", async () => {
+  const rounds = [
+    {
+      roundId: 1,
+      status: "done",
+      startedAt: "2026-08-10T09:00:00Z",
+      endedAt: "2026-08-10T09:02:00Z",
+      startEventId: 0,
+      startSpendId: 0,
+      eventCount: 2,
+      schemaVersion: 1,
+      artifact: { prsMerged: 0, spendUsd: 0 },
+    },
+    // Round 2 is already `in_progress` per /api/rounds — the still-cached /api/loop/state snapshot
+    // below just hasn't caught up to it yet (`round: null`, LOOP_STATE_OK's own default).
+    {
+      roundId: 2,
+      status: "in_progress",
+      startedAt: "2026-08-10T09:03:00Z",
+      endedAt: null,
+      startEventId: 2,
+      startSpendId: 0,
+      eventCount: 2,
+      schemaVersion: null,
+      artifact: null,
+    },
+  ];
+  const { container, unmount } = await mountSettledApp({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/rounds": { status: 200, body: { rounds } },
+    "/api/events": {
+      status: 200,
+      body: {
+        events: [
+          { id: 3, ts: "2026-08-10T09:03:00Z", kind: "dispatched", payload: { issue: 801 } },
+          { id: 4, ts: "2026-08-10T09:03:30Z", kind: "dispatched", payload: { issue: 802 } },
+        ],
+        lastId: 4,
+      },
+    },
+  });
+  try {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const feed = container.querySelector('[aria-label="activity"]');
+    assert.ok(feed, "the activity feed must render");
+    assert.doesNotMatch(
+      feed.innerHTML,
+      /ROUND 1/,
+      "must not show the stale last-CLOSED round while a genuinely open round (2) is already known to /api/rounds",
+    );
+    assert.match(
+      feed.innerHTML,
+      /ROUND 2/,
+      "the newest in_progress row is the honest middle read between the live id match and the closed fallback",
+    );
+    assert.match(feed.innerHTML, /2 events/);
+    assert.match(feed.innerHTML, /#801/);
+    assert.match(feed.innerHTML, /#802/);
+  } finally {
+    await unmount();
+  }
+});
+
+// #934 (feed-fetch-rejection): the live per-round fetch behind the
+// feed had no rejection handling at all — a failed page fetch left `events` wherever the LAST
+// successful poll left it, forever (the effect's own deps never change just because a fetch
+// failed). mock.timers is the seam (review doctrine's "no timing-dependent assertions" rule) for
+// the retry's own setTimeout — a fake clock this test ticks deterministically, never a real
+// elapsed-wall-clock wait racing anything (Controls.test.tsx's EMERGENCY STOP hold tests use the
+// same seam for their own component-owned setTimeout).
+test("#934 (WIRING via App, feed-fetch-rejection): a rejected round-scoped fetch degrades the feed to the SAME disconnected treatment a transport failure already gets, and the next retry tick recovers the rows", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const round = {
+    roundId: 1,
+    status: "in_progress",
+    startedAt: "2026-08-10T09:00:00Z",
+    endedAt: null,
+    startEventId: 0,
+    startSpendId: 0,
+    eventCount: 2,
+    schemaVersion: null,
+    artifact: null,
+  };
+  let roundFetchAttempts = 0;
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const parsed = new URL(url, "http://localhost");
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (parsed.pathname === "/api/loop/state") return json({ ...LOOP_STATE_OK, round: { id: 1, phase: "executing" } });
+    if (parsed.pathname === "/api/rounds") return json({ rounds: [round] });
+    if (parsed.pathname === "/api/spend") return json({ spend: [], lastId: 0 });
+    if (parsed.pathname === "/api/events") {
+      // `loadRoundEvents`'s own default page size (500, round-log.ts) is what distinguishes the
+      // feed's round-scoped fetch from `useEventHistory`'s bounded global-tail poll (`EVENTS_PAGE`
+      // = 200, queries.ts) — the one fetch this test rejects once, then recovers.
+      if (parsed.searchParams.get("limit") === "500") {
+        roundFetchAttempts += 1;
+        if (roundFetchAttempts === 1) return json({ error: "boom" }, 500);
+        return json({
+          events: [
+            { id: 1, ts: "2026-08-10T09:00:00Z", kind: "dispatched", payload: { issue: 901 } },
+            { id: 2, ts: "2026-08-10T09:01:00Z", kind: "dispatched", payload: { issue: 902 } },
+          ],
+          lastId: 2,
+        });
+      }
+      return json({ events: [], lastId: 0 });
+    }
+    throw new Error(`unstubbed fetch: ${url}`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
+  await Promise.allSettled([
+    client.prefetchQuery(loopStateQuery()),
+    client.prefetchQuery(eventsQuery(0)),
+    client.prefetchQuery(spendQuery(0)),
+    client.prefetchQuery(roundsQuery()),
+  ]);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={client}>
+          <App />
+        </QueryClientProvider>,
+      );
+    });
+    // Drain the round-scoped fetch's own rejection — a handful of microtask turns, no timer
+    // involved (the rejection itself is a Promise reaction, not a scheduled callback).
+    await act(async () => {
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+    let feed = container.querySelector('[aria-label="activity"]');
+    assert.ok(feed, "the activity feed must render");
+    assert.match(
+      feed.textContent ?? "",
+      /disconnected/i,
+      "a rejected round-scoped fetch must degrade the feed to the SAME disconnected treatment a transport failure already gets — never a silently empty list under a nonzero divider",
+    );
+    assert.equal(roundFetchAttempts, 1, "exactly one attempt so far — the retry must not fire before its own scheduled delay");
+
+    // Advance past the retry's own scheduled delay (POLL_MS — the SAME cadence every other live
+    // query here already polls at) and drain the retried fetch's resolution.
+    await act(async () => {
+      mock.timers.tick(POLL_MS);
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+    feed = container.querySelector('[aria-label="activity"]');
+    assert.ok(feed);
+    assert.equal(roundFetchAttempts, 2, "the retry actually re-fetched, rather than staying stuck forever");
+    assert.doesNotMatch(feed.textContent ?? "", /disconnected/i, "the retry recovers — the feed is no longer degraded");
+    assert.match(feed.innerHTML, /#901/);
+    assert.match(feed.innerHTML, /#902/);
+  } finally {
+    mock.timers.reset();
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+});
+
+test("#934 AC3 (replay, WIRING via App): entering replay for a round starts the feed at the as-of-cursor rule's own 'nothing folded yet' state — the divider shows the round's full count, but zero rows render until the cursor advances (never the whole round dumped at once)", async () => {
+  const rounds = [
+    {
+      roundId: 9,
+      status: "done",
+      startedAt: "2026-08-10T09:00:00Z",
+      endedAt: "2026-08-10T09:05:00Z",
+      startEventId: 0,
+      startSpendId: 0,
+      eventCount: 2,
+      schemaVersion: 1,
+      artifact: { prsMerged: 0, spendUsd: 0 },
+    },
+  ];
+  const { container, unmount } = await mountSettledApp({
+    "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
+    "/api/rounds": { status: 200, body: { rounds } },
+    "/api/events": {
+      status: 200,
+      body: {
+        events: [
+          { id: 1, ts: "2026-08-10T09:00:00Z", kind: "dispatched", payload: { issue: 501 } },
+          { id: 2, ts: "2026-08-10T09:01:00Z", kind: "dispatched", payload: { issue: 502 } },
+        ],
+        lastId: 2,
+      },
+    },
+  });
+  try {
+    const prevRound = container.querySelector('[aria-label="previous round"]');
+    assert.ok(prevRound, "the header round navigator's ◀ must render (round 9 is replayable)");
+    await act(async () => {
+      prevRound.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const feed = container.querySelector('[aria-label="activity"]');
+    assert.ok(feed);
+    assert.match(feed.innerHTML, /ROUND 9/);
+    assert.match(feed.innerHTML, /2 events/, "the divider's count is the round's full total, independent of the cursor");
+    assert.equal(
+      feed.querySelectorAll(".feed-entry").length,
+      0,
+      "as-of-cursor at the round's start (nothing played yet) renders zero rows",
+    );
+
+    // engine-agent finding [1] (ac3-interior-cursor-wiring-unproven): cursor 0 and the round's own
+    // END (the `?demo` case below) are both edge cases a wiring bug could pass by accident (e.g.
+    // ignoring the cursor and always rendering nothing, or always rendering everything). Driving
+    // the REAL Transport scrub bar (`realOnChange` — happy-dom's `dispatchEvent` never reaches
+    // React 19's synthetic pickup here, so this reads the actual `onChange` closure React attached
+    // to the DOM node, the same seam #927 AC1 established) to an INTERIOR cursor — id 1 of the
+    // round's 2 events — proves `eventsUpToCursor`'s id<=cursor filter is actually wired through
+    // `App`, not just correct in isolation.
+    const scrub = container.querySelector<HTMLInputElement>('[aria-label="scrub"]');
+    assert.ok(scrub, "the real Transport scrub bar must render once round 9 is selected for replay");
+    await act(async () => {
+      realOnChange(scrub)({ target: { value: "1" } });
+    });
+    const feedAtCursor1 = container.querySelector('[aria-label="activity"]');
+    assert.ok(feedAtCursor1);
+    assert.match(feedAtCursor1.innerHTML, /#501/, "event id 1 (issue #501) is at/before the cursor — it must render");
+    assert.doesNotMatch(feedAtCursor1.innerHTML, /#502/, "event id 2 (issue #502) is PAST the cursor — it must not render yet");
+  } finally {
+    await unmount();
+  }
+});
+
+test("#934 AC3 (?demo, WIRING via DemoApp): the demo bundle's round renders with the divider and its events (demo opens at the round's END position — the as-of-cursor rule's other real value)", async () => {
+  const html = await renderSettledDemoApp(demoBundleFixture());
+  assert.match(html, /feed-round-divider/);
+  assert.match(html, new RegExp(`ROUND ${DEMO_ROUND_ID}`));
+  assert.match(html, /2 events/);
+  assert.match(html, /#1\b/, "the fixture's issue #1 (folded into the demo round) must render in the feed");
+});
+
+test("#934 AC3: the feed's relative timestamps read the SAME replay-cursor clock the needs-attention strip already uses in ?demo — the two panels agree on a CONCRETE, independently-computable age, not just 'not days old'", async () => {
+  // engine-agent finding [1]: the previous version of this test asserted only the ABSENCE of a
+  // wrong pattern ("Nd ago") — an arbitrary non-wall clock (e.g. a frozen epoch, or the round's
+  // OWN startedAt instead of the cursor) could pass that check too, without actually proving the
+  // two panels share one clock. This bundle gives both panels the SAME open item (PR #6011) to
+  // read an age off, at a fixed, unambiguous 5-minute (300s) delta from the round's own last
+  // event — which is exactly `replay.asOf` at demo's default END position (`cursorTs`'s own doc)
+  // — so both panels must independently land on "5m", never a coincidence.
+  const base = demoBundleFixture();
+  const round = {
+    roundId: 555111,
+    status: "done" as const,
+    startedAt: "2026-08-09T09:00:00Z",
+    endedAt: "2026-08-09T09:05:00Z",
+    startEventId: 0,
+    startSpendId: 0,
+    eventCount: 2,
+    schemaVersion: 1,
+    artifact: { prsMerged: 0, spendUsd: 0 },
+  };
+  const bundle: DemoBundle = {
+    ...base,
+    rounds: [round],
+    events: [
+      // `drive-needs-human`'s own sentence (copy.ts) tokens the PR number, not the issue — #6011
+      // is the distinguishable id this test actually greps for.
+      { id: 1, ts: "2026-08-09T09:00:00Z", kind: "drive-needs-human", payload: { issue: 601, pr: 6011 } },
+      // The round's LAST event — its own `ts` becomes `replay.asOf` at demo's default (END)
+      // position, exactly 5 minutes after PR #6011 above.
+      { id: 2, ts: "2026-08-09T09:05:00Z", kind: "dispatched", payload: { issue: 602 } },
+    ],
+    spend: [],
+  };
+  const html = await renderSettledDemoApp(bundle);
+  const stripSection = (html.split('aria-label="needs attention"')[1] ?? "").slice(0, 4000);
+  const feedSection = (html.split('aria-label="activity"')[1] ?? "").slice(0, 4000);
+  assert.match(stripSection, /6011/, "the strip must render the still-open PR #6011 item");
+  assert.match(feedSection, /6011/, "the feed must render the same PR #6011 event");
+  // The strip's single row is also the fold's oldest (and only) one, so it renders the #925 AC4
+  // compact emphasis form (numeral only, no ' ago' suffix) — `NeedsAttention.tsx`'s own
+  // `ageClassName`/`ageText`. `[^>]*` between `tabindex="0"` and the numeral tolerates the Radix
+  // tooltip trigger's own extra `data-state` attribute (`EntityRef`'s real markup, not a
+  // hand-simplified stand-in).
+  assert.match(
+    stripSection,
+    /<span class="data attention-age attention-age-emphasis" tabindex="0"[^>]*>5m<\/span>/,
+    "the strip's age box must read exactly 5m off the replay cursor, not the live wall clock",
+  );
+  // The feed reads the identical cursor through `formatRelative` (format.ts), which always keeps
+  // the ' ago' suffix — `ActivityFeed.tsx`'s own `.feed-ts` span.
+  assert.match(
+    feedSection,
+    /<span class="muted data feed-ts">5m ago<\/span>/,
+    "the feed's timestamp must read the SAME 5m off the SAME replay cursor — never the live wall clock's real elapsed days",
+  );
+});
+
+// ── #934 AC5 tests live in ../../docs/frontend-design.md itself — no dashboard code asserts docs
+// prose; see that file's §3 D + strip paragraph.
 
 // ── #766 gate② finding [1] (header-replay-total-is-round-scoped): resolveRoundSpend ────────────
 //
@@ -3599,6 +4203,73 @@ test("AC1: every panel-head title resolves Fraunces/uppercase, the mockup-scale 
       const headComputed = getComputedStyle(head);
       assert.equal(headComputed.borderBottomWidth, "1px", `"${key}" .panel-head border-bottom-width`);
     }
+  } finally {
+    await cleanup();
+  }
+});
+
+// engine-agent finding [0] (ac2-divider-sub-label-style, run 80282f81): the round-in-view
+// divider's own tests (`ActivityFeed.test.tsx`) only ever asserted markup/text — the `.data`/
+// `.muted` classes it used to carry supplied SOME of the shared chapter-mark idiom
+// (`.cost-panel-group h4`, "BY STAGE"/"BY MODEL") but not `text-transform: uppercase` or
+// `letter-spacing: 0.04em`, leaving it at the inherited 13px body-caption styling — a cascade gap
+// no markup-only test could ever catch. `panels.css` now declares `.feed-round-divider` alongside
+// `.cost-panel-group h4` in one shared rule (never two independently-value-pinned copies that
+// could drift); this test proves the REAL rendered result, not just the source rule text.
+//
+// engine-agent finding [2] (divider-spacing-oracle, run e4213ded): the first version of this test
+// only compared the divider against `.cost-panel-group h4` — since both resolve through the SAME
+// shared selector, that comparison stays equal under ANY mutation to the shared declaration (e.g.
+// 0.04em -> 0.05em), never catching a wrong value. `DIVIDER_LETTER_SPACING_PX`/`DIVIDER_FONT_SIZE_PX`
+// below are the AC's own golden values (0.04em resolved at the real 13px body-caption size this
+// component inherits — the exact figures a probe render confirmed), asserted directly rather than
+// re-derived from the rule under test.
+const DIVIDER_FONT_SIZE_PX = 13;
+const DIVIDER_LETTER_SPACING_PX = 0.52; // 0.04em at 13px
+
+test("#934 gate② finding [0]: the round-in-view divider resolves the SAME chapter-mark sub-label styling as BY STAGE/BY MODEL — mono, uppercase, tracked, muted — never the inherited body-caption default", async () => {
+  const round: Round = {
+    roundId: 42,
+    status: "in_progress",
+    startedAt: "2026-08-06T09:15:00Z",
+    endedAt: null,
+    startEventId: 0,
+    startSpendId: 0,
+    eventCount: 3,
+    schemaVersion: null,
+    artifact: null,
+  };
+  const { container, cleanup } = await mountAppWithCascade(minimalAppViewModel({ feedRound: round, feedEvents: [] }));
+  try {
+    const divider = container.querySelector(".feed-round-divider");
+    assert.ok(divider, "the round-in-view divider must render");
+    const groupHeading = container.querySelector(".cost-panel-group h4");
+    assert.ok(groupHeading, "the BY STAGE/BY MODEL sub-label must render as the sibling idiom to compare against");
+    const dividerComputed = getComputedStyle(divider as Element);
+    const groupComputed = getComputedStyle(groupHeading as Element);
+    assert.match(dividerComputed.fontFamily, /JetBrains Mono/, "divider font-family must actually resolve the mono stack");
+    assert.equal(dividerComputed.fontFamily, groupComputed.fontFamily, "divider font-family must match the chapter-mark idiom");
+    assert.equal(dividerComputed.textTransform, "uppercase", "divider text-transform");
+    // finding [2]: exact golden values, not a same-rule self-comparison — a mutation to the shared
+    // declaration's own numbers now fails this assertion directly.
+    assert.equal(dividerComputed.fontSize, `${DIVIDER_FONT_SIZE_PX}px`, "divider font-size (scale)");
+    assert.equal(
+      Number.parseFloat(dividerComputed.letterSpacing),
+      DIVIDER_LETTER_SPACING_PX,
+      "divider letter-spacing must resolve the AC's exact 0.04em (0.52px at 13px), not just 'not normal'",
+    );
+    // Kept alongside the exact pin above as a residual safety net: proves the divider and the
+    // sub-label still share ONE declaration rather than two independently-maintained copies that
+    // could diverge from each other even if a future refactor keeps each individually correct.
+    assert.equal(dividerComputed.letterSpacing, groupComputed.letterSpacing, "divider letter-spacing must match the chapter-mark idiom");
+    // `--bark-text` is `light-dark()` (tokens.css) — happy-dom echoes it unresolved for both
+    // sides equally, so this proves the divider and the sub-label reference the SAME color
+    // source, not that either one's real pixel color has been independently verified here.
+    assert.equal(
+      dividerComputed.color,
+      groupComputed.color,
+      "divider color must reference the same --bark-text source as the chapter-mark idiom",
+    );
   } finally {
     await cleanup();
   }

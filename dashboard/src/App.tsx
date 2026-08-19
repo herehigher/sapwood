@@ -2,7 +2,7 @@ import { FastForward } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import { useEffect, useRef, useState } from "react";
 import { fetchEvents } from "./api/client.ts";
-import { useDemoFixture, useEventHistory, useLoopState, useRounds, useSpendHistory } from "./api/queries.ts";
+import { POLL_MS, useDemoFixture, useEventHistory, useLoopState, useRounds, useSpendHistory } from "./api/queries.ts";
 import type { EventsPage, Lane, Round, SpendRow } from "./api/types.ts";
 import { BUILD_SHA, BUILD_TIME } from "./build-info.ts";
 import { ActivityFeed } from "./components/ActivityFeed.tsx";
@@ -200,10 +200,16 @@ export function resolveInspectorRound(rounds: readonly Round[], liveRoundId: num
  * effect — factored out (the same treatment `replay/useReplay.ts`'s `loadRoundLog` already gets)
  * so a test can call it directly instead of mounting a component to reach an effect's inline
  * promise. Delegates straight to `replay/round-log.ts`'s `loadRoundEvents` — the SAME mechanism
- * replay's one-time full-round load already uses — with `ceilingId: null`: this only ever loads
- * the CURRENT open round (a closed round's own events already flow through `useReplay`'s
- * round-scoped `roundEvents`, wired in below), and an open round has no NEXT round yet to bound
- * it, so "no ceiling" is the honest boundary, not a missing one.
+ * replay's one-time full-round load already uses. `ceilingId` defaults `null` — the drawer's own
+ * caller always passes the genuinely CURRENT open round (a closed round's own events already flow
+ * through `useReplay`'s round-scoped `roundEvents` instead), which has no NEXT round yet to bound
+ * it, so "no ceiling" is the honest boundary there. #934 gate② finding [1]
+ * (feed-loader-overcollects-round): the activity feed's own caller can land on a CLOSED round
+ * (`resolveLiveFeedRound`'s idle/skew fallback) that DOES have a real next round — it passes
+ * `roundEventCeiling`'s own id explicitly rather than relying on this default. Either way,
+ * `loadRoundEvents` itself now also hard-clamps to `round.eventCount` regardless of `ceilingId`
+ * (that function's own doc) — belt-and-braces once an id-based ceiling isn't available yet either
+ * (a round newer than `ceilingId` can bound hasn't appeared in `/api/rounds` at all).
  *
  * Unlike `useEventHistory`'s `events` (window-capped at `MAX_EVENT_HISTORY`, `api/queries.ts`),
  * `loadRoundEvents` takes no window parameter at all — it keeps paging `/api/events` until
@@ -213,37 +219,72 @@ export function resolveInspectorRound(rounds: readonly Round[], liveRoundId: num
 export function loadInspectorRoundEvents(
   round: Round,
   fetchEventsPage: (after: number, limit: number) => Promise<EventsPage> = (after, limit) => fetchEvents({ after, limit }),
+  ceilingId: number | null = null,
 ): Promise<DomainEvent[]> {
-  return loadRoundEvents(round, null, fetchEventsPage);
+  return loadRoundEvents(round, ceilingId, fetchEventsPage);
 }
 
 /**
- * #868 gate② finding [1]: the drawer's own live-round-scoped event source. `round: null` (drawer
- * closed, or the live round hasn't appeared in `/api/rounds` yet) returns `[]` without fetching —
- * the same "nothing to load" posture `useReplay`'s own load effect takes for
- * `selectedRoundId === null`. Re-fetches whenever the round's identity OR its own `eventCount`
- * changes — `/api/rounds`' 3 s poll recomputes `eventCount` live for the currently open round
- * (`engine/src/state/state.ts`'s `listRounds` doc), so the drawer's counts keep pace with a round
- * still in progress while it's open. Mirrors `useReplay.ts`'s `resolveActiveLog`: a result whose
- * OWN round no longer matches the round CURRENTLY requested reads as absent (empty), never a
- * stale prior round's counts shown under a freshly-opened round's drawer.
+ * #868 gate② finding [1]: the drawer's own live-round-scoped event source, also reused by #934's
+ * activity feed for its own live per-round fetch. `round: null` (drawer closed, or the round
+ * hasn't appeared in `/api/rounds` yet) returns `[]` without fetching — the same "nothing to load"
+ * posture `useReplay`'s own load effect takes for `selectedRoundId === null`. Re-fetches whenever
+ * the round's identity, its own `eventCount`, OR `ceilingId` changes — `/api/rounds`' 3 s poll
+ * recomputes `eventCount` live for the currently open round (`engine/src/state/state.ts`'s
+ * `listRounds` doc), so a still-in-progress round's counts keep pace with it. Mirrors
+ * `useReplay.ts`'s `resolveActiveLog`: a result whose OWN round no longer matches the round
+ * CURRENTLY requested reads as absent (empty), never a stale prior round's counts shown under a
+ * freshly-opened round's drawer/feed. `ceilingId` defaults `null` — see `loadInspectorRoundEvents`'s
+ * own doc for when a caller supplies one instead.
+ *
+ * #934 (feed-fetch-rejection): the fetch above had no rejection
+ * handling — a page that failed after an earlier one had already succeeded left `state` (and so
+ * the returned `events`) exactly where that last success left it, forever: the effect's own deps
+ * (`round.roundId`/`round.eventCount`/`ceilingId`) never change just because a fetch failed, so
+ * nothing else was left to re-trigger it. `error` is now exposed so a caller can render the same
+ * degraded treatment a transport failure already gets elsewhere in this app (`disconnected`),
+ * rather than a feed that looks merely quiet under a nonzero round divider. `retryNonce` — bumped
+ * from a `setTimeout` armed only on rejection — is the one thing this effect adds to its own deps
+ * purely to force that retry, at the SAME `POLL_MS` cadence every other live query here already
+ * polls at, not a new unbounded retry loop of its own: a rejection never leaves the feed
+ * permanently empty, only until the next tick recovers `events` or reschedules another retry.
  */
-export function useInspectorRoundEvents(round: Round | null): DomainEvent[] {
-  const [state, setState] = useState<{ roundId: number | null; events: DomainEvent[] }>({ roundId: null, events: [] });
+export function useInspectorRoundEvents(round: Round | null, ceilingId: number | null = null): { events: DomainEvent[]; error: boolean } {
+  const [state, setState] = useState<{ roundId: number | null; events: DomainEvent[]; error: boolean }>({
+    roundId: null,
+    events: [],
+    error: false,
+  });
+  const [retryNonce, setRetryNonce] = useState(0);
   // `round` itself is a fresh object reference every `/api/rounds` poll — its own `roundId`/
-  // `eventCount` are the only two fields that decide whether a re-fetch is warranted.
+  // `eventCount` (plus the caller-supplied `ceilingId`/the rejection-driven `retryNonce`) are the
+  // only fields that decide whether a re-fetch is warranted.
   // biome-ignore lint/correctness/useExhaustiveDependencies: see the comment above.
   useEffect(() => {
     if (!round) return;
     let cancelled = false;
-    loadInspectorRoundEvents(round).then((events) => {
-      if (!cancelled) setState({ roundId: round.roundId, events });
-    });
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    loadInspectorRoundEvents(round, undefined, ceilingId).then(
+      (events) => {
+        if (!cancelled) setState({ roundId: round.roundId, events, error: false });
+      },
+      () => {
+        if (cancelled) return;
+        setState((prev) => ({ ...prev, error: true }));
+        retryTimer = setTimeout(() => {
+          if (!cancelled) setRetryNonce((n) => n + 1);
+        }, POLL_MS);
+      },
+    );
     return () => {
       cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [round?.roundId, round?.eventCount]);
-  return round && state.roundId === round.roundId ? state.events : [];
+  }, [round?.roundId, round?.eventCount, ceilingId, retryNonce]);
+  return {
+    events: round && state.roundId === round.roundId ? state.events : [],
+    error: state.error,
+  };
 }
 
 /**
@@ -254,6 +295,55 @@ export function useInspectorRoundEvents(round: Round | null): DomainEvent[] {
  */
 export function findLastClosedRound(rounds: readonly Round[]): Round | null {
   return [...rounds].filter((r) => r.status === "done").sort((a, b) => b.roundId - a.roundId)[0] ?? null;
+}
+
+/**
+ * #934: the activity feed's LIVE round-in-view. Precedence: the live snapshot's own round id
+ * (`liveRoundId`) match in `rounds` first; then the newest `in_progress` row; then (idle/standby,
+ * nothing open) the last CLOSED round; `null` only once no round exists at all (fresh DB).
+ *
+ * `/api/loop/state` and `/api/rounds` poll independently, so either can lead the other:
+ *
+ * #934 gate② finding [0] (live-round-snapshot-skew): a freshly-opened round can appear in the
+ * FIRST (`liveRoundId`) before its own row has landed in the SECOND (`rounds`). Falling straight
+ * through to `null` there used to misrender the feed's idle "Waiting for the first dispatch"
+ * caption while the header navigator, reading the very same live snapshot, already said "round N
+ * · live" — a live contradiction between the two panels.
+ *
+ * #934 (reverse-round-snapshot-skew): the REVERSE also happens — `rounds` can
+ * already list the new round `in_progress` while the still-cached `loop.state` snapshot has not
+ * caught up and reports `round: null`. Falling straight through to `findLastClosedRound` there
+ * showed the LAST CLOSED round while an open round was already available, violating AC2's LIVE =
+ * open-round rule. The newest `in_progress` row is the honest middle step between "the live id
+ * match" and "nothing open at all": in this skew window it IS the open round, just not yet
+ * confirmed by `liveRoundId`.
+ *
+ * Falling back to the last CLOSED round (only once no `in_progress` row exists either) is the
+ * honest "keep showing whatever was already in view": the round that just closed to make room for
+ * the new one is, by construction, already the newest closed row by the time the new one opens, so
+ * this is never a stale guess — only a genuinely fresh database (no round has EVER closed, none
+ * open) still falls through to `null` here.
+ */
+export function resolveLiveFeedRound(rounds: readonly Round[], liveRoundId: number | null): Round | null {
+  if (liveRoundId !== null) {
+    const open = rounds.find((r) => r.roundId === liveRoundId);
+    if (open) return open;
+  }
+  const newestInProgress = [...rounds].filter((r) => r.status === "in_progress").sort((a, b) => b.roundId - a.roundId)[0];
+  if (newestInProgress) return newestInProgress;
+  return findLastClosedRound(rounds);
+}
+
+/**
+ * #934: REPLAY/`?demo`'s as-of-cursor filter over a round's own FULL log (`replay.roundEvents`/
+ * `useDemoReplay`'s `roundEvents` — never the bounded `state.events` fold that `reducer.ts`'s
+ * `foldReplay` caps at `DEFAULT_EVENT_WINDOW`, exactly the "bounded live tail" the issue's own
+ * "What" bans reading the feed from, since it could silently truncate a round longer than that
+ * window). `cursorId` is `player.ts`'s own "last folded event's id, 0 before anything has folded"
+ * — 0 means nothing is visible yet, not "no ceiling".
+ */
+export function eventsUpToCursor(events: readonly DomainEvent[], cursorId: number): DomainEvent[] {
+  return cursorId <= 0 ? [] : events.filter((e) => e.id <= cursorId);
 }
 
 /**
@@ -449,8 +539,8 @@ type AppViewModel = {
   setInspectorNode: Dispatch<SetStateAction<StageNode | null>>;
   inspectorArtifact: unknown;
   /** #868 gate② finding [1]: the round-scoped source for the drawer's Arch review/Verify
-   *  event-derived counts — NEVER `activeEvents` (the shared display tail: process-wide,
-   *  window-bounded, and in live mode not filtered to the open round at all). Live mode reads
+   *  event-derived counts — NEVER `resolveActiveFold`'s own `events` (the shared display tail:
+   *  process-wide, window-bounded, and in live mode not filtered to the open round at all). Live mode reads
    *  `useInspectorRoundEvents`'s own round-scoped fetch; replay/demo read `replay.roundEvents`
    *  (the selected round's already-loaded, uncapped full log) — see those two hooks' own docs. */
   inspectorEvents: DomainEvent[];
@@ -465,9 +555,24 @@ type AppViewModel = {
   replay: ReplayView;
   activeHero: HeroState;
   activeSteps: FoldStep[];
-  activeEvents: DomainEvent[];
   activeTitles: EntityTitles;
   activeOpenAttention: DomainEvent[];
+  /** #934: the activity feed's round-in-view — LIVE the open round (or the last closed one while
+   *  idle/standby, `resolveLiveFeedRound`), REPLAY/`?demo` the selected round. `null` only before
+   *  any round exists at all. */
+  feedRound: Round | null;
+  /** #934: that round's own events — LIVE the per-round fetch (`useInspectorRoundEvents`), REPLAY/
+   *  `?demo` that round's full log filtered to the replay cursor (`eventsUpToCursor`). NEVER
+   *  `resolveActiveFold`'s own `events` (the shared, process-wide, window-bounded display tail —
+   *  no other panel this function renders needs raw events at all, so that field never reaches
+   *  `appContent`). */
+  feedEvents: DomainEvent[];
+  /** #934 (feed-fetch-rejection): the live per-round fetch behind `feedEvents` rejected and hasn't
+   *  yet recovered — ORed into the panel's own `disconnected` prop so a stuck failure renders the
+   *  feed's existing degraded treatment instead of a silent, permanently-empty list under a
+   *  nonzero round divider. Always `false` in replay/`?demo` (`feedEvents` there reads an
+   *  already-loaded log, never this live fetch). */
+  feedError: boolean;
   /** The header meter's LIVE spend snapshot — used only in live mode; in replay `roundSpend`
    *  below always wins (Header.tsx's own `RoundSpend`-overrides-`SpendFacts` contract). */
   spendFacts: SpendFacts | undefined;
@@ -514,9 +619,11 @@ export function appContent(vm: AppViewModel) {
     replay,
     activeHero,
     activeSteps,
-    activeEvents,
     activeTitles,
     activeOpenAttention,
+    feedRound,
+    feedEvents,
+    feedError,
     spendFacts,
     roundSpend,
     estUsd,
@@ -665,11 +772,19 @@ export function appContent(vm: AppViewModel) {
         />
 
         <ActivityFeed
-          events={activeEvents}
-          pinnedAttention={activeOpenAttention}
+          events={feedEvents}
+          round={feedRound}
           titles={activeTitles}
           repoUrl={repoUrl}
-          disconnected={disconnected}
+          // #934 (feed-fetch-rejection): `feedError` (the live per-round fetch's own rejection,
+          // never the whole-transport `disconnected`) ORs in here — a stuck feed fetch degrades
+          // this panel alone, without misreporting the rest of the app as disconnected too.
+          disconnected={disconnected || feedError}
+          // #934 AC3: the SAME replay-cursor clock the needs-attention strip/Hero staleness
+          // caption already use (#925 AC4/#895 item 1) — never the live wall clock, which used to
+          // read a `?demo`/replay fixture recorded days ago as "8d ago" while the strip (bound to
+          // `replay.asOf`) read a sane "1h ago" for the same moment (PO witness 2026-08-18).
+          now={mode === "replay" && replay.asOf ? new Date(replay.asOf) : clock}
         />
 
         <CostStrip today={costToday} round={costRound} />
@@ -691,7 +806,7 @@ export function appContent(vm: AppViewModel) {
         {/* §6 phase inspector (#861) — unlike ConfigDrawer, this is NOT live-only: §6's own mode
          *  purity rule binds it to whichever round (live open, or replay cursor) is active.
          *  #868 gate② finding [1]: `events` is `inspectorEvents` (the round-scoped source), NEVER
-         *  `activeEvents` — the shared display tail, process-wide and window-bounded. */}
+         *  the shared display tail — process-wide and window-bounded. */}
         <PhaseInspectorDrawer
           node={inspectorNode}
           onClose={() => setInspectorNode(null)}
@@ -746,7 +861,6 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
   const {
     hero: activeHero,
     steps: activeSteps,
-    events: activeEvents,
     titles: activeTitles,
     openAttention: activeOpenAttention,
   } = resolveActiveFold(mode, replay.position, events, initialReplayState(lanesMax));
@@ -834,8 +948,28 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
   // `replay.roundEvents`, the selected round's own already-loaded, uncapped full log (`useReplay`'s
   // own doc) rather than a second parallel fetch.
   const inspectorRound = resolveInspectorRound(allRounds, loop.data?.round?.id ?? null);
-  const inspectorLiveEvents = useInspectorRoundEvents(mode === "live" && inspectorNode !== null ? inspectorRound : null);
+  const { events: inspectorLiveEvents } = useInspectorRoundEvents(mode === "live" && inspectorNode !== null ? inspectorRound : null);
   const inspectorEvents = mode === "live" ? inspectorLiveEvents : replay.roundEvents;
+
+  // #934: the activity feed's round-in-view + its own events — LIVE the open round (or the last
+  // closed one while idle/standby, `resolveLiveFeedRound`) fetched fresh via the SAME per-round
+  // mechanism the inspector drawer uses (`useInspectorRoundEvents`, generic over which round —
+  // this is a second, independent call, not gated on `inspectorNode`, so the feed's divider count
+  // stays live even with the drawer closed); REPLAY/`?demo` that round's already-loaded full log
+  // filtered to the replay cursor (`eventsUpToCursor`) — never `resolveActiveFold`'s own `events`,
+  // the shared process-wide, window-bounded display tail (`ActivityFeed.tsx`'s own doc).
+  const feedRound = mode === "live" ? resolveLiveFeedRound(allRounds, loop.data?.round?.id ?? null) : selectedRound;
+  // #934 gate② finding [1] (feed-loader-overcollects-round): UNLIKE the drawer's own caller above
+  // (always the genuinely-open round, honestly ceiling-less), `feedRound` can resolve to a CLOSED
+  // fallback round (`resolveLiveFeedRound`'s idle/skew branch) — one that DOES have a real next
+  // round. `roundEventCeiling` bounds the fetch at that next round's own `startEventId` whenever
+  // `allRounds` already knows about it; `loadRoundEvents`'s own `eventCount` clamp (that
+  // function's doc) is the remaining backstop for the narrower window where the next round hasn't
+  // appeared in `/api/rounds` yet either.
+  const feedCeilingId = mode === "live" && feedRound ? roundEventCeiling(feedRound, allRounds) : null;
+  const { events: feedLiveEvents, error: feedLiveError } = useInspectorRoundEvents(mode === "live" ? feedRound : null, feedCeilingId);
+  const feedEvents = mode === "live" ? feedLiveEvents : eventsUpToCursor(replay.roundEvents, replay.position?.cursorId ?? 0);
+  const feedError = mode === "live" && feedLiveError;
 
   return appContent({
     clock,
@@ -859,9 +993,11 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
     replay,
     activeHero,
     activeSteps,
-    activeEvents,
     activeTitles,
     activeOpenAttention,
+    feedRound,
+    feedEvents,
+    feedError,
     spendFacts: loop.data?.spend,
     roundSpend,
     estUsd: mode === "live" ? lanesEstUsd : undefined,
@@ -909,7 +1045,6 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
   const {
     hero: activeHero,
     steps: activeSteps,
-    events: activeEvents,
     titles: activeTitles,
     openAttention: activeOpenAttention,
   } = resolveActiveFold(mode, replay.position, emptyLive, initialReplayState(lanesMax));
@@ -958,6 +1093,10 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
       : undefined;
   // #861: demo mode has no live open round at all — see this function's own doc.
   const inspectorArtifact = resolveInspectorArtifact(mode, rounds, null, replay.selectedRoundId);
+  // #934: same as `LiveApp` — the round-in-view is the selected round, its events the round's own
+  // log filtered to the replay cursor (`eventsUpToCursor`), never the shared display tail.
+  const feedRound = selectedRound;
+  const feedEvents = eventsUpToCursor(replay.roundEvents, replay.position?.cursorId ?? 0);
 
   return appContent({
     clock,
@@ -985,9 +1124,13 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
     replay,
     activeHero,
     activeSteps,
-    activeEvents,
     activeTitles,
     activeOpenAttention,
+    feedRound,
+    feedEvents,
+    // #934 (feed-fetch-rejection): demo mode has no live per-round fetch to reject at all — see
+    // `feedError`'s own doc on `AppViewModel`.
+    feedError: false,
     spendFacts: bundle?.loopState.spend,
     roundSpend,
     // #890: demo mode is always "replay" (this function's own doc) — no live lane exists to sum

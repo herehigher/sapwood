@@ -1,8 +1,10 @@
 import { useState } from "react";
+import type { Round } from "../api/types.ts";
 import { copyFor, type EntityToken, hasAttention, type SentencePart } from "../copy.ts";
 import type { DomainEvent } from "../domain-event.ts";
 import type { EntityTitles } from "../entities.ts";
 import { formatRelative } from "../format.ts";
+import { formatAbsoluteTime } from "../format-time.ts";
 import { EntityRef } from "./EntityRef.tsx";
 import { StateGlyph } from "./icons.tsx";
 
@@ -15,21 +17,30 @@ function isTelemetryKind(kind: string): boolean {
 
 /** #722: the feed panel gets its own scroll container (`.feed-scroll`, panels.css) rather than
  *  driving the whole page's height, but a scroll container alone still leaves thousands of `<li>`
- *  DOM rows mounted — this caps what actually renders. Newest-first, pinned entries exempt (their
- *  own contract, unchanged). Matches `EVENTS_PAGE` (queries.ts) — one fetched page is a "sane
- *  window" per the issue, no virtualization library needed at this size. */
+ *  DOM rows mounted — this caps what actually renders. Newest-first, applied WITHIN the round in
+ *  view (#934 — a round's own event count is normally far below this). Matches `EVENTS_PAGE`
+ *  (queries.ts) — one fetched page is a "sane window" per the issue, no virtualization library
+ *  needed at this size. */
 export const FEED_RENDER_CAP = 200;
 
 export interface ActivityFeedProps {
-  /** The bounded recent window — routine display, newest-first, capped for memory. `DomainEvent`,
-   *  not the raw wire `LoopEvent` (#715 gate② round 5 [0]) — the parse boundary that classifies a
-   *  wire kind against copy.ts's closed `EventKind` union has already run (`queries.ts`'s
-   *  `accumulateEventsPage`) by the time events reach this component. */
+  /** The round-in-view's own events. `DomainEvent`, not the raw wire `LoopEvent` (#715 gate②
+   *  round 5 [0]) — the parse boundary that classifies a wire kind against copy.ts's closed
+   *  `EventKind` union has already run (`queries.ts`'s `accumulateEventsPage`) by the time events
+   *  reach this component. #934: sourced from the same durable per-round fetch §3 E's round
+   *  panel/cost strip already use — LIVE the round's own `/api/rounds`-scoped events, REPLAY/
+   *  `?demo` that round's events up to the replay cursor (§11's as-of-cursor rule) — never a
+   *  client-side filter of the bounded live tail, which would silently truncate a round longer
+   *  than that window. */
   events: DomainEvent[];
-  /** Durable, NEVER bounded by the display window (§715 gate② [0]) — `useEventHistory`'s
-   *  `foldOpenAttention` accumulator, folded incrementally over the WHOLE history so an
-   *  escalation that ages out of `events` stays pinned until its own resolution clears it. */
-  pinnedAttention: DomainEvent[];
+  /** The round the header's navigator is currently showing (#889 is the pager; this component
+   *  renders no pager of its own) — LIVE the open round, or the last closed one while the engine
+   *  is idle/standby; REPLAY/`?demo` the selected round. `null` only when no round exists yet at
+   *  all (fresh DB) — the feed then renders the idle caption instead of a divider. Drives the
+   *  "ROUND N · started · n events" divider; `round.eventCount` (not `events.length`) is the
+   *  divider's count — the round's own full total, unaffected by the telemetry toggle or the
+   *  render cap below. */
+  round: Round | null;
   titles: EntityTitles;
   repoUrl?: string | undefined;
   disconnected?: boolean;
@@ -107,12 +118,10 @@ function FeedEntry({ event, titles, repoUrl, now }: { event: DomainEvent; titles
   );
 }
 
-export function ActivityFeed({ events, pinnedAttention, titles, repoUrl, disconnected, now }: ActivityFeedProps) {
+export function ActivityFeed({ events, round, titles, repoUrl, disconnected, now }: ActivityFeedProps) {
   const clock = now ?? new Date();
   // #893: telemetry (heartbeat/bookkeeping) rows are collapsed from the default view — the feed
-  // shows narrative, telemetry is opt-in. A pinned attention row is never telemetry-tier (every
-  // COPY entry carrying `attention` is narrative), so this has no interaction with the pin
-  // contract below.
+  // shows narrative, telemetry is opt-in.
   const [showTelemetry, setShowTelemetry] = useState(false);
   if (disconnected) {
     return (
@@ -126,7 +135,11 @@ export function ActivityFeed({ events, pinnedAttention, titles, repoUrl, disconn
       </section>
     );
   }
-  if (events.length === 0 && pinnedAttention.length === 0) {
+  // #934: no round in view at all (fresh DB, nothing has ever run) is the only honest "nothing to
+  // show" case now — once a round exists, an empty `events` (its own fetch still loading, or a
+  // round that has genuinely produced nothing yet) still renders the panel + divider below rather
+  // than this caption, so a resolving per-round fetch never flashes the idle message.
+  if (events.length === 0 && round === null) {
     return (
       <section className="panel activity-feed" aria-label="activity">
         <div className="panel-head">
@@ -136,56 +149,32 @@ export function ActivityFeed({ events, pinnedAttention, titles, repoUrl, disconn
       </section>
     );
   }
-  // Needs-human-class events pin to the top until their own resolution clears them (§3's
-  // pre-strip feed convention). #361 landed the dedicated needs-attention strip alongside this —
-  // that surface is now the primary place to see what's open; this feed keeps its own pin too,
-  // since the pinned item is still a real feed entry and the feed reads fine on its own.
-  // `pinnedAttention` is the caller's DURABLE fold (`foldOpenAttention`, over the whole history,
-  // never bounded by `events`' display window — #715 gate② [0]): an escalation that ages out of
-  // the recent window must still stay pinned until its own resolution clears it, which a fold
-  // computed only from the bounded `events` array could never guarantee. Dedupe by id against the
-  // bounded window — a pinned item that is ALSO still within the recent window must render once,
-  // in its pinned position, not twice.
-  const pinnedIds = new Set(pinnedAttention.map((e) => e.id));
-  const pinned = [...pinnedAttention].sort((a, b) => b.id - a.id);
-  const nonPinned = events.filter((e) => !pinnedIds.has(e.id));
-  // #893: honest disclosure count — computed from the FULL non-pinned set regardless of the
+  // #893: honest disclosure count — computed from the full round-in-view set regardless of the
   // toggle's current state, so the "N telemetry event(s)" wording never goes stale mid-toggle.
-  const telemetryCount = nonPinned.filter((e) => e.known && isTelemetryKind(e.kind)).length;
-  const rest = (showTelemetry ? nonPinned : nonPinned.filter((e) => !(e.known && isTelemetryKind(e.kind)))).sort((a, b) => b.id - a.id);
-  const total = pinned.length + rest.length;
-  // Pinned entries are exempt from the cap (their own durable contract, #715 gate② [0]) — an open
-  // escalation must never be silently dropped by the display cap. That means `pinned.length` alone
-  // can exceed `FEED_RENDER_CAP` (#722 gate② [0] pinned-bypasses-cap) — the cap is intentionally
-  // blown to keep every pin visible, and the disclosure below says so rather than staying silent.
-  const visibleRest = rest.slice(0, Math.max(0, FEED_RENDER_CAP - pinned.length));
-  const rendered = [...pinned, ...visibleRest];
-  // PR #900 gate② finding [0] (telemetry-visible-count): `telemetryCount` is the FULL non-pinned
-  // count, computed before FEED_RENDER_CAP truncates `rest` into `visibleRest` — with the toggle
-  // on, the disclosure must say how many telemetry rows actually rendered (`rendered`), never the
-  // pre-cap total, or "showing 201" can describe a view that only rendered 200 (or, with 200+
-  // pinned rows alone exceeding the cap, zero). With the toggle off this distinction is moot —
-  // `telemetryCount` IS the render-independent "how many are hidden" fact, since none render
-  // either way — so only the shown-state message reads off `renderedTelemetryCount`.
+  const telemetryCount = events.filter((e) => e.known && isTelemetryKind(e.kind)).length;
+  const rest = (showTelemetry ? events : events.filter((e) => !(e.known && isTelemetryKind(e.kind)))).sort((a, b) => b.id - a.id);
+  // #934: FEED_RENDER_CAP is now a plain within-round safety cap — no pinned exception to carve
+  // out (the strip is the sole "open items" surface — #934's own "Why").
+  const rendered = rest.slice(0, FEED_RENDER_CAP);
+  // PR #900 gate② finding [0] (telemetry-visible-count): `telemetryCount` is the FULL round-in-view
+  // count, computed before FEED_RENDER_CAP truncates `rest` into `rendered` — with the toggle on,
+  // the disclosure must say how many telemetry rows actually rendered, never the pre-cap total, or
+  // "showing 201" can describe a view that only rendered 200. With the toggle off this distinction
+  // is moot — `telemetryCount` IS the render-independent "how many are hidden" fact, since none
+  // render either way — so only the shown-state message reads off `renderedTelemetryCount`.
   const renderedTelemetryCount = showTelemetry ? rendered.filter((e) => e.known && isTelemetryKind(e.kind)).length : 0;
-  const pinnedExceedsCap = pinned.length > FEED_RENDER_CAP;
-  const restTruncated = rendered.length < total;
-  // A pinned row need not be among the newest — mixing it into a capped render breaks the "latest
-  // N" framing, so the note names the pinned exception instead of implying pure recency ordering.
-  let capNote: string | null = null;
-  if (pinnedExceedsCap) {
-    capNote = `showing all ${rendered.length} — ${pinned.length} pinned exceed the ${FEED_RENDER_CAP}-row display cap`;
-  } else if (restTruncated) {
-    capNote =
-      pinned.length > 0
-        ? `showing ${rendered.length} of ${total} — ${pinned.length} pinned always included, latest ${visibleRest.length} of ${rest.length} routine`
-        : `showing latest ${rendered.length} of ${total}`;
-  }
+  const restTruncated = rendered.length < rest.length;
+  const capNote: string | null = restTruncated ? `showing latest ${rendered.length} of ${rest.length}` : null;
   return (
     <section className="panel activity-feed" aria-label="activity">
       <div className="panel-head">
         <h2>activity</h2>
       </div>
+      {round && (
+        <p className="feed-round-divider">
+          ROUND {round.roundId} · {formatAbsoluteTime(round.startedAt)} · {round.eventCount} events
+        </p>
+      )}
       {capNote && <p className="muted feed-cap-note">{capNote}</p>}
       {telemetryCount > 0 && (
         <p className="muted feed-telemetry-note">
