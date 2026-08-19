@@ -8,6 +8,7 @@ import {
   changelogHasSection,
   checkLockfileVersions,
   checkManifestLockstep,
+  checkMarketplaceRef,
   checkPublishPreconditions,
   checkTagExists,
   compareSemver,
@@ -18,14 +19,18 @@ import {
   formatBuildStamp,
   isPrerelease,
   MANIFEST_PATHS,
+  MARKETPLACE_PATH,
+  marketplaceRefFor,
   moveUnreleasedToVersion,
   npmDistTag,
   type PublishContext,
   readManifestVersion,
+  readMarketplaceRef,
   runPrepare,
   runPublish,
   validateReleaseVersion,
   writeManifestVersion,
+  writeMarketplaceRef,
 } from "./release.ts";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -134,6 +139,68 @@ test("writeManifestVersion: edits only the version line, formatting otherwise un
   }
 });
 
+// ── marketplace.json ref: rewrite + lockstep check ──────────────────────────────────
+
+test("marketplaceRefFor: 0.0.0 (pre-first-release) is main, everything else is v<version>", () => {
+  assert.equal(marketplaceRefFor("0.0.0"), "main");
+  assert.equal(marketplaceRefFor("0.3.0"), "v0.3.0");
+  assert.equal(marketplaceRefFor("0.3.0-alpha.1"), "v0.3.0-alpha.1");
+});
+
+test("writeMarketplaceRef: edits only plugins[0].source.ref, formatting otherwise untouched", () => {
+  const dir = tmpRepo();
+  try {
+    const path = join(dir, "marketplace.json");
+    const original =
+      '{\n  "name": "sapwood",\n  "plugins": [\n    { "name": "sapwood", "source": { "source": "github", "repo": "x/x", "ref": "main" } }\n  ]\n}\n';
+    writeFileSync(path, original);
+    writeMarketplaceRef(path, "v0.3.0-alpha.1");
+    const updated = readFileSync(path, "utf8");
+    assert.equal(
+      updated,
+      '{\n  "name": "sapwood",\n  "plugins": [\n    { "name": "sapwood", "source": { "source": "github", "repo": "x/x", "ref": "v0.3.0-alpha.1" } }\n  ]\n}\n',
+    );
+    assert.equal(readMarketplaceRef(path), "v0.3.0-alpha.1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("checkMarketplaceRef: at 0.0.0, any ref is accepted (nothing prepared/tagged yet)", () => {
+  const dir = tmpRepo();
+  try {
+    writeFakeMarketplace(dir, "main");
+    assert.deepEqual(checkMarketplaceRef(join(dir, MARKETPLACE_PATH), "0.0.0"), { ok: true });
+    writeMarketplaceRef(join(dir, MARKETPLACE_PATH), "anything-at-all");
+    assert.deepEqual(checkMarketplaceRef(join(dir, MARKETPLACE_PATH), "0.0.0"), { ok: true });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("checkMarketplaceRef: past 0.0.0, ref must equal v<version> exactly", () => {
+  const dir = tmpRepo();
+  try {
+    writeFakeMarketplace(dir, "v0.3.0");
+    assert.deepEqual(checkMarketplaceRef(join(dir, MARKETPLACE_PATH), "0.3.0"), { ok: true });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("checkMarketplaceRef: past 0.0.0, a mismatched ref fails with both the actual and expected values", () => {
+  const dir = tmpRepo();
+  try {
+    writeFakeMarketplace(dir, "main"); // stale — never bumped by a prepare
+    const r = checkMarketplaceRef(join(dir, MARKETPLACE_PATH), "0.3.0");
+    assert.equal(r.ok, false);
+    assert.match((r as { message: string }).message, /"main"/);
+    assert.match((r as { message: string }).message, /"v0\.3\.0"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function writeFakeManifests(dir: string, versions: string[]): string[] {
   const paths = MANIFEST_PATHS.map((p) => join(dir, p));
   paths.forEach((p, i) => {
@@ -157,6 +224,20 @@ function writeFakeLockfile(repoRoot: string, version: string): void {
     },
   };
   writeFileSync(join(repoRoot, "package-lock.json"), `${JSON.stringify(lock, null, 2)}\n`);
+}
+
+// A minimal but structurally real marketplace.json — only the `plugins[0].source.ref` field
+// `checkMarketplaceRef`/`writeMarketplaceRef` actually touch, not every optional field the real
+// one carries.
+function writeFakeMarketplace(dir: string, ref: string): void {
+  const path = join(dir, MARKETPLACE_PATH);
+  mkdirSync(dirname(path), { recursive: true });
+  const marketplace = {
+    name: "sapwood",
+    owner: { name: "x" },
+    plugins: [{ name: "sapwood", source: { source: "github", repo: "x/x", ref } }],
+  };
+  writeFileSync(path, `${JSON.stringify(marketplace, null, 2)}\n`);
 }
 
 test("checkManifestLockstep: ok when all four agree", () => {
@@ -189,6 +270,15 @@ test("lockstep: the repo's own four manifests agree, and CHANGELOG has a matchin
   const version = (lockstep as { version: string }).version;
   const changelog = readFileSync(join(REPO_ROOT, "CHANGELOG.md"), "utf8");
   assert.equal(changelogHasSection(changelog, version), true, `CHANGELOG.md has no section for manifest version ${version}`);
+});
+
+test("lockstep: the repo's own marketplace.json ref agrees with the manifest version", () => {
+  const paths = MANIFEST_PATHS.map((p) => join(REPO_ROOT, p));
+  const lockstep = checkManifestLockstep(paths);
+  assert.equal(lockstep.ok, true, lockstep.ok ? "" : (lockstep as { message: string }).message);
+  const version = (lockstep as { version: string }).version;
+  const r = checkMarketplaceRef(join(REPO_ROOT, MARKETPLACE_PATH), version);
+  assert.equal(r.ok, true, r.ok ? "" : (r as { message: string }).message);
 });
 
 // ── checkLockfileVersions ───────────────────────────────────────────────────────────
@@ -375,6 +465,7 @@ function setupPublishRepo(version: string, changelog: string): string {
   writeFakeManifests(dir, [version, version, version, version]);
   writeFileSync(join(dir, "CHANGELOG.md"), changelog);
   writeFakeLockfile(dir, version);
+  writeFakeMarketplace(dir, marketplaceRefFor(version));
   return dir;
 }
 
@@ -462,6 +553,20 @@ test("checkPublishPreconditions: fails when package-lock.json disagrees with the
     const r = checkPublishPreconditions(deps);
     assert.equal(r.ok, false);
     assert.match((r as { reason: string }).reason, /package-lock/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("checkPublishPreconditions: fails when marketplace.json's ref doesn't match v<version>", () => {
+  const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
+  try {
+    writeMarketplaceRef(join(dir, MARKETPLACE_PATH), "main"); // stale — never bumped by a prepare
+    const deps: Deps = { repoRoot: dir, exec: fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }) };
+    const r = checkPublishPreconditions(deps);
+    assert.equal(r.ok, false);
+    assert.match((r as { reason: string }).reason, /marketplace\.json/);
+    assert.match((r as { reason: string }).reason, /"v0\.3\.0"/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -647,6 +752,9 @@ function setupPrepareRepo(version: string, changelog: string): string {
   const dir = tmpRepo();
   writeFakeManifests(dir, [version, version, version, version]);
   writeFileSync(join(dir, "CHANGELOG.md"), changelog);
+  // The ref written here is deliberately whatever the PRE-bump version would carry — runPrepare
+  // must always overwrite it, never trust what's already there.
+  writeFakeMarketplace(dir, marketplaceRefFor(version));
   return dir;
 }
 
@@ -758,6 +866,7 @@ test("runPrepare: succeeds end-to-end from a 0.0.0 baseline — anything valid i
     assert.equal(r.code, 0);
     assert.equal(readManifestVersion(join(dir, "package.json")), version);
     assert.deepEqual(checkLockfileVersions(dir, version), { ok: true });
+    assert.equal(readMarketplaceRef(join(dir, MARKETPLACE_PATH)), `v${version}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -780,7 +889,10 @@ test("runPrepare (real run): exact argv sequence — checkout -b, npm install, a
 
     const addCall = calls.find((c) => c.file === "git" && c.args[0] === "add");
     assert.ok(addCall);
-    assert.deepEqual([...(addCall?.args.slice(1) ?? [])].sort(), [...MANIFEST_PATHS, "package-lock.json", "CHANGELOG.md"].sort());
+    assert.deepEqual(
+      [...(addCall?.args.slice(1) ?? [])].sort(),
+      [...MANIFEST_PATHS, MARKETPLACE_PATH, "package-lock.json", "CHANGELOG.md"].sort(),
+    );
 
     const commitCall = calls.find((c) => c.file === "git" && c.args[0] === "commit");
     assert.deepEqual(commitCall?.args, ["commit", "-m", `release: v${version}`]);
