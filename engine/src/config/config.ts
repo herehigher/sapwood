@@ -650,7 +650,7 @@ const Roles = z
       // #104 (#100 gate② P3): the architecture-doc path — was hardcoded to
       // `<cwd>/docs/PLAN.md` (architect.ts's old defaultPlanMdPath), which breaks for any target
       // repo sapwood runs against that doesn't keep its architecture doc at that exact path.
-      // Defaults to "docs/PLAN.md" (this repo's own convention) but is now a real config key, ALWAYS
+      // Defaults to DEFAULT_GOAL_FILE ("docs/GOAL.md") but is now a real config key, ALWAYS
       // resolved relative to the CONFIG FILE's directory (see loadConfig below) — same #74
       // promptFile pattern, except this key always has a value (never "unset -> engine-shipped
       // default": the target repo's own doc, not a file sapwood ships). align.ts's PLAN.md read
@@ -699,7 +699,7 @@ const Roles = z
       .strict()
       .default({}),
     // #89: the PO (product-owner) peripheral — goal alignment/decomposition at round start
-    // (reads the round milestone/theme + docs/PLAN.md, creates issues) plus the round-start
+    // (reads the round milestone/theme + the goal file, creates issues) plus the round-start
     // triage pass that drafts a plan into any existing plan-less issue. Every PO-created issue
     // carries `origin:agent` + a verification plan; the PO never sets board Status=Ready (locked
     // decision 5 — only a human confirms Ready). Same #74 promptFile shape as every other role

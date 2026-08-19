@@ -1799,7 +1799,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       }
 
       // ── Alignment/decomposition pass: at most ONE session, dispatched even with an unscoped
-      // fresh round (round.milestone unset) — decomposition still has docs/PLAN.md to work from
+      // fresh round (round.milestone unset) — decomposition still has the goal file to work from
       // alone. A persisted proposal set bypasses the session entirely on a crash rerun.
       // #104: ported to peripheral.ts's shared runSessionWithRetry (outcome-check -> retry-once
       // -> visible-degradation). Same retry-once stance as plan-review.ts's reviewer sessions;

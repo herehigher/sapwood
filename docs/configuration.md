@@ -413,7 +413,7 @@ PRs are English" without hand-writing that as `CLAUDE.md` prose:
 |---|---|---|
 | `codeComments` | `en` | Working language for comments and identifier-adjacent prose the worker/fix-leg producer writes into code. |
 | `issuesAndPrs` | `en` | Working language for issue bodies, proposal/triage text, and review-comment prose the engine's peripheral roles (PO, verification-plan reviewer/drafter, architect, harvest, retro, the engine-agent reviewer) compose. |
-| `docs` | `en` | Working language for documentation files/chapters a role edits (e.g. the architect's `docs/PLAN.md` architecture-chapter proposals). |
+| `docs` | `en` | Working language for documentation files/chapters a role edits (e.g. the architect's goal-file architecture-chapter proposals). |
 
 ```yaml
 # language:

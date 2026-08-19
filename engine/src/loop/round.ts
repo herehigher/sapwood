@@ -1139,7 +1139,7 @@ async function runRoundsCore(deps: RoundDeps): Promise<RoundsResult> {
   // completed dispatch nothing (workersThisRound === 0 — the same signal the #109 throttle
   // keys on)? Standby may only engage after such a round: the probe's three API signals can
   // all be empty while the aligning phase's PO still has real work — decomposing the plan doc
-  // (align.ts's align mode reads docs/PLAN.md ALONE) into a first backlog on a fresh/unscoped
+  // (align.ts's align mode reads the goal file ALONE) into a first backlog on a fresh/unscoped
   // repo — so the first round of a run ALWAYS opens, giving the PO its decomposition shot; if
   // it drafts issues, the probe sees them (triage/Ready) and rounds continue. Only once a full
   // round came up empty AND the board is still probe-empty does the run sleep. In-memory only,
