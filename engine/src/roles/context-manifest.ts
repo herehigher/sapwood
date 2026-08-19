@@ -191,6 +191,21 @@ export interface ContextManifest {
    *  init report — both the SET of available servers and each one's actual connection status,
    *  which is closer to "availability" than a bare name list. Sorted for determinism. */
   mcpTools: string[];
+  /** #1010: the session's own init-reported EFFECTIVE host permission mode (the CLI's
+   *  `permissionMode` field on its `system/init` stream-json line) — recorded alongside
+   *  `mcpTools`/`toolInventoryHash` above with the same "prefer the session's own report" stance,
+   *  no new hashing. The engine always REQUESTS one fixed mode (`worker.ts`'s
+   *  `REQUESTED_PERMISSION_MODE`), but Claude Code can silently fall back to a different one when
+   *  that mode is unavailable — this is the honest record of what the session actually got.
+   *  `null` when the init line carried no such field (an older CLI, a parse miss, or a
+   *  crashed-before-init session), never a guess. */
+  permissionMode: string | null;
+  /** #1010: how many `<sandbox_violations>` blocks worker.ts's `countSandboxViolations` found
+   *  across this session's own denied-command `tool_result`s — the only stream-json evidence a
+   *  Bash-sandbox profile engaged (see `permissionMode`'s own doc for why no positive-engagement
+   *  field exists). Zero when none were found, never a guess; never affects the session's own
+   *  outcome. */
+  sandboxViolationCount: number;
   worktree: WorktreeGitState;
   /** Hash of the exact `--settings` JSON string passed to the CLI (guardSettings' output) —
    *  hashed rather than stored verbatim: it's fully reproducible from guardHookPath + guard
@@ -255,6 +270,13 @@ export interface ContextManifestEnv {
   promptTemplateSource?: string | null;
   /** `"<name>:<status>"` pairs or bare names — assemble() sorts, never re-derives status. */
   mcpTools: string[];
+  /** #1010: optional so existing fixtures/callers that predate this field keep compiling —
+   *  assemble() defaults an omitted value to `null`, same as `cliVersion` above. */
+  permissionMode?: string | null;
+  /** #1010: optional so existing fixtures/callers that predate this field keep compiling —
+   *  assemble() defaults an omitted value to `0`, the same honest-empty stance every other
+   *  omittable count/list field here takes. */
+  sandboxViolationCount?: number;
   worktree: WorktreeGitState;
   settingsJson: string;
   /** The guard hook file's content, for hashing — null when unreadable. Assembling a manifest
@@ -304,6 +326,8 @@ export function assembleContextManifest(env: ContextManifestEnv): ContextManifes
     toolInventoryHash: tools.length > 0 ? hashList(tools) : null,
     promptTemplateVersion: env.promptTemplateSource ? sha256(env.promptTemplateSource) : null,
     mcpTools: [...env.mcpTools].sort(),
+    permissionMode: env.permissionMode ?? null,
+    sandboxViolationCount: env.sandboxViolationCount ?? 0,
     worktree: env.worktree,
     settingsHash: sha256(env.settingsJson),
     hookHash: env.hookContent === null ? null : sha256(env.hookContent),

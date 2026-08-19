@@ -530,6 +530,14 @@ repeatedly (worth reading the surrounding `investigate`/`intervene` events for w
 actually wrong upstream). This is a supervisor-side read, not an engine threshold — no
 kind is reclassified by count; you are just choosing where to look next.
 
+**`permission-mode-mismatch` (#1010).** A lane/session's own init line reported an
+effective host permission mode different from the one the engine requested (today:
+always `auto`) — Claude Code silently falling back to a different mode (e.g. Manual,
+when auto is unavailable) can leave a headless leg under-delivering with no other
+visible signal. `sapwood events --kind permission-mode-mismatch` surfaces it; see the
+glossary for the full meaning. Never gates a lane's outcome — read it for context, not
+as an escalation.
+
 ## Known blind spot: persistent forge-fetch failure in queued arms
 
 **This is an accepted, bounded blind spot.** Several

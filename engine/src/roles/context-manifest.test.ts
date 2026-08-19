@@ -133,6 +133,25 @@ test("assembleContextManifest: mcpTools are sorted for determinism; settingsHash
   assert.equal(noHook.hookHash, null);
 });
 
+// ── #1010: permissionMode/sandboxViolationCount — the effective host permission mode plus the
+//    denied-command sandbox-violation count, recorded alongside mcpTools/toolInventoryHash. ──
+
+test("assembleContextManifest (#1010): permissionMode passes through verbatim; omitted -> null, same fakes-keep-compiling stance as cliVersion", () => {
+  const withMode = assembleContextManifest(baseEnv({ permissionMode: "dontAsk" }));
+  assert.equal(withMode.permissionMode, "dontAsk");
+  const explicitNull = assembleContextManifest(baseEnv({ permissionMode: null }));
+  assert.equal(explicitNull.permissionMode, null);
+  const omitted = assembleContextManifest(baseEnv());
+  assert.equal(omitted.permissionMode, null);
+});
+
+test("assembleContextManifest (#1010): sandboxViolationCount passes through verbatim; omitted -> 0, never a guess", () => {
+  const withCount = assembleContextManifest(baseEnv({ sandboxViolationCount: 2 }));
+  assert.equal(withCount.sandboxViolationCount, 2);
+  const omitted = assembleContextManifest(baseEnv());
+  assert.equal(omitted.sandboxViolationCount, 0);
+});
+
 // ── #235 PR-B: toolUsage/readPaths — the "what did this session actually use" half ──────────
 
 test("assembleContextManifest (#235 PR-B): toolUsage/readPaths pass through verbatim when supplied", () => {

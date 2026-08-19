@@ -1418,9 +1418,29 @@ It records:
   doesn't emit.)
 - MCP server availability (name + live connection status, from the same init report);
 - the worktree's resolved git HEAD (via a **namespace-aware** pure-filesystem read of
-  git's own plumbing files — see below — never a `git status` call); and
+  git's own plumbing files — see below — never a `git status` call);
 - hashes of the `--settings` JSON and the guard hook file, so a hook/config change
-  between attempts is also detectable.
+  between attempts is also detectable; and
+- **(#1010) the session's own init-reported EFFECTIVE host `permissionMode`** — the
+  engine always REQUESTS one fixed mode (`worker.ts`'s `REQUESTED_PERMISSION_MODE`,
+  `auto`), but Claude Code can silently fall back to a different one when that mode is
+  unavailable (org settings turn it off / model unsupported), and in a headless `-p`
+  run a fallback to Manual means "anything not allow-listed is denied, and Claude keeps
+  working" — a leg then under-delivers with no engine-visible signal unless this field
+  is read. `null` when the init line carried no such field, never a guess. At lane end
+  (the same jsonl read `parseCostUsd`/`scanEgressSuspects` already use), a divergence
+  from the requested mode also emits one `permission-mode-mismatch` event — informational
+  only, fail-safe in the allow direction, never gating the lane/session's own outcome.
+  The `system/init` line carries no separate sandbox field, so "was the Bash sandbox
+  actually engaged" cannot be read the same way; that positive-attestation question is
+  left to DR #1009.
+- **(#1010) `sandboxViolationCount`** — how many `<sandbox_violations>` blocks the CLI
+  appended to a denied command's own `tool_result` across the session (`worker.ts`'s
+  `countSandboxViolations`: one string match over the already-parsed jsonl, no new
+  scanner). Zero when none were found. Together with `permissionMode` above, this is
+  today's full observability floor for the permission-mode/Bash-sandbox profile work
+  (DR #1009) — a count of observed evidence, never a claim the sandbox was or wasn't
+  engaged, and never affects the session's own outcome.
 
 Manifests persist in the state DB's `context_manifests` table, keyed by
 `(round, phase, role, session, attempt)` — the same tuple a separately

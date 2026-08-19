@@ -34,6 +34,7 @@ import {
   buildRenderPrompt,
   classifyEgressTarget,
   claudeArgs,
+  countSandboxViolations,
   defaultFixPromptPath,
   defaultPromptPath,
   deployKeyTransportOverlay,
@@ -57,9 +58,11 @@ import {
   parseResultText,
   parseSessionInit,
   parseToolUsage,
+  permissionModeMismatched,
   probeClaudeVersion,
   probeDeployKeySsh,
   probeLlmPing,
+  REQUESTED_PERMISSION_MODE,
   type ReapableChild,
   type ReapOutcome,
   reapChildren,
@@ -533,7 +536,7 @@ test('parseResultText: empty input -> ""', () => {
 //    stream-json's `{"type":"system","subtype":"init",...}` line. Same tolerance-test shapes as
 //    parseCostUsd/parseResultText. Field names/shape verified against a real Claude Code CLI
 //    2.1.212 probe session (see context-manifest.ts's module doc). ──
-test("parseSessionInit: a real-shaped init line yields model/cliVersion/tools/mcpServers/memoryPathAuto", () => {
+test("parseSessionInit: a real-shaped init line yields model/cliVersion/tools/mcpServers/memoryPathAuto/permissionMode", () => {
   const initLine = JSON.stringify({
     type: "system",
     subtype: "init",
@@ -546,6 +549,7 @@ test("parseSessionInit: a real-shaped init line yields model/cliVersion/tools/mc
       { name: "github", status: "disabled" },
     ],
     memory_paths: { auto: "/Users/x/.claude/projects/repo/memory/" },
+    permissionMode: "auto",
   });
   const jsonl = [initLine, `{"type":"assistant","message":{}}`, `{"type":"result","subtype":"success","total_cost_usd":0.01}`].join("\n");
   const info = parseSessionInit(jsonl);
@@ -557,10 +561,19 @@ test("parseSessionInit: a real-shaped init line yields model/cliVersion/tools/mc
     { name: "github", status: "disabled" },
   ]);
   assert.equal(info.memoryPathAuto, "/Users/x/.claude/projects/repo/memory/");
+  assert.equal(info.permissionMode, "auto");
+});
+
+// #1010 AC1: permissionMode captured for a non-"auto" effective mode; missing field -> null.
+test('parseSessionInit (#1010): permissionMode:"dontAsk" is captured verbatim; a missing field -> null', () => {
+  const withMode = JSON.stringify({ type: "system", subtype: "init", model: "m", permissionMode: "dontAsk" });
+  assert.equal(parseSessionInit(withMode).permissionMode, "dontAsk");
+  const withoutMode = JSON.stringify({ type: "system", subtype: "init", model: "m" });
+  assert.equal(parseSessionInit(withoutMode).permissionMode, null);
 });
 
 test("parseSessionInit: no init line, garbage lines, or empty input -> honest empty defaults, never throws", () => {
-  const empty = { model: null, cliVersion: null, tools: [], mcpServers: [], memoryPathAuto: null };
+  const empty = { model: null, cliVersion: null, tools: [], mcpServers: [], memoryPathAuto: null, permissionMode: null };
   assert.deepEqual(parseSessionInit(""), empty);
   assert.deepEqual(parseSessionInit(`garbage{{{\n{"type":"assistant","message":{}}`), empty);
   assert.deepEqual(parseSessionInit(`{"type":"system","subtype":"hook_started"}`), empty);
@@ -584,6 +597,55 @@ test("parseSessionInit: only the FIRST init line is used; malformed tools/mcp_se
     "a server entry missing `name` degrades, never dropped silently",
   );
   assert.equal(info.memoryPathAuto, null);
+});
+
+// ── #1010: permissionModeMismatched — the shared, fail-safe-toward-allow predicate. ──
+test("permissionModeMismatched (#1010): a different effective mode is a mismatch; the same mode is not; null (unparseable/absent) is NEVER a mismatch", () => {
+  assert.equal(permissionModeMismatched("dontAsk", "auto"), true);
+  assert.equal(permissionModeMismatched("auto", "auto"), false);
+  assert.equal(permissionModeMismatched(null, "auto"), false, "an absent/unparseable field must never manufacture a false positive");
+  // default `requested` is REQUESTED_PERMISSION_MODE (the one mode claudeArgs ever asks for).
+  assert.equal(permissionModeMismatched("default"), true);
+  assert.equal(permissionModeMismatched(REQUESTED_PERMISSION_MODE), false);
+});
+
+// ── #1010 AC4: countSandboxViolations — one string match over already-parsed jsonl. ──
+const toolResultLine = (text: string): string =>
+  JSON.stringify({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "text", text }], is_error: true }] },
+  });
+
+test("countSandboxViolations (#1010): a jsonl with two <sandbox_violations> blocks across tool_results -> 2; none -> 0", () => {
+  const jsonl = [
+    toolResultLine("<sandbox_violations>write denied</sandbox_violations>"),
+    toolResultLine("ordinary output, no denial"),
+  ].join("\n");
+  assert.equal(countSandboxViolations(jsonl), 1);
+  const two = [
+    toolResultLine("<sandbox_violations>write denied</sandbox_violations>"),
+    toolResultLine("<sandbox_violations>network denied</sandbox_violations>"),
+  ].join("\n");
+  assert.equal(countSandboxViolations(two), 2);
+  assert.equal(countSandboxViolations(""), 0);
+  assert.equal(countSandboxViolations(`{"type":"assistant","message":{}}`), 0);
+});
+
+test("countSandboxViolations (#1010): only tool_result content counts — the SAME tag inside an assistant message (the model merely discussing it) is never counted", () => {
+  const assistantLine = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "text", text: "I saw a <sandbox_violations>...</sandbox_violations> block in the output" }] },
+  });
+  assert.equal(countSandboxViolations(assistantLine), 0);
+});
+
+test("countSandboxViolations (#1010): a tool_result whose content is a bare string (not a content-part array) is still scanned; malformed lines are skipped, never thrown", () => {
+  const bareString = JSON.stringify({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "<sandbox_violations>denied</sandbox_violations>" }] },
+  });
+  assert.equal(countSandboxViolations(bareString), 1);
+  assert.equal(countSandboxViolations(`garbage{{{\n${bareString}`), 1, "a preceding garbage line is skipped, not thrown");
 });
 
 // ── #47: per-model token usage capture (parseModelUsage) ──
@@ -1794,6 +1856,101 @@ test("#304 wiring: a completed lane records one egress-suspect event through the
       },
     ]);
     assert.equal((await s.probe(name)).done, true);
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    state?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #1010 AC3: lane-end permission-mode-mismatch wiring, same shape as the #304 egress test
+//    above (dispatch a stub `claude` that echoes its own init line, wait for the terminal
+//    sentinel, read the events ledger back). ──
+test("#1010 wiring: an init line reporting a DIFFERENT effective permission mode than requested emits one permission-mode-mismatch event, with lane/session identity", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let state: State | undefined;
+  let s: WorkerSupervisor | undefined;
+  try {
+    const initLine = JSON.stringify({ type: "system", subtype: "init", model: "claude-stub", permissionMode: "default" });
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${initLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
+    state = new State(join(dir, "state.sqlite"));
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      state,
+    });
+    const { name, sessionId } = await s.dispatch({ number: 1010, title: "mode mismatch", labels: [] });
+    await waitForFile(join(dir, `${name}.done.json`));
+    assert.deepEqual(state.eventsSince("1970-01-01T00:00:00.000Z", ["permission-mode-mismatch"]), [
+      {
+        kind: "permission-mode-mismatch",
+        payload: { worker: name, issue: 1010, session_id: sessionId, requested: "auto", effective: "default" },
+      },
+    ]);
+    assert.equal((await s.probe(name)).done, true, "the mismatch never gates the lane's own outcome");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    state?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#1010 wiring: an init line reporting the SAME (requested) permission mode emits no event", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let state: State | undefined;
+  let s: WorkerSupervisor | undefined;
+  try {
+    const initLine = JSON.stringify({ type: "system", subtype: "init", model: "claude-stub", permissionMode: "auto" });
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${initLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
+    state = new State(join(dir, "state.sqlite"));
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      state,
+    });
+    const { name } = await s.dispatch({ number: 1011, title: "mode match", labels: [] });
+    await waitForFile(join(dir, `${name}.done.json`));
+    assert.deepEqual(state.eventsSince("1970-01-01T00:00:00.000Z", ["permission-mode-mismatch"]), []);
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    state?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#1010 wiring: a stub with NO init line (parser miss / crashed-before-init) emits no event — a null effective mode is never a mismatch", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let state: State | undefined;
+  let s: WorkerSupervisor | undefined;
+  try {
+    const bin = mkStub(dir, FAST_STUB); // FAST_STUB's only line is a result record — no init line at all
+    state = new State(join(dir, "state.sqlite"));
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      state,
+    });
+    const { name } = await s.dispatch({ number: 1012, title: "no init line", labels: [] });
+    await waitForFile(join(dir, `${name}.done.json`));
+    assert.deepEqual(state.eventsSince("1970-01-01T00:00:00.000Z", ["permission-mode-mismatch"]), []);
   } finally {
     killAnyRunningLanes(s);
     s?.dispose();
@@ -8482,8 +8639,20 @@ test("dispatch: a worker leg records a ContextManifest fingerprint via WorkerDep
       claude_code_version: "9.9.9",
       tools: ["Read", "Write", "Bash"],
       mcp_servers: [{ name: "server-filesystem", status: "pending" }],
+      permissionMode: "default",
     });
-    const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${initLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
+    // #1010 AC2/AC4: one denied-command tool_result carrying a <sandbox_violations> block, so
+    // the SAME dispatch that proves permissionMode lands also proves sandboxViolationCount does.
+    const deniedToolResult = JSON.stringify({
+      type: "user",
+      message: {
+        content: [{ type: "tool_result", tool_use_id: "t1", content: "<sandbox_violations>write denied</sandbox_violations>" }],
+      },
+    });
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\necho '${initLine}'\necho '${deniedToolResult}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`,
+    );
     s = new WorkerSupervisor({
       now: realClock,
       cfg,
@@ -8515,6 +8684,11 @@ test("dispatch: a worker leg records a ContextManifest fingerprint via WorkerDep
     // NOT derived from the (possibly MCP-tool-empty, deferred-loading) `tools` inventory above —
     // even though `tools` here carries zero mcp__-prefixed entries, the server still shows up.
     assert.deepEqual(manifest.mcpTools, ["server-filesystem:pending"]);
+    // #1010 AC2: the init report's own effective permission mode, alongside the other init
+    // self-report fields above.
+    assert.equal(manifest.permissionMode, "default");
+    // #1010 AC4: one <sandbox_violations> block in one leg tool_result -> count 1.
+    assert.equal(manifest.sandboxViolationCount, 1);
     assert.ok(typeof manifest.settingsHash === "string" && manifest.settingsHash.length > 0);
     // The stub never provisions a real `--worktree` checkout (it just echoes JSON and exits), so
     // this reads as "worktree-missing" rather than "unknown-write-capable-session" — a real
@@ -8554,6 +8728,105 @@ test("resume: a resumed leg's ContextManifest OVERWRITES the prior leg's row und
     }
     assert.ok(recorded, "expected a context_manifests row for the resumed lane");
     assert.equal(JSON.parse(recorded!.json).model, "resumed-model");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #1010 regression: the test above never caught the leg-scoping bug because
+// mkHandoffLane's ORIGINAL leg emits no init line at all — parseSessionInit(wholeJsonl) falling
+// through to the resumed leg's init line looked correct by coincidence. This test gives BOTH
+// legs their own distinct init line so a first-init read (the pre-fix bug) is distinguishable
+// from a leg-scoped read (the fix) — and pins the fix's three guarantees at once: the overwritten
+// manifest's init-derived fields (model/mcpTools/permissionMode) all come from the RESUMED leg,
+// exactly one permission-mode-mismatch event fires (the resumed leg's own, not a phantom off the
+// original leg's "auto"), and the resumed leg's own non-zero exit still settles as failed —
+// the manifest fix never touches lane outcome.
+test("resume (#1010): a resumed leg's OWN init line — never the ORIGINAL leg's — lands in the overwritten manifest; the resumed leg's own permission-mode-mismatch fires exactly once; the lane's failure outcome is unaffected", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const state = new State(join(dir, "state.sqlite"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const ready = join(dir, "stub-ready");
+    const originalInit = JSON.stringify({
+      type: "system",
+      subtype: "init",
+      model: "original-model",
+      permissionMode: "auto",
+      mcp_servers: [{ name: "original-server", status: "pending" }],
+    });
+    const resumedInit = JSON.stringify({
+      type: "system",
+      subtype: "init",
+      model: "resumed-model",
+      permissionMode: "default",
+      mcp_servers: [{ name: "resumed-server", status: "pending" }],
+    });
+    // The resumed leg exits NON-ZERO (no result line at all) so the lane settles `failed` —
+    // proving the manifest leg-scoping fix is orthogonal to the lane's own outcome.
+    const bin = mkStub(
+      dir,
+      [
+        "#!/usr/bin/env bash",
+        `if [[ "$*" == *"--resume"* ]]; then`,
+        `  echo '${resumedInit}'`,
+        `  exit 1`,
+        "fi",
+        `echo '${originalInit}'`,
+        "trap 'exit 0' TERM",
+        `touch "${ready}"`,
+        "for _ in $(seq 1 600); do sleep 1; done",
+        "",
+      ].join("\n"),
+    );
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "issue-rendered-prompt",
+      heartbeatMs: 50,
+      guardHookPath: hook,
+      state,
+      preSpawnCaptureTimeoutMs: 2_000,
+      preSpawnCapturePollMs: 20,
+    });
+    const { name } = await s.dispatch({ number: 1010, title: "t", labels: [] });
+    await waitForFile(ready, "stub installed its TERM trap before handoff");
+    assert.equal(s.requestHandoff(name), true);
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.handoff.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.handoff.json`)), "handed off before resuming");
+
+    const resumed = await s.resume({ number: 1010, title: "t", labels: [] }, name);
+    await waitForFile(join(dir, `${name}.failed.json`), "resumed leg exits non-zero -> failed sentinel");
+    const failedSentinel = JSON.parse(readFileSync(join(dir, `${name}.failed.json`), "utf8"));
+    assert.equal(failedSentinel.exit_code, 1, "the manifest leg-scoping fix must never change the lane's own outcome");
+
+    let recorded: { recordedAt: string; json: string } | undefined;
+    for (let i = 0; i < 200 && !recorded; i++) {
+      recorded = state.getContextManifest({ roundId: 0, phase: "worker", role: "worker", session: name, attempt: 1 });
+      if (!recorded) await sleep(20);
+    }
+    assert.ok(recorded, "expected a context_manifests row for the resumed lane");
+    const manifest = JSON.parse(recorded!.json);
+    assert.equal(manifest.model, "resumed-model", "leg-scoped: the RESUMED leg's own init, never the ORIGINAL leg's");
+    assert.equal(manifest.permissionMode, "default");
+    assert.deepEqual(manifest.mcpTools, ["resumed-server:pending"]);
+
+    assert.deepEqual(
+      state.eventsSince("1970-01-01T00:00:00.000Z", ["permission-mode-mismatch"]),
+      [
+        {
+          kind: "permission-mode-mismatch",
+          payload: { worker: name, issue: 1010, session_id: resumed.sessionId, requested: "auto", effective: "default" },
+        },
+      ],
+      "exactly ONE mismatch event — the resumed leg's own divergence, not a phantom off the original leg's auto/auto init",
+    );
   } finally {
     killAnyRunningLanes(s);
     s?.dispose();

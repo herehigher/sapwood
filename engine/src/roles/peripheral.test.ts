@@ -1125,6 +1125,73 @@ test("#410 (Codex sol-high PR #417 review, P2-b): a role session WITHOUT the Web
   }
 });
 
+// ── #1010: the peripheral-session half of the SAME permission-mode-mismatch/manifest checks
+//    worker.test.ts exercises for a worker leg. ──
+
+test("#1010 AC2: a peripheral session's own init-reported permissionMode/sandboxViolationCount land in its ContextManifest", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const initLine = JSON.stringify({ type: "system", subtype: "init", model: "claude-stub", permissionMode: "dontAsk" });
+    const deniedToolResult = JSON.stringify({
+      type: "user",
+      message: {
+        content: [{ type: "tool_result", tool_use_id: "t1", content: "<sandbox_violations>write denied</sandbox_violations>" }],
+      },
+    });
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\necho '${initLine}'\necho '${deniedToolResult}'\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const runner = mkRunner(dir, bin);
+    const result = await runner.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(result.outcome, "done");
+    assert.ok(result.contextManifest, "expected a ContextManifest on the result");
+    assert.equal(result.contextManifest!.permissionMode, "dontAsk");
+    assert.equal(result.contextManifest!.sandboxViolationCount, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#1010 AC3: a peripheral session's init line reporting a DIFFERENT effective permission mode emits one permission-mode-mismatch event; the SAME (requested) mode emits none", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const mismatchLine = JSON.stringify({ type: "system", subtype: "init", model: "claude-stub", permissionMode: "default" });
+    const mismatchBin = mkStub(dir, `#!/usr/bin/env bash\necho '${mismatchLine}'\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`);
+    const mismatchEvents: Array<{ kind: string; payload: unknown }> = [];
+    const mismatchRunner = mkRunner(dir, mismatchBin, {
+      state: { appendEvent: (kind: string, payload: unknown) => mismatchEvents.push({ kind, payload }), maxEventIdForRoleSession: () => 0 },
+    });
+    const mismatchResult = await mismatchRunner.run({
+      roleId: "architect",
+      prompt: "p",
+      model: "sonnet",
+      effort: "medium",
+      fallbackModel: "sonnet",
+    });
+    const mismatches = mismatchEvents.filter((e) => e.kind === "permission-mode-mismatch");
+    assert.equal(mismatches.length, 1);
+    const payload = mismatches[0]!.payload as { worker: string; issue: number; session_id: string; requested: string; effective: string };
+    assert.equal(payload.worker, mismatchResult.name, "the session's own lane/sentinel name, same field name worker.ts's event uses");
+    assert.equal(payload.issue, 0, "round-level sentinel — a role session has no single associated issue at this layer");
+    assert.equal(typeof payload.session_id, "string");
+    assert.ok(payload.session_id.length > 0);
+    assert.equal(payload.requested, "auto");
+    assert.equal(payload.effective, "default");
+
+    const matchLine = JSON.stringify({ type: "system", subtype: "init", model: "claude-stub", permissionMode: "auto" });
+    const matchBin = mkStub(dir, `#!/usr/bin/env bash\necho '${matchLine}'\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`);
+    const matchEvents: Array<{ kind: string; payload: unknown }> = [];
+    const matchRunner = mkRunner(dir, matchBin, {
+      state: { appendEvent: (kind: string, payload: unknown) => matchEvents.push({ kind, payload }), maxEventIdForRoleSession: () => 0 },
+    });
+    await matchRunner.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(matchEvents.filter((e) => e.kind === "permission-mode-mismatch").length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("PLAN_DRAFTER_DISALLOWED_TOOLS (#235 PR-B): now byte-identical to the base deny list — kept as its OWN named export purely for call-site documentation clarity, a regression trip-wire in its own right", () => {
   assert.equal(PLAN_DRAFTER_DISALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS);
   // Before #235 PR-B this carried EXTRA `Bash(gh issue edit *--add-label/--remove-label*)`
@@ -1801,6 +1868,8 @@ const mkManifest = (tag: string): ContextManifest => ({
   toolInventoryHash: null,
   promptTemplateVersion: null,
   mcpTools: [],
+  permissionMode: null,
+  sandboxViolationCount: 0,
   worktree: { path: "/wt", head: null, headResolution: "unresolved", dirty: false, dirtyBasis: "structural-no-write-tools" },
   settingsHash: "hash",
   hookHash: null,
