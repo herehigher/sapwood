@@ -85,9 +85,13 @@ function SpendMeter({ spend, round, estUsd = 0 }: { spend: SpendFacts; round?: R
             estUsd={estUsd}
             max={spendBarMax(view)}
             label={`${view.tier} spend`}
-            // #923 AC1 (D16): the mockup's outlined ~400×20 capsule, vs the 12px default every
-            // other CostBar instance (cost panels, lane cards) keeps.
+            // #923 AC1 (D16): the mockup's ~400×20 capsule, vs the 12px default every other
+            // CostBar instance (cost panels, lane cards) keeps.
             height={20}
+            // #1025: with the outer capsule outline dropped (panels.css), this bar's own
+            // track/fill IS the capsule now — `flush` fills the full 20px box instead of the
+            // shared centered-pill geometry every other CostBar instance keeps unchanged.
+            flush
           />
         )}
         <span className="data spend-meter-value">

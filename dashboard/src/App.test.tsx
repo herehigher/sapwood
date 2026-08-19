@@ -4341,12 +4341,22 @@ test("AC2: every 12px-default hairline-bar instance's own CSS height is exactly 
 
 // #923 AC1 (D16): the header meter's own taller capsule — asserted separately from the 12px-shared
 // bars above, since it deliberately doesn't share their default.
-test("#923 AC1: the header's spend-meter-bar resolves its own 20px height, ≥ the AC's 16px floor", async () => {
+// gate② round 2 (P3): the 20px CANVAS alone proves nothing about the visible capsule once #923
+// D16's outline is dropped (#1025) — a canvas can be 20px tall while drawing a much shorter pill
+// centered inside it. `Header.tsx`'s `flush` prop is what makes the track actually cover the full
+// canvas; asserted here on the real rendered `.cost-bar-track` rect, not just the SVG's own box.
+test("#923/#1025 AC1: the header's spend-meter-bar resolves a 20px canvas AND a flush, full-height track — the capsule is the rect, not the (invisible) canvas around it", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   try {
     const bar = container.querySelector("svg.cost-bar.spend-meter-bar");
     assert.ok(bar, "the header's spend-meter-bar must render");
-    assert.equal(getComputedStyle(bar as Element).height, "20px");
+    assert.equal(getComputedStyle(bar as Element).height, "20px", "the SVG canvas box");
+
+    const track = bar!.querySelector(".cost-bar-track");
+    assert.ok(track, "the header's own .cost-bar-track must render");
+    assert.equal(track!.getAttribute("y"), "0", "flush: no transparent margin above the visible capsule");
+    assert.equal(track!.getAttribute("height"), "20", "flush: the track fills the full 20px canvas — THIS is the capsule");
+    assert.equal(track!.getAttribute("rx"), "10", "flush: rx = height/2, a true pill radius at the full height");
   } finally {
     await cleanup();
   }
@@ -4717,7 +4727,22 @@ test("#923/#1025 AC1: .app-header ≥100px, the round-nav stepper's three cells 
       Number.parseFloat(barComputed.width) >= 360,
       `.spend-meter-bar's declared width (${barComputed.width}) must be >= 360px (25% of the issue's 1440 normalization width)`,
     );
-    assert.ok(Number.parseFloat(barComputed.height) >= 16, `.spend-meter-bar's declared height (${barComputed.height}) must be >= 16px`);
+    assert.ok(
+      Number.parseFloat(barComputed.height) >= 16,
+      `.spend-meter-bar's declared CANVAS height (${barComputed.height}) must be >= 16px`,
+    );
+    // gate② round 2 (P3): the 20px canvas checked above is just the SVG's own bounding box — with
+    // no outline drawn around it any more (below), the canvas itself is invisible; the REAL
+    // capsule is whatever the track/fill rects draw inside it. `CostBar.tsx`'s default centered-
+    // pill geometry would leave that at ~10px (`BASE_FILL_HEIGHT * height/BASE_HEIGHT`), floating
+    // in 5px of transparent margin above and below — Header.tsx's `flush` prop is what makes the
+    // track/fill instead cover the FULL canvas (`y=0`, `height=20`), so this is the assertion that
+    // actually proves the capsule reads as 20px tall, not just its invisible bounding box.
+    const track = bar!.querySelector(".cost-bar-track");
+    assert.ok(track, ".spend-meter-bar's own .cost-bar-track must render");
+    assert.equal(track!.getAttribute("y"), "0", "flush track y — no transparent margin above the visible capsule");
+    assert.equal(track!.getAttribute("height"), "20", "flush track height fills the full 20px canvas — THIS is the capsule now");
+
     // #1025 (supersedes #923 D16): the outlined capsule border is dropped — `.cost-bar-track`
     // (the full-width pill #1020 already draws) is the capsule now, not a second bordered box
     // around it. happy-dom's CSSOM-only getComputedStyle reports an UNDECLARED property as "",

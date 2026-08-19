@@ -391,7 +391,11 @@
    * that 0.5px off, thinning the light outline right where it matters most. The pill's own FILL
    * (the cap itself) never needs this: a `rect`'s `rx` rounds inward, never past its own box, so
    * the 0.5px overshoot here is the stroke alone, and harmless once nothing else relies on this
-   * SVG clipping its own contents. */
+   * SVG clipping its own contents.
+   * #1025: this rule is what also keeps `CostBar.tsx`'s own `flush` geometry (the header spend
+   * meter, `y=0`/`height`-tall track/fill) safe — the SAME centered-stroke overshoot now straddles
+   * the TOP/BOTTOM edges too (y=0, y=height) instead of just the left/right ones, and this
+   * property clips on every axis at once, not per-side. */
   overflow: visible;
 }
 
@@ -840,27 +844,53 @@
  * the stepper — broken reading order vs #923's own "status · stepper · …"; the other folded the
  * status caption itself onto three lines).
  *
- * Breakpoint is a summed-token estimate, not a measured real-browser value — this repo's test
- * harness has no real layout engine (`.app-header`'s own AC1 comment) and there is no
- * real-browser CI to run one against (this file's own verification plan: the PO renders 995/1024/
- * 1440 on the branch build before merge). Roughly: status group ≈ 230px (8px dot + 8px gap +
- * "running" in `--font-data` + " — actively working" in body text) + 8px gap + the round-nav
- * stepper ≈ 260px (two 32px arrow cells + a `--font-data` `--text-1` pill, `.round-nav-pill`
- * above) + 8px gap + the 400px spend-meter capsule, before even reaching `.app-header-row`'s own
- * Controls verbs / "?" legend past it — comfortably past 1000px on its own, matching this issue's
- * own ~1100px ballpark with room for the verbs. 1100px is the chosen floor; `.engine-status-line`
- * (above) is what lets the status group drop to its own full-width line as a single unit instead
- * of the browser choosing a break point inside it — the stepper + BACK TO LIVE + meter (still
- * separate flex items) wrap together onto the line below by ordinary flow, no rule of their own
- * needed for that half. `.round-nav-pill`'s own `white-space: nowrap` (above) is what keeps the
- * stepper's text on one line once it's a shrinkable flex item on that second line. */
-@media (max-width: 1100px) {
+ * gate② round 2 (P2): the first cut's 1100px floor was too low for LIVE mode specifically —
+ * `.app-header-row`'s available width at a VIEWPORT of W is roughly `W - 56 (.icon-rail) - 32
+ * (.stack padding, 16px each side) - 34 (.panel padding 16px each side + its 1px hairline border
+ * each side)`; at 1200px that's ≈1078px. The unstacked engine block alone needs ≈230px (status:
+ * 8px dot + 8px gap + "running" + " — actively working") + 8px gap + ≈260px (stepper: two 32px
+ * arrow cells + the `.round-nav-pill` label) + 8px gap + 400px (meter) = 906px — and live mode
+ * ALSO carries `.app-header-row`'s own Controls verbs (Start/Pause/Resume/Stop + gaps, ≈225px)
+ * and the "?" legend + row gaps (≈38px) past that, ≈1169px total. So a 1101–~1290px floor left
+ * the row unstacked while it still couldn't fit unbroken — the exact failure mode this rule
+ * exists to close. 1300px is the corrected floor (a conservative round figure past the ≈1169px
+ * four-control tally, with headroom for the ESTOP button's own `margin-left: var(--space-4)`
+ * gap this tally doesn't itemize). `.engine-status-line` (above) is what lets the status group
+ * drop to its own full-width line as a single unit instead of the browser choosing a break point
+ * inside it — the stepper + BACK TO LIVE + meter (still separate flex items) wrap together onto
+ * the line below by ordinary flow, no rule of their own needed for that half. `.round-nav-pill`'s
+ * own `white-space: nowrap` (above) is what keeps the stepper's text on one line once it's a
+ * shrinkable flex item on that second line.
+ *
+ * gate② round 2 (P2), `.spend-meter`/`.spend-meter-bar` below: at the narrower end of this range
+ * (995px replay, no Controls to size against) the second line's own natural width — stepper
+ * (≈260px) + gap + BACK TO LIVE (≈145px) + gap + the meter's AUTHORED 400px — is ≈821px, which
+ * fits the ≈840–890px row available there. The meter used to drop to a third line anyway because
+ * its SVG couldn't shrink below its authored 400px; making it a genuinely flexible item (`flex: 1
+ * 1 400px` — grow/shrink both allowed, 400px only the STARTING size — plus `min-width: 0` so its
+ * flex basis doesn't become a shrink floor) lets it give up a few px and stay on line 2 instead.
+ * `.spend-meter-bar`'s own width switches from a fixed 400px to `100%` of that now-flexible box
+ * (capped at `max-width: 400px` so it still never exceeds its authored size when there's room).
+ * The ≤720px block below is unaffected — its own `.spend-meter { flex-basis: 100% }` still wins
+ * there (source order — the narrower query is written after this one) and drops the meter to its
+ * own line regardless of how much this rule lets it shrink. */
+@media (max-width: 1300px) {
   .engine-status {
     flex-wrap: wrap;
   }
 
   .engine-status-line {
     flex-basis: 100%;
+  }
+
+  .spend-meter {
+    flex: 1 1 400px;
+    min-width: 0;
+  }
+
+  .spend-meter-bar {
+    width: 100%;
+    max-width: 400px;
   }
 }
 

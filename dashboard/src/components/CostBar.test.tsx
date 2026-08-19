@@ -202,3 +202,43 @@ test("#923: a taller height scales every coordinate proportionally, not just the
   assert.equal(Number(fillMatch?.[2]), 6 * (20 / 12), "fill height scales");
   assert.equal(Number(fillMatch?.[3]), Number(fillMatch?.[2]) / 2, "rx stays half the (now taller) fill height");
 });
+
+// ── #1025 (gate② P3): `flush` — the header capsule fills its own box, no centered-pill margin ──
+
+// Omitting `flush` must render BYTE-IDENTICAL geometry to #923's own scaled-centered-pill grammar
+// above — this prop is opt-in, every pre-#1025 call site (cost panels, lane cards) never passes it.
+test("#1025: without `flush`, a tall bar still renders the scaled-centered-pill geometry, not the full box", () => {
+  const html = renderToStaticMarkup(<CostBar settledUsd={5} max={10} label="lane" height={20} />);
+  const trackMatch = html.match(/class="cost-bar-track"[^>]*y="([\d.]+)"[^>]*width="100%"[^>]*height="([\d.]+)"[^>]*rx="([\d.]+)"/);
+  assert.ok(trackMatch, "the track must render");
+  assert.equal(Number(trackMatch?.[1]), 3 * (20 / 12), "unflushed track y still centers within the 20px box");
+  assert.equal(Number(trackMatch?.[2]), 6 * (20 / 12), "unflushed track height stays the scaled 10px pill, not the full 20px box");
+});
+
+// #1025: `flush` makes the track, fill, AND the hatch tail all cover the full `height` box — the
+// header spend meter's only remaining visible shape once #923 D16's outer capsule outline is
+// dropped (panels.css), so a centered pill floating inside extra transparent canvas would no
+// longer read as a capsule at all.
+test("#1025: `flush` fills the FULL box — y=0, height=height, rx=height/2 — for the track, fill, and hatch tail alike", () => {
+  const html = renderToStaticMarkup(<CostBar settledUsd={5} estUsd={2} max={10} label="lane" height={20} flush />);
+
+  const trackMatch = html.match(/class="cost-bar-track"[^>]*y="([\d.]+)"[^>]*width="100%"[^>]*height="([\d.]+)"[^>]*rx="([\d.]+)"/);
+  assert.ok(trackMatch, "the track must render");
+  assert.equal(Number(trackMatch?.[1]), 0, "flush track y is 0 — no transparent margin above it");
+  assert.equal(Number(trackMatch?.[2]), 20, "flush track height fills the full 20px box");
+  assert.equal(Number(trackMatch?.[3]), 10, "flush track rx is height/2 — a true pill radius at the full height");
+
+  const fillMatch = html.match(/class="cost-bar-fill"[^>]*y="([\d.]+)"[^>]*height="([\d.]+)"[^>]*rx="([\d.]+)"/);
+  assert.ok(fillMatch, "the fill must render");
+  assert.equal(Number(fillMatch?.[1]), 0, "flush fill y is 0");
+  assert.equal(Number(fillMatch?.[2]), 20, "flush fill height fills the full 20px box");
+  assert.equal(Number(fillMatch?.[3]), 10, "flush fill rx is height/2");
+
+  // The hatch tail's `y`/`height` are plain attributes (only its `x`/`width` need `calc()`, hence
+  // `style=` — CostBar.tsx's own comment on why) — matched here by its distinguishing `style="x:`
+  // prefix rather than a class, since (unlike the track/fill) it carries no class of its own.
+  const hatchMatch = html.match(/<rect style="x:max\(0px[^>]*y="([\d.]+)"[^>]*height="([\d.]+)"/);
+  assert.ok(hatchMatch, "the hatch tail must render");
+  assert.equal(Number(hatchMatch?.[1]), 0, "flush hatch tail y is 0 — the SAME geometry as the track/fill, never drifting out of sync");
+  assert.equal(Number(hatchMatch?.[2]), 20, "flush hatch tail height fills the full 20px box");
+});

@@ -314,12 +314,23 @@ test("#879 gate② run 2e566ac9 finding [3]: the spend meter value renders bold 
 
 // ── #1025: mid-width deterministic stacking + dropped spend-meter capsule outline ──────────────
 
-/** Shared setup for the two viewport tests below — real cascade (tokens + panels + app), a real
- *  happy-dom viewport, `.engine-status`'s own flex-wrap and `.round-nav-pill`'s white-space, at a
- *  given width. STYLE doctrine (docs/REVIEW-DOCTRINE.md): needs a real viewport + getComputedStyle
- *  read against the full production cascade, never a regex read of the source text — same posture
- *  Controls.test.tsx's own #895 item 6 test already established for the sibling 720px floor. */
-function readHeaderLayout(viewportWidth: number): { flexWrap: string; lineFlexBasis: string; pillWhiteSpace: string } {
+/** Shared setup for the viewport tests below — real cascade (tokens + panels + app), a real
+ *  happy-dom viewport, `.engine-status`'s own flex-wrap, `.round-nav-pill`'s white-space, and the
+ *  meter's own shrink rule, at a given width. STYLE doctrine (docs/REVIEW-DOCTRINE.md): needs a
+ *  real viewport + getComputedStyle read against the full production cascade, never a regex read
+ *  of the source text — same posture Controls.test.tsx's own #895 item 6 test already established
+ *  for the sibling 720px floor. */
+function readHeaderLayout(viewportWidth: number): {
+  flexWrap: string;
+  lineFlexBasis: string;
+  pillWhiteSpace: string;
+  meterFlexGrow: string;
+  meterFlexShrink: string;
+  meterFlexBasis: string;
+  meterMinWidth: string;
+  barWidth: string;
+  barMaxWidth: string;
+} {
   (window as unknown as { happyDOM: { setViewport: (v: { width: number }) => void } }).happyDOM.setViewport({
     width: viewportWidth,
   });
@@ -332,18 +343,34 @@ function readHeaderLayout(viewportWidth: number): { flexWrap: string; lineFlexBa
     const status = container.querySelector(".engine-status");
     const line = container.querySelector(".engine-status-line");
     const pill = container.querySelector(".round-nav-pill");
-    assert.ok(status && line && pill, ".engine-status, .engine-status-line, and .round-nav-pill must all render");
+    const meter = container.querySelector(".spend-meter");
+    const bar = container.querySelector(".spend-meter-bar");
+    assert.ok(
+      status && line && pill && meter && bar,
+      ".engine-status, .engine-status-line, .round-nav-pill, .spend-meter, and .spend-meter-bar must all render",
+    );
+    const meterComputed = getComputedStyle(meter as Element);
+    const barComputed = getComputedStyle(bar as Element);
     return {
       flexWrap: getComputedStyle(status as Element).flexWrap,
       lineFlexBasis: getComputedStyle(line as Element).flexBasis,
       pillWhiteSpace: getComputedStyle(pill as Element).whiteSpace,
+      meterFlexGrow: meterComputed.flexGrow,
+      meterFlexShrink: meterComputed.flexShrink,
+      meterFlexBasis: meterComputed.flexBasis,
+      meterMinWidth: meterComputed.minWidth,
+      barWidth: barComputed.width,
+      barMaxWidth: barComputed.maxWidth,
     };
   } finally {
     document.body.removeChild(container);
   }
 }
 
-test("#1025 AC1/AC2: .engine-status wraps with .engine-status-line as its own full-width line at/below the 1100px floor; the row stays unbroken above it", () => {
+// gate② round 2 (P2): the first cut's 1100px floor left LIVE mode's Controls verbs + "?" legend
+// unstacked past their own natural fit (see panels.css's own arithmetic comment) — 1300px is the
+// corrected floor.
+test("#1025 AC1/AC2: .engine-status wraps with .engine-status-line as its own full-width line at/below the 1300px floor; the row stays unbroken above it", () => {
   const style = document.createElement("style");
   style.textContent = `${tokensCss}\n${panelsCss}\n${appCss}`;
   document.head.appendChild(style);
@@ -352,11 +379,11 @@ test("#1025 AC1/AC2: .engine-status wraps with .engine-status-line as its own fu
     // "", not the resolved initial value — this only confirms the media rule hasn't fired early
     // (same posture Controls.test.tsx's #895 item 6 test documents for its own 720px sibling).
     assert.notEqual(readHeaderLayout(1440).flexWrap, "wrap", "well above the floor (AC2), the mid-width rule must not have fired early");
-    assert.notEqual(readHeaderLayout(1101).flexWrap, "wrap", "one px above the floor (AC2), the media query must not have fired yet");
+    assert.notEqual(readHeaderLayout(1301).flexWrap, "wrap", "one px above the floor (AC2), the media query must not have fired yet");
 
-    // 995/1024 are the issue's own two named widths (owner walk broke at ~995) — both sit inside
-    // the wrapped range this rule now covers.
-    for (const width of [1100, 1024, 995]) {
+    // 995/1024/1200 are all inside the wrapped range this rule now covers — 1200 is the owner
+    // walk's own live-mode reference width from the gate② round 2 arithmetic (panels.css).
+    for (const width of [1300, 1200, 1024, 995]) {
       const layout = readHeaderLayout(width);
       assert.equal(layout.flexWrap, "wrap", `at ${width}px, .engine-status must wrap`);
       assert.equal(layout.lineFlexBasis, "100%", `at ${width}px, .engine-status-line must claim the full first line`);
@@ -374,6 +401,29 @@ test("#1025 AC1: .round-nav-pill resolves white-space: nowrap at 995px and 1024p
     for (const width of [995, 1024]) {
       assert.equal(readHeaderLayout(width).pillWhiteSpace, "nowrap", `at ${width}px, .round-nav-pill must resolve white-space: nowrap`);
     }
+  } finally {
+    document.head.removeChild(style);
+  }
+});
+
+// gate② round 2 (P2): at 995px replay, the second line's own natural width (stepper + BACK TO
+// LIVE + meter) is close enough to fit that letting the meter shrink a little keeps it off a
+// THIRD line — `.spend-meter` becomes a genuinely flexible item (`flex: 1 1 400px` + `min-width:
+// 0`) instead of the 400px SVG being a hard floor; `.spend-meter-bar` switches from a fixed
+// 400px to `width: 100%` of that now-shrinkable box (still capped at its authored `max-width:
+// 400px`).
+test("#1025 (gate② P2): at 995px the meter is a genuinely shrinkable flex item — flex: 1 1 400px, min-width: 0, bar width: 100%/max-width: 400px", () => {
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${appCss}`;
+  document.head.appendChild(style);
+  try {
+    const layout = readHeaderLayout(995);
+    assert.equal(layout.meterFlexGrow, "1", "at 995px, .spend-meter must be allowed to grow");
+    assert.equal(layout.meterFlexShrink, "1", "at 995px, .spend-meter must be allowed to shrink below its 400px basis");
+    assert.equal(layout.meterFlexBasis, "400px", "at 995px, .spend-meter's STARTING size is still the authored 400px");
+    assert.equal(layout.meterMinWidth, "0", "at 995px, .spend-meter must not have an implicit shrink floor");
+    assert.equal(layout.barWidth, "100%", "at 995px, .spend-meter-bar tracks its now-flexible parent, not a fixed 400px");
+    assert.equal(layout.barMaxWidth, "400px", "at 995px, .spend-meter-bar still never exceeds its authored 400px when there's room");
   } finally {
     document.head.removeChild(style);
   }

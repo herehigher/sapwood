@@ -71,19 +71,27 @@ entry's target-tick clause.
 
 Amended 2026-08-19 (#1025): two owner rulings from the same walk. First, §3 A's header
 band-2 row (`status · stepper · [BACK TO LIVE] · meter`, plus §3 Operations' verbs/"?" as
-row-level siblings) gains a deterministic **mid-width stacking rule**: below ~1100px
-(the row's own natural width no longer fits unbroken; #895/#972 already own the
-narrower 720px floor) the status word/caption/chip group wraps as ONE unit onto its
-own full-width first line, with the stepper + BACK TO LIVE + meter following on a
-second line — never an unscoped `flex-wrap` left to the browser's own arbitrary break
-point (the prior gap: two browsers picked two different, both-wrong points at the same
-width). The round-nav stepper's own label never wraps at any width. Second, #923 D16's
+row-level siblings) gains a deterministic **mid-width stacking rule**: below 1300px
+(the row's own natural width no longer fits unbroken — gate② round 2 re-measured the
+floor against LIVE mode's own Controls verbs, which pushed it up from the first cut's
+1100px; #895/#972 already own the narrower 720px floor) the status word/caption/chip
+group wraps as ONE unit onto its own full-width first line, with the stepper + BACK TO
+LIVE + meter following on a second line — never an unscoped `flex-wrap` left to the
+browser's own arbitrary break point (the prior gap: two browsers picked two different,
+both-wrong points at the same width). The round-nav stepper's own label never wraps at
+any width, and the meter itself becomes a genuinely shrinkable flex item (rather than a
+hard 400px floor) so line 2 can absorb the stepper + BACK TO LIVE + meter together down
+toward the 720px floor before the meter needs a line of its own. Second, #923 D16's
 outlined ~400×20 capsule around the header spend meter is dropped outright — with
 #1020's full-length pill track now drawing the SAME rounded shape the outline used to
 frame, the outline was a redundant third layer; the track pill alone is the capsule
-now. Supersedes the 2026-08-14 entry's "#923 outlined capsule ... remains the real
-budget reference" clause for the header instance specifically (the by-stage cost-panel
-bars #1020 describes were never outlined and are unaffected).
+now. The header capsule is the 20px track pill itself, flush to its canvas (`CostBar`'s
+new `flush` prop: `y=0`, `height=height`, `rx=height/2`) — not the shared centered-pill
+geometry every other `<CostBar>` instance keeps, which would otherwise leave a ~10px
+pill floating in 5px of transparent margin above and below once nothing outlines the
+box around it. Supersedes the 2026-08-14 entry's "#923 outlined capsule ... remains the
+real budget reference" clause for the header instance specifically (the by-stage
+cost-panel bars #1020 describes were never outlined and are unaffected).
 
 ---
 
