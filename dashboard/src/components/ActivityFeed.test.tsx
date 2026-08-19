@@ -91,9 +91,20 @@ test("payload details collapse behind each entry, never inline in the sentence",
   const html = renderToStaticMarkup(<ActivityFeed events={events} round={null} titles={{}} now={NOW} />);
   assert.match(html, /<details/);
   assert.match(html, /<summary/);
-  // the sentence itself never leaks the raw worker field
-  const sentenceOnly = html.split("<details")[0] ?? "";
-  assert.doesNotMatch(sentenceOnly, /"worker"/);
+  // the sentence itself never leaks the raw worker field — before the FIRST tag of either the
+  // toggle or the payload, since #954 moved `.feed-payload` out to a sibling of `.feed-details`.
+  const detailsIndex = html.indexOf("<details");
+  const payloadIndex = html.indexOf('class="feed-payload');
+  const sentenceOnly = html.slice(0, Math.min(detailsIndex, payloadIndex));
+  assert.doesNotMatch(sentenceOnly, /worker/);
+  // #954 gate② finding [3] (ac3-payload-assertion-vacuous): the prior version of this test never
+  // asserted the payload `<pre>` actually exists or carries the real serialized JSON — it would
+  // have stayed green even with an empty/removed `.feed-payload`. React's static-markup renderer
+  // HTML-escapes quotes in text content, so the fixture's own field/value land as `&quot;`-quoted
+  // substrings, not raw `"worker"`.
+  assert.match(html, /<pre class="feed-payload data">/);
+  assert.match(html, /&quot;issue&quot;: 1/);
+  assert.match(html, /&quot;worker&quot;: &quot;w1&quot;/);
 });
 
 // ── #934: chronology only — no pinned rows, the strip is the sole "open items" surface ──────────
@@ -437,13 +448,23 @@ test("#890: a lane-settlement event with no est/real figures on the payload rend
 
 // ── #954 (#729 D33, #929): `.feed-entry` becomes a [lead | sentence | meta] grid ────────────────
 
-/** #954 AC1: the STYLE doctrine's own real-DOM + full production stylesheet mount (`tokens.css`
- *  cascaded into `panels.css`, this component's own cascade — no hero/app.css dependency) — a
- *  computed-style claim needs a real cascade read via `getComputedStyle`, never a regex on source
- *  text. */
+const heroCss = readFileSync(new URL("../hero/hero.css", import.meta.url), "utf8");
+// `@import` lines resolve under Vite's bundler only — happy-dom's plain <style> injection can't
+// follow them (same posture App.test.tsx's own `appCss924` concatenation takes, #924 gate②
+// finding [0]).
+const appCss = readFileSync(new URL("../app.css", import.meta.url), "utf8").replace(/^@import.*$/gm, "");
+
+/** #954 gate② finding [0] (ac1-incomplete-cascade-coverage): the FULL production cascade —
+ *  `tokens.css` → `panels.css` → `hero.css` → `app.css`, `app.css`'s own `@import` order — not
+ *  just tokens+panels; `app.css` sets inherited base rules (e.g. `body`'s line-height) that a
+ *  real page load always applies before `.feed-entry` ever renders. Same helper shape as
+ *  `App.test.tsx`'s own `mountAppWithCascade`. Viewport forced to 1440 (this component's own
+ *  production width, no width-scoped rule in play here, but matching the established convention
+ *  rather than trusting happy-dom's default). */
 async function mountFeedWithCascade(events: KnownDomainEvent[]) {
+  (window as unknown as { happyDOM: { setViewport: (v: { width: number }) => void } }).happyDOM.setViewport({ width: 1440 });
   const style = document.createElement("style");
-  style.textContent = `${tokensCss}\n${panelsCss}`;
+  style.textContent = `${tokensCss}\n${panelsCss}\n${heroCss}\n${appCss}`;
   document.head.appendChild(style);
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -512,15 +533,21 @@ test("#954 AC1: every rendered .feed-entry resolves a 3-track grid, exactly one 
       assert.ok(metas[0]!.querySelector(".feed-ts"), ".feed-meta must hold .feed-ts");
       assert.ok(metas[0]!.querySelector(".feed-details"), ".feed-meta must hold .feed-details");
       assert.equal(getComputedStyle(metas[0] as Element).whiteSpace, "nowrap", ".feed-meta must resolve white-space: nowrap");
+
+      // #954 gate② finding [0]: checked for EVERY entry that actually carries a glyph, not just
+      // the first one found across the fixture — a glyph rendered outside its own entry's
+      // `.feed-lead` on entry #3 must fail even if entry #2's glyph is correctly placed.
+      const glyph = entry.querySelector(".glyph-ok, .glyph-fail");
+      if (glyph) {
+        assert.ok(
+          entry.querySelector(".feed-lead")!.contains(glyph),
+          "the StateGlyph must render inside its OWN entry's .feed-lead — its presence must never add a 4th track",
+        );
+      }
     }
 
-    const glyphEntry = entries.find((e) => e.querySelector(".glyph-ok, .glyph-fail"));
-    assert.ok(glyphEntry, "COVERAGE: fixture must include a StateGlyph row");
-    const glyph = glyphEntry!.querySelector(".glyph-ok, .glyph-fail")!;
-    assert.ok(
-      glyphEntry!.querySelector(".feed-lead")!.contains(glyph),
-      "the StateGlyph must render inside .feed-lead — its presence must never add a 4th track",
-    );
+    const glyphEntryCount = entries.filter((e) => e.querySelector(".glyph-ok, .glyph-fail")).length;
+    assert.equal(glyphEntryCount, 2, "COVERAGE: fixture must include both StateGlyph rows (attention fail glyph + merged ok glyph)");
   } finally {
     await cleanup();
   }

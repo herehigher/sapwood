@@ -85,6 +85,11 @@ test("capture the ?demo fixture across viewports/themes/states and build the con
       await page.waitForLoadState("networkidle");
 
       const idlePrefix = `${width}-${theme.key}-idle`;
+      // #954 AC2 (gate② finding [1]): must run BEFORE this capture's own full-page screenshot —
+      // 1024/720 are the criterion's own named widths.
+      if (width === 1024 || width === 720) {
+        await assertFeedEntryGeometry(page, idlePrefix);
+      }
       await page.screenshot({ path: `${CAPTURES_DIR}/${idlePrefix}-full.png`, fullPage: true });
       for (const [moduleKey, selectors] of Object.entries(MODULE_SELECTORS)) {
         const locator = await firstMatch(page, selectors);
@@ -1241,60 +1246,56 @@ test("#928 AC2: at 720px, lanes and activity stack (no horizontal overlap), and 
 /**
  * #954 AC2: the real-layout companion to `ActivityFeed.test.tsx`'s AC1 structural proof (happy-dom
  * performs no layout, so it can prove the grid's declared tracks/containment but never real boxes).
- * At 1024/720, both themes, over every rendered `.feed-entry` in the `?demo` fixture: the dot never
- * orphans onto its own line above the sentence, and the meta cell (timestamp + "▶ details") never
- * strands below it — the exact defect `1024-dark-idle-full.png` recorded (#729 D33, #929).
+ * Over every rendered `.feed-entry` on the CURRENT page: the dot never orphans onto its own line
+ * above the sentence, and the meta cell (timestamp + "▶ details") never strands below it — the
+ * exact defect `1024-dark-idle-full.png` recorded (#729 D33, #929). Called from the main capture
+ * loop below, at 1024/720, BEFORE that loop's own `page.screenshot` (#954 gate② finding [1]: a
+ * standalone test declared after the capture test still runs its own assertions after the
+ * screenshot file already exists on disk, contrary to AC2's own "before the existing full-page
+ * screenshot" wording) — never re-navigates/re-themes the page itself, so it must run while the
+ * caller's own `?demo` + theme + viewport state is still current.
  */
-test("#954 AC2: at 1024/720, both themes, every .feed-entry's dot sits within the sentence's first line and .feed-meta sits beside it, never below", async ({
-  page,
-}) => {
-  for (const width of [1024, 720] as const) {
-    for (const theme of THEMES) {
-      await page.setViewportSize({ width, height: 900 });
-      await page.goto("/?demo");
-      await page.evaluate((attr) => document.documentElement.setAttribute("data-theme", attr), theme.attr);
-      await page.locator("#overview").waitFor({ state: "visible" });
-      await page.waitForLoadState("networkidle");
+async function assertFeedEntryGeometry(page: Page, label: string): Promise<void> {
+  const entries = page.locator(".feed-entry");
+  const entryCount = await entries.count();
+  expect(entryCount, `${label}: COVERAGE: the ?demo fixture must render >= 1 .feed-entry`).toBeGreaterThan(0);
 
-      const entries = page.locator(".feed-entry");
-      const entryCount = await entries.count();
-      expect(entryCount, `${width}/${theme.key}: COVERAGE: the ?demo fixture must render >= 1 .feed-entry`).toBeGreaterThan(0);
+  const geometries = await entries.evaluateAll((els) =>
+    els.map((el) => {
+      const dot = el.querySelector(".feed-dot")!.getBoundingClientRect();
+      const sentenceEl = el.querySelector(".feed-sentence")!;
+      const sentence = sentenceEl.getBoundingClientRect();
+      const meta = el.querySelector(".feed-meta")!.getBoundingClientRect();
+      const cs = getComputedStyle(sentenceEl);
+      const fontSize = Number.parseFloat(cs.fontSize);
+      const lineHeight = cs.lineHeight.endsWith("px") ? Number.parseFloat(cs.lineHeight) : Number.parseFloat(cs.lineHeight) * fontSize;
+      return { dot, sentence, meta, sentenceLineHeight: lineHeight };
+    }),
+  );
 
-      const geometries = await entries.evaluateAll((els) =>
-        els.map((el) => {
-          const dot = el.querySelector(".feed-dot")!.getBoundingClientRect();
-          const sentenceEl = el.querySelector(".feed-sentence")!;
-          const sentence = sentenceEl.getBoundingClientRect();
-          const meta = el.querySelector(".feed-meta")!.getBoundingClientRect();
-          const cs = getComputedStyle(sentenceEl);
-          const fontSize = Number.parseFloat(cs.fontSize);
-          const lineHeight = cs.lineHeight.endsWith("px") ? Number.parseFloat(cs.lineHeight) : Number.parseFloat(cs.lineHeight) * fontSize;
-          return { dot, sentence, meta, sentenceLineHeight: lineHeight };
-        }),
-      );
-
-      const tolerancePx = 1;
-      for (const [i, g] of geometries.entries()) {
-        expect(
-          g.dot.top,
-          `${width}/${theme.key} entry #${i}: .feed-dot top (${g.dot.top}) must not sit above the sentence's first line (${g.sentence.top})`,
-        ).toBeGreaterThanOrEqual(g.sentence.top - tolerancePx);
-        expect(
-          g.dot.bottom,
-          `${width}/${theme.key} entry #${i}: .feed-dot bottom (${g.dot.bottom}) must stay within the sentence's first line (${g.sentence.top + g.sentenceLineHeight})`,
-        ).toBeLessThanOrEqual(g.sentence.top + g.sentenceLineHeight + tolerancePx);
-        expect(
-          Math.abs(g.meta.top - g.sentence.top),
-          `${width}/${theme.key} entry #${i}: .feed-meta top (${g.meta.top}) must equal .feed-sentence top (${g.sentence.top}), never stranded below`,
-        ).toBeLessThanOrEqual(tolerancePx);
-        expect(
-          g.meta.left,
-          `${width}/${theme.key} entry #${i}: .feed-meta left (${g.meta.left}) must sit to the right of .feed-sentence left (${g.sentence.left})`,
-        ).toBeGreaterThan(g.sentence.left);
-      }
-    }
+  // #954 gate② finding [1]: AC2's own "±1 px" tolerance is named ONLY for the .feed-meta/
+  // .feed-sentence top comparison — the dot inequalities are the criterion's exact wording
+  // (`dot.top >= sentence.top && dot.bottom <= sentence.top + sentenceLineHeight`), no slack.
+  const metaTolerancePx = 1;
+  for (const [i, g] of geometries.entries()) {
+    expect(
+      g.dot.top,
+      `${label} entry #${i}: .feed-dot top (${g.dot.top}) must not sit above the sentence's first line (${g.sentence.top})`,
+    ).toBeGreaterThanOrEqual(g.sentence.top);
+    expect(
+      g.dot.bottom,
+      `${label} entry #${i}: .feed-dot bottom (${g.dot.bottom}) must stay within the sentence's first line (${g.sentence.top + g.sentenceLineHeight})`,
+    ).toBeLessThanOrEqual(g.sentence.top + g.sentenceLineHeight);
+    expect(
+      Math.abs(g.meta.top - g.sentence.top),
+      `${label} entry #${i}: .feed-meta top (${g.meta.top}) must equal .feed-sentence top (${g.sentence.top}), never stranded below`,
+    ).toBeLessThanOrEqual(metaTolerancePx);
+    expect(
+      g.meta.left,
+      `${label} entry #${i}: .feed-meta left (${g.meta.left}) must sit to the right of .feed-sentence left (${g.sentence.left})`,
+    ).toBeGreaterThan(g.sentence.left);
   }
-});
+}
 
 /**
  * A genuine RENDERED-PIXEL sample at one page coordinate — not a geometry-box comparison (a
