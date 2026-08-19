@@ -1047,6 +1047,11 @@ test("tick DRIVE (#995 AC1): a PO body edit landing DURING gate.driveOne is caug
     forge.issueBodies[7] = editedBody;
     return result;
   };
+  // This SAME tick's DRIVE phase terminalizes the lane (state "failed"), which drops it out of
+  // activeWorkers() and would make DISPATCH phase (later in this same tick) treat issue #7 as
+  // free again — clear `ready` so it isn't re-offered (mirrors AC1b's own fixture note for the
+  // identical reason).
+  forge.ready = [];
 
   const r = await tick({
     now: realClock,
@@ -1073,6 +1078,7 @@ test("tick DRIVE (#995 AC1): a PO body edit landing DURING gate.driveOne is caug
       "the load-bearing proof is fix-leg-started/drive-fixup/resumeCalls above, all zero",
   );
   assert.equal(sup.resumeCalls.length, 0, "supervisor.resume() was never called — no paid fix leg dispatched");
+  assert.equal(sup.dispatched.length, 1, "DISPATCH never re-offers issue #7 in the SAME tick that terminalized it");
   assert.ok(r.driven.some((d) => d.kind === "needs-human" && d.issue === 7 && d.reason.startsWith("ac-snapshot-drift")));
   st.close();
 });

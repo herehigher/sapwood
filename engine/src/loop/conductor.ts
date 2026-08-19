@@ -3718,7 +3718,6 @@ async function checkAcDriftBeforeDrive(
  *  action actually spawns its fix leg (`checkpoint: "fix-leg-spawn"`) — same ordering relative to
  *  its own sibling drift check, just at a later moment in the tick than the "drive" call above.
  *
-
  *  #752 finding 1 (PO adjudication on PR #812, P1 — fixes a real production bounce): computes the
  *  cursor from `liveBody` — the SAME live body `checkAcDriftBeforeDrive` just fetched and
  *  confirmed AC-authority-matches the snapshot — never `snapshot.body` (the dispatch-time text).
@@ -5709,7 +5708,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             // startFixLeg, no `drive-fixup`, no `fix-leg-started` — the existing needs-human ->
             // re-approve -> gated-reentry path takes it from here.
             //
-            // Waste-window reduction, NOT race elimination (co-review, #995): GitHub has no
+            // Waste-window reduction, NOT race elimination (#995): GitHub has no
             // compare-and-start primitive, so an edit can still land in the handful of synchronous
             // statements between this check and `supervisor.resume()` inside startFixLeg — that
             // residual is cost-only, and the NEXT DRIVE pass rechecks again before any review or
