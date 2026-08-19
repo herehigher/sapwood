@@ -850,7 +850,7 @@
 
 /* ---- needs-attention strip (§3, #361, row anatomy #925) -------------------- */
 
-/* #925: severity bar | chip | entity ref (glyph+number+title) | reason · asks | age — every
+/* #925/#1024: severity bar | chip | reason · asks (with its own inline entity ref) | age — every
  * track but reason is a FIXED size so the columns line up down the whole strip (#729 owner walk:
  * "the chip's word length currently drives the chip's width, so every column to its right shifts
  * per row"). `--attention-chip-w` is sized to `copy.ts`'s `ATTENTION_CATEGORY`'s own longest
@@ -866,24 +866,15 @@
   flex-direction: column;
 }
 
-/* #1018 (owner ruling, reverses #925 AC4's inline title composition and the entity track's `1fr`
- * flex it needed): the entity cell's visible text is now just "PR #N"/"#N" (NeedsAttention.tsx) —
- * a short string that never needs to consume free space or clip, so the reason track — the thing
- * that actually wraps onto multiple cramped lines — becomes the row's flexible `1fr`, taking the
- * width the title used to eat.
- *
- * #1018 (each `<li>` is its own independent grid, so a bare `max-content` lets the
- * reason column's LEFT edge go ragged across rows — a production INSPECT row with no entity
- * token starts its reason ~109px left of a `PR #1016` row): `minmax(112px, max-content)` gives
- * the entity track a floor sized to the common case — 24px glyph + 8px gap + eight 16px-mono
- * glyphs at ≈9.6px each covers a typical 4-digit "PR #NNNN" ref — so those rows align, while an
- * unusually wide ref (5+ digits) still grows past the floor via `max-content` rather than
- * clipping. AC5's "entity-ref cell same left edge" still holds regardless: that edge is determined
- * entirely by the FIXED tracks before it (severity/chip), never by this column's own resolved
- * width — see NeedsAttention.test.tsx's AC5 geometry oracle for the full argument. */
+/* #1024 (owner walk on :4517, after #1018): the dedicated entity-ref cell was DERIVED from the
+ * reason sentence's own token — a row had the cell iff its sentence carried the token — and the
+ * sentence's inline `EntityRef` (ActivityFeed.tsx's `SentencePartView`) already carries the glyph,
+ * the number, and the title tooltip. The cell only doubled the ref that was already in the
+ * sentence, so it's gone: the row is now a 4-track grid (severity, chip, reason, age), and the
+ * reason track — the row's one flexible track — takes the width the entity column used to own. */
 .attention-row {
   display: grid;
-  grid-template-columns: 4px var(--attention-chip-w) minmax(112px, max-content) 1fr 96px;
+  grid-template-columns: 4px var(--attention-chip-w) 1fr 96px;
   align-items: center;
   column-gap: var(--space-2);
   min-height: 56px;
@@ -950,46 +941,6 @@
 .attention-category {
   display: flex;
   align-items: center;
-}
-
-/* #1018: the entity track is now `minmax(112px, max-content)` (above) — the visible "PR #N"/"#N"
- * ref never exceeds it, so there is nothing left to clip. The #925-era `overflow: hidden` +
- * `text-overflow: ellipsis` + `min-width: 0` truncation mechanism is dropped as dead: it only
- * ever fired against the inline title this issue moved to the tooltip. `white-space: nowrap`
- * stays — the glyph + ref still render on a single baseline, never wrapping onto a second line. */
-.attention-entity {
-  white-space: nowrap;
-}
-
-/* The glyph is a direct child now (not `EntityRef`'s own wrapper, gate① round-3 finding [0]) —
- * ≥24px, sitting to the label's left by DOM order; `vertical-align`/`margin-right` keep it on the
- * label's baseline with a visible gap without needing a flex container (which would break
- * `text-overflow: ellipsis` on the cell as a whole — ellipsis only clips a block's own inline
- * content, not separate flex-item boxes). */
-.attention-entity svg {
-  width: 24px;
-  height: 24px;
-  vertical-align: middle;
-  margin-right: var(--space-2);
-}
-
-/* The ONE styled label element — "PR #9202" (#1018: ref only, title moved to the tooltip) as a
- * single string, one font-size, one baseline (gate① round-3 finding [0]: no separate,
- * differently-sized "PR " literal). `--text-1` (16px) comfortably clears the AC's ≥14px floor.
- *
- * #925 AC4: an unstyled `<a>` (this element is a link when `repoUrl` is set) otherwise falls
- * back to the UA's default blue/underline — the mockup reads this ref in the row's own cream
- * ("primary text") ink, no underline. `--attention-emphasis-text` (tokens.css), not `--sapwood`
- * directly — the SAME resolvable-literal alias this file's own `.attention-age-emphasis` already
- * uses for the identical "primary-text role, STYLE-testable" reason (happy-dom never evaluates
- * `light-dark()` for a colour-typed property); reusing it here is the no-new-token path. The
- * keyboard focus ring stays: `:focus-visible` (app.css) is a global rule, not `.entity-ref`'s own
- * hover-only underline, so dropping `text-decoration` here never removes it. */
-.attention-entity-ref {
-  font-family: var(--font-data);
-  font-size: var(--text-1);
-  color: var(--attention-emphasis-text);
-  text-decoration: none;
 }
 
 /* #925 gate① engine-agent finding [3]: the reason column's own grid cell — holds the sentence

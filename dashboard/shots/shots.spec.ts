@@ -1281,10 +1281,10 @@ async function scanPeakDeltaPixel(
 }
 
 /**
- * #925 AC5 — THE real measurement AC5 names ("every chip the SAME computed width, every entity
- * ref cell the same left edge, every age box the same right edge... the longest word still fits").
- * happy-dom (`NeedsAttention.test.tsx`'s own harness) never runs a real layout pass — confirmed
- * directly against it: `getBoundingClientRect`/`scrollWidth`/`clientWidth` all read back
+ * #925/#1024 AC5 — THE real measurement AC5 names ("every chip the SAME computed width, every
+ * reason cell the same left edge, every age box the same right edge... the longest word still
+ * fits"). happy-dom (`NeedsAttention.test.tsx`'s own harness) never runs a real layout pass —
+ * confirmed directly against it: `getBoundingClientRect`/`scrollWidth`/`clientWidth` all read back
  * hard-coded 0 on every element, real DOM or not. That suite's own "#925 AC5" test is the FAST
  * structural guard (a CSS-Grid-determinism argument over `getComputedStyle`'s CASCADE reads, which
  * happy-dom DOES resolve faithfully — that test's own comment makes the case for why the structural
@@ -1293,8 +1293,13 @@ async function scanPeakDeltaPixel(
  * fixture's real rows: FIX CAP / DECISION / REVIEW SILENCE — three categories, including
  * `ATTENTION_CATEGORY`'s own longest word, no fixture rebuild needed (leg 2's demo-fixture growth,
  * #925 AC4, already put >=3 rows across >=3 categories on this exact page).
+ *
+ * #1024: the row dropped its dedicated entity-ref track (severity | chip | entity | reason | age
+ * -> severity | chip | reason | age) — the reason cell is now the one directly after the two fixed
+ * tracks (severity/chip), so ITS left edge is the pinned-by-construction invariant this oracle
+ * proves, not a cell that no longer exists.
  */
-test("#925 AC5 (REAL measurement, the actual geometry proof — see NeedsAttention.test.tsx's own AC5 test for the fast structural guard): every .attention-chip is the same rendered width, every entity cell shares the same left edge, every age box shares the same right edge, and REVIEW SILENCE fits inside its chip", async ({
+test("#925/#1024 AC5 (REAL measurement, the actual geometry proof — see NeedsAttention.test.tsx's own AC5 test for the fast structural guard): every .attention-chip is the same rendered width, every reason cell shares the same left edge, every age box shares the same right edge, and REVIEW SILENCE fits inside its chip", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -1322,12 +1327,12 @@ test("#925 AC5 (REAL measurement, the actual geometry proof — see NeedsAttenti
     ).toBeLessThanOrEqual(tolerancePx);
   }
 
-  const entityLefts = await page.locator(".attention-entity").evaluateAll((els) => els.map((el) => el.getBoundingClientRect().left));
-  const firstEntityLeft = entityLefts[0]!;
-  for (const l of entityLefts) {
+  const reasonLefts = await page.locator(".attention-reason").evaluateAll((els) => els.map((el) => el.getBoundingClientRect().left));
+  const firstReasonLeft = reasonLefts[0]!;
+  for (const l of reasonLefts) {
     expect(
-      Math.abs(l - firstEntityLeft),
-      `every entity cell must share the SAME left edge (±${tolerancePx}px), got: ${entityLefts.join(", ")}`,
+      Math.abs(l - firstReasonLeft),
+      `every reason cell must share the SAME left edge (±${tolerancePx}px), got: ${reasonLefts.join(", ")}`,
     ).toBeLessThanOrEqual(tolerancePx);
   }
 

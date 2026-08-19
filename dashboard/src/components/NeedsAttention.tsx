@@ -1,29 +1,10 @@
-import { attentionCategory, copyFor, type EntityToken, isReviewDissentCategory, type SentencePart } from "../copy.ts";
+import { attentionCategory, copyFor, isReviewDissentCategory, type SentencePart } from "../copy.ts";
 import type { DomainEvent } from "../domain-event.ts";
 import { attentionSummary, type EntityTitles } from "../entities.ts";
 import { formatCompactAge, formatRelativeWithAbsoluteTitle } from "../format-time.ts";
 import { ATTENTION_KIND_TO_NODE, type StageNode } from "../inspector.ts";
 import { SentencePartView } from "./ActivityFeed.tsx";
-import { resolveEntityTitle } from "./EntityRef.tsx";
 import { HintTooltip } from "./HintTooltip.tsx";
-import { IssueGlyph, PrGlyph } from "./icons.tsx";
-
-/** #925 gate① engine-agent finding [3] (sentence-prefix-dropped): the entity token drives the
- *  row's dedicated entity-ref cell ("PR #212", #1018), but the FULL original sentence still
- *  renders in the reason cell — never sliced. An earlier version dropped every `SentencePart`
- *  before the token, assuming it was always a redundant "PR "/"Issue " prefix; `copy.ts`'s own
- *  shapes disprove that (`gated-flag-unprovable`: `["Lane ", worker, "'s reentry flag couldn't be
- *  found on either carrier · asks: check issue ", issueTok(...), "'s labels by hand"]` — the token
- *  sits mid-sentence, and slicing everything up to and including it discarded the reason's own
- *  subject and verb). `copy.ts` carries ~30 independently-authored sentence shapes with no
- *  structural guarantee the token is a leading prefix; there is no reliable, non-text-guessing way
- *  to know which leading words are safe to drop for a given kind (the "authoritative signals over
- *  inferred ones" rule — text-shape sniffing is exactly the free-text-pattern guessing it warns
- *  against). Showing the entity number twice (once in its own cell, once inline in the sentence's
- *  own prose) is the accepted, honest trade-off — never losing the reason's own meaning. */
-function findEntityToken(parts: SentencePart[]): EntityToken | undefined {
-  return parts.find((part): part is EntityToken => typeof part === "object" && (part.kind === "issue" || part.kind === "pr"));
-}
 
 export interface NeedsAttentionProps {
   /** The caller's durable `foldOpenAttention` result (`useEventHistory().openAttention`) —
@@ -83,15 +64,6 @@ function AttentionRow({
   // permanently unprovable against them. The two literal-hex aliases are pinned to --rust/
   // --sap-text's own per-theme values by tokens.test.ts, so they can never silently drift.
   const tone = category && isReviewDissentCategory(category) ? "var(--attention-tone-review)" : "var(--attention-tone-rust)";
-  const token = findEntityToken(parts);
-  const entityTitle = token ? resolveEntityTitle(token, titles) : undefined;
-  // #1018 (owner ruling, reverses #925 AC4's inline "PR #N — <title>" composition): the VISIBLE
-  // label is the ref alone — the title crowded the reason column and was truncated anyway, while
-  // the exact same string was already available on hover/focus. `entityRef` is what renders in
-  // the cell; `entityLabel` (ref + title, when a title resolves) moves to being tooltip-only
-  // content below — never composed into the visible DOM text.
-  const entityRef = token ? `${token.kind === "pr" ? "PR " : ""}#${token.number}` : undefined;
-  const entityLabel = entityTitle ? `${entityRef} — ${entityTitle}` : undefined;
   // gate① engine-agent finding [1] (ac4-age-box): `.muted` (app.css) and `.attention-age-emphasis`
   // (panels.css) carry EQUAL selector specificity, and `.muted` loads LATER in the production
   // cascade (tokens.css -> panels.css -> hero.css -> app.css) — a `.muted`-carrying emphasis box
@@ -106,14 +78,13 @@ function AttentionRow({
   const ageClassName = emphasize ? "data attention-age attention-age-emphasis" : "muted data attention-age";
   const rowModifier = emphasize ? " attention-row-emphasis" : "";
   return (
-    // #925 gate① engine-agent finding [3] (inspect-control-breaks-grid): `.attention-row` is a
-    // 5-track CSS grid — exactly 5 direct children, ALWAYS, regardless of which optional content
-    // a given row carries. The category chip and the inspect button are both conditional, so each
-    // lives inside a stable wrapper cell (`.attention-category`, `.attention-reason`) rather than
-    // being a direct grid child itself — otherwise a row that skips the chip (an unrecognized
-    // kind) or adds the inspect button (App's own onInspect wiring, real production rows like
-    // plan-review-escalated) shifts every column after it, or auto-places the age box into a
-    // second implicit grid row.
+    // #1024: `.attention-row` is a 4-track CSS grid — exactly 4 direct children, ALWAYS,
+    // regardless of which optional content a given row carries. The category chip and the inspect
+    // button are both conditional, so each lives inside a stable wrapper cell (`.attention-
+    // category`, `.attention-reason`) rather than being a direct grid child itself — otherwise a
+    // row that skips the chip (an unrecognized kind) or adds the inspect button (App's own
+    // onInspect wiring, real production rows like plan-review-escalated) shifts every column
+    // after it, or auto-places the age box into a second implicit grid row.
     <li className={"attention-row" + rowModifier + " recipe-list-entry"}>
       {/* `backgroundColor` (the longhand), not `background` — a happy-dom quirk (this file's own
        *  #925 AC1 test comment) only echoes the raw inline value back for the longhand. */}
@@ -123,40 +94,6 @@ function AttentionRow({
           <span className="attention-chip" style={{ borderColor: tone, color: tone }}>
             {category}
           </span>
-        )}
-      </span>
-      {/* #1018: the glyph renders FIRST (≥24px, to the
-       *  label's left — `.attention-entity svg`, panels.css), then ONE `--font-data` ≥14px element
-       *  carrying JUST "PR #9202" (or "#9202") on a single baseline — never a glyph wrapped
-       *  mid-string. The full "PR #9202 — <title>" composition (#925 AC4) is now tooltip-ONLY
-       *  content (`entityLabel`, above) — never rendered as visible DOM text, which is what let
-       *  the title crowd the reason column and get truncated regardless (the owner ruling this
-       *  issue implements). The glyph lives INSIDE `.attention-entity-ref` (not a preceding
-       *  sibling) so the WHOLE composed trigger — glyph + ref — is the one element `HintTooltip`
-       *  clones via Radix's `asChild` (a single-child contract); reusing `EntityRef`/the age box's
-       *  own tooltip mechanism, never a second hover/focus implementation. */}
-      <span className="attention-entity">
-        {token && (
-          <HintTooltip content={entityLabel}>
-            {repoUrl ? (
-              <a
-                className="attention-entity-ref data"
-                href={`${repoUrl}/${token.kind === "issue" ? "issues" : "pull"}/${token.number}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {token.kind === "issue" ? <IssueGlyph /> : <PrGlyph />}
-                {entityRef}
-              </a>
-            ) : (
-              // tabIndex: only when there's a tooltip to reveal — same rule EntityRef.tsx's own
-              // no-repoUrl branch uses (#892 AC1) — a titleless entity has nothing to Tab to.
-              <span className="attention-entity-ref data" tabIndex={entityTitle ? 0 : undefined}>
-                {token.kind === "issue" ? <IssueGlyph /> : <PrGlyph />}
-                {entityRef}
-              </span>
-            )}
-          </HintTooltip>
         )}
       </span>
       <span className="attention-reason">

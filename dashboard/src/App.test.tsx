@@ -5127,12 +5127,13 @@ test("#953 AC2: a by-model row's .cost-bar-label renders the aliased family word
 // `getComputedStyle` in happy-dom (unlike the light-dark()-fed originals). Looped over both
 // themes (COVERAGE), same posture the #923 closed-round-stepper STYLE test already takes for the
 // identical happy-dom gap.
-test("#925 AC1: every .attention-row is >=56px with a hairline separator, its severity bar and chip resolve the REAL rust/--sap-text tone in both themes, the chip is >=30px/uppercase/mono, the entity ref is >=14px mono, and the reason resolves the REAL --bark-text colour and is mono", async () => {
+test("#925/#1024 AC1: every .attention-row is >=56px with a hairline separator, its severity bar and chip resolve the REAL rust/--sap-text tone in both themes, the chip is >=30px/uppercase/mono, and the reason resolves the REAL --bark-text colour and is mono", async () => {
   const fontDataStack = parseTokensLocal(tokensCss924)["--font-data"];
   assert.ok(fontDataStack, "tokens.css must still declare --font-data for this test's own oracle");
   const { light: lightTokens, dark: darkTokens } = parseColorTokens(tokensCss924);
   // Two distinct categories (DECISION/rust, DISSENT/--sap-text) — COVERAGE over both severity
-  // tones, not just the default one, and both carry a PR token so the entity-ref cell renders.
+  // tones, not just the default one, and both carry a PR token so the sentence's own entity ref
+  // renders.
   const { container, cleanup } = await mountLiveAppWithCascade({
     "/api/loop/state": { status: 200, body: LOOP_STATE_OK },
     "/api/events": {
@@ -5185,13 +5186,6 @@ test("#925 AC1: every .attention-row is >=56px with a hairline separator, its se
           `${themeAttr}: the chip's border-colour must resolve to the SAME real hex as the severity bar`,
         );
 
-        const entityRef = row.querySelector(".attention-entity-ref") as HTMLElement | null;
-        if (entityRef) {
-          const entityComputed = getComputedStyle(entityRef);
-          assert.ok(Number.parseFloat(entityComputed.fontSize) >= 14, `entity ref font-size (${entityComputed.fontSize}) must be >= 14px`);
-          assert.equal(entityComputed.fontFamily, fontDataStack);
-        }
-
         const reason = row.querySelector(".attention-sentence") as HTMLElement | null;
         assert.ok(reason, "each row must render its reason cell");
         const reasonComputed = getComputedStyle(reason as Element);
@@ -5203,9 +5197,14 @@ test("#925 AC1: every .attention-row is >=56px with a hairline separator, its se
         );
       }
     }
-    // Both fixture kinds carry a PR token — the `if (entityRef)` guard above would otherwise
-    // silently skip its own assertion if wiring ever dropped the token through to the row.
-    assert.equal(container.querySelectorAll(".attention-entity-ref").length, 2, "both rows must render an entity ref");
+    // #1024: the dedicated entity-ref cell is gone — both fixture kinds carry a PR token, so the
+    // reason sentence's own inline `EntityRef` (`.entity-ref`, ActivityFeed.tsx's
+    // `SentencePartView`) is the only place that ref still renders.
+    assert.equal(
+      container.querySelectorAll(".attention-sentence .entity-ref").length,
+      2,
+      "both rows must render their sentence's own entity ref",
+    );
   } finally {
     document.documentElement.removeAttribute("data-theme");
     await cleanup();
