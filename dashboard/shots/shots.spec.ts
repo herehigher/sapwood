@@ -445,6 +445,99 @@ test("#923 AC4: at 1440px, .spend-meter-bar's live width is >= 25% of .app-heade
 });
 
 /**
+ * #972 AC1: at 720px in replay mode (`?demo` is always replay once its fixture loads —
+ * `App.tsx`'s `DemoApp` doc, same posture the `#923 AC4` test above relies on) every header
+ * control's box lies inside `.app-header`'s own content box, and the BACK TO LIVE button renders
+ * as a single unclipped line — the exact defect this issue's "Why" names against the #928
+ * close-out witness (`720-dark-idle-full.png`): BTL wrapping onto three clipped lines
+ * ("BACK / TO / LIVE"), and the meter's fixed-width capsule running past the panel's right edge.
+ */
+test("#972 AC1: at 720px replay, every header control stays inside .app-header's content box and BACK TO LIVE renders on one unclipped line", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 720, height: 1024 });
+  await page.goto("/?demo");
+  await page.locator("#overview").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle");
+
+  const header = page.locator(".app-header");
+  const content = await header.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    const cs = getComputedStyle(el);
+    return {
+      left: r.left + Number.parseFloat(cs.paddingLeft),
+      right: r.right - Number.parseFloat(cs.paddingRight),
+      top: r.top + Number.parseFloat(cs.paddingTop),
+      bottom: r.bottom - Number.parseFloat(cs.paddingBottom),
+    };
+  });
+
+  for (const selector of [".round-nav-stepper", ".header-back-to-live", ".spend-meter"]) {
+    const box = await page.locator(selector).boundingBox();
+    expect(box, `${selector} must render with a real bounding box`).not.toBeNull();
+    expect(
+      box!.x,
+      `${selector}'s left edge (${box!.x}px) must sit inside the header's content box (${content.left}px)`,
+    ).toBeGreaterThanOrEqual(content.left - 1);
+    expect(
+      box!.x + box!.width,
+      `${selector}'s right edge (${box!.x + box!.width}px) must sit inside the header's content box (${content.right}px)`,
+    ).toBeLessThanOrEqual(content.right + 1);
+    expect(
+      box!.y,
+      `${selector}'s top edge (${box!.y}px) must sit inside the header's content box (${content.top}px)`,
+    ).toBeGreaterThanOrEqual(content.top - 1);
+    expect(
+      box!.y + box!.height,
+      `${selector}'s bottom edge (${box!.y + box!.height}px) must sit inside the header's content box (${content.bottom}px)`,
+    ).toBeLessThanOrEqual(content.bottom + 1);
+  }
+
+  const backToLive = page.locator(".header-back-to-live");
+  const [scrollHeight, clientHeight] = await backToLive.evaluate((el) => [el.scrollHeight, el.clientHeight]);
+  expect(scrollHeight, "BACK TO LIVE must not overflow/clip its own single-line box at 720px").toBeLessThanOrEqual(clientHeight);
+
+  // The visible label collapses to icon-only at 720 (panels.css's `.header-back-to-live-label`
+  // media rule) — the button's own explicit `aria-label` is what carries the accessible name once
+  // that text is gone, the AC's own "icon-only with an accessible name" allowance.
+  const accessibleName = await backToLive.evaluate((el) => el.getAttribute("aria-label"));
+  expect(accessibleName, "BACK TO LIVE must keep an explicit accessible name once its visible label collapses at 720px").toBe(
+    "back to live",
+  );
+});
+
+/**
+ * #972 AC3: the SAME invariant `#923 AC4`'s own test above already checks at 1440px — re-checked
+ * here at both 1440 and 1024 as this issue's own proof that the 720-only reflow (AC1's media
+ * query, panels.css) left every wider breakpoint's header geometry untouched: `.app-header`
+ * renders at its full, unclipped height, and `.spend-meter-bar`'s live width stays >= 25% of
+ * `.app-header`'s live width.
+ */
+test("#972 AC3: at 1440px and 1024px, .app-header renders unclipped and .spend-meter-bar stays >= 25% of .app-header's width — unchanged outside the 720px reflow", async ({
+  page,
+}) => {
+  for (const width of [1440, 1024] as const) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/?demo");
+    await page.locator("#overview").waitFor({ state: "visible" });
+    await page.waitForLoadState("networkidle");
+
+    const header = page.locator(".app-header");
+    const headerBox = await header.boundingBox();
+    expect(headerBox, `${width}px: .app-header must render with a real bounding box`).not.toBeNull();
+    const [scrollHeight, clientHeight] = await header.evaluate((el) => [el.scrollHeight, el.clientHeight]);
+    expect(scrollHeight, `${width}px: .app-header must render at its full height — no internal clipping`).toBeLessThanOrEqual(clientHeight);
+
+    const meterBox = await page.locator(".spend-meter-bar").boundingBox();
+    expect(meterBox, `${width}px: .spend-meter-bar must render with a real bounding box`).not.toBeNull();
+    expect(
+      meterBox!.width,
+      `${width}px: the spend meter (${meterBox!.width}px) must be >= 25% of the header's width (${(headerBox!.width * 0.25).toFixed(0)}px)`,
+    ).toBeGreaterThanOrEqual(headerBox!.width * 0.25);
+  }
+});
+
+/**
  * engine-agent audit run fe112e01-e488-4d80-864a-9a490750cfb1 finding [0]
  * (dropdown-clipped-by-navigator): `.round-nav`'s `overflow: hidden` (added for the joined-stepper
  * look) used to clip `.round-nav-list-wrap` — its own absolutely positioned child — out of the

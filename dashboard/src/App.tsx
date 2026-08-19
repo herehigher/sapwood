@@ -669,8 +669,12 @@ export function appContent(vm: AppViewModel) {
               // way back just because the connection did.
               replayAction={
                 mode === "replay" ? (
-                  <button type="button" className="header-back-to-live" onClick={() => replay.selectRound(null)}>
-                    <FastForward size={18} strokeWidth={1.5} aria-hidden="true" /> back to live
+                  // #972 (720 reflow): the label collapses to icon-only at 720 (panels.css) — the
+                  // button carries its own explicit `aria-label` so the accessible name survives
+                  // that, rather than being derived from text content that may be visually hidden.
+                  <button type="button" className="header-back-to-live" aria-label="back to live" onClick={() => replay.selectRound(null)}>
+                    <FastForward size={18} strokeWidth={1.5} aria-hidden="true" />
+                    <span className="header-back-to-live-label">back to live</span>
                   </button>
                 ) : undefined
               }
