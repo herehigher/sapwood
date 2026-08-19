@@ -106,6 +106,15 @@ test("compareSemver: numeric pre-release identifiers compare by length then lexi
   assert.ok(compareSemver("0.3.0-alpha.9", "0.3.0-alpha.10") < 0);
 });
 
+test("compareSemver: the major/minor/patch components also compare by length then lexically, not via Number() — a 20-digit major orders correctly", () => {
+  const a = "12345678901234567890.0.0";
+  const b = "12345678901234567891.0.0";
+  assert.ok(compareSemver(a, b) < 0, "a should be < b despite exceeding Number.MAX_SAFE_INTEGER");
+  assert.ok(compareSemver(b, a) > 0);
+  // a shorter major is always less than a longer one, regardless of leading digit
+  assert.ok(compareSemver("9.0.0", "10.0.0") < 0);
+});
+
 // ── manifest read/write + lockstep ─────────────────────────────────────────────────
 
 test("writeManifestVersion: edits only the version line, formatting otherwise untouched", () => {
@@ -192,14 +201,34 @@ test("checkLockfileVersions: ok when root/engine/dashboard entries all match", (
   }
 });
 
-test("checkLockfileVersions: fails when one of the three entries disagrees", () => {
+test("checkLockfileVersions: fails when one of the three packages entries disagrees", () => {
   const dir = tmpRepo();
   try {
-    const lock = { packages: { "": { version: "0.3.0" }, engine: { version: "0.2.9" }, dashboard: { version: "0.3.0" } } };
+    const lock = {
+      version: "0.3.0",
+      packages: { "": { version: "0.3.0" }, engine: { version: "0.2.9" }, dashboard: { version: "0.3.0" } },
+    };
     writeFileSync(join(dir, "package-lock.json"), JSON.stringify(lock));
     const r = checkLockfileVersions(dir, "0.3.0");
     assert.equal(r.ok, false);
     assert.match((r as { message: string }).message, /engine/);
+    assert.doesNotMatch((r as { message: string }).message, /top-level/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('checkLockfileVersions: fails when the lockfile\'s own top-level "version" disagrees, even though all three packages entries agree', () => {
+  const dir = tmpRepo();
+  try {
+    const lock = {
+      version: "0.2.9",
+      packages: { "": { version: "0.3.0" }, engine: { version: "0.3.0" }, dashboard: { version: "0.3.0" } },
+    };
+    writeFileSync(join(dir, "package-lock.json"), JSON.stringify(lock));
+    const r = checkLockfileVersions(dir, "0.3.0");
+    assert.equal(r.ok, false);
+    assert.match((r as { message: string }).message, /top-level/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

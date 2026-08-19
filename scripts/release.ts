@@ -45,17 +45,20 @@ export function isPrerelease(version: string): boolean {
 }
 
 interface ParsedSemver {
-  major: number;
-  minor: number;
-  patch: number;
+  major: string;
+  minor: string;
+  patch: string;
   prerelease: string[];
 }
 
+// major/minor/patch stay strings, same as the prerelease identifiers below — `compareSemver`
+// runs them through the identical length-then-lexical numeric compare rather than `Number()`,
+// so a 20-digit major component orders correctly instead of silently losing precision.
 function parseSemver(version: string): ParsedSemver {
   const m = SEMVER_RE.exec(version);
   if (!m) throw new Error(`"${version}" is not a valid SemVer 2.0.0 version`);
   const [, major, minor, patch, prerelease] = m;
-  return { major: Number(major), minor: Number(minor), patch: Number(patch), prerelease: prerelease ? prerelease.split(".") : [] };
+  return { major, minor, patch, prerelease: prerelease ? prerelease.split(".") : [] };
 }
 
 // SemVer 2.0.0 §11 precedence: numeric identifiers compare numerically, alphanumeric
@@ -83,9 +86,15 @@ function compareIdentifier(a: string, b: string): number {
 export function compareSemver(a: string, b: string): number {
   const pa = parseSemver(a);
   const pb = parseSemver(b);
-  if (pa.major !== pb.major) return pa.major - pb.major;
-  if (pa.minor !== pb.minor) return pa.minor - pb.minor;
-  if (pa.patch !== pb.patch) return pa.patch - pb.patch;
+  // major/minor/patch are guaranteed all-digit by SEMVER_RE's grammar, so compareIdentifier's
+  // numeric branch always applies here — the same length-then-lexical rule the prerelease loop
+  // below uses, not a second numeric-compare implementation.
+  const majorCmp = compareIdentifier(pa.major, pb.major);
+  if (majorCmp !== 0) return majorCmp;
+  const minorCmp = compareIdentifier(pa.minor, pb.minor);
+  if (minorCmp !== 0) return minorCmp;
+  const patchCmp = compareIdentifier(pa.patch, pb.patch);
+  if (patchCmp !== 0) return patchCmp;
   if (pa.prerelease.length === 0 && pb.prerelease.length === 0) return 0;
   if (pa.prerelease.length === 0) return 1;
   if (pb.prerelease.length === 0) return -1;
@@ -137,16 +146,23 @@ export type LockfileCheckResult = { ok: true } | { ok: false; message: string };
 
 export function checkLockfileVersions(repoRoot: string, version: string): LockfileCheckResult {
   const lockPath = join(repoRoot, "package-lock.json");
-  let lock: { packages?: Record<string, { version?: string }> };
+  let lock: { version?: string; packages?: Record<string, { version?: string }> };
   try {
     lock = JSON.parse(readFileSync(lockPath, "utf8"));
   } catch (e) {
     return { ok: false, message: `package-lock.json could not be read: ${e instanceof Error ? e.message : String(e)}` };
   }
   const packages = lock.packages ?? {};
-  const mismatched = LOCKFILE_PACKAGE_KEYS.filter((key) => packages[key]?.version !== version);
+  // The lockfile's OWN top-level "version" (line 3 of a fresh `npm install` output) is a
+  // fourth place it states a version, distinct from the three `packages[...]` entries below —
+  // `npm install --package-lock-only` sets both, so both are checked, not just the entries.
+  const entries: Array<{ label: string; actual: string | undefined }> = [
+    { label: "(top-level)", actual: lock.version },
+    ...LOCKFILE_PACKAGE_KEYS.map((key) => ({ label: key === "" ? "(root)" : key, actual: packages[key]?.version })),
+  ];
+  const mismatched = entries.filter((e) => e.actual !== version);
   if (mismatched.length > 0) {
-    const found = mismatched.map((key) => `${key === "" ? "(root)" : key}=${packages[key]?.version ?? "missing"}`).join(", ");
+    const found = mismatched.map((e) => `${e.label}=${e.actual ?? "missing"}`).join(", ");
     return { ok: false, message: `package-lock.json disagrees with version ${version}: ${found}` };
   }
   return { ok: true };
