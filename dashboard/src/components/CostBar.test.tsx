@@ -125,23 +125,38 @@ test("the hatch pattern def is a real SVG <pattern>, not a decorative rect — t
   assert.match(html, /patternUnits="userSpaceOnUse"/);
 });
 
-test("the target tick renders at the given coordinate, same contract as the pre-existing cost-panel bar", () => {
-  const html = renderToStaticMarkup(<CostBar settledUsd={4} max={10} targetPct={70} label="lane" />);
-  assert.match(html, /x1="70%"/);
-});
-
-test("no target tick renders when targetPct is null", () => {
+// #1020: no `.cost-bar-target` element ever renders, at any settled amount — the tick is gone
+// outright, not just hidden behind a prop default.
+test("#1020: no .cost-bar-target ever renders — the roundBudget/6 tick is dropped, not restyled", () => {
   const html = renderToStaticMarkup(<CostBar settledUsd={4} max={10} label="lane" />);
   assert.doesNotMatch(html, /cost-bar-target/);
 });
 
-// ── #924 AC2: the hairline-bar grammar's own geometry ───────────────────────────────────────────
+// ── #1020: the track — a full-width pill in the SAME geometry as the fill ─────────────────────
 
-// #924 AC2: the track is a full-width line at a fixed local Y — width comes from a plain "100%"
-// SVG length, not a hand-computed value, so it always spans the bar's own real rendered box.
-test("AC2: the track is a full-width line at a fixed Y, regardless of the settled fill", () => {
+// #1020: the track is now a full-width ROUNDED RECT, same `y`/`height`/`rx` grammar `.cost-bar-fill`
+// draws (never a hand-computed value of its own) — width comes from a plain "100%" SVG length, so
+// it always spans the bar's own real rendered box regardless of the settled fill.
+test("#1020: the track is a full-width rounded rect, same height/rx as the fill, regardless of the settled amount", () => {
   const html = renderToStaticMarkup(<CostBar settledUsd={4} max={10} label="lane" />);
-  assert.match(html, /<line class="cost-bar-track" x1="0" y1="5\.5" x2="100%" y2="5\.5">/);
+  const trackMatch = html.match(/class="cost-bar-track"[^>]*y="([\d.]+)"[^>]*width="100%"[^>]*height="([\d.]+)"[^>]*rx="([\d.]+)"/);
+  assert.ok(trackMatch, "the track must be a rect spanning 100% width with its own y/height/rx");
+  const [, y, height, rx] = trackMatch!;
+  assert.equal(Number(height), 6, "track height matches the fill's own 6px");
+  assert.equal(Number(rx), Number(height) / 2, "track rx is a true pill radius, same formula as the fill");
+  const fillMatch = html.match(/class="cost-bar-fill"[^>]*y="([\d.]+)"/);
+  assert.equal(Number(y), Number(fillMatch![1]), "track and fill share the same y — one pill drawn under the other");
+});
+
+// #1020: the track paints FIRST (bottom of the stack) — the fill (and any est hatch) must sit
+// visually on top of it, since the track is the bar's own full-scale "empty" reference the fill
+// covers as it grows, not the other way round.
+test("#1020: the track renders before the fill in document order, so the fill paints on top of it", () => {
+  const html = renderToStaticMarkup(<CostBar settledUsd={4} max={10} label="lane" />);
+  const trackIndex = html.indexOf('class="cost-bar-track"');
+  const fillIndex = html.indexOf('class="cost-bar-fill"');
+  assert.ok(trackIndex > -1 && fillIndex > -1, "both the track and the fill must render");
+  assert.ok(trackIndex < fillIndex, "the track must appear before the fill in the rendered markup");
 });
 
 // #924 AC2: the fill is a real rounded RECT (`rx` = half its own `height`) — both attributes are
@@ -161,39 +176,29 @@ test("AC2: the fill rect is 6px tall with rx=3 — a true semicircle cap fully i
   assert.equal(rx, height / 2, "rx must be exactly half the fill's own height — a true pill radius");
 });
 
-test("AC2: the target tick's own span (y1=1, y2=11 — height 10) is a fixed constant, unaffected by the settled amount", () => {
-  const html = renderToStaticMarkup(<CostBar settledUsd={4} max={10} targetPct={50} label="lane" />);
-  const tickMatch = html.match(/class="cost-bar-target"[^>]*y1="([\d.]+)"[^>]*y2="([\d.]+)"/);
-  assert.ok(tickMatch, "the target tick must render");
-  const tickHeight = Math.abs(Number(tickMatch![2]) - Number(tickMatch![1]));
-  assert.equal(tickHeight, 10, "the tick spans a fixed 10px, taller than the fill's own 6px height");
-});
-
 // ── #923 (D16): the header spend meter's own taller capsule ────────────────────────────────────
 
 // A caller with no `height` prop must render byte-identical geometry to before the prop
 // existed — every pre-#923 shared instance (cost panels, lane cards) omits it.
-test("#923: the default (no height prop) renders the exact same 12px geometry as before — height=12, fill=6/rx=3, tick 1..11", () => {
-  const html = renderToStaticMarkup(<CostBar settledUsd={4} max={10} targetPct={50} label="lane" />);
+test("#923: the default (no height prop) renders the exact same 12px geometry as before — height=12, track/fill=6/rx=3", () => {
+  const html = renderToStaticMarkup(<CostBar settledUsd={4} max={10} label="lane" />);
   assert.match(html, /<svg width="100%" height="12"/);
-  assert.match(html, /<line class="cost-bar-track" x1="0" y1="5\.5" x2="100%" y2="5\.5">/);
+  assert.match(html, /class="cost-bar-track"[^>]*width="100%"[^>]*height="6"[^>]*rx="3"/);
   assert.match(html, /class="cost-bar-fill"[^>]*height="6"[^>]*rx="3"/);
-  assert.match(html, /class="cost-bar-target"[^>]*y1="1"[^>]*y2="11"/);
 });
 
 // #923 AC1: the header spend meter passes `height={20}` (D16's "~400×20 outlined capsule") — the
-// track/fill/tick geometry scales proportionally (20/12 = 1.667×) rather than staying the 12px
-// drawing floating in extra blank space a bare CSS height override would leave.
+// track/fill geometry scales proportionally (20/12 = 1.667×) rather than staying the 12px drawing
+// floating in extra blank space a bare CSS height override would leave.
 test("#923: a taller height scales every coordinate proportionally, not just the outer box", () => {
-  const html = renderToStaticMarkup(<CostBar settledUsd={5} estUsd={2} max={10} targetPct={50} label="lane" height={20} />);
+  const html = renderToStaticMarkup(<CostBar settledUsd={5} estUsd={2} max={10} label="lane" height={20} />);
   assert.match(html, /<svg width="100%" height="20"/);
-  const trackMatch = html.match(/<line class="cost-bar-track" x1="0" y1="([\d.]+)"/);
-  assert.equal(Number(trackMatch?.[1]), 5.5 * (20 / 12));
+  const trackMatch = html.match(/class="cost-bar-track"[^>]*y="([\d.]+)"[^>]*width="100%"[^>]*height="([\d.]+)"[^>]*rx="([\d.]+)"/);
+  assert.equal(Number(trackMatch?.[1]), 3 * (20 / 12), "track y scales");
+  assert.equal(Number(trackMatch?.[2]), 6 * (20 / 12), "track height scales");
+  assert.equal(Number(trackMatch?.[3]), Number(trackMatch?.[2]) / 2, "track rx stays half the (now taller) track height");
   const fillMatch = html.match(/class="cost-bar-fill"[^>]*y="([\d.]+)"[^>]*height="([\d.]+)"[^>]*rx="([\d.]+)"/);
   assert.equal(Number(fillMatch?.[1]), 3 * (20 / 12), "fill y scales");
   assert.equal(Number(fillMatch?.[2]), 6 * (20 / 12), "fill height scales");
   assert.equal(Number(fillMatch?.[3]), Number(fillMatch?.[2]) / 2, "rx stays half the (now taller) fill height");
-  const tickMatch = html.match(/class="cost-bar-target"[^>]*y1="([\d.]+)"[^>]*y2="([\d.]+)"/);
-  assert.equal(Number(tickMatch?.[1]), 1 * (20 / 12));
-  assert.equal(Number(tickMatch?.[2]), 11 * (20 / 12));
 });

@@ -1,5 +1,4 @@
 import type { CostBar as CostBarData, CostPanelData, RoundCostFooter } from "../cost-panel.ts";
-import { tickPositionPct } from "../cost-panel.ts";
 import { modelDisplayName } from "../format.ts";
 import { CostBar } from "./CostBar.tsx";
 import { HintTooltip } from "./HintTooltip.tsx";
@@ -12,7 +11,7 @@ export type { CostBar, CostPanelData } from "../cost-panel.ts";
  *  (`sonnet`) for the visible label, wrapped in `HintTooltip` carrying the full raw id — the ONLY
  *  place it survives. By-stage rows (English labels, not model ids) render `bar.label` unaliased,
  *  no tooltip. */
-function Bar({ bar, max, targetPct, isModel }: { bar: CostBarData; max: number; targetPct: number | null; isModel: boolean }) {
+function Bar({ bar, max, isModel }: { bar: CostBarData; max: number; isModel: boolean }) {
   const label = isModel ? (
     <HintTooltip content={bar.label}>
       {/* biome-ignore lint/a11y/noNoninteractiveTabindex: a real Radix Tooltip trigger (HintTooltip
@@ -28,25 +27,13 @@ function Bar({ bar, max, targetPct, isModel }: { bar: CostBarData; max: number; 
   return (
     <li className="cost-bar-row">
       {label}
-      <CostBar settledUsd={bar.usd} estUsd={bar.estUsd} max={max} targetPct={targetPct} label={bar.label} />
+      <CostBar settledUsd={bar.usd} estUsd={bar.estUsd} max={max} label={bar.label} />
       <span className="data cost-bar-value">${bar.usd.toFixed(2)}</span>
     </li>
   );
 }
 
-function BarGroup({
-  title,
-  bars,
-  max,
-  targetPct = null,
-  isModel = false,
-}: {
-  title: string;
-  bars: CostBarData[];
-  max: number;
-  targetPct?: number | null;
-  isModel?: boolean;
-}) {
+function BarGroup({ title, bars, max, isModel = false }: { title: string; bars: CostBarData[]; max: number; isModel?: boolean }) {
   return (
     <div className="cost-panel-group">
       <h4 className="muted">{title}</h4>
@@ -55,7 +42,7 @@ function BarGroup({
       ) : (
         <ul className="cost-bar-list">
           {bars.map((bar) => (
-            <Bar key={bar.label} bar={bar} max={max} targetPct={targetPct} isModel={isModel} />
+            <Bar key={bar.label} bar={bar} max={max} isModel={isModel} />
           ))}
         </ul>
       )}
@@ -72,9 +59,8 @@ function footerLine(footer: RoundCostFooter): string {
 /** One "COST · ..." panel — `cost-dark.png`'s two stacked instances (TODAY, ROUND N) are the SAME
  *  shape, distinguished only by which optional fields are populated (`avgRoundUsd` for today,
  *  `closed`/`footer` for a round). */
-function CostPanel({ heading, closed, avgRoundUsd, stageBars, targetUsd, modelBars, footer }: CostPanelData) {
-  const stageMax = Math.max(0, ...stageBars.map((b) => b.usd + (b.estUsd ?? 0)), targetUsd ?? 0);
-  const targetPct = targetUsd != null ? tickPositionPct(targetUsd, stageMax) : null;
+function CostPanel({ heading, closed, avgRoundUsd, stageBars, modelBars, footer }: CostPanelData) {
+  const stageMax = Math.max(0, ...stageBars.map((b) => b.usd + (b.estUsd ?? 0)));
   const modelMax = Math.max(0, ...modelBars.map((b) => b.usd));
   return (
     // `cost-dark.png` frames TODAY and ROUND N as two INDEPENDENT bordered cards, not one shared
@@ -88,7 +74,7 @@ function CostPanel({ heading, closed, avgRoundUsd, stageBars, targetUsd, modelBa
         {avgRoundUsd != null && <span className="data muted cost-panel-avg panel-head-stat">avg round ${avgRoundUsd.toFixed(2)}</span>}
       </div>
       <div className="cost-panel-groups">
-        <BarGroup title="by stage" bars={stageBars} max={stageMax} targetPct={targetPct} />
+        <BarGroup title="by stage" bars={stageBars} max={stageMax} />
         <BarGroup title="by model" bars={modelBars} max={modelMax} isModel />
       </div>
       {footer && <p className="data muted cost-panel-footer">{footerLine(footer)}</p>}

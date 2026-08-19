@@ -12,7 +12,6 @@ import {
   rowsForDay,
   stageCostBars,
   sumEstCostUsd,
-  tickPositionPct,
 } from "./cost-panel.ts";
 import { bucketSpendByPhase, buildPhaseWindows } from "./replay/spend-replay.ts";
 
@@ -129,7 +128,7 @@ test("sumEstCostUsd is 0 (never NaN) for no lanes", () => {
 });
 
 test("buildTodayCostPanel threads lanesEstUsd through to the Lanes stage bar", () => {
-  const panel = buildTodayCostPanel([], [], [], null, null, 3.3);
+  const panel = buildTodayCostPanel([], [], [], null, 3.3);
   assert.equal(panel.stageBars.find((b) => b.label === "Lanes")?.estUsd, 3.3);
 });
 
@@ -149,22 +148,6 @@ test("modelCostBars sums usd per model, sorted by spend descending", () => {
 
 test("modelCostBars is empty for no rows, never a fabricated zero row", () => {
   assert.deepEqual(modelCostBars([]), []);
-});
-
-// ── tickPositionPct: the target-tick marker's bar-coordinate ────────────────────────────────────
-
-test("tickPositionPct places the tick proportionally, matching the bar's own width formula", () => {
-  assert.equal(tickPositionPct(5, 10), 50);
-  assert.equal(tickPositionPct(10, 10), 100);
-  assert.equal(tickPositionPct(0, 10), 0);
-});
-
-test("tickPositionPct clamps to [0, 100] — a target past the group max never draws off-track", () => {
-  assert.equal(tickPositionPct(15, 10), 100);
-});
-
-test("tickPositionPct is 0 when the group has no max at all (max <= 0), never NaN/Infinity", () => {
-  assert.equal(tickPositionPct(5, 0), 0);
 });
 
 // ── roundCostFooter: total / PRs merged / $-per-PR / review cost ────────────────────────────────
@@ -241,30 +224,23 @@ test("roundsForDay keeps only rounds whose startedAt falls on the same UTC calen
 
 // ── buildTodayCostPanel / buildClosedRoundCostPanel: the full panel shape ───────────────────────
 
-test("buildTodayCostPanel wires bucketed spend into stage bars, passes model bars through, and halves-of-sixths the round budget into the target tick", () => {
+test("buildTodayCostPanel wires bucketed spend into stage bars, passes model bars and avg-round through", () => {
   const windows = buildPhaseWindows([{ known: true, id: 1, ts: "t0", kind: "round-phase", payload: { round_id: 1, phase: "aligning" } }]);
   const rows = [spendRow(1, "t0", 1.2)];
-  const panel = buildTodayCostPanel(rows, windows, [{ label: "opus", usd: 1.2 }], 4.8, 30);
+  const panel = buildTodayCostPanel(rows, windows, [{ label: "opus", usd: 1.2 }], 4.8);
   assert.equal(panel.heading, "cost · today");
   assert.equal(panel.avgRoundUsd, 4.8);
-  assert.equal(panel.targetUsd, 5); // 30 / 6
   assert.equal(panel.footer, null);
   assert.deepEqual(panel.modelBars, [{ label: "opus", usd: 1.2 }]);
   assert.equal(panel.stageBars.find((b) => b.label === "Goal & align")?.usd, 1.2);
 });
 
-test("buildTodayCostPanel's target tick is null when no round budget is configured, never a fabricated ceiling", () => {
-  const panel = buildTodayCostPanel([], [], [], null, null);
-  assert.equal(panel.targetUsd, null);
-});
-
-test("buildClosedRoundCostPanel reads total/PRs/target straight from the round's persisted artifact, review cost from its own spend rows", () => {
+test("buildClosedRoundCostPanel reads total/PRs straight from the round's persisted artifact, review cost from its own spend rows", () => {
   const r = round({ roundId: 9, artifact: { spendUsd: 6.2, roundBudgetUsd: 30, prsMerged: 3 } });
   const rows = [spendRow(1, "t0", 1.5, { actorKind: "engine-review" }), spendRow(2, "t1", 4.7, { actorKind: "worker" })];
   const panel = buildClosedRoundCostPanel(r, rows, []);
   assert.equal(panel.heading, "cost · round 9");
   assert.equal(panel.closed, true);
-  assert.equal(panel.targetUsd, 5); // 30 / 6
   assert.deepEqual(panel.footer, { totalUsd: 6.2, prsMerged: 3, usdPerPr: 6.2 / 3, reviewUsd: 1.5 });
   assert.deepEqual(panel.modelBars, [{ label: "opus", usd: 6.2 }]);
 });
@@ -274,6 +250,5 @@ test("buildClosedRoundCostPanel omits the footer entirely (never a fabricated to
   const rows = [spendRow(1, "t0", 2.0)];
   const panel = buildClosedRoundCostPanel(r, rows, []);
   assert.equal(panel.footer, null);
-  assert.equal(panel.targetUsd, null);
   assert.deepEqual(panel.modelBars, [{ label: "opus", usd: 2.0 }]);
 });

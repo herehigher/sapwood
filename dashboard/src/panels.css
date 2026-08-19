@@ -394,13 +394,18 @@
   overflow: visible;
 }
 
-/* #924 (D29/D30) — the shared hairline-bar grammar `CostBar.tsx` draws: a 1px `--bark` track, an
- * amber pill fill 6px tall (`.cost-bar-fill`, `--sap-fill`, `rx` = a true semicircle at both
- * ends), and a 1px `--sap-text` tick taller than the pill (`.cost-bar-target`). Geometry is fixed
- * per instance as SVG attributes in `CostBar.tsx` itself. */
+/* #1020 (owner walk on :4517, supersedes #924's track half of the grammar) — the track is now a
+ * full-width pill in the SAME `rx`/height geometry `.cost-bar-fill` below draws (CostBar.tsx), a
+ * light neutral "glass column" the amber fill reads as liquid inside, rather than a 1px hairline.
+ * Same `--bark`-at-low-opacity derivation the old hairline already used — a muted, unsaturated
+ * neutral is what reads as "light" relative to the fully-saturated `--sap-fill` amber sitting on
+ * top of it, in both themes; `contrast.ts`'s `checkFillTrackContrast` composites this SAME
+ * `opacity` over `--panel` (every bar renders inside a `.panel` card) to prove the fill/track pair
+ * clears WCAG's 3:1 non-text boundary — unchanged by switching the element from a `<line>` to a
+ * `<rect>`, since the composited colour depends only on this opacity, not on the shape painting
+ * it. */
 .cost-bar-track {
-  stroke: var(--bark);
-  stroke-width: 1;
+  fill: var(--bark);
   opacity: 0.4;
 }
 
@@ -411,19 +416,17 @@
  * SAME rect carries the light-theme outline directly (`stroke: var(--sap-fill-outline)`, 1px) —
  * the real rendered `.cost-bar-track` (this fill's own immediate neighbour — `--bark` at 0.4
  * opacity over `--panel`, `contrast.ts`'s `checkFillTrackContrast`) clears 3:1 against `--sap-fill`
- * in dark theme (4.24:1) but NOT in light (1.15:1); `--sap-fill-outline` is invisible in dark
- * theme, where it already clears unaided (tokens.css). The stroke traces the rect's own already-
- * rounded path directly, so one element carries both fill and outline — no second element needed. */
+ * in dark theme (4.24:1) but NOT in light (1.15:1, re-measured #1020 — identical figures to
+ * before: the opacity/colour math is unchanged, only the track's own shape (line -> full-width
+ * rect) moved); `--sap-fill-outline` is invisible in dark theme, where it already clears unaided
+ * (tokens.css). #1020: kept rather than dropped — the underlying light-theme shortfall this
+ * outline compensates for is exactly as real against the new full-pill track as it was against
+ * the old hairline, since both composite the SAME `--bark`-over-`--panel` colour. The stroke
+ * traces the rect's own already-rounded path directly, so one element carries both fill and
+ * outline — no second element needed. */
 .cost-bar-fill {
   fill: var(--sap-fill);
   stroke: var(--sap-fill-outline);
-  stroke-width: 1;
-}
-
-/* #924 AC2: the by-stage group's shared target/ceiling tick (`cost-panel.ts`'s `tickPositionPct`)
- * — a plain 1px vertical hairline, taller than the pill. */
-.cost-bar-target {
-  stroke: var(--sap-text);
   stroke-width: 1;
 }
 

@@ -22,7 +22,6 @@ function todayPanel(overrides: Partial<Parameters<typeof CostStrip>[0]["today"]>
     heading: "cost · today",
     avgRoundUsd: 4.8,
     stageBars: STAGE_BARS,
-    targetUsd: 5,
     modelBars: MODEL_BARS,
     footer: null,
     ...overrides,
@@ -49,9 +48,7 @@ test("#924 AC1: the today panel's head carries .panel-head, with the avg-round s
 });
 
 test("a round with no artifact data still renders all six stage rows, zero-filled — never a blank chart", () => {
-  const html = renderToStaticMarkup(
-    <CostStrip today={todayPanel({ stageBars: [], modelBars: [], avgRoundUsd: null, targetUsd: null })} round={null} />,
-  );
+  const html = renderToStaticMarkup(<CostStrip today={todayPanel({ stageBars: [], modelBars: [], avgRoundUsd: null })} round={null} />);
   assert.match(html, /no spend yet/);
 });
 
@@ -69,7 +66,6 @@ test("renders a second panel only when a round is given, with its CLOSED badge a
         heading: "cost · round 9",
         closed: true,
         stageBars: STAGE_BARS,
-        targetUsd: 5,
         modelBars: MODEL_BARS,
         footer: { totalUsd: 6.2, prsMerged: 3, usdPerPr: 6.2 / 3, reviewUsd: 0 },
       }}
@@ -91,7 +87,6 @@ test("footer's $-per-PR figure is omitted (never a division-by-zero string) when
         heading: "cost · round 9",
         closed: true,
         stageBars: STAGE_BARS,
-        targetUsd: 5,
         modelBars: MODEL_BARS,
         footer: { totalUsd: 1.1, prsMerged: 0, usdPerPr: null, reviewUsd: 0 },
       }}
@@ -101,17 +96,11 @@ test("footer's $-per-PR figure is omitted (never a division-by-zero string) when
   assert.match(html, /0 PRs merged/);
 });
 
-test("the target-tick marker draws at the correct bar coordinate, shared across every stage bar in the group", () => {
+// #1020: no `.cost-bar-target` element ever renders from a real panel render — the roundBudget/6
+// tick and its `targetUsd`/`tickPositionPct` plumbing are gone outright.
+test("#1020: no .cost-bar-target renders anywhere in a cost panel", () => {
   const html = renderToStaticMarkup(
-    <CostStrip today={todayPanel({ stageBars: [{ label: "Lanes", usd: 10 }], targetUsd: 5, modelBars: [] })} round={null} />,
-  );
-  // max is 10 (the bar's own usd, since it exceeds targetUsd 5) -> tick at 50%.
-  assert.match(html, /x1="50%"/);
-});
-
-test("no target tick renders at all when targetUsd is null (no ceiling configured)", () => {
-  const html = renderToStaticMarkup(
-    <CostStrip today={todayPanel({ stageBars: [{ label: "Lanes", usd: 10 }], targetUsd: null, modelBars: [] })} round={null} />,
+    <CostStrip today={todayPanel({ stageBars: [{ label: "Lanes", usd: 10 }], modelBars: [] })} round={null} />,
   );
   assert.doesNotMatch(html, /cost-bar-target/);
 });
@@ -149,7 +138,6 @@ test("a CLOSED round panel's bars never carry a hatch — nothing is still runni
         heading: "cost · round 9",
         closed: true,
         stageBars: STAGE_BARS,
-        targetUsd: 5,
         modelBars: MODEL_BARS,
         footer: { totalUsd: 6.2, prsMerged: 3, usdPerPr: 6.2 / 3, reviewUsd: 0 },
       }}

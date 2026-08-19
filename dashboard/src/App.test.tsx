@@ -133,7 +133,7 @@ function minimalAppViewModel(
     parked: false,
     repoUrl: overrides.repoUrl,
     fixCap: 2,
-    costToday: { heading: "cost · today", avgRoundUsd: null, stageBars: [], targetUsd: null, modelBars: [], footer: null },
+    costToday: { heading: "cost · today", avgRoundUsd: null, stageBars: [], modelBars: [], footer: null },
     costRound: null,
     configOpen: overrides.configOpen ?? false,
     setConfigOpen: overrides.setConfigOpen ?? (() => {}),
@@ -4074,7 +4074,6 @@ function fullCoverageViewModel() {
       heading: "cost · today",
       avgRoundUsd: 4.8,
       stageBars,
-      targetUsd: 5,
       // #924 gate② PO item 2's own observed boundary case: a by-model label longer than the
       // 7em floor — the exact shape that wrapped under the fixed-width column. #953: the raw id
       // itself now renders aliased ("sonnet"), so the wrap risk this fixture exercises moved to
@@ -4086,7 +4085,6 @@ function fullCoverageViewModel() {
       heading: "cost · round 9",
       closed: true,
       stageBars,
-      targetUsd: 5,
       modelBars: [{ label: "opus", usd: 4.9 }],
       footer: { totalUsd: 6.2, prsMerged: 3, usdPerPr: 6.2 / 3, reviewUsd: 0 },
     },
@@ -4290,13 +4288,12 @@ test("AC1: where a panel-head carries a stat cluster, it is the head's last chil
   }
 });
 
-test("AC2: .cost-bar-target stroke resolves to the real --sap-text colour, and .cost-panel-footer is right-aligned", async () => {
+// #1020: no `.cost-bar-target` element ever renders in the real cascade — the roundBudget/6 tick
+// is dropped outright, not merely restyled.
+test("#1020: .cost-bar-target never renders in the real cascade, and .cost-panel-footer is right-aligned", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   try {
-    const tick = container.querySelector(".cost-bar-target");
-    assert.ok(tick, "the by-stage group's target tick must render (costToday.targetUsd is set)");
-    const expectedSapText = parseTokensLocal(tokensCss924)["--sap-text"];
-    assert.equal(getComputedStyle(tick as Element).stroke, expectedSapText, ".cost-bar-target stroke must resolve to --sap-text");
+    assert.equal(container.querySelector(".cost-bar-target"), null, "no .cost-bar-target element may render anywhere");
 
     const footer = container.querySelector(".cost-panel-footer");
     assert.ok(footer, "the closed round panel's footer must render (roundSpend.footer is set)");
@@ -4307,14 +4304,14 @@ test("AC2: .cost-bar-target stroke resolves to the real --sap-text colour, and .
 });
 
 /**
- * #924 AC2: `CostBar.tsx` has no `viewBox` — its track/fill/tick geometry (y=5.5, y=3/height=6, a
- * tick spanning y1=1..y2=11) is set directly in real CSS px, so those numbers only land where
- * they're drawn to when the `<svg>`'s own CSS height ALSO equals 12 (its own default, panels.css);
- * a shorter box would clip the tick, a taller one would leave dead space below the bar — never a
- * distortion now (no scale transform exists to distort), but still a real positioning contract
- * every context sharing this primitive must hold. COVERAGE: every production bar context this
- * fixture renders — a cost-panel bar (multiple: by-stage/by-model, today AND round), the lane
- * card's own bar — never a hand-picked subset.
+ * #924 AC2 (#1020: track geometry updated, tick geometry deleted): `CostBar.tsx` has no `viewBox`
+ * — its track/fill geometry (y=3, height=6) is set directly in real CSS px, so those numbers only
+ * land where they're drawn to when the `<svg>`'s own CSS height ALSO equals 12 (its own default,
+ * panels.css); a shorter box would clip the pills, a taller one would leave dead space below the
+ * bar — never a distortion now (no scale transform exists to distort), but still a real
+ * positioning contract every context sharing this primitive must hold. COVERAGE: every production
+ * bar context this fixture renders — a cost-panel bar (multiple: by-stage/by-model, today AND
+ * round), the lane card's own bar — never a hand-picked subset.
  *
  * #923 AC1 (D16): the header's `cost-bar spend-meter-bar` instance deliberately does NOT share
  * this 12px default any more — `Header.tsx` passes `CostBar` a `height={20}` prop (the mockup's
@@ -4322,7 +4319,7 @@ test("AC2: .cost-bar-target stroke resolves to the real --sap-text colour, and .
  * `CostBar.test.tsx`'s own `#923` tests), so it is asserted separately at its own 20px, not folded
  * into this loop's single shared expectation.
  */
-test("AC2: every 12px-default hairline-bar instance's own CSS height is exactly 12px, the box its track/fill/tick coordinates assume", async () => {
+test("AC2: every 12px-default hairline-bar instance's own CSS height is exactly 12px, the box its track/fill coordinates assume", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   try {
     const bars = [...container.querySelectorAll("svg.cost-bar")].filter((b) => !b.classList.contains("spend-meter-bar"));
@@ -4356,26 +4353,22 @@ test("#923 AC1: the header's spend-meter-bar resolves its own 20px height, ≥ t
 });
 
 /**
- * #924 AC2: `CostBar.tsx` has no `viewBox` — the track and tick's own `stroke-width: 1` (panels.css)
- * is already a real device px, with no scale-compensation mechanism (`vector-effect`) needed to
- * keep it one. happy-dom has no real layout engine (confirmed directly, repeatedly, in this file
- * and hero.test.ts — `getBoundingClientRect()` returns an all-zero box for every element), so the
- * ACTUAL rendered pixel width still can't be measured here — that is a real-browser fact, same
- * ceiling the light-dark()-outline tests above already document. What IS provable in this harness:
- * the `stroke-width` declaration cascades onto the real elements at all (a regression that dropped
- * it would fail this) — the achievable half of the proof, same STYLE-doctrine posture as the rest
- * of this file.
+ * #1020: `CostBar.tsx` has no `viewBox` — the track's own `opacity: 0.4` (panels.css, the SAME
+ * derivation `contrast.ts`'s `checkFillTrackContrast` reads from source) is a real declared value
+ * with no scale-compensation mechanism needed to keep it one. happy-dom has no real layout engine
+ * (confirmed directly, repeatedly, in this file and hero.test.ts — `getBoundingClientRect()`
+ * returns an all-zero box for every element), so the ACTUAL rendered pixel width still can't be
+ * measured here — that is a real-browser fact, same ceiling the light-dark()-outline tests above
+ * already document. What IS provable in this harness: the `opacity` declaration cascades onto the
+ * real element at all (a regression that dropped it would fail this) — the achievable half of the
+ * proof, same STYLE-doctrine posture as the rest of this file.
  */
-test("AC2 (track/tick stroke-width): the track and target tick both resolve stroke-width: 1", async () => {
+test("#1020 (track opacity): the track resolves opacity: 0.4, the SAME figure checkFillTrackContrast reads", async () => {
   const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
   try {
     const track = container.querySelector(".cost-bar-track");
     assert.ok(track, "a real .cost-bar-track must render");
-    assert.equal(getComputedStyle(track as Element).strokeWidth, "1", ".cost-bar-track stroke-width");
-
-    const tick = container.querySelector(".cost-bar-target");
-    assert.ok(tick, "a real .cost-bar-target must render (costToday.targetUsd is set)");
-    assert.equal(getComputedStyle(tick as Element).strokeWidth, "1", ".cost-bar-target stroke-width");
+    assert.equal(getComputedStyle(track as Element).opacity, "0.4", ".cost-bar-track opacity");
   } finally {
     await cleanup();
   }
@@ -4387,7 +4380,7 @@ test("AC2 (track/tick stroke-width): the track and target tick both resolve stro
  * contained at every settled percentage with no scale-compensation mechanism needed (unlike a
  * stroked line's round LINECAP, which bulges OUTWARD past its own endpoint and needed
  * `vector-effect: non-scaling-stroke` to stay a true circle under a non-uniform scale that no
- * longer exists here). Same STYLE-doctrine ceiling as the track/tick test above: happy-dom cannot
+ * longer exists here). Same STYLE-doctrine ceiling as the track opacity test above: happy-dom cannot
  * measure the actual rendered corner radius (no real layout engine), so this proves the
  * mechanism is correctly wired — `rx`/`fill`/`stroke` all resolving on the real element is what
  * GUARANTEES a true semicircle cap, fully inside the box, in any real browser (the real-pixel half
@@ -4417,6 +4410,42 @@ test("AC2 (pill end caps): the fill pill is a rect with rx=3 (half its own 6px h
         computed.strokeWidth,
         "1",
         ".cost-bar-fill stroke-width — the light outline is a plain 1px stroke, no extra element needed",
+      );
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+/**
+ * #1020 AC2: the track is now a real full-width rounded `<rect rx>`, the SAME `rx`/`y`/`height`
+ * grammar as the fill above it — not the old 1px `<line>` hairline. Drawn BEFORE the fill in
+ * document order (SVG paints in source order, no z-index escape hatch) so the fill visually reads
+ * as liquid sitting on top of the track's own "glass column".
+ */
+test("#1020 AC2: the track is a real full-width rect, same rx/y/height as the fill, drawn before it", async () => {
+  const { container, cleanup } = await mountAppWithCascade(fullCoverageViewModel());
+  const { light: lightTokens } = parseColorTokens(tokensCss924);
+  try {
+    const tracks = [...container.querySelectorAll(".cost-bar-track")].filter((t) => !t.closest("svg.spend-meter-bar"));
+    assert.ok(tracks.length >= 2, `expected track rects across cost panel/lane card contexts; found ${tracks.length}`);
+    for (const track of tracks) {
+      assert.equal(track.tagName.toLowerCase(), "rect", ".cost-bar-track must be a real <rect>, not a stroked line");
+      assert.equal(track.getAttribute("width"), "100%", ".cost-bar-track must span the bar's full width");
+      assert.equal(track.getAttribute("rx"), "3", ".cost-bar-track rx — the SAME true pill radius as the fill");
+      const fill = track.parentElement?.querySelector(".cost-bar-fill");
+      assert.ok(fill, "every track's own bar must also render a fill");
+      assert.equal(track.getAttribute("y"), fill!.getAttribute("y"), "track and fill share the same y — one pill drawn under the other");
+      const computed = getComputedStyle(track as Element);
+      assert.equal(computed.fill, lightTokens["--bark"], ".cost-bar-track's own fill must resolve the real --bark hex");
+      // Document order, not z-index — SVG has no stacking-context escape hatch, so the track's own
+      // markup must precede the fill's for the fill to paint on top of it.
+      const svg = track.closest("svg");
+      assert.ok(svg, "the track must render inside an <svg>");
+      const html = svg!.innerHTML;
+      assert.ok(
+        html.indexOf('class="cost-bar-track"') < html.indexOf('class="cost-bar-fill"'),
+        "track must precede fill in document order",
       );
     }
   } finally {
