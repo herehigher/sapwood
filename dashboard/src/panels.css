@@ -380,8 +380,9 @@
 
 /* `CostBar.tsx` has no `viewBox` — its own coordinates are already real CSS px (or SVG
  * percentages resolved against this real rendered box), so this rule's only job is picking that
- * box's own size: full width, and 12px tall (`TRACK_Y`/`FILL_HEIGHT`/`TICK_Y1`/`TICK_Y2`'s shared
- * local space), everywhere `<CostBar>` mounts (cost panels, lane cards, the header meter alike). */
+ * box's own size: full width, and 12px tall (`FILL_Y`/`FILL_HEIGHT`'s shared local space — #1020:
+ * the track now shares these SAME two constants with the fill, rather than its own `TRACK_Y`),
+ * everywhere `<CostBar>` mounts (cost panels, lane cards, the header meter alike). */
 .cost-bar {
   width: 100%;
   height: 12px;
@@ -394,9 +395,9 @@
   overflow: visible;
 }
 
-/* #1020 (owner walk on :4517, supersedes #924's track half of the grammar) — the track is now a
- * full-width pill in the SAME `rx`/height geometry `.cost-bar-fill` below draws (CostBar.tsx), a
- * light neutral "glass column" the amber fill reads as liquid inside, rather than a 1px hairline.
+/* #1020 — the track is now a full-width pill in the SAME `rx`/height geometry `.cost-bar-fill`
+ * below draws (CostBar.tsx), a light neutral "glass column" the amber fill reads as liquid inside,
+ * rather than a 1px hairline — supersedes #924's track half of the grammar.
  * Same `--bark`-at-low-opacity derivation the old hairline already used — a muted, unsaturated
  * neutral is what reads as "light" relative to the fully-saturated `--sap-fill` amber sitting on
  * top of it, in both themes; `contrast.ts`'s `checkFillTrackContrast` composites this SAME

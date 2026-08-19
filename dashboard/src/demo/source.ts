@@ -25,12 +25,7 @@ export const DEMO_SOURCE: DemoBundle = {
     rings: 1,
     mergedPrs: [9201],
     logPath: "/Users/demo-operator/work/sapwood/dashboard/data/dogfood-run-5001.log",
-    // #880: a genuine engine setting (`config-captions.ts`'s "Spending limit for a single round"),
-    // present here so the ConfigDrawer's own captioned-value walk has something real to show for
-    // it. #1020 dropped the cost panel's by-stage target tick this value used to also drive
-    // (`cost-panel.ts`'s `stageTargetUsd`, deleted) — no longer display-load-bearing, just a
-    // plausible fixture value.
-    config: { board: { owner: "herehigher", repo: "sapwood" }, lanes: { prFixCap: 2 }, cost: { roundBudgetUsd: 15 } },
+    config: { board: { owner: "herehigher", repo: "sapwood" }, lanes: { prFixCap: 2 } },
     controlsEnabled: false,
     // #894: a recorded demo has no live server behind it to compare against — honestly unknown,
     // same posture `logPath`'s real recording-machine path doesn't extend to (this fixture is

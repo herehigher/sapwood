@@ -340,17 +340,19 @@ item becomes a routed page, that is a scope amendment to this section.
   "today" of its own — the WHOLE static fixture (`events`/`spend`/`rounds`, never capped at all)
   stands in for it wholesale, so every round the bundle carries counts, regardless of the fixture's
   own fixed recording date (day-filtering a static demo by wall-clock date would silently empty it
-  the moment the shipped recording ages past its own day). Both modes render through a shared
-  **target-tick marker** — one value (the currently configured `cost.roundBudgetUsd`, spread evenly
-  across the six stages — no per-phase budget exists to draw on) drawn at the same coordinate on
-  every bar in the group, since they share one `max` — plus a **by model** group (the
+  the moment the shipped recording ages past its own day). Both modes render each bar with a
+  full-length **track** — a light pill in the fill's own rounded-rect grammar (same `rx`/height,
+  drawn under it), no target tick (#1020: the prior `roundBudgetUsd / 6` tick was a derived guess —
+  no per-phase budget exists to draw one against — dropped rather than restyled; the header's own
+  #923 outlined capsule around this same bar primitive stays the real budget reference) — plus a
+  **by model** group (the
   server-aggregated today total in live mode, already unbounded; the bundle's own total in demo),
   and an **avg-round-cost** header stat (mean settled spend across that SAME today-scoped round set
   the by-stage group unions — live: today-started rounds; demo: the whole bundle). **"COST · ROUND
   N"**: the same by-stage/by-model shape for a specific
   CLOSED round — live mode's last-closed round when nothing is selected in the navigator, or the
-  navigator's own selection in replay — carrying a **CLOSED** badge, its own target tick (that
-  round's OWN persisted `roundBudgetUsd`, never today's live config), and a **footer** line: total
+  navigator's own selection in replay — carrying a **CLOSED** badge (#1020: no target tick here
+  either — same track-only bar grammar as the today panel), and a **footer** line: total
   spend / PRs merged / $-per-PR read straight from the round's persisted artifact, and review cost
   summed from that round's OWN `spend_ledger` rows (`actorKind: "engine-review"` — the artifact
   carries no review-cost field of its own) — the whole footer omitted, never fabricated, when the

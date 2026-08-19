@@ -72,11 +72,11 @@ export interface CostBarProps {
 }
 
 /**
- * #1020 (owner walk on :4517, supersedes #924's track half of the grammar): the track is now a
- * full-width pill in the SAME `rx`/height geometry as `.cost-bar-fill` (a "glass column" the fill
- * reads as liquid inside), not a 1px hairline — and the `roundBudgetUsd / 6` target tick is
- * dropped outright, not restyled: it was a derived guess (no per-stage budget exists in config,
- * `cost-panel.ts`'s own doc), and the real budget reference stays the header capsule. No
+ * #1020: the track is now a full-width pill in the SAME `rx`/height geometry as `.cost-bar-fill`
+ * (a "glass column" the fill reads as liquid inside), not a 1px hairline — supersedes #924's track
+ * half of the grammar. The `roundBudgetUsd / 6` target tick is dropped outright, not restyled: it
+ * was a derived guess (no per-stage budget exists in config, `cost-panel.ts`'s own doc), and the
+ * real budget reference stays the header capsule. No
  * `viewBox` — every coordinate below is either a plain CSS px (matching the SVG's own real
  * `width="100%" height="12"`) or an SVG percentage length, which the browser resolves against
  * that same real rendered box natively, no runtime measurement or scale-compensation needed. A
