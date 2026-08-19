@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -3195,6 +3195,189 @@ test('resume (#1011): a fix/resume leg gets the SAME bashSandbox "required" floo
     const settingsIdx = argv.indexOf("--settings");
     const settings = JSON.parse(argv[settingsIdx + 1]!);
     assert.ok(settings.sandbox, "resume() must compose the SAME bashSandbox floor dispatch() does");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const sha256Hex = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
+
+// ── #1011 fix-leg regression: recordLaneContextManifest must hash the EXACT --settings string a
+// leg was spawned with, never a freshly recomputed guardSettings() call (which silently drops
+// the sandbox key under bashSandbox: required — a Codex sol P1 finding on PR #1017). ──────────
+
+test('dispatch (#1011 P1 regression): bashSandbox "required" + deploy key configured -> ContextManifest.settingsHash equals sha256 of the ACTUAL --settings argv value, sandbox key included', async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const state = new State(":memory:");
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const initLine = JSON.stringify({ type: "system", subtype: "init", model: "claude-stub", permissionMode: "auto" });
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '${initLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`,
+    );
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      worker: { deployKeyPath: "/tmp/fake-deploy-key-1011-p1", deployKeyId: 1 },
+      bashSandbox: "required",
+    });
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg: scfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      state,
+      probeDeployKeySsh: async () => ({ ok: true }),
+      preSpawnCaptureTimeoutMs: 2_000,
+      preSpawnCapturePollMs: 20,
+    });
+    const { name } = await s.dispatch({ number: 45, title: "t", labels: [] }, "lane-1011-p1-dispatch");
+    await waitForFile(join(dir, "args.seen"), "argv was not published");
+    await waitForFile(join(dir, `${name}.done.json`), "lane did not reach a terminal sentinel");
+    const argv = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    const settingsIdx = argv.indexOf("--settings");
+    const actualSettingsJson = argv[settingsIdx + 1]!;
+    // Sanity: this leg's actual --settings string DOES carry the sandbox floor (deploy key
+    // configured -> excludedCommands present too) — otherwise the hash-equality check below
+    // would trivially pass even with the P1 bug (a recomputed guardSettings() with the SAME
+    // missing sandbox key would coincidentally hash the same as a settings string that also
+    // never carried one).
+    const parsedSettings = JSON.parse(actualSettingsJson);
+    assert.ok(parsedSettings.sandbox, "precondition: this leg's real --settings must carry the sandbox floor");
+    assert.deepEqual(parsedSettings.sandbox.excludedCommands, ["git push *", "git fetch *", "git pull *", "git ls-remote *"]);
+
+    let recorded: { recordedAt: string; json: string } | undefined;
+    for (let i = 0; i < 200 && !recorded; i++) {
+      recorded = state.getContextManifest({ roundId: 0, phase: "worker", role: "worker", session: name, attempt: 1 });
+      if (!recorded) await sleep(20);
+    }
+    assert.ok(recorded, "expected a context_manifests row for this lane");
+    const manifest = JSON.parse(recorded!.json);
+    assert.equal(manifest.settingsHash, sha256Hex(actualSettingsJson));
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume (#1011 P1 regression): a fix leg under bashSandbox \"required\" -> its OWN manifest row (overwriting the driving leg's) hashes the RESUMED leg's actual --settings, not a recomputation", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const state = new State(":memory:");
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    // Distinct `model` per leg (same convention the #1010 leg-scoping regression test above
+    // uses) — bashSandbox composition is a CONFIG-level fact, so dispatch's and resume's own
+    // --settings strings are byte-identical here (same guardHookPath, same bashSandbox, same
+    // deployKeyPath — nothing about the leg itself changes the floor); `model` is what
+    // disambiguates WHICH leg's manifest row this poll is reading.
+    const dispatchInit = JSON.stringify({ type: "system", subtype: "init", model: "dispatch-model", permissionMode: "auto" });
+    const resumeInit = JSON.stringify({ type: "system", subtype: "init", model: "resume-model", permissionMode: "auto" });
+    const bin = mkStub(
+      dir,
+      [
+        "#!/usr/bin/env bash",
+        'if [[ "$*" == *"--resume"* ]]; then',
+        `  printf '%s\\n' "$@" > "${join(dir, "resume-args.seen.tmp")}"`,
+        `  mv "${join(dir, "resume-args.seen.tmp")}" "${join(dir, "resume-args.seen")}"`,
+        `  echo '${resumeInit}'`,
+        `  echo '{"type":"result","total_cost_usd":0.0002}'`,
+        "  exit 0",
+        "fi",
+        `printf '%s\\n' "$@" > "${join(dir, "dispatch-args.seen.tmp")}"`,
+        `mv "${join(dir, "dispatch-args.seen.tmp")}" "${join(dir, "dispatch-args.seen")}"`,
+        `echo '${dispatchInit}'`,
+        `echo '{"type":"result","total_cost_usd":0.0001}'`,
+        "exit 0",
+      ].join("\n"),
+    );
+    const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, bashSandbox: "required" });
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg: scfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      state,
+      preSpawnCaptureTimeoutMs: 2_000,
+      preSpawnCapturePollMs: 20,
+    });
+    const { name, sessionId } = await s.dispatch({ number: 46, title: "t", labels: [] }, "lane-1011-p1-resume");
+    await waitForFile(join(dir, "dispatch-args.seen"), "dispatch argv was not published");
+    await waitForFile(join(dir, `${name}.done.json`), "driving-lane precondition: dispatch must reach done");
+
+    await s.resume({ number: 46, title: "t", labels: [] }, name, { sessionId, prompt: "fix-leg: address review findings" });
+    await waitForFile(join(dir, "resume-args.seen"), "resume argv was not published");
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+
+    const resumeArgv = readFileSync(join(dir, "resume-args.seen"), "utf8").split("\n");
+    const resumeSettings = resumeArgv[resumeArgv.indexOf("--settings") + 1]!;
+    assert.ok(JSON.parse(resumeSettings).sandbox, "precondition: the resumed leg's real --settings must carry the sandbox floor too");
+
+    // Poll past the dispatch leg's own manifest row (recorded from its OWN onExit, which also
+    // schedules asynchronously) until the RESUMED leg's overwrite lands — same disambiguator
+    // (`model`) the #1010 leg-scoping regression test above already relies on.
+    let recorded: { recordedAt: string; json: string } | undefined;
+    for (let i = 0; i < 200; i++) {
+      recorded = state.getContextManifest({ roundId: 0, phase: "worker", role: "worker", session: name, attempt: 1 });
+      if (recorded && JSON.parse(recorded.json).model === "resume-model") break;
+      recorded = undefined;
+      await sleep(20);
+    }
+    assert.ok(recorded, "expected the RESUMED leg's own context_manifests row to overwrite the dispatch leg's");
+    const manifest = JSON.parse(recorded!.json);
+    assert.equal(manifest.settingsHash, sha256Hex(resumeSettings));
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('dispatch (#1011 P1 regression): bashSandbox "host-managed" (default) -> ContextManifest.settingsHash is unaffected (still the guard-hook-only settings string)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const state = new State(":memory:");
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const initLine = JSON.stringify({ type: "system", subtype: "init", model: "claude-stub", permissionMode: "auto" });
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '${initLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`,
+    );
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg, // default cfg -> bashSandbox: host-managed
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      state,
+      preSpawnCaptureTimeoutMs: 2_000,
+      preSpawnCapturePollMs: 20,
+    });
+    const { name } = await s.dispatch({ number: 47, title: "t", labels: [] }, "lane-1011-p1-hostmanaged");
+    await waitForFile(join(dir, "args.seen"), "argv was not published");
+    await waitForFile(join(dir, `${name}.done.json`), "lane did not reach a terminal sentinel");
+    const argv = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    const actualSettingsJson = argv[argv.indexOf("--settings") + 1]!;
+    assert.equal("sandbox" in JSON.parse(actualSettingsJson), false);
+
+    let recorded: { recordedAt: string; json: string } | undefined;
+    for (let i = 0; i < 200 && !recorded; i++) {
+      recorded = state.getContextManifest({ roundId: 0, phase: "worker", role: "worker", session: name, attempt: 1 });
+      if (!recorded) await sleep(20);
+    }
+    assert.ok(recorded, "expected a context_manifests row for this lane");
+    const manifest = JSON.parse(recorded!.json);
+    assert.equal(manifest.settingsHash, sha256Hex(actualSettingsJson));
   } finally {
     killAnyRunningLanes(s);
     s?.dispose();

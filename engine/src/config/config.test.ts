@@ -277,10 +277,20 @@ test('host.permissionMode (#1011): defaults to "auto", overridable to "dontAsk"/
     parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nhost: { permissionMode: bypassPermissions }").host.permissionMode,
     "bypassPermissions",
   );
-  assert.throws(
-    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nhost: { permissionMode: yolo }"),
-    /host\.permissionMode|permissionMode/i,
-  );
+  // P3 (fix-leg, Codex sol review of PR #1017): a bare field-name match doesn't prove the
+  // message actually GUIDES the operator toward a valid value — assert the three allowed
+  // values are all named in the rejection text, not just that the field is mentioned.
+  assert.throws(() => {
+    try {
+      parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nhost: { permissionMode: yolo }");
+    } catch (e) {
+      assert.match(String((e as Error).message), /permissionMode/i);
+      assert.match(String((e as Error).message), /dontAsk/);
+      assert.match(String((e as Error).message), /\bauto\b/);
+      assert.match(String((e as Error).message), /bypassPermissions/);
+      throw e;
+    }
+  });
 });
 
 test("host: strict unknown-key rejection (a typo'd host key is not silently dropped)", () => {
@@ -294,7 +304,19 @@ test('bashSandbox (#1011): defaults to "host-managed", overridable to "required"
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.bashSandbox, "host-managed");
   assert.equal(parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nbashSandbox: required").bashSandbox, "required");
-  assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nbashSandbox: yolo"), /bashSandbox/i);
+  // P3 (fix-leg, Codex sol review of PR #1017): assert the message names BOTH allowed values,
+  // not just the field — same "the guidance message actually guides" strengthening as
+  // host.permissionMode's own test above.
+  assert.throws(() => {
+    try {
+      parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nbashSandbox: yolo");
+    } catch (e) {
+      assert.match(String((e as Error).message), /bashSandbox/i);
+      assert.match(String((e as Error).message), /host-managed/);
+      assert.match(String((e as Error).message), /required/);
+      throw e;
+    }
+  });
 });
 
 test("logging: defaults, overrides, and strict unknown-key rejection", () => {
