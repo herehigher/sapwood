@@ -397,12 +397,13 @@ already returns:
 
 The engine floor carries no `allowedDomains`/`allowRead`/`allowWrite` — those stay host settings
 (floor = governance core, allowances = host, per Decision #11); an operator running a `required`
-leg must add `allowedDomains` (`github.com` at minimum) in their own Claude settings, or nothing
-beyond `denyRead` is reachable. One engine-added exception: when `worker.deployKeyPath` is set
+leg must add `allowedDomains` (`github.com` at minimum) in their own Claude settings, or no
+sandboxed network destination is reachable. One engine-added exception: when `worker.deployKeyPath` is set
 (L1), the floor also adds `excludedCommands: ["git push *","git fetch *","git pull *","git
-ls-remote *"]` — exactly the four network verbs deploy-key SSH transport needs, prefix-matched
-against the literal command string (a `git -c ... push` invocation does NOT match and stays
-sandboxed) — because plain `ssh` cannot resolve or reach GitHub from inside the sandbox
+ls-remote *"]` — exactly the four network verbs deploy-key SSH transport needs,
+prefix-matched against the command after any leading environment assignments (so
+`GIT_SSH_COMMAND=… git ls-remote …` matches `git ls-remote *`; `git -c … ls-remote …` does not,
+and stays sandboxed) — because plain `ssh` cannot resolve or reach GitHub from inside the sandbox
 (confirmed live, #1009 P1(b)) and no simpler recipe carries deploy-key SSH through it today.
 `excludedCommands: ["git *"]` was tested and rejected as needlessly broad: it exempts every local
 git operation (checkout/commit/merge/rebase/add/diff/log/status) along with the four verbs that
@@ -410,12 +411,11 @@ actually need it. (Verified feasible on claude 2.1.235: SSH:22 transits the sand
 authenticated HTTP CONNECT proxy via a proxy-aware `ProxyCommand`; not built — the added
 complexity isn't worth the narrowing this residual would close.)
 
-`required` guarantees the CLI refused to start without a sandbox (`failIfUnavailable: true`) and
-that the floor keys above were injected. **It does not positively verify engagement on a leg that
-never hit a denial** — the engine records the observed `<sandbox_violations>` count per session
-(#1010) rather than attesting engagement, because no CLI-level "sandbox: engaged" event exists to
-key an attestation on (probed, #1009 P5, version-anchored to claude 2.1.235 — the only positive
-signal anywhere in the stream-json is a `<sandbox_violations>` block on a denied tool_result).
+`required` injects the floor and sets `failIfUnavailable: true`, which Claude Code's
+documentation says makes sandbox-initialization failure block CLI startup instead of falling back
+unsandboxed. The engine does not positively attest per-leg engagement; it records the observed
+`<sandbox_violations>` count (#1010). In P5 on claude 2.1.235, the init event exposed no sandbox
+field, while a denied tool result carried `<sandbox_violations>`.
 
 **Guaranteed:** the `dangerouslyDisableSandbox` escape hatch is off; `sandbox.filesystem.denyRead`
 closes the worker.ts:1929 `steal.mjs` read (probed: `EPERM`, with a specific `allowRead` entry
@@ -432,14 +432,13 @@ merge, so they can't be locally re-opened the way array keys can (below); the gu
 ADDITIVE across settings sources with no lock outside managed settings — a worker-writable
 worktree's own `.claude/settings.json` widened the inline floor's `allowedDomains` in a live
 probe (#1009 P6); the effective allowlist is `allowedDomains` plus every `WebFetch(domain:...)`
-rule, not `allowedDomains` alone. `excludedCommands` matches by literal command PREFIX against
-the whole invocation string, not just the top-level executable — `["ssh *"]` never matches an
-`ssh` child spawned by `git`, and a `-c ...`-prefixed git invocation escapes a subcommand-specific
-exclusion too (stays sandboxed, fails DNS the same as any other unexcluded `git` call). The L1
+rule, not `allowedDomains` alone. `excludedCommands` matches by command PREFIX against the
+invocation after any leading environment assignments (so `GIT_SSH_COMMAND=… git ls-remote …`
+matches `git ls-remote *`; `git -c … ls-remote …` does not, and stays sandboxed) — `["ssh *"]`
+never matches an `ssh` child spawned by `git`, and a `-c ...`-prefixed git invocation escapes a
+subcommand-specific exclusion too (fails DNS the same as any other unexcluded `git` call). The L1
 exclusion above (four network verbs only) leaves them running unsandboxed — their own filesystem
-writes included — and an option-carried local exec such as `git push <local-path>
---receive-pack=<cmd>` is not confined either, since the whole matched invocation runs outside the
-sandbox. An allowlisted domain is not a protocol-or-port restriction — CONNECT was verified to
+writes included. An allowlisted domain is not a protocol-or-port restriction — CONNECT was verified to
 carry SSH:22 to an allowlisted `github.com` the same way it carries HTTPS. `bypassPermissions`
 skips protected-path checks and the sandbox never covers
 `Edit`/`Write` at all, so a same-lane self-escalation via `.mcp.json`/`.claude/hooks` stays
@@ -451,9 +450,9 @@ GPG-signed commits fail under the default filesystem confinement (`~/.gnupg` unw
 P1a) — a host allowance (`filesystem.allowWrite: ["~/.gnupg"]`), not an engine floor entry,
 closes it.
 
-Two states cover every probed shape — nothing engine-configured, or an engine-injected,
-partially-verified floor; a third "on but unattested" state would be indistinguishable from
-`host-managed` until something is denied.
+Two states cover every probed shape — nothing engine-configured, or an engine-injected floor
+with an initialization hard-fail but no engagement attestation; a third "on but unattested"
+state would be indistinguishable from `host-managed` until something is denied.
 
 ### Operator recipe for an outer boundary (pointers, not files)
 
