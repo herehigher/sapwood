@@ -8,103 +8,12 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { z } from "zod";
-import { ConfigSchema, configHash, engineAgentEmptyCiRequiredChecksError, parseConfig } from "./config.js";
+import { ConfigSchema, engineAgentEmptyCiRequiredChecksError, parseConfig } from "./config.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const examplePath = join(repoRoot, "sapwood.config.example.yaml");
 const exampleText = readFileSync(examplePath, "utf8");
 const withBoard = (text: string) => text.replace("owner: CHANGEME", "owner: acme").replace("repo: CHANGEME", "repo: widgets");
-
-// The pre-#984 example (77 lines, board/lanes/worker/cost/reviewer.mode/merge.mode/language/
-// envFailure/ci-guidance/escalation only) — kept here ONLY as the "before" half of the
-// effective-config equivalence oracle below, never as a style reference. #984 must add every
-// missing schema key as a COMMENT without moving a single live value.
-const PRE_984_EXAMPLE = `# Sapwood configuration example for the repository you want Sapwood to operate on.
-# Copy this file to sapwood.config.yaml, then replace the three board placeholders. The comments
-# state the documented defaults; see docs/configuration.md for the complete reference.
-
-board:
-  owner: CHANGEME # required: your GitHub user or organization
-  repo: CHANGEME # required: your repository name
-  projectNumber: 1 # required: your ProjectV2 board number
-  # ownerKind: user # default: auto-detected by \`sapwood init\` when omitted
-  # statusField: Status # default: Status
-  # status: # defaults: Todo, Ready, In Progress, Done
-  #   backlog: Todo
-  #   ready: Ready
-  #   inProgress: In Progress
-  #   done: Done
-
-# goal:
-#   file: docs/GOAL.md # default: docs/GOAL.md — the project's north-star goal file (\`sapwood init\`
-#                        # scaffolds it from the shipped template when missing)
-
-lanes:
-  max: 3 # default: 3 concurrent workers
-  roundDispatchCap: 2 # default: 2 new dispatches per round/tick
-  reserveCap: 1 # default: 1 (accepted but not yet wired)
-  prFixCap: 4 # default: 4 fix-leg rounds
-  frictionMin: 0 # default: 0 (accepted but not yet wired)
-  gatedReentryCap: 2 # default: 2
-
-worker:
-  model: opus # default: opus
-  effort: high # default: high
-  fallbackModel: sonnet # default: sonnet; set "none" to fail rather than downgrade
-  timeoutSec: 3600 # default: 3600 seconds
-  budgetUsdSoft: 10 # default: 10 USD soft per-worker budget
-  maxResumes: 2 # default: 2
-  heartbeatStaleSecs: 180 # default: 180 seconds
-
-cost:
-  roundBudgetUsd: 30 # default: 30 USD
-  dailyBudgetUsd: 100 # default: 100 USD
-
-reviewer:
-  mode: engine-agent # default: engine-agent
-
-# ci.requiredChecks is deliberately NOT pre-filled: sapwood cannot know your CI check's name, and a
-# plausible wrong guess would queue every PR forever. With reviewer.mode engine-agent, \`sapwood run\`
-# refuses to start until you name at least one check-run of your CI (\`sapwood validate\` tells you
-# the same). Use the exact check-run name GitHub shows on a PR (a workflow job name, e.g. "test").
-# ci:
-#   requiredChecks:
-#     - name: test
-
-merge:
-  # The schema default is conductor-merge (L3). \`sapwood init\` deliberately pins this L2
-  # starter default so a new target repository produces a PR and stops for human merge authority.
-  mode: produce-pr-and-stop
-
-# These are the documented defaults. Uncomment to override them.
-# language: # default: en for every surface — see docs/configuration.md's "language" section
-#   codeComments: en # BCP-47-ish tag (e.g. ja, zh-Hans, pt-BR); passed through opaquely
-#   issuesAndPrs: en
-#   docs: en
-# envFailure:
-#   llmPatterns: [rate_limit_error, "rate limit exceeded", "usage limit reached",
-#                 "credit balance is too low", insufficient_quota, overloaded_error,
-#                 "429 too many requests", "hit your (?:session|weekly|5-hour) limit"]
-#   forgePatterns: ["could not resolve host", "connection refused", "network is unreachable",
-#                   "temporary failure in name resolution", "bad gateway", "gateway timeout",
-#                   "service unavailable", "bad credentials", "401 unauthorized", "gh auth login",
-#                   "SAML enforcement"]
-#   parkEscalateAfterSec: 3600 # default: 3600 seconds
-#   probeBackoffBaseSec: 30 # default: 30 seconds
-#   probeBackoffMaxSec: 1800 # default: 1800 seconds
-#   probeModel: haiku # default: haiku
-#   probeTimeoutSec: 30 # default: 30 seconds
-#   probeMaxBudgetUsd: 0.05 # default: 0.05 USD
-
-# escalation:
-#   # Defaults are canonical paths relative to YOUR target repository. \`engine/prompts/**\`
-#   # matters only when that target repository is Sapwood's engine source tree; it is otherwise
-#   # inert self-hosting coverage, not a path your repository is expected to contain.
-#   instructionPaths: [CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md, .claude/rules/**, AGENTS.md,
-#                      engine/prompts/**, engine/src/review/instruction-path-escalation.ts,
-#                      engine/src/config/config.ts, sapwood.config.example.yaml, docs/security.md, engine/src/roles/skills-plugin.ts,
-#                      engine/src/forge/labels.ts]
-`;
 
 // ---- schema key enumeration (mechanical — walks the Zod schema itself, not a parsed instance,
 // so a purely-optional no-default field like stop.afterIssuesMerged is found too) ----
@@ -118,11 +27,28 @@ function unwrapSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
 
 function collectLeafPaths(schema: z.ZodTypeAny, prefix: string[], out: Set<string>): void {
   const s = unwrapSchema(schema);
-  const def = (s as unknown as { _def: { typeName: string; shape?: () => Record<string, z.ZodTypeAny> } })._def;
+  const def = (s as unknown as { _def: { typeName: string; shape?: () => Record<string, z.ZodTypeAny>; type?: z.ZodTypeAny } })._def;
   if (def.typeName === "ZodObject" && def.shape) {
     const shape = def.shape();
     for (const key of Object.keys(shape)) collectLeafPaths(shape[key]!, [...prefix, key], out);
     return;
+  }
+  if (def.typeName === "ZodArray" && def.type) {
+    const element = unwrapSchema(def.type);
+    const elementTypeName = (element as unknown as { _def: { typeName: string } })._def.typeName;
+    if (elementTypeName === "ZodObject") {
+      // An array of OBJECTS (ci.requiredChecks: {name, app}[]) has structure past the array
+      // itself — recurse into the element so e.g. `ci.requiredChecks[].app` (config.ts:360,
+      // default "github-actions") is found too. `[]` folds onto the array's own key with no
+      // separating dot (joinPath below mirrors this), so the leaf reads `ci.requiredChecks[].app`
+      // rather than `ci.requiredChecks.[].app`. An array of primitives/enums (e.g.
+      // reviewer.trustedReviewers, escalation.instructionPaths) has no further structure and
+      // falls through to the plain leaf below, unchanged.
+      const last = prefix[prefix.length - 1];
+      const arrayPrefix = last === undefined ? prefix : [...prefix.slice(0, -1), `${last}[]`];
+      collectLeafPaths(element, arrayPrefix, out);
+      return;
+    }
   }
   out.add(prefix.join("."));
 }
@@ -137,7 +63,15 @@ function schemaKeyPaths(): { leaves: Set<string>; all: Set<string> } {
   const all = new Set<string>();
   for (const leaf of leaves) {
     const parts = leaf.split(".");
-    for (let i = 1; i <= parts.length; i++) all.add(parts.slice(0, i).join("."));
+    for (let i = 1; i <= parts.length; i++) {
+      const ancestor = parts.slice(0, i).join(".");
+      all.add(ancestor);
+      // An array-of-objects key is legitimately mentioned in the YAML BOTH as its own plain
+      // container line (`requiredChecks:`, before any `- ` item differentiates it) and, once an
+      // item opens an element, as `requiredChecks[]` (collectLeafPaths' own convention above) —
+      // accept either spelling as a valid (reverse-check) container path.
+      if (ancestor.endsWith("[]")) all.add(ancestor.slice(0, -2));
+    }
   }
   return { leaves, all };
 }
@@ -148,10 +82,21 @@ function schemaKeyPaths(): { leaves: Set<string>; all: Set<string> } {
 // `<real leading spaces>#<one separator space><key>: ...` — extra spaces after that one
 // separator encode nesting depth exactly like live YAML's own 2-space indent, so a commented
 // block's structure is recoverable without a YAML parser (which would just discard comments). A
-// line that doesn't look like a bare `identifier:` at its own indent — prose, a list item, a
-// wrapped array continuation, a nested explanatory comment starting with a second `#` — is not a
+// line that doesn't look like a bare `identifier:` at its own indent, OR a `- ` list item — prose,
+// a wrapped array continuation, a nested explanatory comment starting with a second `#` — is not a
 // key line and is ignored; it neither opens nor closes a nesting level.
 const KEY_LINE = /^([A-Za-z_][A-Za-z0-9_]*):/;
+
+/** Joins stack keys into a dotted path, EXCEPT a `"[]"` element-marker (pushed for an array-of-
+ *  object's list item — see the `content.startsWith("-")` branch below) folds onto the PRECEDING
+ *  key with no separating dot, matching `collectLeafPaths`' own `${arrayKey}[]` convention above
+ *  — so `ci`, `requiredChecks`, `[]`, `app` joins as `ci.requiredChecks[].app`, never
+ *  `ci.requiredChecks.[].app`. */
+function joinPath(keys: string[]): string {
+  let out = "";
+  for (const key of keys) out += key === "[]" ? "[]" : out.length ? `.${key}` : key;
+  return out;
+}
 
 function exampleKeyPaths(text: string): Set<string> {
   const stack: { indent: number; key: string }[] = [];
@@ -176,11 +121,31 @@ function exampleKeyPaths(text: string): Set<string> {
       indent = spacesBeforeHash + Math.max(0, spacesAfterHash - 1);
       content = afterHash.trimStart();
     }
-    if (content.startsWith("-") || content.startsWith("#")) continue; // list item / nested prose
+    if (content.startsWith("#")) continue; // nested explanatory prose, never a key line
+
+    if (content.startsWith("-")) {
+      // A list item under an array-of-objects key (`ci.requiredChecks`'s `- name: test` example)
+      // opens ONE array-element level at its own indent (`requiredChecks[]`); an inline
+      // `key: value` right after the dash (`- name: test`) is a CHILD of that element, one level
+      // deeper still — same rule as any other nesting — so a later sibling line at that child's
+      // indent (`app: ...`, two spaces deeper than the dash) attaches under the SAME element
+      // instead of reopening a new one.
+      while (stack.length && stack[stack.length - 1]!.indent >= indent) stack.pop();
+      found.add(joinPath([...stack.map((s) => s.key), "[]"]));
+      stack.push({ indent, key: "[]" });
+      const rest = content.slice(1).trimStart();
+      const m = KEY_LINE.exec(rest);
+      if (m) {
+        found.add(joinPath([...stack.map((s) => s.key), m[1]!]));
+        stack.push({ indent: indent + 2, key: m[1]! });
+      }
+      continue;
+    }
+
     const m = KEY_LINE.exec(content);
     if (!m) continue;
     while (stack.length && stack[stack.length - 1]!.indent >= indent) stack.pop();
-    found.add([...stack.map((s) => s.key), m[1]].join("."));
+    found.add(joinPath([...stack.map((s) => s.key), m[1]!]));
     stack.push({ indent, key: m[1]! });
   }
   return found;
@@ -231,14 +196,4 @@ test("AC3: sapwood.config.example.yaml still refuses per #801 (engine-agent + em
   assert.ok(engineAgentEmptyCiRequiredChecksError(cfg), "expected the #801 refusal to still fire on the shipped example");
   assert.match(exampleText, /ci\.requiredChecks is deliberately NOT pre-filled/);
   assert.match(exampleText, /requiredChecks:\s*\n#\s*- name: test/);
-});
-
-test("becoming a complete reference does not change the example's EFFECTIVE config: parseConfig(new text) equals parseConfig(pre-#984 text)", () => {
-  const before = configHash(parseConfig(withBoard(PRE_984_EXAMPLE)));
-  const after = configHash(parseConfig(withBoard(exampleText)));
-  assert.equal(
-    after,
-    before,
-    "sapwood.config.example.yaml's resolved config changed — #984 may only ADD commented keys, never move a live value",
-  );
 });

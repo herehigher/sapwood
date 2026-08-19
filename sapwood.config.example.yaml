@@ -354,6 +354,8 @@ merge:
   #                             # that CONCLUDED without ever going green
 #   requiredChecks:
 #     - name: test
+#       app: github-actions # default: github-actions — the check-run's owning GitHub App slug;
+      #                      # only meaningful if the check comes from a non-Actions CI app
 
 # escalation:
 #   # Defaults are canonical paths relative to YOUR target repository. `engine/prompts/**`
