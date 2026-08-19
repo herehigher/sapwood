@@ -25,15 +25,7 @@ export const DEMO_SOURCE: DemoBundle = {
     rings: 1,
     mergedPrs: [9201],
     logPath: "/Users/demo-operator/work/sapwood/dashboard/data/dogfood-run-5001.log",
-    // #880: `cost.roundBudgetUsd` is what drives the cost panel's by-stage target-tick marker
-    // (`cost-panel.ts`'s `stageTargetUsd`) — without it here, the shots capture (this fixture's
-    // whole reason to exist) would show every tick omitted, the one thing `cost-dark.png` names
-    // that a config-less demo can't otherwise demonstrate. 15 (below the engine schema's default
-    // of 30) rather than the default itself: at 30 the per-stage target ($5) sits ABOVE this
-    // fixture's total round spend ($4.20), pinning every tick to the track's far right edge; 15
-    // puts the target ($2.50) below the Lanes stage's own $4.20, matching `cost-dark.png`'s own
-    // pairing (the tick sits inside the group's real max, visible mid-track on the empty stages).
-    config: { board: { owner: "herehigher", repo: "sapwood" }, lanes: { prFixCap: 2 }, cost: { roundBudgetUsd: 15 } },
+    config: { board: { owner: "herehigher", repo: "sapwood" }, lanes: { prFixCap: 2 } },
     controlsEnabled: false,
     // #894: a recorded demo has no live server behind it to compare against — honestly unknown,
     // same posture `logPath`'s real recording-machine path doesn't extend to (this fixture is
@@ -53,9 +45,10 @@ export const DEMO_SOURCE: DemoBundle = {
       startSpendId: 0,
       eventCount: 13,
       schemaVersion: 1,
-      // #880: `roundBudgetUsd` here (not just `loopState.config` above) — the ROUND N panel's own
-      // target tick reads the round's OWN persisted artifact (`readSummary`), never today's live
-      // config (`buildClosedRoundCostPanel`'s doc: a closed round's ceiling is historically fixed).
+      // #880: `roundBudgetUsd` here (not just `loopState.config` above) feeds the header's
+      // replay-mode "used/budget" reading (`resolveRoundSpend`, App.tsx) off the round's OWN
+      // persisted artifact, never today's live config — a closed round's ceiling is historically
+      // fixed.
       artifact: { prsMerged: 1, spendUsd: 4.2, roundBudgetUsd: 15 },
     },
   ],

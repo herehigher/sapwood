@@ -27,16 +27,6 @@ export function sumEstCostUsd(lanes: readonly Lane[]): number {
   return lanes.reduce((sum, l) => sum + (l.estCostUsd ?? 0), 0);
 }
 
-/** The round's own ceiling, spread evenly across the six stages — the ONE target/ceiling value a
- *  by-stage group's bars share (every bar scales against the same `max`, so a single target lands
- *  at the same coordinate on every one of them — `cost-dark.png`'s ticks all sit at the same x). No
- *  per-phase budget exists in config (only `cost.roundBudgetUsd`, the whole-round soft ceiling), so
- *  this is the most honest per-stage reference derivable from real config, not a fabricated one.
- *  `null` — no tick drawn — when the round/config carries no readable budget at all. */
-function stageTargetUsd(roundBudgetUsd: number | null): number | null {
-  return roundBudgetUsd !== null ? roundBudgetUsd / 6 : null;
-}
-
 /** `round.ts`'s own `SEQUENCE` (engine/src/loop/round.ts), minus `closed` — the six phases a round
  *  actually spends money in, fixed display order per the issue body / §7 stage vocabulary (never
  *  the internal phase keys). */
@@ -74,15 +64,6 @@ export function modelCostBars(rows: readonly SpendRow[]): CostBar[] {
   const totals = new Map<string, number>();
   for (const row of rows) totals.set(row.model, (totals.get(row.model) ?? 0) + row.usd);
   return [...totals.entries()].sort((a, b) => b[1] - a[1]).map(([label, usd]) => ({ label, usd }));
-}
-
-/** Where a target/ceiling value falls along a bar drawn against `max` — the exact formula
- *  `CostStrip.tsx`'s `Bar` already uses for its own fill width, so the tick lands exactly where
- *  the fill would reach if the bar were AT the target. Clamped like the fill is (a target past the
- *  group's own max still draws a tick, pinned to the track's right edge, never off-canvas). */
-export function tickPositionPct(target: number, max: number): number {
-  if (max <= 0) return 0;
-  return Math.min(100, Math.max(0, (target / max) * 100));
 }
 
 export interface RoundCostFooter {
@@ -146,8 +127,6 @@ export interface CostPanelData {
   /** The "TODAY" header's own stat — absent (never rendered) on the round panel. */
   avgRoundUsd?: number | null;
   stageBars: CostBar[];
-  /** The by-stage group's shared target/ceiling tick — see `stageTargetUsd`'s own doc. */
-  targetUsd?: number | null;
   modelBars: CostBar[];
   /** The round panel's footer line (total / PRs merged / $-per-PR / review cost) — absent on the
    *  today panel, which has no single round to summarize. */
@@ -166,14 +145,12 @@ export function buildTodayCostPanelFromBuckets(
   buckets: readonly PhaseSpendBucket[],
   modelBars: readonly CostBar[],
   avgRoundUsd: number | null,
-  roundBudgetUsd: number | null,
   lanesEstUsd = 0,
 ): CostPanelData {
   return {
     heading: "cost · today",
     avgRoundUsd,
     stageBars: stageCostBars(buckets, lanesEstUsd),
-    targetUsd: stageTargetUsd(roundBudgetUsd),
     modelBars: [...modelBars],
     footer: null,
   };
@@ -190,10 +167,9 @@ export function buildTodayCostPanel(
   phaseWindows: readonly PhaseWindow[],
   modelBars: readonly CostBar[],
   avgRoundUsd: number | null,
-  roundBudgetUsd: number | null,
   lanesEstUsd = 0,
 ): CostPanelData {
-  return buildTodayCostPanelFromBuckets(bucketSpendByPhase(spend, phaseWindows), modelBars, avgRoundUsd, roundBudgetUsd, lanesEstUsd);
+  return buildTodayCostPanelFromBuckets(bucketSpendByPhase(spend, phaseWindows), modelBars, avgRoundUsd, lanesEstUsd);
 }
 
 /** The "COST · ROUND N" panel — a CLOSED round's frozen by-stage + by-model breakdown plus footer
@@ -213,7 +189,6 @@ export function buildClosedRoundCostPanel(round: Round, spend: readonly SpendRow
     heading: `cost · round ${round.roundId}`,
     closed: true,
     stageBars: stageCostBars(bucketSpendByPhase(spend, phaseWindows)),
-    targetUsd: stageTargetUsd(summary.roundBudgetUsd),
     modelBars: modelCostBars(spend),
     footer,
   };

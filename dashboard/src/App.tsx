@@ -903,21 +903,11 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
   // hook's own doc).
   const todayLog = useTodayCostLog(todayRounds, allRounds, lanesMax, loop.data?.spend.todayUsd ?? null);
   const todayModelBars = (loop.data?.spend.byModel ?? []).map((m) => ({ label: m.model, usd: m.usd }));
-  const roundBudgetUsdConfig = ((): number | null => {
-    const raw = loop.data?.config ? readConfigPath(loop.data.config, "cost.roundBudgetUsd") : undefined;
-    return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
-  })();
   // #890 (§3 E): the header meter's and the "Lanes" stage bar's shared est source — live lanes
   // only (`mode === "replay"` has no live lane data to sum, same gate `Hero`'s own `lanes` prop
   // above already applies).
   const lanesEstUsd = mode === "live" ? sumEstCostUsd(loop.data?.lanes.items ?? []) : 0;
-  const costToday = buildTodayCostPanelFromBuckets(
-    todayLog.buckets,
-    todayModelBars,
-    avgRoundCostUsd(todayRounds),
-    roundBudgetUsdConfig,
-    lanesEstUsd,
-  );
+  const costToday = buildTodayCostPanelFromBuckets(todayLog.buckets, todayModelBars, avgRoundCostUsd(todayRounds), lanesEstUsd);
 
   // #880: "COST · ROUND N" — a round explicitly selected in the navigator (replay mode) reads its
   // OWN full, never-cursor-truncated log (`replay.roundSpend`/`replay.phaseWindows` — see
@@ -1073,16 +1063,11 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
   // fixed historical recording date, not "today" in any wall-clock sense — filtering by `clock`
   // would silently empty the header the moment the shipped recording ages past its own day).
   const bundleEvents = (bundle?.events ?? []).map(toDomainEvent);
-  const demoRoundBudgetUsd = ((): number | null => {
-    const raw = bundle?.loopState.config ? readConfigPath(bundle.loopState.config, "cost.roundBudgetUsd") : undefined;
-    return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
-  })();
   const costToday = buildTodayCostPanel(
     bundle?.spend ?? [],
     buildPhaseWindows(bundleEvents),
     modelCostBars(bundle?.spend ?? []),
     avgRoundCostUsd(rounds),
-    demoRoundBudgetUsd,
   );
   // #880: "COST · ROUND N" — the selected round's own full log, same never-cursor-truncated
   // reading `LiveApp`'s replay branch uses (`replay.roundSpend`/`phaseWindows`).

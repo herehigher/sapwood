@@ -61,40 +61,38 @@ export interface CostBarProps {
    *  when no external ceiling exists (lane cards) — the caller's choice, this primitive only
    *  draws proportions against whatever `max` it's given. */
   max: number;
-  /** The shared by-stage/by-model target-tick coordinate (`cost-panel.ts`'s `tickPositionPct`) —
-   *  absent everywhere else. */
-  targetPct?: number | null;
   label: string;
   className?: string;
   /** #923 (D16): the box height in real px — every shared instance (cost panels, lane cards)
    *  stays the default 12px grammar; only the header spend meter passes a taller value (the
-   *  mockup's outlined ~20px capsule, vs the internal bars' thin 12px track). Track/fill/tick
+   *  mockup's outlined ~20px capsule, vs the internal bars' thin 12px track). Track/fill
    *  geometry below scales proportionally off this so a taller box is a genuinely bigger capsule,
    *  not the same 12px drawing floating in extra blank space. */
   height?: number;
 }
 
 /**
- * #924 (D29/D30) — the hairline-bar grammar: a 1px track, an amber pill fill (6px tall, `rx=3` —
- * a true semicircle at both ends), and a target tick taller than the pill. No `viewBox` — every
- * coordinate below is either a plain CSS px (matching the SVG's own real `width="100%"
- * height="12"`) or an SVG percentage length, which the browser resolves against that same real
- * rendered box natively, no runtime measurement or scale-compensation needed. A `rect`'s own `rx`
- * rounding is carved INWARD from its own x/width box — unlike a stroked line's round linecap,
- * which bulges OUTWARD past its endpoint — so the pill is fully contained inside the bar at every
- * settled percentage, 0 through 100, with nothing extra required to keep it that way.
+ * #1020: the track is now a full-width pill in the SAME `rx`/height geometry as `.cost-bar-fill`
+ * (a "glass column" the fill reads as liquid inside), not a 1px hairline — supersedes #924's track
+ * half of the grammar. The `roundBudgetUsd / 6` target tick is dropped outright, not restyled: it
+ * was a derived guess (no per-stage budget exists in config, `cost-panel.ts`'s own doc), and the
+ * real budget reference stays the header capsule. No
+ * `viewBox` — every coordinate below is either a plain CSS px (matching the SVG's own real
+ * `width="100%" height="12"`) or an SVG percentage length, which the browser resolves against
+ * that same real rendered box natively, no runtime measurement or scale-compensation needed. A
+ * `rect`'s own `rx` rounding is carved INWARD from its own x/width box — unlike a stroked line's
+ * round linecap, which bulges OUTWARD past its endpoint — so the pill (track or fill) is fully
+ * contained inside the bar at every settled percentage, 0 through 100, with nothing extra
+ * required to keep it that way.
  */
 const BASE_HEIGHT = 12;
-const BASE_TRACK_Y = 5.5;
 const BASE_FILL_Y = 3;
 const BASE_FILL_HEIGHT = 6;
-const BASE_TICK_Y1 = 1;
-const BASE_TICK_Y2 = 11;
 
 /** Hand-rolled SVG bar (frontend-design.md §3 E) — zero chart-library dependency, on purpose (§2
  *  dependency budget). Settled fill first, hatched est tail immediately after it, both clamped to
  *  the track so neither segment ever draws past 100%. */
-export function CostBar({ settledUsd, estUsd, max, targetPct = null, label, className, height = BASE_HEIGHT }: CostBarProps) {
+export function CostBar({ settledUsd, estUsd, max, label, className, height = BASE_HEIGHT }: CostBarProps) {
   // Per-instance id (see HATCH_PATTERN_ID_SUFFIX above) — this bar's own `fill="url(#…)"` below
   // resolves to the `<pattern>` this SAME render mounts, never another instance's.
   const patternId = `${useId()}${HATCH_PATTERN_ID_SUFFIX}`;
@@ -107,12 +105,9 @@ export function CostBar({ settledUsd, estUsd, max, targetPct = null, label, clas
   // already draws exactly — `scale` is 1 there, so every existing shared-instance call site
   // (cost panels, lane cards) renders byte-identical geometry to before this prop existed.
   const scale = height / BASE_HEIGHT;
-  const trackY = BASE_TRACK_Y * scale;
   const fillY = BASE_FILL_Y * scale;
   const fillHeight = BASE_FILL_HEIGHT * scale;
   const fillRadius = fillHeight / 2;
-  const tickY1 = BASE_TICK_Y1 * scale;
-  const tickY2 = BASE_TICK_Y2 * scale;
   // #924 AC2: the hatch tail's own leading edge, extended `fillRadius` px BACKWARD under the
   // pill — the pill's `rx` corner recedes inward from the nominal seam by up to that same radius
   // at its top/bottom edges (a rounded corner is never a flat vertical line), so an unextended
@@ -134,9 +129,12 @@ export function CostBar({ settledUsd, estUsd, max, targetPct = null, label, clas
   return (
     <svg width="100%" height={height} className={className ? `cost-bar ${className}` : "cost-bar"} role="img" aria-label={ariaLabel}>
       <HatchDef patternId={patternId} />
-      {/* The bar's fixed full-width reference — a plain 1px stroke, no `rx`/round cap of its own,
-       * so it never needs anything beyond its own coordinates to stay inside the box. */}
-      <line className="cost-bar-track" x1="0" y1={trackY} x2="100%" y2={trackY} />
+      {/* #1020: the bar's fixed full-width reference — now the SAME rounded-pill geometry as
+       * `.cost-bar-fill` below (full width, not the settled share), drawn first so the fill and
+       * hatch tail paint on top of it. Source order, not z-index, is what puts it "under" — SVG
+       * has no stacking-context escape hatch, so this element must stay the first shape here for
+       * as long as the fill/hatch above need to visually cover it. */}
+      <rect className="cost-bar-track" x="0" y={fillY} width="100%" height={fillHeight} rx={fillRadius} />
       {/* #924 AC2: rendered BEFORE the pill (below), extended back under it (see `hatchX`/
        * `hatchWidth` above) — the pill's own opaque fill, painted on top, covers the seam cleanly
        * instead of a flat hatch edge cutting a visible notch into the pill's curved cap. */}
@@ -147,7 +145,6 @@ export function CostBar({ settledUsd, estUsd, max, targetPct = null, label, clas
        * second wider element underneath it — a `rect`'s own stroke traces its already-rounded
        * path directly, so one element is enough. */}
       {settledPct > 0 && <rect className="cost-bar-fill" x="0" y={fillY} width={`${settledPct}%`} height={fillHeight} rx={fillRadius} />}
-      {targetPct != null && <line className="cost-bar-target" x1={`${targetPct}%`} y1={tickY1} x2={`${targetPct}%`} y2={tickY2} />}
     </svg>
   );
 }
