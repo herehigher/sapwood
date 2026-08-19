@@ -1211,11 +1211,10 @@ export function HeroStage({
   const firstFixingLane = fixingLanes[0];
   // #1026: the shared row every fixing lane's return path uses (`fixLoopSharedRowY`) — below
   // the STAGE's own last channel (`state.lanes` is the capped/renumbered view `laneY`/the lanes
-  // map both already iterate over, #716 gate② P1-9 — never a hard-coded lane count), so it
-  // clears every lane's captions regardless of which one is actually fixing. At the default
-  // `lanesMax` = 3 (`laneY(2)` = 238), this resolves to y = 262 — well below `FIXLOOP_EXIT.y`
-  // (≈211), so the drop off the CI node is always downward, never back through the node's own
-  // circle.
+  // map both already iterate over — never a hard-coded lane count), so it clears every lane's
+  // captions regardless of which one is actually fixing. At the default `lanesMax` = 3
+  // (`laneY(2)` = 238), this resolves to y = 262 — well below `FIXLOOP_EXIT.y` (≈211), so the
+  // drop off the CI node is always downward, never back through the node's own circle.
   const fixLoopRowY = fixLoopSharedRowY(state.lanes.length);
   // Cap the checkpoint zone's DRAWN chips — never let a rank grow the grid above the viewBox.
   // At or under `CHECKPOINT_DRAW_CAP`, every droplet draws normally (unchanged). Past it, only
