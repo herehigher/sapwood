@@ -69,6 +69,15 @@ export interface CostBarProps {
    *  geometry below scales proportionally off this so a taller box is a genuinely bigger capsule,
    *  not the same 12px drawing floating in extra blank space. */
   height?: number;
+  /** #1025: with #923 D16's outer capsule OUTLINE dropped (panels.css), the header
+   *  spend meter's only remaining visible shape is this primitive's own track/fill/hatch — the
+   *  shared centered-pill geometry (a `BASE_FILL_HEIGHT`-tall pill floating inside a taller
+   *  `height` box, `fillY`/`fillHeight` below) left 5px of transparent canvas above and below it
+   *  at height=20, reading as an ungrounded pill rather than a capsule filling its own box. `flush`
+   *  makes the track/fill/hatch tail cover the FULL `height` box (`fillY = 0`, `fillHeight =
+   *  height`) instead — opt-in, every other call site (cost panels, lane cards, and any future
+   *  default-height instance) keeps the unchanged centered-pill geometry. */
+  flush?: boolean;
 }
 
 /**
@@ -92,7 +101,7 @@ const BASE_FILL_HEIGHT = 6;
 /** Hand-rolled SVG bar (frontend-design.md §3 E) — zero chart-library dependency, on purpose (§2
  *  dependency budget). Settled fill first, hatched est tail immediately after it, both clamped to
  *  the track so neither segment ever draws past 100%. */
-export function CostBar({ settledUsd, estUsd, max, label, className, height = BASE_HEIGHT }: CostBarProps) {
+export function CostBar({ settledUsd, estUsd, max, label, className, height = BASE_HEIGHT, flush = false }: CostBarProps) {
   // Per-instance id (see HATCH_PATTERN_ID_SUFFIX above) — this bar's own `fill="url(#…)"` below
   // resolves to the `<pattern>` this SAME render mounts, never another instance's.
   const patternId = `${useId()}${HATCH_PATTERN_ID_SUFFIX}`;
@@ -105,8 +114,13 @@ export function CostBar({ settledUsd, estUsd, max, label, className, height = BA
   // already draws exactly — `scale` is 1 there, so every existing shared-instance call site
   // (cost panels, lane cards) renders byte-identical geometry to before this prop existed.
   const scale = height / BASE_HEIGHT;
-  const fillY = BASE_FILL_Y * scale;
-  const fillHeight = BASE_FILL_HEIGHT * scale;
+  // #1025: `flush` overrides the shared scaled-pill geometry with the full box — track, fill, and
+  // hatch tail below all read off these SAME three values, so flush applies uniformly to every
+  // shape this primitive draws, never just one of them drifting out of sync with the others. The
+  // resulting `fillRadius = height / 2` is exactly what the header instance needs for a pill-
+  // capped (not rectangular) capsule at its own full height.
+  const fillY = flush ? 0 : BASE_FILL_Y * scale;
+  const fillHeight = flush ? height : BASE_FILL_HEIGHT * scale;
   const fillRadius = fillHeight / 2;
   // #924 AC2: the hatch tail's own leading edge, extended `fillRadius` px BACKWARD under the
   // pill — the pill's `rx` corner recedes inward from the nominal seam by up to that same radius

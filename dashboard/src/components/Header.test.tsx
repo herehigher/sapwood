@@ -312,6 +312,136 @@ test("#879 gate② run 2e566ac9 finding [3]: the spend meter value renders bold 
   assert.match(body, /letter-spacing:\s*0\.02em\b/, "pin the exact shipped value — not a wildcard letter-spacing check");
 });
 
+// ── #1025: mid-width deterministic stacking + dropped spend-meter capsule outline ──────────────
+
+/** Shared setup for the viewport tests below — real cascade (tokens + panels + app), a real
+ *  happy-dom viewport, `.engine-status`'s own flex-wrap, `.round-nav-pill`'s white-space, and the
+ *  meter's own shrink rule, at a given width. STYLE doctrine (docs/REVIEW-DOCTRINE.md): needs a
+ *  real viewport + getComputedStyle read against the full production cascade, never a regex read
+ *  of the source text — same posture Controls.test.tsx's own #895 item 6 test already established
+ *  for the sibling 720px floor. */
+function readHeaderLayout(viewportWidth: number): {
+  flexWrap: string;
+  lineFlexBasis: string;
+  pillWhiteSpace: string;
+  meterFlexGrow: string;
+  meterFlexShrink: string;
+  meterFlexBasis: string;
+  meterMinWidth: string;
+  barWidth: string;
+  barMaxWidth: string;
+} {
+  (window as unknown as { happyDOM: { setViewport: (v: { width: number }) => void } }).happyDOM.setViewport({
+    width: viewportWidth,
+  });
+  const container = document.createElement("div");
+  container.innerHTML = renderToStaticMarkup(
+    <Header disconnected={false} isPending={false} engine={engine("running")} spend={SPEND_OK} parked={false} />,
+  );
+  document.body.appendChild(container);
+  try {
+    const status = container.querySelector(".engine-status");
+    const line = container.querySelector(".engine-status-line");
+    const pill = container.querySelector(".round-nav-pill");
+    const meter = container.querySelector(".spend-meter");
+    const bar = container.querySelector(".spend-meter-bar");
+    assert.ok(
+      status && line && pill && meter && bar,
+      ".engine-status, .engine-status-line, .round-nav-pill, .spend-meter, and .spend-meter-bar must all render",
+    );
+    const meterComputed = getComputedStyle(meter as Element);
+    const barComputed = getComputedStyle(bar as Element);
+    return {
+      flexWrap: getComputedStyle(status as Element).flexWrap,
+      lineFlexBasis: getComputedStyle(line as Element).flexBasis,
+      pillWhiteSpace: getComputedStyle(pill as Element).whiteSpace,
+      meterFlexGrow: meterComputed.flexGrow,
+      meterFlexShrink: meterComputed.flexShrink,
+      meterFlexBasis: meterComputed.flexBasis,
+      meterMinWidth: meterComputed.minWidth,
+      barWidth: barComputed.width,
+      barMaxWidth: barComputed.maxWidth,
+    };
+  } finally {
+    document.body.removeChild(container);
+  }
+}
+
+// #1025: LIVE mode's own Controls verbs (up to and including EMERGENCY STOP) + "?" legend push
+// the row's real natural width close to 1400px (see panels.css's own arithmetic comment) — 1400px
+// is the floor.
+test("#1025 AC1/AC2: .engine-status wraps with .engine-status-line as its own full-width line at/below the 1400px floor; the row stays unbroken above it", () => {
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${appCss}`;
+  document.head.appendChild(style);
+  try {
+    // Above the floor: happy-dom's CSSOM-only getComputedStyle reports an undeclared property as
+    // "", not the resolved initial value — this only confirms the media rule hasn't fired early
+    // (same posture Controls.test.tsx's #895 item 6 test documents for its own 720px sibling).
+    assert.notEqual(readHeaderLayout(1440).flexWrap, "wrap", "well above the floor (AC2), the mid-width rule must not have fired early");
+    assert.notEqual(readHeaderLayout(1401).flexWrap, "wrap", "one px above the floor (AC2), the media query must not have fired yet");
+
+    // 995/1024/1200/1300 are all inside the wrapped range this rule now covers — 1200 is the
+    // owner walk's own live-mode reference width from panels.css's own breakpoint arithmetic.
+    for (const width of [1400, 1300, 1200, 1024, 995]) {
+      const layout = readHeaderLayout(width);
+      assert.equal(layout.flexWrap, "wrap", `at ${width}px, .engine-status must wrap`);
+      assert.equal(layout.lineFlexBasis, "100%", `at ${width}px, .engine-status-line must claim the full first line`);
+    }
+  } finally {
+    document.head.removeChild(style);
+  }
+});
+
+test("#1025 AC1: .round-nav-pill resolves white-space: nowrap at 995px and 1024px — the stepper label never wraps", () => {
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${appCss}`;
+  document.head.appendChild(style);
+  try {
+    for (const width of [995, 1024]) {
+      assert.equal(readHeaderLayout(width).pillWhiteSpace, "nowrap", `at ${width}px, .round-nav-pill must resolve white-space: nowrap`);
+    }
+  } finally {
+    document.head.removeChild(style);
+  }
+});
+
+// #1025: a multi-line flex container decides which line an item lands on using that item's flex
+// BASE size, not its shrunk result — shrinking only happens AFTER placement. 200px is a base size
+// small enough that stepper + BACK TO LIVE + the meter fit together on line 2 at 995px replay;
+// `flex-grow: 1` then expands the meter back out from there (panels.css's own comment has the
+// full page-measured numbers). `.spend-meter-bar` follows its now-flexible parent (`width: 100%`,
+// capped at its authored `max-width: 400px`).
+test("#1025: at 995px the meter is a genuinely shrinkable flex item with a 200px base size — flex: 1 1 200px, min-width: 0, bar width: 100%/max-width: 400px", () => {
+  const style = document.createElement("style");
+  style.textContent = `${tokensCss}\n${panelsCss}\n${appCss}`;
+  document.head.appendChild(style);
+  try {
+    const layout = readHeaderLayout(995);
+    assert.equal(layout.meterFlexGrow, "1", "at 995px, .spend-meter must be allowed to grow");
+    assert.equal(layout.meterFlexShrink, "1", "at 995px, .spend-meter must be allowed to shrink below its base size");
+    assert.equal(
+      layout.meterFlexBasis,
+      "200px",
+      "at 995px, .spend-meter's flex BASE size must be small enough for the item to land on line 2 at all",
+    );
+    assert.equal(layout.meterMinWidth, "0", "at 995px, .spend-meter must not have an implicit shrink floor");
+    assert.equal(layout.barWidth, "100%", "at 995px, .spend-meter-bar tracks its now-flexible parent, not a fixed 400px");
+    assert.equal(layout.barMaxWidth, "400px", "at 995px, .spend-meter-bar still never exceeds its authored 400px when there's room");
+  } finally {
+    document.head.removeChild(style);
+  }
+});
+
+// AC3: the outlined capsule border (superseded #923 D16) is gone from source, not merely
+// unasserted — VALUE-family check, same posture the `.spend-meter-value` source check above uses.
+test("#1025 AC3: .spend-meter-bar declares no border/outline of its own — the CostBar track pill is the capsule now", () => {
+  const match = panelsCss.match(/\.spend-meter-bar\s*\{([^}]*)\}/);
+  assert.ok(match, ".spend-meter-bar rule must exist");
+  const ruleBody = match?.[1] as string;
+  assert.doesNotMatch(ruleBody, /border/, ".spend-meter-bar must declare no border property at all");
+});
+
 // ── #889: Header wires the round navigator's own props straight through, unedited ─────────────
 
 test("Header wires selectedRoundId/liveRoundId through to the round navigator pill", () => {
