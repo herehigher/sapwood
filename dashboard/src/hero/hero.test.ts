@@ -28,10 +28,12 @@ import {
   dropletRadius,
   ESCALATION,
   ESCALATION_R,
+  FIXLOOP_ENTRY_X,
+  FIXLOOP_EXIT,
   FIXLOOP_RETURN_DY,
   GATES,
   HeroStage,
-  LANE_TERMINAL_R,
+  LANE_FIXING_CAPTION_DY,
   LANES,
   laneY,
   NODE_CAPTION_OFFSET,
@@ -466,9 +468,11 @@ test("#897 AC1: the fix-loop label renders as plain upright text below the retur
   assert.ok(labelMatch, "the label must render as a plain <text> element carrying its own x/y");
   assert.doesNotMatch(labelMatch![0], /rotate\(/, "no rotation transform on the label");
 
-  // #1026: the label sits under lane w1's (channel 0) own horizontal run — below its own
-  // return leg, distinct from the arrow's own path, which the label no longer rides.
-  assert.equal(Number(labelMatch![2]), laneY(0) + FIXLOOP_RETURN_DY + 12);
+  // #1026 (PO ruling, dogfood round 431 live review): the label sits under the SHARED return
+  // row now, below the STAGE's own last lane (`state.lanes.length - 1` — this fixture's default
+  // `lanesMax` is 3, so channel 2), not under whichever lane is fixing — distinct from the
+  // arrow's own path, which the label no longer rides.
+  assert.equal(Number(labelMatch![2]), laneY(2) + FIXLOOP_RETURN_DY + 12);
 });
 
 test("#1026 AC1: with W2 fixing and W1 idle, W2's return path ends at W2's own start terminal, not W1's", () => {
@@ -489,12 +493,10 @@ test("#1026 AC1: with W2 fixing and W1 idle, W2's return path ends at W2's own s
   const pathMatch = html.match(/<path id="hero-fixloop-path-w2" class="hero-fixloop"[^>]*d="([^"]+)"/);
   assert.ok(pathMatch, "W2's own fix-loop path must render");
   const [endX, endY] = fixLoopPoints(pathMatch![1] as string).at(-1) as [number, number];
-  assert.ok(Number.isFinite(endX));
-  assert.ok(
-    Math.abs(endY - laneY(1)) <= LANE_TERMINAL_R,
-    `endpoint y (${endY}) must land within ${LANE_TERMINAL_R}px of W2's own terminal (laneY(1) = ${laneY(1)})`,
-  );
-  assert.ok(Math.abs(endY - laneY(0)) > LANE_TERMINAL_R, "must NOT land at W1's (lane 0's) terminal instead");
+  // #1026 (PO ruling): the geometry is fully deterministic — exact endpoint, not a tolerance.
+  assert.equal(endX, FIXLOOP_ENTRY_X, "the final tick lands exactly at the entry x (LANES.x - LANE_TERMINAL_R - 1)");
+  assert.equal(endY, laneY(1), "the endpoint's y is exactly W2's own terminal (laneY(1))");
+  assert.notEqual(endY, laneY(0), "must NOT land at W1's (lane 0's) terminal instead");
 });
 
 test("#1026 AC2: the fix-loop return path is orthogonal (M + axis-aligned L segments only, no free curve), amber, with a marker", () => {
@@ -521,6 +523,19 @@ test("#1026 AC2: the fix-loop return path is orthogonal (M + axis-aligned L segm
     const [x1, y1] = points[i] as [number, number];
     assert.ok(x0 === x1 || y0 === y1, `segment ${i} (${x0},${y0}) -> (${x1},${y1}) is not axis-aligned`);
   }
+
+  // #1026 (PO ruling, dogfood round 431 live review): the exit is the CI node's LOWER-RIGHT
+  // rim (45° off centre) — the first #1026 cut's lower-left exit visibly overlapped W3's own
+  // incoming connector curve.
+  const [exitX, exitY] = points[0] as [number, number];
+  assert.equal(exitX, FIXLOOP_EXIT.x);
+  assert.equal(exitY, FIXLOOP_EXIT.y);
+  assert.ok(exitX > GATES.ci, "lower-RIGHT, not lower-left, off the CI node's own centre");
+
+  // The final tick lands exactly at this lane's own start terminal.
+  const [endX, endY] = points.at(-1) as [number, number];
+  assert.equal(endX, FIXLOOP_ENTRY_X);
+  assert.equal(endY, laneY(0));
 
   // The amber in-motion token — the fixing lane's own dashed channel uses it too — never the
   // idle black `--sapwood` the old shared bezier drew in.
@@ -551,18 +566,38 @@ test("#1026 AC3: with W1 + W2 both fixing, two return paths render — each endi
   assert.equal(state.lanes[1]?.phase, "fixing");
 
   const html = markup(state);
+  // #1026 (PO ruling, dogfood round 431 live review): both lanes' paths ride the SAME shared
+  // drop/row/arm bus (`FIXLOOP_EXIT`, `fixLoopRowY`, `FIXLOOP_ARM_X`) and diverge only at their
+  // own final two points — collect both point lists to assert that directly.
+  const pointsByChannel = new Map<0 | 1, [number, number][]>();
   for (const [id, channel] of [
     ["hero-fixloop-path-w1", 0],
     ["hero-fixloop-path-w2", 1],
   ] as const) {
     const pathMatch = html.match(new RegExp(`<path id="${id}" class="hero-fixloop"[^>]*d="([^"]+)"`));
     assert.ok(pathMatch, `${id} must render`);
-    const [, endY] = fixLoopPoints(pathMatch![1] as string).at(-1) as [number, number];
-    assert.ok(
-      Math.abs(endY - laneY(channel)) <= LANE_TERMINAL_R,
-      `${id} must end at its own lane's terminal (laneY(${channel}) = ${laneY(channel)}), got y=${endY}`,
-    );
+    pointsByChannel.set(channel, fixLoopPoints(pathMatch![1] as string));
   }
+  const w1Points = pointsByChannel.get(0) as [number, number][];
+  const w2Points = pointsByChannel.get(1) as [number, number][];
+
+  // Distinct endpoints — each lane's own terminal, same entry x.
+  assert.deepEqual(w1Points.at(-1), [FIXLOOP_ENTRY_X, laneY(0)]);
+  assert.deepEqual(w2Points.at(-1), [FIXLOOP_ENTRY_X, laneY(1)]);
+  assert.notDeepEqual(w1Points.at(-1), w2Points.at(-1), "the two lanes must end at DISTINCT terminals");
+
+  // Identical shared segments — the exit point, the row after the drop, and the row at the arm
+  // (every point except each path's own final two) match byte-for-byte between both lanes.
+  assert.deepEqual(w1Points.slice(0, -2), w2Points.slice(0, -2), "both lanes must share the same drop/row/arm bus");
+
+  // The shared row clears the STAGE's own last lane's deepest caption (`LANE_FIXING_CAPTION_DY`,
+  // the FIXING round/reason caption) by a real margin — not just a literal recomputed here.
+  const lastChannel = state.lanes.length - 1;
+  const [, rowY] = w1Points[1] as [number, number];
+  assert.ok(
+    rowY > laneY(lastChannel) + LANE_FIXING_CAPTION_DY,
+    `shared row (${rowY}) must sit below the last lane's own FIXING caption (laneY(${lastChannel}) + ${LANE_FIXING_CAPTION_DY} = ${laneY(lastChannel) + LANE_FIXING_CAPTION_DY})`,
+  );
 
   // Exactly one label — the FIRST fixing lane (channel order) wins, not a concatenated list.
   const labelMatches = [...html.matchAll(/<text class="hero-fixloop-label"[^>]*>([^<]*)<\/text>/g)];

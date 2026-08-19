@@ -788,17 +788,21 @@ The four zones:
    escalated PR droplets park on it. Rust appears nowhere else on the
    stage.
 
-   Amended 2026-08-19 (#1026): the fix loop's return arrow is drawn PER
-   fixing lane, not as one shared curve terminating at lane 0 regardless of
-   which lane is actually fixing. Each fixing lane's own return path leaves
-   the CI node at the same exit point, then runs in orthogonal (H/V)
-   segments down to a row below that lane's own channel, left, then back up
-   into that lane's own start terminal — never a free bezier. Multiple
-   lanes fixing at once each draw their own path; the send-back reason
-   label stays singular, sitting under the first (channel-order) fixing
-   lane's own horizontal run. The arrow's ink is the amber in-motion token
-   the fixing lane's own dashed channel already uses, not the idle black
-   the rest of the stage's structural lines draw in.
+   Amended 2026-08-19 (#1026, PO ruling after a dogfood round 431 live
+   review): the fix loop's return arrow is drawn PER fixing lane, not as
+   one shared curve terminating at lane 0 regardless of which lane is
+   actually fixing. Every fixing lane's own path rides the SAME shared
+   return bus — leaving the CI node at its lower-right rim (clear of every
+   lane's own incoming connector arm), dropping to ONE shared row below the
+   stage's own last lane, running left to an arm sitting in the dead strip
+   between the PLAN|IMPLEMENT divider and the lane start terminals — and
+   only diverges at the very end: a short tick right into ITS OWN lane's
+   start terminal, arrowhead pointing in. Multiple lanes fixing at once
+   read as one shared return line tapped by each lane, not competing arcs;
+   the send-back reason label stays singular, centred under the shared row.
+   The arrow's ink is the amber in-motion token the fixing lane's own
+   dashed channel already uses, not the idle black the rest of the stage's
+   structural lines draw in.
 4. **Rings + reflection**: the trunk cross-section — strictly one ring per
    merge, no decorative base grain. At zero merges the disc area shows a
    small sapling glyph (`lucide-react`'s `Sprout`, §2 adjudication table)
