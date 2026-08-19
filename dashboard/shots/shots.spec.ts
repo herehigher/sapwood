@@ -2075,9 +2075,14 @@ function buildContactSheet(): void {
   ).join("");
 
   // #956 AC4: the three live-mocked capture families (D13/D19/D23), each paired against its own
-  // named mockup crop — same "missing capture is an invariant violation, missing mockup is an
-  // honest not-yet-baselined gap" split `AC4_MOMENTS` above already applies. `fixing` needs BOTH
-  // its own hero-panel AND lanes mockup; `live-header`/`attention3` each pair against one file.
+  // named mockup crop — same "missing capture is an invariant violation" posture `AC4_MOMENTS`
+  // above already applies, EVERY family/theme combination gets its own row unconditionally (engine
+  // audit run a086a92a finding [1], attention-light-pair-omitted: an EARLIER version of this
+  // function returned "" — a silently omitted row — whenever a theme's mockup file was absent,
+  // e.g. `needs-attention-light.png` doesn't exist on disk; AC4's own "the three families ... under
+  // a section of their own" names every family/theme pair, so a missing mockup baseline must render
+  // as an EXPLICIT, visible gap in that section, never a row that just isn't there). `fixing` needs
+  // BOTH its own hero-panel AND lanes mockup; `live-header`/`attention3` each pair against one file.
   const D956_FAMILIES = [
     { slug: "fixing-hero-panel", mockup: (t: string) => `hero-panel-${t}.png`, label: "fixing (hero panel)" },
     { slug: "fixing-lanes", mockup: (t: string) => `lanes-${t}.png`, label: "fixing (lanes)" },
@@ -2088,18 +2093,20 @@ function buildContactSheet(): void {
     THEMES.map((t) => {
       const mockupFile = `mockups/${family.mockup(t.key)}`;
       const captureFile = `captures/${CANONICAL_WIDTH}-${t.key}-${family.slug}.png`;
-      // No frozen baseline for this theme yet (e.g. `needs-attention-light.png` doesn't exist on
-      // disk) — an honest gap, same as `modulesWithNoMockup` above, never a failure.
-      if (!existsSync(`${OUTPUT_DIR}/${mockupFile}`)) return "";
       if (!existsSync(`${OUTPUT_DIR}/${captureFile}`)) {
         // The main test's own presence assertions (before `buildContactSheet()` ever runs) already
         // guarantee every #956 capture exists — reaching here means that invariant broke.
-        throw new Error(`invariant violated: capture missing for an existing mockup pairing (${captureFile})`);
+        throw new Error(`invariant violated: #956 capture missing (${captureFile})`);
       }
+      const hasMockup = existsSync(`${OUTPUT_DIR}/${mockupFile}`);
       return `
       <tr>
-        <td class="label">${family.label} · ${t.key}<br><span class="tag">mockup vs. a real fold</span></td>
-        <td><img src="${mockupFile}" alt="${family.label} ${t.key} mockup"></td>
+        <td class="label">${family.label} · ${t.key}<br><span class="tag">${hasMockup ? "mockup vs. a real fold" : "no frozen mockup baseline yet"}</span></td>
+        <td>${
+          hasMockup
+            ? `<img src="${mockupFile}" alt="${family.label} ${t.key} mockup">`
+            : `<p class="note">No frozen mockup exists yet for ${family.label} · ${t.key} — judge the live capture alone.</p>`
+        }</td>
         <td><img src="${captureFile}" alt="${family.label} ${t.key} live capture"></td>
       </tr>`;
     }),
