@@ -1653,6 +1653,20 @@ test("#934 AC2 (WIRING via App, live: stubbed /api/rounds + events for two round
     assert.ok(feed);
     assert.match(feed.innerHTML, /ROUND 1/, "stepping ◀ re-renders the feed for the previous round");
     assert.match(feed.innerHTML, /3 events/, "round 1's own full eventCount — never a bounded-tail total like 5");
+    // engine-agent finding [0] (ac2-post-navigation-feed-unasserted): the divider text alone
+    // would still read "ROUND 1 · 3 events" even if the row CONTENT stayed stuck on round 2's own
+    // rows (or on nothing) — a bug that changed the divider without actually re-scoping `events`
+    // would slip past the assertions above. Round 1's freshly-selected replay starts at cursorId 0
+    // (nothing folded yet, `eventsUpToCursor`'s own contract), so the row list must be genuinely
+    // EMPTY — never round 2's stale #401/#402 rows lingering, and not round 1's own #301/#302/#303
+    // either (those only appear once the cursor actually advances past them — proven separately by
+    // the interior-cursor scrub test below).
+    assert.equal(
+      feed.querySelectorAll(".feed-entry").length,
+      0,
+      "round 1's replay starts at cursor 0 (nothing folded yet) — zero rows, never a leftover round 2 row",
+    );
+    assert.doesNotMatch(feed.innerHTML, /#401|#402/, "round 2's rows must not linger after switching to round 1's replay");
   } finally {
     await act(async () => {
       root.unmount();
@@ -1707,6 +1721,24 @@ test("#934 AC3 (replay, WIRING via App): entering replay for a round starts the 
       0,
       "as-of-cursor at the round's start (nothing played yet) renders zero rows",
     );
+
+    // engine-agent finding [1] (ac3-interior-cursor-wiring-unproven): cursor 0 and the round's own
+    // END (the `?demo` case below) are both edge cases a wiring bug could pass by accident (e.g.
+    // ignoring the cursor and always rendering nothing, or always rendering everything). Driving
+    // the REAL Transport scrub bar (`realOnChange` — happy-dom's `dispatchEvent` never reaches
+    // React 19's synthetic pickup here, so this reads the actual `onChange` closure React attached
+    // to the DOM node, the same seam #927 AC1 established) to an INTERIOR cursor — id 1 of the
+    // round's 2 events — proves `eventsUpToCursor`'s id<=cursor filter is actually wired through
+    // `App`, not just correct in isolation.
+    const scrub = container.querySelector<HTMLInputElement>('[aria-label="scrub"]');
+    assert.ok(scrub, "the real Transport scrub bar must render once round 9 is selected for replay");
+    await act(async () => {
+      realOnChange(scrub)({ target: { value: "1" } });
+    });
+    const feedAtCursor1 = container.querySelector('[aria-label="activity"]');
+    assert.ok(feedAtCursor1);
+    assert.match(feedAtCursor1.innerHTML, /#501/, "event id 1 (issue #501) is at/before the cursor — it must render");
+    assert.doesNotMatch(feedAtCursor1.innerHTML, /#502/, "event id 2 (issue #502) is PAST the cursor — it must not render yet");
   } finally {
     await unmount();
   }
@@ -1720,17 +1752,60 @@ test("#934 AC3 (?demo, WIRING via DemoApp): the demo bundle's round renders with
   assert.match(html, /#1\b/, "the fixture's issue #1 (folded into the demo round) must render in the feed");
 });
 
-test("#934 AC3: the feed's relative timestamps read the SAME replay-cursor clock the needs-attention strip already uses in ?demo — the two panels never disagree", async () => {
-  const bundle = demoBundleFixture();
-  // Both fixture events are minutes old relative to their own round's `startedAt`/`endedAt`
-  // (2026-08-09T09:0x) — under the real wall clock (today, 2026-08-xx onward) they would read as
-  // many DAYS old instead, the exact PO-witnessed strip/feed disagreement (#934's own "Why").
+test("#934 AC3: the feed's relative timestamps read the SAME replay-cursor clock the needs-attention strip already uses in ?demo — the two panels agree on a CONCRETE, independently-computable age, not just 'not days old'", async () => {
+  // engine-agent finding [1]: the previous version of this test asserted only the ABSENCE of a
+  // wrong pattern ("Nd ago") — an arbitrary non-wall clock (e.g. a frozen epoch, or the round's
+  // OWN startedAt instead of the cursor) could pass that check too, without actually proving the
+  // two panels share one clock. This bundle gives both panels the SAME open item (PR #6011) to
+  // read an age off, at a fixed, unambiguous 5-minute (300s) delta from the round's own last
+  // event — which is exactly `replay.asOf` at demo's default END position (`cursorTs`'s own doc)
+  // — so both panels must independently land on "5m", never a coincidence.
+  const base = demoBundleFixture();
+  const round = {
+    roundId: 555111,
+    status: "done" as const,
+    startedAt: "2026-08-09T09:00:00Z",
+    endedAt: "2026-08-09T09:05:00Z",
+    startEventId: 0,
+    startSpendId: 0,
+    eventCount: 2,
+    schemaVersion: 1,
+    artifact: { prsMerged: 0, spendUsd: 0 },
+  };
+  const bundle: DemoBundle = {
+    ...base,
+    rounds: [round],
+    events: [
+      // `drive-needs-human`'s own sentence (copy.ts) tokens the PR number, not the issue — #6011
+      // is the distinguishable id this test actually greps for.
+      { id: 1, ts: "2026-08-09T09:00:00Z", kind: "drive-needs-human", payload: { issue: 601, pr: 6011 } },
+      // The round's LAST event — its own `ts` becomes `replay.asOf` at demo's default (END)
+      // position, exactly 5 minutes after PR #6011 above.
+      { id: 2, ts: "2026-08-09T09:05:00Z", kind: "dispatched", payload: { issue: 602 } },
+    ],
+    spend: [],
+  };
   const html = await renderSettledDemoApp(bundle);
-  const feedSection = html.split('aria-label="activity"')[1] ?? "";
-  assert.doesNotMatch(
-    feedSection.slice(0, 4000),
-    /\d+d ago/,
-    "the feed must not read the fixture's minutes-old events as days old under the live wall clock",
+  const stripSection = (html.split('aria-label="needs attention"')[1] ?? "").slice(0, 4000);
+  const feedSection = (html.split('aria-label="activity"')[1] ?? "").slice(0, 4000);
+  assert.match(stripSection, /6011/, "the strip must render the still-open PR #6011 item");
+  assert.match(feedSection, /6011/, "the feed must render the same PR #6011 event");
+  // The strip's single row is also the fold's oldest (and only) one, so it renders the #925 AC4
+  // compact emphasis form (numeral only, no ' ago' suffix) — `NeedsAttention.tsx`'s own
+  // `ageClassName`/`ageText`. `[^>]*` between `tabindex="0"` and the numeral tolerates the Radix
+  // tooltip trigger's own extra `data-state` attribute (`EntityRef`'s real markup, not a
+  // hand-simplified stand-in).
+  assert.match(
+    stripSection,
+    /<span class="data attention-age attention-age-emphasis" tabindex="0"[^>]*>5m<\/span>/,
+    "the strip's age box must read exactly 5m off the replay cursor, not the live wall clock",
+  );
+  // The feed reads the identical cursor through `formatRelative` (format.ts), which always keeps
+  // the ' ago' suffix — `ActivityFeed.tsx`'s own `.feed-ts` span.
+  assert.match(
+    feedSection,
+    /<span class="muted data feed-ts">5m ago<\/span>/,
+    "the feed's timestamp must read the SAME 5m off the SAME replay cursor — never the live wall clock's real elapsed days",
   );
 });
 

@@ -8,6 +8,7 @@ import type { LoopEvent, Round } from "../api/types.ts";
 import type { EventKind } from "../copy.ts";
 import type { KnownDomainEvent, UnknownDomainEvent } from "../domain-event.ts";
 import { toDomainEvent } from "../domain-event.ts";
+import { formatAbsoluteTime } from "../format-time.ts";
 import { registerRealDom } from "../test-dom.ts";
 import { ActivityFeed, FEED_RENDER_CAP } from "./ActivityFeed.tsx";
 
@@ -279,12 +280,24 @@ test("#722: the feed has its own scroll container, fixed max-height, distinct fr
 
 test("#934: a round in view renders the divider with its own roundId, absolute start time, and full eventCount", () => {
   const events = [ev(1, "dispatched", { issue: 1 }), ev(2, "dispatched", { issue: 2 })];
+  const startedAt = "2026-08-06T09:15:00Z";
   const html = renderToStaticMarkup(
-    <ActivityFeed events={events} round={round({ roundId: 7, startedAt: "2026-08-06T09:15:00Z", eventCount: 2 })} titles={{}} now={NOW} />,
+    <ActivityFeed events={events} round={round({ roundId: 7, startedAt, eventCount: 2 })} titles={{}} now={NOW} />,
   );
   assert.match(html, /feed-round-divider/);
   assert.match(html, /ROUND 7/);
   assert.match(html, /2 events/);
+  // engine-agent finding [0]: this test's own name claims "absolute start time", but the
+  // assertions above never checked it — a divider that rendered "ROUND 7 · <garbage> · 2 events"
+  // would still pass. `formatAbsoluteTime` (format-time.ts) is the ONE call site every absolute
+  // time on the dashboard renders through (that file's own doc) — reading the expected string off
+  // it here (rather than a hand-typed literal) keeps this pinned to the real environment's clock
+  // formatting (locale/timezone-offset), matching what `ActivityFeed.tsx` itself actually calls.
+  assert.match(
+    html,
+    new RegExp(`ROUND 7 · ${formatAbsoluteTime(startedAt).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} · 2 events`),
+    "the divider must render the round's own formatted absolute start time, not just the roundId/count either side of it",
+  );
 });
 
 test("#934: the divider's count is the round's own eventCount, not events.length — honest even while the round's own fetch is still catching up", () => {
