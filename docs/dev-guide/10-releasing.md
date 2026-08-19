@@ -23,8 +23,12 @@ These are written **only** by `scripts/release.ts` — never by hand. `package-l
 own root/`engine`/`dashboard` entries agree with them too, but not because anyone edits
 a fifth place: the script runs `npm install --package-lock-only --ignore-scripts`
 immediately after bumping the four manifests, and those entries are simply what that
-step derives from them. A lockstep test (`scripts/release.test.ts`) fails the build the
-moment any manifest, or the lockfile's derived entries, drifts from the rest.
+step derives from them. `.claude-plugin/marketplace.json`'s `plugins[0].source.ref` is a
+second derived carrier, in the same relationship: `prepare` sets it to `v<version>`
+right after the four manifests (`main` at the pre-first-release `0.0.0` baseline, since
+there is no tag yet to point at), and it is never hand-edited either. A lockstep test
+(`scripts/release.test.ts`) fails the build the moment any manifest, the lockfile's
+derived entries, or the marketplace ref drifts from the rest.
 
 **Three layers, one truth:**
 
@@ -68,9 +72,10 @@ ever pushed.
 
 **Delivery channels.** A release ships as (1) a git tag + GitHub Release, (2) the
 `sapwood` npm package, and (3) the Claude Code marketplace plugin, whose slash
-commands run `npx sapwood@<version>` — all three keyed to the same tag, with the
-marketplace `ref` and the npx pin moving in lockstep with it. `publish` performs
-(1) and (2); the marketplace step is appended to `PUBLISH_STEPS` when it lands.
+commands fall back to `npx sapwood@<version>` when no local `engine/dist` build is
+present — all three keyed to the same tag. `prepare` moves the marketplace `ref` to
+`v<version>` in lockstep with the four manifests (see above); `publish` performs (1)
+and (2).
 
 **Package name: bare `sapwood`, not `@sapwood/engine`.** The `engine` workspace
 publishes under the bare npm name `sapwood`, not the scoped `@sapwood/engine` its

@@ -14,6 +14,16 @@ import { fileURLToPath } from "node:url";
 
 export const MANIFEST_PATHS = ["package.json", "engine/package.json", "dashboard/package.json", ".claude-plugin/plugin.json"];
 
+// Not one of the four version-carrying manifests (it has no "version" field of its own) — its
+// plugins[0].source.ref is a DERIVED carrier, same relationship package-lock.json has to the
+// four: written only as a side effect of a prepare bump, never hand-edited. "main" is the
+// pre-first-release placeholder (see marketplaceRefFor below); once a version ships, ref must
+// equal that tag for the marketplace's `npx sapwood@<version>` pin to resolve the version the
+// slash commands actually invoked. The committed file's bytes are the exact
+// `JSON.stringify(data, null, 2) + "\n"` canonical form writeMarketplaceFile below produces, so
+// every rewrite stays a minimal one-line diff instead of reformatting the whole file.
+export const MARKETPLACE_PATH = ".claude-plugin/marketplace.json";
+
 const UNRELEASED_HEADING = "## [Unreleased]";
 
 // Official SemVer 2.0.0 grammar (semver.org). Anchored, so a version string that
@@ -122,6 +132,83 @@ export function writeManifestVersion(path: string, version: string): void {
   const re = /("version"\s*:\s*")([^"]*)(")/;
   if (!re.test(text)) throw new Error(`no "version" field found in ${path}`);
   writeFileSync(path, text.replace(re, `$1${version}$3`));
+}
+
+// "main" is the pre-first-release value (nothing has been tagged yet, so there is no `v<version>`
+// ref to point at); everything from the first prepare onward pins to the tag prepare is about to
+// cut, matching the tag `PUBLISH_STEPS`'s "tag" step creates.
+export function marketplaceRefFor(version: string): string {
+  return version === "0.0.0" ? "main" : `v${version}`;
+}
+
+// Unlike the four manifests' bare `"version"` line, `"ref"` is not a key `marketplace.json`
+// carries only once — a source object can legitimately have sibling fields, and a future
+// multi-plugin entry could carry its own `"ref"` elsewhere in the file. A text-regex rewrite (the
+// approach `writeManifestVersion` uses, safe there because `"version"` really is unique per
+// manifest) risks touching the wrong occurrence, so this walks the parsed structure to
+// `plugins[0].source.ref` specifically instead of pattern-matching the raw text.
+interface MarketplaceSource {
+  ref?: string;
+  [key: string]: unknown;
+}
+interface MarketplacePlugin {
+  source: MarketplaceSource | string;
+  [key: string]: unknown;
+}
+interface MarketplaceFile {
+  plugins: MarketplacePlugin[];
+  [key: string]: unknown;
+}
+
+function readMarketplaceFile(path: string): MarketplaceFile {
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+
+// `JSON.stringify(data, null, 2) + "\n"` is the canonical on-disk form the committed
+// marketplace.json is written to match exactly — see MARKETPLACE_PATH's own comment — so a
+// rewrite here is always a minimal, one-line diff on `ref`, never a reformat of the whole file.
+function writeMarketplaceFile(path: string, data: MarketplaceFile): void {
+  writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`);
+}
+
+function marketplaceSourceObject(data: MarketplaceFile, path: string): MarketplaceSource {
+  const source = data.plugins[0]?.source;
+  if (typeof source !== "object" || source === null) {
+    throw new Error(`no plugins[0].source object found in ${path}`);
+  }
+  return source;
+}
+
+// Edits only `plugins[0].source.ref`'s value, mirroring `writeManifestVersion`'s "touch one
+// field, leave everything else alone" contract — but structurally, so a `"ref"` string anywhere
+// else in the file (a sibling plugin, a differently-shaped source) is never at risk of being hit.
+export function writeMarketplaceRef(path: string, ref: string): void {
+  const data = readMarketplaceFile(path);
+  marketplaceSourceObject(data, path).ref = ref;
+  writeMarketplaceFile(path, data);
+}
+
+export function readMarketplaceRef(path: string): string {
+  const data = readMarketplaceFile(path);
+  const ref = marketplaceSourceObject(data, path).ref;
+  if (typeof ref !== "string") throw new Error(`no plugins[0].source.ref field found in ${path}`);
+  return ref;
+}
+
+export type MarketplaceRefCheckResult = { ok: true } | { ok: false; message: string };
+
+// Lockstep's marketplace half: at "0.0.0" (nothing shipped yet) any ref is accepted — there is no
+// tag to point at, and `runPrepare` hasn't rewritten it for the version about to be cut. Once a
+// version is set, the ref must equal marketplaceRefFor(version) exactly, the same way the four
+// manifests and the lockfile must equal it.
+export function checkMarketplaceRef(marketplacePath: string, version: string): MarketplaceRefCheckResult {
+  if (version === "0.0.0") return { ok: true };
+  const ref = readMarketplaceRef(marketplacePath);
+  const expected = marketplaceRefFor(version);
+  if (ref !== expected) {
+    return { ok: false, message: `${marketplacePath}'s plugins[0].source.ref is "${ref}", expected "${expected}" for version ${version}.` };
+  }
+  return { ok: true };
 }
 
 export type LockstepResult = { ok: true; version: string } | { ok: false; message: string };
@@ -334,6 +421,8 @@ export function checkPublishPreconditions(deps: Deps): PublishPrecondition {
   }
   const lockfileCheck = checkLockfileVersions(deps.repoRoot, lockstep.version);
   if (!lockfileCheck.ok) return { ok: false, reason: lockfileCheck.message };
+  const marketplaceRefCheck = checkMarketplaceRef(join(deps.repoRoot, MARKETPLACE_PATH), lockstep.version);
+  if (!marketplaceRefCheck.ok) return { ok: false, reason: marketplaceRefCheck.message };
   const changelog = readFileSync(join(deps.repoRoot, "CHANGELOG.md"), "utf8");
   if (!changelogHasSection(changelog, lockstep.version)) {
     return { ok: false, reason: `CHANGELOG.md has no "## [${lockstep.version}]" section.` };
@@ -481,6 +570,10 @@ export function runPrepare(deps: Deps, version: string): CommandResult {
     actions.push(`bumped ${p} -> ${version}`);
   }
 
+  const marketplaceRef = marketplaceRefFor(version);
+  writeMarketplaceRef(join(deps.repoRoot, MARKETPLACE_PATH), marketplaceRef);
+  actions.push(`set ${MARKETPLACE_PATH} plugins[0].source.ref -> ${marketplaceRef}`);
+
   // package-lock.json's root/engine/dashboard entries are DERIVED from the four manifests
   // just bumped above, never hand-set — `--package-lock-only` skips reinstalling
   // node_modules (this only needs to happen once, at publish time, not on every prepare) and
@@ -497,7 +590,7 @@ export function runPrepare(deps: Deps, version: string): CommandResult {
   writeFileSync(changelogPath, updatedChangelog);
   actions.push(`moved CHANGELOG Unreleased -> [${version}] - ${date}`);
 
-  deps.exec("git", ["add", ...MANIFEST_PATHS, "package-lock.json", "CHANGELOG.md"]);
+  deps.exec("git", ["add", ...MANIFEST_PATHS, MARKETPLACE_PATH, "package-lock.json", "CHANGELOG.md"]);
   deps.exec("git", ["commit", "-m", `release: v${version}`]);
   actions.push(`committed "release: v${version}"`);
 

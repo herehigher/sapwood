@@ -18,11 +18,20 @@ Each `commands/*.md` file defines one slash command as frontmatter
 (description, argument hint, allowed tools) plus instructions that invoke the
 engine CLI:
 
-- Commands resolve the engine through `$CLAUDE_PLUGIN_ROOT` and run it with the
-  **plugin's own `tsx` binary by absolute path** — a bare `node --import tsx`
-  would resolve `tsx` from the target repo, which cannot be assumed to install
-  it. The working directory stays the *target* repo, so `sapwood.config.yaml`
-  and `data/` resolve where the operator runs the command.
+- `sapwood-run.md` and `sapwood-status.md` resolve the engine through a shared wrapper,
+  `bin/sapwood-plugin.sh <verb> $ARGUMENTS`: it runs a local `engine/dist/cli.js` when
+  one exists (a contributor/dogfood checkout or a built Channel A clone), and otherwise
+  falls back to `npx sapwood@<version>` pinned to the plugin's own version — a
+  marketplace install only runs `npm ci --ignore-scripts` at the plugin root, so
+  `engine/dist` is never built there. The working directory stays the *target* repo in
+  both branches, so `sapwood.config.yaml` and `data/` resolve where the operator runs
+  the command. Their `allowed-tools` is `Bash(sh:*)`, not a narrower pin on the wrapper's
+  own path: permission-rule matching is a literal-text prefix match against the command
+  string as written (`$CLAUDE_PLUGIN_ROOT` unexpanded), and the docs give no example of a
+  shell-variable reference inside a specifier, so a pinned pattern risks silently denying
+  the command instead of narrowing it. `Bash(sh:*)` is the same breadth class the prior
+  `Bash(node:*)` already had — it authorizes the interpreter, not an arbitrary command —
+  and the wrapper script itself is the actual boundary on what runs.
 - `sapwood-run.md` → `run` (rounds driver by default; `--once`/`--until-idle`
   are tick-driver-only). `sapwood-status.md` → `status` (reads SQLite without
   an engine). `sapwood-stop.md` manages the `data/EMERGENCY_STOP` /
@@ -61,5 +70,5 @@ Engine tests never cover the plugin packaging itself. To verify it end-to-end,
 install the local checkout as a plugin in a scratch target repository (see
 [Getting started](../getting-started.md) for the install flow), then run
 `/sapwood-status` (no engine needed) and `/sapwood-run --dry-run` (no state
-written) against it. `$CLAUDE_PLUGIN_ROOT` resolution and the `tsx` path trick
-above are exactly what this smoke-checks.
+written) against it. `$CLAUDE_PLUGIN_ROOT` resolution and `bin/sapwood-plugin.sh`'s
+local-dist-vs-`npx` branch above are exactly what this smoke-checks.
