@@ -1013,6 +1013,202 @@ test("#752 (inverted #676 drift test): a live body edit that ONLY advances the c
   st.close();
 });
 
+// ── #995: re-check AC-snapshot drift + comment-cursor freshness immediately before a fix leg
+//    actually spawns — not just before gate.driveOne. Batch-18 (#967/#974/#990): a gate② verdict
+//    and a PO body edit can land in the SAME tick, but gate.driveOne (the review itself) can take
+//    minutes — the pre-driveOne checkpoint above necessarily reads the body/comments BEFORE that
+//    call, so an edit landing during it was invisible until the next reclaim, by which point the
+//    fix leg (spawned off the stale snapshot) had already spent its money. ──
+
+test("tick DRIVE (#995 AC1): a PO body edit landing DURING gate.driveOne is caught by the pre-spawn recheck — ac-snapshot-drift(checkpoint: fix-leg-spawn), no fix leg spawned", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const originalBody = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests";
+  const editedBody = "## Acceptance criteria\n\n- [ ] one EDITED\n\n## Verification plan\nrun tests";
+  // Dispatch normally so the AC snapshot lands through the real DISPATCH path.
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body: originalBody }];
+  forge.issueBodies[7] = originalBody;
+  const firstTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const dispatchedOutcome = firstTick.dispatched.find((d) => d.kind === "dispatched");
+  assert.ok(dispatchedOutcome);
+  const workerName = (dispatchedOutcome as { worker: string }).worker;
+  // The worker finishes with a PR — promotes to `driving` on the NEXT tick's RECLAIM phase.
+  sup.probes[workerName] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 99 };
+
+  const gate = new FakeMergeGate();
+  gate.outcomes[99] = { kind: "fixable", pr: 99, reason: "gate:FIXABLE:CI_RED:test@github-actions", prescription: "ci-red" };
+  // The PO's body edit lands WHILE gate.driveOne (the review) is in flight — the pre-driveOne
+  // checkpoint already read the ORIGINAL body, so only a recheck immediately before the spawn can
+  // still catch it.
+  const originalDriveOne = gate.driveOne.bind(gate);
+  gate.driveOne = async (pr, issue, triggerPin, recordTrigger, fallback, _reentered, recordVerdict) => {
+    const result = await originalDriveOne(pr, issue, triggerPin, recordTrigger, fallback, _reentered, recordVerdict);
+    forge.issueBodies[7] = editedBody;
+    return result;
+  };
+
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+
+  assert.equal(gate.calls.length, 1, "driveOne WAS called — the edit lands during it, not before");
+  const driftEvents = st.eventsSince("1970-01-01T00:00:00.000Z", ["ac-snapshot-drift"]);
+  assert.equal(driftEvents.length, 1);
+  assert.equal((driftEvents[0]!.payload as { checkpoint: string }).checkpoint, "fix-leg-spawn");
+  assert.ok(forge.labelsAdded.some(([n, l]) => n === 7 && l === "needs-human"));
+  assert.equal(st.getWorker(workerName)?.state, "failed");
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-started"]).length, 0, "no fix leg was ever spawned");
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]).length, 0);
+  assert.equal(
+    st.eventsSince("1970-01-01T00:00:00.000Z", ["lane-spawned"]).length,
+    0,
+    "FakeSupervisor never reports a worktreePath (dispatch or resume), so this asserts by the fixture's own shape — " +
+      "the load-bearing proof is fix-leg-started/drive-fixup/resumeCalls above, all zero",
+  );
+  assert.equal(sup.resumeCalls.length, 0, "supervisor.resume() was never called — no paid fix leg dispatched");
+  assert.ok(r.driven.some((d) => d.kind === "needs-human" && d.issue === 7 && d.reason.startsWith("ac-snapshot-drift")));
+  st.close();
+});
+
+test("tick DRIVE (#995 AC1b): a NEW comment landing DURING gate.driveOne (no body edit) is caught by the pre-spawn recheck — comment-cursor-stale(checkpoint: fix-leg-spawn), no fix leg spawned", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const body = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests";
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body }];
+  forge.issueBodies[7] = body;
+  const firstTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const dispatchedOutcome = firstTick.dispatched.find((d) => d.kind === "dispatched");
+  assert.ok(dispatchedOutcome);
+  const workerName = (dispatchedOutcome as { worker: string }).worker;
+  sup.probes[workerName] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 99 };
+
+  const gate = new FakeMergeGate();
+  gate.outcomes[99] = { kind: "fixable", pr: 99, reason: "gate:FIXABLE:CI_RED:test@github-actions", prescription: "ci-red" };
+  // A human/PO leaves a NEW comment WHILE the review runs — never folded into the body at all
+  // (the exact batch-8/#652 incident shape this checkpoint exists to close, now at the later
+  // fix-leg-spawn checkpoint too).
+  const originalDriveOne = gate.driveOne.bind(gate);
+  gate.driveOne = async (pr, issue, triggerPin, recordTrigger, fallback, _reentered, recordVerdict) => {
+    const result = await originalDriveOne(pr, issue, triggerPin, recordTrigger, fallback, _reentered, recordVerdict);
+    forge.externalIssueComments[7] = [{ id: "9001", login: "the-po", body: "adjudicating now, hold on" }];
+    return result;
+  };
+  // This SAME tick's DRIVE phase terminalizes the lane (state "failed"), which drops it out of
+  // activeWorkers() and would make DISPATCH phase (later in this same tick) treat issue #7 as
+  // free again — clear `ready` so it isn't re-offered (mirrors the existing #652 drive test's own
+  // fixture note for the identical reason).
+  forge.ready = [];
+
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+
+  assert.equal(gate.calls.length, 1);
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["ac-snapshot-drift"]).length, 0, "the body itself never changed");
+  const cursorEvents = st.eventsSince("1970-01-01T00:00:00.000Z", ["comment-cursor-stale"]);
+  assert.equal(cursorEvents.length, 1);
+  assert.equal((cursorEvents[0]!.payload as { checkpoint: string }).checkpoint, "fix-leg-spawn");
+  assert.ok(forge.labelsAdded.some(([n, l]) => n === 7 && l === "needs-human"));
+  assert.equal(st.getWorker(workerName)?.state, "failed");
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-started"]).length, 0, "no fix leg was ever spawned");
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]).length, 0);
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["lane-spawned"]).length, 0);
+  assert.equal(sup.resumeCalls.length, 0, "supervisor.resume() was never called — no paid fix leg dispatched");
+  assert.ok(r.driven.some((d) => d.kind === "needs-human" && d.issue === 7 && d.reason === "comment-cursor-stale"));
+  st.close();
+});
+
+test("tick DRIVE (#995 AC2): unchanged body/comments — the pre-spawn recheck costs exactly one extra body fetch and one extra comments fetch, and the fix leg still dispatches normally", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const body = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests";
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body }];
+  forge.issueBodies[7] = body;
+  const firstTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const dispatchedOutcome = firstTick.dispatched.find((d) => d.kind === "dispatched");
+  assert.ok(dispatchedOutcome);
+  const workerName = (dispatchedOutcome as { worker: string }).worker;
+  sup.probes[workerName] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 99 };
+
+  let bodyFetches = 0;
+  const originalGetIssueBody = forge.getIssueBody.bind(forge);
+  forge.getIssueBody = async (n: number) => {
+    bodyFetches++;
+    return originalGetIssueBody(n);
+  };
+  let commentFetches = 0;
+  const originalGetIssueComments = forge.getIssueComments.bind(forge);
+  forge.getIssueComments = async (n: number) => {
+    commentFetches++;
+    return originalGetIssueComments(n);
+  };
+
+  const gate = new FakeMergeGate();
+  gate.outcomes[99] = { kind: "fixable", pr: 99, reason: "gate:FIXABLE:CI_RED:test@github-actions", prescription: "ci-red" };
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+
+  assert.equal(bodyFetches, 2, "one body fetch before driveOne, one immediately before the fix-leg spawn — AC2's own bound");
+  assert.equal(commentFetches, 2, "one comments fetch before driveOne, one immediately before the fix-leg spawn");
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["fix-leg-started"]).length, 1, "unchanged body/comments never block the spawn");
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"]).length, 1);
+  assert.equal(st.getWorker(workerName)?.state, "fixing");
+  assert.ok(r.driven.some((d) => d.kind === "fixup"));
+  st.close();
+});
+
+test("tick DRIVE (#995 AC2b): a non-FIXUP tick (WAIT) only ever pays the single pre-drive body fetch — the pre-spawn recheck is never reached", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  const body = "## Acceptance criteria\n\n- [ ] one\n\n## Verification plan\nrun tests";
+  forge.ready = [{ number: 7, title: "", labels: ["prio:3-feature"], body }];
+  forge.issueBodies[7] = body;
+  const firstTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg() });
+  const dispatchedOutcome = firstTick.dispatched.find((d) => d.kind === "dispatched");
+  assert.ok(dispatchedOutcome);
+  const workerName = (dispatchedOutcome as { worker: string }).worker;
+  sup.probes[workerName] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 99 };
+
+  let bodyFetches = 0;
+  const originalGetIssueBody = forge.getIssueBody.bind(forge);
+  forge.getIssueBody = async (n: number) => {
+    bodyFetches++;
+    return originalGetIssueBody(n);
+  };
+
+  const gate = new FakeMergeGate();
+  gate.outcomes[99] = { kind: "queued", pr: 99, reason: "gate-pending:WAIT_REVIEW" };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+
+  assert.equal(bodyFetches, 1, "only the pre-drive checkpoint runs — a WAIT outcome never reaches the fix-leg-spawn recheck");
+  assert.equal(gate.calls.length, 1);
+  assert.equal(st.getWorker(workerName)?.state, "driving", "the lane stays driving — WAIT is not an escalation");
+  st.close();
+});
+
 test("#676: GATED RECLAIM re-baselines the AC snapshot on supervisor clear — drift, label, clear, reentry drives normally with no re-escalation", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();

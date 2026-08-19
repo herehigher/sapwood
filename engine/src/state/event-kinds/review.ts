@@ -118,7 +118,7 @@ export const REVIEW_EVENT_KINDS = defineKinds({
   "comment-cursor-stale": {
     tags: ["escalation-source:never"],
     meaning:
-      "a checkpoint (gate⓪, dispatch, or drive) found the issue's comment-adjudication cursor stale or invalid relative to its own comment thread and refused to spend/dispatch/drive; needs-human applied with a deduplicated pointer comment.",
+      "a checkpoint (gate⓪, dispatch, drive, or fix-leg-spawn — #995 added the last: immediately before a FIXUP action's fix leg actually spawns, not just before gate.driveOne) found the issue's comment-adjudication cursor stale or invalid relative to its own comment thread and refused to spend/dispatch/drive/spawn; needs-human applied with a deduplicated pointer comment.",
     actionability: "intervene",
     see: "#652",
   },

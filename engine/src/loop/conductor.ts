@@ -3582,6 +3582,13 @@ interface AcDriftCheckResult {
   liveBody: string | null;
 }
 
+/** #995: the two moments freshness is (re)checked before a paid action — once before
+ *  `gate.driveOne` ("drive"), and again immediately before a fix leg actually spawns
+ *  ("fix-leg-spawn", closing the verdict-tick PO-edit window; see checkAcAuthorityFreshness's
+ *  own doc). Recorded on the escalation event so a human reading `ac-snapshot-drift` /
+ *  `comment-cursor-stale` knows which recheck caught it. */
+type AcAuthorityCheckpoint = "drive" | "fix-leg-spawn";
+
 async function checkAcDriftBeforeDrive(
   forge: IForge,
   state: State,
@@ -3589,6 +3596,7 @@ async function checkAcDriftBeforeDrive(
   w: WorkerRow,
   pr: number,
   iso: () => string,
+  checkpoint: AcAuthorityCheckpoint,
 ): Promise<AcDriftCheckResult> {
   const expectedHash = w.ac_body_hash ?? null;
   if (expectedHash == null) return { outcome: null, liveBody: null }; // pre-#283 legacy lane, no snapshot ever expected -> drive normally
@@ -3667,6 +3675,7 @@ async function checkAcDriftBeforeDrive(
     worker: w.name,
     issue: w.issue,
     pr,
+    checkpoint,
     reason,
     labeled,
     ...(labelError != null ? { labelError } : {}),
@@ -3705,6 +3714,11 @@ async function checkAcDriftBeforeDrive(
  *  rechecked using the cursor embedded in the LIVE body; a comment arriving while the worker runs
  *  escalates exactly like existing body drift" (design adjudicated 2026-08-05).
  *
+ *  #995: also called a second time, via checkAcAuthorityFreshness, immediately before a FIXUP
+ *  action actually spawns its fix leg (`checkpoint: "fix-leg-spawn"`) — same ordering relative to
+ *  its own sibling drift check, just at a later moment in the tick than the "drive" call above.
+ *
+
  *  #752 finding 1 (PO adjudication on PR #812, P1 — fixes a real production bounce): computes the
  *  cursor from `liveBody` — the SAME live body `checkAcDriftBeforeDrive` just fetched and
  *  confirmed AC-authority-matches the snapshot — never `snapshot.body` (the dispatch-time text).
@@ -3755,6 +3769,7 @@ async function checkCommentCursorBeforeDrive(
   pr: number,
   iso: () => string,
   liveBody: string | null,
+  checkpoint: AcAuthorityCheckpoint,
 ): Promise<DrivenOutcome | null> {
   const snapshot = state.getAcSnapshot(w.issue);
   if (!snapshot) return null;
@@ -3796,7 +3811,7 @@ async function checkCommentCursorBeforeDrive(
   });
   state.appendEvent("comment-cursor-stale", {
     issue: w.issue,
-    checkpoint: "drive",
+    checkpoint,
     worker: w.name,
     pr,
     labeled,
@@ -3805,6 +3820,43 @@ async function checkCommentCursorBeforeDrive(
     ...(postError !== undefined ? { postError } : {}),
   });
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: "comment-cursor-stale" };
+}
+
+/** #995: runs BOTH freshness checks (checkAcDriftBeforeDrive, then checkCommentCursorBeforeDrive
+ *  on its liveBody) as one unit — the pair the pre-driveOne DRIVE checkpoint has always run
+ *  together, now also called a second time immediately before a FIXUP action's fix leg actually
+ *  spawns (`startFixLeg`). Batch-18 (#967/#974/#990) burned three full paid legs on a gate②
+ *  verdict-tick PO body edit that landed AFTER the pre-driveOne check (which necessarily runs
+ *  BEFORE `gate.driveOne`, and that review itself can take minutes) but BEFORE the spawn, which
+ *  happens much later in the same tick — `ac-snapshot-drift`/`comment-cursor-stale` only fired at
+ *  the NEXT reclaim, after the leg had already spent its money.
+ *
+ *  This is WASTE-WINDOW REDUCTION, not race elimination — say so wherever this is cited. GitHub
+ *  has no compare-and-start primitive: an edit can still land between this recheck's own read and
+ *  `supervisor.resume()` a few synchronous statements later, and that residual is accepted as
+ *  cost-only (the next DRIVE pass rechecks again before any review/merge, so nothing unverified
+ *  ever merges). What this call buys is shrinking the exposed window from "however long
+ *  gate.driveOne takes" (minutes) to "however long the handful of synchronous statements between
+ *  this call and resume() take" (milliseconds) — see the "fix-leg-spawn" call site's own doc for
+ *  why it sits exactly there.
+ *
+ *  Both checks still upsert `{ ...w, state: "failed", ... }` using the LOOP-START row `w`, not a
+ *  freshly re-read one — the same stance escalateNeedsHuman already takes for this same driving
+ *  lane elsewhere in this branch (post-driveOne). Not revisited here: broadening it is a separate
+ *  concern from this issue's narrow one (recheck timing), and every other terminal upsert on this
+ *  lane already shares the identical `w`-staleness exposure. */
+async function checkAcAuthorityFreshness(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  w: WorkerRow,
+  pr: number,
+  iso: () => string,
+  checkpoint: AcAuthorityCheckpoint,
+): Promise<DrivenOutcome | null> {
+  const driftCheck = await checkAcDriftBeforeDrive(forge, state, cfg, w, pr, iso, checkpoint);
+  if (driftCheck.outcome) return driftCheck.outcome;
+  return checkCommentCursorBeforeDrive(forge, state, cfg, w, pr, iso, driftCheck.liveBody, checkpoint);
 }
 
 /** #778: EMERGENCY_STOP's own synchronous, forge-free hard-kill primitive for ONE lane — the
@@ -5007,28 +5059,20 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         driven.push({ kind: "thread-writes-pending", worker: w.name, issue: w.issue, pr });
         continue;
       }
-      // #283 (M10, E2, design #279 §5): AC-snapshot drift check — BEFORE gate.driveOne is ever
-      // called for this lane. See checkAcDriftBeforeDrive's own doc for the fail-closed ordering
-      // guarantee (drift routes to needsHuman and skips driveOne entirely this tick; a missing
-      // snapshot is not drift and drives normally).
+      // #283 (M10, E2, design #279 §5): AC-snapshot drift + #652 comment-cursor freshness —
+      // BOTH, via checkAcAuthorityFreshness, BEFORE gate.driveOne is ever called for this lane.
+      // See that helper's own doc for the fail-closed ordering guarantee (drift/staleness routes
+      // to needsHuman and skips driveOne entirely this tick; a missing snapshot is neither and
+      // drives normally). #995: this is the "drive" checkpoint — the SAME pair is rechecked again
+      // at "fix-leg-spawn", immediately before a FIXUP action actually spawns its leg, below.
       //
       // #826: a lane GATED RECLAIM has already proven terminal-success (its PR is MERGED) never
       // reaches this loop at all — that branch settles it directly (settleMergedLane) instead of
       // flipping it to `driving` and relying on this check to let it through. So every lane seen
       // here genuinely has a drive left to protect, and this check is unconditional again.
-      const driftCheck = await checkAcDriftBeforeDrive(forge, state, cfg, w, pr, iso);
-      if (driftCheck.outcome) {
-        driven.push(driftCheck.outcome);
-        continue;
-      }
-      // #652: comment-adjudication cursor recheck — immediately after the AC-snapshot drift
-      // check above confirms the body itself hasn't drifted, and still BEFORE gate.driveOne. A
-      // comment can arrive without ever touching the body (the batch-8 incident shape); see
-      // checkCommentCursorBeforeDrive's own doc for the fail-closed ordering. #752: threads the
-      // live body the drift check above already fetched — no second forge fetch here.
-      const cursorOutcome = await checkCommentCursorBeforeDrive(forge, state, cfg, w, pr, iso, driftCheck.liveBody);
-      if (cursorOutcome) {
-        driven.push(cursorOutcome);
+      const authorityOutcome = await checkAcAuthorityFreshness(forge, state, cfg, w, pr, iso, "drive");
+      if (authorityOutcome) {
+        driven.push(authorityOutcome);
         continue;
       }
       // #55 P1-B: the trigger decision now lives in gate.driveOne itself (it's the only place
@@ -5652,6 +5696,30 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           }
           const action = driveDecision("FIXABLE", fixRounds, cap, driveOverBudget, progress);
           if (action === "FIXUP" && !verdictRerun) {
+            // #995: re-run the SAME freshness pair one more time, immediately before the paid
+            // spawn — not merely before gate.driveOne (above). Batch-18 (#967/#974/#990): a gate②
+            // verdict and a PO's body edit can land in the SAME tick, but `gate.driveOne` itself
+            // can take minutes — a body/comment edit arriving during that call was invisible until
+            // the NEXT reclaim, by which point the fix leg (spawned off the stale snapshot) had
+            // already spent its money. Placed AFTER the admission-block check above (so a
+            // paused/parked/ceiling-blocked lane never pays these two extra forge reads) and AFTER
+            // gatherFixupFindingRecord/driveDecision (both already committed to "this tick wants a
+            // fix leg" before this recheck spends anything) — right before the only `await` that
+            // actually spends money. On any non-null outcome, this IS the escalation: no
+            // startFixLeg, no `drive-fixup`, no `fix-leg-started` — the existing needs-human ->
+            // re-approve -> gated-reentry path takes it from here.
+            //
+            // Waste-window reduction, NOT race elimination (co-review, #995): GitHub has no
+            // compare-and-start primitive, so an edit can still land in the handful of synchronous
+            // statements between this check and `supervisor.resume()` inside startFixLeg — that
+            // residual is cost-only, and the NEXT DRIVE pass rechecks again before any review or
+            // merge. This narrows the exposed window from minutes (a review's own duration) to
+            // milliseconds, nothing more.
+            const prespawnOutcome = await checkAcAuthorityFreshness(forge, state, cfg, w, pr, iso, "fix-leg-spawn");
+            if (prespawnOutcome) {
+              driven.push(prespawnOutcome);
+              break;
+            }
             try {
               // #449 gate② P2 fix (design #402 R2) + #450: `findingRecord` was already gathered
               // above — reused here, not re-read. `!verdictRerun` here guarantees `findingRecord`
