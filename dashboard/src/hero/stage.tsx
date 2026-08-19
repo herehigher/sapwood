@@ -211,13 +211,13 @@ export const ESCALATION = { x: 810, y: 460 } as const;
  *  `REFLECTION_R`, the stage's other small icon-bearing node. */
 export const ESCALATION_R = 16;
 /**
- * #1026 (PO ruling, dogfood round 431 live review): the fix-loop return path's own exit off the
- * CI node — the LOWER-RIGHT rim point, 45° off centre. The lower-left rim (the first #1026 cut)
- * sits ~4px from where W3's own curved connector (`laneCiConnector`) lands on the CI circle —
- * the two visibly overlapped. The bottom pole (`GATES.ci`, `GATES.y + GATES.r`) fares no
- * better: W3's connector curve crosses it too, close to its own end terminal. Lower-right is
- * clear of every lane's incoming arm; the nearest neighbour is the NEEDS HUMAN escalation stem
- * (`ESCALATION.x` = `(GATES.ci + GATES.review) / 2` = 810), ~27px further right.
+ * #1026: the fix-loop return path's own exit off the CI node — the LOWER-RIGHT rim point, 45°
+ * off centre. The lower-left rim sits ~4px from where W3's own curved connector
+ * (`laneCiConnector`) lands on the CI circle — the two visibly overlap. The bottom pole
+ * (`GATES.ci`, `GATES.y + GATES.r`) fares no better: W3's connector curve crosses it too, close
+ * to its own end terminal. Lower-right is clear of every lane's incoming arm; the nearest
+ * neighbour is the NEEDS HUMAN escalation stem (`ESCALATION.x` = `(GATES.ci + GATES.review) / 2`
+ * = 810), ~27px further right.
  */
 export const FIXLOOP_EXIT = { x: GATES.ci + GATES.r * Math.SQRT1_2, y: GATES.y + GATES.r * Math.SQRT1_2 } as const;
 /**
@@ -242,13 +242,12 @@ export const FIXLOOP_ENTRY_X = LANES.x - LANE_TERMINAL_R - 1;
  */
 export const LANE_FIXING_CAPTION_DY = 14;
 /**
- * #1026 (PO ruling, dogfood round 431 live review): how far below the LAST lane's own channel
- * line the fix-loop return path's shared horizontal row sits. Every fixing lane's path uses this
- * SAME row (`fixLoopPath` below) — never a per-lane offset — so the row sits under the bottom-
- * most lane on the stage, clearing every lane's captions by construction (a lower lane's row
- * clears a higher lane's text just by being further down the page). It still has to clear the
- * LAST lane's own captions, so the offset is that lane's deepest caption
- * (`LANE_FIXING_CAPTION_DY`) plus 10px of real clearance below it.
+ * #1026: how far below the LAST lane's own channel line the fix-loop return path's shared
+ * horizontal row sits. Every fixing lane's path uses this SAME row (`fixLoopPath` below) — never
+ * a per-lane offset — so the row sits under the bottom-most lane on the stage, clearing every
+ * lane's captions by construction (a lower lane's row clears a higher lane's text just by being
+ * further down the page). It still has to clear the LAST lane's own captions, so the offset is
+ * that lane's deepest caption (`LANE_FIXING_CAPTION_DY`) plus 10px of real clearance below it.
  */
 export const FIXLOOP_RETURN_DY = LANE_FIXING_CAPTION_DY + 10;
 /**
@@ -621,17 +620,25 @@ const REFLECTION_NODES = [
 export const laneY = (index: number) => LANES.top + index * LANES.gap;
 
 /**
- * #1026 (PO ruling, dogfood round 431 live review): the return path for ONE fixing lane —
- * orthogonal segments only (no free curve). Every fixing lane shares the SAME drop off
- * `FIXLOOP_EXIT`, the SAME horizontal row (`rowY`, one shared bus below the whole stage's
- * lanes — the caller computes it once from the LAST channel, never a per-lane offset), and the
- * SAME arm (`FIXLOOP_ARM_X`) — the paths are visually identical up to this point and diverge
- * only in their final two points: down (or up) to their OWN channel's row, then a short
- * rightward tick into their OWN start terminal. Reading as one shared return bus with each
- * fixing lane tapping off it, not competing separate arcs.
+ * #1026: the return path for ONE fixing lane — orthogonal segments only (no free curve). Every
+ * fixing lane shares the SAME drop off `FIXLOOP_EXIT`, the SAME horizontal row (`rowY`, one
+ * shared bus below the whole stage's lanes — the caller computes it once from the LAST channel,
+ * never a per-lane offset), and the SAME arm (`FIXLOOP_ARM_X`) — the paths are visually
+ * identical up to this point and diverge only in their final two points: down (or up) to their
+ * OWN channel's row, then a short rightward tick into their OWN start terminal. Reading as one
+ * shared return bus with each fixing lane tapping off it, not competing separate arcs.
  */
 export function fixLoopPath(channel: number, rowY: number): string {
   return `M ${FIXLOOP_EXIT.x} ${FIXLOOP_EXIT.y} L ${FIXLOOP_EXIT.x} ${rowY} L ${FIXLOOP_ARM_X} ${rowY} L ${FIXLOOP_ARM_X} ${laneY(channel)} L ${FIXLOOP_ENTRY_X} ${laneY(channel)}`;
+}
+
+/**
+ * #1026: the fix-loop return path's shared row for a stage carrying `channelCount` lanes — the
+ * single source both `HeroStage` and `hero.test.ts`'s shape oracle read, so the row's own
+ * formula (`FIXLOOP_RETURN_DY` below the LAST channel) can't drift between the two.
+ */
+export function fixLoopSharedRowY(channelCount: number): number {
+  return laneY(channelCount - 1) + FIXLOOP_RETURN_DY;
 }
 
 /**
@@ -1202,16 +1209,14 @@ export function HeroStage({
   // here is "first in channel order" for the shared label below.
   const fixingLanes = state.lanes.filter((l) => l.phase === "fixing");
   const firstFixingLane = fixingLanes[0];
-  // #1026 (PO ruling, dogfood round 431 live review): the shared row every fixing lane's return
-  // path uses — below the STAGE's own last channel (`state.lanes` is the capped/renumbered view
-  // `laneY`/the lanes map both already iterate over, #716 gate② P1-9 — never a hard-coded lane
-  // count), so it clears every lane's captions regardless of which one is actually fixing. At
-  // the default `lanesMax` = 3 (`laneY(2)` = 238), this resolves to y = 262 — well below
-  // `FIXLOOP_EXIT.y` (≈211), so the drop off the CI node is always downward, never back through
-  // the node's own circle the way the first #1026 cut's per-lane offset could be for a lane
-  // above CI's own centre.
-  const lastChannel = state.lanes.length - 1;
-  const fixLoopRowY = laneY(lastChannel) + FIXLOOP_RETURN_DY;
+  // #1026: the shared row every fixing lane's return path uses (`fixLoopSharedRowY`) — below
+  // the STAGE's own last channel (`state.lanes` is the capped/renumbered view `laneY`/the lanes
+  // map both already iterate over, #716 gate② P1-9 — never a hard-coded lane count), so it
+  // clears every lane's captions regardless of which one is actually fixing. At the default
+  // `lanesMax` = 3 (`laneY(2)` = 238), this resolves to y = 262 — well below `FIXLOOP_EXIT.y`
+  // (≈211), so the drop off the CI node is always downward, never back through the node's own
+  // circle.
+  const fixLoopRowY = fixLoopSharedRowY(state.lanes.length);
   // Cap the checkpoint zone's DRAWN chips — never let a rank grow the grid above the viewBox.
   // At or under `CHECKPOINT_DRAW_CAP`, every droplet draws normally (unchanged). Past it, only
   // `CHECKPOINT_OVERFLOW_REAL_CAP` real chips draw — one row short of the grid's capacity — so
@@ -1469,11 +1474,11 @@ export function HeroStage({
           ));
         })()}
 
-        {/* #1026 (PO ruling, dogfood round 431 live review): one return path PER fixing lane,
-         * back into THAT lane's own start — sharing one drop/row/arm bus (`fixLoopRowY`,
-         * `FIXLOOP_ARM_X`) so several fixing lanes at once read as one shared return line, not
-         * competing arcs. #728: mounted only while a lane is actually fixing — an unlabeled arc
-         * left drawn after the fix loop ends read as stray, unexplained stage furniture. */}
+        {/* #1026: one return path PER fixing lane, back into THAT lane's own start — sharing
+         * one drop/row/arm bus (`fixLoopRowY`, `FIXLOOP_ARM_X`) so several fixing lanes at once
+         * read as one shared return line, not competing arcs. #728: mounted only while a lane is
+         * actually fixing — an unlabeled arc left drawn after the fix loop ends read as stray,
+         * unexplained stage furniture. */}
         {fixingLanes.map((lane) => (
           <path
             key={lane.channel}

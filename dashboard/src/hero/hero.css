@@ -302,12 +302,11 @@
  * this lane right now), not idle stage structure like `.hero-arm`/`.hero-return` above — same
  * `--sap-text` amber ink `.hero-lane[data-phase="fixing"] .hero-channel` already uses for the
  * fixing lane's own dashed channel, never the muted `--sapwood` black the old shared bezier drew
- * in (that black reading matched idle furniture, not an active send-back).
- * #1026 (PO ruling, dogfood round 431 live review): the token itself was never the "too faint"
- * bug — the first cut's exit point (`FIXLOOP_EXIT`, `stage.tsx`) ran the path's own vertical
- * segment THROUGH the CI node's own circle, and the gate node draws on top (later in source
- * order), so a chunk of this SAME stroke was silently painted over. The lower-right exit fixes
- * that; this rule is unchanged. */
+ * in (that black reading matched idle furniture, not an active send-back). Keep any segment of
+ * this path clear of the CI gate node's own circle (`FIXLOOP_EXIT`/`fixLoopRowY`, `stage.tsx`) —
+ * the gate node draws AFTER the lanes (later in source order), so a segment running through its
+ * circle gets silently painted over, reading as a fainter/broken stroke even at full opacity;
+ * that is a geometry bug to fix in `stage.tsx`, not a reason to reach for a bolder token here. */
 .hero-fixloop {
   fill: none;
   stroke: var(--sap-text);

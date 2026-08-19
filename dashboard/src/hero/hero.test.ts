@@ -28,12 +28,15 @@ import {
   dropletRadius,
   ESCALATION,
   ESCALATION_R,
+  FIXLOOP_ARM_X,
   FIXLOOP_ENTRY_X,
   FIXLOOP_EXIT,
   FIXLOOP_RETURN_DY,
+  fixLoopSharedRowY,
   GATES,
   HeroStage,
   LANE_FIXING_CAPTION_DY,
+  LANE_TERMINAL_R,
   LANES,
   laneY,
   NODE_CAPTION_OFFSET,
@@ -53,6 +56,7 @@ import {
   STAGE,
   TRUNK,
   TRUNK_DISC_R_MAX,
+  ZONE_DIVIDERS,
 } from "./stage.tsx";
 import {
   activePlanningNode,
@@ -468,10 +472,10 @@ test("#897 AC1: the fix-loop label renders as plain upright text below the retur
   assert.ok(labelMatch, "the label must render as a plain <text> element carrying its own x/y");
   assert.doesNotMatch(labelMatch![0], /rotate\(/, "no rotation transform on the label");
 
-  // #1026 (PO ruling, dogfood round 431 live review): the label sits under the SHARED return
-  // row now, below the STAGE's own last lane (`state.lanes.length - 1` — this fixture's default
-  // `lanesMax` is 3, so channel 2), not under whichever lane is fixing — distinct from the
-  // arrow's own path, which the label no longer rides.
+  // #1026: the label sits under the SHARED return row now, below the STAGE's own last lane
+  // (`state.lanes.length - 1` — this fixture's default `lanesMax` is 3, so channel 2), not under
+  // whichever lane is fixing — distinct from the arrow's own path, which the label no longer
+  // rides.
   assert.equal(Number(labelMatch![2]), laneY(2) + FIXLOOP_RETURN_DY + 12);
 });
 
@@ -492,8 +496,17 @@ test("#1026 AC1: with W2 fixing and W1 idle, W2's return path ends at W2's own s
   assert.doesNotMatch(html, /id="hero-fixloop-path-w1"/, "an idle lane must not draw a return path of its own");
   const pathMatch = html.match(/<path id="hero-fixloop-path-w2" class="hero-fixloop"[^>]*d="([^"]+)"/);
   assert.ok(pathMatch, "W2's own fix-loop path must render");
-  const [endX, endY] = fixLoopPoints(pathMatch![1] as string).at(-1) as [number, number];
-  // #1026 (PO ruling): the geometry is fully deterministic — exact endpoint, not a tolerance.
+  const points = fixLoopPoints(pathMatch![1] as string);
+
+  // #1026: the geometry is fully deterministic — every point derived from production's own
+  // exported constants/helper, never a literal or a tolerance band.
+  const [exitX, exitY] = points[0] as [number, number];
+  assert.equal(exitX, FIXLOOP_EXIT.x);
+  assert.equal(exitY, FIXLOOP_EXIT.y);
+  const [, rowY] = points[1] as [number, number];
+  assert.equal(rowY, fixLoopSharedRowY(state.lanes.length));
+
+  const [endX, endY] = points.at(-1) as [number, number];
   assert.equal(endX, FIXLOOP_ENTRY_X, "the final tick lands exactly at the entry x (LANES.x - LANE_TERMINAL_R - 1)");
   assert.equal(endY, laneY(1), "the endpoint's y is exactly W2's own terminal (laneY(1))");
   assert.notEqual(endY, laneY(0), "must NOT land at W1's (lane 0's) terminal instead");
@@ -524,9 +537,8 @@ test("#1026 AC2: the fix-loop return path is orthogonal (M + axis-aligned L segm
     assert.ok(x0 === x1 || y0 === y1, `segment ${i} (${x0},${y0}) -> (${x1},${y1}) is not axis-aligned`);
   }
 
-  // #1026 (PO ruling, dogfood round 431 live review): the exit is the CI node's LOWER-RIGHT
-  // rim (45° off centre) — the first #1026 cut's lower-left exit visibly overlapped W3's own
-  // incoming connector curve.
+  // #1026: the exit is the CI node's LOWER-RIGHT rim (45° off centre) — a lower-left exit
+  // would visibly overlap W3's own incoming connector curve (`laneCiConnector`, `stage.tsx`).
   const [exitX, exitY] = points[0] as [number, number];
   assert.equal(exitX, FIXLOOP_EXIT.x);
   assert.equal(exitY, FIXLOOP_EXIT.y);
@@ -566,9 +578,10 @@ test("#1026 AC3: with W1 + W2 both fixing, two return paths render — each endi
   assert.equal(state.lanes[1]?.phase, "fixing");
 
   const html = markup(state);
-  // #1026 (PO ruling, dogfood round 431 live review): both lanes' paths ride the SAME shared
-  // drop/row/arm bus (`FIXLOOP_EXIT`, `fixLoopRowY`, `FIXLOOP_ARM_X`) and diverge only at their
-  // own final two points — collect both point lists to assert that directly.
+  // #1026: both lanes' paths ride the SAME shared drop/row/arm bus (`FIXLOOP_EXIT`,
+  // `fixLoopSharedRowY`, `FIXLOOP_ARM_X`) and diverge only at their own final two points —
+  // collect both point lists to assert that directly, against production's own exported
+  // constants/helper (never a re-derived literal a regression could silently drift past).
   const pointsByChannel = new Map<0 | 1, [number, number][]>();
   for (const [id, channel] of [
     ["hero-fixloop-path-w1", 0],
@@ -590,14 +603,29 @@ test("#1026 AC3: with W1 + W2 both fixing, two return paths render — each endi
   // (every point except each path's own final two) match byte-for-byte between both lanes.
   assert.deepEqual(w1Points.slice(0, -2), w2Points.slice(0, -2), "both lanes must share the same drop/row/arm bus");
 
-  // The shared row clears the STAGE's own last lane's deepest caption (`LANE_FIXING_CAPTION_DY`,
-  // the FIXING round/reason caption) by a real margin — not just a literal recomputed here.
-  const lastChannel = state.lanes.length - 1;
+  // The exit is exactly `FIXLOOP_EXIT` — not just "somewhere off the CI node".
+  const [exitX, exitY] = w1Points[0] as [number, number];
+  assert.equal(exitX, FIXLOOP_EXIT.x);
+  assert.equal(exitY, FIXLOOP_EXIT.y);
+
+  // The shared row is EXACTLY `fixLoopSharedRowY` — a regression that nudged it (e.g. `rowY + 8`)
+  // would still clear the caption floor but must still fail this exact-equality check.
   const [, rowY] = w1Points[1] as [number, number];
+  assert.equal(rowY, fixLoopSharedRowY(state.lanes.length));
+  // ...and that formula itself still has to clear the last lane's own deepest caption
+  // (`LANE_FIXING_CAPTION_DY`, the FIXING round/reason caption) by a real margin.
+  const lastChannel = state.lanes.length - 1;
   assert.ok(
     rowY > laneY(lastChannel) + LANE_FIXING_CAPTION_DY,
     `shared row (${rowY}) must sit below the last lane's own FIXING caption (laneY(${lastChannel}) + ${LANE_FIXING_CAPTION_DY} = ${laneY(lastChannel) + LANE_FIXING_CAPTION_DY})`,
   );
+
+  // The arm is EXACTLY `FIXLOOP_ARM_X` — a regression that put it on the zone divider itself
+  // (or anywhere but the dead strip between the divider and the lane terminals) must fail here.
+  const [armX] = w1Points[2] as [number, number];
+  assert.equal(armX, FIXLOOP_ARM_X);
+  assert.ok(FIXLOOP_ARM_X > ZONE_DIVIDERS[0] + 2, "the arm must sit strictly right of the PLAN|IMPLEMENT divider");
+  assert.ok(FIXLOOP_ARM_X < LANES.x - LANE_TERMINAL_R, "the arm must sit strictly left of the lane start terminals");
 
   // Exactly one label — the FIRST fixing lane (channel order) wins, not a concatenated list.
   const labelMatches = [...html.matchAll(/<text class="hero-fixloop-label"[^>]*>([^<]*)<\/text>/g)];
