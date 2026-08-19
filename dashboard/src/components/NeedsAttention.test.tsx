@@ -52,33 +52,63 @@ test("#924 AC1: the populated strip's head carries .panel-head, with the summary
   );
 });
 
-// ── #925 gate① round-3 engine-agent finding [0] (ac4-entity-composition): the glyph precedes ONE
-// uniformly-styled element carrying the COMPLETE "PR #NNN — title" string — never a "PR " literal
-// or a title span composed as a separate sibling outside it (each would then escape the entity
-// style, the exact defect the finding named — `entity.textContent` equality alone can't detect it,
-// since text-content concatenation is identical either way; this asserts the actual markup shape).
+// ── #1018 (owner ruling, reverses #925 AC4's inline "PR #NNN — title" composition): the visible
+// entity cell is the glyph + ONE `.attention-entity-ref` element carrying the REF ALONE — no
+// title text, no sibling "PR " literal. The full "PR #NNN — title" string moves to the tooltip
+// (C1 below still proves that reveal path).
 
-test('gate① round-3 finding "ac4-entity-composition": the entity cell is exactly [glyph, ONE .attention-entity-ref element] — no sibling "PR " text or separate title span', () => {
+test('#1018: the entity cell is exactly [glyph, ONE .attention-entity-ref element] carrying the REF ALONE — no inline title, no sibling "PR " text', () => {
   const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
   const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} />);
-  // C1: the glyph now lives INSIDE `.attention-entity-ref` (a Radix `HintTooltip` trigger clones
-  // exactly one child, so glyph+label share the one composed element) — still the ONLY styled
-  // element in the cell, no sibling "PR " text or separate title span.
+  // C1: the glyph lives INSIDE `.attention-entity-ref` (a Radix `HintTooltip` trigger clones
+  // exactly one child, so glyph+ref share the one composed element) — still the ONLY styled
+  // element in the cell, no sibling "PR " text or title span.
   assert.match(
     html,
-    /<span class="attention-entity"><span class="attention-entity-ref data"[^>]*><svg[^>]*>[\s\S]*?<\/svg>PR #9202 — fix rounding<\/span><\/span>/,
+    /<span class="attention-entity"><span class="attention-entity-ref data"[^>]*><svg[^>]*>[\s\S]*?<\/svg>PR #9202<\/span><\/span>/,
     "the glyph must render INSIDE the one .attention-entity-ref element, nothing else in the cell",
+  );
+  assert.doesNotMatch(
+    html,
+    /PR #9202 — fix rounding/,
+    "AC1: the visible entity cell must never contain the title — it moved to the tooltip",
   );
 });
 
-test('gate① round-3 finding "ac4-entity-composition": with a repoUrl, the SAME single composed string renders inside the anchor, not split around it', () => {
+test("#1018: with a repoUrl, the SAME ref-only string renders inside the anchor, not split around it", () => {
   const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
   const html = renderToStaticMarkup(
     <NeedsAttention items={[event]} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} repoUrl="https://github.com/o/r" />,
   );
   assert.match(
     html,
-    /<span class="attention-entity"><a class="attention-entity-ref data" href="https:\/\/github\.com\/o\/r\/pull\/9202"[^>]*><svg[^>]*>[\s\S]*?<\/svg>PR #9202 — fix rounding<\/a><\/span>/,
+    /<span class="attention-entity"><a class="attention-entity-ref data" href="https:\/\/github\.com\/o\/r\/pull\/9202"[^>]*><svg[^>]*>[\s\S]*?<\/svg>PR #9202<\/a><\/span>/,
+  );
+});
+
+// ── #1018 AC1/AC2: exact visible-label shape and the no-title unchanged path ─────────────────
+
+test("#1018 AC1: with a resolvable title, the visible entity text equals exactly 'PR #N' — never the title, whether the token is a PR or an issue", () => {
+  const prEvent = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
+  const prHtml = renderToStaticMarkup(<NeedsAttention items={[prEvent]} titles={{ 9102: { prTitle: "fix rounding" } }} now={NOW} />);
+  assert.match(prHtml, />PR #9202<\/span>/, "a PR token's visible text must be exactly 'PR #N'");
+
+  const issueEvent = toDomainEvent(wire(2, "2026-08-10T11:59:00.000Z", "rollback-escalated", { issue: 5 }));
+  const issueHtml = renderToStaticMarkup(<NeedsAttention items={[issueEvent]} titles={{ 5: { issueTitle: "fix rounding" } }} now={NOW} />);
+  assert.match(issueHtml, />#5<\/span>/, "an issue token's visible text must be exactly '#N' — no 'PR ' prefix, no title");
+});
+
+test("#1018 AC2: without a title, behaviour is unchanged — no tooltip content, not focusable", () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
+  const html = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} />);
+  assert.match(html, />PR #9202<\/span>/, "the ref alone still renders when no title resolves");
+  // Scoped to the entity-ref element specifically — the age box has its own, ALWAYS-focusable
+  // tooltip (an absolute timestamp is always available), so a bare `tabindex="0"` doesNotMatch
+  // over the whole row would false-positive on that unrelated element.
+  assert.match(
+    html,
+    /<span class="attention-entity"><span class="attention-entity-ref data"><svg/,
+    "a titleless entity-ref renders with no tabindex attribute at all — nothing to reveal, no tab stop",
   );
 });
 
@@ -453,8 +483,9 @@ test("#925 AC3: a DECISION row (--rust tone) still names its category in the chi
  * every element. That is provably sufficient for a FAST guard, not a fallback for the real proof:
  * CSS Grid's column-sizing algorithm is DETERMINISTIC — a track's start/end offset depends only on
  * the tracks strictly before it, never on that track's own or a later track's content.
- * `.attention-row`'s template is `4px | <chip, fixed> | <entity, 1fr> | <reason, minmax(auto,40%)>
- * | <age, 96px fixed>`:
+ * `.attention-row`'s template is `4px | <chip, fixed> | <entity, max-content> | <reason, 1fr>
+ * | <age, 96px fixed>` (#1018: entity/reason swapped roles — the visible entity text is now the
+ * short "PR #N" ref alone, so IT is content-sized and the reason column takes the freed `1fr`):
  *   - the entity cell's LEFT edge depends only on the severity (4px) and chip tracks, both fixed,
  *     literal, and — proven below — IDENTICAL across every row's own template string. Two rows
  *     sharing that identical prefix cannot start their entity cell at different x-offsets in any
@@ -497,9 +528,10 @@ test("#925 AC5 fast structural guard (see shots.spec.ts for the real geometry me
     // so the entity cell's left edge is pinned by construction (the argument above).
     assert.equal(severityTrack, "4px", "the severity bar must be a literal fixed width");
     assert.doesNotMatch(chipTrack!, /^(auto|.*fr$)/, "the chip track must be a fixed, non-flexible size");
-    // Entity is the row's ONE flexible track — it, and only it, may consume free space.
-    assert.equal(entityTrack, "1fr", "the entity cell must be the row's sole flexible track");
-    assert.match(reasonTrack!, /^minmax\(auto,/, "the reason column keeps a content-driven floor so it can never be squeezed to nothing");
+    // #1018 AC3: entity is content-sized (the visible "PR #N" ref never needs free space); reason
+    // is now the row's ONE flexible track, taking the width the inline title used to consume.
+    assert.equal(entityTrack, "max-content", "the entity cell must be sized to its own ref-only content, never flexible");
+    assert.equal(reasonTrack, "1fr", "the reason column must be the row's sole flexible track");
     // Age is the LAST track and fixed — its right edge is always the row's own right edge.
     assert.equal(ageTrack, "96px", "the age box must be a literal fixed width, and the row's trailing track");
 
@@ -548,17 +580,17 @@ test("#925 AC5 fast structural guard (see shots.spec.ts for the real geometry me
   }
 });
 
-// #925 gate① round-3 engine-agent finding [3]: the reason track's own `auto` minimum must stay a
-// mutation-check anchor — a track sizing regression that DROPPED the flexible split (e.g. reverting
-// both entity and reason to fixed pixel tracks) would still pass a template-equality-only check.
-test("#925 AC5 mutation-anchor: the entity track is the row's ONLY `1fr` track — asserts the flex split is exactly one track wide, not zero or two", async () => {
+// #1018: this AC5 mutation-check anchor must stay in step with the entity/reason track SWAP — a
+// regression that dropped the flexible split entirely (e.g. reverting both to fixed pixel tracks)
+// would still pass a template-equality-only check.
+test("#925/#1018 AC5 mutation-anchor: the reason track is the row's ONLY `1fr` track — asserts the flex split is exactly one track wide, not zero or two", async () => {
   const items = [toDomainEvent(wire(1, "2026-08-05T00:00:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }))];
   const { container, cleanup } = await mountWithCascade(<NeedsAttention items={items} titles={{}} now={NOW} />);
   try {
     const row = container.querySelector(".attention-row") as HTMLElement;
     const template = getComputedStyle(row).gridTemplateColumns;
     const frTrackCount = (template.match(/(?:^|\s)1fr(?:\s|$)/g) ?? []).length;
-    assert.equal(frTrackCount, 1, `exactly one track may be \`1fr\` (the entity cell), got ${frTrackCount} in: ${template}`);
+    assert.equal(frTrackCount, 1, `exactly one track may be \`1fr\` (the reason cell), got ${frTrackCount} in: ${template}`);
   } finally {
     await cleanup();
   }
@@ -785,13 +817,12 @@ test('C1: the composed entity trigger (glyph + label) is Tab-reachable and its t
   }
 });
 
-// ── #925 gate① round-3 engine-agent finding [1] (ac4-entity-clipping): the round-2 fix
-// over-corrected — it grew the entity track without bound and disabled clipping entirely, so a
-// long title could paint across the reason column instead of stopping at its edge. The title must
-// consume free space while there is any, and truncate via CSS ellipsis exactly once the reason
-// column's own track is reached — never earlier (a short title), never by JS string-slicing. ────
+// ── #1018 (supersedes gate① round-3 finding "ac4-entity-clipping"): the entity cell no longer
+// carries the title at all, so there is nothing left to clip — a long title stays confined to the
+// tooltip regardless of its length, and the visible ref never grows past "PR #N". The CSS ellipsis
+// mechanism the round-3 finding needed is dead code, dropped in panels.css alongside this test. ──
 
-test('gate① round-3 finding "ac4-entity-clipping": a long title truncates via CSS ellipsis, the DOM always keeps the FULL text, and the reason column keeps its own non-zero floor', async () => {
+test("#1018: a long title never reaches the visible entity cell — the ref alone renders, regardless of title length", async () => {
   const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
   const longTitle = "a substantially long PR title meant to exceed the entity column's own available space by a wide margin";
   const { container, cleanup } = await mountWithCascade(
@@ -802,42 +833,26 @@ test('gate① round-3 finding "ac4-entity-clipping": a long title truncates via 
     assert.ok(entity, "the entity cell must render");
     assert.equal(
       entity.textContent,
-      `PR #9202 — ${longTitle}`,
-      "the FULL title is always in the DOM — truncation is a CSS visual effect, never a JS string slice",
+      "PR #9202",
+      "the visible entity cell is always just the ref — the title never lands here, however long",
     );
 
-    // The truncation mechanism itself: the entity cell clips its OWN overflow once its `1fr` track
-    // runs out of room, rather than letting a long title paint into or push out the reason column.
-    const entityComputed = getComputedStyle(entity);
-    assert.equal(entityComputed.overflow, "hidden", "the entity cell must clip once its 1fr track's available space runs out");
-    assert.equal(entityComputed.textOverflow, "ellipsis", "clipped content must ellipsize, never just vanish mid-character");
-    assert.equal(entityComputed.whiteSpace, "nowrap", "still a single line — nowrap only wraps, it never itself clips");
-    assert.equal(
-      Number.parseFloat(entityComputed.minWidth),
-      0,
-      "a grid item's default min-width:auto would override the ellipsis and never let this cell shrink below its own content",
-    );
-
-    // The reason column's own `minmax(auto, 40%)` floor (panels.css) is a fixture of the row's
-    // shared, content-independent template — a long title can only consume the ENTITY track's own
-    // `1fr`, never the reason track's track FUNCTION itself, regardless of the title's length.
+    // #1018 AC3: the reason column's `1fr` track is now the row's flexible one — it takes the
+    // width an inline title used to eat, so the reason cell is never squeezed by title length.
     const row = container.querySelector(".attention-row") as HTMLElement;
     assert.match(
       getComputedStyle(row).gridTemplateColumns,
-      /minmax\(auto, 40%\)/,
-      "the reason column keeps its own content-driven floor regardless of the entity title's length",
+      /max-content 1fr 96px$/,
+      "reason must be the row's flexible track, entity content-sized",
     );
     const reason = container.querySelector(".attention-reason") as HTMLElement;
-    assert.ok(
-      reason?.textContent && reason.textContent.length > 0,
-      "the reason cell must still render its own content — never squeezed to nothing by a long title",
-    );
+    assert.ok(reason?.textContent && reason.textContent.length > 0, "the reason cell must still render its own content");
   } finally {
     await cleanup();
   }
 });
 
-test('gate① round-3 finding "ac4-entity-clipping": a short title renders in full under the SAME static CSS — never a JS length-conditional branch', async () => {
+test("#1018: a short title ALSO never reaches the visible entity cell — same ref-only rendering, no title-length branch", async () => {
   const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "drive-needs-human", { pr: 9202, issue: 9102 }));
   const shortTitle = "fix typo";
   const { container, cleanup } = await mountWithCascade(
@@ -847,17 +862,9 @@ test('gate① round-3 finding "ac4-entity-clipping": a short title renders in fu
     const entity = container.querySelector(".attention-entity") as HTMLElement;
     assert.equal(
       entity.textContent,
-      `PR #9202 — ${shortTitle}`,
-      "a short title renders in full — truncated only when the reason column is actually reached, never while free space remains",
+      "PR #9202",
+      "the ref alone renders — NeedsAttention.tsx has no title-length branch that would need its own coverage",
     );
-
-    // The SAME overflow/ellipsis/nowrap declarations as the long-title case above — the mechanism
-    // is passive CSS that only visually activates once content exceeds the resolved track width;
-    // NeedsAttention.tsx has no title-length branch that would need its own, separate coverage.
-    const entityComputed = getComputedStyle(entity);
-    assert.equal(entityComputed.overflow, "hidden");
-    assert.equal(entityComputed.textOverflow, "ellipsis");
-    assert.equal(entityComputed.whiteSpace, "nowrap");
   } finally {
     await cleanup();
   }

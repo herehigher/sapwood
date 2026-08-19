@@ -862,22 +862,17 @@
   flex-direction: column;
 }
 
-/* #925 gate① round-3 engine-agent finding [1] (ac4-entity-clipping): the round-2 fix
- * (`minmax(180px, max-content)` + `nowrap` + visible overflow) over-corrected — it grew the
- * entity track to fit any title, however long, with no truncation mechanism at all, so a long
- * title could paint across the reason column instead of stopping at its edge. The entity track is
- * now the row's ONE flexible track (`1fr`): it consumes whatever space the reason column doesn't
- * need, and `.attention-entity`'s own `overflow: hidden` + `text-overflow: ellipsis` (below)
- * truncates the title exactly at that boundary — the AC's "truncated only when the reason column
- * is actually reached, never while free space remains". The reason column keeps a non-zero floor
- * of its own (`minmax(auto, 40%)` — `auto` = its own longest unbroken word, since `.attention-
- * sentence` wraps rather than forcing one line) so it can never be squeezed to nothing. AC5's own
- * "entity-ref cell same left edge" still holds regardless of either track's flex: that edge is
- * determined entirely by the FIXED tracks before it (severity/chip), never by this column's own
- * resolved width — see NeedsAttention.test.tsx's AC5 geometry oracle for the full argument. */
+/* #1018 (owner ruling, reverses #925 AC4's inline title composition and the entity track's `1fr`
+ * flex it needed): the entity cell's visible text is now just "PR #N"/"#N" (NeedsAttention.tsx) —
+ * a short, content-sized string that never needs to consume free space or clip, so the entity
+ * track drops to `max-content` and the reason track — the thing that actually wraps onto
+ * multiple cramped lines — becomes the row's flexible `1fr`, taking the width the title used to
+ * eat. AC5's "entity-ref cell same left edge" still holds: that edge is determined entirely by the
+ * FIXED tracks before it (severity/chip), never by this column's own resolved width — see
+ * NeedsAttention.test.tsx's AC5 geometry oracle for the full argument. */
 .attention-row {
   display: grid;
-  grid-template-columns: 4px var(--attention-chip-w) 1fr minmax(auto, 40%) 96px;
+  grid-template-columns: 4px var(--attention-chip-w) max-content 1fr 96px;
   align-items: center;
   column-gap: var(--space-2);
   min-height: 56px;
@@ -946,16 +941,12 @@
   align-items: center;
 }
 
-/* #925 gate① round-3 engine-agent finding [1]: the truncation mechanism itself. The entity track
- * is the row's flexible `1fr` (above) — this cell fills it, then clips its OWN overflow rather
- * than letting a long title paint into the reason column. `min-width: 0` is required for a flex/
- * grid *item* to shrink below its content's intrinsic width at all (the grid default is
- * `min-width: auto`, which would defeat the ellipsis by never letting the cell get smaller than
- * its unclipped content). */
+/* #1018: the entity track is now `max-content` (above) — the visible "PR #N"/"#N" ref never
+ * exceeds it, so there is nothing left to clip. The #925-era `overflow: hidden` +
+ * `text-overflow: ellipsis` + `min-width: 0` truncation mechanism is dropped as dead: it only
+ * ever fired against the inline title this issue moved to the tooltip. `white-space: nowrap`
+ * stays — the glyph + ref still render on a single baseline, never wrapping onto a second line. */
 .attention-entity {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -971,9 +962,9 @@
   margin-right: var(--space-2);
 }
 
-/* The ONE styled label element — "PR #9202 — <title>" as a single string, one font-size, one
- * baseline (gate① round-3 finding [0]: no separate, differently-sized "PR " literal or title
- * span). `--text-1` (16px) comfortably clears the AC's ≥14px floor.
+/* The ONE styled label element — "PR #9202" (#1018: ref only, title moved to the tooltip) as a
+ * single string, one font-size, one baseline (gate① round-3 finding [0]: no separate,
+ * differently-sized "PR " literal). `--text-1` (16px) comfortably clears the AC's ≥14px floor.
  *
  * #925 AC4: an unstyled `<a>` (this element is a link when `repoUrl` is set) otherwise falls
  * back to the UA's default blue/underline — the mockup reads this ref in the row's own cream
