@@ -287,7 +287,6 @@
  * `tokens.css`'s own doc) — the mockup draws these in the SAME primary ink (`--sapwood`) as
  * `.hero-node-label`, not a separately-muted variant. */
 .hero-arm,
-.hero-fixloop,
 .hero-return {
   fill: none;
   stroke: var(--sapwood);
@@ -299,11 +298,34 @@
   stroke-dasharray: 4 6;
 }
 
+/* #1026: the fix loop's return path is a LIVE, in-motion signal (a worker is actively fixing
+ * this lane right now), not idle stage structure like `.hero-arm`/`.hero-return` above — same
+ * `--sap-text` amber ink `.hero-lane[data-phase="fixing"] .hero-channel` already uses for the
+ * fixing lane's own dashed channel, never the muted `--sapwood` black the old shared bezier drew
+ * in (that black reading matched idle furniture, not an active send-back). Keep any segment of
+ * this path clear of the CI gate node's own circle (`FIXLOOP_EXIT`/`fixLoopRowY`, `stage.tsx`) —
+ * the gate node draws AFTER the lanes (later in source order), so a segment running through its
+ * circle gets silently painted over, reading as a fainter/broken stroke even at full opacity;
+ * that is a geometry bug to fix in `stage.tsx`, not a reason to reach for a bolder token here. */
+.hero-fixloop {
+  fill: none;
+  stroke: var(--sap-text);
+  stroke-opacity: 1;
+  stroke-width: 1.5;
+}
+
 /* #920 AC5: the return path's own arrowhead — filled, not stroked, so it reads as a solid
  * closing point rather than another hairline. */
 .hero-arrowhead {
   fill: var(--bark);
   fill-opacity: 0.4;
+}
+
+/* #1026: the fix loop's own arrowhead — same triangle as `.hero-arrowhead`, opaque `--sap-text`
+ * instead of the muted `--bark` above (this marker only ever fires while the loop is live). */
+.hero-fixloop-arrowhead {
+  fill: var(--sap-text);
+  fill-opacity: 1;
 }
 
 /* #920 AC5: two dashed zone dividers (PLAN|IMPLEMENT, IMPLEMENT|OUTCOME).
