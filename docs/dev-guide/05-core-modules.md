@@ -88,6 +88,6 @@ The proxy is a local, per-session, read-only MCP server. `startForgeProxyServer(
 | `status [db-path]` | Query-only SQLite summary without a live engine. |
 
 `commands/sapwood-run.md`, `commands/sapwood-status.md`, and `commands/sapwood-dashboard.md`
-use the shared package wrapper; [09 — Plugin, commands & prompts](09-plugin-commands-prompts.md#slash-commands)
+use the shared package wrapper; [09 — Plugin, commands & prompts](09-plugin-commands-prompts.md#slash-commands-commands)
 owns its resolution details. `commands/sapwood-stop.md` manages
 `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`; it does not map to a CLI subcommand.
