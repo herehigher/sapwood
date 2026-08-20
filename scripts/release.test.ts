@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -843,17 +843,36 @@ test("runPublish: a mismatched npm view stops before catalog clone or push", () 
   }
 });
 
+const STALE_MARKETPLACE_INSTALL_CLAIM = /marketplace install[\s\S]{0,120}only runs `npm ci --ignore-scripts`/;
+const TEXT_FILE_SUFFIX = /\.(?:md|sh|txt|yaml|yml|json)$/;
+
+function filesWithStaleMarketplaceInstallClaim(dirs: string[]): string[] {
+  return dirs.flatMap((dir) =>
+    readdirSync(dir, { recursive: true })
+      .filter((path): path is string => typeof path === "string")
+      .filter((path) => TEXT_FILE_SUFFIX.test(path))
+      .map((path) => join(dir, path))
+      .filter((path) => STALE_MARKETPLACE_INSTALL_CLAIM.test(readFileSync(path, "utf8"))),
+  );
+}
+
 test("plugin command documentation never claims marketplace installs run npm ci --ignore-scripts", () => {
-  const files = execFileSync("rg", ["--files", "commands", "bin", "docs"], { cwd: REPO_ROOT, encoding: "utf8" })
-    .trim()
-    .split("\n")
-    .filter(Boolean);
-  const staleClaim = /marketplace install[\s\S]{0,120}only runs `npm ci --ignore-scripts`/;
+  const scannedDirs = [join(REPO_ROOT, "commands"), join(REPO_ROOT, "bin"), join(REPO_ROOT, "docs")];
   const correctedSentence = "A marketplace install has no local engine build; the wrapper falls back to `npx sapwood@<plugin version>`";
-  for (const file of files) assert.doesNotMatch(readFileSync(join(REPO_ROOT, file), "utf8"), staleClaim, file);
+  assert.deepEqual(filesWithStaleMarketplaceInstallClaim(scannedDirs), []);
   assert.ok(readFileSync(join(REPO_ROOT, "commands", "sapwood-run.md"), "utf8").includes(correctedSentence));
   assert.ok(readFileSync(join(REPO_ROOT, "commands", "sapwood-status.md"), "utf8").includes(correctedSentence));
-  assert.doesNotMatch(readFileSync(join(REPO_ROOT, "commands", "sapwood-stop.md"), "utf8"), staleClaim);
+  assert.doesNotMatch(readFileSync(join(REPO_ROOT, "commands", "sapwood-stop.md"), "utf8"), STALE_MARKETPLACE_INSTALL_CLAIM);
+
+  const fixtureDir = tmpRepo();
+  try {
+    const stalePath = join(fixtureDir, "commands", "stale.md");
+    mkdirSync(dirname(stalePath), { recursive: true });
+    writeFileSync(stalePath, "a marketplace install only runs `npm ci --ignore-scripts`\n");
+    assert.deepEqual(filesWithStaleMarketplaceInstallClaim([fixtureDir]), [stalePath]);
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
 });
 
 test("runPublish: a failed precondition is a non-zero exit with one clear line, no gh/git side effects", () => {
