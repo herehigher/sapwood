@@ -17,6 +17,9 @@ Status: **early development, pre-v1.**
 - `engine/prompts/worker.md` ("Working language & comments") — code-comment discipline
   (why, not what). It's the copy guaranteed to reach workers on any target repo; applies
   here too when writing code interactively.
+- [`docs/dev-guide/11-writing-for-audiences.md`](docs/dev-guide/11-writing-for-audiences.md) —
+  where text renders (target repo vs. this repo) decides whether a bare `#NNN` is a
+  misresolution hazard or just reader noise.
 
 ## Non-negotiables
 
