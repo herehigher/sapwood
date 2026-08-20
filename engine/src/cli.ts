@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
+import { type SpawnSyncOptionsWithStringEncoding, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 // `sapwood` CLI. M0.5 shipped `init`; `run` (the M4 loop driver, #46) and `validate` (#49)
 // landed next; `status` + `run --dry-run` (#15) land here. The plugin's slash commands
@@ -159,9 +159,15 @@ const ROOT_BOUND_COMMANDS = new Set(["dashboard", "estop", "events", "init", "pa
 
 /** A value-bearing --config is the only path option that selects config-relative runtime files. */
 function explicitConfigPath(argv: string[]): string | undefined {
-  const index = argv.indexOf("--config");
-  const candidate = index === -1 ? undefined : argv[index + 1];
-  return candidate === undefined || candidate.startsWith("-") ? undefined : candidate;
+  let configPath: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] !== "--config") continue;
+    const candidate = argv[i + 1];
+    if (candidate === undefined || candidate.startsWith("-")) return undefined;
+    configPath = candidate;
+    i++;
+  }
+  return configPath;
 }
 
 /**
@@ -175,16 +181,48 @@ export function cwdContractError(argv: string[], cwd = process.cwd()): string | 
     return undefined;
   }
 
-  const git = spawnSync("git", ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], {
+  const gitEnv: NodeJS.ProcessEnv = { ...process.env, LC_ALL: "C", LANG: "C" };
+  for (const key of Object.keys(gitEnv)) {
+    if (key.startsWith("GIT_")) delete gitEnv[key];
+  }
+  const gitOpts: SpawnSyncOptionsWithStringEncoding = {
     cwd,
     encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  });
-  if (git.status !== 0) return undefined;
+    stdio: ["ignore", "pipe", "pipe"],
+    env: gitEnv,
+  };
+  const bare = spawnSync("git", ["rev-parse", "--is-bare-repository"], gitOpts);
+  if (bare.status !== 0) {
+    if (bare.status === 128 && /not a git repository/.test(bare.stderr)) return undefined;
+    const reason = bare.error !== undefined || bare.status === null ? "git unavailable" : "git failed";
+    return `sapwood ${command}: could not determine the repository root (${reason}). ${CWD_CONTRACT_MESSAGE}\n`;
+  }
+  if (bare.stdout.trim() === "true") {
+    return `sapwood ${command}: could not determine the repository root (bare repository has no worktree). ${CWD_CONTRACT_MESSAGE}\n`;
+  }
+  if (bare.stdout.trim() !== "false") {
+    return `sapwood ${command}: could not determine the repository root (git returned malformed output). ${CWD_CONTRACT_MESSAGE}\n`;
+  }
 
-  const [gitDir, commonDir] = git.stdout.trim().split("\n");
-  if (gitDir === undefined || commonDir === undefined) return undefined;
-  const mainRoot = realpathSync(dirname(commonDir));
+  const git = spawnSync("git", ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", "--show-toplevel"], gitOpts);
+  if (git.status !== 0) {
+    const reason = git.error !== undefined || git.status === null ? "git unavailable" : "git failed";
+    return `sapwood ${command}: could not determine the repository root (${reason}). ${CWD_CONTRACT_MESSAGE}\n`;
+  }
+  const [gitDir, commonDir, worktreeRoot] = git.stdout.trim().split("\n");
+  if (gitDir === undefined || commonDir === undefined || worktreeRoot === undefined) {
+    return `sapwood ${command}: could not determine the repository root (git returned malformed output). ${CWD_CONTRACT_MESSAGE}\n`;
+  }
+  let mainRoot = realpathSync(worktreeRoot);
+  if (gitDir !== commonDir) {
+    const worktrees = spawnSync("git", ["worktree", "list", "--porcelain"], gitOpts);
+    const firstLine = worktrees.stdout.split("\n").find((line) => line.startsWith("worktree "));
+    if (worktrees.status !== 0 || firstLine === undefined) {
+      const reason = worktrees.error !== undefined || worktrees.status === null ? "git unavailable" : "git worktree query failed";
+      return `sapwood ${command}: could not determine the repository root (${reason}). ${CWD_CONTRACT_MESSAGE}\n`;
+    }
+    mainRoot = realpathSync(firstLine.slice("worktree ".length));
+  }
   const cwdRealpath = realpathSync(cwd);
   const configPath = explicitConfigPath(argv);
   const resolvedConfigPath = configPath === undefined ? undefined : resolve(cwd, configPath);
@@ -3463,7 +3501,7 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
   }
 }
 
-async function main(argv: string[]): Promise<number> {
+export async function main(argv: string[]): Promise<number> {
   const cwdError = cwdContractError(argv);
   if (cwdError !== undefined) {
     process.stderr.write(cwdError);
