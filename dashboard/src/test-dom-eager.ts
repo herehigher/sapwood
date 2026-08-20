@@ -1,4 +1,5 @@
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import React from "react";
 
 /**
  * #892: `registerRealDom()` (`test-dom.ts`) defers registration to `test.before()`, which runs
@@ -20,6 +21,8 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
  *   test.after(() => unregisterRealDomEager());
  */
 GlobalRegistrator.register();
+// WHY: @radix-ui/react-use-layout-effect evaluates `globalThis?.document ? React.useLayoutEffect : () => {}` and tsx's classic JSX tests need the same global.
+(globalThis as { React?: typeof React }).React = React;
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 export function unregisterRealDomEager(): Promise<void> {

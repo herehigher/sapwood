@@ -7,7 +7,7 @@
 // a write route registered, and the listener binds loopback.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -1122,6 +1122,91 @@ test("POST /api/control requires the X-Sapwood-Control header and a JSON content
   }
 });
 
+test("POST /api/attention/dismiss shares /api/control's request guards and validates eventId/kind", async () => {
+  const fx = await fixture();
+  try {
+    const noHeader = await fetch(`${fx.origin}/api/attention/dismiss`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ eventId: 1 }),
+    });
+    assert.equal(noHeader.status, 403);
+    const wrongType = await fetch(`${fx.origin}/api/attention/dismiss`, {
+      method: "POST",
+      headers: { "content-type": "text/plain", "x-sapwood-control": "1" },
+      body: JSON.stringify({ eventId: 1 }),
+    });
+    assert.equal(wrongType.status, 415);
+    const foreign = await dismissAttention(
+      fx,
+      1,
+      {
+        headers: { "content-type": "application/json", "x-sapwood-control": "1", origin: "http://evil.example" },
+      },
+      "park-escalated",
+    );
+    assert.equal(foreign.status, 403);
+    for (const eventId of [undefined, 0, -1, 1.5, "1", null]) {
+      assert.equal(
+        (await dismissAttention(fx, eventId, {}, "park-escalated")).status,
+        400,
+        `expected ${JSON.stringify(eventId)} to be rejected`,
+      );
+    }
+    for (const kind of [undefined, "", "x".repeat(101), 1, null]) {
+      assert.equal((await dismissAttention(fx, 1, {}, kind)).status, 400, `expected kind ${JSON.stringify(kind)} to be rejected`);
+    }
+  } finally {
+    fx.close();
+  }
+});
+
+test("attention dismissals round-trip, persist across server instances, and skip malformed JSONL lines", async () => {
+  const fx = await fixture();
+  let second: Awaited<ReturnType<typeof createDashboardServer>> | undefined;
+  try {
+    assert.deepEqual(await getJson(fx, "/api/attention/dismissals"), { eventIds: [] });
+    assert.deepEqual(await (await dismissAttention(fx, 17, {}, "park-escalated")).json(), { eventId: 17 });
+    assert.deepEqual(await (await dismissAttention(fx, 17, {}, "park-escalated")).json(), { eventId: 17 }, "the write is idempotent");
+    const dismissalPath = join(fx.dir, "attention-dismissals.jsonl");
+    const persistedLines = readFileSync(dismissalPath, "utf8").trimEnd().split("\n").filter(Boolean);
+    assert.equal(persistedLines.length, 1, "idempotent POSTs append exactly one JSONL record");
+    assert.equal(JSON.parse(persistedLines[0]!).kind, "park-escalated");
+    assert.deepEqual(await getJson(fx, "/api/attention/dismissals"), { eventIds: [17] });
+    writeFileSync(dismissalPath, `${readFileSync(dismissalPath, "utf8")}not-json\n`, "utf8");
+
+    await new Promise<void>((resolve) => fx.server.close(() => resolve()));
+    fx.state.close();
+    second = await createDashboardServer({
+      dbPath: join(fx.dir, "sapwood.sqlite"),
+      configPath: join(fx.dir, "sapwood.config.yaml"),
+      port: 0,
+      now: () => new Date("2026-07-24T12:00:00.000Z"),
+    });
+    const res = await fetch(`http://127.0.0.1:${second.port}/api/attention/dismissals`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { eventIds: [17] });
+  } finally {
+    if (second) {
+      await new Promise<void>((resolve) => second!.server.close(() => resolve()));
+      second.state.close();
+      rmSync(fx.dir, { recursive: true, force: true });
+    } else {
+      fx.close();
+    }
+  }
+});
+
+test("attention dismiss POST is absent when controls are disabled while its GET remains available", async () => {
+  const fx = await fixture(undefined, { controls: false });
+  try {
+    assert.equal((await dismissAttention(fx, 1, {}, "park-escalated")).status, 404);
+    assert.deepEqual(await getJson(fx, "/api/attention/dismissals"), { eventIds: [] });
+  } finally {
+    fx.close();
+  }
+});
+
 test("POST /api/control's only effect is sentinel create/remove, and it answers with the post-signal state", async () => {
   const fx = await fixture(ticking);
   const pausePath = join(fx.dir, "PAUSE");
@@ -1379,6 +1464,16 @@ function control(fx: Fixture, verb: unknown, init: RequestInit = {}): Promise<Re
     method: "POST",
     headers: { "content-type": "application/json", "x-sapwood-control": "1" },
     body: JSON.stringify({ verb }),
+    ...init,
+  });
+}
+
+function dismissAttention(fx: Fixture, eventId: unknown, init: RequestInit = {}, kind?: unknown): Promise<Response> {
+  const body = { eventId, ...(kind === undefined ? {} : { kind }) };
+  return fetch(`${fx.origin}/api/attention/dismiss`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-sapwood-control": "1" },
+    body: JSON.stringify(body),
     ...init,
   });
 }

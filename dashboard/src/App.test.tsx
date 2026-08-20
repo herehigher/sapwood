@@ -32,7 +32,16 @@ import {
   resolveWorkerBudgetUsdSoft,
   toggleConfigOpen,
 } from "./App.tsx";
-import { demoFixtureQuery, eventsQuery, loopStateQuery, MAX_EVENT_HISTORY, POLL_MS, roundsQuery, spendQuery } from "./api/queries.ts";
+import {
+  attentionDismissalsQuery,
+  demoFixtureQuery,
+  eventsQuery,
+  loopStateQuery,
+  MAX_EVENT_HISTORY,
+  POLL_MS,
+  roundsQuery,
+  spendQuery,
+} from "./api/queries.ts";
 import type { Lane, LoopEvent, Round, SpendRow } from "./api/types.ts";
 import { Header } from "./components/Header.tsx";
 import { IconRail, railContent } from "./components/IconRail.tsx";
@@ -217,13 +226,14 @@ const SPEND_EMPTY = { "/api/spend": { status: 200, body: { spend: [], lastId: 0 
 // source `App` depends on — defaults to an empty, successful page for every test that isn't
 // specifically exercising rounds, same rationale `SPEND_EMPTY` already documents for `/api/spend`.
 const ROUNDS_EMPTY = { "/api/rounds": { status: 200, body: { rounds: [] } } };
+const DISMISSALS_EMPTY = { "/api/attention/dismissals": { status: 200, body: { eventIds: [] } } };
 
 async function renderSettledApp(
   byPath: Record<string, { status: number; body: unknown }>,
   now?: Date,
   initialConfigOpen?: boolean,
 ): Promise<string> {
-  stubFetch({ ...SPEND_EMPTY, ...ROUNDS_EMPTY, ...byPath });
+  stubFetch({ ...SPEND_EMPTY, ...ROUNDS_EMPTY, ...DISMISSALS_EMPTY, ...byPath });
   // `retryOnMount: false` matters as much as `retry: false` here: a query that has ONLY ever
   // errored (never succeeded) otherwise re-triggers a fresh fetch the instant a new observer
   // mounts (TanStack Query's default `retryOnMount: true`), which collapses `status` back to
@@ -235,6 +245,7 @@ async function renderSettledApp(
     client.prefetchQuery(eventsQuery(0)),
     client.prefetchQuery(spendQuery(0)),
     client.prefetchQuery(roundsQuery()),
+    client.prefetchQuery(attentionDismissalsQuery()),
   ]);
   return renderToStaticMarkup(
     <QueryClientProvider client={client}>
@@ -250,12 +261,17 @@ async function renderSettledApp(
  * `createRoot` so `onClick`/`onKeyDown`/`Escape` actually fire. `fetchCalls` lets a test assert
  * exactly which URLs were ever fetched (AC5: "no fetch call is made" for the log content).
  */
-async function mountSettledApp(byPath: Record<string, { status: number; body: unknown }>, now?: Date) {
+async function mountSettledApp(
+  byPath: Record<string, { status: number; body: unknown }>,
+  now?: Date,
+  onFetch?: (url: string, init: RequestInit | undefined) => void,
+) {
   const fetchCalls: string[] = [];
-  mock.method(globalThis, "fetch", async (url: string) => {
+  mock.method(globalThis, "fetch", async (url: string, init?: RequestInit) => {
     fetchCalls.push(url);
+    onFetch?.(url, init);
     const path = url.split("?")[0]!;
-    const resp = { ...SPEND_EMPTY, ...ROUNDS_EMPTY, ...byPath }[path];
+    const resp = { ...SPEND_EMPTY, ...ROUNDS_EMPTY, ...DISMISSALS_EMPTY, ...byPath }[path];
     if (!resp) throw new Error(`unstubbed fetch: ${url}`);
     return new Response(JSON.stringify(resp.body), { status: resp.status, headers: { "content-type": "application/json" } });
   });
@@ -265,6 +281,7 @@ async function mountSettledApp(byPath: Record<string, { status: number; body: un
     client.prefetchQuery(eventsQuery(0)),
     client.prefetchQuery(spendQuery(0)),
     client.prefetchQuery(roundsQuery()),
+    client.prefetchQuery(attentionDismissalsQuery()),
   ]);
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -284,6 +301,36 @@ async function mountSettledApp(byPath: Record<string, { status: number; body: un
   };
   return { container, fetchCalls, unmount };
 }
+
+test("#1047: App wires a row's event id/kind to the dismissal POST and refetches dismissals", async () => {
+  const event = { id: 77, ts: "2026-08-10T11:59:00.000Z", kind: "park-escalated", payload: { source: "llm" } };
+  const requests: Array<{ url: string; method: string; body: string | undefined }> = [];
+  const { container, fetchCalls, unmount } = await mountSettledApp(
+    {
+      "/api/loop/state": { status: 200, body: { ...LOOP_STATE_OK, controlsEnabled: true } },
+      "/api/events": { status: 200, body: { events: [event], lastId: event.id } },
+      "/api/attention/dismiss": { status: 200, body: { eventId: event.id } },
+    },
+    undefined,
+    (url, init) => requests.push({ url, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : undefined }),
+  );
+  try {
+    const button = container.querySelector('button[aria-label="mark resolved"]') as HTMLButtonElement | null;
+    assert.ok(button, "controls-enabled live rows render the resolve control");
+    await act(async () => {
+      button!.click();
+    });
+    const post = requests.find((request) => request.url === "/api/attention/dismiss" && request.method === "POST");
+    assert.ok(post, "click sends the dismissal POST");
+    assert.deepEqual(JSON.parse(post!.body!), { eventId: event.id, kind: event.kind });
+    assert.ok(
+      fetchCalls.filter((url) => url.split("?")[0] === "/api/attention/dismissals").length >= 2,
+      "successful dismissal refetches the dismissals query",
+    );
+  } finally {
+    await unmount();
+  }
+});
 
 test.afterEach(() => mock.restoreAll());
 
@@ -934,6 +981,7 @@ test("#715/#880 gate② finding today-stage-history-truncation: TODAY's by-stage
       const page = spend.filter((r) => r.id > after).slice(0, limit);
       return json({ spend: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
     }
+    if (parsed.pathname === "/api/attention/dismissals") return json({ eventIds: [] });
     throw new Error(`unstubbed fetch: ${url}`);
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
@@ -1101,6 +1149,7 @@ test("#888 gate② run 949439c8 finding [0]: TODAY's by-stage bars correctly att
       const page = spend.filter((r) => r.id > after).slice(0, limit);
       return json({ spend: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
     }
+    if (parsed.pathname === "/api/attention/dismissals") return json({ eventIds: [] });
     throw new Error(`unstubbed fetch: ${url}`);
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
@@ -1213,6 +1262,7 @@ test("#888 gate② run 949439c8 finding [1]: TODAY's by-stage bars stay fresh wh
       const page = spend.filter((r) => r.id > after).slice(0, limit);
       return json({ spend: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
     }
+    if (parsed.pathname === "/api/attention/dismissals") return json({ eventIds: [] });
     throw new Error(`unstubbed fetch: ${url}`);
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
@@ -1632,6 +1682,7 @@ test("#934 AC2 (WIRING via App, live: stubbed /api/rounds + events for two round
       const page = LEDGER.filter((e) => e.id > after).slice(0, limit);
       return json({ events: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
     }
+    if (parsed.pathname === "/api/attention/dismissals") return json({ eventIds: [] });
     throw new Error(`unstubbed fetch: ${url}`);
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
@@ -1873,6 +1924,7 @@ test("#934 (WIRING via App, feed-fetch-rejection): a rejected round-scoped fetch
       }
       return json({ events: [], lastId: 0 });
     }
+    if (parsed.pathname === "/api/attention/dismissals") return json({ eventIds: [] });
     throw new Error(`unstubbed fetch: ${url}`);
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
@@ -2696,6 +2748,7 @@ test("#880: LIVE mode's ROUND N panel is populated by the real useLastClosedRoun
       const page = spend.filter((r) => r.id > after).slice(0, limit);
       return json({ spend: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
     }
+    if (parsed.pathname === "/api/attention/dismissals") return json({ eventIds: [] });
     throw new Error(`unstubbed fetch: ${url}`);
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
@@ -2792,6 +2845,7 @@ test("#927 AC3 (WIRING, replay of a closed round in LiveApp with stubbed fetch):
     if (parsed.pathname === "/api/rounds") return json({ rounds });
     if (parsed.pathname === "/api/events") return json({ events: [], lastId: 0 });
     if (parsed.pathname === "/api/spend") return json({ spend: [], lastId: 0 });
+    if (parsed.pathname === "/api/attention/dismissals") return json({ eventIds: [] });
     throw new Error(`unstubbed fetch: ${url}`);
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
@@ -3401,6 +3455,7 @@ test("#868 gate② finding [1]: the real live wiring excludes a PRIOR round's ma
       const page = ledger.filter((e) => e.id > after).slice(0, limit);
       return json({ events: page, lastId: page.length > 0 ? page[page.length - 1]!.id : after });
     }
+    if (parsed.pathname === "/api/attention/dismissals") return json({ eventIds: [] });
     throw new Error(`unstubbed fetch: ${url}`);
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
@@ -3762,7 +3817,12 @@ test("AC1: clicking a hero stage node opens its phase inspector drawer; the clos
 
     assert.ok(
       fetchCalls.every(
-        (u) => u.startsWith("/api/loop/state") || u.startsWith("/api/events") || u.startsWith("/api/spend") || u.startsWith("/api/rounds"),
+        (u) =>
+          u.startsWith("/api/loop/state") ||
+          u.startsWith("/api/events") ||
+          u.startsWith("/api/spend") ||
+          u.startsWith("/api/rounds") ||
+          u.startsWith("/api/attention/dismissals"),
       ),
       `opening/closing the drawer must never trigger an unexpected (log content) fetch; saw: ${fetchCalls.join(", ")}`,
     );
@@ -3801,7 +3861,12 @@ test("AC5: a real non-null logPath renders as plain text once the drawer opens, 
     );
     assert.ok(
       fetchCalls.every(
-        (u) => u.startsWith("/api/loop/state") || u.startsWith("/api/events") || u.startsWith("/api/spend") || u.startsWith("/api/rounds"),
+        (u) =>
+          u.startsWith("/api/loop/state") ||
+          u.startsWith("/api/events") ||
+          u.startsWith("/api/spend") ||
+          u.startsWith("/api/rounds") ||
+          u.startsWith("/api/attention/dismissals"),
       ),
       `opening the drawer must never trigger an unexpected fetch; saw: ${fetchCalls.join(", ")}`,
     );
@@ -5062,13 +5127,14 @@ async function mountLiveAppWithCascade(byPath: Record<string, { status: number; 
   const style = document.createElement("style");
   style.textContent = `${tokensCss924}\n${panelsCss924}\n${heroCss924}\n${appCss924}`;
   document.head.appendChild(style);
-  stubFetch({ ...SPEND_EMPTY, ...ROUNDS_EMPTY, ...byPath });
+  stubFetch({ ...SPEND_EMPTY, ...ROUNDS_EMPTY, ...DISMISSALS_EMPTY, ...byPath });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
   await Promise.allSettled([
     client.prefetchQuery(loopStateQuery()),
     client.prefetchQuery(eventsQuery(0)),
     client.prefetchQuery(spendQuery(0)),
     client.prefetchQuery(roundsQuery()),
+    client.prefetchQuery(attentionDismissalsQuery()),
   ]);
   const container = document.createElement("div");
   document.body.appendChild(container);

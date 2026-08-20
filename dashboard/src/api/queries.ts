@@ -5,8 +5,8 @@ import { type DomainEvent, toDomainEvent } from "../domain-event.ts";
 import type { EntityTitles, OpenAttention } from "../entities.ts";
 import { type FoldStep, type HeroState, withFoldTruncated, withLaneCount } from "../hero/state.ts";
 import { DEFAULT_EVENT_WINDOW, foldReplay, initialReplayState } from "../replay/reducer.ts";
-import { fetchDemoFixture, fetchEvents, fetchLoopState, fetchRounds, fetchSpend } from "./client.ts";
-import type { EventsPage, LoopState, RoundsPage, SpendPage, SpendRow } from "./types.ts";
+import { fetchAttentionDismissals, fetchDemoFixture, fetchEvents, fetchLoopState, fetchRounds, fetchSpend } from "./client.ts";
+import type { AttentionDismissals, EventsPage, LoopState, RoundsPage, SpendPage, SpendRow } from "./types.ts";
 
 /** §2 Transport: HTTP polling at 3 s. No WebSocket — that row is the acceptance bar. */
 export const POLL_MS = 3000;
@@ -45,6 +45,14 @@ export const spendQuery = (after: number) => ({
 });
 
 export const useLoopState = () => useQuery(loopStateQuery());
+
+export const attentionDismissalsQuery = () => ({
+  queryKey: ["attention", "dismissals"] as const,
+  queryFn: ({ signal }: { signal: AbortSignal }): Promise<AttentionDismissals> => fetchAttentionDismissals(signal),
+  refetchInterval: POLL_MS,
+});
+
+export const useAttentionDismissals = () => useQuery(attentionDismissalsQuery());
 
 /** `GET /api/rounds` — the round navigator's list + replay chapter marks (§8). Unpaged, so this
  *  polls the same 3 s cadence as everything else rather than accumulating a cursor like the

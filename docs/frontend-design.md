@@ -122,7 +122,7 @@ in/out call:
 | 2 | See the agent roles interacting | **IN**: conductor, worker, reviewer, merge driver as actors in the hero scene and lane cards; the round-orchestrator roles (PO/architect/plan review/harvest/retro) as stage nodes on the loop's arcs, lit from live data. | The `rounds` table carries the live phase cursor and `round_artifacts` the per-round history (#123, [round-artifact.md](round-artifact.md)) — the stage nodes render real state, never fake animation. Deep round-browse views stay deferred (§10). |
 | 3 | Per-node status, output summary, cost | **IN**: lane board from `workers` (+ per-lane cost from `spend_ledger`); header status strip with the run-tier spend meter (daily ceiling as the secondary readout, §3 A). | Settled (real) cost comes from `spend_ledger` at lane end; **in-flight cost is the engine's #33 estimate** (the pricing.yaml table that already drives the soft worker budget), shown marked `est` and settling to real when the lane ends. |
 | 4 | Browse past loop rounds | **IN via replay, not metrics.** The `events` table is a complete append-only history → a replay player (play/pause/scrub) re-drives the whole UI from any point. | History-*aggregation* metrics (cycle time, merge/rework rate) stay **OUT** — PLAN.md defers them to a later phase gated on GitHub-history work. |
-| 5 | Config panel | **IN as read-only.** Grouped, plain-language view of the resolved config. **Editing is OUT.** | A config write path would break the dashboard's no-config-writes security posture, and security-relevant config is human-merge-only territory. Edit via the YAML file, where review applies. (The §3 control verbs are the sole, narrower write surface — run-state signals, never config.) |
+| 5 | Config panel | **IN as read-only.** Grouped, plain-language view of the resolved config. **Editing is OUT.** | A config write path would break the dashboard's no-config-writes security posture, and security-relevant config is human-merge-only territory. Edit via the YAML file, where review applies. (The §3 control verbs and manual-resolve POST are the two narrower write surfaces — run-state signals and dismissal JSONL, never config.) |
 | 6 | Avoid jargon | **IN as a copy layer**: one map covering **every** event kind — the §7 table is the authoritative list (a hard-coded count here would drift). UI language is English (repo/launch artifact); the map is a single module, trivially localizable later — no i18n framework. | |
 | 7 | Spec-first, consistent styling | **IN — this document.** Design tokens (§5) are defined before any component; one CSS file of custom properties is the only styling mechanism. | |
 
@@ -193,7 +193,7 @@ bar instead of re-litigating the rationale from zero):
 |---|---|
 | Chart library | none — cost bars/sparklines are hand-rolled SVG |
 | CSS framework / CSS-in-JS | none — `tokens.css` + `app.css`/`panels.css`/`hero.css`, plain CSS only |
-| Server | `node:http` + `node:sqlite` (read-only), 127.0.0.1-bound; no Express. One guarded `POST /api/control` route (§3 Operations) — sentinel writes only |
+| Server | `node:http` + `node:sqlite` (read-only), 127.0.0.1-bound; no Express. Two guarded POST routes (§3 Operations) — `/api/control` sentinel writes and `/api/attention/dismiss` dismissal-JSONL appends |
 | Transport | HTTP polling (3 s via TanStack Query); no WebSocket |
 | Fonts | two self-hosted faces, woff2, CDN forbidden (display: Fraunces, hand-subset latin woff2; data: JetBrains Mono Variable, the `@fontsource-variable/jetbrains-mono` package's own CSS, §5); system stack for body |
 
@@ -528,9 +528,13 @@ recovers. `worktree-retained` clears on `worktree-released` — a new
 the `dashboard.controls` schema key): the engine already owns the retained
 path, so on tick/startup it notices the folder is gone (the human cleaned
 it up) and appends the event; the filesystem it manages is the resolution
-signal, no acknowledge UI invented. The strip never invents state and
-never requires an acknowledge action. In replay it rebuilds from the same
-fold at the cursor, like every other event-backed surface (§11).
+signal, no acknowledge UI invented. The strip never invents state. An operator can also mark any live
+row resolved when no ledger witness will arrive: the dismissal is scoped to
+that event id in the operator-owned `attention-dismissals.jsonl`, so it
+survives reload/restart without mutating the ledger, and a later attention
+event under the same fold key has a new id and reopens the row. Dismissals
+do not apply in replay; replay rebuilds from the ledger fold at the cursor,
+like every other event-backed surface (§11).
 
 The issue-scoped clear SET itself (#933) is **derived from the engine's own
 registry**, not hand-mirrored on the dashboard side: every kind the engine
@@ -548,8 +552,8 @@ tags cannot fall through the same way.
 round 2, user decision; e-stop added 2026-07-21): the release dashboard is
 no longer a pure spectator — the engine-level verbs get UI entry points in
 the header, next to the engine state word they act on. The **data surface stays read-only**; the
-verbs are the *only* write path, and they write nothing but the engine's
-own control signals:
+two gated write routes are the only mutations, and they write only engine
+sentinel files or the operator-owned dismissal JSONL:
 
 | Verb | Meaning (existing engine semantics — nothing new invented) |
 |---|---|
@@ -586,16 +590,20 @@ verbs row above, rather than as a separate panel stacked below the header.
 While a verb is taking effect the header shows the engine's real
 transition state (`winding down`, `stopping` — §8 derivations, not an
 optimistic flip); controls disable during transitions. Buttons reflect
-validity (Resume only while paused, etc.). Server side this is **one**
-allowlisted `POST /api/control {verb}` route (§8) — sentinel files only, no
-DB, config, or GitHub writes. The route defends itself **server-side** — a
-UI confirm binds nobody: it requires `Content-Type: application/json` plus
-a custom `X-Sapwood-Control` header (a cross-origin page hits a CORS
-preflight the server never grants) and rejects requests whose `Origin`
-header, when present, is not the dashboard's own. `dashboard.controls`
+validity (Resume only while paused, etc.). Server side the
+manual-resolve addition joins the control write routes: `POST /api/control
+{verb}` changes sentinel files, while `POST /api/attention/dismiss
+{eventId, kind}` appends the operator-owned dismissal JSONL beside them. Neither
+can write SQLite, config, or GitHub. Both routes defend themselves
+**server-side** — a UI confirm binds nobody: they require
+`Content-Type: application/json` plus a custom `X-Sapwood-Control` header
+(a cross-origin page hits a CORS preflight the server never grants) and
+reject requests whose `Origin` header, when present, is not the dashboard's
+own. `dashboard.controls`
 defaults to **true** — the release decision is that operators get these
-verbs out of the box — and `false` removes the route and the buttons
-entirely; the key is new to the (strict) config schema — engine follow-up
+verbs out of the box — and `false` removes both POST routes and all their
+controls (the verbs and the mark-resolved button); the key is new to the
+(strict) config schema — engine follow-up
 #210 (PAUSE `#75` and the kill switch already exist; only the
 schema key is new). Config *editing* stays out (§2 #5,
 §10) — flipping a documented run-state signal the engine already honors is
@@ -1181,12 +1189,13 @@ pattern as §7's copy-map-extension rule above.
 
 ## 8. Data contract
 
-Four read-only GET endpoints plus the single `POST /api/control` route
-(below), served from the existing SQLite tables
+The four ledger GET endpoints are served from the existing SQLite tables
 (schema v11, `engine/src/state/state.ts` — including `rounds` and
-`round_artifacts`); no dashboard-specific engine tables. Response shapes
-mirror what `StatusSnapshot` (`engine/src/cli.ts`) already computes for
-`sapwood status`.
+`round_artifacts`); no dashboard-specific engine tables. Their response
+shapes mirror what `StatusSnapshot` (`engine/src/cli.ts`) already computes for
+`sapwood status`. `GET /api/attention/dismissals` is the one non-ledger read,
+served from the operator-owned dismissal JSONL. The two
+`dashboard.controls`-gated POST routes are documented below.
 
 **`GET /api/loop/state`** — everything current, one poll:
 
@@ -1343,9 +1352,17 @@ and an `eventCount` for the transport's "event n/N". Ascending:
                                 update the dashboard" rather than mis-render */ } }] }
 ```
 
+**`GET /api/attention/dismissals`** — the operator's id-scoped display overlay,
+read from `attention-dismissals.jsonl` beside the engine sentinels; always
+registered, including for spectators:
+
+```json
+{ "eventIds": [480, 481] }
+```
+
 Server: `node:http` on `127.0.0.1` (port configurable, default 4517), SQLite
-opened read-only, serves `dashboard/dist` statics plus these four GET
-routes and exactly one write route:
+opened read-only, serves `dashboard/dist` statics plus the five read-only GET
+routes above. The manual-resolve POST joins the original control POST:
 
 **`POST /api/control`** — body `{ "verb": "start" | "pause" | "resume" |
 "stop" | "estop" }`, allowlist-validated; anything else is 400. Effect is
@@ -1356,9 +1373,17 @@ Operations); the server grants no CORS, so a foreign page cannot preflight
 through. Response is the §8 engine state after the signal — for Stop that
 is `{"state": "stopping"}` (KILL_SWITCH + active lanes, per the derivation
 above), so the UI renders the real transition, never an optimistic flip.
-When `dashboard.controls: false`, the route is not registered (404) and the
-buttons don't render — the pure-spectator posture remains available as
+When `dashboard.controls: false`, neither POST route is registered (404) and
+the verbs and mark-resolved controls don't render — the pure-spectator posture remains available as
 configuration.
+
+**`POST /api/attention/dismiss`** — body `{ "eventId": n, "kind": "..." }`, with `n` an
+integer at least one and `kind` a non-empty string of at most 100 characters; appends `{ eventId, kind, ts }` to
+`attention-dismissals.jsonl` in the data directory beside the engine
+sentinels. It uses the exact same JSON/custom-header/origin defences as
+`/api/control`, is gated by the same `dashboard.controls` predicate, and is
+idempotent. `GET /api/attention/dismissals` is always registered so a
+spectator applies the same id-scoped display overlay as an operator.
 
 ## 9. Tech architecture
 
@@ -1402,10 +1427,12 @@ lands as a separate human-authored change.
 
 ### Server — what has landed (#142, completed by #360)
 
-`dashboard/server.ts` serves the whole §8 surface: the four READ routes (`GET
+`dashboard/server.ts` serves the whole §8 surface: the five READ routes (`GET
 /api/loop/state`, `GET /api/events?after=&limit=`, `GET
-/api/spend?after=&limit=`, `GET /api/rounds`), the single gated `POST
-/api/control`, and the `dashboard/dist` statics.
+/api/spend?after=&limit=`, `GET /api/rounds`, `GET
+/api/attention/dismissals`), the gated write routes `POST
+/api/control` and `POST /api/attention/dismiss`, and the `dashboard/dist`
+statics.
 `createDashboardServer({ dbPath, configPath, port, staticDir })` opens `State`
 in `readOnly` mode, binds `127.0.0.1` (default port 4517), and dispatches
 through a pathname→method route table. There is no CLI entry point yet — until
@@ -1438,13 +1465,14 @@ Wire details the frontend can rely on:
 
 Five things about it are decisions, not implementation detail:
 
-- **The write route is registered, not hidden.** `dashboard.controls` (#210)
-  decides whether `/api/control` exists at all; `false` — *and an unreadable
-  config*, fail-closed — means a 404, so the spectator posture is structural.
-  The route defends itself server-side: `X-Sapwood-Control` (which forces a
+- **The write routes are registered, not hidden.** `dashboard.controls` (#210)
+  decides whether `/api/control` and `/api/attention/dismiss` exist at all;
+  `false` — *and an unreadable config*, fail-closed — means 404s, so the
+  spectator posture is structural.
+  Both write routes defend themselves server-side: `X-Sapwood-Control` (which forces a
   preflight this server never grants), an `application/json` content-type (so a
   no-preflight form POST cannot reach a verb), and an `Origin` that, when
-  present, must be this server's. Its verb allowlist is exactly `start`,
+  present, must be this server's. `/api/control`'s verb allowlist is exactly `start`,
   `pause`, `resume`, `stop`, `estop` — `estop` joined once #293's
   `EMERGENCY_STOP` sentinel landed (#724), because a verb that reports success
   while signalling nothing would have been worse than a 400. The only effect is
@@ -1454,6 +1482,8 @@ Five things about it are decisions, not implementation detail:
   `message` naming the real consequence — immediate hard kill, WIP stranded
   pending human review, never an unqualified "lost"), so the UI renders the
   real transition.
+  `/api/attention/dismiss` instead validates `{eventId, kind}` and appends the
+  idempotent dismissal record to the operator-owned JSONL.
 
 - **The config surface is an allowlist**, `CONFIG_ALLOWLIST` in the same file —
   the §3 E groups' named leaves plus the per-role `model`/`effort` keys. A
@@ -1466,9 +1496,10 @@ Five things about it are decisions, not implementation detail:
   `eventsPage`, `spendByModelForDay`, `spendPage`, `listRounds`) are read-only
   additions to `engine/src/state/state.ts` — notably `lastTickAt`, which reads
   the heartbeat without the write `touchLastTick` performs.
-- **The SQLite handle stays read-only even now that a write route exists.** The
-  control verbs write files, never rows; a write attempted through the handle
-  still throws, and the test suite asserts it after a successful control call.
+- **The SQLite handle stays read-only even now that write routes exist.** The
+  control verbs and dismissal route write files, never rows; a write attempted
+  through the handle still throws, and the test suite asserts it after a
+  successful control call.
 - **`spend.runUsd` is `null`** until follow-up #206's `run-started` event
   persists the #154 run anchor (today it exists only in engine-process memory).
   The header meter therefore falls back whole to the daily tier, exactly as §3 A
@@ -1577,8 +1608,9 @@ mutable snapshot or outside the engine's own DB is live-only.
   must never render beside replayed state as if they were one moment — in a
   closed round the header shows the *as-of-cursor* round/phase/spend plus
   the persistent tinted "ROUND N · CLOSED" badge; whether the engine is
-  currently alive shrinks to the engine-state word. Engine control verbs
-  hide entirely (§3 Operations — mode purity applied to the write path).
+  currently alive shrinks to the engine-state word. Engine control verbs and
+  the manual-resolve control hide entirely (§3 Operations — mode purity applied
+  to the write paths).
 - The **open round is not scrubbable** in v0.2: at LIVE the cursor is
   pinned to HEAD. Scrubbing backward inside a live round would create a
   third mode ("cursor behind HEAD") with unanswered rules for controls,
@@ -1667,8 +1699,9 @@ the overlay is the named boundary.
    lane slot recycled at the same path can be retained, and resolve, again.
 5. **`dashboard.controls` config key** (#210, round-2 amendment) —
    **LANDED** — boolean, default `true`, in the strict config schema
-   (`docs/configuration.md`); gates the §3 Operations verbs and the §8
-   `POST /api/control` route. `false` = pure-spectator dashboard. Schema
+  (`docs/configuration.md`); gates the §3 Operations verbs, the §8
+  `POST /api/control` and `POST /api/attention/dismiss` routes, and their
+  controls. `false` = pure-spectator dashboard. Schema
    only: the dashboard reads it, the engine does not.
 6. **`EMERGENCY_STOP` sentinel** (#293, third amendment) — **LANDED** (engine
    sentinel #724; the §3 Operations button and `estop` verb #733) — immediate

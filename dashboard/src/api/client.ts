@@ -1,5 +1,5 @@
 import type { DemoBundle } from "../demo/types.ts";
-import type { ControlVerb, EventsPage, LoopState, RoundsPage, SpendPage } from "./types.ts";
+import type { AttentionDismissals, ControlVerb, EventsPage, LoopState, RoundsPage, SpendPage } from "./types.ts";
 
 /**
  * Fetch wrappers for the §8 read-only endpoints. Same-origin relative paths only: the
@@ -31,6 +31,10 @@ export const fetchSpend = ({ after, limit }: { after: number; limit: number }, s
  *  per round, ascending, artifact-less rows included. */
 export const fetchRounds = (signal?: AbortSignal): Promise<RoundsPage> => getJson<RoundsPage>("/api/rounds", signal);
 
+/** `GET /api/attention/dismissals` — the operator's live-strip overlay. */
+export const fetchAttentionDismissals = (signal?: AbortSignal): Promise<AttentionDismissals> =>
+  getJson<AttentionDismissals>("/api/attention/dismissals", signal);
+
 /**
  * #793 gate② finding [0] (demo-static-base-path): resolved against Vite's configured `base`
  * (`vite.config.ts`: `base: "./"`, deliberately relative — "the built dashboard can be mounted
@@ -55,7 +59,7 @@ export function demoFixtureUrl(base: string = typeof import.meta.env !== "undefi
  *  engine/DB required. One-shot fetch, no polling — the bundle never changes at runtime. */
 export const fetchDemoFixture = (signal?: AbortSignal): Promise<DemoBundle> => getJson<DemoBundle>(demoFixtureUrl(), signal);
 
-/** `POST /api/control` (§3 Operations / §8) — the dashboard's one write path. The server defends
+/** `POST /api/control` (§3 Operations / §8) — the operations write path. The server defends
  *  itself independently of this client (same-origin `Origin` check, the `X-Sapwood-Control`
  *  header forcing a CORS preflight it never grants) — this just sends what it expects. */
 export async function postControl(verb: ControlVerb, signal?: AbortSignal): Promise<{ state: string }> {
@@ -67,4 +71,15 @@ export async function postControl(verb: ControlVerb, signal?: AbortSignal): Prom
   });
   if (!res.ok) throw new Error(`POST /api/control ${verb} → ${res.status} ${res.statusText}`);
   return (await res.json()) as { state: string };
+}
+
+export async function postAttentionDismiss(eventId: number, kind: string, signal?: AbortSignal): Promise<{ eventId: number }> {
+  const res = await fetch("/api/attention/dismiss", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-sapwood-control": "1" },
+    body: JSON.stringify({ eventId, kind }),
+    ...(signal ? { signal } : {}),
+  });
+  if (!res.ok) throw new Error(`POST /api/attention/dismiss ${eventId} → ${res.status} ${res.statusText}`);
+  return (await res.json()) as { eventId: number };
 }

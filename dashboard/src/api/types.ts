@@ -120,6 +120,9 @@ export type LoopEvent = {
 
 export type EventsPage = { events: LoopEvent[]; lastId: number };
 
+/** `GET /api/attention/dismissals` — event occurrences hidden from the live strip only. */
+export type AttentionDismissals = { eventIds: number[] };
+
 /** One `spend_ledger` row, served verbatim (`server.ts`'s `/api/spend` route, `State.spendPage`) —
  *  `actorKind`/`role`/`estimated` are `null` on a row that never claimed one (#645), same never-
  *  guess stance as everywhere else this triple appears. */

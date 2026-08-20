@@ -16,13 +16,16 @@
  * never writes to the ledger it inspects.
  */
 
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 // #933: cross-package import, same direction (dashboard -> engine) as `server.ts`'s own
 // `new State(opts.dbPath, { readOnly: true })` — the established, safe way this package reads a
 // real sqlite ledger; engine never imports back into dashboard.
 import { DEFAULT_DB_PATH, State } from "../../engine/src/state/state.ts";
+import { ATTENTION_DISMISSALS_FILE, readAttentionDismissalIds } from "./attention-dismissals.ts";
+import type { DomainEvent } from "./domain-event.ts";
 import { toDomainEvent } from "./domain-event.ts";
-import { foldOpenAttention } from "./entities.ts";
+import { applyDismissals, foldOpenAttention } from "./entities.ts";
 
 /** PR #937 gate② finding [1]: `DEFAULT_DB_PATH` ("data/sapwood.sqlite") is relative — correct
  *  ONLY when the current process's cwd is already the repository root. `npm run
@@ -35,6 +38,12 @@ import { foldOpenAttention } from "./entities.ts";
  *  — a human passing a path expects ordinary shell-relative resolution, not a silent second
  *  anchor underneath it. */
 export const REPO_ROOT_DEFAULT_DB_PATH = fileURLToPath(new URL(`../../${DEFAULT_DB_PATH}`, import.meta.url));
+
+/** The CLI's live-strip projection, kept separate from ledger reconstruction so replay remains
+ * an unmodified event fold. */
+export function foldOpenAttentionForProbe(events: readonly DomainEvent[], dismissalsPath: string): DomainEvent[] {
+  return applyDismissals(Object.values(foldOpenAttention(events)), readAttentionDismissalIds(dismissalsPath));
+}
 
 /** Every ledger event, oldest→newest, paged through `eventsPage` until exhausted — a one-shot
  *  snapshot read (never a live tail), so a plain advancing cursor is correct: an empty page means
@@ -51,12 +60,15 @@ function readAllEvents(state: Pick<State, "eventsPage">, pageSize = 5000): Retur
 }
 
 /** The strip's own row count for a real DB path — the number AC5 asks a human to record. */
-export function countOpenAttention(dbPath: string): { openCount: number; rows: Array<{ kind: string; issue?: number; pr?: number }> } {
+export function countOpenAttention(
+  dbPath: string,
+  dismissalsPath = join(dirname(dbPath), ATTENTION_DISMISSALS_FILE),
+): { openCount: number; rows: Array<{ kind: string; issue?: number; pr?: number }> } {
   const state = new State(dbPath, { readOnly: true });
   try {
     const events = readAllEvents(state).map((e) => toDomainEvent({ id: e.id, ts: e.ts, kind: e.kind, payload: e.payload as never }));
-    const open = foldOpenAttention(events);
-    const rows = Object.values(open).map((e) => ({
+    const open = foldOpenAttentionForProbe(events, dismissalsPath);
+    const rows = open.map((e) => ({
       kind: e.kind,
       ...(typeof e.payload?.issue === "number" ? { issue: e.payload.issue } : {}),
       ...(typeof e.payload?.pr === "number" ? { pr: e.payload.pr } : {}),

@@ -6,7 +6,7 @@ import test from "node:test";
 import { CLEAR_KINDS } from "../../engine/src/loop/escalation-reconcile.ts";
 import type { EventKind } from "./copy.ts";
 import type { DomainEvent, KnownDomainEvent, UnknownDomainEvent } from "./domain-event.ts";
-import { attentionSummary, foldEntityTitles, foldOpenAttention, ISSUE_CLEAR_KINDS } from "./entities.ts";
+import { applyDismissals, attentionSummary, foldEntityTitles, foldOpenAttention, ISSUE_CLEAR_KINDS } from "./entities.ts";
 import { formatCompactAge } from "./format-time.ts";
 
 // `kind: EventKind`, not a bare `string` — #715 gate② round 4 [0] / round 5 [0]: `entities.ts`
@@ -105,6 +105,29 @@ test("foldEntityTitles(seed) still keeps the first title, even across two separa
 });
 
 // ── foldOpenAttention ────────────────────────────────────────────────────────────────────────
+
+test("applyDismissals removes only the targeted open occurrence", () => {
+  const open = foldOpenAttention([event(1, "drive-needs-human", { issue: 5, pr: 50 }), event(2, "park-escalated", { source: "llm" })]);
+  const dismissed = applyDismissals(Object.values(open), [1]);
+  assert.deepEqual(
+    dismissed.map((entry) => entry.id),
+    [2],
+  );
+  assert.deepEqual(
+    Object.values(open).map((entry) => entry.id),
+    [1, 2],
+    "the fold result remains immutable",
+  );
+});
+
+test("applyDismissals lets a later occurrence under the same key reopen", () => {
+  const first = foldOpenAttention([event(1, "drive-needs-human", { issue: 5, pr: 50 })]);
+  const reopened = foldOpenAttention([event(2, "drive-needs-human", { issue: 5, pr: 51 })], first);
+  assert.deepEqual(
+    applyDismissals(Object.values(reopened), [1]).map((entry) => entry.id),
+    [2],
+  );
+});
 
 test("foldOpenAttention opens an entry for an attention-class event", () => {
   const open = foldOpenAttention([event(1, "drive-needs-human", { issue: 5, pr: 50 })]);
