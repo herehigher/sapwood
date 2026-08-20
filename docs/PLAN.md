@@ -120,7 +120,9 @@ sapwood/
   work preserved, resumable) — see the soft-budget design in the Security model.
 - **Claude CLI coupling isolated** in `worker.ts`: every `claude -p` flag, the
   `stream-json` cost parsing, and `CLAUDE_BIN` discovery live in one module. State a
-  minimum Claude Code CLI version and test against it in CI.
+  minimum Claude Code CLI version; a manual floor-check script
+  (`engine/scripts/check-claude-cli-flags.ts`) verifies the pinned floor offers every
+  flag the engine emits, run when the floor or the engine's flag surface moves.
 - **Lifecycle (v1):** conductor ticks via ScheduleWakeup (session-bound — documented
   limitation; durable SQLite makes restart clean). `sapwood status` (the CLI, not a
   skill) reads SQLite directly and works with no live session; it detects a dead

@@ -1668,7 +1668,7 @@ test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --pe
       "Respond with the single word 'pong' and nothing else.",
     ]);
     // #799 gate② P1 #4: every long flag (`--xxx`) THIS REAL invocation actually sent must be
-    // named in ENGINE_CLAUDE_LONG_FLAGS (the human-owned CI remainder's import source) — the
+    // named in ENGINE_CLAUDE_LONG_FLAGS (the manual floor-check script's import source) — the
     // REVERSE direction from ENGINE_CLAUDE_LONG_FLAGS's own derivation (which calls
     // `llmPingArgv` directly, no spawn). probeLlmPing delegates to that SAME builder internally
     // now, so this should hold tautologically; it guards against a future regression that
