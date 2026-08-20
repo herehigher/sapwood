@@ -5035,15 +5035,19 @@ test("#69 grep-invariant (engine-wide, fable P3; extended #284, #285, #443, #743
       assert.match(src, /\bspawnSync\b/, "cwd-contract.ts imports and uses spawnSync");
       assert.doesNotMatch(src, /\b(execFileSync|execFile|execSync|spawn|exec)\b/, "cwd-contract.ts uses spawnSync only");
       assert.doesNotMatch(src, /shell\s*:/, "cwd-contract.ts never spawns through a shell");
-      assert.doesNotMatch(src, /[{,]\s*cwd\s*:/, "cwd-contract.ts passes no cwd option to spawnSync (uses -C instead)");
-      const gitArgv = [...src.matchAll(/spawnSync\("git",\s*\[([^\]]+)\]/g)].map((match) => match[1] ?? "");
-      assert.ok(gitArgv.length > 0, "cwd-contract.ts must retain its Git probe");
-      assert.ok(
-        gitArgv.every((args) => args.includes('"rev-parse"') || args.includes('"worktree", "list"')),
-        "cwd-contract.ts Git probe uses rev-parse or worktree list only",
+      const gitArgvPattern = /spawnSync\(\s*"git"\s*,\s*\[([\s\S]*?)\]/g;
+      const gitArgv = [...src.matchAll(gitArgvPattern)].map((match) => (match[1] ?? "").replace(/\s+/g, " ").trim());
+      assert.deepEqual(
+        gitArgv,
+        [
+          '"-C", cwd, "rev-parse", "--is-bare-repository"',
+          '"-C", cwd, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", "--show-toplevel"',
+          '"-C", cwd, "worktree", "list", "--porcelain"',
+        ],
+        "cwd-contract.ts Git probe has exactly the three fixed read-only argv shapes",
       );
-      assert.doesNotMatch(src, /["'](?:add|remove|prune|checkout)["']/, "cwd-contract.ts has no mutating Git subcommand");
-      assert.doesNotMatch(src, /["']-c["']/, "cwd-contract.ts has no Git configuration override");
+      const srcWithoutGitArgv = src.replace(gitArgvPattern, "");
+      assert.doesNotMatch(srcWithoutGitArgv, /[{,]\s*cwd\s*[:,}]/, "cwd-contract.ts passes no cwd option to spawnSync");
     } else {
       // Every other engine module must not shell out at all.
       assert.equal(importsChildProcess, false, `${f} must not import node:child_process`);
