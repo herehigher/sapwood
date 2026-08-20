@@ -1,8 +1,17 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { FastForward } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import { useEffect, useRef, useState } from "react";
-import { fetchEvents } from "./api/client.ts";
-import { POLL_MS, useDemoFixture, useEventHistory, useLoopState, useRounds, useSpendHistory } from "./api/queries.ts";
+import { fetchEvents, postAttentionDismiss } from "./api/client.ts";
+import {
+  POLL_MS,
+  useAttentionDismissals,
+  useDemoFixture,
+  useEventHistory,
+  useLoopState,
+  useRounds,
+  useSpendHistory,
+} from "./api/queries.ts";
 import type { EventsPage, Lane, Round, SpendRow } from "./api/types.ts";
 import { BUILD_SHA, BUILD_TIME } from "./build-info.ts";
 import { ActivityFeed } from "./components/ActivityFeed.tsx";
@@ -29,7 +38,7 @@ import {
 } from "./cost-panel.ts";
 import { useDemoReplay } from "./demo/useDemoReplay.ts";
 import { type DomainEvent, toDomainEvent } from "./domain-event.ts";
-import type { EntityTitles } from "./entities.ts";
+import { applyDismissals, type EntityTitles } from "./entities.ts";
 import { Hero } from "./hero/Hero.tsx";
 import { Legend } from "./hero/Legend.tsx";
 import { type FoldStep, type HeroState, initialHeroState } from "./hero/state.ts";
@@ -558,6 +567,7 @@ type AppViewModel = {
   activeSteps: FoldStep[];
   activeTitles: EntityTitles;
   activeOpenAttention: DomainEvent[];
+  onDismiss?: (eventId: number, kind: string) => Promise<unknown>;
   /** #934: the activity feed's round-in-view — LIVE the open round (or the last closed one while
    *  idle/standby, `resolveLiveFeedRound`), REPLAY/`?demo` the selected round. `null` only before
    *  any round exists at all. */
@@ -622,6 +632,7 @@ export function appContent(vm: AppViewModel) {
     activeSteps,
     activeTitles,
     activeOpenAttention,
+    onDismiss,
     feedRound,
     feedEvents,
     feedError,
@@ -720,6 +731,8 @@ export function appContent(vm: AppViewModel) {
           // the fixture's own events actually are, instead of the ages their spacing encodes.
           now={mode === "replay" && replay.asOf ? new Date(replay.asOf) : clock}
           onInspect={onInspect}
+          controlsEnabled={(loop.data?.controlsEnabled ?? false) && mode === "live"}
+          onDismiss={onDismiss}
           roundEscalated={activeHero.roundEscalated}
         />
 
@@ -844,6 +857,8 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
   // the same way `Hero.tsx` used to do internally — see `useEventHistory`'s own doc.
   const lanesMax = loop.data?.lanes.max ?? null;
   const events = useEventHistory(lanesMax);
+  const dismissals = useAttentionDismissals();
+  const queryClient = useQueryClient();
   const spend = useSpendHistory();
   const [configOpen, setConfigOpen] = useState(initialConfigOpen ?? false);
   const [inspectorNode, setInspectorNode] = useState<StageNode | null>(null);
@@ -867,10 +882,19 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
     hero: activeHero,
     steps: activeSteps,
     titles: activeTitles,
-    openAttention: activeOpenAttention,
+    openAttention: foldedOpenAttention,
   } = resolveActiveFold(mode, replay.position, events, initialReplayState(lanesMax));
+  // Dismissals are an operator display overlay, never replay history: only the live fold reads
+  // them, and a later occurrence remains visible because its ledger id differs.
+  const activeOpenAttention =
+    mode === "live" ? applyDismissals(events.openAttention, dismissals.data?.eventIds ?? []) : foldedOpenAttention;
 
-  // §3's documented `disconnected` header state: ANY of the FOUR queries failing means the
+  const onDismiss = async (eventId: number, kind: string): Promise<void> => {
+    await postAttentionDismiss(eventId, kind);
+    await queryClient.refetchQueries({ queryKey: ["attention", "dismissals"] });
+  };
+
+  // §3's documented `disconnected` header state: ANY of the FIVE queries failing means the
   // dashboard has lost part of its one data source, regardless of which one (#715 gate② [7] —
   // this used to render only `loop.error`'s raw message, and nothing at all when just the events
   // query failed; #715 gate② round 4 [2] — `spend` was still missing, so a lone `/api/spend`
@@ -879,7 +903,7 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
   // `/api/rounds` fetch left the header reading healthy while `rounds.data?.rounds ?? []`
   // silently rendered the truthful-empty "no rounds yet" caption, converting a real transport
   // failure into an honest-looking empty history).
-  const disconnected = loop.isError || Boolean(events.error) || Boolean(spend.error) || rounds.isError;
+  const disconnected = loop.isError || Boolean(events.error) || Boolean(spend.error) || rounds.isError || dismissals.isError;
   // §3 A: env-park folds into the standby/"waiting" tier rather than an eighth state word — read
   // straight off the SAME open-attention fold the needs-attention strip already renders, never a
   // second park signal. Read off whichever fold is active (live or replay) — mode purity (§11).
@@ -990,6 +1014,7 @@ function LiveApp({ now, initialConfigOpen }: AppProps) {
     activeSteps,
     activeTitles,
     activeOpenAttention,
+    onDismiss,
     feedRound,
     feedEvents,
     feedError,

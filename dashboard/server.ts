@@ -1,17 +1,19 @@
 // server.ts (#142, completed in #360) — the dashboard's data server. docs/frontend-design.md §8
-// is the contract: four READ routes (`/api/loop/state`, `/api/events`, `/api/spend`,
-// `/api/rounds`), exactly ONE write route (`POST /api/control`, gated by `dashboard.controls`),
-// and the `dashboard/dist` statics. The API namespace takes precedence over statics.
+// is the contract: five READ routes (`/api/loop/state`, `/api/events`, `/api/spend`,
+// `/api/rounds`, `/api/attention/dismissals`), two gated write routes
+// (`POST /api/control` and `POST /api/attention/dismiss`, both gated by
+// `dashboard.controls`), and the `dashboard/dist` statics. The API namespace takes precedence
+// over statics.
 //
 // Posture, all structural rather than promised:
 //   - the SQLite handle is opened READ-ONLY (State's `readOnly` mode), so no route — including
-//     the write route — can write through it even by accident. `/api/control`'s ONLY effect is
-//     creating/removing the engine's own file sentinels (§3 Operations);
+//     either write route — can write through it even by accident. `/api/control` only creates or
+//     removes engine sentinels; `/api/attention/dismiss` only appends an operator-owned file;
 //   - the listener binds 127.0.0.1 explicitly, never 0.0.0.0;
 //   - `config` is an ALLOWLIST of named keys (§3 E), so a config that later grows a sensitive
 //     key does not silently start serving it;
-//   - the write route is REGISTERED, not merely hidden, per `dashboard.controls` — a spectator
-//     deployment has no such route to POST at.
+//   - the write routes are REGISTERED, not merely hidden, per `dashboard.controls` — a spectator
+//     deployment has no such routes to POST at.
 //
 // It deliberately imports the ENGINE's own State/config rather than re-querying SQLite itself:
 // §8 requires that `sapwood status` and the dashboard can never disagree about engine state, and
@@ -20,7 +22,7 @@ import { execFile } from "node:child_process";
 import { createReadStream, existsSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { extname, join, resolve, sep } from "node:path";
+import { dirname, extname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { loadConfig, type SapwoodConfig } from "../engine/src/config/config.js";
 // #642: engine-state derivation, the config allowlist, and the paging cap moved to
@@ -45,6 +47,7 @@ import {
   standbySignal,
 } from "../engine/src/state/read-model.js";
 import { State, type WorkerRow } from "../engine/src/state/state.js";
+import { ATTENTION_DISMISSALS_FILE, appendAttentionDismissal, readAttentionDismissalIds } from "./src/attention-dismissals.js";
 
 export {
   allowlistedConfig,
@@ -283,7 +286,7 @@ function pagedReply<T extends { id: number }>(url: URL, key: string, page: (afte
   return { status: 200, body: { [key]: rows, lastId: rows[rows.length - 1]?.id ?? from } };
 }
 
-// ── POST /api/control (§8 / §3 Operations) ─────────────────────────────────────────────────
+// ── guarded write routes (§8 / §3 Operations) ──────────────────────────────────────────────
 
 /** The EXHAUSTIVE set of verbs the route accepts. `estop` joined once #724 landed the additive
  *  `EMERGENCY_STOP` engine sentinel (#293) — before that, a verb that reported success while
@@ -333,27 +336,37 @@ async function readBody(req: IncomingMessage): Promise<string | null> {
  *  preflight this server never grants), a JSON content-type (so a form POST, which needs no
  *  preflight at all, cannot reach the verb), and an `Origin` that, when present, is this very
  *  server's. Together with the loopback bind that is the whole access story. */
-async function control(_url: URL, ctx: Ctx, req: IncomingMessage): Promise<Reply> {
+async function guardedWriteBody(req: IncomingMessage): Promise<{ body: unknown } | { reply: Reply }> {
   if (req.headers["x-sapwood-control"] === undefined) {
-    return { status: 403, body: { error: "missing X-Sapwood-Control header" } };
+    return { reply: { status: 403, body: { error: "missing X-Sapwood-Control header" } } };
   }
   const contentType = (req.headers["content-type"] ?? "").split(";")[0]?.trim().toLowerCase();
   if (contentType !== "application/json") {
-    return { status: 415, body: { error: "content-type must be application/json" } };
+    return { reply: { status: 415, body: { error: "content-type must be application/json" } } };
   }
   const origin = req.headers.origin;
   if (origin !== undefined && !sameOrigin(origin, req.headers.host)) {
-    return { status: 403, body: { error: "cross-origin control requests are refused" } };
+    return { reply: { status: 403, body: { error: "cross-origin control requests are refused" } } };
   }
 
   const raw = await readBody(req);
-  if (raw === null) return { status: 413, body: { error: "control body too large" } };
-  let parsed: unknown;
+  if (raw === null) return { reply: { status: 413, body: { error: "control body too large" } } };
   try {
-    parsed = JSON.parse(raw);
+    return { body: JSON.parse(raw) };
   } catch {
-    return { status: 400, body: { error: "body must be JSON" } };
+    return { reply: { status: 400, body: { error: "body must be JSON" } } };
   }
+}
+
+function attentionDismissalsPath(state: State): string | null {
+  const pausePath = state.pausePath();
+  return pausePath === null ? null : join(dirname(pausePath), ATTENTION_DISMISSALS_FILE);
+}
+
+async function control(_url: URL, ctx: Ctx, req: IncomingMessage): Promise<Reply> {
+  const guarded = await guardedWriteBody(req);
+  if ("reply" in guarded) return guarded.reply;
+  const parsed = guarded.body;
   const verb = (parsed as { verb?: unknown } | null)?.verb;
   if (typeof verb !== "string" || !(CONTROL_VERBS as readonly string[]).includes(verb)) {
     return { status: 400, body: { error: `verb must be one of: ${CONTROL_VERBS.join(", ")}` } };
@@ -371,6 +384,24 @@ async function control(_url: URL, ctx: Ctx, req: IncomingMessage): Promise<Reply
   // Read the state back AFTER the signal — §8: Stop answers `stopping` while lanes drain.
   const state = currentEngineState(ctx.state, ctx.config, ctx.now());
   return verb === "estop" ? { status: 200, body: { state, message: ESTOP_CONSEQUENCE } } : { status: 200, body: { state } };
+}
+
+async function dismissAttention(_url: URL, ctx: Ctx, req: IncomingMessage): Promise<Reply> {
+  const guarded = await guardedWriteBody(req);
+  if ("reply" in guarded) return guarded.reply;
+  const body = guarded.body as { eventId?: unknown; kind?: unknown } | null;
+  const eventId = body?.eventId;
+  if (typeof eventId !== "number" || !Number.isInteger(eventId) || eventId < 1) {
+    return { status: 400, body: { error: "eventId must be an integer >= 1" } };
+  }
+  const kind = body?.kind;
+  if (typeof kind !== "string" || kind.length === 0 || kind.length > 100) {
+    return { status: 400, body: { error: "kind must be a non-empty string of at most 100 characters" } };
+  }
+  const path = attentionDismissalsPath(ctx.state);
+  if (path === null) return { status: 500, body: { error: "this data dir has no dismissal path" } };
+  appendAttentionDismissal(path, eventId, kind, ctx.now());
+  return { status: 200, body: { eventId } };
 }
 
 function sameOrigin(origin: string, host: string | undefined): boolean {
@@ -400,6 +431,9 @@ const ROUTES: Record<string, Partial<Record<string, Handler>>> = {
     // Unpaged on purpose: one row per ROUND, so this is the chapter index of the whole run —
     // hundreds of rows after a long campaign, not the tens of thousands the event feed reaches.
     GET: (_url, ctx) => ({ status: 200, body: { rounds: ctx.state.listRounds() } }),
+  },
+  "/api/attention/dismissals": {
+    GET: (_url, ctx) => ({ status: 200, body: { eventIds: readAttentionDismissalIds(attentionDismissalsPath(ctx.state)) } }),
   },
 };
 
@@ -518,11 +552,13 @@ export async function createDashboardServer(opts: DashboardServerOptions): Promi
   const repoDir = resolve(opts.repoDir ?? join(import.meta.dirname, ".."));
   const ctx: Ctx = { state, config, now: opts.now, staticRoot, repoDir };
 
-  // The write route is REGISTERED per config, not hidden per config: with `dashboard.controls`
+  // The write routes are REGISTERED per config, not hidden per config: with `dashboard.controls`
   // false there is no such route to POST at, which is what makes the spectator posture
   // structural. An UNREADABLE config lands here too — fail-closed, matching how every other
   // config-derived field degrades to null rather than to a guessed default (§8).
-  const routes: typeof ROUTES = controlsAllowed(config) ? { ...ROUTES, "/api/control": { POST: control } } : ROUTES;
+  const routes: typeof ROUTES = controlsAllowed(config)
+    ? { ...ROUTES, "/api/control": { POST: control }, "/api/attention/dismiss": { POST: dismissAttention } }
+    : ROUTES;
 
   const server = createServer((req, res) => {
     void (async () => {

@@ -1127,6 +1127,15 @@
   cursor: pointer;
 }
 
+.attention-dismiss {
+  flex-shrink: 0;
+  background: var(--panel);
+  border: var(--hairline);
+  border-radius: var(--radius-card);
+  padding: 2px var(--space-2);
+  cursor: pointer;
+}
+
 /* ---- operations controls (§3 Operations, #361) ---------------------------- */
 
 .controls {

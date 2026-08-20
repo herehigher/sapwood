@@ -4,10 +4,11 @@ import type { EventKind } from "../copy.ts";
 import { type DomainEvent, toDomainEvent } from "../domain-event.ts";
 import { foldEntityTitles, foldOpenAttention } from "../entities.ts";
 import { foldEvents, initialHeroState, withLaneCount } from "../hero/state.ts";
-import { demoFixtureUrl, fetchDemoFixture, fetchEvents, fetchLoopState, fetchSpend } from "./client.ts";
+import { demoFixtureUrl, fetchAttentionDismissals, fetchDemoFixture, fetchEvents, fetchLoopState, fetchSpend } from "./client.ts";
 import {
   accumulateEventsPage,
   accumulateSpendPage,
+  attentionDismissalsQuery,
   EMPTY_EVENT_HISTORY,
   EMPTY_SPEND_HISTORY,
   type EventHistory,
@@ -58,6 +59,13 @@ test("§8 GET /api/events pages with after + limit", async () => {
   assert.equal(calls[0]?.url, "/api/events?after=480&limit=50");
   assert.equal(page.lastId, 512);
   assert.equal(page.events[0]?.kind, "merged");
+});
+
+test("attention dismissals use the same polling cadence as the live strip", async () => {
+  const calls = stubFetch({ eventIds: [7] });
+  assert.deepEqual(await fetchAttentionDismissals(), { eventIds: [7] });
+  assert.equal(calls[0]?.url, "/api/attention/dismissals");
+  assert.equal(attentionDismissalsQuery().refetchInterval, POLL_MS);
 });
 
 test("a non-2xx response rejects instead of yielding a half-typed object", async () => {

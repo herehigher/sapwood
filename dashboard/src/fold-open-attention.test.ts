@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { REPO_ROOT_DEFAULT_DB_PATH } from "./fold-open-attention.ts";
+import { toDomainEvent } from "./domain-event.ts";
+import { foldOpenAttentionForProbe, REPO_ROOT_DEFAULT_DB_PATH } from "./fold-open-attention.ts";
 
 // PR #937 gate② finding [1]: `npm run fold-open-attention -w dashboard` runs with cwd set to
 // `dashboard/`, so a bare `DEFAULT_DB_PATH` ("data/sapwood.sqlite", cwd-relative) would resolve
@@ -23,4 +25,16 @@ test("REPO_ROOT_DEFAULT_DB_PATH resolves to the repository root's data/sapwood.s
     !REPO_ROOT_DEFAULT_DB_PATH.includes(join("dashboard", "data")),
     "must never resolve inside dashboard/data — the cwd-relative bug",
   );
+});
+
+test("the CLI probe applies the operator dismissal file through the shared fold helper", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-fold-attention-"));
+  const dismissalsPath = join(dir, "attention-dismissals.jsonl");
+  try {
+    writeFileSync(dismissalsPath, '{"eventId":1,"kind":"park-escalated","ts":"2026-08-20T00:00:00.000Z"}\n', "utf8");
+    const events = [toDomainEvent({ id: 1, ts: "2026-08-20T00:00:00.000Z", kind: "park-escalated", payload: { source: "llm" } })];
+    assert.deepEqual(foldOpenAttentionForProbe(events, dismissalsPath), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

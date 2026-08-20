@@ -210,6 +210,13 @@ export function foldOpenAttention(events: readonly DomainEvent[], seed: OpenAtte
   return open;
 }
 
+/** Filters only the currently-open occurrences: a later event under the same fold key has a new
+ * id and therefore reopens naturally. */
+export function applyDismissals(open: readonly DomainEvent[], dismissedIds: Iterable<number>): DomainEvent[] {
+  const dismissed = new Set(dismissedIds);
+  return open.filter((event) => !dismissed.has(event.id));
+}
+
 /** #891: the needs-attention strip's own header summary line — "N waiting · oldest Xd · M
  *  dissent" (frontend-design.md mockup) — computed from the SAME `foldOpenAttention` result the
  *  strip already renders rows from, never a second derivation. ISO timestamps compare correctly

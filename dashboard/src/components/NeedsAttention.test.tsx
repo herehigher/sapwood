@@ -41,6 +41,70 @@ test("aria-live is present so a new row announces itself", () => {
   assert.match(html, /aria-live="polite"/);
 });
 
+test("manual resolve is rendered for every attention row only when controls are enabled", () => {
+  const event = toDomainEvent(wire(1, "2026-08-10T11:59:00.000Z", "park-escalated", { source: "llm" }));
+  const disabled = renderToStaticMarkup(
+    <NeedsAttention items={[event]} titles={{}} now={NOW} controlsEnabled={false} onDismiss={async () => {}} />,
+  );
+  const enabled = renderToStaticMarkup(<NeedsAttention items={[event]} titles={{}} now={NOW} controlsEnabled onDismiss={async () => {}} />);
+  assert.doesNotMatch(disabled, /mark resolved/);
+  assert.match(enabled, /aria-label="mark resolved"/);
+});
+
+test("manual resolve errors stay attached to the failed row", async () => {
+  const eventA = toDomainEvent(wire(2, "2026-08-10T11:59:00.000Z", "park-escalated", { source: "llm" }));
+  const eventB = toDomainEvent(wire(1, "2026-08-10T11:58:00.000Z", "park-escalated", { source: "engine" }));
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  let failA = true;
+  const onDismiss = async (eventId: number) => {
+    if (failA && eventId === eventA.id) throw new Error("dismiss failed");
+  };
+  try {
+    await act(async () => {
+      root.render(<NeedsAttention items={[eventA, eventB]} titles={{}} now={NOW} controlsEnabled onDismiss={onDismiss} />);
+    });
+    const buttons = container.querySelectorAll('button[aria-label="mark resolved"]');
+    assert.equal(buttons.length, 2);
+    await act(async () => {
+      (buttons[0] as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    assert.match(container.querySelector(".controls-error")?.textContent ?? "", /Couldn't reach the engine/);
+
+    await act(async () => {
+      failA = false;
+      (container.querySelectorAll('button[aria-label="mark resolved"]')[1] as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    assert.equal(container.querySelector(".controls-error"), null, "a new successful attempt clears the prior failure");
+
+    await act(async () => {
+      failA = true;
+      (container.querySelector('button[aria-label="mark resolved"]') as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    assert.match(container.querySelector(".controls-error")?.textContent ?? "", /Couldn't reach the engine/);
+
+    await act(async () => {
+      root.render(<NeedsAttention items={[eventB]} titles={{}} now={NOW} controlsEnabled onDismiss={onDismiss} />);
+    });
+    assert.equal(container.querySelectorAll(".attention-row").length, 1, "the surviving row still renders");
+    assert.equal(container.querySelector(".controls-error"), null, "a removed row cannot retain its failure banner");
+
+    await act(async () => {
+      root.render(<NeedsAttention items={[eventB]} titles={{}} now={NOW} controlsEnabled={false} onDismiss={onDismiss} />);
+    });
+    assert.equal(container.querySelector(".controls-error"), null, "disabled controls never show the failure banner");
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  }
+});
+
 // ── #924: the shared .panel-head recipe ─────────────────────────────────────────────────────────
 
 test("#924 AC1: the populated strip's head carries .panel-head, with the summary stat cluster as its own .panel-head-stat last child", () => {

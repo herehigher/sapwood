@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { attentionCategory, copyFor, isReviewDissentCategory, type SentencePart } from "../copy.ts";
 import type { DomainEvent } from "../domain-event.ts";
 import { attentionSummary, type EntityTitles } from "../entities.ts";
@@ -18,6 +19,10 @@ export interface NeedsAttentionProps {
   /** §6 phase inspector (#861) — AC7: only the three `ATTENTION_KIND_TO_NODE` kinds render an
    *  "inspect" control at all; absent entirely leaves every row exactly as it renders today. */
   onInspect?: ((node: StageNode) => void) | undefined;
+  /** The live controls signal also gates manual resolution, so spectators cannot see a dead
+   * affordance for a route the server did not register. */
+  controlsEnabled?: boolean;
+  onDismiss?: ((eventId: number, kind: string) => Promise<unknown>) | undefined;
   /**
    * #891 AC2: `hero/state.ts`'s `HeroState.roundEscalated` — this round's raw, never-decremented
    * escalation-event count. Used ONLY to tell "nothing has escalated" apart from "everything
@@ -34,6 +39,8 @@ function AttentionRow({
   repoUrl,
   now,
   onInspect,
+  controlsEnabled,
+  onDismiss,
   emphasize,
 }: {
   event: DomainEvent;
@@ -41,6 +48,8 @@ function AttentionRow({
   repoUrl?: string | undefined;
   now: Date;
   onInspect?: ((node: StageNode) => void) | undefined;
+  controlsEnabled: boolean;
+  onDismiss?: ((eventId: number, kind: string) => Promise<unknown>) | undefined;
   /** #925 AC2: this row carries the fold's greatest age (ties broken by render order) — the ONE
    *  row whose age box renders at the mockup's oversized, bold-numeral emphasis. */
   emphasize: boolean;
@@ -112,6 +121,16 @@ function AttentionRow({
             inspect
           </button>
         )}
+        {controlsEnabled && onDismiss && (
+          <button
+            type="button"
+            className="attention-dismiss"
+            aria-label="mark resolved"
+            onClick={() => void onDismiss(event.id, event.kind)}
+          >
+            mark resolved
+          </button>
+        )}
       </span>
       <HintTooltip content={title}>
         {/* biome-ignore lint/a11y/noNoninteractiveTabindex: this <span> is a Radix Tooltip
@@ -133,8 +152,27 @@ function AttentionRow({
  * entities.ts's clearing rules) — this component owns no membership or clearing logic of its
  * own (#361 AC).
  */
-export function NeedsAttention({ items, titles, repoUrl, now, onInspect, roundEscalated = 0 }: NeedsAttentionProps) {
+export function NeedsAttention({
+  items,
+  titles,
+  repoUrl,
+  now,
+  onInspect,
+  controlsEnabled = false,
+  onDismiss,
+  roundEscalated = 0,
+}: NeedsAttentionProps) {
   const clock = now ?? new Date();
+  const [failedId, setFailedId] = useState<number | null>(null);
+  const handleDismiss = async (eventId: number, kind: string): Promise<void> => {
+    if (!onDismiss) return;
+    setFailedId(null);
+    try {
+      await onDismiss(eventId, kind);
+    } catch {
+      setFailedId(eventId);
+    }
+  };
 
   if (items.length === 0) {
     // #891 AC2: the fold is empty, but this round DID escalate something — an unexplained empty
@@ -172,6 +210,9 @@ export function NeedsAttention({ items, titles, repoUrl, now, onInspect, roundEs
           {summary.waiting} waiting · oldest {summary.oldestAge} · {summary.dissent} dissent
         </span>
       </div>
+      {controlsEnabled && failedId !== null && items.some((event) => event.id === failedId) && (
+        <p className="muted controls-error">Couldn't reach the engine — try again.</p>
+      )}
       <ul aria-live="polite" className="attention-list">
         {sorted.map((event, i) => (
           <AttentionRow
@@ -181,6 +222,8 @@ export function NeedsAttention({ items, titles, repoUrl, now, onInspect, roundEs
             repoUrl={repoUrl}
             now={clock}
             onInspect={onInspect}
+            controlsEnabled={controlsEnabled}
+            onDismiss={onDismiss ? handleDismiss : undefined}
             emphasize={i === emphasisIndex}
           />
         ))}
