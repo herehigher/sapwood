@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   changelogHasSection,
-  checkCatalogSourcePaths,
+  checkCatalogPaths,
   checkLockfileVersions,
   checkManifestLockstep,
   checkPublishPreconditions,
@@ -430,7 +430,8 @@ function realExecForTests(defaultCwd: string): Exec {
 }
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync("git", args[0] === "commit" ? ["-c", "commit.gpgsign=false", ...args] : args, { cwd, encoding: "utf8" });
+  const commitConfig = ["-c", "commit.gpgsign=false", "-c", "user.name=sapwood-test", "-c", "user.email=test@sapwood.invalid"];
+  return execFileSync("git", args[0] === "commit" ? [...commitConfig, ...args] : args, { cwd, encoding: "utf8" });
 }
 
 function writeCatalogShell(repoRoot: string, version: string): void {
@@ -448,21 +449,39 @@ function writeCatalogShell(repoRoot: string, version: string): void {
   writeFileSync(join(repoRoot, "scripts", "catalog", "ci.yml"), "name: Catalog CI\n");
 }
 
-function setupCatalogPromotionRepo(version = "0.3.0"): { repoRoot: string; catalogRemote: string } {
+function setupCatalogPromotionRepo(
+  version = "0.3.0",
+  catalogSeedFiles: Record<string, string> = {},
+): {
+  repoRoot: string;
+  catalogRemote: string;
+  initialCatalogHead: string;
+} {
   const repoRoot = tmpRepo();
   writeFakeManifests(repoRoot, [version, version, version, version]);
   writeFakeLockfile(repoRoot, version);
   writeCatalogShell(repoRoot, version);
   git(repoRoot, ["init"]);
-  git(repoRoot, ["config", "user.email", "test@example.com"]);
-  git(repoRoot, ["config", "user.name", "Test User"]);
   git(repoRoot, ["add", "."]);
   git(repoRoot, ["commit", "-m", "release shell"]);
   git(repoRoot, ["tag", `v${version}`]);
 
   const catalogRemote = join(tmpRepo(), "catalog.git");
-  execFileSync("git", ["init", "--bare", catalogRemote], { encoding: "utf8" });
-  return { repoRoot, catalogRemote };
+  execFileSync("git", ["init", "--bare", "--initial-branch=main", catalogRemote], { encoding: "utf8" });
+  const catalogSeed = tmpRepo();
+  git(catalogSeed, ["clone", catalogRemote, "."]);
+  writeFileSync(join(catalogSeed, "README.md"), "# Sapwood catalog\n");
+  for (const [path, contents] of Object.entries(catalogSeedFiles)) {
+    const fullPath = join(catalogSeed, path);
+    mkdirSync(dirname(fullPath), { recursive: true });
+    writeFileSync(fullPath, contents);
+  }
+  git(catalogSeed, ["add", "."]);
+  git(catalogSeed, ["commit", "-m", "seed catalog"]);
+  git(catalogSeed, ["push", "origin", "HEAD:main"]);
+  const initialCatalogHead = catalogHead(catalogRemote);
+  rmSync(catalogSeed, { recursive: true, force: true });
+  return { repoRoot, catalogRemote, initialCatalogHead };
 }
 
 function catalogHead(catalogRemote: string): string {
@@ -487,12 +506,12 @@ function npmViewExec(repoRoot: string, result: string, failPush = false): Exec {
 }
 
 test("catalog promotion: the npm registry exact-match is checked before any catalog write", () => {
-  const { repoRoot, catalogRemote } = setupCatalogPromotionRepo();
+  const { repoRoot, catalogRemote, initialCatalogHead } = setupCatalogPromotionRepo();
   try {
     const r = runCatalogPromote({ repoRoot, exec: npmViewExec(repoRoot, "0.3.1\n") }, { catalogRemote, dryRun: false });
     assert.equal(r.code, 1);
     assert.match(r.output, /returned "0.3.1"/);
-    assert.equal(catalogHead(catalogRemote), "");
+    assert.equal(catalogHead(catalogRemote), initialCatalogHead);
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
     rmSync(dirname(catalogRemote), { recursive: true, force: true });
@@ -516,6 +535,7 @@ test("catalog promotion: local bare remote is idempotent and stamps the release 
     assert.equal(plugin.version, "0.3.0");
     assert.equal(plugin.sourceCommit, git(repoRoot, ["rev-list", "-n", "1", "v0.3.0"]).trim());
     assert.deepEqual(JSON.parse(readFileSync(join(clone, ".claude-plugin", "marketplace.json"), "utf8")).plugins[0].source, "./");
+    assert.equal(git(clone, ["log", "-1", "--format=%an <%ae>"]).trim(), "sapwood-release <release@sapwood.invalid>");
     rmSync(clone, { recursive: true, force: true });
 
     const second = runCatalogPromote(deps, { catalogRemote, dryRun: false });
@@ -528,29 +548,66 @@ test("catalog promotion: local bare remote is idempotent and stamps the release 
   }
 });
 
-test("catalog promotion: a failed push is recoverable by re-running promotion alone", () => {
+test("catalog promotion: dry-run shows the deterministic commit identity", () => {
   const { repoRoot, catalogRemote } = setupCatalogPromotionRepo();
   try {
-    const failed = runCatalogPromote({ repoRoot, exec: npmViewExec(repoRoot, "0.3.0\n", true) }, { catalogRemote, dryRun: false });
-    assert.equal(failed.code, 1);
-    assert.equal(catalogHead(catalogRemote), "");
-
-    const retry = runCatalogPromote({ repoRoot, exec: npmViewExec(repoRoot, "0.3.0\n") }, { catalogRemote, dryRun: false });
-    assert.equal(retry.code, 0, retry.output);
-    assert.notEqual(catalogHead(catalogRemote), "");
+    const r = runCatalogPromote({ repoRoot, exec: npmViewExec(repoRoot, "0.3.0\n") }, { catalogRemote, dryRun: true });
+    assert.equal(r.code, 0, r.output);
+    assert.match(
+      r.output,
+      /git -c commit\.gpgsign=false -c user\.name=sapwood-release -c user\.email=release@sapwood\.invalid commit -m "chore: promote sapwood v0\.3\.0"/,
+    );
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
     rmSync(dirname(catalogRemote), { recursive: true, force: true });
   }
 });
 
-test("catalog promotion: the copied source set accepts only the three shell roots", () => {
-  assert.deepEqual(checkCatalogSourcePaths([".claude-plugin/plugin.json", "commands/sapwood-run.md", "bin/sapwood-plugin.sh"]), {
-    ok: true,
-  });
-  const r = checkCatalogSourcePaths([".claude-plugin/plugin.json", "scripts/release.ts"]);
+test("catalog promotion: a failed push is recoverable by re-running promotion alone", () => {
+  const { repoRoot, catalogRemote, initialCatalogHead } = setupCatalogPromotionRepo();
+  try {
+    const failed = runCatalogPromote({ repoRoot, exec: npmViewExec(repoRoot, "0.3.0\n", true) }, { catalogRemote, dryRun: false });
+    assert.equal(failed.code, 1);
+    assert.equal(catalogHead(catalogRemote), initialCatalogHead);
+
+    const retry = runCatalogPromote({ repoRoot, exec: npmViewExec(repoRoot, "0.3.0\n") }, { catalogRemote, dryRun: false });
+    assert.equal(retry.code, 0, retry.output);
+    assert.notEqual(catalogHead(catalogRemote), initialCatalogHead);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(dirname(catalogRemote), { recursive: true, force: true });
+  }
+});
+
+test("catalog promotion: the assembled catalog tree accepts only catalog CI paths", () => {
+  assert.deepEqual(
+    checkCatalogPaths([
+      ".claude-plugin/plugin.json",
+      "commands/sapwood-run.md",
+      "bin/sapwood-plugin.sh",
+      ".github/workflows/ci.yml",
+      "README.md",
+    ]),
+    {
+      ok: true,
+    },
+  );
+  const r = checkCatalogPaths([".claude-plugin/plugin.json", "scripts/release.ts"]);
   assert.equal(r.ok, false);
   assert.match(r.ok ? "" : r.message, /scripts\/release\.ts/);
+});
+
+test("catalog promotion: refuses a nonallowlisted file in the assembled catalog working tree", () => {
+  const { repoRoot, catalogRemote, initialCatalogHead } = setupCatalogPromotionRepo("0.3.0", { "scripts/release.ts": "not allowed\n" });
+  try {
+    const r = runCatalogPromote({ repoRoot, exec: npmViewExec(repoRoot, "0.3.0\n") }, { catalogRemote, dryRun: false });
+    assert.equal(r.code, 1);
+    assert.match(r.output, /scripts\/release\.ts/);
+    assert.equal(catalogHead(catalogRemote), initialCatalogHead);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(dirname(catalogRemote), { recursive: true, force: true });
+  }
 });
 
 test("catalog promotion steps follow npm publish and the dashboard canary", () => {
@@ -722,6 +779,22 @@ test("runPublish --dry-run: omits --prerelease for a plain release version, npm 
     assert.equal(r.code, 0);
     assert.doesNotMatch(r.output, /--prerelease/);
     assert.match(r.output, /npm publish --workspace engine --tag latest/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runPublish: marks catalog steps as skipped when no catalog remote is configured", () => {
+  const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
+  try {
+    const { exec, calls } = withRecorder(fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }));
+    const r = runPublish({ repoRoot: dir, exec }, { dryRun: false });
+    assert.equal(r.code, 0, r.output);
+    assert.equal((r.output.match(/skipped: no --catalog remote/g) ?? []).length, 2);
+    assert.equal(
+      calls.some((call) => call.file === "npm" && call.args[0] === "view"),
+      false,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

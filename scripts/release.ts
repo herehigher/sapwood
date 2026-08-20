@@ -7,7 +7,7 @@
 // that first if a check here looks surprising. The four version-carrying manifests are
 // written ONLY from here; never hand-edit a manifest's "version" field.
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -353,12 +353,27 @@ export function checkPublishPreconditions(deps: Deps): PublishPrecondition {
 // ── catalog promotion ───────────────────────────────────────────────────────────────
 
 const CATALOG_SHELL_PATHS = [".claude-plugin", "commands", "bin"];
+const CATALOG_COMMIT_CONFIG = ["-c", "commit.gpgsign=false", "-c", "user.name=sapwood-release", "-c", "user.email=release@sapwood.invalid"];
 
-export type CatalogSourcePathCheck = { ok: true } | { ok: false; message: string };
+export type CatalogPathCheck = { ok: true } | { ok: false; message: string };
 
-export function checkCatalogSourcePaths(paths: string[]): CatalogSourcePathCheck {
-  const invalid = paths.find((path) => !CATALOG_SHELL_PATHS.some((root) => path === root || path.startsWith(`${root}/`)));
-  return invalid ? { ok: false, message: `catalog source path is outside the shell allowlist: ${invalid}` } : { ok: true };
+export function checkCatalogPaths(paths: string[]): CatalogPathCheck {
+  const invalid = paths.find(
+    (path) =>
+      !CATALOG_SHELL_PATHS.some((root) => path.startsWith(`${root}/`)) &&
+      !path.startsWith(".github/workflows/") &&
+      path !== "marketplace.json" &&
+      path !== "README.md",
+  );
+  return invalid ? { ok: false, message: `catalog path is outside the catalog CI allowlist: ${invalid}` } : { ok: true };
+}
+
+function catalogWorkingTreePaths(catalogRoot: string, relative = ""): string[] {
+  return readdirSync(join(catalogRoot, relative), { withFileTypes: true }).flatMap((entry) => {
+    if (relative === "" && entry.name === ".git") return [];
+    const path = relative === "" ? entry.name : join(relative, entry.name);
+    return entry.isDirectory() ? catalogWorkingTreePaths(catalogRoot, path) : [path];
+  });
 }
 
 function verifyPublishedVersion(deps: Deps, version: string): void {
@@ -378,7 +393,7 @@ function catalogPromotionCommands(repoRoot: string, catalogRemote: string, versi
     `git checkout --detach v${version}`,
     `git clone ${catalogRemote} <temp>/catalog`,
     "git add -- .claude-plugin commands bin .github/workflows/ci.yml",
-    `git -c commit.gpgsign=false commit -m "chore: promote sapwood v${version}"`,
+    `git ${CATALOG_COMMIT_CONFIG.join(" ")} commit -m "chore: promote sapwood v${version}"`,
     "git push origin HEAD:main",
   ];
 }
@@ -407,12 +422,6 @@ function promoteCatalog(deps: Deps, version: string, catalogRemote: string): voi
   try {
     deps.exec("git", ["clone", "--no-checkout", deps.repoRoot, sourceRoot]);
     deps.exec("git", ["checkout", "--detach", `v${version}`], sourceRoot);
-    const sourcePaths = deps
-      .exec("git", ["ls-tree", "-r", "--name-only", releaseCommit, "--", ...CATALOG_SHELL_PATHS], sourceRoot)
-      .split("\n")
-      .filter(Boolean);
-    const pathCheck = checkCatalogSourcePaths(sourcePaths);
-    if (!pathCheck.ok) throw new Error(pathCheck.message);
     for (const root of CATALOG_SHELL_PATHS) {
       if (!existsSync(join(sourceRoot, root))) throw new Error(`release commit ${releaseCommit} has no ${root}/ catalog shell path`);
     }
@@ -424,10 +433,12 @@ function promoteCatalog(deps: Deps, version: string, catalogRemote: string): voi
     mkdirSync(workflowDir, { recursive: true });
     cpSync(join(sourceRoot, "scripts", "catalog", "ci.yml"), join(workflowDir, "ci.yml"));
     writeCatalogManifests(catalogRoot, version, releaseCommit);
+    const pathCheck = checkCatalogPaths(catalogWorkingTreePaths(catalogRoot));
+    if (!pathCheck.ok) throw new Error(pathCheck.message);
 
     if (deps.exec("git", ["status", "--porcelain"], catalogRoot).trim() === "") return;
     deps.exec("git", ["add", "--", ".claude-plugin", "commands", "bin", ".github/workflows/ci.yml"], catalogRoot);
-    deps.exec("git", ["-c", "commit.gpgsign=false", "commit", "-m", `chore: promote sapwood v${version}`], catalogRoot);
+    deps.exec("git", [...CATALOG_COMMIT_CONFIG, "commit", "-m", `chore: promote sapwood v${version}`], catalogRoot);
     deps.exec("git", ["push", "origin", "HEAD:main"], catalogRoot);
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
@@ -532,7 +543,7 @@ export const PUBLISH_STEPS: PublishStep[] = [
   },
   {
     name: "npm-view-verify",
-    describe: (ctx) => `npm view sapwood@${ctx.version} version`,
+    describe: (ctx) => (ctx.catalogRemote ? `npm view sapwood@${ctx.version} version` : "skipped: no --catalog remote"),
     run: (ctx, deps) => {
       if (ctx.catalogRemote) verifyPublishedVersion(deps, ctx.version);
     },
@@ -542,7 +553,7 @@ export const PUBLISH_STEPS: PublishStep[] = [
     describe: (ctx) =>
       ctx.catalogRemote
         ? catalogPromotionCommands(ctx.repoRoot, ctx.catalogRemote, ctx.version).join("\n")
-        : "catalog-promote <catalog remote>",
+        : "skipped: no --catalog remote",
     run: (ctx, deps) => {
       if (ctx.catalogRemote) promoteCatalog(deps, ctx.version, ctx.catalogRemote);
     },
