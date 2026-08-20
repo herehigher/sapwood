@@ -1036,7 +1036,7 @@ const EVENTS_USAGE = `\
 usage: sapwood events [db-path] [--config PATH] [options]
 
 Read the engine's event ledger straight from SQLite (no live engine session required) — the
-codified dogfood "monitor recipe": the same kind-filtered, id-cursor read a hand-rolled
+codified "monitor recipe": the same kind-filtered, id-cursor read a hand-rolled
 polling loop used to reimplement per session, now one contract shared with the dashboard's own
 \`/api/events\`.
 
