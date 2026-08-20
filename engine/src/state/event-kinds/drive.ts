@@ -36,9 +36,8 @@ export const DRIVE_EVENT_KINDS = defineKinds({
   "drive-human-merge-only": {
     tags: [],
     meaning:
-      "gate② classified the PR as human-merge-only (bucket 2, #397/#292 instruction-path trust chain) — the PR is fine, but its merge decision is a human's, one-way and never re-decided.",
+      "gate② classified the PR as human-merge-only (bucket 2, instruction-path trust chain) — the PR is fine, but its merge decision is a human's, one-way and never re-decided.",
     actionability: "intervene",
-    see: "#292",
   },
   "drive-thread-writes-pending": {
     tags: [],
@@ -54,7 +53,7 @@ export const DRIVE_EVENT_KINDS = defineKinds({
   },
   "rollback-recovered": {
     tags: ["round-artifact"],
-    meaning: "a pending board-status rollback (#31) succeeded on retry; the durable rollback record is cleared.",
+    meaning: "a pending board-status rollback succeeded on retry; the durable rollback record is cleared.",
     actionability: "routine",
   },
   "rollback-escalated": {
@@ -72,9 +71,8 @@ export const DRIVE_EVENT_KINDS = defineKinds({
   // PR custody + CI pins.
   "pr-held": {
     tags: [],
-    meaning: "a PR is being held from driving because a human hold label was observed on it (#441).",
+    meaning: "a PR is being held from driving because a human hold label was observed on it.",
     actionability: "routine",
-    see: "#441",
   },
   "pr-released": {
     tags: [],
@@ -86,16 +84,13 @@ export const DRIVE_EVENT_KINDS = defineKinds({
   // visibility bookkeeping, no consumer surface beyond its own fold.
   "lane-state-labeled": {
     tags: [],
-    meaning:
-      "the engine's per-tick lane-state mirror (#399) applied/updated the PR-side lane-state label to match this lane's current state.",
+    meaning: "the engine's per-tick lane-state mirror applied/updated the PR-side lane-state label to match this lane's current state.",
     actionability: "routine",
-    see: "#399",
   },
   "lane-state-cleared": {
     tags: [],
-    meaning: "the engine's per-tick lane-state mirror (#399) removed the PR-side lane-state label (the lane no longer needs one).",
+    meaning: "the engine's per-tick lane-state mirror removed the PR-side lane-state label (the lane no longer needs one).",
     actionability: "routine",
-    see: "#399",
   },
   "ci-pending-observed": {
     tags: [],
@@ -125,7 +120,6 @@ export const DRIVE_EVENT_KINDS = defineKinds({
     meaning:
       "a PR's CI concluded without ever going green (no check still running, none failed, at least one concluded without passing) — it can never progress on its own; labeled needs-human.",
     actionability: "intervene",
-    see: "#783",
   },
   "ci-pending-cleared": {
     tags: [],
@@ -136,15 +130,14 @@ export const DRIVE_EVENT_KINDS = defineKinds({
   // #147 gated reentry.
   "gated-reentry": {
     tags: ["round-artifact", "escalation-clear"],
-    meaning: "a human removed a lane's escalation label, and the #147 handshake re-admitted the lane for one bounded reentry attempt.",
+    meaning:
+      "a human removed a lane's escalation label, and the gated-reentry handshake re-admitted the lane for one bounded reentry attempt.",
     actionability: "routine",
-    see: "#147",
   },
   "gated-reentry-capped": {
     tags: ["round-artifact", "escalation-source:always"],
-    meaning: "a lane exhausted its bounded #147 gated-reentry attempts; always proven by presence.",
+    meaning: "a lane exhausted its bounded gated-reentry attempts; always proven by presence.",
     actionability: "intervene",
-    see: "#147",
   },
   // `never`: the label write is precisely what failed here, so its absence is the engine's own
   // footprint, not a human's.
@@ -174,7 +167,6 @@ export const DRIVE_EVENT_KINDS = defineKinds({
     meaning:
       "a gated-reentry lane whose escalation never pinned a body-hash candidate (comment-cursor-stale) had one staged from the live body on this tick's first observation of the cleared hold; reentry itself waits for a later tick to reconfirm it.",
     actionability: "routine",
-    see: "#685",
   },
 
   // Fix legs. The three `fix-leg` tagged kinds carry the journal cursor fix-response.ts reads
@@ -251,9 +243,8 @@ export const DRIVE_EVENT_KINDS = defineKinds({
   // Fix-round cap.
   "fix-rounds-capped": {
     tags: ["escalation-source:always"],
-    meaning: "a PR exhausted its configured fix-round budget (#295's most common escalation); always proven by presence.",
+    meaning: "a PR exhausted its configured fix-round budget — the most common escalation source; always proven by presence.",
     actionability: "intervene",
-    see: "#295",
   },
   "fix-rounds-cap-label-failed": {
     tags: [],
@@ -290,9 +281,8 @@ export const DRIVE_EVENT_KINDS = defineKinds({
   "fix-thread-write-escalated": {
     tags: [],
     meaning:
-      "a queued thread-write (reply/resolve) exhausted its retry budget; escalated to needs-human on the PR (#398 — PR-born, its issue-side twin was deleted).",
+      "a queued thread-write (reply/resolve) exhausted its retry budget; escalated to needs-human on the PR (PR-born; its issue-side twin was deleted).",
     actionability: "intervene",
-    see: "#398",
   },
   "fix-thread-write-escalation-label-failed": {
     tags: [],
@@ -309,15 +299,13 @@ export const DRIVE_EVENT_KINDS = defineKinds({
   "ac-snapshot-drift": {
     tags: ["escalation-source:never"],
     meaning:
-      "a PR's issue body changed after its acceptance-criteria snapshot was taken (#279 §5); the lane fails closed and needs-human is applied via its own bespoke label site (escalation-buckets.test.ts's SITE_INVENTORY), not the shared addLabel call the other `always`/`payload` sources share — so `never` is the honest proof mode: the reconciler now OBSERVES this kind for external resolution (a merged/closed PR, a closed issue), but `never` keeps escalation-sweep.ts from ever removing the label off this event's own say-so (#933). `checkpoint` (#995) records which recheck caught it: \"drive\" (immediately before `gate.driveOne`) or \"fix-leg-spawn\" (immediately before a FIXUP action's fix leg actually spawns — closes the verdict-tick PO-edit window a review's own duration used to leave open, waste-window reduction only, not race elimination).",
+      "a PR's issue body changed after its acceptance-criteria snapshot was taken (docs/security.md's \"The AC-authority dispatch snapshot\"); the lane fails closed and needs-human is applied via its own bespoke label site (escalation-buckets.test.ts's SITE_INVENTORY), not the shared addLabel call the other `always`/`payload` sources share — so `never` is the honest proof mode: the reconciler now OBSERVES this kind for external resolution (a merged/closed PR, a closed issue), but `never` keeps escalation-sweep.ts from ever removing the label off this event's own say-so. `checkpoint` records which recheck caught it: \"drive\" (immediately before `gate.driveOne`) or \"fix-leg-spawn\" (immediately before a FIXUP action's fix leg actually spawns — closes the verdict-tick PO-edit window a review's own duration used to leave open, waste-window reduction only, not race elimination).",
     actionability: "intervene",
-    see: "#279",
   },
   "blocked-by-cleared": {
     tags: [],
-    meaning: "a `blocked-by:<issue>` fence label was removed because the referenced blocker issue had already closed (#485).",
+    meaning: "a `blocked-by:<issue>` fence label was removed because the referenced blocker issue had already closed.",
     actionability: "routine",
-    see: "#485",
   },
   "drain-driving-escalation-label-failed": {
     tags: [],

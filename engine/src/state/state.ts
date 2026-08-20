@@ -1606,7 +1606,6 @@ export const PARK_SOURCE_GLOSSARY: Record<ParkSource, KindGlossary> = {
     meaning:
       "the crash-loop breaker tripped on restart cadence; no probe — clears only when a later engine start observes the birth window drained, or a human clears it.",
     actionability: "intervene",
-    see: "#431",
   },
   "consecutive-stalls": {
     // #648 gate② P2 (Codex): an OPEN episode never auto-clears (PR #473 round 3 adjudicated
@@ -1614,15 +1613,13 @@ export const PARK_SOURCE_GLOSSARY: Record<ParkSource, KindGlossary> = {
     // streak fold is consulted only to decide whether to open a NEW episode after a later
     // start; it is never itself the clearing signal for an episode already open. Same
     // human-only clearing story as idle-churn below, not rapid-restart above.
-    meaning: "the stall breaker (#407) tripped on a run of consecutive stalls; no probe — clears only when a human clears it.",
+    meaning: "the stall breaker tripped on a run of consecutive stalls; no probe — clears only when a human clears it.",
     actionability: "intervene",
-    see: "#407",
   },
   "idle-churn": {
     meaning:
-      "the idle-churn breaker (#470) tripped: rounds close cleanly but nothing consumable exists upstream; no probe (nothing downstream is broken to re-test) — clears only when a human clears it.",
+      "the idle-churn breaker tripped: rounds close cleanly but nothing consumable exists upstream; no probe (nothing downstream is broken to re-test) — clears only when a human clears it.",
     actionability: "intervene",
-    see: "#470",
   },
 } satisfies Record<ParkSource, KindGlossary>;
 

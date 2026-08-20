@@ -909,7 +909,7 @@ function stripExampleAndCodeSpans(text: string): string {
   return stripped;
 }
 
-test("negative lint: no shipped engine/prompts or commands file carries a bare sapwood-dev issue/PR reference (#NNN) outside an example/code span — misread on a target repo as THAT repo's own issue number", () => {
+test("negative lint: no shipped engine/prompts, commands, or the generated event-glossary skill carries a bare sapwood-dev issue/PR reference (#NNN) outside an example/code span — misread on a target repo as THAT repo's own issue number", () => {
   const promptsDir = dirname(defaultPromptPath());
   const shippedPrompts = readdirSync(promptsDir, { recursive: true })
     .filter((f): f is string => typeof f === "string" && f.endsWith(".md"))
@@ -918,8 +918,12 @@ test("negative lint: no shipped engine/prompts or commands file carries a bare s
   const shippedCommands = readdirSync(commandsDir)
     .filter((f) => f.endsWith(".md"))
     .map((f) => join(commandsDir, f));
-  const allFiles = [...shippedPrompts, ...shippedCommands];
-  assert.ok(allFiles.length >= 17, `sanity: expected the full prompts+commands set, got ${allFiles.length} .md files`);
+  // The event-glossary skill (#1046) is generated, not hand-authored, but ships from the same
+  // repo root and loads ambiently into every session exactly like the prompts/commands above —
+  // a regenerated bare #NNN would misread on a target repo the same way.
+  const skillPath = join(promptsDir, "..", "..", ".claude-plugin", "skills", "sapwood-event-glossary", "SKILL.md");
+  const allFiles = [...shippedPrompts, ...shippedCommands, skillPath];
+  assert.ok(allFiles.length >= 18, `sanity: expected the full prompts+commands+skill set, got ${allFiles.length} .md files`);
   for (const path of allFiles) {
     const stripped = stripExampleAndCodeSpans(readFileSync(path, "utf8"));
     assert.doesNotMatch(

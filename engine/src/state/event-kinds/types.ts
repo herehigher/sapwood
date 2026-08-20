@@ -98,12 +98,10 @@ export type Actionability = "routine" | "expected-noise" | "investigate" | "inte
  *  a source that routes attention through the park path instead of a label
  *  (`env-failure-preserved`) are all legitimately `investigate`. Judge `actionability` from the
  *  emit site's own behavior, never from the tag alone; a pure lifecycle event with no
- *  `escalation-source:*` tag is `routine`. `see` is an optional anchor (an issue number or a doc
- *  path) for a reader who wants the full story instead of the one-line summary. */
+ *  `escalation-source:*` tag is `routine`. */
 export interface KindGlossary {
   readonly meaning: string;
   readonly actionability: Actionability;
-  readonly see?: string;
 }
 
 /** A declared kind's full entry: the existing consumer-surface `tags` PLUS the glossary fields

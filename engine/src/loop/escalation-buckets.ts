@@ -25,21 +25,19 @@ export type EscalationBucket = "human-merge-only" | "needs-human" | "planless";
  *  sapwood-event-glossary skill alongside the event-kind and park-source glossaries. */
 export const ESCALATION_BUCKET_GLOSSARY: Record<EscalationBucket, KindGlossary> = {
   "needs-human": {
-    meaning: "the machine stopped; a human owes the next decision. Removal is the #147 reentry handshake, unchanged.",
+    meaning:
+      "the machine stopped; a human owes the next decision. Removal happens by a human removing the label, the gated-reentry handshake that reclaims and re-drives the lane.",
     actionability: "intervene",
-    see: "#397",
   },
   "human-merge-only": {
     meaning:
-      "a human must MERGE this PR. One-way: written on the PR exactly once (the #292 instruction-path trust chain), never removed or re-decided by the loop.",
+      "a human must MERGE this PR. One-way: written on the PR exactly once (the instruction-path trust chain), never removed or re-decided by the loop.",
     actionability: "intervene",
-    see: "#292",
   },
   planless: {
     meaning:
       "not an escalation at all — a routing fence for a plan-less issue. Nobody owes a decision; the issue is simply off every queue until a plan exists.",
     actionability: "routine",
-    see: "#397",
   },
 } satisfies Record<EscalationBucket, KindGlossary>;
 
