@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 // `sapwood` CLI. M0.5 shipped `init`; `run` (the M4 loop driver, #46) and `validate` (#49)
 // landed next; `status` + `run --dry-run` (#15) land here. The plugin's slash commands
@@ -6,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSyn
 // — see ../../commands/.
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
 import {
@@ -150,6 +151,53 @@ export function formatVersionString(baseVersion: string, stamp: BuildStamp | und
  *  silently fall back to the real clock (the compiler refuses), and every real-clock read is
  *  traceable to this constant instead of being scattered across defaults. */
 const systemClock = (): Date => new Date();
+
+const CWD_CONTRACT_MESSAGE = "Run sapwood from the repository root.";
+
+/** Commands whose state belongs to one repository-wide composition root. */
+const ROOT_BOUND_COMMANDS = new Set(["dashboard", "estop", "events", "init", "park", "pause", "run", "status", "stop"]);
+
+/** A value-bearing --config is the only path option that selects config-relative runtime files. */
+function explicitConfigPath(argv: string[]): string | undefined {
+  const index = argv.indexOf("--config");
+  const candidate = index === -1 ? undefined : argv[index + 1];
+  return candidate === undefined || candidate.startsWith("-") ? undefined : candidate;
+}
+
+/**
+ * Refuse a state command outside a repository's canonical main-worktree root. Git's common
+ * directory identifies that root even when the cwd contains a tracked config in a linked lane.
+ * Non-git directories deliberately retain their exact-cwd behaviour.
+ */
+export function cwdContractError(argv: string[], cwd = process.cwd()): string | undefined {
+  const command = argv[2];
+  if (command === undefined || !ROOT_BOUND_COMMANDS.has(command) || argv.slice(3).includes("--help") || argv.slice(3).includes("-h")) {
+    return undefined;
+  }
+
+  const git = spawnSync("git", ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (git.status !== 0) return undefined;
+
+  const [gitDir, commonDir] = git.stdout.trim().split("\n");
+  if (gitDir === undefined || commonDir === undefined) return undefined;
+  const mainRoot = realpathSync(dirname(commonDir));
+  const cwdRealpath = realpathSync(cwd);
+  const configPath = explicitConfigPath(argv);
+  const resolvedConfigPath = configPath === undefined ? undefined : resolve(cwd, configPath);
+  const configLocation =
+    resolvedConfigPath !== undefined && existsSync(resolvedConfigPath) ? realpathSync(resolvedConfigPath) : resolvedConfigPath;
+  const configRelative = configLocation === undefined ? undefined : relative(mainRoot, configLocation);
+  const configOutsideRoot =
+    configRelative === ".." || configRelative?.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) === true;
+  if (gitDir !== commonDir || cwdRealpath !== mainRoot || configOutsideRoot) {
+    return `sapwood ${command}: ${CWD_CONTRACT_MESSAGE} ${mainRoot}\n`;
+  }
+  return undefined;
+}
 
 const USAGE = `\
 usage: sapwood <command> [options]
@@ -3416,6 +3464,11 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
 }
 
 async function main(argv: string[]): Promise<number> {
+  const cwdError = cwdContractError(argv);
+  if (cwdError !== undefined) {
+    process.stderr.write(cwdError);
+    return 1;
+  }
   const { stdout, stderr, code, validatedRun, validatedDashboard } = runCli(argv);
   if (stdout) process.stdout.write(stdout);
   if (stderr) process.stderr.write(stderr);

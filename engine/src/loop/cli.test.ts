@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import {
@@ -11,6 +12,7 @@ import {
   buildTickFixLegResume,
   checkWebAccessSettingsDenial,
   computeDryRunPreview,
+  cwdContractError,
   formatDryRunPreview,
   formatStatus,
   formatStopConditionLine,
@@ -44,6 +46,27 @@ import { requiredLabels } from "./init.js";
  *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
  *  so every deliberate real-clock read in this suite greps as one decision. */
 const realClock = (): Date => new Date();
+
+function git(cwd: string, args: string[]): void {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+}
+
+function makeGitRepo(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  git(dir, ["init", "--quiet"]);
+  git(dir, ["config", "user.email", "sapwood-test@example.invalid"]);
+  git(dir, ["config", "user.name", "Sapwood test"]);
+  git(dir, ["config", "commit.gpgsign", "false"]);
+  writeFileSync(join(dir, "sapwood.config.yaml"), "board: { owner: acme, repo: widgets, projectNumber: 7 }\n");
+  git(dir, ["add", "sapwood.config.yaml"]);
+  git(dir, ["commit", "--quiet", "-m", "test fixture"]);
+  return realpathSync(dir);
+}
+
+function expectedRootError(command: string, root: string): string {
+  return `sapwood ${command}: Run sapwood from the repository root. ${root}\n`;
+}
 
 test("--version prints package version and exits 0", () => {
   const r = runCli(["node", "sapwood", "--version"]);
@@ -95,6 +118,63 @@ test("run: falls through to the async engine-wiring path (code -1), same as init
   assert.equal(r.code, -1);
   assert.equal(r.stdout, "");
   assert.equal(r.stderr, "");
+});
+
+test("cwd contract: real linked worktrees, including a Claude lane with its tracked config, refuse before state can be written", () => {
+  const repo = makeGitRepo("sapwood-cwd-contract-");
+  const claudeLane = join(repo, ".claude", "worktrees", "lane");
+  const peripheralLane = join(repo, "peripheral-lane");
+  try {
+    mkdirSync(dirname(claudeLane), { recursive: true });
+    git(repo, ["worktree", "add", "--quiet", "-b", "claude-lane", claudeLane, "HEAD"]);
+    git(repo, ["worktree", "add", "--quiet", "-b", "peripheral-lane", peripheralLane, "HEAD"]);
+
+    assert.equal(existsSync(join(claudeLane, "sapwood.config.yaml")), true, "the lane fixture must include the tracked config");
+    for (const [command, lane] of [
+      ["run", claudeLane],
+      ["init", claudeLane],
+      ["status", claudeLane],
+      ["events", peripheralLane],
+      ["dashboard", peripheralLane],
+      ["park", peripheralLane],
+      ["pause", peripheralLane],
+      ["stop", peripheralLane],
+      ["estop", peripheralLane],
+    ] as const) {
+      assert.equal(cwdContractError(["node", "sapwood", command], lane), expectedRootError(command, repo));
+      assert.equal(existsSync(join(lane, "data")), false, `${command} must not create lane state`);
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("cwd contract: a main-worktree subdirectory and an external --config both refuse without creating a local data namespace", () => {
+  const repoA = makeGitRepo("sapwood-cwd-contract-config-a-");
+  const repoB = makeGitRepo("sapwood-cwd-contract-config-b-");
+  const subdir = join(repoB, "subdir");
+  try {
+    mkdirSync(subdir);
+    assert.equal(cwdContractError(["node", "sapwood", "run"], subdir), expectedRootError("run", repoB));
+    assert.equal(existsSync(join(subdir, "data")), false, "the subdirectory must not gain a state directory");
+
+    const configA = join(repoA, "sapwood.config.yaml");
+    assert.equal(cwdContractError(["node", "sapwood", "run", "--config", configA], repoB), expectedRootError("run", repoB));
+    assert.equal(existsSync(join(repoB, "data")), false, "an external config must not split state into repo B");
+  } finally {
+    rmSync(repoA, { recursive: true, force: true });
+    rmSync(repoB, { recursive: true, force: true });
+  }
+});
+
+test("cwd contract: non-git directories retain exact-cwd behaviour", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cwd-contract-non-git-"));
+  try {
+    assert.equal(cwdContractError(["node", "sapwood", "run"], dir), undefined);
+    assert.equal(cwdContractError(["node", "sapwood", "status"], dir), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── #638: `init` gets the same synchronous fail-closed argument boundary as run/status/park ──
