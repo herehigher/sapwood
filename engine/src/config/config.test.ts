@@ -264,6 +264,42 @@ test('engine.driver (#106): defaults to "rounds", overridable to "tick", rejects
   assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nengine: { driver: bogus }"), /driver/i);
 });
 
+// ── #1011 AC1: host.permissionMode — DR #1009's execution-profile key ────────────────────────
+
+test('host.permissionMode (#1011): defaults to "auto", overridable to "dontAsk"/"bypassPermissions", rejects anything else with a guidance message', () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
+  assert.equal(cfg.host.permissionMode, "auto");
+  assert.equal(
+    parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nhost: { permissionMode: dontAsk }").host.permissionMode,
+    "dontAsk",
+  );
+  assert.equal(
+    parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nhost: { permissionMode: bypassPermissions }").host.permissionMode,
+    "bypassPermissions",
+  );
+  // P3 (fix-leg, Codex sol review of PR #1017): a bare field-name match doesn't prove the
+  // message actually GUIDES the operator toward a valid value — assert the three allowed
+  // values are all named in the rejection text, not just that the field is mentioned.
+  assert.throws(() => {
+    try {
+      parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nhost: { permissionMode: yolo }");
+    } catch (e) {
+      assert.match(String((e as Error).message), /permissionMode/i);
+      assert.match(String((e as Error).message), /dontAsk/);
+      assert.match(String((e as Error).message), /\bauto\b/);
+      assert.match(String((e as Error).message), /bypassPermissions/);
+      throw e;
+    }
+  });
+});
+
+test("host: strict unknown-key rejection (a typo'd host key is not silently dropped)", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nhost: { permissionModee: auto }"),
+    /permissionModee|[Uu]nrecognized/,
+  );
+});
+
 test("logging: defaults, overrides, and strict unknown-key rejection", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.deepEqual(cfg.logging, { path: "data/logs/sapwood.log", teeToStderr: true, maxBytes: 10 * 1024 * 1024 });

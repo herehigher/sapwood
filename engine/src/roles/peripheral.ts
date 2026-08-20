@@ -58,7 +58,6 @@ import {
   parseSessionInit,
   parseToolUsage,
   permissionModeMismatched,
-  REQUESTED_PERMISSION_MODE,
   type SpawnedSession,
   scanEgressSuspects,
   spawnClaudeSession,
@@ -738,6 +737,10 @@ export class RoleRunner {
         ...(reviewMode ? {} : { worktree: name }),
         name,
         sessionId,
+        // #1011: the configured mode, same as worker.ts's dispatch()/resume() — every peripheral
+        // role session (review sessions included: reviewMode changes the TOOL profile, never the
+        // permission mode).
+        permissionMode: this.deps.cfg.host.permissionMode,
         settings: settingsJson,
         allowedTools,
         disallowedTools,
@@ -1397,17 +1400,22 @@ export class RoleRunner {
    *  above uses (a role session has no single associated issue), plus `session_id` for the
    *  per-session identity. Fail-safe, allow direction — `permissionModeMismatched` treats a `null`
    *  effective mode (unparseable/absent field) as no-mismatch, and a scan/event-write failure here
-   *  is logged, never allowed to affect the session's own outcome. */
+   *  is logged, never allowed to affect the session's own outcome.
+   *
+   *  #1011: "what the engine requested" is `cfg.host.permissionMode` — the same configured value
+   *  `run()`'s own `claudeArgs` call passes, not the bare `REQUESTED_PERMISSION_MODE` fallback
+   *  constant (see worker.ts's own `recordPermissionModeMismatch` doc for why). */
   private recordPermissionModeMismatch(name: string, sessionId: string, jsonl: string): void {
     if (!this.deps.state) return;
     try {
       const effective = parseSessionInit(jsonl).permissionMode;
-      if (permissionModeMismatched(effective)) {
+      const requested = this.deps.cfg.host.permissionMode;
+      if (permissionModeMismatched(effective, requested)) {
         this.deps.state.appendEvent("permission-mode-mismatch", {
           worker: name,
           issue: 0,
           session_id: sessionId,
-          requested: REQUESTED_PERMISSION_MODE,
+          requested,
           effective,
         });
       }

@@ -29,6 +29,7 @@ import {
 } from "./forge/forge.js";
 import { type BaseRedPin, baseRedPin } from "./loop/base-ci.js";
 import { createBranchProtectionDetector } from "./loop/branch-protection-warning.js";
+import { detectBypassPermissionsMode } from "./loop/bypass-permissions-warning.js";
 import { detectClaudeVersionStartupTier } from "./loop/claude-version-startup-check.js";
 import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop/conductor.js";
 import {
@@ -79,8 +80,8 @@ import {
   buildRenderPrompt,
   type ClaudeVersionProbeResult,
   discoverClaudeBin,
+  mkProbeLlmReachable,
   probeClaudeVersion,
-  probeLlmPing,
   WorkerSupervisor,
 } from "./roles/worker.js";
 // #642: event-kinds registry validation for `events --kind`/`--exclude-kind` arguments (the
@@ -2957,6 +2958,9 @@ async function runTickEngine(
     // #410 amendment: same best-effort startup-pass stance as the board normalization above —
     // detects, never blocks, never mutates.
     checkWebAccessSettingsDenial(cfg, state, log);
+    // #1011: same disclose-only stance — one WARN (log + event) when host.permissionMode is
+    // configured "bypassPermissions", never a gate. See bypass-permissions-warning.ts's own doc.
+    detectBypassPermissionsMode(cfg, state, log);
     // #385 F10: same stance again — announces the `prFixCap > 0` + unattached-fix-loop
     // combination ONCE here, rather than leaving it to surface per-escalation on an already
     // needs-human PR. See announceFixLoopUnattached's own doc.
@@ -2985,16 +2989,10 @@ async function runTickEngine(
     // maxWallClockSec / KILL_SWITCH) is fully live regardless — that's the actual hard safety
     // boundary; roundBudgetUsd is a softer per-round throttle.
     // #168 (P1-1 amendment): the real LLM-source park probe — a minimal inference ping on the
-    // cheapest model (worker.ts's probeLlmPing), resolved against the SAME claude binary
-    // WorkerSupervisor's dispatch() would use. The rich {ok, detail} result flows into the
-    // park-probe event so a failing probe names its own cause.
-    const probeLlmReachable = () =>
-      probeLlmPing(
-        discoverClaudeBin(process.env),
-        cfg.envFailure.probeModel,
-        cfg.envFailure.probeMaxBudgetUsd,
-        cfg.envFailure.probeTimeoutSec,
-      );
+    // cheapest model (worker.ts's probeLlmPing via mkProbeLlmReachable), resolved against the
+    // SAME claude binary WorkerSupervisor's dispatch() would use. The rich {ok, detail} result
+    // flows into the park-probe event so a failing probe names its own cause.
+    const probeLlmReachable = mkProbeLlmReachable(cfg, discoverClaudeBin(process.env));
     const result = await runDriver({
       forge,
       state,
@@ -3210,6 +3208,9 @@ async function runRoundsEngine(
     // #410 amendment: same best-effort startup-pass stance as the board normalization above —
     // detects, never blocks, never mutates.
     checkWebAccessSettingsDenial(cfg, state, log);
+    // #1011: same disclose-only stance — one WARN (log + event) when host.permissionMode is
+    // configured "bypassPermissions", never a gate. See bypass-permissions-warning.ts's own doc.
+    detectBypassPermissionsMode(cfg, state, log);
     // #385 F10: same stance again — announces the `prFixCap > 0` + unattached-fix-loop
     // combination ONCE here, rather than leaving it to surface per-escalation on an already
     // needs-human PR. See announceFixLoopUnattached's own doc.
@@ -3231,13 +3232,7 @@ async function runRoundsEngine(
     });
     log(`[sapwood:run] driver=rounds tickIntervalSec=${cfg.engine.tickIntervalSec}`);
     // #168 (P1-1 amendment): same real LLM-source ping probe as the tick driver above.
-    const probeLlmReachable = () =>
-      probeLlmPing(
-        discoverClaudeBin(process.env),
-        cfg.envFailure.probeModel,
-        cfg.envFailure.probeMaxBudgetUsd,
-        cfg.envFailure.probeTimeoutSec,
-      );
+    const probeLlmReachable = mkProbeLlmReachable(cfg, discoverClaudeBin(process.env));
     const result = await runRounds({
       forge,
       state,

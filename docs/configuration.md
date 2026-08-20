@@ -1120,6 +1120,23 @@ state event), it never blocks startup or restores the capability.
 |---|---|---|
 | `mode` | `hard` | `hard`: fail-closed deny — the actual producer≠merger/boundary-write enforcement. `soft`: observe-only — log what would be blocked, but allow it. `soft` is a first-run/dogfood affordance only, never the shipped default; it reaches the hook via a spawn env a worker cannot itself rewrite. |
 
+## `host`
+
+**Host execution-profile key** (DR #1009, implemented #1011) — it configures HOW a session's
+already-granted tools reach the host (execution reach), never WHICH tools a producer leg is
+offered (that stays [host-delegated capability management](security.md#host-delegated-capability-management),
+Decision #11, unchanged and unrelated — no `capabilities.*` surface is reopened by this key).
+Full mechanics live in [`docs/security.md`'s "Execution
+profiles"](security.md#execution-profiles-host-permission-mode--bash-sandbox) section —
+semantics here are copied verbatim from there.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `host.permissionMode` | `auto` | `dontAsk \| auto \| bypassPermissions` — the ONE mode requested via `--permission-mode` for every `claude` session the engine spawns (worker legs, every peripheral role session, and the LLM-source liveness ping alike). The engine's deny side (`--disallowedTools`, the guard hook, gate②'s seal) stays engine-owned across all three values — only the allow side moves. `auto`: unchanged from every sapwood release before this key existed — a classifier reviews actions in place of a human prompt. `dontAsk`: only an explicit `permissions.allow` rule / read-only Bash command / guard-approved call runs; the allow side is the OPERATOR's own Claude settings, never a new engine `allowedTools` config key. `bypassPermissions`: everything runs unchecked, including writes to Claude Code's own protected paths — an operator call the engine does not gate; configuring it triggers one guidance-carrying startup WARN (log line + `bypass-permissions-mode-configured` event) naming the outer-boundary recipe, never a refusal. |
+
+The key validates at load with a guidance message on an invalid value (`sapwood validate`
+catches it) — same `.strict()`/enum rejection style as `guard.mode`/`reviewer.mode` above.
+
 ## `envFailure`
 
 Environment-failure park — detect an LLM-provider or forge outage as ONE class distinct
@@ -1164,7 +1181,8 @@ validate` catches all three).
   dispatch):
 
   ```
-  claude -p --model <probeModel> --no-session-persistence \
+  claude -p --model <probeModel> --permission-mode <host.permissionMode> \
+    --no-session-persistence \
     --system-prompt "You are a heartbeat responder. Only output the requested word." \
     --strict-mcp-config --tools "" \
     --max-budget-usd <probeMaxBudgetUsd> --output-format text \

@@ -983,6 +983,29 @@ const Guard = z
   })
   .strict();
 
+// #1011 (DR #1009, Decision #11 amendment): host EXECUTION-PROFILE key — it configures HOW a
+// session's already-granted tools reach the host (execution reach), never WHICH tools a producer
+// leg is offered (host-delegated capability management, Decision #11, unchanged and unrelated —
+// no `capabilities.*` surface is reopened here). Semantics copied verbatim from docs/security.md's
+// "Execution profiles" section — that section, not this file, is the place to read the full
+// seven-layer table and deployment-tier ladder.
+const Host = z
+  .object({
+    // The ONE mode requested via `--permission-mode` for EVERY claude session the engine spawns
+    // (worker legs and every peripheral role session alike). The engine's deny side
+    // (--disallowedTools, the guard hook, gate②'s seal) stays engine-owned across all three
+    // values — only the allow side moves. `auto` (default): unchanged from every sapwood release
+    // before this key existed — a classifier reviews actions in place of a human prompt.
+    // `dontAsk`: only an explicit `permissions.allow` rule / read-only Bash command / guard-
+    // approved call runs; the allow side is the OPERATOR's own Claude settings, never a new
+    // engine `allowedTools` config key. `bypassPermissions`: everything runs unchecked, including
+    // writes to Claude Code's own protected paths — an operator call the engine does not gate;
+    // configuring it triggers one guidance-carrying startup WARN (log + event) naming the
+    // outer-boundary recipe docs/security.md documents, never a refusal.
+    permissionMode: z.enum(["dontAsk", "auto", "bypassPermissions"]).default("auto"),
+  })
+  .strict();
+
 const Engine = z
   .object({
     // The loop's tick cadence (#46): how often the drivers call tick() — the inter-tick sleep
@@ -1510,6 +1533,7 @@ const ConfigSchemaRaw = z
     lanes: Lanes.default({}),
     worker: Worker.default({}),
     guard: Guard.default({}),
+    host: Host.default({}),
     cost: Cost.default({}),
     stop: Stop.default({}),
     round: Round.default({}),

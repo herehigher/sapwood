@@ -564,13 +564,15 @@ export function parseSessionInit(jsonl: string): SessionInitInfo {
   return empty; // no init line found — honest empty, never a thrown error
 }
 
-/** #1010: the shared predicate both WorkerSupervisor's lane-end and peripheral.ts's role-session-
- *  end read points evaluate before emitting `permission-mode-mismatch`. `effective` is a session's
- *  own `SessionInitInfo.permissionMode`; `requested` defaults to the one mode the engine ever asks
- *  for (`REQUESTED_PERMISSION_MODE`, `claudeArgs`' `--permission-mode` flag). `null` — the init
- *  line carried no such field, or was never observed at all (a parser miss, a crashed-before-init
- *  session) — is NEVER a mismatch: fail-safe, allow direction, so an unparseable/absent field can
- *  never manufacture a false positive that then makes its way into the events ledger. */
+/** #1010/#1011: the shared predicate both WorkerSupervisor's lane-end and peripheral.ts's
+ *  role-session-end read points evaluate before emitting `permission-mode-mismatch`. `effective`
+ *  is a session's own `SessionInitInfo.permissionMode`; `requested` is the CONFIGURED
+ *  `cfg.host.permissionMode` both production call sites pass explicitly (the `=
+ *  REQUESTED_PERMISSION_MODE` default below only fires for a caller that omits it, e.g. a
+ *  fixture built before #1011). `null` — the init line carried no such field, or was never
+ *  observed at all (a parser miss, a crashed-before-init session) — is NEVER a mismatch:
+ *  fail-safe, allow direction, so an unparseable/absent field can never manufacture a false
+ *  positive that then makes its way into the events ledger. */
 export function permissionModeMismatched(effective: string | null, requested: string = REQUESTED_PERMISSION_MODE): boolean {
   return effective !== null && effective !== requested;
 }
@@ -992,12 +994,20 @@ const LLM_PING_PROMPT = "Respond with the single word 'pong' and nothing else.";
  *  set by actually CALLING this function rather than hand-copying flag names into a second list
  *  that can silently fall behind (sol-high gate② finding: a 5-flag hand list omitted even this
  *  same function's own `--model`/`--output-format`, and 19 more flags `claudeArgs` can emit).
- *  probeLlmPing itself calls this — one source, not two. */
-function llmPingArgv(probeModel: string, probeMaxBudgetUsd: number): string[] {
+ *  probeLlmPing itself calls this — one source, not two.
+ *
+ *  #1011: `permissionMode` follows the same optional-with-`REQUESTED_PERMISSION_MODE`-fallback
+ *  shape `ClaudeArgsOpts.permissionMode` uses — this is a `claude` session the engine spawns
+ *  same as any worker/peripheral session, so it requests the CONFIGURED `host.permissionMode`
+ *  too, never a hardcoded mode. Omitted -> the schema's own default ("auto"), so a caller/fixture
+ *  built before this parameter existed keeps its byte-identical argv. */
+function llmPingArgv(probeModel: string, probeMaxBudgetUsd: number, permissionMode?: string): string[] {
   return [
     "-p",
     "--model",
     probeModel,
+    "--permission-mode",
+    permissionMode ?? REQUESTED_PERMISSION_MODE,
     "--no-session-persistence",
     "--system-prompt",
     LLM_PING_SYSTEM_PROMPT,
@@ -1016,9 +1026,9 @@ function llmPingArgv(probeModel: string, probeMaxBudgetUsd: number): string[] {
  *  park machinery (TickDeps.probeLlmReachable) — a REAL minimal inference ping, verified
  *  working against claude CLI 2.1.209 in exactly this form (returns "pong", exit 0):
  *
- *      claude -p --model <probeModel> --no-session-persistence \
- *        --system-prompt "<LLM_PING_SYSTEM_PROMPT>" --strict-mcp-config --tools "" \
- *        --max-budget-usd <probeMaxBudgetUsd> --output-format text "<LLM_PING_PROMPT>"
+ *      claude -p --model <probeModel> --permission-mode <configured host.permissionMode> \
+ *        --no-session-persistence --system-prompt "<LLM_PING_SYSTEM_PROMPT>" --strict-mcp-config \
+ *        --tools "" --max-budget-usd <probeMaxBudgetUsd> --output-format text "<LLM_PING_PROMPT>"
  *
  *  Flag rationale: --no-session-persistence keeps probe runs off the disk (no session files);
  *  --system-prompt REPLACES the CLI's default full system prompt; --strict-mcp-config +
@@ -1050,8 +1060,18 @@ function llmPingArgv(probeModel: string, probeMaxBudgetUsd: number): string[] {
  *  upgrade (see docs/configuration.md).
  *
  *  Never throws — any spawn error, non-zero exit, non-"pong" output, or a hang past
- *  `timeoutSec` (hard kill) resolves `{ ok: false, detail }`. */
-export function probeLlmPing(claudeBin: string, probeModel: string, probeMaxBudgetUsd: number, timeoutSec: number): Promise<LlmPingResult> {
+ *  `timeoutSec` (hard kill) resolves `{ ok: false, detail }`.
+ *
+ *  #1011: `permissionMode` — same optional-with-fallback shape as `llmPingArgv`'s own param
+ *  (see that function's doc) — threads the configured `host.permissionMode` through to argv;
+ *  cli.ts's two production driver call sites (tick + rounds) both pass it. */
+export function probeLlmPing(
+  claudeBin: string,
+  probeModel: string,
+  probeMaxBudgetUsd: number,
+  timeoutSec: number,
+  permissionMode?: string,
+): Promise<LlmPingResult> {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (r: LlmPingResult): void => {
@@ -1062,7 +1082,7 @@ export function probeLlmPing(claudeBin: string, probeModel: string, probeMaxBudg
     const firstLine = (s: string): string => s.trim().split("\n")[0]?.trim() ?? "";
     let child: ChildProcess;
     try {
-      child = spawn(claudeBin, llmPingArgv(probeModel, probeMaxBudgetUsd), { stdio: ["ignore", "pipe", "pipe"] });
+      child = spawn(claudeBin, llmPingArgv(probeModel, probeMaxBudgetUsd, permissionMode), { stdio: ["ignore", "pipe", "pipe"] });
     } catch (e) {
       finish({ ok: false, detail: `ping spawn failed: ${e instanceof Error ? e.message : String(e)}` });
       return;
@@ -1106,6 +1126,25 @@ export function probeLlmPing(claudeBin: string, probeModel: string, probeMaxBudg
       finish({ ok: false, detail });
     });
   });
+}
+
+/** #1011: cli.ts's TWO production driver call sites (tick + rounds) each need a
+ *  `TickDeps.probeLlmReachable`-shaped closure over the SAME five config values — a
+ *  per-call-site argument list is exactly the kind of duplication a later edit (e.g. this
+ *  helper's own permissionMode fix) can update at one site and silently miss the other. One
+ *  shared builder makes both call sites identical one-liners instead. `claudeBin` stays a
+ *  caller-supplied param (not read from `process.env` here) so this function stays pure and
+ *  testable without env mutation — cli.ts resolves it once via `discoverClaudeBin` and passes
+ *  it in. */
+export function mkProbeLlmReachable(cfg: SapwoodConfig, claudeBin: string): () => Promise<LlmPingResult> {
+  return () =>
+    probeLlmPing(
+      claudeBin,
+      cfg.envFailure.probeModel,
+      cfg.envFailure.probeMaxBudgetUsd,
+      cfg.envFailure.probeTimeoutSec,
+      cfg.host.permissionMode,
+    );
 }
 
 // ── #799: the version probe — claude-version-startup-check.ts's own detector logic lives in
@@ -1212,6 +1251,12 @@ export interface ClaudeArgsOpts {
   worktree?: string;
   name: string;
   sessionId: string;
+  /** #1011: the `--permission-mode` value — every caller now passes the CONFIGURED
+   *  `host.permissionMode` (worker.ts's dispatch()/resume(), peripheral.ts's RoleRunner.run(),
+   *  both alike). Omitted -> `REQUESTED_PERMISSION_MODE` ("auto", the schema's own default and
+   *  every sapwood release's behavior before this key existed) — so a caller/fixture built before
+   *  this field existed keeps its byte-identical argv. */
+  permissionMode?: string;
   addDir?: string;
   settings?: string; // --settings value: inline JSON string (or path); omitted -> no --settings (#26)
   /** #46: resume a prior session (`--resume <id>`) instead of starting a fresh one
@@ -1438,9 +1483,14 @@ function omitStaleDefaultBranch(env: NodeJS.ProcessEnv, defaultBranch: string | 
   return env;
 }
 
-/** #1010: the ONE mode the engine ever requests via `--permission-mode` — every claude role
- *  session (worker and peripheral alike; both spawn through claudeArgs). Named so the lane-end
- *  mismatch check below compares against this constant instead of a second hardcoded literal. */
+/** #1010/#1011: the DEFAULT `--permission-mode` value — `host.permissionMode`'s own schema
+ *  default (config.ts), kept here too as the literal `claudeArgs`/`permissionModeMismatched` fall
+ *  back to when a caller omits `ClaudeArgsOpts.permissionMode` (a fixture built before #1011, or
+ *  a probe/ping argv that never threads config through at all). Every PRODUCTION caller
+ *  (worker.ts's dispatch()/resume(), peripheral.ts's RoleRunner.run()) now passes the CONFIGURED
+ *  `host.permissionMode` explicitly instead of relying on this fallback — see either call site's
+ *  own doc. Named so the lane-end mismatch check below compares against a symbol instead of a
+ *  second hardcoded literal. */
 export const REQUESTED_PERMISSION_MODE = "auto";
 
 /** The full `claude -p` argv. Pure, so every flag is testable without spawning. NOTE: no
@@ -1460,7 +1510,7 @@ export function claudeArgs(o: ClaudeArgsOpts): string[] {
     o.name,
     ...(o.resumeSessionId ? ["--resume", o.resumeSessionId] : ["--session-id", o.sessionId]),
     "--permission-mode",
-    REQUESTED_PERMISSION_MODE,
+    o.permissionMode ?? REQUESTED_PERMISSION_MODE,
     // Coarse noise-reduction only — the real boundary is the guard hook (#26).
     "--allowedTools",
     o.allowedTools ?? WORKER_ALLOWED_TOOLS,
@@ -1505,6 +1555,7 @@ const MAXIMAL_CLAUDE_ARGS_OPTS: Required<ClaudeArgsOpts> = {
   worktree: "lane",
   name: "lane",
   sessionId: "session",
+  permissionMode: "auto",
   addDir: "/tmp/add-dir",
   settings: "{}",
   resumeSessionId: "prior-session",
@@ -2031,9 +2082,16 @@ export interface WorkerProxyOpts {
  *  isolation (redirecting `$HOME` would break the `claude` CLI's own config/auth, which this
  *  lane also needs to run at all) and (2) stripping `Bash(node *)`/`Bash(npm *)` (a fix leg's
  *  whole job requires running the test suite). The upgrade path for a genuinely closed boundary
- *  is OS-level sandboxing (a container/chroot/Landlock-style filesystem confinement) or running
- *  fix legs under a dedicated, narrowly-scoped CI identity whose credential store contains
- *  nothing worth stealing — neither is implemented by this function. One narrowing worth naming:
+ *  is OS-level sandboxing — container/chroot/Landlock-style filesystem confinement, available as
+ *  the operator-configured Bash-sandbox recipe in docs/security.md's "Execution profiles" section
+ *  — or running fix legs under a dedicated, narrowly-scoped CI identity whose credential store
+ *  contains nothing worth stealing; the CI-identity path remains unimplemented. This function
+ *  alone (`workerCredentialFreeEnv`) provides no filesystem confinement — an operator who has
+ *  configured that recipe gets OS-blocked Bash reads of the `denyRead`-listed paths (probed
+ *  live: the exact `steal.mjs` read above returns `EPERM`); without that operator configuration
+ *  there is no such guarantee, and even with it active the recipe is still not a home-directory
+ *  jail (unlisted paths and additive `allowRead` entries remain residuals). One narrowing worth
+ *  naming:
  *  `hosts.yml` is `gh`'s PLAINTEXT-token storage path; on macOS, `gh auth login` by default
  *  stores the token in the OS keychain instead, which this mechanism (and the PoC) does not
  *  expose — the concrete risk this note describes is sharpest wherever `gh` ends up with a
@@ -2789,17 +2847,24 @@ export class WorkerSupervisor implements Supervisor {
    *  in the same append-only file. Fail-safe, allow direction: never gates the lane's own outcome
    *  (the terminal sentinel has already landed by the time this runs), and `permissionModeMismatched`
    *  itself treats a `null` (unparseable/absent field) as no-mismatch rather than manufacturing a
-   *  false positive. Best-effort, same allow-direction catch as its sibling above. */
+   *  false positive. Best-effort, same allow-direction catch as its sibling above.
+   *
+   *  #1011: "what the engine requested" is now `cfg.host.permissionMode` — the SAME configured
+   *  value dispatch()/resume() pass to `claudeArgs`' `permissionMode` opt, never the bare
+   *  REQUESTED_PERMISSION_MODE fallback constant (which only fires for a caller that omits the
+   *  opt entirely). A `dontAsk`/`bypassPermissions` deployment must compare against ITS OWN
+   *  configured mode, or every leg would misreport a false mismatch. */
   private recordPermissionModeMismatch(worker: string, issue: number, sessionId: string, legJsonl: string): void {
     if (!this.deps.state) return;
     try {
       const effective = parseSessionInit(legJsonl).permissionMode;
-      if (permissionModeMismatched(effective)) {
+      const requested = this.deps.cfg.host.permissionMode;
+      if (permissionModeMismatched(effective, requested)) {
         this.deps.state.appendEvent("permission-mode-mismatch", {
           worker,
           issue,
           session_id: sessionId,
-          requested: REQUESTED_PERMISSION_MODE,
+          requested,
           effective,
         });
       }
@@ -2952,6 +3017,9 @@ export class WorkerSupervisor implements Supervisor {
       worktree: laneName,
       name: laneName,
       sessionId,
+      // #1011: the configured mode, never the bare REQUESTED_PERMISSION_MODE fallback — see
+      // ClaudeArgsOpts.permissionMode's own doc.
+      permissionMode: this.deps.cfg.host.permissionMode,
       settings: settingsJson,
       // #244: widen --allowedTools with the proxy's own (role-scoped) tool names, same pattern
       // as peripheral.ts's RoleRunner — only when a proxy actually minted; unattached dispatch
@@ -3405,6 +3473,8 @@ export class WorkerSupervisor implements Supervisor {
         name,
         sessionId,
         resumeSessionId: sessionId,
+        // #1011: same as dispatch() — see that call site's own doc.
+        permissionMode: this.deps.cfg.host.permissionMode,
         settings: settingsJson,
         // #245: widen --allowedTools with the proxy's own tool names — same pattern as dispatch().
         // Unattached resume (today's entire #172 handoff path) passes neither flag, byte-identical

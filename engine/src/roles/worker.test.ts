@@ -51,6 +51,7 @@ import {
   MAX_EGRESS_SUSPECTS_PER_LEG,
   MAX_INCONCLUSIVE_PR_PROBES,
   MIN_CLAUDE_CLI_VERSION,
+  mkProbeLlmReachable,
   parseAssistantUsageDeltas,
   parseCostUsd,
   parseCostUsdOrNull,
@@ -1639,7 +1640,7 @@ test("probeLlmPing (#578): output still in flight when the process exits is NOT 
   }
 });
 
-test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no-session-persistence, --system-prompt, --strict-mcp-config, --tools '', --max-budget-usd, --output-format text, prompt (and NO --max-tokens, which the CLI rejects)", async () => {
+test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --permission-mode (default 'auto' when omitted), --no-session-persistence, --system-prompt, --strict-mcp-config, --tools '', --max-budget-usd, --output-format text, prompt (and NO --max-tokens, which the CLI rejects)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
   const argsFile = join(dir, "args.txt");
   try {
@@ -1652,6 +1653,8 @@ test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no
       "-p",
       "--model",
       "my-cheap-model",
+      "--permission-mode",
+      "auto",
       "--no-session-persistence",
       "--system-prompt",
       "You are a heartbeat responder. Only output the requested word.",
@@ -1675,6 +1678,47 @@ test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no
       if (!token.startsWith("--")) continue;
       assert.ok(ENGINE_CLAUDE_LONG_FLAGS.includes(token), `ENGINE_CLAUDE_LONG_FLAGS must name "${token}", sent by this real invocation`);
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeLlmPing (#1011): a configured non-'auto' host.permissionMode reaches the ping's own --permission-mode flag", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  const argsFile = join(dir, "args.txt");
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\0' "$@" > "${argsFile}"\necho pong\nexit 0\n`);
+    assert.deepEqual(await probeLlmPing(bin, "haiku", 0.05, 30, "bypassPermissions"), { ok: true });
+    const argv = readFileSync(argsFile, "utf8").split("\0").slice(0, -1);
+    const modeIdx = argv.indexOf("--permission-mode");
+    assert.ok(modeIdx >= 0);
+    assert.equal(argv[modeIdx + 1], "bypassPermissions");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #1011: mkProbeLlmReachable is the SAME closure cli.ts's two production driver call sites
+// (tick + rounds) build — testing it directly, rather than only probeLlmPing's own lower-level
+// argv, is what actually catches a call site regressing to a hardcoded mode: both cli.ts call
+// sites are one-line calls into this shared builder, so this is the one place that config-to-argv
+// wiring can drift.
+test("mkProbeLlmReachable (#1011): the closure it returns spawns the ping with the CONFIGURED host.permissionMode, not REQUESTED_PERMISSION_MODE", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  const argsFile = join(dir, "args.txt");
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\0' "$@" > "${argsFile}"\necho pong\nexit 0\n`);
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      host: { permissionMode: "dontAsk" },
+    });
+    const probe = mkProbeLlmReachable(scfg, bin);
+    assert.deepEqual(await probe(), { ok: true });
+    const argv = readFileSync(argsFile, "utf8").split("\0").slice(0, -1);
+    const modeIdx = argv.indexOf("--permission-mode");
+    assert.ok(modeIdx >= 0);
+    assert.equal(argv[modeIdx + 1], "dontAsk");
+    assert.notEqual(argv[modeIdx + 1], REQUESTED_PERMISSION_MODE);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1923,6 +1967,75 @@ test("#1010 wiring: an init line reporting the SAME (requested) permission mode 
     const { name } = await s.dispatch({ number: 1011, title: "mode match", labels: [] });
     await waitForFile(join(dir, `${name}.done.json`));
     assert.deepEqual(state.eventsSince("1970-01-01T00:00:00.000Z", ["permission-mode-mismatch"]), []);
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    state?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #1011: every test above runs with the DEFAULT `auto` config, where the configured value
+// happens to equal REQUESTED_PERMISSION_MODE — a comparison reverted to the bare constant would
+// still pass every test above. These two pin a NON-`auto` configured mode, proving
+// recordPermissionModeMismatch reads `cfg.host.permissionMode`, not the constant.
+test("#1010/#1011 wiring: configured host.permissionMode 'dontAsk' with a MATCHING effective mode emits no event", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let state: State | undefined;
+  let s: WorkerSupervisor | undefined;
+  try {
+    const initLine = JSON.stringify({ type: "system", subtype: "init", model: "claude-stub", permissionMode: "dontAsk" });
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${initLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
+    state = new State(join(dir, "state.sqlite"));
+    const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, host: { permissionMode: "dontAsk" } });
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg: scfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      state,
+    });
+    const { name } = await s.dispatch({ number: 1013, title: "configured dontAsk, effective dontAsk", labels: [] });
+    await waitForFile(join(dir, `${name}.done.json`));
+    assert.deepEqual(state.eventsSince("1970-01-01T00:00:00.000Z", ["permission-mode-mismatch"]), []);
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    state?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#1010/#1011 wiring: configured host.permissionMode 'dontAsk' with a DIFFERENT effective mode emits one event whose requested field is the CONFIGURED mode, not the bare 'auto' constant", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let state: State | undefined;
+  let s: WorkerSupervisor | undefined;
+  try {
+    const initLine = JSON.stringify({ type: "system", subtype: "init", model: "claude-stub", permissionMode: "auto" });
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${initLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
+    state = new State(join(dir, "state.sqlite"));
+    const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, host: { permissionMode: "dontAsk" } });
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg: scfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      state,
+    });
+    const { name, sessionId } = await s.dispatch({ number: 1014, title: "configured dontAsk, effective auto", labels: [] });
+    await waitForFile(join(dir, `${name}.done.json`));
+    assert.deepEqual(state.eventsSince("1970-01-01T00:00:00.000Z", ["permission-mode-mismatch"]), [
+      {
+        kind: "permission-mode-mismatch",
+        payload: { worker: name, issue: 1014, session_id: sessionId, requested: "dontAsk", effective: "auto" },
+      },
+    ]);
   } finally {
     killAnyRunningLanes(s);
     s?.dispose();
@@ -3004,6 +3117,99 @@ test("dispatch passes INLINE guard --settings (no mutable file) + sets SAPWOOD_G
     s?.dispose();
     if (previousGhToken === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = previousGhToken;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #1011 AC2/AC3: dispatch()/resume() thread host.permissionMode through to the real spawn
+// argv — end-to-end, not just claudeArgs()'s own unit tests. ────────────────────────────────
+
+test('dispatch (#1011): host.permissionMode "dontAsk" -> --permission-mode dontAsk in argv; the inline --settings never carries a sandbox key', async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nexit 0\n`,
+    );
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      host: { permissionMode: "dontAsk" },
+    });
+    s = new WorkerSupervisor({ now: realClock, cfg: scfg, stateDir: dir, claudeBin: bin, renderPrompt: () => "p", guardHookPath: hook });
+    await s.dispatch({ number: 41, title: "t", labels: [] }, "lane-1011-dispatch-dontask");
+    await waitForFile(join(dir, "args.seen"), "argv was not published");
+    const argv = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    const modeIdx = argv.indexOf("--permission-mode");
+    assert.ok(modeIdx >= 0);
+    assert.equal(argv[modeIdx + 1], "dontAsk");
+    const settingsIdx = argv.indexOf("--settings");
+    assert.ok(settingsIdx >= 0);
+    const settings = JSON.parse(argv[settingsIdx + 1]!);
+    // AC2: guardSettings() output stays byte-identical to pre-#1011 — no sandbox key, ever,
+    // regardless of host.permissionMode (the engine injects no sandbox settings; see
+    // docs/security.md's "Execution profiles" section for the operator recipe).
+    assert.equal("sandbox" in settings, false);
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('dispatch (#1011): host.permissionMode omitted -> --permission-mode defaults to "auto"', async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nexit 0\n`,
+    );
+    const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 } });
+    s = new WorkerSupervisor({ now: realClock, cfg: scfg, stateDir: dir, claudeBin: bin, renderPrompt: () => "p", guardHookPath: hook });
+    await s.dispatch({ number: 42, title: "t", labels: [] }, "lane-1011-dispatch-default");
+    await waitForFile(join(dir, "args.seen"), "argv was not published");
+    const argv = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    const modeIdx = argv.indexOf("--permission-mode");
+    assert.equal(argv[modeIdx + 1], "auto");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume (#1011): a fix/resume leg gets the SAME configured --permission-mode as dispatch()", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(
+      dir,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
+    );
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      host: { permissionMode: "bypassPermissions" },
+    });
+    s = new WorkerSupervisor({ now: realClock, cfg: scfg, stateDir: dir, claudeBin: bin, renderPrompt: () => "p", guardHookPath: hook });
+    const { name, sessionId } = await s.dispatch({ number: 44, title: "t", labels: [] }, "lane-1011-resume");
+    await waitForFile(join(dir, "args.seen"), "dispatch argv was not published");
+    for (let i = 0; i < 400 && !existsSync(join(dir, `${name}.done.json`)); i++) await sleep(20);
+    assert.ok(existsSync(join(dir, `${name}.done.json`)), "driving-lane precondition: dispatch must have reached done");
+    rmSync(join(dir, "args.seen"));
+    // Fix-leg entry (opts.sessionId/opts.prompt) — the shape a driving-lane fix leg actually
+    // uses, never the .handoff-sentinel resume path (A1: resume() no longer requires .handoff).
+    await s.resume({ number: 44, title: "t", labels: [] }, name, { sessionId, prompt: "fix-leg: address review findings" });
+    await waitForFile(join(dir, "args.seen"), "resume argv was not published");
+    const argv = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
+    const modeIdx = argv.indexOf("--permission-mode");
+    assert.equal(argv[modeIdx + 1], "bypassPermissions");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });

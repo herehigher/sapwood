@@ -64,6 +64,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `board-gap-detected` — **investigate**: open issues exist that are unplaced on the ProjectV2 board; carries the total/shown/elsewhere counts.
 - `proxy-mint-failed` — **investigate**: the forge MCP proxy failed to mint a scoped token for a lane/role; the caller degrades per its own fail-open/fail-closed branch (#244). (see #244)
 - `egress-suspect` — **investigate** [round-artifact]: a worker or peripheral session's transcript showed a network-egress-shaped tool call (curl, WebFetch/WebSearch, ...) — informational, never an escalation (#341, #410). (see #410)
+- `bypass-permissions-mode-configured` — **investigate**: startup detected host.permissionMode: bypassPermissions — every claude session runs unchecked on the operator's own say-so; disclosure only, never a gate (#1011). (see #1011)
 
 ### Lane lifecycle
 

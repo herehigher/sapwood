@@ -83,6 +83,15 @@ worker:
 #   mode: hard # default: hard — fail-closed PreToolUse enforcement; "soft" only observes and
   #             # logs what would be blocked, never the shipped default
 
+# host: the --permission-mode requested for every claude session the engine spawns (worker legs
+  #       and every peripheral role session alike). See docs/configuration.md's "host" section /
+  #       docs/security.md's "Execution profiles" section for full semantics.
+# host:
+#   permissionMode: auto # default: auto — unchanged classifier-reviewed behavior; "dontAsk"
+    #                      # only runs an explicitly allowed/read-only/guard-approved action;
+    #                      # "bypassPermissions" runs everything unchecked (an operator call the
+    #                      # engine does not gate — triggers one startup WARN, never a refusal)
+
 cost:
   roundBudgetUsd: 30 # default: 30 USD
   dailyBudgetUsd: 100 # default: 100 USD

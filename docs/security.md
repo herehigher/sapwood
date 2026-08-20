@@ -225,35 +225,33 @@ through `Bash`. A worker that can execute `curl`, open a socket, or run an equiv
 can send repository or environment data to an external endpoint.
 
 **Amended by [DR #1009](https://github.com/herehigher/sapwood/issues/1009), re-adjudicating
-[#304](https://github.com/herehigher/sapwood/issues/304) (c):** #304 rejected egress isolation on
-the premise that no proxy/isolation layer existed and building one would be heavy. That premise no
-longer holds — Claude Code's built-in Bash sandbox (see [Execution
-profiles](#execution-profiles-host-permission-mode--bash-sandbox) below) IS that layer, shipped by
-the host, wired through the same inline `--settings` carrier the guard hook already uses. The
-re-adjudicated position: **Bash-channel containment is available as a hardening profile
-(`bashSandbox: required`) — egress is not "solved."** Inherited MCP servers and hooks stay
-OUTSIDE the sandbox boundary entirely (the sandbox isolates Bash subprocesses only; see
-"Execution profiles" for the full scope), so the host-delegated-capability-management gap below is
-unchanged by this amendment. The Bash lexical tripwire (below) downgrades from "the only
-mitigation" to **forensics** under `required` — a detection/audit backstop for whatever a
-`required` floor's `allowedDomains`/`excludedCommands` widening still lets through (P6 of #1009:
-array keys merge across scopes, so a widened floor is a real, not hypothetical, case) — and stays
-the ONLY mitigation under the default `host-managed` profile, where the engine injects nothing.
+[#304](https://github.com/herehigher/sapwood/issues/304) (c), further amended 2026-08-20
+(owner ruling, deferral record [#1038](https://github.com/herehigher/sapwood/issues/1038)):**
+#304 rejected egress isolation on the premise that no proxy/isolation layer existed and building
+one would be heavy. That premise is gone — Claude Code's built-in Bash sandbox (see [Execution
+profiles](#execution-profiles-host-permission-mode--bash-sandbox) below) IS a layer that could
+close it, shipped by the host, requiring no engine-side build. Engine-enforced injection of that
+sandbox was evaluated (DR #1009, probed P1–P8) and **deferred pre-release** — no engine-injected
+sandbox config key ships, and the engine injects no sandbox settings into any session. **The Bash lexical
+tripwire below is therefore the only engine-side mitigation for worker Bash egress**, full stop —
+not conditional on any config key. The probed floor survives as an **operator recipe** (below):
+an operator who wants Claude Code's built-in Bash sandbox enabled for engine-spawned sessions
+configures it in their OWN Claude settings (project/user/managed) — the engine neither requires
+nor prevents this.
 
-That gap is an accepted boundary, not an isolation feature waiting to be implied by the rest
-of the model. sapwood targets trusted repos first; by owner decision, the engine does not
-UNCONDITIONALLY place worker sessions in a network-isolated sandbox or proxy — `bashSandbox`
-defaults to `host-managed` (operator's own Claude settings decide) and `required` is an explicit
-opt-in. Operators must therefore still treat worker Bash egress as a blind spot under the default
-profile, and as a hardened-but-not-eliminated surface under `required`, when deciding which
+That gap is an accepted boundary, not an isolation feature waiting to be implied by the rest of
+the model. sapwood targets trusted repos first; the engine does not configure a network-isolated
+sandbox or proxy for worker sessions. Operators must therefore treat worker Bash egress as a
+blind spot — mitigated only by the lexical tripwire below and, if the operator has independently
+configured one, whatever their own Bash-sandbox settings enforce — when deciding which
 repositories, host credentials, and environment data are safe to expose to a run. This is not the
 engine's only inherited-capability egress gap: host-delegated capability management (above)
 documents a second, broader one — the operator's ambient host MCP surface, which a producer leg
-inherits regardless of `Bash`, which the guard hook's matcher does not mediate, and which the Bash
-sandbox does not cover either (MCP servers are separate processes, not Bash subprocesses). The two
-are tracked separately because they arrived from different decisions and are detected by different
-mechanisms (the Bash lexical tripwire below vs. `scanEgressSuspects`'s `mcp__*` family), not
-because either is more or less real than the other.
+inherits regardless of `Bash`, which the guard hook's matcher does not mediate, and which a Bash
+sandbox would not cover either (MCP servers are separate processes, not Bash subprocesses). The
+two are tracked separately because they arrived from different decisions and are detected by
+different mechanisms (the Bash lexical tripwire below vs. `scanEgressSuspects`'s `mcp__*`
+family), not because either is more or less real than the other.
 
 The engine adds a monitor-only lexical tripwire at lane end. It scans the completed leg's
 existing Claude stream-json log for Bash tool calls whose executable matches
@@ -292,17 +290,19 @@ precisely why this is a prominence marker on a retained record, not an exclusion
 
 **[DR #1009](https://github.com/herehigher/sapwood/issues/1009) (owner-confirmed 2026-08-19),
 re-adjudicating [#304](https://github.com/herehigher/sapwood/issues/304) (c) and amending
-[Decision #11](PLAN.md#locked-decisions):** every `claude` role session sapwood spawns has run
-`--permission-mode auto` since the first `worker.ts`, and the engine has never configured or
-recorded the host's Bash sandbox. #304 rejected egress isolation on the premise that no
-proxy/isolation layer existed. That premise is gone — Claude Code's built-in Bash sandbox
-(Seatbelt on macOS with nothing to install, bubblewrap+socat on Linux/WSL2) IS that layer, wired
-through the same inline `--settings` carrier `guardSettings()` already uses. This section is the
-DR's durable output: two host execution-profile keys, what each guarantees, and what each leaves
-open. **These are profile keys, not capability grants** — they configure HOW a session's tools
-reach the host, never WHICH tools a producer leg is offered (that stays [host-delegated capability
-management](#host-delegated-capability-management), Decision #11, unchanged and unrelated). No
-`capabilities.*` surface is reopened by this DR.
+[Decision #11](PLAN.md#locked-decisions); further amended 2026-08-20 (owner ruling, deferral
+record [#1038](https://github.com/herehigher/sapwood/issues/1038)):** every `claude` role
+session sapwood spawns has run `--permission-mode auto` since the first `worker.ts`. #1011
+implements the operator-choice half of that DR — `host.permissionMode`, below — as a config key.
+The DR also probed Claude Code's built-in Bash sandbox (Seatbelt on macOS with nothing to
+install, bubblewrap+socat on Linux/WSL2) as a candidate engine-injected floor for worker Bash
+egress; the owner deferred that half pre-release (#1038) — **the engine injects no sandbox
+settings and no sandbox-selecting config key exists.** The probed floor survives as an **operator
+recipe** (below): paste-ready JSON for the operator's OWN Claude settings, not something sapwood
+configures on their behalf. **`host.permissionMode` is a profile key, not a capability grant** —
+it configures HOW a session's tools reach the host, never WHICH tools a producer leg is offered
+(that stays [host-delegated capability management](#host-delegated-capability-management),
+Decision #11, unchanged and unrelated). No `capabilities.*` surface is reopened by this DR.
 
 ### Seven layers, none redundant with another
 
@@ -313,18 +313,18 @@ These seven mechanisms answer different questions; landing the sandbox makes non
 | 1 | CLI `--allowedTools`/`--disallowedTools` | Host tool shaping (advisory for producers) | Which named tools/subcommands does the CLI offer this session at all? |
 | 2 | Guard hook + deterministic engine writes + merge driver | Governance effects | Which write actions (merge, label, forge state change) are EVER trusted, regardless of what a session asked for? |
 | 3 | L0/L1 credential tier (worker credential tiers, above) | Credential identity | WHO is this session, forge-API-wise — the operator's full identity, or a scoped git-transport-only key, or nothing? |
-| 4 | Bash sandbox (`bashSandbox`, this section) | Execution reach — Bash subprocesses only | What can a Bash command this session RUNS read, write, or reach on the network, once it's already been allowed to run? |
+| 4 | Bash sandbox (operator-configured, recipe in this section) | Execution reach — Bash subprocesses only | What can a Bash command this session RUNS read, write, or reach on the network, once it's already been allowed to run? |
 | 5 | Forge MCP proxy | Information access | What forge (GitHub) data can this session read/write through the engine's own mediated channel, independent of raw `gh`/git? |
 | 6 | AC-authority dispatch snapshot | Authoritative gate input | What is the issue's body/ACs AS OF DISPATCH, immune to a later producer-side edit? |
 | 7 | Gate② review-session seal | Init integrity | Does the REVIEW session itself start with zero MCP servers, zero file-based settings, and a forced-hard guard? |
 
-Layer 4 (this DR's subject) is orthogonal to layer 3 (credential identity vs. execution reach —
-two independent axes; `bashSandbox` is never coupled to `worker.deployKeyPath`/`worker.deployKeyId`
-in config, though operationally an L1 deployment is the natural pairing since both reduce the
-same class of theft-blast-radius). It applies to every Bash-bearing `claude` session the engine
-spawns — worker legs (dispatch/resume/fix) and `retro` — never to gate② (D1: no Bash at all in a
-review session) or to `codex exec` (its own `--sandbox read-only`, a vendor-specific mechanism
-outside this key's scope).
+Layer 4 (the recipe below) is orthogonal to layer 3 (credential identity vs. execution reach —
+two independent axes; an operator-configured Bash sandbox is never coupled to
+`worker.deployKeyPath`/`worker.deployKeyId` in config, though operationally an L1 deployment is
+the natural pairing since both reduce the same class of theft-blast-radius). It would apply to
+every Bash-bearing `claude` session the engine spawns — worker legs (dispatch/resume/fix) and
+`retro` — never to gate② (D1: no Bash at all in a review session) or to `codex exec` (its own
+`--sandbox read-only`, a vendor-specific mechanism outside this recipe's scope).
 
 ### Deployment-tier ladder
 
@@ -333,8 +333,8 @@ environments](https://code.claude.com/docs/en/sandbox-environments) taxonomy:
 
 | Tier | Isolates | sapwood's stance |
 |------|----------|-------------------|
-| Host, `bashSandbox: host-managed` (default) | Nothing engine-configured; whatever the operator's own Claude settings already do | Zero engine change — "host-managed already exists today," per Decision #11's own rationale |
-| Bash sandbox, `bashSandbox: required` | Bash subprocesses only (filesystem + network); built-in tools (Read/Edit/Write), MCP servers, and hooks run unconstrained | Engine-injected, `failIfUnavailable`-verified at init only; documented and probed in this DR; the profile sapwood recommends as a floor |
+| Host (default) | Nothing engine-configured; whatever the operator's own Claude settings already do | The engine's own default — it injects nothing |
+| Bash sandbox (operator-configured, recipe in this section) | Bash subprocesses only (filesystem + network); built-in tools (Read/Edit/Write), MCP servers, and hooks run unconstrained | Operator recipe only — the probed floor (below) is paste-ready for the operator's OWN Claude settings; engine-side injection was evaluated and deferred (#1038) |
 | `@anthropic-ai/sandbox-runtime` | The WHOLE `claude` process — Bash, built-in tools, MCP servers, and hooks together, same OS primitives as the Bash sandbox | Operator recipe only (below); sapwood does not wrap its own process launch in it — framework code stays generic (CLAUDE.md non-negotiable) |
 | Dev container / custom container | Full development environment, Docker-based | Operator recipe only; the upstream example dev container's default-deny firewall is the documented starting point for pairing with `--dangerously-skip-permissions`-class unattended runs |
 | Dedicated VM / Claude Code on the web | Full OS, or Anthropic-managed VM | Out of scope for sapwood's own engine; named for completeness, not built |
@@ -372,8 +372,9 @@ values; only the allow side moves.
   paths](https://code.claude.com/docs/en/permission-modes#protected-paths). **This is an operator
   call the engine does not gate:** whether the operator's own OS-level isolation is adequate is a
   judgment the engine has no way to verify. At startup, when `bypassPermissions` is configured,
-  the engine emits one guidance-carrying WARN (log + event) naming the outer-boundary recipe
-  below. Probed live (#1009 P8): a headless `-p` session under `bypassPermissions` starts with no
+  the engine emits one guidance-carrying WARN (log line + a `bypass-permissions-mode-configured`
+  state event, #1011) naming the outer-boundary recipe below. Probed live (#1009 P8): a headless
+  `-p` session under `bypassPermissions` starts with no
   acceptance dialog, and the engine's deny side still fires — `--disallowedTools`
   (`decision_reason_type: "rule"`) AND an inline PreToolUse guard hook's `exit 2`
   (`PreToolUse:Bash hook error: ...`) both independently blocked a `gh pr merge` attempt,
@@ -382,13 +383,20 @@ values; only the allow side moves.
   `permissions.disableBypassPermissionsMode: "disable"` silently removes this mode regardless of
   what `host.permissionMode` requests — engine-invisible.
 
-### `bashSandbox`: `host-managed | required`
+### Bash sandbox: operator recipe (engine injection deferred)
 
-`host-managed` (default) injects nothing; the operator's own Claude settings (project/user/
-managed) decide whether and how the sandbox engages.
+**The engine injects no sandbox settings into any session it spawns, and no sandbox-selecting
+config key exists.** DR #1009 probed Claude Code's built-in Bash sandbox as a candidate
+engine-injected floor (P1–P8); the owner deferred engine-enforced injection pre-release
+(2026-08-20, [#1038](https://github.com/herehigher/sapwood/issues/1038) — no known deployment,
+dogfood included, would enable it today, so shipping the injection path plus its containment
+tail would serve zero users). Re-introduction is deferred to real demand, tracked in #1038 along
+with its adoption/containment designs.
 
-`required` injects this floor inline, merged into the SAME `--settings` JSON `guardSettings()`
-already returns:
+An operator who wants Claude Code's built-in Bash sandbox engaged for engine-spawned sessions
+configures it in their OWN Claude settings (project/user/managed) — the engine neither requires
+nor prevents this, and never inspects or overrides it. The probed floor below is paste-ready for
+that purpose:
 
 ```json
 {"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true,"allowUnsandboxedCommands":false,
@@ -396,64 +404,70 @@ already returns:
  "filesystem":{"denyRead":["~/.config/gh","~/.ssh","~/.aws","~/.claude/.credentials.json"]}}}
 ```
 
-The engine floor carries no `allowedDomains`/`allowRead`/`allowWrite` — those stay host settings
-(floor = governance core, allowances = host, per Decision #11); an operator running a `required`
-leg must add `allowedDomains` (`github.com` at minimum) in their own Claude settings, or no
-sandboxed network destination is reachable. One engine-added exception: when `worker.deployKeyPath` is set
-(L1), the floor also adds `excludedCommands: ["git push *","git fetch *","git pull *","git
-ls-remote *"]` — exactly the four network verbs deploy-key SSH transport needs,
-prefix-matched against the command after any leading environment assignments (so
-`GIT_SSH_COMMAND=… git ls-remote …` matches `git ls-remote *`; `git -c … ls-remote …` does not,
-and stays sandboxed) — because plain `ssh` cannot resolve or reach GitHub from inside the sandbox
-(confirmed live, #1009 P1(b)) and no simpler recipe carries deploy-key SSH through it today.
+This floor carries no `allowedDomains`/`allowRead`/`allowWrite` — an operator pasting it in must
+add `allowedDomains` (`github.com` at minimum; a real deployment needs more — the forge API
+endpoints, package registries, and any other host the worker's Bash calls legitimately reach) in
+the same settings, or no sandboxed network destination is reachable at all.
+
+**L1 deploy-key note:** plain `ssh` cannot resolve or reach GitHub from inside the sandbox
+(confirmed live, #1009 P1(b)), so an operator running an L1 (deploy-key) deployment under this
+recipe additionally needs `excludedCommands: ["git push *","git fetch *","git pull *","git
+ls-remote *"]` — exactly the four network verbs deploy-key SSH transport needs, prefix-matched
+against the command after any leading environment assignments (so `GIT_SSH_COMMAND=… git
+ls-remote …` matches `git ls-remote *`; `git -c … ls-remote …` does not, and stays sandboxed).
 `excludedCommands: ["git *"]` was tested and rejected as needlessly broad: it exempts every local
 git operation (checkout/commit/merge/rebase/add/diff/log/status) along with the four verbs that
-actually need it. (Verified feasible on claude 2.1.235: SSH:22 transits the sandbox's
-authenticated HTTP CONNECT proxy via a proxy-aware `ProxyCommand`; not built — the added
-complexity isn't worth the narrowing this residual would close.)
+actually need it — an unnecessarily large unsandboxed surface for the same functional outcome.
+(Verified feasible on claude 2.1.235: SSH:22 transits the sandbox's authenticated HTTP CONNECT
+proxy via a proxy-aware `ProxyCommand`; not documented as a simpler alternative here because the
+added complexity isn't worth the narrowing it would close.)
 
-`required` injects the floor and sets `failIfUnavailable: true`, which Claude Code's
-documentation says makes sandbox-initialization failure block CLI startup instead of falling back
-unsandboxed. The engine does not positively attest per-leg engagement; it records the observed
-`<sandbox_violations>` count (#1010). In P5 on claude 2.1.235, the init event exposed no sandbox
-field, while a denied tool result carried `<sandbox_violations>`.
+Enabling this recipe with `failIfUnavailable: true` (as shown) makes sandbox-initialization
+failure block CLI startup instead of falling back unsandboxed, per Claude Code's own
+documentation. Neither the engine nor this recipe positively attests per-leg engagement; #1010's
+observability records whatever `<sandbox_violations>` count a session's own transcript reports,
+independent of whether the sandbox was engaged by this recipe, some other operator
+configuration, or not at all. In probing (P5 on claude 2.1.235), the init event exposed no
+sandbox field, while a denied tool result carried `<sandbox_violations>`.
 
-**Guaranteed:** the `dangerouslyDisableSandbox` escape hatch is off; `sandbox.filesystem.denyRead`
-closes the worker.ts:1929 `steal.mjs` read (probed: `EPERM`, with a specific `allowRead` entry
-able to re-open one named file); ordinary git-over-HTTPS to an allowlisted domain transits the
-sandbox's CONNECT proxy cleanly; `npm ci`/build/typecheck/lint run clean with the host allowing
-just `registry.npmjs.org` for this repo (a local-port-binding test additionally needs
-`network.allowLocalBinding: true` — off by default, `EPERM` on `listen(127.0.0.1)` without it);
-boolean keys (`allowUnsandboxedCommands`, `failIfUnavailable`) resolve by settings-scope rank, not
-merge, so they can't be locally re-opened the way array keys can (below); the guard hook and
-`--disallowedTools` both keep firing regardless of `bashSandbox`'s own state, including under
-`bypassPermissions` (probed).
+**Guaranteed, once an operator has this floor active:** the `dangerouslyDisableSandbox` escape
+hatch is off; `sandbox.filesystem.denyRead` closes the worker.ts:1929 `steal.mjs` read (probed:
+`EPERM`, with a specific `allowRead` entry able to re-open one named file); ordinary
+git-over-HTTPS to an allowlisted domain transits the sandbox's CONNECT proxy cleanly; `npm
+ci`/build/typecheck/lint run clean with the host allowing just `registry.npmjs.org` for this repo
+(a local-port-binding test additionally needs `network.allowLocalBinding: true` — off by
+default, `EPERM` on `listen(127.0.0.1)` without it); boolean keys (`allowUnsandboxedCommands`,
+`failIfUnavailable`) resolve by settings-scope rank, not merge, so they can't be locally
+re-opened the way array keys can (below); the guard hook and `--disallowedTools` both keep firing
+regardless of sandbox state, including under `bypassPermissions` (probed) — those stay
+engine-owned and are unaffected by whether an operator has this recipe active.
 
-**Residual:** array keys (`allowedDomains`, `excludedCommands`, `allowRead`, `allowWrite`) are
-ADDITIVE across settings sources with no lock outside managed settings — a worker-writable
-worktree's own `.claude/settings.json` widened the inline floor's `allowedDomains` in a live
-probe (#1009 P6); the effective allowlist is `allowedDomains` plus every `WebFetch(domain:...)`
-rule, not `allowedDomains` alone. `excludedCommands` matches by command PREFIX against the
-invocation after any leading environment assignments (so `GIT_SSH_COMMAND=… git ls-remote …`
-matches `git ls-remote *`; `git -c … ls-remote …` does not, and stays sandboxed) — `["ssh *"]`
-never matches an `ssh` child spawned by `git`, and a `-c ...`-prefixed git invocation escapes a
-subcommand-specific exclusion too (fails DNS the same as any other unexcluded `git` call). The L1
-exclusion above (four network verbs only) leaves them running unsandboxed — their own filesystem
-writes included. An allowlisted domain is not a protocol-or-port restriction — CONNECT was verified to
-carry SSH:22 to an allowlisted `github.com` the same way it carries HTTPS. `bypassPermissions`
-skips protected-path checks and the sandbox never covers
-`Edit`/`Write` at all, so a same-lane self-escalation via `.mcp.json`/`.claude/hooks` stays
-structurally possible, bounded only by the guard hook and by L1 credential absence. A managed
-`allowManagedDomainsOnly`/`allowManagedPermissionRulesOnly` policy can silently change the
-effective floor the same way the existing [managed-settings
+**Residual, even with this recipe active:** array keys (`allowedDomains`, `excludedCommands`,
+`allowRead`, `allowWrite`) are ADDITIVE across settings sources with no lock outside managed
+settings — a worker-writable worktree's own `.claude/settings.json` widened the inline floor's
+`allowedDomains` in a live probe (#1009 P6); the effective allowlist is `allowedDomains` plus
+every `WebFetch(domain:...)` rule, not `allowedDomains` alone. `excludedCommands` matches by
+command PREFIX against the invocation after any leading environment assignments (so
+`GIT_SSH_COMMAND=… git ls-remote …` matches `git ls-remote *`; `git -c … ls-remote …` does not,
+and stays sandboxed) — `["ssh *"]` never matches an `ssh` child spawned by `git`, and a `-c
+...`-prefixed git invocation escapes a subcommand-specific exclusion too (fails DNS the same as
+any other unexcluded `git` call). The L1 exclusion above (four network verbs only) leaves them
+running unsandboxed — their own filesystem writes included. An allowlisted domain is not a
+protocol-or-port restriction — CONNECT was verified to carry SSH:22 to an allowlisted
+`github.com` the same way it carries HTTPS. `bypassPermissions` skips protected-path checks and
+the sandbox never covers `Edit`/`Write` at all, so a same-lane self-escalation via
+`.mcp.json`/`.claude/hooks` stays structurally possible, bounded only by the guard hook and by L1
+credential absence. A managed `allowManagedDomainsOnly`/`allowManagedPermissionRulesOnly` policy
+can silently change the effective floor the same way the existing [managed-settings
 exception](#managed-settings-allowmanagedpermissionrulesonly-exception) already documents.
 GPG-signed commits fail under the default filesystem confinement (`~/.gnupg` unwritable, probed
-P1a) — a host allowance (`filesystem.allowWrite: ["~/.gnupg"]`), not an engine floor entry,
+P1a) — a host allowance (`filesystem.allowWrite: ["~/.gnupg"]`), not a change to the floor above,
 closes it.
 
-Two states cover every probed shape — nothing engine-configured, or an engine-injected floor
-with an initialization hard-fail but no engagement attestation; a third "on but unattested"
-state would be indistinguishable from `host-managed` until something is denied.
+Sandbox coverage is Bash subprocesses only — built-in tools (Read/Edit/Write), MCP servers, and
+hooks run unconstrained regardless of whether this recipe is active, which is why it is not
+sufficient for unattended runs on its own; see the deployment-tier ladder above and the outer-
+boundary recipe below for what wraps the whole process.
 
 ### Operator recipe for an outer boundary (pointers, not files)
 
@@ -1367,20 +1381,21 @@ either closes it. Two mitigations this repo deliberately does NOT attempt: **HOM
 (redirecting `$HOME` would break the `claude` CLI's own config/auth, which the lane also needs
 merely to run) and **stripping `Bash(node *)`/`Bash(npm *)`** (a fix leg's whole job requires
 running tests). The upgrade path for a boundary that's actually closed is **OS-level sandboxing**
-(container/chroot/Landlock-style filesystem confinement, available opt-in as `bashSandbox:
-required` — see [Execution profiles](#execution-profiles-host-permission-mode--bash-sandbox)
-below) or running fix legs under a **dedicated, narrowly-scoped CI identity** whose credential
-store holds nothing worth stealing — the CI-identity path remains unimplemented. One narrowing
-worth naming precisely: `hosts.yml` is `gh`'s plaintext-token storage path; on macOS, `gh auth
-login` by default stores the token in the OS **keychain** instead, which neither this mechanism
-nor the PoC exposes — the risk this note describes is sharpest wherever `gh` ends up with a
-plaintext on-disk token (Linux, CI images, an explicit non-keychain login), not a universal
-property of every `gh` installation.
+(container/chroot/Landlock-style filesystem confinement, available as the operator-configured
+Bash-sandbox recipe — see [Execution
+profiles](#execution-profiles-host-permission-mode--bash-sandbox) below) or running fix legs
+under a **dedicated, narrowly-scoped CI identity** whose credential store holds nothing worth
+stealing — the CI-identity path remains unimplemented. One narrowing worth naming precisely:
+`hosts.yml` is `gh`'s plaintext-token storage path; on macOS, `gh auth login` by default stores
+the token in the OS **keychain** instead, which neither this mechanism nor the PoC exposes — the
+risk this note describes is sharpest wherever `gh` ends up with a plaintext on-disk token (Linux,
+CI images, an explicit non-keychain login), not a universal property of every `gh` installation.
 
-`workerCredentialFreeEnv()` alone provides no filesystem confinement. Under `bashSandbox:
-required`, Bash reads of the named `denyRead` paths are OS-blocked (probed live against this
-exact PoC path — `node -e "readFileSync(process.env.HOME+'/.config/gh/hosts.yml')"` returned
-`EPERM`); `host-managed` provides no such engine guarantee. `required` is still not a
+`workerCredentialFreeEnv()` alone provides no filesystem confinement. An operator who has
+configured the Bash-sandbox recipe above gets OS-blocked Bash reads of the named `denyRead`
+paths (probed live against this exact PoC path — `node -e
+"readFileSync(process.env.HOME+'/.config/gh/hosts.yml')"` returned `EPERM`); without that
+operator configuration there is no such guarantee. Even with the recipe active it is still not a
 home-directory jail: unlisted paths and additive `allowRead` entries remain residuals.
 
 #### Worker-leg user-settings persistence vector — detect & disclose
@@ -1734,12 +1749,12 @@ hardcoded (not caller-overridable) for every review session:
   entries at session init; with `--setting-sources ""`, that application never happened, while the
   CLI still ran a full turn cleanly (exit 0, empty stderr). Excluding `user` too — not just
   `project`/`local` — closes a specific residual this page already names above: a worker leg's
-  `Bash(node *)`/`Bash(npm *)` grant runs with the operator's REAL `$HOME` and, under the default
-  `bashSandbox: host-managed` profile, is not filesystem-confined from it (the "forge MCP proxy"
+  `Bash(node *)`/`Bash(npm *)` grant runs with the operator's REAL `$HOME` and, absent an
+  operator-configured Bash sandbox, is not filesystem-confined from it (the "forge MCP proxy"
   section's `workerCredentialFreeEnv` HONEST SCOPE note, and its `steal.mjs` proof-of-concept —
   see also [Execution profiles](#execution-profiles-host-permission-mode--bash-sandbox) for the
-  opt-in `required` profile that closes the named-path subset of this residual), so a producer
-  could in principle have
+  operator recipe that closes the named-path subset of this residual), so a producer could in
+  principle have
   influenced the operator's own `~/.claude/settings.json` in an *earlier* round; a review session
   loading `user` settings would inherit whatever that earlier influence left behind. Loading no
   file sources at all removes that inheritance path for review specifically, without requiring the
