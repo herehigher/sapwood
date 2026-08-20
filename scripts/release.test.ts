@@ -34,6 +34,15 @@ import {
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
+const CLAUDE_CLI_AVAILABLE = (() => {
+  try {
+    execFileSync("claude", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
 function tmpRepo(): string {
   return mkdtempSync(join(tmpdir(), "sapwood-release-test-"));
 }
@@ -439,12 +448,27 @@ function writeCatalogShell(repoRoot: string, version: string): void {
   mkdirSync(join(repoRoot, "commands"), { recursive: true });
   mkdirSync(join(repoRoot, "bin"), { recursive: true });
   mkdirSync(join(repoRoot, "scripts", "catalog"), { recursive: true });
-  writeFileSync(join(repoRoot, ".claude-plugin", "plugin.json"), `${JSON.stringify({ name: "sapwood", version }, null, 2)}\n`);
+  writeFileSync(
+    join(repoRoot, ".claude-plugin", "plugin.json"),
+    `${JSON.stringify(
+      {
+        name: "sapwood",
+        version,
+        description: "Test catalog plugin",
+        author: { name: "test" },
+        homepage: "https://example.invalid/sapwood",
+        license: "MIT",
+        keywords: ["claude-code"],
+      },
+      null,
+      2,
+    )}\n`,
+  );
   writeFileSync(
     join(repoRoot, ".claude-plugin", "marketplace.json"),
     `${JSON.stringify({ name: "sapwood", owner: { name: "test" }, plugins: [{ name: "sapwood", source: "./" }] }, null, 2)}\n`,
   );
-  writeFileSync(join(repoRoot, "commands", "sapwood-run.md"), "run\n");
+  writeFileSync(join(repoRoot, "commands", "sapwood-run.md"), "---\ndescription: Test command\n---\nrun\n");
   writeFileSync(join(repoRoot, "bin", "sapwood-plugin.sh"), "#!/bin/sh\necho sapwood\n");
   writeFileSync(join(repoRoot, "scripts", "catalog", "ci.yml"), "name: Catalog CI\n");
 }
@@ -545,6 +569,42 @@ test("catalog promotion: local bare remote is idempotent and stamps the release 
     assert.match(second.output, /already matches/);
     assert.equal(catalogHead(catalogRemote), head);
   } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(dirname(catalogRemote), { recursive: true, force: true });
+  }
+});
+
+test("catalog promotion: strict manifest-file validation rejects an unknown field", {
+  skip: CLAUDE_CLI_AVAILABLE ? false : "claude CLI is not on PATH",
+}, () => {
+  const { repoRoot, catalogRemote } = setupCatalogPromotionRepo();
+  const clone = tmpRepo();
+  try {
+    const promoted = runCatalogPromote({ repoRoot, exec: npmViewExec(repoRoot, "0.3.0\n") }, { catalogRemote, dryRun: false });
+    assert.equal(promoted.code, 0, promoted.output);
+    git(clone, ["clone", catalogRemote, "."]);
+    const manifestPath = join(clone, ".claude-plugin", "plugin.json");
+    assert.doesNotThrow(() =>
+      execFileSync("claude", ["plugin", "validate", ".claude-plugin/plugin.json", "--strict"], {
+        cwd: clone,
+        encoding: "utf8",
+        stdio: "pipe",
+      }),
+    );
+    const plugin = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+    plugin.unknownField = true;
+    writeFileSync(manifestPath, `${JSON.stringify(plugin, null, 2)}\n`);
+    assert.throws(
+      () =>
+        execFileSync("claude", ["plugin", "validate", ".claude-plugin/plugin.json", "--strict"], {
+          cwd: clone,
+          encoding: "utf8",
+          stdio: "pipe",
+        }),
+      (error: unknown) => (error as { status?: unknown }).status === 1,
+    );
+  } finally {
+    rmSync(clone, { recursive: true, force: true });
     rmSync(repoRoot, { recursive: true, force: true });
     rmSync(dirname(catalogRemote), { recursive: true, force: true });
   }
@@ -843,33 +903,33 @@ test("runPublish: a mismatched npm view stops before catalog clone or push", () 
   }
 });
 
-const STALE_MARKETPLACE_INSTALL_CLAIM = /marketplace install[\s\S]{0,120}only runs `npm ci --ignore-scripts`/;
+const BANNED_MARKETPLACE_INSTALL_COMMAND = "npm ci --ignore-scripts";
 const TEXT_FILE_SUFFIX = /\.(?:md|sh|txt|yaml|yml|json)$/;
 
-function filesWithStaleMarketplaceInstallClaim(dirs: string[]): string[] {
+function filesWithBannedMarketplaceInstallCommand(dirs: string[]): string[] {
   return dirs.flatMap((dir) =>
     readdirSync(dir, { recursive: true })
       .filter((path): path is string => typeof path === "string")
       .filter((path) => TEXT_FILE_SUFFIX.test(path))
       .map((path) => join(dir, path))
-      .filter((path) => STALE_MARKETPLACE_INSTALL_CLAIM.test(readFileSync(path, "utf8"))),
+      .filter((path) => readFileSync(path, "utf8").includes(BANNED_MARKETPLACE_INSTALL_COMMAND)),
   );
 }
 
 test("plugin command documentation never claims marketplace installs run npm ci --ignore-scripts", () => {
   const scannedDirs = [join(REPO_ROOT, "commands"), join(REPO_ROOT, "bin"), join(REPO_ROOT, "docs")];
   const correctedSentence = "A marketplace install has no local engine build; the wrapper falls back to `npx sapwood@<plugin version>`";
-  assert.deepEqual(filesWithStaleMarketplaceInstallClaim(scannedDirs), []);
+  assert.deepEqual(filesWithBannedMarketplaceInstallCommand(scannedDirs), []);
   assert.ok(readFileSync(join(REPO_ROOT, "commands", "sapwood-run.md"), "utf8").includes(correctedSentence));
   assert.ok(readFileSync(join(REPO_ROOT, "commands", "sapwood-status.md"), "utf8").includes(correctedSentence));
-  assert.doesNotMatch(readFileSync(join(REPO_ROOT, "commands", "sapwood-stop.md"), "utf8"), STALE_MARKETPLACE_INSTALL_CLAIM);
+  assert.equal(readFileSync(join(REPO_ROOT, "commands", "sapwood-stop.md"), "utf8").includes(BANNED_MARKETPLACE_INSTALL_COMMAND), false);
 
   const fixtureDir = tmpRepo();
   try {
     const stalePath = join(fixtureDir, "commands", "stale.md");
     mkdirSync(dirname(stalePath), { recursive: true });
-    writeFileSync(stalePath, "a marketplace install only runs `npm ci --ignore-scripts`\n");
-    assert.deepEqual(filesWithStaleMarketplaceInstallClaim([fixtureDir]), [stalePath]);
+    writeFileSync(stalePath, `unrelated fixture text: ${BANNED_MARKETPLACE_INSTALL_COMMAND}\n`);
+    assert.deepEqual(filesWithBannedMarketplaceInstallCommand([fixtureDir]), [stalePath]);
   } finally {
     rmSync(fixtureDir, { recursive: true, force: true });
   }
