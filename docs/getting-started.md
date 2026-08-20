@@ -32,8 +32,7 @@ first autonomous run.
 /plugin install sapwood@sapwood
 ```
 
-These are the catalog coordinates landed by #1031; they were not executed in this worktree.
-After the catalog has promoted a release, the plugin supplies `/sapwood-run`,
+After the owner's first catalog promotion, the plugin supplies `/sapwood-run`,
 `/sapwood-status`, `/sapwood-stop`, and `/sapwood-dashboard`. They use the released package
 without a build step. The first command invocation may download the package through `npx` and
 therefore needs network access; later calls reuse npm's local cache. `init` and `validate` use
@@ -43,6 +42,36 @@ On Windows, these slash commands need the POSIX `sh` that Claude Code supplies (
 WSL); see the operator [install-scope observations](supervision.md#install-scope-observations).
 `/sapwood-dashboard` starts `sapwood dashboard`; if it cannot open a browser, it prints the
 loopback URL and keeps serving until you stop it with Ctrl+C.
+
+### Plugin-only slash commands (Channel B)
+
+These thin wrappers are available only in a Claude Code session that has loaded the sapwood
+plugin (Channel B, above) — they are **not** loaded by Channel A's contributor checkout or
+Channel C's npm install. Channel A and C users get the same functionality from the linked or
+installed `sapwood` CLI (`run`/`status`/`dashboard`) and, for stop/pause control, the
+file-sentinel commands (raw or the `sapwood pause`/`stop`/`estop` CLI verbs) above.
+
+- **`/sapwood-run [--once|--until-idle|--dry-run]`** — runs `sapwood run` with the given
+  mode and reports its output. No flags = daemon mode.
+- **`/sapwood-status [db-path]`** — runs `sapwood status`, reading the state DB directly
+  (`data/sapwood.sqlite` by default). Works even with no engine session currently
+  running.
+- **`/sapwood-dashboard [--port PORT] [--config PATH]`** — runs `sapwood dashboard`, opening
+  it in your default browser or printing the loopback URL in a headless environment.
+- **`/sapwood-stop [--emergency|--clear-emergency|--pause|--resume|--lift]`** — sapwood's
+  three tiers of human control:
+  - **`--emergency`**: the strictest tier — hard-kills running/fixing lane process groups
+    without a drain window. In-flight WIP is lost; clear it with `--clear-emergency` only after
+    human review.
+  - No argument: trips the **kill switch** — freezes all new dispatch and merges;
+    running workers are asked to hand off gracefully, then the conductor escalates to a
+    hard kill past the drain window. `--lift` reverses it.
+  - **`--pause`**: the gentle tier — freezes new dispatch *only*. Everything already in
+    flight (running workers, PRs moving through the review/merge gate) keeps going
+    normally. `--resume` lifts it.
+
+  See [`security.md`](security.md#human-controls-three-tiers) for the full semantics, including
+  how pause interacts with `--until-idle`.
 
 ### Channel C — npm
 
@@ -67,9 +96,7 @@ sapwood dashboard
 
 `alpha` is the pre-release dist-tag (a pre-release version never becomes `latest` — see
 [`10-releasing.md`](dev-guide/10-releasing.md)); use the shipped version or `latest` after a
-plain release. The registry examples are for a published release and were not run verbatim from
-this unpublished checkout. The pack/install smoke instead runs the same installed CLI from a
-local tarball (`sapwood --version` and `sapwood dashboard`), including on Windows.
+plain release.
 
 ### Channel A — contributor checkout
 
