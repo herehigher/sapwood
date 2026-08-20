@@ -530,6 +530,12 @@ export interface DashboardServerOptions {
 
 /** Open the read-only handle, bind loopback, resolve once the server is actually listening. */
 export async function createDashboardServer(opts: DashboardServerOptions): Promise<{ server: Server; state: State; port: number }> {
+  // A first dashboard visit can precede the first engine run. Initialize only a missing database,
+  // then reopen it read-only for every request; an existing database is never opened writable here.
+  if (!existsSync(opts.dbPath)) {
+    const bootstrap = new State(opts.dbPath);
+    bootstrap.close();
+  }
   const state = new State(opts.dbPath, { readOnly: true });
   let config: SapwoodConfig | null;
   if (opts.config !== undefined) {

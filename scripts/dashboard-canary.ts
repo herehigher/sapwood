@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -100,10 +100,7 @@ export async function runDashboardCanary(opts: DashboardCanaryOptions): Promise<
 async function main(argv: string[]): Promise<void> {
   const version = argv[2];
   if (version === undefined) throw new Error("usage: dashboard-canary <published-version>");
-  const cwd = process.cwd();
-  if (!existsSync(join(cwd, "data", "sapwood.sqlite"))) {
-    throw new Error("dashboard canary requires data/sapwood.sqlite in the repository root");
-  }
+  const cwd = mkdtempSync(join(tmpdir(), "sapwood-npx-canary-cwd-"));
   const cache = mkdtempSync(join(tmpdir(), "sapwood-npx-canary-"));
   try {
     const port = await availableDashboardPort();
@@ -116,6 +113,7 @@ async function main(argv: string[]): Promise<void> {
     process.stdout.write(`dashboard canary: OK ${result.origin}\n`);
   } finally {
     rmSync(cache, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
   }
 }
 

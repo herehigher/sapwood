@@ -1,15 +1,60 @@
 // pack.test.ts (#1032): proves the engine is packed from a clean checkout, then installed as the
 // bare `sapwood` package into a temporary global prefix.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { availableDashboardPort, runDashboardCanary } from "./dashboard-canary.ts";
+import { bundledDashboardDependencies } from "../engine/scripts/generate-third-party-notices.ts";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+async function assertCleanWorkspaceDashboardLaunch(checkoutDir: string): Promise<void> {
+  const cwd = mkdtempSync(join(tmpdir(), "sapwood-clean-dashboard-cwd-"));
+  const dbPath = join(cwd, "data", "sapwood.sqlite");
+  const port = await availableDashboardPort();
+  const child = spawn(process.execPath, [join(checkoutDir, "dashboard", "dist-server", "start.js"), "--db-path", dbPath, "--port", String(port)], {
+    cwd,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout.on("data", (chunk: Buffer) => (output += chunk.toString("utf8")));
+  child.stderr.on("data", (chunk: Buffer) => (output += chunk.toString("utf8")));
+  try {
+    const actualPort = await new Promise<number>((resolvePromise, reject) => {
+      const timer = setTimeout(() => reject(new Error(`clean workspace dashboard did not start:\n${output}`)), 30_000);
+      const inspect = () => {
+        const match = /\{"ok":true,"port":(\d+)\}/.exec(output);
+        if (match?.[1] !== undefined) {
+          clearTimeout(timer);
+          resolvePromise(Number(match[1]));
+        }
+      };
+      child.stdout.on("data", inspect);
+      child.stderr.on("data", inspect);
+      child.once("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.once("exit", (code) => {
+        clearTimeout(timer);
+        reject(new Error(`clean workspace dashboard exited before readiness (code ${code}):\n${output}`));
+      });
+      inspect();
+    });
+    assert.equal(actualPort, port);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/api/events`)).status, 200);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+      await new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise()));
+    }
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}
 
 test("packed engine tarball is fresh, map-free, and runnable from a clean checkout", { timeout: 600_000 }, async () => {
   const checkoutParent = mkdtempSync(join(tmpdir(), "sapwood-pack-checkout-"));
@@ -42,10 +87,22 @@ test("packed engine tarball is fresh, map-free, and runnable from a clean checko
     checkoutAdded = true;
     assert.equal(existsSync(join(checkoutDir, "engine", "dist")), false, "the staged checkout must start without build output");
     execFileSync("npm", ["ci", "--ignore-scripts"], { cwd: checkoutDir, env: npmEnv, stdio: "pipe", timeout: 180_000 });
+    // The dashboard server deliberately leaves yaml/zod external. This launch immediately after
+    // clean `npm ci` proves its workspace runtime dependencies resolve, rather than accidentally
+    // passing only with a pre-lockfile-change node_modules tree.
+    execFileSync("npm", ["run", "build", "--workspace", "dashboard"], { cwd: checkoutDir, env: npmEnv, stdio: "pipe", timeout: 180_000 });
+    await assertCleanWorkspaceDashboardLaunch(checkoutDir);
 
-    const staleOutput = join(checkoutDir, "engine", "dist", "review-stale.js");
-    mkdirSync(dirname(staleOutput), { recursive: true });
-    writeFileSync(staleOutput, "export default 'stale';\n");
+    const staleInputs = [
+      join(checkoutDir, "engine", "dist", "review-stale-engine.js"),
+      join(checkoutDir, "dashboard", "dist", "review-stale-dashboard.js"),
+      join(checkoutDir, "dashboard", "dist-server", "review-stale-server.js"),
+      join(checkoutDir, "engine", "dashboard-dist", "review-stale-staged.js"),
+    ];
+    for (const staleInput of staleInputs) {
+      mkdirSync(dirname(staleInput), { recursive: true });
+      writeFileSync(staleInput, "export default 'stale';\n");
+    }
     const packOutput = execFileSync("npm", ["pack", "--json", "--workspace", "engine", "--pack-destination", packDir], {
       cwd: checkoutDir,
       env: npmEnv,
@@ -65,7 +122,14 @@ test("packed engine tarball is fresh, map-free, and runnable from a clean checko
     const tarballPath = join(packDir, `sapwood-${manifestVersion}.tgz`);
     assert.ok(existsSync(tarballPath), `expected \`npm pack\` to produce ${tarballPath}`);
     const tarEntries = execFileSync("tar", ["-tzf", tarballPath], { encoding: "utf8", timeout: 15_000 }).trim().split("\n");
-    assert.equal(tarEntries.includes("package/dist/review-stale.js"), false, "prepack must remove stale dist output before building");
+    for (const staleInput of staleInputs) {
+      const staleName = staleInput.slice(checkoutDir.length + 1);
+      assert.equal(
+        tarEntries.some((entry) => entry.endsWith(staleName.slice(staleName.indexOf("/") + 1))),
+        false,
+        `prepack must remove stale ${staleName} before staging`,
+      );
+    }
     assert.equal(
       tarEntries.some((entry) => entry.endsWith(".map")),
       false,
@@ -76,6 +140,18 @@ test("packed engine tarball is fresh, map-free, and runnable from a clean checko
     const packedFiles = new Set(packed.files?.map((file) => file.path));
     for (const required of ["dashboard-dist/dist/index.html", "dashboard-dist/dist-server/start.js", "THIRD_PARTY_NOTICES"]) {
       assert.ok(packedFiles.has(required), `npm pack manifest is missing ${required}`);
+    }
+    const notices = execFileSync("tar", ["-xOzf", tarballPath, "package/THIRD_PARTY_NOTICES"], { encoding: "utf8", timeout: 15_000 });
+    assert.match(notices, /Vite's optimized SPA output does not retain dependency @license banners/);
+    // Rebuild only to recover the two bundles' input metadata. The staged package has already
+    // been created above; this asserts the notice CONTENT against every package Vite/esbuild
+    // actually bundled, not merely that a notice file happened to be included.
+    execFileSync("npm", ["run", "build", "--workspace", "dashboard"], { cwd: checkoutDir, env: npmEnv, stdio: "pipe", timeout: 180_000 });
+    for (const dependency of bundledDashboardDependencies(checkoutDir)) {
+      assert.ok(notices.includes(`## ${dependency.name}@${dependency.version}`), `notice omits bundled ${dependency.name}`);
+      for (const copyrightLine of dependency.copyrightLines) {
+        assert.ok(notices.includes(copyrightLine), `notice omits ${dependency.name}'s copyright line: ${copyrightLine}`);
+      }
     }
     assert.equal(
       [...packedFiles].some((path) => path.endsWith(".map")),
@@ -122,17 +198,6 @@ test("packed engine tarball is fresh, map-free, and runnable from a clean checko
 
     const canaryDir = mkdtempSync(join(tmpdir(), "sapwood-dashboard-canary-"));
     try {
-      const dbPath = join(canaryDir, "data", "sapwood.sqlite");
-      execFileSync(
-        process.execPath,
-        [
-          "--input-type=module",
-          "--eval",
-          `import { State } from ${JSON.stringify(pathToFileURL(join(installedRoot, "dist", "state", "state.js")).href)}; ` +
-            `const state = new State(${JSON.stringify(dbPath)}); state.close();`,
-        ],
-        { cwd: canaryDir, stdio: "pipe", timeout: 15_000 },
-      );
       const port = await availableDashboardPort();
       const canary = await runDashboardCanary({
         command: binPath,

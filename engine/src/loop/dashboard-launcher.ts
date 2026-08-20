@@ -21,7 +21,7 @@
 // BEFORE this function is ever called (same "run the build command" message that already covers
 // the vite SPA bundle).
 import { execFile, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -88,6 +88,14 @@ function pairedAssets(root: string): DashboardAssetPaths | undefined {
   return existsSync(assets.serverEntry) && existsSync(assets.distIndex) ? assets : undefined;
 }
 
+function isSourceDashboard(root: string): boolean {
+  try {
+    return JSON.parse(readFileSync(join(root, "package.json"), "utf8")).name === "@sapwood/dashboard";
+  } catch {
+    return false;
+  }
+}
+
 /** Resolve the complete dashboard layout as one unit. A source checkout deliberately uses its
  * repository build even if a previous pack left its ignored staging directory behind: that tree
  * is packaging state, never a contributor runtime. An installed package has no sibling dashboard
@@ -95,7 +103,7 @@ function pairedAssets(root: string): DashboardAssetPaths | undefined {
 export function dashboardAssetPaths(roots: DashboardAssetPathRoots = {}): DashboardAssetPaths | undefined {
   const packageRoot = roots.packageRoot ?? resolve(import.meta.dirname, "..", "..", "dashboard-dist");
   const repositoryDashboardRoot = roots.repositoryDashboardRoot ?? resolve(import.meta.dirname, "..", "..", "..", "dashboard");
-  if (existsSync(join(repositoryDashboardRoot, "package.json"))) return pairedAssets(repositoryDashboardRoot);
+  if (isSourceDashboard(repositoryDashboardRoot)) return pairedAssets(repositoryDashboardRoot);
   return pairedAssets(packageRoot) ?? pairedAssets(repositoryDashboardRoot);
 }
 

@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeThirdPartyNotices } from "./generate-third-party-notices.ts";
 
 const engineRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const repoRoot = dirname(engineRoot);
@@ -15,6 +16,7 @@ if (process.argv.includes("--clean")) {
   removeStagedDashboard();
 } else {
   execFileSync("npm", ["run", "build", "--workspace", "dashboard"], { cwd: repoRoot, stdio: "inherit" });
+  writeThirdPartyNotices(repoRoot);
   removeStagedDashboard();
   cpSync(join(repoRoot, "dashboard", "dist"), join(stagedRoot, "dist"), { recursive: true });
   cpSync(join(repoRoot, "dashboard", "dist-server"), join(stagedRoot, "dist-server"), { recursive: true });

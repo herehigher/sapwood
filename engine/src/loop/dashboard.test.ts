@@ -99,7 +99,36 @@ test("dashboardAssetPaths: contributor checkout assets win over stale packaging 
     const sourceRoot = join(dir, "dashboard");
     writePairedAssets(packageRoot);
     const expected = writePairedAssets(sourceRoot);
-    writeFileSync(join(sourceRoot, "package.json"), "{}\n");
+    writeFileSync(join(sourceRoot, "package.json"), '{"name":"@sapwood/dashboard"}\n');
+    assert.deepEqual(dashboardAssetPaths({ packageRoot, repositoryDashboardRoot: sourceRoot }), expected);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dashboardAssetPaths: a half-built source candidate blocks fallback to staged package assets", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-dashboard-assets-"));
+  try {
+    const packageRoot = join(dir, "package");
+    const sourceRoot = join(dir, "dashboard");
+    writePairedAssets(packageRoot);
+    mkdirSync(join(sourceRoot, "dist"), { recursive: true });
+    writeFileSync(join(sourceRoot, "package.json"), '{"name":"@sapwood/dashboard"}\n');
+    writeFileSync(join(sourceRoot, "dist", "index.html"), "<html></html>");
+    assert.equal(dashboardAssetPaths({ packageRoot, repositoryDashboardRoot: sourceRoot }), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dashboardAssetPaths: an unrelated node_modules/dashboard package cannot hide staged package assets", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-dashboard-assets-"));
+  try {
+    const packageRoot = join(dir, "package");
+    const sourceRoot = join(dir, "dashboard");
+    const expected = writePairedAssets(packageRoot);
+    writePairedAssets(sourceRoot);
+    writeFileSync(join(sourceRoot, "package.json"), '{"name":"dashboard"}\n');
     assert.deepEqual(dashboardAssetPaths({ packageRoot, repositoryDashboardRoot: sourceRoot }), expected);
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -17,6 +17,10 @@ const ALLOWED_RUNTIME_DEPS = [
   "lucide-react",
   "react",
   "react-dom",
+  // The server bundle keeps these engine parsers external, so the contributor workspace must
+  // own the exact runtime versions used by its built start.js.
+  "yaml",
+  "zod",
 ];
 
 test("root package.json lists dashboard as a workspace", () => {

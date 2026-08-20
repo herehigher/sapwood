@@ -750,6 +750,21 @@ test("#894 /api/loop/state build: no build-meta.json and a non-git repoDir both 
   }
 });
 
+test("/api/loop/state: a missing database starts as an empty read-only dashboard", async () => {
+  const outer = mkdtempSync(join(tmpdir(), "sapwood-build-"));
+  const dbPath = join(outer, "data", "sapwood.sqlite");
+  const { server, state, port } = await createDashboardServer({ dbPath, port: 0, now: () => new Date("2026-07-24T12:00:00.000Z") });
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/events`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { events: [], lastId: 0 });
+  } finally {
+    server.close();
+    state.close();
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
 test("/api/loop/state round is null when no round is open", async () => {
   const fx = await fixture((s) => {
     s.startRound("2026-07-24T10:00:00.000Z");
