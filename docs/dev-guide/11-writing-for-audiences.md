@@ -13,23 +13,30 @@ agent:
 
 - **Renders on the TARGET repo** — `engine/prompts/*.md`, `commands/*.md`,
   generated skills (e.g. the event-glossary `SKILL.md`), GitHub comments the
-  engine posts, label descriptions. Some of these are read by an agent
-  session (prompts, commands, skills) and some by a human (posted comments,
-  labels) — but all of them render on whatever repo installed sapwood, not
-  on sapwood's own. That's what creates the hazard below, for human-read and
-  agent-read surfaces alike.
+  engine posts, label descriptions, and `sapwood.config.example.yaml`'s
+  inline comments (`sapwood init` copies that file verbatim into the target
+  repo as its own `sapwood.config.yaml` — see
+  [`docs/configuration.md`](../configuration.md)). Some of these are read by
+  an agent session (prompts, commands, skills) and some by a human (posted
+  comments, labels, a config file viewed on GitHub) — but all of them render
+  on whatever repo installed sapwood, not on sapwood's own. That's what
+  creates the hazard below, for human-read and agent-read surfaces alike.
 - **Renders in sapwood's OWN repo** — README, user-facing docs
   (`docs/getting-started.md`, `docs/configuration.md`, `docs/security.md`,
-  `docs/supervision.md`, `docs/troubleshooting.md`, …), config comments,
-  CLI/log output, dev docs (this guide), code comments, `CHANGELOG.md`,
-  `docs/PLAN.md`. A reference here can't misresolve — it's still this
-  repo's own tracker. The reason to still keep the user-facing subset clean
-  is the separate durable-knowledge/process partition (root `CLAUDE.md`,
-  "Documentation principle"): those docs state *what is true now*, not
-  *which issue introduced it*, and a stray dev-process number is
-  reader-comprehension noise even where it resolves correctly. Dev docs,
-  code comments, and `CHANGELOG.md` keep references on purpose — see
-  Exemptions.
+  `docs/supervision.md`, `docs/troubleshooting.md`, …), dev docs (this
+  guide), code comments, `CHANGELOG.md`, `docs/PLAN.md`. A reference here
+  can't misresolve — it's still this repo's own tracker. The reason to still
+  keep the user-facing subset clean is the separate durable-knowledge/
+  process partition (root `CLAUDE.md`, "Documentation principle"): those
+  docs state *what is true now*, not *which issue introduced it*, and a
+  stray dev-process number is reader-comprehension noise even where it
+  resolves correctly. Dev docs, code comments, and `CHANGELOG.md` keep
+  references on purpose — see Exemptions.
+- **CLI/log output is neither bucket.** It renders in the operator's
+  terminal, so there's no GitHub autolink to misresolve at all — but the
+  operator is looking at a target repo, so a sapwood-dev `#NNN` in that text
+  is still an unresolvable, confusing reference. The edit rule applies here
+  for comprehension, not autolinking.
 
 ## The `#NNN` hazard
 
