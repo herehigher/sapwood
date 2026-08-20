@@ -1120,23 +1120,21 @@ state event), it never blocks startup or restores the capability.
 |---|---|---|
 | `mode` | `hard` | `hard`: fail-closed deny — the actual producer≠merger/boundary-write enforcement. `soft`: observe-only — log what would be blocked, but allow it. `soft` is a first-run/dogfood affordance only, never the shipped default; it reaches the hook via a spawn env a worker cannot itself rewrite. |
 
-## `host` and `bashSandbox`
+## `host`
 
-**Host execution-profile keys** (DR #1009, implemented #1011) — they configure HOW a session's
+**Host execution-profile key** (DR #1009, implemented #1011) — it configures HOW a session's
 already-granted tools reach the host (execution reach), never WHICH tools a producer leg is
 offered (that stays [host-delegated capability management](security.md#host-delegated-capability-management),
-Decision #11, unchanged and unrelated — no `capabilities.*` surface is reopened by these two
-keys). Full mechanics, the
-seven-layer table, the deployment-tier ladder, and the guaranteed-vs-residual lists for both keys
-live in [`docs/security.md`'s "Execution profiles"](security.md#execution-profiles-host-permission-mode--bash-sandbox)
-section — semantics here are copied verbatim from there.
+Decision #11, unchanged and unrelated — no `capabilities.*` surface is reopened by this key).
+Full mechanics live in [`docs/security.md`'s "Execution
+profiles"](security.md#execution-profiles-host-permission-mode--bash-sandbox) section —
+semantics here are copied verbatim from there.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `host.permissionMode` | `auto` | `dontAsk \| auto \| bypassPermissions` — the ONE mode requested via `--permission-mode` for every `claude` session the engine spawns (worker legs and every peripheral role session alike). The engine's deny side (`--disallowedTools`, the guard hook, gate②'s seal) stays engine-owned across all three values — only the allow side moves. `auto`: unchanged from every sapwood release before this key existed — a classifier reviews actions in place of a human prompt. `dontAsk`: only an explicit `permissions.allow` rule / read-only Bash command / guard-approved call runs; the allow side is the OPERATOR's own Claude settings, never a new engine `allowedTools` config key. `bypassPermissions`: everything runs unchecked, including writes to Claude Code's own protected paths — an operator call the engine does not gate; configuring it triggers one guidance-carrying startup WARN (log line + `bypass-permissions-mode-configured` event) naming the outer-boundary recipe, never a refusal. |
-| `bashSandbox` | `host-managed` | `host-managed \| required` — deliberately top-level, not nested under `host`: an independent axis from `host.permissionMode` (execution reach vs. classifier bypass) and from `worker.deployKeyPath`/`worker.deployKeyId` (credential identity), never coupled to either in config. `host-managed`: the engine injects nothing — the operator's own Claude settings (project/user/managed) decide whether and how the CLI's built-in Bash sandbox engages. `required`: composes DR #1009's floor JSON into the SAME inline `--settings` the guard hook already rides in on, for every Bash-bearing session the engine spawns — worker legs (dispatch/resume/fix) and `retro`; never a gate② review session (no Bash at all) or `codex exec` (its own `--sandbox read-only`, a separate vendor mechanism). Filesystem+network confinement for Bash SUBPROCESSES only — built-in tools (Read/Edit/Write), MCP servers, and hooks run unconstrained either way. Carries no `allowedDomains`/`allowRead`/`allowWrite` — those stay host settings; an operator running a `required` leg must add `allowedDomains` (`github.com` at minimum) in their own Claude settings, or no sandboxed network destination is reachable. One engine-added exception: when `worker.deployKeyPath` is SET (config presence, not a per-leg SSH-preflight result), the floor also adds `excludedCommands: ["git push *", "git fetch *", "git pull *", "git ls-remote *"]` — exactly the four verbs deploy-key SSH transport needs. |
 
-Both keys validate at load with a guidance message on an invalid value (`sapwood validate`
+The key validates at load with a guidance message on an invalid value (`sapwood validate`
 catches it) — same `.strict()`/enum rejection style as `guard.mode`/`reviewer.mode` above.
 
 ## `envFailure`

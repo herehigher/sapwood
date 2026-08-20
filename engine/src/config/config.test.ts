@@ -264,7 +264,7 @@ test('engine.driver (#106): defaults to "rounds", overridable to "tick", rejects
   assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nengine: { driver: bogus }"), /driver/i);
 });
 
-// ── #1011 AC1: host.permissionMode / bashSandbox — DR #1009's execution-profile keys ─────────
+// ── #1011 AC1: host.permissionMode — DR #1009's execution-profile key ────────────────────────
 
 test('host.permissionMode (#1011): defaults to "auto", overridable to "dontAsk"/"bypassPermissions", rejects anything else with a guidance message', () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
@@ -298,25 +298,6 @@ test("host: strict unknown-key rejection (a typo'd host key is not silently drop
     () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nhost: { permissionModee: auto }"),
     /permissionModee|[Uu]nrecognized/,
   );
-});
-
-test('bashSandbox (#1011): defaults to "host-managed", overridable to "required", rejects anything else with a guidance message', () => {
-  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.equal(cfg.bashSandbox, "host-managed");
-  assert.equal(parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nbashSandbox: required").bashSandbox, "required");
-  // P3 (fix-leg, Codex sol review of PR #1017): assert the message names BOTH allowed values,
-  // not just the field — same "the guidance message actually guides" strengthening as
-  // host.permissionMode's own test above.
-  assert.throws(() => {
-    try {
-      parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nbashSandbox: yolo");
-    } catch (e) {
-      assert.match(String((e as Error).message), /bashSandbox/i);
-      assert.match(String((e as Error).message), /host-managed/);
-      assert.match(String((e as Error).message), /required/);
-      throw e;
-    }
-  });
 });
 
 test("logging: defaults, overrides, and strict unknown-key rejection", () => {

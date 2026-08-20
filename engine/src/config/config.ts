@@ -983,16 +983,12 @@ const Guard = z
   })
   .strict();
 
-// #1011 (DR #1009, Decision #11 amendment 2026-08-19): host EXECUTION-PROFILE keys — they
-// configure HOW a session's already-granted tools reach the host (execution reach), never WHICH
-// tools a producer leg is offered (host-delegated capability management, Decision #11, unchanged
-// and unrelated — no `capabilities.*` surface is reopened here). Semantics copied verbatim from
-// docs/security.md's "Execution profiles: host permission mode + Bash sandbox" section — that
-// section, not this file, is the place to read the full seven-layer table and deployment-tier
-// ladder. `bashSandbox` (below, top-level rather than nested under `host`) is a deliberately
-// separate schema entry: it is an independent axis from `host.permissionMode` (execution reach
-// vs. classifier bypass) and from `worker.deployKeyPath`/`worker.deployKeyId` (credential
-// identity) — never coupled to either in config.
+// #1011 (DR #1009, Decision #11 amendment): host EXECUTION-PROFILE key — it configures HOW a
+// session's already-granted tools reach the host (execution reach), never WHICH tools a producer
+// leg is offered (host-delegated capability management, Decision #11, unchanged and unrelated —
+// no `capabilities.*` surface is reopened here). Semantics copied verbatim from docs/security.md's
+// "Execution profiles" section — that section, not this file, is the place to read the full
+// seven-layer table and deployment-tier ladder.
 const Host = z
   .object({
     // The ONE mode requested via `--permission-mode` for EVERY claude session the engine spawns
@@ -1538,17 +1534,6 @@ const ConfigSchemaRaw = z
     worker: Worker.default({}),
     guard: Guard.default({}),
     host: Host.default({}),
-    // #1011: `host-managed` (default) injects nothing — the operator's own Claude settings
-    // (project/user/managed) decide whether and how the CLI's built-in Bash sandbox engages.
-    // `required` composes DR #1009's floor JSON into the SAME inline --settings guardSettings()
-    // already returns, for every Bash-bearing session the engine spawns (worker legs — dispatch/
-    // resume/fix — and retro; never gate② review sessions, which carry no Bash at all, and never
-    // codex-exec, whose own `--sandbox read-only` is a separate vendor mechanism outside this
-    // key's scope). Filesystem+network confinement for Bash SUBPROCESSES only — built-in tools
-    // (Read/Edit/Write), MCP servers, and hooks run unconstrained either way; see docs/
-    // security.md's "Execution profiles" section for the exact floor JSON, the guaranteed-vs-
-    // residual lists, and the deployment-tier ladder above this floor.
-    bashSandbox: z.enum(["host-managed", "required"]).default("host-managed"),
     cost: Cost.default({}),
     stop: Stop.default({}),
     round: Round.default({}),

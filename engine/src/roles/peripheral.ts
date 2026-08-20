@@ -675,9 +675,9 @@ export class RoleRunner {
     const sessionId = randomUUID();
     const jsonlPath = this.path(name, "jsonl");
     const jsonlFd = openSync(jsonlPath, "w");
-    // #1011: the inline-JSON guard wiring itself (settingsJson) moved below, next to the
-    // allowedTools/disallowedTools it now composes the bashSandbox floor's Bash-capability check
-    // against — see that computation's own doc for why it needed to move.
+    // Same inline-JSON (never a file) guard wiring as worker.ts's dispatch(), for the same
+    // reason: a settings FILE would be an on-disk target the session could try to mutate.
+    const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
     // #234: mint the read-only forge MCP proxy BEFORE building argv — the resulting tool names
     // widen allowedTools and the mcp-config is an inline argv value, so both must be known before
     // claudeArgs runs. Non-fatal on failure (see RoleSessionOpts.proxy's doc): the session simply
@@ -727,29 +727,6 @@ export class RoleRunner {
         ? [baseAllowedTools, ...proxyHandle.toolNames].filter((s) => s.length > 0).join(",")
         : baseAllowedTools;
       const disallowedTools = reviewMode ? ROLE_DISALLOWED_TOOLS : (opts.disallowedTools ?? ROLE_DISALLOWED_TOOLS);
-      // #1011: the bashSandbox floor applies to every Bash-BEARING claude session the engine
-      // spawns — worker legs (dispatch/resume/fix, worker.ts) AND retro, never a review session
-      // (reviewMode, structurally Bash-less above) and never any other peripheral role (align/
-      // architect/harvest/plan-review, whose ROLE_ALLOWED_TOOLS/opts.allowedTools carry no `Bash`
-      // entry at all today). Detected off the FINAL `allowedTools` string rather than a
-      // role-name allowlist, so a future Bash-granted role picks this up automatically instead of
-      // needing a second, easily-forgotten edit here — mirrors docs/security.md's own framing
-      // ("every Bash-bearing claude session ... worker legs ... and retro — never gate② ... or
-      // codex-exec").
-      const bashCapable = !reviewMode && allowedTools.includes("Bash");
-      // Same inline-JSON (never a file) guard wiring as worker.ts's dispatch(), for the same
-      // reason: a settings FILE would be an on-disk target the session could try to mutate.
-      // `deployKeyConfigured` mirrors worker.ts's own config-presence trigger (see that module's
-      // guardSettings() call sites) — retro shares the SAME engine-wide `worker.deployKeyPath`
-      // config key even though it never itself transports over deploy-key SSH.
-      const settingsJson = JSON.stringify(
-        guardSettings(
-          this.guardHookPath,
-          bashCapable
-            ? { mode: this.deps.cfg.bashSandbox, deployKeyConfigured: this.deps.cfg.worker.deployKeyPath !== undefined }
-            : undefined,
-        ),
-      );
       const args = claudeArgs({
         prompt: opts.prompt,
         model: opts.model,

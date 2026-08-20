@@ -207,14 +207,10 @@ export interface ContextManifest {
    *  outcome. */
   sandboxViolationCount: number;
   worktree: WorktreeGitState;
-  /** Hash of the exact `--settings` JSON string passed to the CLI (guardSettings' output,
-   *  including whatever `bashSandbox` composition, #1011, that specific leg's `--settings` flag
-   *  actually carried) — hashed rather than stored verbatim, since keeping the manifest's bulk in
-   *  the CLAUDE.md sources (the actual point of this file) matters more than duplicating a value
-   *  the caller already has in hand. Callers MUST pass the string the CLI was actually spawned
-   *  with, never a freshly recomputed `guardSettings()` call — a recomputation that omits a
-   *  leg-specific opt (e.g. the bashSandbox floor) silently hashes a DIFFERENT settings object
-   *  than what the session received. */
+  /** Hash of the exact `--settings` JSON string passed to the CLI (guardSettings' output) —
+   *  hashed rather than stored verbatim: it's fully reproducible from guardHookPath + guard
+   *  mode, and keeping the manifest's bulk in the CLAUDE.md sources (the actual point of this
+   *  file) matters more than duplicating a value the engine already knows how to regenerate. */
   settingsHash: string;
   /** Hash of the guard hook file's content, or null when unreadable at manifest time. */
   hookHash: string | null;

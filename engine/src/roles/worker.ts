@@ -1775,13 +1775,8 @@ export function hasQuotaErrorStatus(jsonl: string): boolean {
  *  non-zero *non-2* PreToolUse exit as NON-blocking, so the tool would proceed unguarded — a
  *  fail-OPEN in the only live safety boundary (Codex #26 P1). So a hook launch/runtime failure
  *  is mapped to exit 2 (BLOCKING) in hard mode. Soft mode is observe-only, so a crash there
- *  allows (exit 0). Mode is read from the SAPWOOD_GUARD_MODE spawn env.
- *
- *  HUMAN-MERGE-ONLY (#1011): the `sandbox` composition this function adds below is part of the
- *  same inline-JSON guard carrier the CLAUDE.md non-negotiable already flags — a caller-supplied
- *  `bashSandbox` opt controls the ENGINE's own hardening floor, no different in kind from the
- *  `hooks`/`disableAllHooks` keys already here. */
-export function guardSettings(hookPath: string, bashSandbox?: BashSandboxOpts): object {
+ *  allows (exit 0). Mode is read from the SAPWOOD_GUARD_MODE spawn env. */
+export function guardSettings(hookPath: string): object {
   // The command is shell-evaluated, so single-quote the path: double quotes still expand $,
   // backticks, and $() — an install path containing those would break or inject (Codex #26 R2).
   // Single quotes suppress all expansion; embedded single quotes are escaped '\'' .
@@ -1800,52 +1795,6 @@ export function guardSettings(hookPath: string, bashSandbox?: BashSandboxOpts): 
         { matcher: "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|NotebookRead", hooks: [{ type: "command", command }] },
       ],
     },
-    // #1011: composed into the SAME --settings object the guard hook rides in on, never a second
-    // --settings flag — mirrors DR #1009's own framing ("wired through the same inline --settings
-    // carrier guardSettings() already uses"). Omitted entirely under `host-managed` (the default)
-    // — byte-identical to every guardSettings() call site that predates this parameter.
-    ...(bashSandbox?.mode === "required" ? { sandbox: bashSandboxFloor(bashSandbox.deployKeyConfigured) } : {}),
-  };
-}
-
-/** #1011: the `guardSettings()` param selecting the `bashSandbox: "required"` floor —
- *  `mode` is the configured `SapwoodConfig["bashSandbox"]` value verbatim (only `"required"`
- *  actually composes anything; `"host-managed"` behaves exactly as if this whole param were
- *  omitted), `deployKeyConfigured` is whether `worker.deployKeyPath` is SET in config (the DR's
- *  own trigger — "when worker.deployKeyPath is set (L1)" — a config-presence check, not a
- *  per-leg SSH-preflight result: the exception exists so deploy-key SSH transport CAN work
- *  under the sandbox, independent of whether any one leg happens to use it this run). */
-export interface BashSandboxOpts {
-  mode: SapwoodConfig["bashSandbox"];
-  deployKeyConfigured: boolean;
-}
-
-/** #1011: DR #1009's `bashSandbox: "required"` floor JSON, copied verbatim (docs/security.md's
- *  "Execution profiles" section is the source of truth for this shape — do not hand-edit one
- *  without the other). `enabled`/`autoAllowBashIfSandboxed`/`allowUnsandboxedCommands`/
- *  `failIfUnavailable` are the engine's hardening floor; `network.strictAllowlist` and
- *  `filesystem.denyRead` close the two residuals DR #1009 measured live (an unconfined worker
- *  Bash reaches any network destination, and can read `~/.config/gh`/`~/.ssh`/`~/.aws`/
- *  `~/.claude/.credentials.json` directly off disk — see worker.ts's own credential-tier docs).
- *  No `allowedDomains`/`allowRead`/`allowWrite` here — those stay host settings (floor =
- *  governance core, allowances = host, per Decision #11's own amendment text); an operator
- *  running a `required` leg must add `allowedDomains` (`github.com` at minimum) in their own
- *  Claude settings, or no sandboxed network destination is reachable.
- *
- *  `deployKeyConfigured` adds exactly the four network verbs deploy-key SSH transport needs
- *  (`excludedCommands`, prefix-matched against the command after any leading environment
- *  assignments) — `["git *"]` was tested and rejected as needlessly broad (DR #1009 P1(b)): it
- *  would exempt every local git operation the sandbox should still confine, for the sake of the
- *  four verbs that actually need it. */
-export function bashSandboxFloor(deployKeyConfigured: boolean): object {
-  return {
-    enabled: true,
-    autoAllowBashIfSandboxed: true,
-    allowUnsandboxedCommands: false,
-    failIfUnavailable: true,
-    network: { strictAllowlist: true },
-    filesystem: { denyRead: ["~/.config/gh", "~/.ssh", "~/.aws", "~/.claude/.credentials.json"] },
-    ...(deployKeyConfigured ? { excludedCommands: ["git push *", "git fetch *", "git pull *", "git ls-remote *"] } : {}),
   };
 }
 
@@ -2096,15 +2045,16 @@ export interface WorkerProxyOpts {
  *  isolation (redirecting `$HOME` would break the `claude` CLI's own config/auth, which this
  *  lane also needs to run at all) and (2) stripping `Bash(node *)`/`Bash(npm *)` (a fix leg's
  *  whole job requires running the test suite). The upgrade path for a genuinely closed boundary
- *  is OS-level sandboxing — container/chroot/Landlock-style filesystem confinement, available
- *  opt-in as `bashSandbox: required` (#1011; see docs/security.md's "Execution profiles" section)
+ *  is OS-level sandboxing — container/chroot/Landlock-style filesystem confinement, available as
+ *  the operator-configured Bash-sandbox recipe in docs/security.md's "Execution profiles" section
  *  — or running fix legs under a dedicated, narrowly-scoped CI identity whose credential store
  *  contains nothing worth stealing; the CI-identity path remains unimplemented. This function
- *  alone (`workerCredentialFreeEnv`) provides no filesystem confinement — under `bashSandbox:
- *  required`, Bash reads of the `denyRead`-listed paths are OS-blocked (probed live: the exact
- *  `steal.mjs` read above returns `EPERM`), while `host-managed` (the default) gives no such
- *  engine guarantee; `required` is still not a home-directory jail (unlisted paths and additive
- *  `allowRead` entries remain residuals). One narrowing worth naming:
+ *  alone (`workerCredentialFreeEnv`) provides no filesystem confinement — an operator who has
+ *  configured that recipe gets OS-blocked Bash reads of the `denyRead`-listed paths (probed
+ *  live: the exact `steal.mjs` read above returns `EPERM`); without that operator configuration
+ *  there is no such guarantee, and even with it active the recipe is still not a home-directory
+ *  jail (unlisted paths and additive `allowRead` entries remain residuals). One narrowing worth
+ *  naming:
  *  `hosts.yml` is `gh`'s PLAINTEXT-token storage path; on macOS, `gh auth login` by default
  *  stores the token in the OS keychain instead, which this mechanism (and the PoC) does not
  *  expose — the concrete risk this note describes is sharpest wherever `gh` ends up with a
@@ -2346,14 +2296,6 @@ interface Lane {
    *  promptTemplateVersion field), same as peripheral.ts's manifest wiring does via opts.prompt,
    *  rather than fabricating a version string or leaving the field null for every worker leg. */
   prompt: string;
-  /** #1011: the exact `--settings` JSON STRING this leg was actually spawned with (dispatch()'s
-   *  or resume()'s own `guardSettings(...)` call, already composed with this leg's bashSandbox
-   *  opts) — carried so recordLaneContextManifest hashes what the CLI actually received, never a
-   *  RECOMPUTED `guardSettings(this.guardHookPath)` call with no sandbox param, which silently
-   *  drops the `sandbox` key under `bashSandbox: required` and makes ContextManifest.settingsHash
-   *  false under exactly the hardened profile the audit record exists to cover. Same "carry the
-   *  real value, don't regenerate a fresh one" rule `prompt` above already follows. */
-  settingsJson: string;
   /** #617 (seam 3): the in-flight FILESYSTEM-derived half of this lane's context manifest,
    *  kicked off fire-and-forget by capturePreSpawnManifestForLane right after spawn. A PROMISE,
    *  not a settled value — onExit() (the one place a lane truly terminates) chains onto this
@@ -2967,17 +2909,7 @@ export class WorkerSupervisor implements Supervisor {
     // edits live — a worker could set disableAllHooks:true on its own settings mid-session and
     // disable the guard (Codex #26 R4 P1). An argv JSON string has no file to mutate. Scoped to
     // THIS claude -p only (not a plugin-global hook that would hit the human).
-    // #1011: `deployKeyConfigured` reads cfg.worker.deployKeyPath directly (not the awaited/
-    // preflighted resolveDeployKeyPath() result computed further down) — the bashSandbox floor's
-    // excludedCommands exception is keyed on CONFIG PRESENCE, the same trigger docs/security.md
-    // states ("when worker.deployKeyPath is set"), so this needs no reordering against the
-    // deploy-key SSH preflight below.
-    const settingsJson = JSON.stringify(
-      guardSettings(this.guardHookPath, {
-        mode: this.deps.cfg.bashSandbox,
-        deployKeyConfigured: this.deps.cfg.worker.deployKeyPath !== undefined,
-      }),
-    );
+    const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
     // #244: mint the read-only forge MCP proxy BEFORE building argv — its tool names widen
     // --allowedTools and its --mcp-config is an inline argv value, both needed before claudeArgs
     // runs.
@@ -3158,7 +3090,6 @@ export class WorkerSupervisor implements Supervisor {
       estimateBaselineUsd: 0,
       jsonlLegOffset: 0,
       prompt,
-      settingsJson,
       ...(proxyHandle ? { proxyHandle } : {}),
       // #606 gate② round 1 (P1-3): the GH_CONFIG_DIR scratch dir now exists whenever EITHER
       // credentialFree OR an L1 deploy key is in play — cleanup (removeGhConfigDir via
@@ -3456,11 +3387,6 @@ export class WorkerSupervisor implements Supervisor {
     // try) and the catch's own cleanup can read them.
     let deployKeyPath: string | undefined;
     let deployKeyEnv: NodeJS.ProcessEnv | undefined;
-    // #1011: same "declared outside try, assigned inside" pattern as `args`/`startedMs` above —
-    // the Lane literal built AFTER this try/catch (so onExit/recordLaneContextManifest can later
-    // hash the EXACT string this leg was spawned with, never a recomputed one) needs to read it
-    // there, outside the try block's own scope.
-    let settingsJson: string;
     try {
       // #245: mint BEFORE argv — same ordering as dispatch() (WorkerProxyOpts' doc): the handle's
       // tool names / --mcp-config are needed before claudeArgs runs.
@@ -3500,16 +3426,7 @@ export class WorkerSupervisor implements Supervisor {
         !opts?.proxy?.credentialFree && deployKeyPath
           ? workerDeployKeyEnv(deployKeyPath, ghConfigDir, this.deps.cfg.board.owner, this.deps.cfg.board.repo)
           : undefined;
-      // #1011: same config-presence trigger as dispatch()'s own settingsJson — see that call
-      // site's doc. Assigned (not `const`-declared here) — the hoisted `let settingsJson` above
-      // the try block is what makes it readable from the Lane literal built after this
-      // try/catch (see that `let`'s own doc).
-      settingsJson = JSON.stringify(
-        guardSettings(this.guardHookPath, {
-          mode: this.deps.cfg.bashSandbox,
-          deployKeyConfigured: this.deps.cfg.worker.deployKeyPath !== undefined,
-        }),
-      );
+      const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
       args = claudeArgs({
         prompt,
         model: this.deps.cfg.worker.model,
@@ -3644,7 +3561,6 @@ export class WorkerSupervisor implements Supervisor {
       estimateBaselineUsd,
       jsonlLegOffset,
       prompt,
-      settingsJson,
       ...(proxyHandle ? { proxyHandle } : {}),
       // #606 gate② round 1 (P1-3): same "GH_CONFIG_DIR exists whenever credentialFree OR an L1
       // deploy key is in play" condition as dispatch() — cleanup must track the same condition.
@@ -3992,18 +3908,11 @@ export class WorkerSupervisor implements Supervisor {
     // already leans on for proxy teardown/GH_CONFIG_DIR cleanup above — schedule the context
     // manifest recording here too, regardless of `lane.reclaiming` (the process really did exit
     // either way; only the SENTINEL write above is reclaim()'s to own, not manifest bookkeeping).
-    // Captures `jsonlPath`/`prompt`/`settingsJson` in closure BEFORE the lane is deleted below —
-    // the chained `.then()` runs whenever the in-flight pre-spawn capture settles, which may be
-    // AFTER this synchronous method returns (see scheduleContextManifestRecording's own doc for
-    // why this can't simply read a value off `lane` here).
-    this.scheduleContextManifestRecording(
-      name,
-      lane.jsonlPath,
-      lane.prompt,
-      lane.settingsJson,
-      lane.manifestPreSpawnPromise,
-      lane.jsonlLegOffset,
-    );
+    // Captures `jsonlPath`/`prompt` in closure BEFORE the lane is deleted below — the chained
+    // `.then()` runs whenever the in-flight pre-spawn capture settles, which may be AFTER this
+    // synchronous method returns (see scheduleContextManifestRecording's own doc for why this
+    // can't simply read a value off `lane` here).
+    this.scheduleContextManifestRecording(name, lane.jsonlPath, lane.prompt, lane.manifestPreSpawnPromise, lane.jsonlLegOffset);
     this.lanes.delete(name);
     // #395 (gate② round 3): drop this lane's heartbeat gate along with the lane itself — onExit
     // is the one place a lane truly terminates (this method's own doc), so this is the one
@@ -4159,28 +4068,21 @@ export class WorkerSupervisor implements Supervisor {
    *  matters most to catch (a crash-fast worker leg). Fire-and-forget from onExit's own
    *  perspective — onExit stays synchronous; this method's own promise chain resolves whenever
    *  it resolves, independent of the lane's continued presence in `this.lanes`. `jsonlPath`/
-   *  `prompt`/`settingsJson` are passed explicitly (captured by the caller BEFORE lane deletion)
-   *  rather than re-read off a `Lane` object this method never assumes still exists.
-   *  `jsonlLegOffset` (#1010) is the SAME per-leg start offset onExit() already threads into
+   *  `prompt` are passed explicitly (captured by the caller BEFORE lane deletion) rather than
+   *  re-read off a `Lane` object this method never assumes still exists. `jsonlLegOffset`
+   *  (#1010) is the SAME per-leg start offset onExit() already threads into
    *  writeTerminalSentinel's own readJsonlFromByte slice — needed here too so the init-derived
-   *  manifest fields land leg-scoped; see recordLaneContextManifest's own doc for why.
-   *
-   *  #1011: `settingsJson` is the exact `--settings` string THIS leg was spawned with (`Lane`'s
-   *  own field, set at dispatch()/resume() time) — never recomputed here. A fresh
-   *  `guardSettings(this.guardHookPath)` call with no sandbox param would silently omit the
-   *  `sandbox` key under `bashSandbox: required`, making the recorded manifest's `settingsHash`
-   *  describe a DIFFERENT (unsandboxed) settings object than what the CLI actually received. */
+   *  manifest fields land leg-scoped; see recordLaneContextManifest's own doc for why. */
   private scheduleContextManifestRecording(
     name: string,
     jsonlPath: string,
     prompt: string,
-    settingsJson: string,
     preSpawnPromise: Promise<PreSpawnManifestCapture | undefined> | undefined,
     jsonlLegOffset: number,
   ): void {
     if (!preSpawnPromise) return; // lane never reached the confirmed-alive gate — capture never started
     preSpawnPromise
-      .then((pre) => this.recordLaneContextManifest(name, jsonlPath, prompt, settingsJson, pre, jsonlLegOffset))
+      .then((pre) => this.recordLaneContextManifest(name, jsonlPath, prompt, pre, jsonlLegOffset))
       .catch((e) => this.log(`[sapwood:context-manifest] lane ${name}: pre-spawn capture promise rejected (non-fatal): ${String(e)}`));
   }
 
@@ -4224,7 +4126,6 @@ export class WorkerSupervisor implements Supervisor {
     name: string,
     jsonlPath: string,
     prompt: string,
-    settingsJson: string,
     pre: PreSpawnManifestCapture | undefined,
     jsonlLegOffset: number,
   ): void {
@@ -4275,10 +4176,7 @@ export class WorkerSupervisor implements Supervisor {
               dirty: true,
               dirtyBasis: "unknown-write-capable-session",
             },
-        // #1011: the caller's own `settingsJson` param — the exact --settings string this leg
-        // was spawned with — never a fresh guardSettings() call (see this method's own doc for
-        // why a recomputation is wrong under bashSandbox: required).
-        settingsJson,
+        settingsJson: JSON.stringify(guardSettings(this.guardHookPath)),
         hookContent: pre.hookContent,
         toolUsage,
         readPaths,
