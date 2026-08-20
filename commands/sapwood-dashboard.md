@@ -1,5 +1,5 @@
 ---
-description: Start the read-only sapwood dashboard and open it in a browser when available
+description: Start the sapwood dashboard and open it in a browser when available
 argument-hint: "[--port PORT] [--config PATH]"
 allowed-tools: Bash(sh:*)
 ---
