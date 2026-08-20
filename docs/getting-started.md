@@ -9,9 +9,7 @@ first autonomous run.
 - **Node.js ≥ 24** (the engine uses the built-in `node:sqlite`, no native build step).
 - **Claude Code CLI ≥ 2.1.209** — the engine's declared minimum (`MIN_CLAUDE_CLI_VERSION`,
   `engine/src/roles/worker.ts`; see [Configuration: `worker`](configuration.md#worker) for why
-  this exact version). The marketplace and dashboard commands below use no behavior newer than
-  that floor; the GitHub Actions Ubuntu runner currently ships 2.1.209, while current local
-  installs are 2.1.237. Authenticate it and make sure it can run the configured models with `claude -p` in a
+  this exact version). Authenticate it and make sure it can run the configured models with `claude -p` in a
   non-interactive shell. Workers and the default `engine-agent` reviewer are headless Claude
   sessions; this is a real Anthropic usage path and incurs real spend. A CLI below the floor is
   not refused outright — a once-per-start startup check WARNs (never blocks) when the resolved

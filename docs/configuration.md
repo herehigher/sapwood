@@ -144,9 +144,7 @@ Per-worker execution.
 `2.1.209` is the ONLY version this repo has evidence for — the exact CLI the engine's
 worker/probe argv (`--no-session-persistence`, `--strict-mcp-config`, `--tools`,
 `--max-budget-usd`, `--system-prompt`) was verified against (`engine/src/roles/worker.ts`'s
-`MIN_CLAUDE_CLI_VERSION`, next to `probeLlmPing`'s own doc comment). The GitHub Actions Ubuntu
-runner supplies that version; current local installs are 2.1.237, but neither the declared floor
-nor these arguments require a newer CLI. An older CLI missing one of
+`MIN_CLAUDE_CLI_VERSION`, next to `probeLlmPing`'s own doc comment). An older CLI missing one of
 those flags fails **every** worker leg and **every** environment probe with
 `error: unknown option ...` — the engine's env-failure classifier reads that as a provider outage,
 not a CLI mismatch, so the loop parks and backs off instead of naming the real, fixable cause. A
