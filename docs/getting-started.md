@@ -54,23 +54,16 @@ see `sapwood estop --help`).
 ### Channel B — Claude Code plugin/marketplace install
 
 ```
-/plugin marketplace add herehigher/sapwood
+/plugin marketplace add herehigher/sapwood-plugin
 /plugin install sapwood@sapwood
 ```
 
-Marketplace install runs `npm ci --ignore-scripts` at the plugin root (the repo root
-carries a lockfile) but never builds `engine/dist` — no `postinstall` build step can run
-there. `/sapwood-run` and `/sapwood-status` resolve this by falling back to
+The catalog becomes available after the owner's first promotion. `/sapwood-run` and
+`/sapwood-status` resolve through
 `npx sapwood@<version>` (the plugin's own version) the first time they're invoked; that
 first call downloads the package (**Node.js ≥ 24 required**), and subsequent calls reuse
 npm's local cache. A checkout that already has a local `engine/dist` build — Channel A,
 or a contributor checkout — is used instead when present, no npx involved.
-The marketplace entry pins a released tag once the first release is cut (before that
-the entry points at `main`, and the wrapper refuses the unreleased `0.0.0` rather than
-guessing at a package that doesn't exist yet). A checkout of `main` between releases has
-no published package to fall back to either way, so its `/sapwood-run`/`/sapwood-status`
-need a local `engine/dist` build (`npm --workspace engine run build`) until the next
-release ships.
 Only the three shipped plugin wrappers (`/sapwood-run`, `/sapwood-status`,
 `/sapwood-stop`) are plugin-only; they cover `run`, `status`, and the three stop-control
 tiers, not `init` or `validate` — those still need Channel A or C.

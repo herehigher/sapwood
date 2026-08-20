@@ -1,4 +1,4 @@
-// sapwood release script — `npm run release -- <prepare|publish|stamp> ...`.
+// sapwood release script — `npm run release -- <prepare|publish|promote|stamp> ...`.
 // Node built-ins + `git`/`gh`/`npm` via child_process only, no dependency. Plain Node 24
 // type-stripped TypeScript: erasable syntax only (no enums/namespaces/parameter
 // properties), local imports carry an explicit `.ts` extension.
@@ -7,22 +7,12 @@
 // that first if a check here looks surprising. The four version-carrying manifests are
 // written ONLY from here; never hand-edit a manifest's "version" field.
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const MANIFEST_PATHS = ["package.json", "engine/package.json", "dashboard/package.json", ".claude-plugin/plugin.json"];
-
-// Not one of the four version-carrying manifests (it has no "version" field of its own) — its
-// plugins[0].source.ref is a DERIVED carrier, same relationship package-lock.json has to the
-// four: written only as a side effect of a prepare bump, never hand-edited. "main" is the
-// pre-first-release placeholder (see marketplaceRefFor below); once a version ships, ref must
-// equal that tag for the marketplace's `npx sapwood@<version>` pin to resolve the version the
-// slash commands actually invoked. The committed file's bytes are the exact
-// `JSON.stringify(data, null, 2) + "\n"` canonical form writeMarketplaceFile below produces, so
-// every rewrite stays a minimal one-line diff instead of reformatting the whole file.
-export const MARKETPLACE_PATH = ".claude-plugin/marketplace.json";
 
 const UNRELEASED_HEADING = "## [Unreleased]";
 
@@ -136,83 +126,6 @@ export function writeManifestVersion(path: string, version: string): void {
   const re = /("version"\s*:\s*")([^"]*)(")/;
   if (!re.test(text)) throw new Error(`no "version" field found in ${path}`);
   writeFileSync(path, text.replace(re, `$1${version}$3`));
-}
-
-// "main" is the pre-first-release value (nothing has been tagged yet, so there is no `v<version>`
-// ref to point at); everything from the first prepare onward pins to the tag prepare is about to
-// cut, matching the tag `PUBLISH_STEPS`'s "tag" step creates.
-export function marketplaceRefFor(version: string): string {
-  return version === "0.0.0" ? "main" : `v${version}`;
-}
-
-// Unlike the four manifests' bare `"version"` line, `"ref"` is not a key `marketplace.json`
-// carries only once — a source object can legitimately have sibling fields, and a future
-// multi-plugin entry could carry its own `"ref"` elsewhere in the file. A text-regex rewrite (the
-// approach `writeManifestVersion` uses, safe there because `"version"` really is unique per
-// manifest) risks touching the wrong occurrence, so this walks the parsed structure to
-// `plugins[0].source.ref` specifically instead of pattern-matching the raw text.
-interface MarketplaceSource {
-  ref?: string;
-  [key: string]: unknown;
-}
-interface MarketplacePlugin {
-  source: MarketplaceSource | string;
-  [key: string]: unknown;
-}
-interface MarketplaceFile {
-  plugins: MarketplacePlugin[];
-  [key: string]: unknown;
-}
-
-function readMarketplaceFile(path: string): MarketplaceFile {
-  return JSON.parse(readFileSync(path, "utf8"));
-}
-
-// `JSON.stringify(data, null, 2) + "\n"` is the canonical on-disk form the committed
-// marketplace.json is written to match exactly — see MARKETPLACE_PATH's own comment — so a
-// rewrite here is always a minimal, one-line diff on `ref`, never a reformat of the whole file.
-function writeMarketplaceFile(path: string, data: MarketplaceFile): void {
-  writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`);
-}
-
-function marketplaceSourceObject(data: MarketplaceFile, path: string): MarketplaceSource {
-  const source = data.plugins[0]?.source;
-  if (typeof source !== "object" || source === null) {
-    throw new Error(`no plugins[0].source object found in ${path}`);
-  }
-  return source;
-}
-
-// Edits only `plugins[0].source.ref`'s value, mirroring `writeManifestVersion`'s "touch one
-// field, leave everything else alone" contract — but structurally, so a `"ref"` string anywhere
-// else in the file (a sibling plugin, a differently-shaped source) is never at risk of being hit.
-export function writeMarketplaceRef(path: string, ref: string): void {
-  const data = readMarketplaceFile(path);
-  marketplaceSourceObject(data, path).ref = ref;
-  writeMarketplaceFile(path, data);
-}
-
-export function readMarketplaceRef(path: string): string {
-  const data = readMarketplaceFile(path);
-  const ref = marketplaceSourceObject(data, path).ref;
-  if (typeof ref !== "string") throw new Error(`no plugins[0].source.ref field found in ${path}`);
-  return ref;
-}
-
-export type MarketplaceRefCheckResult = { ok: true } | { ok: false; message: string };
-
-// Lockstep's marketplace half: at "0.0.0" (nothing shipped yet) any ref is accepted — there is no
-// tag to point at, and `runPrepare` hasn't rewritten it for the version about to be cut. Once a
-// version is set, the ref must equal marketplaceRefFor(version) exactly, the same way the four
-// manifests and the lockfile must equal it.
-export function checkMarketplaceRef(marketplacePath: string, version: string): MarketplaceRefCheckResult {
-  if (version === "0.0.0") return { ok: true };
-  const ref = readMarketplaceRef(marketplacePath);
-  const expected = marketplaceRefFor(version);
-  if (ref !== expected) {
-    return { ok: false, message: `${marketplacePath}'s plugins[0].source.ref is "${ref}", expected "${expected}" for version ${version}.` };
-  }
-  return { ok: true };
 }
 
 export type LockstepResult = { ok: true; version: string } | { ok: false; message: string };
@@ -352,7 +265,7 @@ export function formatBuildStamp(version: string, date: string, sha: string): st
 
 // ── exec seam (testable: tests inject a fake) ───────────────────────────────────────
 
-export type Exec = (file: string, args: string[]) => string;
+export type Exec = (file: string, args: string[], cwd?: string) => string;
 
 export interface Deps {
   exec: Exec;
@@ -360,7 +273,7 @@ export interface Deps {
 }
 
 function realExec(repoRoot: string): Exec {
-  return (file, args) => execFileSync(file, args, { cwd: repoRoot, encoding: "utf8" });
+  return (file, args, cwd = repoRoot) => execFileSync(file, args, { cwd, encoding: "utf8" });
 }
 
 // ── shared precondition: HEAD must be exactly origin/main ──────────────────────────
@@ -426,8 +339,6 @@ export function checkPublishPreconditions(deps: Deps): PublishPrecondition {
   }
   const lockfileCheck = checkLockfileVersions(deps.repoRoot, lockstep.version);
   if (!lockfileCheck.ok) return { ok: false, reason: lockfileCheck.message };
-  const marketplaceRefCheck = checkMarketplaceRef(join(deps.repoRoot, MARKETPLACE_PATH), lockstep.version);
-  if (!marketplaceRefCheck.ok) return { ok: false, reason: marketplaceRefCheck.message };
   const changelog = readFileSync(join(deps.repoRoot, "CHANGELOG.md"), "utf8");
   if (!changelogHasSection(changelog, lockstep.version)) {
     return { ok: false, reason: `CHANGELOG.md has no "## [${lockstep.version}]" section.` };
@@ -439,6 +350,110 @@ export function checkPublishPreconditions(deps: Deps): PublishPrecondition {
   return { ok: true, version: lockstep.version };
 }
 
+// ── catalog promotion ───────────────────────────────────────────────────────────────
+
+const CATALOG_SHELL_PATHS = [".claude-plugin", "commands", "bin"];
+
+export type CatalogSourcePathCheck = { ok: true } | { ok: false; message: string };
+
+export function checkCatalogSourcePaths(paths: string[]): CatalogSourcePathCheck {
+  const invalid = paths.find((path) => !CATALOG_SHELL_PATHS.some((root) => path === root || path.startsWith(`${root}/`)));
+  return invalid ? { ok: false, message: `catalog source path is outside the shell allowlist: ${invalid}` } : { ok: true };
+}
+
+function verifyPublishedVersion(deps: Deps, version: string): void {
+  const published = deps.exec("npm", ["view", `sapwood@${version}`, "version"]).trim();
+  if (published !== version) throw new Error(`npm view sapwood@${version} version returned "${published}", expected "${version}"`);
+}
+
+function releaseCommitFor(deps: Deps, version: string): string {
+  const commit = deps.exec("git", ["rev-list", "-n", "1", `v${version}`]).trim();
+  if (commit === "") throw new Error(`tag v${version} does not resolve to a release commit`);
+  return commit;
+}
+
+function catalogPromotionCommands(repoRoot: string, catalogRemote: string, version: string): string[] {
+  return [
+    `git clone --no-checkout ${repoRoot} <temp>/source`,
+    `git checkout --detach v${version}`,
+    `git clone ${catalogRemote} <temp>/catalog`,
+    "git add -- .claude-plugin commands bin .github/workflows/ci.yml",
+    `git -c commit.gpgsign=false commit -m "chore: promote sapwood v${version}"`,
+    "git push origin HEAD:main",
+  ];
+}
+
+function writeCatalogManifests(catalogRoot: string, version: string, sourceCommit: string): void {
+  const pluginPath = join(catalogRoot, ".claude-plugin", "plugin.json");
+  const plugin = JSON.parse(readFileSync(pluginPath, "utf8")) as Record<string, unknown>;
+  plugin.version = version;
+  plugin.sourceCommit = sourceCommit;
+  writeFileSync(pluginPath, `${JSON.stringify(plugin, null, 2)}\n`);
+
+  const marketplacePath = join(catalogRoot, ".claude-plugin", "marketplace.json");
+  const marketplace = JSON.parse(readFileSync(marketplacePath, "utf8")) as { plugins?: Array<Record<string, unknown>> };
+  const entry = marketplace.plugins?.[0];
+  if (!entry) throw new Error("catalog marketplace.json has no plugins[0] entry");
+  entry.source = "./";
+  entry.version = version;
+  writeFileSync(marketplacePath, `${JSON.stringify(marketplace, null, 2)}\n`);
+}
+
+function promoteCatalog(deps: Deps, version: string, catalogRemote: string): void {
+  const releaseCommit = releaseCommitFor(deps, version);
+  const tempRoot = mkdtempSync(join(tmpdir(), "sapwood-catalog-promote-"));
+  const sourceRoot = join(tempRoot, "source");
+  const catalogRoot = join(tempRoot, "catalog");
+  try {
+    deps.exec("git", ["clone", "--no-checkout", deps.repoRoot, sourceRoot]);
+    deps.exec("git", ["checkout", "--detach", `v${version}`], sourceRoot);
+    const sourcePaths = deps
+      .exec("git", ["ls-tree", "-r", "--name-only", releaseCommit, "--", ...CATALOG_SHELL_PATHS], sourceRoot)
+      .split("\n")
+      .filter(Boolean);
+    const pathCheck = checkCatalogSourcePaths(sourcePaths);
+    if (!pathCheck.ok) throw new Error(pathCheck.message);
+    for (const root of CATALOG_SHELL_PATHS) {
+      if (!existsSync(join(sourceRoot, root))) throw new Error(`release commit ${releaseCommit} has no ${root}/ catalog shell path`);
+    }
+
+    deps.exec("git", ["clone", catalogRemote, catalogRoot]);
+    for (const root of CATALOG_SHELL_PATHS) rmSync(join(catalogRoot, root), { recursive: true, force: true });
+    for (const root of CATALOG_SHELL_PATHS) cpSync(join(sourceRoot, root), join(catalogRoot, root), { recursive: true });
+    const workflowDir = join(catalogRoot, ".github", "workflows");
+    mkdirSync(workflowDir, { recursive: true });
+    cpSync(join(sourceRoot, "scripts", "catalog", "ci.yml"), join(workflowDir, "ci.yml"));
+    writeCatalogManifests(catalogRoot, version, releaseCommit);
+
+    if (deps.exec("git", ["status", "--porcelain"], catalogRoot).trim() === "") return;
+    deps.exec("git", ["add", "--", ".claude-plugin", "commands", "bin", ".github/workflows/ci.yml"], catalogRoot);
+    deps.exec("git", ["-c", "commit.gpgsign=false", "commit", "-m", `chore: promote sapwood v${version}`], catalogRoot);
+    deps.exec("git", ["push", "origin", "HEAD:main"], catalogRoot);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+export function runCatalogPromote(deps: Deps, opts: { catalogRemote: string; dryRun: boolean }): CommandResult {
+  const lockstep = checkManifestLockstep(MANIFEST_PATHS.map((path) => join(deps.repoRoot, path)));
+  if (!lockstep.ok) return { code: 1, output: `release promote: ${lockstep.message}\n` };
+  if (lockstep.version === "0.0.0")
+    return { code: 1, output: "release promote: manifests are still at 0.0.0 — nothing published to promote.\n" };
+  const commands = [
+    `npm view sapwood@${lockstep.version} version`,
+    ...catalogPromotionCommands(deps.repoRoot, opts.catalogRemote, lockstep.version),
+  ];
+  if (opts.dryRun)
+    return { code: 0, output: `release promote --dry-run — would run:\n${commands.map((command) => `  ${command}`).join("\n")}\n` };
+  try {
+    verifyPublishedVersion(deps, lockstep.version);
+    promoteCatalog(deps, lockstep.version, opts.catalogRemote);
+    return { code: 0, output: `release promote: catalog already matches or promoted sapwood v${lockstep.version}.\n` };
+  } catch (e) {
+    return { code: 1, output: `release promote: ${e instanceof Error ? e.message : String(e)}\n` };
+  }
+}
+
 // ── publish steps ────────────────────────────────────────────────────────────────────
 // Deliberately an ordered, appendable list rather than inline procedural code: the
 // npm-publish step (docs/dev-guide/10-releasing.md's "Delivery channels") lands here
@@ -448,6 +463,7 @@ export interface PublishContext {
   version: string;
   prerelease: boolean;
   repoRoot: string;
+  catalogRemote?: string;
 }
 
 export interface PublishStep {
@@ -514,6 +530,23 @@ export const PUBLISH_STEPS: PublishStep[] = [
       deps.exec("node", ["scripts/dashboard-canary.ts", ctx.version]);
     },
   },
+  {
+    name: "npm-view-verify",
+    describe: (ctx) => `npm view sapwood@${ctx.version} version`,
+    run: (ctx, deps) => {
+      if (ctx.catalogRemote) verifyPublishedVersion(deps, ctx.version);
+    },
+  },
+  {
+    name: "catalog-promote",
+    describe: (ctx) =>
+      ctx.catalogRemote
+        ? catalogPromotionCommands(ctx.repoRoot, ctx.catalogRemote, ctx.version).join("\n")
+        : "catalog-promote <catalog remote>",
+    run: (ctx, deps) => {
+      if (ctx.catalogRemote) promoteCatalog(deps, ctx.version, ctx.catalogRemote);
+    },
+  },
 ];
 
 // npm's own dist-tag equivalent of gh-release's `--prerelease` flag: a plain release always
@@ -534,10 +567,15 @@ export interface CommandResult {
   output: string;
 }
 
-export function runPublish(deps: Deps, opts: { dryRun: boolean }): CommandResult {
+export function runPublish(deps: Deps, opts: { dryRun: boolean; catalogRemote?: string }): CommandResult {
   const pre = checkPublishPreconditions(deps);
   if (!pre.ok) return { code: 1, output: `release publish: ${pre.reason}\n` };
-  const ctx: PublishContext = { version: pre.version, prerelease: isPrerelease(pre.version), repoRoot: deps.repoRoot };
+  const ctx: PublishContext = {
+    version: pre.version,
+    prerelease: isPrerelease(pre.version),
+    repoRoot: deps.repoRoot,
+    ...(opts.catalogRemote ? { catalogRemote: opts.catalogRemote } : {}),
+  };
   const lines = PUBLISH_STEPS.map((step) => {
     if (!opts.dryRun) step.run(ctx, deps);
     return step.describe(ctx);
@@ -583,10 +621,6 @@ export function runPrepare(deps: Deps, version: string): CommandResult {
     actions.push(`bumped ${p} -> ${version}`);
   }
 
-  const marketplaceRef = marketplaceRefFor(version);
-  writeMarketplaceRef(join(deps.repoRoot, MARKETPLACE_PATH), marketplaceRef);
-  actions.push(`set ${MARKETPLACE_PATH} plugins[0].source.ref -> ${marketplaceRef}`);
-
   // package-lock.json's root/engine/dashboard entries are DERIVED from the four manifests
   // just bumped above, never hand-set — `--package-lock-only` skips reinstalling
   // node_modules (this only needs to happen once, at publish time, not on every prepare) and
@@ -603,7 +637,7 @@ export function runPrepare(deps: Deps, version: string): CommandResult {
   writeFileSync(changelogPath, updatedChangelog);
   actions.push(`moved CHANGELOG Unreleased -> [${version}] - ${date}`);
 
-  deps.exec("git", ["add", ...MANIFEST_PATHS, MARKETPLACE_PATH, "package-lock.json", "CHANGELOG.md"]);
+  deps.exec("git", ["add", ...MANIFEST_PATHS, "package-lock.json", "CHANGELOG.md"]);
   deps.exec("git", ["commit", "-m", `release: v${version}`]);
   actions.push(`committed "release: v${version}"`);
 
@@ -654,7 +688,24 @@ function main(argv: string[]): number {
     return r.code;
   }
   if (cmd === "publish") {
-    const r = runPublish(deps, { dryRun: argv.slice(3).includes("--dry-run") });
+    const catalogIndex = argv.indexOf("--catalog");
+    const catalogRemote = catalogIndex === -1 ? process.env.SAPWOOD_CATALOG_REMOTE : argv[catalogIndex + 1];
+    if (!catalogRemote) {
+      process.stderr.write("release publish: provide --catalog <git remote> or SAPWOOD_CATALOG_REMOTE\n");
+      return 1;
+    }
+    const r = runPublish(deps, { dryRun: argv.slice(3).includes("--dry-run"), catalogRemote });
+    process.stdout.write(r.output);
+    return r.code;
+  }
+  if (cmd === "promote") {
+    const catalogIndex = argv.indexOf("--catalog");
+    const catalogRemote = catalogIndex === -1 ? process.env.SAPWOOD_CATALOG_REMOTE : argv[catalogIndex + 1];
+    if (!catalogRemote) {
+      process.stderr.write("release promote: provide --catalog <git remote> or SAPWOOD_CATALOG_REMOTE\n");
+      return 1;
+    }
+    const r = runCatalogPromote(deps, { dryRun: argv.slice(3).includes("--dry-run"), catalogRemote });
     process.stdout.write(r.output);
     return r.code;
   }
@@ -663,7 +714,9 @@ function main(argv: string[]): number {
     process.stdout.write(r.output);
     return r.code;
   }
-  process.stderr.write("usage: release <prepare <version>|publish [--dry-run]|stamp>\n");
+  process.stderr.write(
+    "usage: release <prepare <version>|publish --catalog <git remote> [--dry-run]|promote --catalog <git remote> [--dry-run]|stamp>\n",
+  );
   return 1;
 }
 

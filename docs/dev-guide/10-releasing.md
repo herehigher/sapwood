@@ -23,12 +23,10 @@ These are written **only** by `scripts/release.ts` — never by hand. `package-l
 own root/`engine`/`dashboard` entries agree with them too, but not because anyone edits
 a fifth place: the script runs `npm install --package-lock-only --ignore-scripts`
 immediately after bumping the four manifests, and those entries are simply what that
-step derives from them. `.claude-plugin/marketplace.json`'s `plugins[0].source.ref` is a
-second derived carrier, in the same relationship: `prepare` sets it to `v<version>`
-right after the four manifests (`main` at the pre-first-release `0.0.0` baseline, since
-there is no tag yet to point at), and it is never hand-edited either. A lockstep test
-(`scripts/release.test.ts`) fails the build the moment any manifest, the lockfile's
-derived entries, or the marketplace ref drifts from the rest.
+step derives from them. `.claude-plugin/marketplace.json` is a local/catalog manifest
+with a relative `./` source; it is not a version carrier or a release-time mutation.
+A lockstep test (`scripts/release.test.ts`) fails the build when a manifest or derived
+lockfile entry drifts from the release version.
 
 **Three layers, one truth:**
 
@@ -71,11 +69,12 @@ the GitHub Release, then ship a patch. Don't reuse or force-move a tag that was
 ever pushed.
 
 **Delivery channels.** A release ships as (1) a git tag + GitHub Release, (2) the
-`sapwood` npm package, and (3) the Claude Code marketplace plugin, whose slash
-commands fall back to `npx sapwood@<version>` when no local `engine/dist` build is
-present — all three keyed to the same tag. `prepare` moves the marketplace `ref` to
-`v<version>` in lockstep with the four manifests (see above); `publish` performs (1)
-and (2).
+`sapwood` npm package, and (3) the thin Claude Code shell promoted into the separate
+catalog repository. After npm publish and the dashboard canary, `publish` exact-matches
+`npm view sapwood@<version> version` before it writes the catalog. The promotion copies
+only `.claude-plugin/`, `commands/`, and `bin/` from the release commit, stamps its
+manifest with the version and source commit, and pushes the catalog. Its catalog CI
+rejects files outside that shell and validates the two manifest versions.
 
 **Package name: bare `sapwood`, not `@sapwood/engine`.** The `engine` workspace
 publishes under the bare npm name `sapwood`, not the scoped `@sapwood/engine` its
@@ -120,10 +119,12 @@ npm run release -- prepare 0.3.0-alpha.1
 # 3. Publish — from main, at the merged commit. Tags, pushes the tag, creates the
 #    GitHub Release with the CHANGELOG section as its notes, then `npm publish`es
 #    the engine workspace as `sapwood` under the version's own dist-tag (see "npm
-#    publish dist-tag" above). Requires a prior local `npm login`.
-npm run release -- publish
+#    publish dist-tag" above), runs the dashboard canary, verifies that npm serves the
+#    exact version, then promotes the shell into the catalog. Requires a prior local
+#    `npm login` and the catalog remote.
+npm run release -- publish --catalog https://github.com/herehigher/sapwood-plugin.git
 # or, to see the exact commands without running them:
-npm run release -- publish --dry-run
+npm run release -- publish --catalog https://github.com/herehigher/sapwood-plugin.git --dry-run
 
 # 4. Verify.
 gh release view v0.3.0-alpha.1
@@ -145,4 +146,8 @@ git push origin :refs/tags/v0.3.0-alpha.1
 #     publish dist-tag" above — latest / alpha / beta / rc / next):
 git checkout v0.3.0-alpha.1
 npm publish --workspace engine --tag <dist-tag>
+
+# 5c. Retry only catalog promotion after a catalog push failure. This verifies the
+#     published npm version again, then replaces the catalog shell from the release tag.
+npm run release -- promote --catalog https://github.com/herehigher/sapwood-plugin.git
 ```
