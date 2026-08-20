@@ -1,84 +1,33 @@
 # CLAUDE.md — sapwood
 
-Guide for Claude sessions working in this repo. Keep it short; the canonical
-detail lives in [`docs/PLAN.md`](docs/PLAN.md) — **read that first.**
+sapwood is the autonomous coding loop with governance built in — a Claude Code plugin that turns a GitHub backlog into reviewed PRs (issues in → reviewed PRs out).
 
-## What this is
+## verification
 
-sapwood = "the autonomous coding loop with governance built in." A Claude Code
-plugin that turns a GitHub backlog into reviewed PRs: *issues in → reviewed PRs
-out*. It packages the autonomous development loop as a standalone, public
-**framework** — the engine, safety hook, and skills all ship in this repo.
-Status: **early development, pre-v1.**
+Run the acceptance set from the repository root: `npm run build && npm run typecheck && npm run test && npm run lint`.
 
-## Where things are
+## non-negotiables
 
-- `docs/PLAN.md` — full goals, architecture, security model, milestones, verification.
-- `engine/prompts/worker.md` ("Working language & comments") — code-comment discipline
-  (why, not what). It's the copy guaranteed to reach workers on any target repo; applies
-  here too when writing code interactively.
-- [`docs/dev-guide/11-writing-for-audiences.md`](docs/dev-guide/11-writing-for-audiences.md) —
-  where text renders (target repo vs. this repo) decides whether a bare `#NNN` is a
-  misresolution hazard or just reader noise.
-
-## Non-negotiables
-
-- **producer ≠ reviewer ≠ merger.** The worker that writes code never approves or
-  merges it. Enforced by a fail-closed PreToolUse hook (`guard.ts`), not a prompt.
-  Anything touching `guard.ts`, hook wiring, `reviewer.ts`, `merge-driver.ts`,
-  security-relevant config, `.claude/settings*.json`, or `.github/workflows/**` is
-  **human-merge-only** (canonical list: docs/security.md "Human-merge-only paths").
-- **Guard ships green before anything autonomous runs** (M1, before M2 engine).
-- **GitHub is the source of truth for *process*** — the ProjectV2 board `Status` +
-  labels are the work queue (no parallel task DB). For *durable knowledge*, the docs
-  are the source of truth — see "Documentation principle" below.
-- **No issue is dispatched without a verification plan.** `Ready` requires acceptance
-  criteria + how to prove them; the reviewer re-checks the PR against it at gate②.
-  Inherently-unverifiable work (docs/chore) is labelled `verify:n/a` and uses the
-  doc-gate path instead. (PLAN.md Decision #8.)
-- **Worker cost limit is soft, never a mid-work kill.** Reaching the per-worker budget
-  triggers a graceful handoff (commit+push WIP, progress note, `.handoff` sentinel,
-  clean exit), not a SIGKILL. Hard stop is reserved for the engine safety ceiling /
-  kill switch, and even there drains before killing. (PLAN.md Security model.)
-- **Framework code stays generic.** `engine/`, the skills, and the shipped prompts
-  encode only the *generic* dev-loop mechanics (scheduling, safety, review, merge) —
-  never behavior specific to one team's workflow. Deployment-specific needs belong in
-  a target repo's own config/prompts, not in the framework core.
+- Keep producer ≠ reviewer ≠ merger: the worker that writes code never approves or merges it; enforce this with the fail-closed PreToolUse guard hook (`engine/src/guard/`), not a prompt.
+- Treat every path listed in `docs/security.md` “Human-merge-only paths” as human-merge-only; that list is authoritative—do not paraphrase or narrow its scope.
+- Never run autonomous work unless the guard test suite passes.
+- Never push directly to `main` — branch + PR.
+- Follow Decision 8 in `docs/PLAN.md` “Locked decisions” for dispatch readiness and verification-plan rules.
+- Keep framework code generic: `engine/`, skills, and shipped prompts encode only generic dev-loop mechanics; put deployment-specific behavior in a target repo’s own config/prompts, never in the framework core.
+- Never commit development-state artifacts (probe logs, launch scripts, run data, or `.patch` files) to this repo.
 
 ## Documentation principle (source-of-truth partition)
 
-Single source of truth, **partitioned by what kind of fact it is** — every fact has
-exactly one home, so the two never drift:
+Use GitHub (issues / project board / PRs) for the development process only: what is in flight and the audit trail.
+Put durable knowledge—what is true now—in project docs.
+Give every fact exactly one home.
+Do not close a development round until its durable-knowledge changes land in docs; a round with no such changes closes with zero doc edits, which is a pass.
+Send doc changes through the same review gate as code.
 
-- **GitHub (issues / Project #4 / PRs) = the *development process* only:** what's in
-  flight, by whom, in what state. The audit trail — *"how did we get here."* Ephemeral.
-- **Project docs (`README`, `docs/PLAN.md`, usage/config guides) = *durable
-  knowledge*:** goals, plans, architecture, decisions, outcomes of finished work, and
-  how to use the tool — *"what is true now."* Users read docs, never issues.
-- Docs never mirror issue mechanics; issues never hold knowledge a user needs.
+## Consult when relevant
 
-**Round-close documentation gate:** a development round is not "closed" until the
-docs reflect that round's **durable-knowledge** changes (new/changed capability,
-behavior, decision, or milestone). Trigger on *knowledge change, not every round* —
-a round that changed no durable knowledge closes with zero doc edits, and that is a
-pass, not churn. Doc changes go through the same review gate as code (gate②) and are
-part of an issue's definition-of-done. Distilled outcomes, never issue transcripts.
-
-## Locked decisions (see PLAN.md table)
-
-TypeScript engine · Claude Code plugin form factor · trusted repos first · default
-merge gate: Conductor merges on CI green + a fresh local **engine-agent** review, a
-different Claude model (#501, 2026-08-01; hosted different-model Codex review stays
-selectable — the pre-#501 default; produce-PR-and-stop also selectable) ·
-dashboard deferred to
-v0.2 (built *by* sapwood as the flagship dogfood) · YAML config default (commented;
-JSON also accepted) · TDD/two-gate method as overridable defaults.
-
-## This repo's own governance
-
-- Work is tracked as GitHub issues on **Project #4** (human board; the loop's own board is
-  Project #6, `board.projectNumber` in `sapwood.config.yaml`), grouped by milestones
-  `M0 → M0.5 → M1 → M2 → M3 → M4 → v0.2`. Labels: `type:*`, `prio:0-3`,
-  `in-progress`, `needs-human`, `blocked`, `reserve`.
-- **Never push directly to `main`** — branch + PR. (The repo dogfoods its own model.)
-- From M2 onward, sapwood builds sapwood; prefer routing real work through the loop.
+- Product decisions, architecture, milestones: `docs/PLAN.md` — relevant section only; do not read it wholesale.
+- Security model, budgets, cost ceilings, protected paths: `docs/security.md` — relevant section only.
+- Code-comment discipline (why, not what): `engine/prompts/worker.md` “Working language & comments” — apply it to interactive work in this repo too.
+- Where text renders (target repo vs this repo) and issue-ref rules: `docs/dev-guide/11-writing-for-audiences.md`.
+- Board number, labels, queue mechanics: `sapwood.config.yaml` is authoritative.
