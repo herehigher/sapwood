@@ -21,7 +21,8 @@
 // BEFORE this function is ever called (same "run the build command" message that already covers
 // the vite SPA bundle).
 import { execFile, spawn } from "node:child_process";
-import { resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 export interface BrowserOpenResult {
@@ -72,18 +73,38 @@ export interface DashboardServerHandle {
   stop: () => Promise<void>;
 }
 
-/** Path to the bundled server entry `npm run build -w dashboard` produces (dashboard/build-
- *  server.mjs's own doc has the full rationale). Exported so cli.ts's `runDashboard` can check for
- *  its existence with the SAME path this function spawns — a probe that drifted from the real
- *  spawn target would be worse than no probe at all. */
-export function dashboardServerEntryPath(): string {
-  return resolve(import.meta.dirname, "..", "..", "..", "dashboard", "dist-server", "start.js");
+export interface DashboardAssetPaths {
+  serverEntry: string;
+  distIndex: string;
+}
+
+export interface DashboardAssetPathRoots {
+  packageRoot?: string;
+  repositoryDashboardRoot?: string;
+}
+
+function pairedAssets(root: string): DashboardAssetPaths | undefined {
+  const assets = { serverEntry: join(root, "dist-server", "start.js"), distIndex: join(root, "dist", "index.html") };
+  return existsSync(assets.serverEntry) && existsSync(assets.distIndex) ? assets : undefined;
+}
+
+/** Resolve the complete dashboard layout as one unit. A source checkout deliberately uses its
+ * repository build even if a previous pack left its ignored staging directory behind: that tree
+ * is packaging state, never a contributor runtime. An installed package has no sibling dashboard
+ * workspace, so it selects its staged assets. */
+export function dashboardAssetPaths(roots: DashboardAssetPathRoots = {}): DashboardAssetPaths | undefined {
+  const packageRoot = roots.packageRoot ?? resolve(import.meta.dirname, "..", "..", "dashboard-dist");
+  const repositoryDashboardRoot = roots.repositoryDashboardRoot ?? resolve(import.meta.dirname, "..", "..", "..", "dashboard");
+  if (existsSync(join(repositoryDashboardRoot, "package.json"))) return pairedAssets(repositoryDashboardRoot);
+  return pairedAssets(packageRoot) ?? pairedAssets(repositoryDashboardRoot);
 }
 
 export interface StartDashboardServerOpts {
   dbPath: string;
   configPath?: string;
   port: number;
+  /** The server half of a layout `dashboardAssetPaths` selected with its paired SPA asset. */
+  serverEntry?: string;
   /** Optional hook (#786 gate② finding [ac2-prehandle-leak]): fires SYNCHRONOUSLY the instant the
    *  child is spawned, before startup confirmation even begins — never only once the returned
    *  promise resolves. A caller that needs to track the real pid for its own leak-cleanup registry
@@ -107,7 +128,8 @@ export interface StartDashboardServerOpts {
  *  apart from "port already in use" without scraping human-facing log text; stderr is inherited
  *  so a real crash still surfaces in the operator's terminal. */
 export function startDashboardServer(opts: StartDashboardServerOpts): Promise<DashboardServerHandle> {
-  const entry = dashboardServerEntryPath();
+  const entry = opts.serverEntry ?? dashboardAssetPaths()?.serverEntry;
+  if (entry === undefined) return Promise.reject(new Error("no paired dashboard assets found"));
   const args = [entry, "--db-path", opts.dbPath, "--port", String(opts.port)];
   if (opts.configPath !== undefined) args.push("--config", opts.configPath);
   const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "inherit"] });

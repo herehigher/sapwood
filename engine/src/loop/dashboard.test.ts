@@ -19,7 +19,13 @@ import { promisify } from "node:util";
 import { parseDashboardArgs, parseDashboardPortFlag, resolveDashboardPort, runCli, runDashboard } from "../cli.js";
 import { DEFAULT_DASHBOARD_PORT } from "../state/read-model.js";
 import { State } from "../state/state.js";
-import { type BrowserOpenResult, type DashboardServerHandle, openerArgv, startDashboardServer } from "./dashboard-launcher.js";
+import {
+  type BrowserOpenResult,
+  type DashboardServerHandle,
+  dashboardAssetPaths,
+  openerArgv,
+  startDashboardServer,
+} from "./dashboard-launcher.js";
 
 const MINIMAL_CONFIG = "board: { owner: acme, repo: widgets, projectNumber: 7 }\nlanes: { max: 3 }\ncost: { dailyBudgetUsd: 50 }\n";
 
@@ -55,22 +61,62 @@ async function withDataDir(fn: (dir: string) => Promise<void> | void): Promise<v
 
 /** A dashboard/dist stub that satisfies runDashboard's dist-present check without a real vite
  *  build — the check only probes for index.html's existence. */
-function stubDist(dir: string): string {
+function stubAssets(dir: string): { distIndex: string; serverEntry: string } {
   const distDir = join(dir, "dist-stub");
   mkdirSync(distDir, { recursive: true });
   const indexPath = join(distDir, "index.html");
   writeFileSync(indexPath, "<html></html>");
-  return indexPath;
-}
-
-/** A dashboard/dist-server stub that satisfies runDashboard's compiled-server-present check —
- *  same "existence only" probe as stubDist above; these fake-startServer tests never actually
- *  spawn it. */
-function stubServerEntry(dir: string): string {
   const entryPath = join(dir, "start-stub.js");
   writeFileSync(entryPath, "");
-  return entryPath;
+  return { distIndex: indexPath, serverEntry: entryPath };
 }
+
+function writePairedAssets(root: string): { distIndex: string; serverEntry: string } {
+  mkdirSync(join(root, "dist"), { recursive: true });
+  mkdirSync(join(root, "dist-server"), { recursive: true });
+  const assets = { distIndex: join(root, "dist", "index.html"), serverEntry: join(root, "dist-server", "start.js") };
+  writeFileSync(assets.distIndex, "<html></html>");
+  writeFileSync(assets.serverEntry, "");
+  return assets;
+}
+
+test("dashboardAssetPaths: installed package assets are selected when both files exist", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-dashboard-assets-"));
+  try {
+    const packageRoot = join(dir, "package");
+    const sourceRoot = join(dir, "not-a-source-checkout");
+    const expected = writePairedAssets(packageRoot);
+    assert.deepEqual(dashboardAssetPaths({ packageRoot, repositoryDashboardRoot: sourceRoot }), expected);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dashboardAssetPaths: contributor checkout assets win over stale packaging state", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-dashboard-assets-"));
+  try {
+    const packageRoot = join(dir, "stale-package");
+    const sourceRoot = join(dir, "dashboard");
+    writePairedAssets(packageRoot);
+    const expected = writePairedAssets(sourceRoot);
+    writeFileSync(join(sourceRoot, "package.json"), "{}\n");
+    assert.deepEqual(dashboardAssetPaths({ packageRoot, repositoryDashboardRoot: sourceRoot }), expected);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dashboardAssetPaths: a half-built candidate is never selected", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-dashboard-assets-"));
+  try {
+    const packageRoot = join(dir, "package");
+    mkdirSync(join(packageRoot, "dist"), { recursive: true });
+    writeFileSync(join(packageRoot, "dist", "index.html"), "<html></html>");
+    assert.equal(dashboardAssetPaths({ packageRoot, repositoryDashboardRoot: join(dir, "absent") }), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 function fakeHandle(port: number): { handle: DashboardServerHandle; stopped: boolean[] } {
   const stopped: boolean[] = [];
@@ -243,18 +289,22 @@ test("runDashboard: a valid --config loads authoritatively and the run proceeds"
         },
         openBrowser: async () => ({ opened: true }),
         waitForStop: async () => {},
-        dashboardDistIndex: stubDist(dir),
-        dashboardServerEntry: stubServerEntry(dir),
+        dashboardAssets: stubAssets(dir),
         log: () => {},
       },
     );
     assert.equal(code, 0);
-    assert.deepEqual(startedWith, { dbPath: "data/sapwood.sqlite", configPath, port: DEFAULT_DASHBOARD_PORT });
+    assert.deepEqual(startedWith, {
+      dbPath: "data/sapwood.sqlite",
+      configPath,
+      port: DEFAULT_DASHBOARD_PORT,
+      serverEntry: join(dir, "start-stub.js"),
+    });
   });
 });
 
 test("runDashboard: missing dashboard/dist bundle — clear error naming the build command, never reaches startServer/openBrowser", async () => {
-  await withDataDir(async (dir) => {
+  await withDataDir(async (_dir) => {
     let startCalls = 0;
     let browserCalls = 0;
     const { log, lines } = collectingLog();
@@ -270,14 +320,14 @@ test("runDashboard: missing dashboard/dist bundle — clear error naming the bui
           browserCalls++;
           return { opened: true };
         },
-        dashboardDistIndex: join(dir, "dist", "index.html"), // deliberately never written
+        dashboardAssets: null,
       },
     );
     assert.equal(code, 1);
     assert.equal(startCalls, 0);
     assert.equal(browserCalls, 0);
     const joined = lines.join("\n");
-    assert.match(joined, /no dashboard build found/);
+    assert.match(joined, /no paired dashboard build found/);
     assert.match(joined, /npm run build -w dashboard/);
   });
 });
@@ -299,8 +349,7 @@ test("runDashboard: port already in use — names the port and the --port flag/e
           browserCalls++;
           return { opened: true };
         },
-        dashboardDistIndex: stubDist(dir),
-        dashboardServerEntry: stubServerEntry(dir),
+        dashboardAssets: stubAssets(dir),
       },
     );
     assert.equal(code, 1);
@@ -335,8 +384,7 @@ test("runDashboard: headless — the server stays alive until the stop seam reso
         startServer: async () => handle,
         openBrowser: async (): Promise<BrowserOpenResult> => ({ opened: false, reason: "no display" }),
         waitForStop,
-        dashboardDistIndex: stubDist(dir),
-        dashboardServerEntry: stubServerEntry(dir),
+        dashboardAssets: stubAssets(dir),
       },
     );
     await new Promise((r) => setImmediate(r));
@@ -367,8 +415,7 @@ test("runDashboard: browser opens successfully — the opener is invoked with th
           return { opened: true };
         },
         waitForStop: async () => {},
-        dashboardDistIndex: stubDist(dir),
-        dashboardServerEntry: stubServerEntry(dir),
+        dashboardAssets: stubAssets(dir),
         log: () => {},
       },
     );

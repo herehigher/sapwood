@@ -35,8 +35,9 @@ import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop
 import { cwdContractError } from "./loop/cwd-contract.js";
 import {
   type BrowserOpenResult,
+  type DashboardAssetPaths,
   type DashboardServerHandle,
-  dashboardServerEntryPath,
+  dashboardAssetPaths,
   openBrowserReal,
   type StartDashboardServerOpts,
   startDashboardServer,
@@ -1926,16 +1927,8 @@ export interface DashboardDeps {
   waitForStop?: () => Promise<void>;
   env?: NodeJS.ProcessEnv;
   log?: (message: string) => void;
-  /** Overrides the dashboard/dist bundle probe path — real default: \`dashboard/dist/index.html\`
-   *  relative to cwd, matching how \`sapwood run\`/\`status\` read data/ relative to cwd too. */
-  dashboardDistIndex?: string;
-  /** Overrides the compiled dashboard server entry probe path — real default:
-   *  dashboardServerEntryPath() (dashboard/dist-server/start.js), the SAME file startServer's real
-   *  implementation spawns. Checked alongside dashboardDistIndex above, before either the server
-   *  starts or any browser-open attempt (AC5) — a stale/half-built \`dashboard/dist\` with no
-   *  compiled server would otherwise fail confusingly deep inside startServer instead of with the
-   *  one actionable "run the build command" message. */
-  dashboardServerEntry?: string;
+  /** Overrides the complete paired dashboard layout for isolated orchestration tests. */
+  dashboardAssets?: DashboardAssetPaths | null;
 }
 
 export interface ValidatedDashboardArgs {
@@ -1964,14 +1957,9 @@ export async function runDashboard(validated: ValidatedDashboardArgs, deps: Dash
     return 1;
   }
 
-  const distIndex = deps.dashboardDistIndex ?? join("dashboard", "dist", "index.html");
-  if (!existsSync(distIndex)) {
-    log(`sapwood dashboard: no dashboard build found at ${distIndex} — run \`${DASHBOARD_BUILD_HINT}\` first, then retry.`);
-    return 1;
-  }
-  const serverEntry = deps.dashboardServerEntry ?? dashboardServerEntryPath();
-  if (!existsSync(serverEntry)) {
-    log(`sapwood dashboard: no dashboard server build found at ${serverEntry} — run \`${DASHBOARD_BUILD_HINT}\` first, then retry.`);
+  const assets = deps.dashboardAssets === undefined ? dashboardAssetPaths() : deps.dashboardAssets;
+  if (assets === undefined || assets === null) {
+    log(`sapwood dashboard: no paired dashboard build found — run \`${DASHBOARD_BUILD_HINT}\` first, then retry.`);
     return 1;
   }
 
@@ -1982,6 +1970,7 @@ export async function runDashboard(validated: ValidatedDashboardArgs, deps: Dash
       dbPath: DEFAULT_DB_PATH,
       ...(validated.configPath !== undefined ? { configPath: validated.configPath } : {}),
       port: portResult.port,
+      serverEntry: assets.serverEntry,
     });
   } catch (e) {
     const err = e as NodeJS.ErrnoException;

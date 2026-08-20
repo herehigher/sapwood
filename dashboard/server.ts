@@ -221,13 +221,16 @@ async function readDistBuildMeta(staticRoot: string): Promise<{ sha: string | nu
 }
 
 /** The repo HEAD this server is running against, read live (never cached) for the same reason
- *  `readDistBuildMeta` reads live — a `git pull`/merge landing must be reflected on the very next
- *  poll. `null` (never thrown) when `repoDir` isn't a git checkout at all, or `git` itself is
- *  unavailable — an honest unknown, same posture as every other best-effort field here. */
+ * `readDistBuildMeta` reads live. A packaged dashboard lives below a consuming project's
+ * node_modules, so `git -C` would otherwise find and compare that unrelated project. Only the
+ * source checkout layout is eligible for a repository comparison. */
 async function repoHeadSha(repoDir: string): Promise<string | null> {
   try {
-    const { stdout } = await pexecFile("git", ["-C", repoDir, "rev-parse", "HEAD"]);
-    return stdout.trim();
+    if (!existsSync(join(repoDir, "package.json")) || !existsSync(join(dirname(repoDir), "engine", "package.json"))) return null;
+    const { stdout: topLevel } = await pexecFile("git", ["-C", repoDir, "rev-parse", "--show-toplevel"]);
+    if (realpathSync(topLevel.trim()) !== realpathSync(dirname(repoDir))) return null;
+    const { stdout: head } = await pexecFile("git", ["-C", repoDir, "rev-parse", "HEAD"]);
+    return head.trim();
   } catch {
     return null;
   }

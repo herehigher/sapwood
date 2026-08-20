@@ -30,5 +30,6 @@ await build({
   target: "node24",
   outfile: `${OUT_DIR}/start.js`,
   external: ["yaml", "zod"],
+  legalComments: "inline",
   logLevel: "info",
 });

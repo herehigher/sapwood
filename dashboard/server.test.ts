@@ -676,6 +676,10 @@ test("/api/loop/state clears ceiling reasons once the kill switch stops the engi
  *  `repoHeadSha` shells out to real `git`, so faking the shape here would prove nothing about the
  *  actual subprocess wiring. */
 function initGitRepo(dir: string): string {
+  mkdirSync(join(dir, "dashboard"), { recursive: true });
+  mkdirSync(join(dir, "engine"), { recursive: true });
+  writeFileSync(join(dir, "dashboard", "package.json"), "{}\n");
+  writeFileSync(join(dir, "engine", "package.json"), "{}\n");
   execFileSync("git", ["init", "-q"], { cwd: dir });
   // A fresh temp repo inherits the machine's global git config, including `commit.gpgsign` —
   // this fixture needs a real commit to exist, not a real signature, so signing is disabled for
@@ -697,7 +701,7 @@ test("#894 /api/loop/state build: a dist build-meta matching repo HEAD serves th
   const headSha = initGitRepo(repo);
   writeFileSync(join(dist, "build-meta.json"), JSON.stringify({ sha: headSha, time: "2026-07-24T10:00:00.000Z" }), "utf8");
 
-  const fx = await fixture(undefined, { staticDir: dist, repoDir: repo });
+  const fx = await fixture(undefined, { staticDir: dist, repoDir: join(repo, "dashboard") });
   try {
     const body = await getJson(fx, "/api/loop/state");
     assert.deepEqual(body.build, { distSha: headSha, distTime: "2026-07-24T10:00:00.000Z", repoHeadSha: headSha });
@@ -717,7 +721,7 @@ test("#894 /api/loop/state build: a dist build-meta naming a SHA the repo has si
   const staleSha = "0000000000000000000000000000000000dead";
   writeFileSync(join(dist, "build-meta.json"), JSON.stringify({ sha: staleSha, time: "2026-07-24T08:00:00.000Z" }), "utf8");
 
-  const fx = await fixture(undefined, { staticDir: dist, repoDir: repo });
+  const fx = await fixture(undefined, { staticDir: dist, repoDir: join(repo, "dashboard") });
   try {
     const body = await getJson(fx, "/api/loop/state");
     assert.equal(body.build.distSha, staleSha);
