@@ -1,6 +1,6 @@
 // Type-checks the root scripts/*.ts files. They ship with no build step — Node 24
-// runs them directly off disk, stripping types at runtime without checking them
-// (see #1030/#1032) — so this config, not `tsconfig.base.json`'s NodeNext build
+// runs them directly off disk, stripping types at runtime without checking them —
+// so this config, not `tsconfig.base.json`'s NodeNext build
 // setup, has to describe what Node's type-stripping actually executes: relative
 // imports keep their literal `.ts` extension (e.g. release.test.ts importing
 // "./release.ts"), which only resolves under `moduleResolution: bundler` +
