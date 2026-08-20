@@ -660,7 +660,7 @@ export function writeDeployKeyConfigIntoYaml(configFilePath: string, relativeKey
         `"deployKeyId: ${keyId}" inside it by hand.`,
     ];
   }
-  const comment = "# #606 gate② round 1: L1 write deploy key (path, id) — the local anchor; git transport only, no forge API credential";
+  const comment = "# written by sapwood init: worker deploy key — git transport only, no forge API credential";
   const newLines = [`  deployKeyPath: ${relativeKeyPath} ${comment}`, `  deployKeyId: ${keyId}`];
   const range = findWorkerBlockRange(lines);
   let edited: string;
