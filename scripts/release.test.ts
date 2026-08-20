@@ -530,10 +530,12 @@ test("catalog promotion: local bare remote is idempotent and stamps the release 
     git(clone, ["clone", catalogRemote, "."]);
     const plugin = JSON.parse(readFileSync(join(clone, ".claude-plugin", "plugin.json"), "utf8")) as {
       version: string;
-      sourceCommit: string;
+      sourceCommit?: string;
+      metadata?: { sourceCommit?: string };
     };
     assert.equal(plugin.version, "0.3.0");
-    assert.equal(plugin.sourceCommit, git(repoRoot, ["rev-list", "-n", "1", "v0.3.0"]).trim());
+    assert.equal(plugin.metadata?.sourceCommit, git(repoRoot, ["rev-list", "-n", "1", "v0.3.0"]).trim());
+    assert.equal(plugin.sourceCommit, undefined);
     assert.deepEqual(JSON.parse(readFileSync(join(clone, ".claude-plugin", "marketplace.json"), "utf8")).plugins[0].source, "./");
     assert.equal(git(clone, ["log", "-1", "--format=%an <%ae>"]).trim(), "sapwood-release <release@sapwood.invalid>");
     rmSync(clone, { recursive: true, force: true });
@@ -548,14 +550,29 @@ test("catalog promotion: local bare remote is idempotent and stamps the release 
   }
 });
 
-test("catalog promotion: dry-run shows the deterministic commit identity", () => {
+test("catalog promotion: dry-run renders the complete execution plan", () => {
   const { repoRoot, catalogRemote } = setupCatalogPromotionRepo();
   try {
     const r = runCatalogPromote({ repoRoot, exec: npmViewExec(repoRoot, "0.3.0\n") }, { catalogRemote, dryRun: true });
     assert.equal(r.code, 0, r.output);
-    assert.match(
+    assert.equal(
       r.output,
-      /git -c commit\.gpgsign=false -c user\.name=sapwood-release -c user\.email=release@sapwood\.invalid commit -m "chore: promote sapwood v0\.3\.0"/,
+      `release promote --dry-run — would run:\n` +
+        `  npm view sapwood@0.3.0 version\n` +
+        `  git rev-list -n 1 v0.3.0\n` +
+        `  git clone --no-checkout ${repoRoot} <temp>/source\n` +
+        `  git checkout --detach v0.3.0 (cwd: <temp>/source)\n` +
+        `  git ls-tree -r --name-only v0.3.0 -- .claude-plugin commands bin scripts/catalog/ci.yml (cwd: <temp>/source)\n` +
+        `  git clone ${catalogRemote} <temp>/catalog\n` +
+        `  rm -rf <temp>/catalog/.claude-plugin <temp>/catalog/commands <temp>/catalog/bin\n` +
+        `  cp -R <temp>/source/.claude-plugin <temp>/catalog/.claude-plugin; cp -R <temp>/source/commands <temp>/catalog/commands; cp -R <temp>/source/bin <temp>/catalog/bin\n` +
+        `  mkdir -p <temp>/catalog/.github/workflows; cp <temp>/source/scripts/catalog/ci.yml <temp>/catalog/.github/workflows/ci.yml\n` +
+        `  stamp <temp>/catalog/.claude-plugin/plugin.json (version 0.3.0, metadata.sourceCommit) and marketplace.json (version 0.3.0, source ./)\n` +
+        `  validate catalog CI allowlist (cwd: <temp>/catalog)\n` +
+        `  git status --porcelain (cwd: <temp>/catalog)\n` +
+        `  git add -- .claude-plugin commands bin .github/workflows/ci.yml (cwd: <temp>/catalog; if changed)\n` +
+        `  git -c commit.gpgsign=false -c user.name=sapwood-release -c user.email=release@sapwood.invalid commit -m "chore: promote sapwood v0.3.0" (cwd: <temp>/catalog; if changed)\n` +
+        `  git push origin HEAD:main (cwd: <temp>/catalog; if changed)\n`,
     );
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
@@ -614,6 +631,7 @@ test("catalog promotion steps follow npm publish and the dashboard canary", () =
   const names = PUBLISH_STEPS.map((step) => step.name);
   assert.ok(names.indexOf("catalog-promote") > names.indexOf("npm-publish"));
   assert.ok(names.indexOf("catalog-promote") > names.indexOf("dashboard-canary"));
+  assert.ok(names.indexOf("npm-view-verify") < names.indexOf("catalog-promote"));
 });
 
 test("checkPublishPreconditions: fails when HEAD is not origin/main", () => {
@@ -798,6 +816,44 @@ test("runPublish: marks catalog steps as skipped when no catalog remote is confi
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("runPublish: a mismatched npm view stops before catalog clone or push", () => {
+  const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
+  try {
+    const base = fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" });
+    const { exec, calls } = withRecorder((file, args, cwd) => {
+      if (file === "npm" && args[0] === "view") return "0.3.1\n";
+      return base(file, args, cwd);
+    });
+    assert.throws(
+      () => runPublish({ repoRoot: dir, exec }, { dryRun: false, catalogRemote: "https://catalog.invalid/sapwood-plugin.git" }),
+      /npm view sapwood@0\.3\.0 version returned "0\.3\.1"/,
+    );
+    assert.equal(
+      calls.some((call) => call.file === "git" && call.args[0] === "clone"),
+      false,
+    );
+    assert.equal(
+      calls.some((call) => call.file === "git" && call.args.join(" ") === "push origin HEAD:main"),
+      false,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("plugin command documentation never claims marketplace installs run npm ci --ignore-scripts", () => {
+  const files = execFileSync("rg", ["--files", "commands", "bin", "docs"], { cwd: REPO_ROOT, encoding: "utf8" })
+    .trim()
+    .split("\n")
+    .filter(Boolean);
+  const staleClaim = /marketplace install[\s\S]{0,120}only runs `npm ci --ignore-scripts`/;
+  const correctedSentence = "A marketplace install has no local engine build; the wrapper falls back to `npx sapwood@<plugin version>`";
+  for (const file of files) assert.doesNotMatch(readFileSync(join(REPO_ROOT, file), "utf8"), staleClaim, file);
+  assert.ok(readFileSync(join(REPO_ROOT, "commands", "sapwood-run.md"), "utf8").includes(correctedSentence));
+  assert.ok(readFileSync(join(REPO_ROOT, "commands", "sapwood-status.md"), "utf8").includes(correctedSentence));
+  assert.doesNotMatch(readFileSync(join(REPO_ROOT, "commands", "sapwood-stop.md"), "utf8"), staleClaim);
 });
 
 test("runPublish: a failed precondition is a non-zero exit with one clear line, no gh/git side effects", () => {

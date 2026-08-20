@@ -26,5 +26,9 @@ jobs:
           const entry = marketplace.plugins?.[0];
           if (!entry || entry.source !== "./") throw new Error("marketplace plugins[0] must use source './'");
           if (entry.version !== plugin.version) throw new Error("marketplace and plugin versions disagree");
-          if (typeof plugin.sourceCommit !== "string" || plugin.sourceCommit === "") throw new Error("plugin sourceCommit is missing");
+          if (typeof plugin.metadata?.sourceCommit !== "string" || plugin.metadata.sourceCommit === "") throw new Error("plugin metadata.sourceCommit is missing");
           NODE
+      - name: Validate plugin manifest strictly
+        run: |
+          npm install --global @anthropic-ai/claude-code@2.1.237
+          claude plugin validate .claude-plugin --strict

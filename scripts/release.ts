@@ -7,7 +7,7 @@
 // that first if a check here looks surprising. The four version-carrying manifests are
 // written ONLY from here; never hand-edit a manifest's "version" field.
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -387,22 +387,15 @@ function releaseCommitFor(deps: Deps, version: string): string {
   return commit;
 }
 
-function catalogPromotionCommands(repoRoot: string, catalogRemote: string, version: string): string[] {
-  return [
-    `git clone --no-checkout ${repoRoot} <temp>/source`,
-    `git checkout --detach v${version}`,
-    `git clone ${catalogRemote} <temp>/catalog`,
-    "git add -- .claude-plugin commands bin .github/workflows/ci.yml",
-    `git ${CATALOG_COMMIT_CONFIG.join(" ")} commit -m "chore: promote sapwood v${version}"`,
-    "git push origin HEAD:main",
-  ];
-}
-
 function writeCatalogManifests(catalogRoot: string, version: string, sourceCommit: string): void {
   const pluginPath = join(catalogRoot, ".claude-plugin", "plugin.json");
   const plugin = JSON.parse(readFileSync(pluginPath, "utf8")) as Record<string, unknown>;
   plugin.version = version;
-  plugin.sourceCommit = sourceCommit;
+  const metadata =
+    typeof plugin.metadata === "object" && plugin.metadata !== null && !Array.isArray(plugin.metadata) ? plugin.metadata : {};
+  (metadata as Record<string, unknown>).sourceCommit = sourceCommit;
+  plugin.metadata = metadata;
+  delete plugin.sourceCommit;
   writeFileSync(pluginPath, `${JSON.stringify(plugin, null, 2)}\n`);
 
   const marketplacePath = join(catalogRoot, ".claude-plugin", "marketplace.json");
@@ -414,32 +407,145 @@ function writeCatalogManifests(catalogRoot: string, version: string, sourceCommi
   writeFileSync(marketplacePath, `${JSON.stringify(marketplace, null, 2)}\n`);
 }
 
-function promoteCatalog(deps: Deps, version: string, catalogRemote: string): void {
-  const releaseCommit = releaseCommitFor(deps, version);
-  const tempRoot = mkdtempSync(join(tmpdir(), "sapwood-catalog-promote-"));
+interface CatalogPromotionStep {
+  describe: string;
+  run(deps: Deps): void;
+}
+
+function catalogPromotionPlan(
+  repoRoot: string,
+  catalogRemote: string,
+  version: string,
+  tempRoot: string,
+  verifyRegistry: boolean,
+): CatalogPromotionStep[] {
   const sourceRoot = join(tempRoot, "source");
   const catalogRoot = join(tempRoot, "catalog");
+  const workflowDir = join(catalogRoot, ".github", "workflows");
+  let releaseCommit = "";
+  let catalogChanged = false;
+  const requireReleaseCommit = (): string => {
+    if (releaseCommit === "") throw new Error(`tag v${version} does not resolve to a release commit`);
+    return releaseCommit;
+  };
+  const sourceTreeArgs = ["ls-tree", "-r", "--name-only", `v${version}`, "--", ...CATALOG_SHELL_PATHS, "scripts/catalog/ci.yml"];
+  const registryVerifyStep: CatalogPromotionStep[] = verifyRegistry
+    ? [
+        {
+          describe: `npm view sapwood@${version} version`,
+          run: (deps) => {
+            verifyPublishedVersion(deps, version);
+          },
+        },
+      ]
+    : [];
+  return [
+    ...registryVerifyStep,
+    {
+      describe: `git rev-list -n 1 v${version}`,
+      run: (deps) => {
+        releaseCommit = releaseCommitFor(deps, version);
+      },
+    },
+    {
+      describe: `git clone --no-checkout ${repoRoot} ${sourceRoot}`,
+      run: (deps) => {
+        deps.exec("git", ["clone", "--no-checkout", repoRoot, sourceRoot]);
+      },
+    },
+    {
+      describe: `git checkout --detach v${version} (cwd: ${sourceRoot})`,
+      run: (deps) => {
+        deps.exec("git", ["checkout", "--detach", `v${version}`], sourceRoot);
+      },
+    },
+    {
+      describe: `git ${sourceTreeArgs.join(" ")} (cwd: ${sourceRoot})`,
+      run: (deps) => {
+        const sourcePaths = deps.exec("git", sourceTreeArgs, sourceRoot).split("\n").filter(Boolean);
+        for (const root of CATALOG_SHELL_PATHS) {
+          if (!sourcePaths.some((path) => path.startsWith(`${root}/`))) {
+            throw new Error(`release commit ${requireReleaseCommit()} has no ${root}/ catalog shell path`);
+          }
+        }
+        if (!sourcePaths.includes("scripts/catalog/ci.yml")) {
+          throw new Error(`release commit ${requireReleaseCommit()} has no scripts/catalog/ci.yml catalog workflow template`);
+        }
+      },
+    },
+    {
+      describe: `git clone ${catalogRemote} ${catalogRoot}`,
+      run: (deps) => {
+        deps.exec("git", ["clone", catalogRemote, catalogRoot]);
+      },
+    },
+    {
+      describe: `rm -rf ${CATALOG_SHELL_PATHS.map((root) => join(catalogRoot, root)).join(" ")}`,
+      run: () => {
+        for (const root of CATALOG_SHELL_PATHS) rmSync(join(catalogRoot, root), { recursive: true, force: true });
+      },
+    },
+    {
+      describe: `cp -R ${CATALOG_SHELL_PATHS.map((root) => `${join(sourceRoot, root)} ${join(catalogRoot, root)}`).join("; cp -R ")}`,
+      run: () => {
+        for (const root of CATALOG_SHELL_PATHS) cpSync(join(sourceRoot, root), join(catalogRoot, root), { recursive: true });
+      },
+    },
+    {
+      describe: `mkdir -p ${workflowDir}; cp ${join(sourceRoot, "scripts", "catalog", "ci.yml")} ${join(workflowDir, "ci.yml")}`,
+      run: () => {
+        mkdirSync(workflowDir, { recursive: true });
+        cpSync(join(sourceRoot, "scripts", "catalog", "ci.yml"), join(workflowDir, "ci.yml"));
+      },
+    },
+    {
+      describe: `stamp ${join(catalogRoot, ".claude-plugin", "plugin.json")} (version ${version}, metadata.sourceCommit) and marketplace.json (version ${version}, source ./)`,
+      run: () => {
+        writeCatalogManifests(catalogRoot, version, requireReleaseCommit());
+      },
+    },
+    {
+      describe: `validate catalog CI allowlist (cwd: ${catalogRoot})`,
+      run: () => {
+        const pathCheck = checkCatalogPaths(catalogWorkingTreePaths(catalogRoot));
+        if (!pathCheck.ok) throw new Error(pathCheck.message);
+      },
+    },
+    {
+      describe: `git status --porcelain (cwd: ${catalogRoot})`,
+      run: (deps) => {
+        catalogChanged = deps.exec("git", ["status", "--porcelain"], catalogRoot).trim() !== "";
+      },
+    },
+    {
+      describe: `git add -- .claude-plugin commands bin .github/workflows/ci.yml (cwd: ${catalogRoot}; if changed)`,
+      run: (deps) => {
+        if (catalogChanged) deps.exec("git", ["add", "--", ".claude-plugin", "commands", "bin", ".github/workflows/ci.yml"], catalogRoot);
+      },
+    },
+    {
+      describe: `git ${CATALOG_COMMIT_CONFIG.join(" ")} commit -m "chore: promote sapwood v${version}" (cwd: ${catalogRoot}; if changed)`,
+      run: (deps) => {
+        if (catalogChanged) deps.exec("git", [...CATALOG_COMMIT_CONFIG, "commit", "-m", `chore: promote sapwood v${version}`], catalogRoot);
+      },
+    },
+    {
+      describe: `git push origin HEAD:main (cwd: ${catalogRoot}; if changed)`,
+      run: (deps) => {
+        if (catalogChanged) deps.exec("git", ["push", "origin", "HEAD:main"], catalogRoot);
+      },
+    },
+  ];
+}
+
+function renderCatalogPromotionPlan(repoRoot: string, catalogRemote: string, version: string, verifyRegistry: boolean): string[] {
+  return catalogPromotionPlan(repoRoot, catalogRemote, version, "<temp>", verifyRegistry).map((step) => step.describe);
+}
+
+function promoteCatalog(deps: Deps, version: string, catalogRemote: string, verifyRegistry: boolean): void {
+  const tempRoot = mkdtempSync(join(tmpdir(), "sapwood-catalog-promote-"));
   try {
-    deps.exec("git", ["clone", "--no-checkout", deps.repoRoot, sourceRoot]);
-    deps.exec("git", ["checkout", "--detach", `v${version}`], sourceRoot);
-    for (const root of CATALOG_SHELL_PATHS) {
-      if (!existsSync(join(sourceRoot, root))) throw new Error(`release commit ${releaseCommit} has no ${root}/ catalog shell path`);
-    }
-
-    deps.exec("git", ["clone", catalogRemote, catalogRoot]);
-    for (const root of CATALOG_SHELL_PATHS) rmSync(join(catalogRoot, root), { recursive: true, force: true });
-    for (const root of CATALOG_SHELL_PATHS) cpSync(join(sourceRoot, root), join(catalogRoot, root), { recursive: true });
-    const workflowDir = join(catalogRoot, ".github", "workflows");
-    mkdirSync(workflowDir, { recursive: true });
-    cpSync(join(sourceRoot, "scripts", "catalog", "ci.yml"), join(workflowDir, "ci.yml"));
-    writeCatalogManifests(catalogRoot, version, releaseCommit);
-    const pathCheck = checkCatalogPaths(catalogWorkingTreePaths(catalogRoot));
-    if (!pathCheck.ok) throw new Error(pathCheck.message);
-
-    if (deps.exec("git", ["status", "--porcelain"], catalogRoot).trim() === "") return;
-    deps.exec("git", ["add", "--", ".claude-plugin", "commands", "bin", ".github/workflows/ci.yml"], catalogRoot);
-    deps.exec("git", [...CATALOG_COMMIT_CONFIG, "commit", "-m", `chore: promote sapwood v${version}`], catalogRoot);
-    deps.exec("git", ["push", "origin", "HEAD:main"], catalogRoot);
+    for (const step of catalogPromotionPlan(deps.repoRoot, catalogRemote, version, tempRoot, verifyRegistry)) step.run(deps);
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -450,15 +556,11 @@ export function runCatalogPromote(deps: Deps, opts: { catalogRemote: string; dry
   if (!lockstep.ok) return { code: 1, output: `release promote: ${lockstep.message}\n` };
   if (lockstep.version === "0.0.0")
     return { code: 1, output: "release promote: manifests are still at 0.0.0 — nothing published to promote.\n" };
-  const commands = [
-    `npm view sapwood@${lockstep.version} version`,
-    ...catalogPromotionCommands(deps.repoRoot, opts.catalogRemote, lockstep.version),
-  ];
+  const plan = renderCatalogPromotionPlan(deps.repoRoot, opts.catalogRemote, lockstep.version, true);
   if (opts.dryRun)
-    return { code: 0, output: `release promote --dry-run — would run:\n${commands.map((command) => `  ${command}`).join("\n")}\n` };
+    return { code: 0, output: `release promote --dry-run — would run:\n${plan.map((command) => `  ${command}`).join("\n")}\n` };
   try {
-    verifyPublishedVersion(deps, lockstep.version);
-    promoteCatalog(deps, lockstep.version, opts.catalogRemote);
+    promoteCatalog(deps, lockstep.version, opts.catalogRemote, true);
     return { code: 0, output: `release promote: catalog already matches or promoted sapwood v${lockstep.version}.\n` };
   } catch (e) {
     return { code: 1, output: `release promote: ${e instanceof Error ? e.message : String(e)}\n` };
@@ -552,10 +654,10 @@ export const PUBLISH_STEPS: PublishStep[] = [
     name: "catalog-promote",
     describe: (ctx) =>
       ctx.catalogRemote
-        ? catalogPromotionCommands(ctx.repoRoot, ctx.catalogRemote, ctx.version).join("\n")
+        ? renderCatalogPromotionPlan(ctx.repoRoot, ctx.catalogRemote, ctx.version, false).join("\n")
         : "skipped: no --catalog remote",
     run: (ctx, deps) => {
-      if (ctx.catalogRemote) promoteCatalog(deps, ctx.version, ctx.catalogRemote);
+      if (ctx.catalogRemote) promoteCatalog(deps, ctx.version, ctx.catalogRemote, false);
     },
   },
 ];

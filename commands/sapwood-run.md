@@ -12,10 +12,7 @@ back to the user verbatim, unedited:
 sh "$CLAUDE_PLUGIN_ROOT/bin/sapwood-plugin.sh" run $ARGUMENTS
 ```
 
-(The wrapper uses a local `engine/dist/cli.js` when one exists — a contributor
-checkout or a Channel A clone that's been built — and otherwise falls back to
-`npx sapwood@<version>` pinned to this plugin's own version, since a marketplace install
-only runs `npm ci --ignore-scripts` and never builds `engine/dist`. cwd stays the target
+(The wrapper uses a local `engine/dist/cli.js` when one exists — a contributor checkout or a Channel A clone that's been built. A marketplace install has no local engine build; the wrapper falls back to `npx sapwood@<plugin version>`. cwd stays the target
 repo, so config/DB paths resolve where the user runs it.)
 
 Notes for the user, only if they ask or the output needs context:
