@@ -31,11 +31,9 @@
 Two kinds of content: technical invariants this repo's review history has already flagged more
 than once, and doctrine for how the loop should treat review findings in general.
 
-**Carrier split (#434).** This file governs the **engine's own** reviewer; standing
-review-*discipline* rules for the **external** review bot live in the repo-root
-[`AGENTS.md`](../AGENTS.md), which it reads directly; per-PR context lives in the
-review-request comment's own verification plan. The three carriers deliberately do not restate
-each other — a rule belongs to exactly one of them.
+**Carrier split (#434).** This file governs the engine reviewer; external-bot discipline is in
+[`AGENTS.md`](../AGENTS.md), and per-PR context is in its review-request verification plan.
+Keep each rule in one carrier.
 
 ## Technical invariants
 
@@ -160,15 +158,16 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
 
 ### Documentation claims
 
-- **Doc-claim grounding rule.** Ground every behavioral/guarantee claim in a doc change in the
-  exact function/branch it describes, not a plausible generalization from a partial read. A
-  fallible operation (delete, prune) is best-effort unless the code checks and reports the
-  outcome; a policy specific to one call path isn't generalized to every lane in that state when
-  another path (e.g. human-merge-only) differs. A documented procedure
-  or recipe is itself a claim: either it has actually been run, or it isn't asserted as working. A
-  docs-only PR has no test suite to catch a false claim the way code does, so name the exact
-  symbol/branch backing a claim rather than writing it from memory of "roughly how it works"
-  (#854, #700).
+- **Doc-claim grounding rule.** Ground each behavioral/guarantee claim in the exact function/branch,
+  not a partial-read generalization. A fallible operation is best-effort unless code checks and
+  reports its outcome; do not generalize a one-path policy to another lane. A procedure/recipe must
+  be run before calling it working. Docs-only PRs need symbol/branch citations, not memory (#854, #700).
+- **Comment discipline** (reviewer bar; producer baseline:
+  `engine/prompts/worker.md`'s “Working language & comments”). Source comments explain a
+  non-obvious **why**, never narrate code's **what**; narration is a finding. Production-source
+  archaeology—origin stories, review/fix-round chronicles, and reviewer attributions—belongs in
+  issue/PR; a bare `#NNN` may anchor rule provenance. Every `ponytail:` simplification names its
+  ceiling and upgrade path; either omitted is a finding.
 
 ### Signal classification & escalation
 
@@ -187,12 +186,11 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   instead on the OUTER safety ceiling (`cost.roundBudgetUsd`/`dailyBudgetUsd`). Prefer narrow
   anyway, naming that outer-layer dependency and the residual blind spot explicitly rather than
   claiming full coverage.
-- **Doctrine self-modification rule.** A PR that modifies this review-doctrine file itself must
-  be prominently flagged in review, recommended needs-human rather than auto-merge. The reviewer
-  applies the doctrine loaded at engine construction, never the version on the PR's branch — the
-  change cannot influence its own review, but can still pass under the prior rules, so a human
-  should confirm rule changes. This file is deliberately NOT guard-protected (docs/security.md)
-  — this prose IS the enforcement.
+- **Doctrine self-modification rule.** A PR changing this doctrine must be flagged for human
+  confirmation and human merge. With default/enabled instruction-path escalation,
+  `instruction-path-escalation.ts` derives its carrier and
+  `instruction-path-escalation.test.ts` pins escalation. The reviewer uses the construction-time
+  snapshot, so the change cannot judge itself.
 - **A tier-C cannot-confirm is not a producer stall signal, and it burns spend twice** (#791,
   #865). `docs/security.md`'s evidence tiers make tier-C (human-witnessed probe)
   producer-unforgeable BY DESIGN — the producer never self-executes or self-attests it, so a
@@ -248,11 +246,9 @@ applied clause-by-clause, not file-by-file. Worked example:
    guard could enforce (or already does — a drifting duplicate). Disposition: name the target
    carrier and file a follow-up to move it there — never "fix" by rewording.
 
-**Q3 safety-floor exception.** A rule whose omission produces unsafe output (the AC-evidence-tier
-floor; the human-merge-only-paths enumeration) stays prompt-resident even where a pull-model
-channel (`skills-plugin.ts`, #639/#640, serving the same `docs/security.md` content) also
-exists: a session must actively invoke a skill, so it is never a load-bearing substitute for
-content that must be unconditionally seen. Where principle 3 collides with a floor like this,
-record the tension and the proposed carrier instead of deleting — a mechanically-pinned
-mirror-pair test against the canonical source (`prompts.test.ts`'s `#628`/`#653` tests) is the
-shipped answer when a floor has more than one hand-maintained carrier.
+**Q3 safety-floor exception.** Unsafe-to-omit floors (AC-evidence tiers and human-merge-only paths)
+remain in prompt text even when a pull-model skill serves the same source: sessions may not invoke
+it, so it is not load-bearing. If principle 3 collides, record the tension and proposed carrier
+instead of deleting. For multi-carrier floors enumerated by `engine/src/roles/prompts.test.ts`
+(#628/#653), its marker/mirror test requires equality after whitespace normalization across the
+enumerated prompt carriers; otherwise retain the carrier tension.
