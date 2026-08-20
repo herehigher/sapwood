@@ -250,5 +250,5 @@ applied clause-by-clause, not file-by-file. Worked example:
 remain in prompt text even when a pull-model skill serves the same source: sessions may not invoke
 it, so it is not load-bearing. If principle 3 collides, record the tension and proposed carrier
 instead of deleting. For multi-carrier floors enumerated by `engine/src/roles/prompts.test.ts`
-(#628/#653), its marker/mirror test requires byte-equal blocks across the enumerated prompt
-carriers; otherwise retain the carrier tension.
+(#628/#653), its marker/mirror test requires equality after whitespace normalization across the
+enumerated prompt carriers; otherwise retain the carrier tension.
