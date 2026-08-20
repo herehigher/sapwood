@@ -501,24 +501,17 @@ export const PUBLISH_STEPS: PublishStep[] = [
     // refuses once the tag exists — see docs/dev-guide/10-releasing.md's Rollback section
     // for the manual one-line retry instead.
     name: "npm-publish",
-    describe: (ctx) => `npm publish --workspace engine --tag ${npmDistTag(ctx)}`,
+    describe: (ctx) => `npm publish --workspace engine --tag ${npmDistTag(ctx.version)}`,
     run: (ctx, deps) => {
-      deps.exec("npm", ["publish", "--workspace", "engine", "--tag", npmDistTag(ctx)]);
+      deps.exec("npm", ["publish", "--workspace", "engine", "--tag", npmDistTag(ctx.version)]);
     },
   },
 ];
 
-// npm's own dist-tag equivalent of gh-release's `--prerelease` flag: a plain release always
-// publishes `latest`. A pre-release uses its own first identifier as the tag (`alpha`/`beta`/
-// `rc`, matching the pre-1.0 ladder in docs/dev-guide/10-releasing.md) when that identifier is
-// purely alphabetic, so distinct pre-release tracks (`0.3.0-beta.1` vs `0.3.0-rc.1`) install
-// side by side under their own tags rather than colliding on a single hardcoded `alpha`. A
-// non-alphabetic first identifier (`0.3.0-1`) has no name to reuse as a tag, so it falls back
-// to the generic `next` — never `latest`, which is the one invariant that actually matters here.
-export function npmDistTag(ctx: PublishContext): string {
-  if (!ctx.prerelease) return "latest";
-  const [firstIdentifier] = parseSemver(ctx.version).prerelease;
-  return firstIdentifier !== undefined && /^[a-zA-Z]+$/.test(firstIdentifier) ? firstIdentifier.toLowerCase() : "next";
+// A release without a pre-release suffix publishes as `latest`; every pre-release is held on the
+// single alpha channel so it cannot become the default `npm install sapwood` resolution.
+export function npmDistTag(version: string): string {
+  return version.includes("-") ? "alpha" : "latest";
 }
 
 export interface CommandResult {

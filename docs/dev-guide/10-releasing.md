@@ -86,23 +86,16 @@ the bare name — it's what both `npm i -g sapwood@alpha` and the marketplace's
 it imports the engine by relative path within the workspace, never by package
 name, so the rename carries no cross-workspace reference to update.
 
-**npm publish dist-tag.** Same pre-release rule as the GitHub Release's
-`--prerelease` flag, applied to npm's own tag concept: a plain release publishes
-under `latest`. A pre-release publishes under its own first identifier
-(`0.3.0-alpha.1` → `alpha`, `0.3.0-beta.1` → `beta`, `0.3.0-rc.1` → `rc`) when
-that identifier is purely alphabetic, so distinct pre-release tracks install
-side by side under their own tags instead of colliding on one hardcoded name; a
-non-alphabetic first identifier (`0.3.0-1`) falls back to the generic `next`.
-Either way, a pre-release **never** publishes under `latest` — `latest` is what
-a bare `npm install sapwood` (no version) and `npx sapwood@latest` resolve, so a
+**npm publish dist-tag.** A plain release publishes under `latest`. Every
+pre-release publishes under `alpha`, never `latest`. `latest` is what a bare
+`npm install sapwood` (no version) and `npx sapwood@latest` resolve, so a
 pre-release landing there would silently become the default install for everyone.
 
 **npm publish token: lives on the publishing human's machine.** `npm publish`
-authenticates via `npm login` run once, locally, by whoever executes `publish` —
-there is no `NPM_TOKEN` CI secret and no automated npm-publish workflow today
-(the loop cannot publish either way: guard denies `gh release` and a direct push
-to the default branch from any session it governs, and the npm step only runs as
-part of this same human-triggered `publish` command).
+authenticates via `npm login` run once, locally, by whoever executes `publish`.
+There is no `NPM_TOKEN` CI secret or automated npm-publish workflow today. An
+`NPM_TOKEN` workflow remains an open, human-merge-only owner decision; this
+release path stays human-triggered unless the owner makes and merges that change.
 
 **Pre-releases always pass `--prerelease`.** `gh release create` does not infer
 pre-release status from a `-` in the tag name, so `publish` passes `--prerelease`
@@ -120,7 +113,7 @@ npm run release -- prepare 0.3.0-alpha.1
 
 # 3. Publish — from main, at the merged commit. Tags, pushes the tag, creates the
 #    GitHub Release with the CHANGELOG section as its notes, then `npm publish`es
-#    the engine workspace as `sapwood` under the version's own dist-tag (see "npm
+#    the engine workspace as `sapwood` under the selected dist-tag (see "npm
 #    publish dist-tag" above). Requires a prior local `npm login`.
 npm run release -- publish
 # or, to see the exact commands without running them:
@@ -143,7 +136,7 @@ git push origin :refs/tags/v0.3.0-alpha.1
 #     `publish` itself refuses to re-run once the tag exists, so retry this one
 #     step by hand from the tagged commit). <dist-tag> is whatever
 #     `npm run release -- publish --dry-run` printed for this version (see "npm
-#     publish dist-tag" above — latest / alpha / beta / rc / next):
+#     publish dist-tag" above — latest or alpha):
 git checkout v0.3.0-alpha.1
 npm publish --workspace engine --tag <dist-tag>
 ```

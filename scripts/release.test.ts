@@ -23,7 +23,6 @@ import {
   marketplaceRefFor,
   moveUnreleasedToVersion,
   npmDistTag,
-  type PublishContext,
   readManifestVersion,
   readMarketplaceRef,
   runPrepare,
@@ -686,22 +685,15 @@ test("checkPublishPreconditions: succeeds when everything lines up (tag absent b
 
 // ── npm dist-tag selection ──────────────────────────────────────────────────────────
 
-function publishCtx(version: string): PublishContext {
-  return { version, prerelease: isPrerelease(version), repoRoot: "" };
-}
-
 test("npmDistTag: a plain release is always latest", () => {
-  assert.equal(npmDistTag(publishCtx("0.3.0")), "latest");
+  assert.equal(npmDistTag("0.3.0"), "latest");
 });
 
-test("npmDistTag: alpha/beta/rc pre-releases use their own identifier as the tag, never a hardcoded alpha", () => {
-  assert.equal(npmDistTag(publishCtx("0.3.0-alpha.1")), "alpha");
-  assert.equal(npmDistTag(publishCtx("0.3.0-beta.1")), "beta");
-  assert.equal(npmDistTag(publishCtx("0.3.0-rc.1")), "rc");
-});
-
-test("npmDistTag: a non-alphabetic first pre-release identifier falls back to next, never latest", () => {
-  assert.equal(npmDistTag(publishCtx("0.3.0-1")), "next");
+test("npmDistTag: every pre-release selects alpha, never latest", () => {
+  assert.equal(npmDistTag("0.3.0-alpha.1"), "alpha");
+  assert.equal(npmDistTag("0.3.0-beta.1"), "alpha");
+  assert.equal(npmDistTag("0.3.0-rc.1"), "alpha");
+  assert.equal(npmDistTag("0.3.0-1"), "alpha");
 });
 
 // ── publish --dry-run output ────────────────────────────────────────────────────────
