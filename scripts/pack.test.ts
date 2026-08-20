@@ -7,8 +7,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { availableDashboardPort, runDashboardCanary } from "./dashboard-canary.ts";
 import { bundledDashboardDependencies } from "../engine/scripts/generate-third-party-notices.ts";
+import { availableDashboardPort, runDashboardCanary } from "./dashboard-canary.ts";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -16,10 +16,14 @@ async function assertCleanWorkspaceDashboardLaunch(checkoutDir: string): Promise
   const cwd = mkdtempSync(join(tmpdir(), "sapwood-clean-dashboard-cwd-"));
   const dbPath = join(cwd, "data", "sapwood.sqlite");
   const port = await availableDashboardPort();
-  const child = spawn(process.execPath, [join(checkoutDir, "dashboard", "dist-server", "start.js"), "--db-path", dbPath, "--port", String(port)], {
-    cwd,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const child = spawn(
+    process.execPath,
+    [join(checkoutDir, "dashboard", "dist-server", "start.js"), "--db-path", dbPath, "--port", String(port)],
+    {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
   let output = "";
   child.stdout.on("data", (chunk: Buffer) => (output += chunk.toString("utf8")));
   child.stderr.on("data", (chunk: Buffer) => (output += chunk.toString("utf8")));

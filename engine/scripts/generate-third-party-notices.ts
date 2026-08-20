@@ -15,6 +15,18 @@ export interface NoticeDependency {
   licenseText: string;
 }
 
+interface PackageManifest {
+  name: string;
+  version: string;
+  license?: unknown;
+  author?: unknown;
+}
+
+function isPackageManifest(value: unknown): value is PackageManifest {
+  if (value === null || typeof value !== "object") return false;
+  return typeof Reflect.get(value, "name") === "string" && typeof Reflect.get(value, "version") === "string";
+}
+
 function packageRootForModule(moduleId: string): string | undefined {
   const marker = `${requirePathSeparator()}node_modules${requirePathSeparator()}`;
   const start = moduleId.lastIndexOf(marker);
@@ -69,8 +81,8 @@ export function bundledDashboardDependencies(repoRoot = defaultRepoRoot): Notice
 
   return [...roots]
     .map((root) => {
-      const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { name?: unknown; version?: unknown; license?: unknown; author?: unknown };
-      if (typeof manifest.name !== "string" || typeof manifest.version !== "string") throw new Error(`invalid package manifest: ${root}/package.json`);
+      const manifest: unknown = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+      if (!isPackageManifest(manifest)) throw new Error(`invalid package manifest: ${root}/package.json`);
       const text = packageLicenseText(root, manifest);
       const copyrightLines = text.split(/\r?\n/).filter((line) => /copyright/i.test(line));
       if (copyrightLines.length === 0) throw new Error(`bundled dependency ${manifest.name} has no copyright line in its licence text`);
