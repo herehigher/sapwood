@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { type SpawnSyncOptionsWithStringEncoding, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 // `sapwood` CLI. M0.5 shipped `init`; `run` (the M4 loop driver, #46) and `validate` (#49)
 // landed next; `status` + `run --dry-run` (#15) land here. The plugin's slash commands
@@ -7,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSyn
 // — see ../../commands/.
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
 import {
@@ -33,6 +32,7 @@ import { createBranchProtectionDetector } from "./loop/branch-protection-warning
 import { detectBypassPermissionsMode } from "./loop/bypass-permissions-warning.js";
 import { detectClaudeVersionStartupTier } from "./loop/claude-version-startup-check.js";
 import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop/conductor.js";
+import { cwdContractError } from "./loop/cwd-contract.js";
 import {
   type BrowserOpenResult,
   type DashboardServerHandle,
@@ -151,91 +151,6 @@ export function formatVersionString(baseVersion: string, stamp: BuildStamp | und
  *  silently fall back to the real clock (the compiler refuses), and every real-clock read is
  *  traceable to this constant instead of being scattered across defaults. */
 const systemClock = (): Date => new Date();
-
-const CWD_CONTRACT_MESSAGE = "Run sapwood from the repository root.";
-
-/** Commands whose state belongs to one repository-wide composition root. */
-const ROOT_BOUND_COMMANDS = new Set(["dashboard", "estop", "events", "init", "park", "pause", "run", "status", "stop"]);
-
-/** A value-bearing --config is the only path option that selects config-relative runtime files. */
-function explicitConfigPath(argv: string[]): string | undefined {
-  let configPath: string | undefined;
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] !== "--config") continue;
-    const candidate = argv[i + 1];
-    if (candidate === undefined || candidate.startsWith("-")) return undefined;
-    configPath = candidate;
-    i++;
-  }
-  return configPath;
-}
-
-/**
- * Refuse a state command outside a repository's canonical main-worktree root. Git's common
- * directory identifies that root even when the cwd contains a tracked config in a linked lane.
- * Non-git directories deliberately retain their exact-cwd behaviour.
- */
-export function cwdContractError(argv: string[], cwd = process.cwd()): string | undefined {
-  const command = argv[2];
-  if (command === undefined || !ROOT_BOUND_COMMANDS.has(command) || argv.slice(3).includes("--help") || argv.slice(3).includes("-h")) {
-    return undefined;
-  }
-
-  const gitEnv: NodeJS.ProcessEnv = { ...process.env, LC_ALL: "C", LANG: "C" };
-  for (const key of Object.keys(gitEnv)) {
-    if (key.startsWith("GIT_")) delete gitEnv[key];
-  }
-  const gitOpts: SpawnSyncOptionsWithStringEncoding = {
-    cwd,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    env: gitEnv,
-  };
-  const bare = spawnSync("git", ["rev-parse", "--is-bare-repository"], gitOpts);
-  if (bare.status !== 0) {
-    if (bare.status === 128 && /not a git repository/.test(bare.stderr)) return undefined;
-    const reason = bare.error !== undefined || bare.status === null ? "git unavailable" : "git failed";
-    return `sapwood ${command}: could not determine the repository root (${reason}). ${CWD_CONTRACT_MESSAGE}\n`;
-  }
-  if (bare.stdout.trim() === "true") {
-    return `sapwood ${command}: could not determine the repository root (bare repository has no worktree). ${CWD_CONTRACT_MESSAGE}\n`;
-  }
-  if (bare.stdout.trim() !== "false") {
-    return `sapwood ${command}: could not determine the repository root (git returned malformed output). ${CWD_CONTRACT_MESSAGE}\n`;
-  }
-
-  const git = spawnSync("git", ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", "--show-toplevel"], gitOpts);
-  if (git.status !== 0) {
-    const reason = git.error !== undefined || git.status === null ? "git unavailable" : "git failed";
-    return `sapwood ${command}: could not determine the repository root (${reason}). ${CWD_CONTRACT_MESSAGE}\n`;
-  }
-  const [gitDir, commonDir, worktreeRoot] = git.stdout.trim().split("\n");
-  if (gitDir === undefined || commonDir === undefined || worktreeRoot === undefined) {
-    return `sapwood ${command}: could not determine the repository root (git returned malformed output). ${CWD_CONTRACT_MESSAGE}\n`;
-  }
-  let mainRoot = realpathSync(worktreeRoot);
-  if (gitDir !== commonDir) {
-    const worktrees = spawnSync("git", ["worktree", "list", "--porcelain"], gitOpts);
-    const firstLine = worktrees.stdout.split("\n").find((line) => line.startsWith("worktree "));
-    if (worktrees.status !== 0 || firstLine === undefined) {
-      const reason = worktrees.error !== undefined || worktrees.status === null ? "git unavailable" : "git worktree query failed";
-      return `sapwood ${command}: could not determine the repository root (${reason}). ${CWD_CONTRACT_MESSAGE}\n`;
-    }
-    mainRoot = realpathSync(firstLine.slice("worktree ".length));
-  }
-  const cwdRealpath = realpathSync(cwd);
-  const configPath = explicitConfigPath(argv);
-  const resolvedConfigPath = configPath === undefined ? undefined : resolve(cwd, configPath);
-  const configLocation =
-    resolvedConfigPath !== undefined && existsSync(resolvedConfigPath) ? realpathSync(resolvedConfigPath) : resolvedConfigPath;
-  const configRelative = configLocation === undefined ? undefined : relative(mainRoot, configLocation);
-  const configOutsideRoot =
-    configRelative === ".." || configRelative?.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) === true;
-  if (gitDir !== commonDir || cwdRealpath !== mainRoot || configOutsideRoot) {
-    return `sapwood ${command}: ${CWD_CONTRACT_MESSAGE} ${mainRoot}\n`;
-  }
-  return undefined;
-}
 
 const USAGE = `\
 usage: sapwood <command> [options]

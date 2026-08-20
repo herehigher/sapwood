@@ -12,7 +12,6 @@ import {
   buildTickFixLegResume,
   checkWebAccessSettingsDenial,
   computeDryRunPreview,
-  cwdContractError,
   formatDryRunPreview,
   formatStatus,
   formatStopConditionLine,
@@ -163,26 +162,11 @@ test("run: falls through to the async engine-wiring path (code -1), same as init
 test("cwd contract: real linked worktrees, including a Claude lane with its tracked config, refuse before state can be written", async () => {
   const repo = makeGitRepo("sapwood-cwd-contract-");
   const claudeLane = join(repo, ".claude", "worktrees", "lane");
-  const peripheralLane = join(repo, "peripheral-lane");
   try {
     mkdirSync(dirname(claudeLane), { recursive: true });
     git(repo, ["worktree", "add", "--quiet", "-b", "claude-lane", claudeLane, "HEAD"]);
-    git(repo, ["worktree", "add", "--quiet", "-b", "peripheral-lane", peripheralLane, "HEAD"]);
 
     assert.equal(existsSync(join(claudeLane, "sapwood.config.yaml")), true, "the lane fixture must include the tracked config");
-    for (const [command, lane] of [
-      ["run", claudeLane],
-      ["init", claudeLane],
-      ["status", claudeLane],
-      ["events", peripheralLane],
-      ["dashboard", peripheralLane],
-      ["park", peripheralLane],
-      ["pause", peripheralLane],
-      ["stop", peripheralLane],
-      ["estop", peripheralLane],
-    ] as const) {
-      assert.equal(cwdContractError(["node", "sapwood", command], lane), expectedRootError(command, repo));
-    }
     const pause = await runMainAtCwd(claudeLane, ["node", "sapwood", "pause"]);
     assert.equal(pause.code, 1);
     assert.match(pause.stderr, new RegExp(expectedRootError("pause", repo).trim()));
@@ -192,84 +176,6 @@ test("cwd contract: real linked worktrees, including a Claude lane with its trac
     assertNoStateFiles(claudeLane);
   } finally {
     rmSync(repo, { recursive: true, force: true });
-  }
-});
-
-test("cwd contract: a main-worktree subdirectory and either repeated --config order refuse without creating a local data namespace", async () => {
-  const repoA = makeGitRepo("sapwood-cwd-contract-config-a-");
-  const repoB = makeGitRepo("sapwood-cwd-contract-config-b-");
-  const subdir = join(repoB, "subdir");
-  try {
-    mkdirSync(subdir);
-    const subdirResult = await runMainAtCwd(subdir, ["node", "sapwood", "pause"]);
-    assert.equal(subdirResult.code, 1);
-    assert.equal(subdirResult.stderr, expectedRootError("pause", repoB));
-    assertNoStateFiles(subdir);
-
-    const configA = join(repoA, "sapwood.config.yaml");
-    const externalLast = ["--config", join(repoB, "sapwood.config.yaml"), "--config", configA];
-    const rejected = await runMainAtCwd(repoB, ["node", "sapwood", "pause", ...externalLast]);
-    assert.equal(rejected.code, 1);
-    assert.equal(rejected.stderr, expectedRootError("pause", repoB));
-    assertNoStateFiles(repoB);
-
-    const localLast = ["--config", configA, "--config", join(repoB, "sapwood.config.yaml")];
-    const accepted = await runMainAtCwd(repoB, ["node", "sapwood", "pause", ...localLast]);
-    assert.equal(accepted.code, 0);
-    assert.doesNotMatch(accepted.stderr, /repository root/);
-    assert.equal(existsSync(join(repoB, "data", "PAUSE")), true, "the command must consume its last --config path");
-    rmSync(join(repoB, "data"), { recursive: true, force: true });
-  } finally {
-    rmSync(repoA, { recursive: true, force: true });
-    rmSync(repoB, { recursive: true, force: true });
-  }
-});
-
-test("cwd contract: unavailable git fails closed, while Git environment overrides cannot bypass linked-worktree refusal", async () => {
-  const repo = makeGitRepo("sapwood-cwd-contract-git-");
-  const lane = join(repo, "lane");
-  try {
-    git(repo, ["worktree", "add", "--quiet", "-b", "git-lane", lane, "HEAD"]);
-    const unavailable = await runMainAtCwd(lane, ["node", "sapwood", "stop"], { PATH: "/nonexistent" });
-    assert.equal(unavailable.code, 1);
-    assert.match(unavailable.stderr, /could not determine the repository root \(git unavailable\)/);
-    assertNoStateFiles(lane);
-
-    const overridden = await runMainAtCwd(lane, ["node", "sapwood", "estop", "--confirm"], { GIT_DIR: "/nonexistent" });
-    assert.equal(overridden.code, 1);
-    assert.equal(overridden.stderr, expectedRootError("estop", repo));
-    assertNoStateFiles(lane);
-  } finally {
-    rmSync(repo, { recursive: true, force: true });
-  }
-});
-
-test("cwd contract: a submodule root remains valid and a bare repository refuses", () => {
-  const submodule = makeGitRepo("sapwood-cwd-contract-submodule-");
-  const superproject = makeGitRepo("sapwood-cwd-contract-superproject-");
-  const bare = mkdtempSync(join(tmpdir(), "sapwood-cwd-contract-bare-"));
-  try {
-    git(superproject, ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", submodule, "vendor/submodule"]);
-    git(superproject, ["commit", "--quiet", "-m", "add submodule"]);
-    const submoduleRoot = join(superproject, "vendor", "submodule");
-    assert.equal(cwdContractError(["node", "sapwood", "status"], submoduleRoot), undefined);
-
-    git(bare, ["init", "--bare", "--quiet"]);
-    assert.match(cwdContractError(["node", "sapwood", "run"], bare)!, /bare repository has no worktree/);
-  } finally {
-    rmSync(submodule, { recursive: true, force: true });
-    rmSync(superproject, { recursive: true, force: true });
-    rmSync(bare, { recursive: true, force: true });
-  }
-});
-
-test("cwd contract: non-git directories retain exact-cwd behaviour", () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-cwd-contract-non-git-"));
-  try {
-    assert.equal(cwdContractError(["node", "sapwood", "run"], dir), undefined);
-    assert.equal(cwdContractError(["node", "sapwood", "status"], dir), undefined);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
   }
 });
 

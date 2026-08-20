@@ -4928,17 +4928,18 @@ test("#69: drain (SIGTERM) -> .handoff sentinel carries the session_id, NO git s
   }
 });
 
-test("#69 grep-invariant (engine-wide, fable P3; extended #284, #285, #443, #743, #825): the ONLY child_process importers are worker.ts (spawn), gh.ts (execFile), review/materializer.ts (execFile), review/codex-exec.ts (spawn, gate②'s cross-vendor review runner), loop/dashboard-launcher.ts (execFile + spawn, the `sapwood dashboard` launcher), and loop/worktree-janitor.ts (execFile, the dead-registration reaper) — and the ONLY subprocess call site that may ever pass a cwd is spawnClaudeSession's own OPTIONAL, caller-supplied opt (#285 review session mode) — WorkerSupervisor's own dispatch()/resume() spawn() calls stay cwd-less, so the engine structurally CANNOT exec git in a worker worktree", () => {
+test("#69 grep-invariant (engine-wide, fable P3; extended #284, #285, #443, #743, #825, #1064): the ONLY child_process importers are worker.ts (spawn), gh.ts (execFile), review/materializer.ts (execFile), review/codex-exec.ts (spawn, gate②'s cross-vendor review runner), loop/dashboard-launcher.ts (execFile + spawn, the `sapwood dashboard` launcher), loop/worktree-janitor.ts (execFile, the dead-registration reaper), and loop/cwd-contract.ts (spawnSync, the read-only cwd probe) — and the ONLY subprocess call site that may ever pass a cwd is spawnClaudeSession's own OPTIONAL, caller-supplied opt (#285 review session mode) — the engine may run a READ-ONLY `git rev-parse`/`worktree list` probe against the cwd to refuse lanes; it still cannot mutate or exec anything in one", () => {
   const srcDir = new URL("../", import.meta.url);
   const files = readdirSync(srcDir, { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
-  // Sanity: the six known subprocess modules are present in the scan set.
+  // Sanity: the seven known subprocess modules are present in the scan set.
   assert.ok(
     files.includes("roles/worker.ts") &&
       files.includes("forge/gh.ts") &&
       files.includes("review/materializer.ts") &&
       files.includes("review/codex-exec.ts") &&
       files.includes("loop/dashboard-launcher.ts") &&
-      files.includes("loop/worktree-janitor.ts"),
+      files.includes("loop/worktree-janitor.ts") &&
+      files.includes("loop/cwd-contract.ts"),
   );
   for (const f of files) {
     const src = readFileSync(new URL(f, srcDir), "utf8");
@@ -5027,6 +5028,22 @@ test("#69 grep-invariant (engine-wide, fable P3; extended #284, #285, #443, #743
       // worktree.
       assert.doesNotMatch(src, /\b(execFileSync|execSync|spawnSync|spawn)\b/, "worktree-janitor.ts uses execFile only");
       assert.doesNotMatch(src, /[{,]\s*cwd\s*:/, "worktree-janitor.ts passes no cwd option to execFile (uses -C instead)");
+    } else if (f === "loop/cwd-contract.ts") {
+      // #1064: the SEVENTH legitimate importer synchronously probes Git before cli.ts can reach
+      // runCli(). It uses fixed read-only git arguments through -C, never a shell or subprocess
+      // cwd option, and is therefore incapable of mutating a worker worktree.
+      assert.match(src, /\bspawnSync\b/, "cwd-contract.ts imports and uses spawnSync");
+      assert.doesNotMatch(src, /\b(execFileSync|execFile|execSync|spawn|exec)\b/, "cwd-contract.ts uses spawnSync only");
+      assert.doesNotMatch(src, /shell\s*:/, "cwd-contract.ts never spawns through a shell");
+      assert.doesNotMatch(src, /[{,]\s*cwd\s*:/, "cwd-contract.ts passes no cwd option to spawnSync (uses -C instead)");
+      const gitArgv = [...src.matchAll(/spawnSync\("git",\s*\[([^\]]+)\]/g)].map((match) => match[1] ?? "");
+      assert.ok(gitArgv.length > 0, "cwd-contract.ts must retain its Git probe");
+      assert.ok(
+        gitArgv.every((args) => args.includes('"rev-parse"') || args.includes('"worktree", "list"')),
+        "cwd-contract.ts Git probe uses rev-parse or worktree list only",
+      );
+      assert.doesNotMatch(src, /["'](?:add|remove|prune|checkout)["']/, "cwd-contract.ts has no mutating Git subcommand");
+      assert.doesNotMatch(src, /["']-c["']/, "cwd-contract.ts has no Git configuration override");
     } else {
       // Every other engine module must not shell out at all.
       assert.equal(importsChildProcess, false, `${f} must not import node:child_process`);
