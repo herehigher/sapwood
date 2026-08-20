@@ -46,10 +46,18 @@ function runClaude(args: string[], cwd = REPO_ROOT): { status: number | null; st
 
 const CLAUDE_VERSION = runClaude(["--version"]);
 const CLAUDE_CLI_AVAILABLE = CLAUDE_VERSION.status === 0;
+const CLAUDE_VALIDATE_HELP = runClaude(["plugin", "validate", "--help"]);
+const CLAUDE_STRICT_SUPPORTED = `${CLAUDE_VALIDATE_HELP.stdout}\n${CLAUDE_VALIDATE_HELP.stderr}`.includes("--strict");
 
 function formatClaudeResult(label: string, result: ReturnType<typeof runClaude>): string {
   return `${label} exit: ${result.status}\n${label} stdout:\n${result.stdout}\n${label} stderr:\n${result.stderr}${result.error ? `\n${label} error: ${result.error}` : ""}`;
 }
+
+const CLAUDE_VALIDATION_SKIP_REASON = !CLAUDE_CLI_AVAILABLE
+  ? `claude CLI is not on PATH\n${formatClaudeResult("claude --version", CLAUDE_VERSION)}`
+  : !CLAUDE_STRICT_SUPPORTED
+    ? `claude plugin validate --help does not list --strict\n${formatClaudeResult("claude --version", CLAUDE_VERSION)}\n${formatClaudeResult("claude plugin validate --help", CLAUDE_VALIDATE_HELP)}`
+    : false;
 
 function tmpRepo(): string {
   return mkdtempSync(join(tmpdir(), "sapwood-release-test-"));
@@ -583,16 +591,8 @@ test("catalog promotion: local bare remote is idempotent and stamps the release 
 });
 
 test("catalog promotion: strict manifest-file validation rejects an unknown field", {
-  skip: CLAUDE_CLI_AVAILABLE ? false : `claude CLI is not on PATH\n${formatClaudeResult("claude --version", CLAUDE_VERSION)}`,
-}, (t) => {
-  const baseline = runClaude(["plugin", "validate", ".claude-plugin/plugin.json", "--strict"]);
-  if (baseline.status !== 0) {
-    t.skip(
-      `committed plugin manifest is not strict-valid for this Claude CLI; validator is not the contract under test\n${formatClaudeResult("claude --version", CLAUDE_VERSION)}\n${formatClaudeResult("committed manifest validator", baseline)}`,
-    );
-    return;
-  }
-
+  skip: CLAUDE_VALIDATION_SKIP_REASON,
+}, () => {
   const { repoRoot, catalogRemote } = setupCatalogPromotionRepo();
   const clone = tmpRepo();
   try {
