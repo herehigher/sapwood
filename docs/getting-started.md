@@ -107,9 +107,16 @@ npm ci
 npm run build
 ```
 
-This creates `engine/dist/` in the checkout. The `npm ci` and `npm run build` commands above
-were run for this change. Do not build a dashboard as an end-user installation step: Channels B
-and C use the dashboard shipped in the release package.
+This creates `engine/dist/` in the checkout. To put `sapwood` on your PATH for the commands
+below, run:
+
+```
+npm link --workspace engine
+```
+
+Alternatively, skip linking and replace every `sapwood <cmd>` below with
+`node engine/dist/cli.js <cmd>`. `npm run build` already builds every workspace, dashboard
+included, so there is no separate end-user dashboard build step on any channel.
 
 ## Bootstrap the target repo, then run `sapwood init`
 
