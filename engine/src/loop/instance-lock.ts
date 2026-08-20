@@ -277,7 +277,7 @@ export function acquireInstanceLock(lockPath: string | null, deps: InstanceLockD
       holder: { pid: holder.pid, acquiredAt },
       message:
         `another sapwood engine (pid ${holder.pid}${acquiredAt ? `, lock acquired ${acquiredAt}` : ""}) already holds ` +
-        `the data-dir lock at ${lockPath} — refusing to start (one engine per data dir/board, #382). ` +
+        `the data-dir lock at ${lockPath} — refusing to start (one engine per data dir/board). ` +
         `If that pid is NOT a sapwood engine (a recycled pid after a crash), delete the lock file and retry.`,
     };
   };
@@ -375,7 +375,7 @@ export function acquireInstanceLock(lockPath: string | null, deps: InstanceLockD
       message:
         `a takeover-mutex directory exists at ${mutexPath} (another engine's stale-lock takeover is in flight, ` +
         `or a previous engine crashed mid-takeover and left it behind) — refusing to start ` +
-        `(one engine per data dir/board, #382). If no sapwood engine is running against this data dir, ` +
+        `(one engine per data dir/board). If no sapwood engine is running against this data dir, ` +
         `remove that directory and retry.`,
     };
   }
@@ -385,6 +385,6 @@ export function acquireInstanceLock(lockPath: string | null, deps: InstanceLockD
     holder: { pid: null, acquiredAt: null },
     message:
       `could not acquire the data-dir lock at ${lockPath} after ${MAX_ACQUIRE_ATTEMPTS} attempts ` +
-      `(the lock kept changing hands) — refusing to start (one engine per data dir/board, #382).`,
+      `(the lock kept changing hands) — refusing to start (one engine per data dir/board).`,
   };
 }

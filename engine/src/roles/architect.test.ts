@@ -1116,7 +1116,7 @@ test("renderArchitectPrompt: substitutes every var; fails closed on an unknown v
   assert.throws(() => renderArchitectPrompt("{{nope}}", { a: "1" }), /unknown variable/);
 });
 
-test("createArchitectStub: the rendered prompt carries the aligned-goals placeholder when none is supplied (#89 not shipped yet)", async () => {
+test("createArchitectStub: the rendered prompt carries the aligned-goals placeholder when none is supplied", async () => {
   const forge = new FakeForge();
   forge.planReviewCandidates = [{ number: 9, title: "t", labels: [] }];
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
@@ -1124,7 +1124,7 @@ test("createArchitectStub: the rendered prompt carries the aligned-goals placeho
   const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   await stub.run({ roundId: 6, phase: "architecting", marker: null });
-  assert.ok(/has not shipped/.test(runner.calls[0]!.prompt));
+  assert.ok(/No PO\/goal-alignment peripheral output is available yet/.test(runner.calls[0]!.prompt));
 });
 
 test("createArchitectStub: an explicitly supplied alignedGoals string reaches the prompt verbatim", async () => {

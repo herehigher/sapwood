@@ -11,7 +11,7 @@ report its output back to the user verbatim, unedited:
 sh "$CLAUDE_PLUGIN_ROOT/bin/sapwood-plugin.sh" status $ARGUMENTS
 ```
 
-(The wrapper uses a local `engine/dist/cli.js` when one exists — a contributor/dogfood
+(The wrapper uses a local `engine/dist/cli.js` when one exists — a contributor
 checkout or a Channel A clone that's been built — and otherwise falls back to
 `npx sapwood@<version>` pinned to this plugin's own version, since a marketplace install
 only runs `npm ci --ignore-scripts` and never builds `engine/dist`. cwd stays the target

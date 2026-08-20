@@ -150,7 +150,7 @@ export function createUserSettingsWatch(
         // #554 pattern: every disclosure carries its own fix, in the line itself.
         const fix = unreadable
           ? `Fix: make ${path} readable to the engine's own user (chmod/chown) — drift detection is BLIND until then and will resume on its own once the file reads again.`
-          : `Fix: open ${path} and remove any apiKeyHelper/hooks entry you did not put there yourself (or restore the file from a known-good copy); if the change is yours and intentional, no action is needed — this posture is detect-and-disclose (#615 arm 2), nothing is blocked.`;
+          : `Fix: open ${path} and remove any apiKeyHelper/hooks entry you did not put there yourself (or restore the file from a known-good copy); if the change is yours and intentional, no action is needed — this posture is detect-and-disclose, nothing is blocked.`;
         log(
           `[sapwood:tick] operator user-level settings (${path}) ${
             unreadable

@@ -55,7 +55,7 @@ continue — defaults to the configured working language `{{lang.issuesAndPrs}}`
 - **Acceptance criteria are checkbox items — mandatory, not stylistic.** Every criterion must
   be its own literal `- [ ]` line under the anchored acceptance-criteria heading; the engine parses
   exactly this shape into the authoritative AC set a worker is dispatched against and later
-  reviewed on (design #279 §5). Prose, a paragraph, or a plain `-` bullet with no checkbox do
+  reviewed on. Prose, a paragraph, or a plain `-` bullet with no checkbox do
   not count as ANY acceptance criteria at all, even if the words are perfectly clear — a
   malformed or empty checkbox set makes an otherwise-good plan **not dispatchable**, full stop.
   If you correct anything here (outcome 1's minor-correction latitude), reformat loose prose
@@ -70,7 +70,7 @@ continue — defaults to the configured working language `{{lang.issuesAndPrs}}`
   the `## Verification plan` section, immediately below its `<!-- sapwood:verification -->`
   anchor, where it belongs; a static gate② session cannot execute
   anything, so leaving them as ACs only manufactures unresolvable review findings (F36).
-- **A wording-pin AC is unfit, not just weak (#963).** "The prompt/doctrine file says X"
+- **A wording-pin AC is unfit, not just weak.** "The prompt/doctrine file says X"
   satisfied only by a test whose sole oracle is that same shipped prompt/doc file is not
   acceptance evidence — it reddens on any legitimate rewording, indistinguishable from a real
   regression. Bounce this shape (outcome 2) unless it fits an exception
@@ -95,7 +95,7 @@ continue — defaults to the configured working language `{{lang.issuesAndPrs}}`
 - **Feasibility against human-merge-only paths.** Cross-check the acceptance criteria against
   `docs/security.md`'s "Human-merge-only paths" list (`guard.ts`/hook wiring, `reviewer.ts`/
   `merge-driver.ts`, `sapwood.config.yaml`/`.json` **in full**, `sapwood.config.example.yaml`/
-  `.json` (the `sapwood init` starter — guard-protected in its own right, #781),
+  `.json` (the `sapwood init` starter — guard-protected in its own right),
   `.claude/settings*.json`, `.github/workflows/**`). `sapwood.config.*` (root and the
   starter template alike) is blocked as a whole file by path pattern, not
   by field — an AC that only touches a comment, a non-security default, or an unrelated key in
@@ -116,9 +116,7 @@ continue — defaults to the configured working language `{{lang.issuesAndPrs}}`
   edits it or is red without it — no independent slice is left to dispatch or word around), do
   not bounce it as a draft request at all: no redraft can fix a scope defect the guard itself enforces, and
   routing it through outcome 2 only burns a self-heal cycle to reach the same verdict a
-  first-pass read already knows (retro round #365: exactly this cost 2 wasted draft→re-review
-  cycles on issue #782 before cycle-exhaustion produced the escalation this paragraph now asks
-  for directly). Emit outcome 4 (`needs_human`) immediately instead — see below. Never approve a
+  first-pass read already knows. Emit outcome 4 (`needs_human`) immediately instead — see below. Never approve a
   plan that quietly assumes a worker can complete an edit the guard will refuse.
 - **Evidence-tier discipline — asymmetric judge duty (docs/security.md's tiered doctrine).**
   Bounce (outcome 2) any plan whose evidence rests on tier-D producer-side artifacts (browser
@@ -130,7 +128,7 @@ continue — defaults to the configured working language `{{lang.issuesAndPrs}}`
   every CI/engine-checkable sub-fact inside the claim to be decomposed OUT into its own A/B
   criterion, and never accept the plan author's own tier self-classification at face value — a
   plan that LABELS something tier C is a claim to verify, not a fact to trust.
-- **Comment-contradiction veto duty (#653) — read-only, never a green light.** Read the
+- **Comment-contradiction veto duty — read-only, never a green light.** Read the
   `<issue-comments>` block above before you decide.
   <!-- sapwood:floor:gate0-comment-veto -->
   Comments may reveal that the body is
@@ -224,8 +222,7 @@ honors — the structured output is. Decide, then emit the structured block.
      implementing the prerequisite directly would let a follow-up issue cover the rest.
    - **Plan presupposes an undecided decision.** The plan reads as concrete and well-formed, but
      satisfying it as written would force a producer to settle something only a human has
-     standing to settle: adopting a new dependency/toolchain (cross-ref #875 — the proposal
-     channel and owner-decision precedence live there, not here), a persistent schema or public
+     standing to settle: adopting a new dependency/toolchain, a persistent schema or public
      interface shape, an architecture-level structural choice, or a non-functional target
      (a latency/throughput/cost bound, say) the issue never states. Distinct from "the plan is
      missing or vague" (outcome 2, which self-heals — a drafting session can fill in detail that
@@ -240,7 +237,7 @@ honors — the structured output is. Decide, then emit the structured block.
    cannot change who the guard allows to make the edit, and it cannot make the decision for the
    human either.
 
-5. **Too large for one PR (#874).** The issue itself — not the wording — does not fit one worker
+5. **Too large for one PR.** The issue itself — not the wording — does not fit one worker
    lane: one PR cannot complete and verify it. This is NOT a wording defect a redraft could fix
    (that is outcome 2); shrinking the prose never shrinks the real scope. Judge this against the
    same structural yardstick po-decompose applies when sizing children:
@@ -258,13 +255,13 @@ honors — the structured output is. Decide, then emit the structured block.
    fired — never "this is hard" or a bare size impression. No BODY block for this outcome:
    `evidence` is the entire deliverable, a short plain-text structural statement, never markdown
    and never a brief. The engine applies the configured split label directly from your verdict —
-   the SAME write path #965's resume-cap path already uses — spends no draft cycle, and the issue
+   the SAME write path the resume-cap path already uses — spends no draft cycle, and the issue
    leaves this round's plan-review pool; a later po-decompose session picks it up with no further
    action from you. This is NOT advisory the way outcome 2's redraft suggestion is: the split
    lands the moment you emit this decision, with no human step first — the human-applied split
    label remains available as an override channel, never the route you take.
 
-   **A container-shaped body is `too_large` BY CONTRACT, never by reviewer discretion (#913).**
+   **A container-shaped body is `too_large` BY CONTRACT, never by reviewer discretion.**
    po-decompose.md's container kind is a coarse child whose acceptance criteria name only a
    main-branch check-run — no PR-scoped criteria at all — and whose own `## Why` is required to
    name the fired predictor. A body shaped that way is never `approve`-able as a small,

@@ -161,7 +161,7 @@ export function detectConsecutiveStalls(
     `The same wedge appears to recur on every restart; restarting again will not fix it, and the ` +
     `park does NOT auto-clear. Diagnose the stall (the engine-stalled events name the round/phase ` +
     `and last event), fix the cause, then stop the engine and run ` +
-    `\`sapwood park clear --source ${CONSECUTIVE_STALLS_PARK_SOURCE}\` (#475 — receipt-first, and it ` +
+    `\`sapwood park clear --source ${CONSECUTIVE_STALLS_PARK_SOURCE}\` (receipt-first, and it ` +
     `refuses while an engine holds the data dir; docs/troubleshooting.md keeps the raw-SQL ` +
     `break-glass). Starting the engine again resumes dispatch. See also docs/getting-started.md ` +
     `("Running under a supervisor").`;

@@ -46,7 +46,7 @@ export function requiredChecksSatisfied(checks: readonly PRCheckItem[], required
   if (required.length === 0) {
     return {
       ok: false,
-      unsatisfied: ["ci.requiredChecks is empty — no trusted execution evidence is configured (fail-closed, design #279 §4.3)"],
+      unsatisfied: ["ci.requiredChecks is empty — no trusted execution evidence is configured (fail-closed)"],
     };
   }
   const unsatisfied: string[] = [];

@@ -361,7 +361,7 @@ export function createDefaultPeripherals(deps: DefaultPeripheralsDeps): Partial<
         : `[sapwood:round] peripheral role(s) disabled by config: ${disabledPhases.join(", ")}`;
     if (disabledPhases.includes("aligning")) {
       line +=
-        `. NOTE: aligning still runs its #212 round-pool selection every round with roles.po.enabled: ` +
+        `. NOTE: aligning still runs its round-pool selection every round with roles.po.enabled: ` +
         `false (deterministic unless roles.po.poolSelection: true) — only the PO's own decomposition/triage passes no-op.`;
     }
     // #127 gate② F1: disabling gate⓪'s roles silently starves ALL dispatch — forge.ts's
