@@ -104,11 +104,19 @@ export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
     { name: l.needsHuman, color: "5319e7", description: "sapwood has stopped and is waiting on a human decision; remove to resume" },
     { name: l.blocked, color: "5319e7", description: "sapwood or a human blocked this on something external; remove once it's resolved" },
     { name: l.reserve, color: "5319e7", description: "A human parked this out of sapwood's work queue; remove to make it available again" },
-    { name: l.verifyNa, color: "c5def5", description: "Not verifiable by automated tests; reviewed and verified manually instead" },
+    {
+      name: l.verifyNa,
+      color: "c5def5",
+      description: "Not verifiable by automated tests; goes through the documentation-review path instead",
+    },
     { name: l.planApproved, color: "0e8a16", description: "This issue's verification plan has been reviewed and approved" },
     { name: l.originAgent, color: "bfd4f2", description: "This issue was created automatically, not by a human" },
     { name: l.split, color: "fbca04", description: "Marks this issue for splitting into smaller issues" },
-    { name: l.decomposed, color: "6e7781", description: "This issue was split into smaller issues; kept open only to track them" },
+    {
+      name: l.decomposed,
+      color: "6e7781",
+      description: "Retired as a parent: sapwood is splitting it into smaller issues; kept open only to track them",
+    },
     // #212: round-pool membership — applied by the aligning phase's pool-selection pass,
     // cleared by the engine at round close (never by a session — see removeRoundPoolLabel).
     { name: l.roundPool, color: "5319e7", description: "Selected for sapwood's current work round" },
@@ -118,7 +126,7 @@ export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
     {
       name: l.humanMergeOnly,
       color: "b60205",
-      description: "A human must merge this PR by hand; sapwood never removes this label",
+      description: "sapwood marked this PR for human merge; a human must merge it and sapwood never removes this",
     },
     // #399: the PR-side lane-state mirror. The description answers the same three questions every
     // escalation-tier description does — WHO writes it / WHAT it means / WHAT removal does — and
