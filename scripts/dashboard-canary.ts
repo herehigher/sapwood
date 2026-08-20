@@ -12,6 +12,8 @@ export interface DashboardCanaryOptions {
   timeoutMs?: number;
   /** Captures the loopback origin from readiness output; defaults to the CLI's human-facing line. */
   readinessPattern?: RegExp;
+  /** Converts a custom readiness match to an origin; the default uses its first capture group. */
+  readinessOrigin?: (match: RegExpExecArray) => string;
   /** Defaults to null for an installed package; a contributor build names its checkout's HEAD. */
   expectedRepoHeadSha?: string | null;
 }
@@ -56,6 +58,12 @@ function waitForExit(child: ReturnType<typeof spawn>, timeoutMs: number): Promis
 export async function runDashboardCanary(opts: DashboardCanaryOptions): Promise<DashboardCanaryResult> {
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const readinessPattern = opts.readinessPattern ?? /serving at (http:\/\/127\.0\.0\.1:\d+)/;
+  const readinessOrigin =
+    opts.readinessOrigin ??
+    ((match: RegExpExecArray) => {
+      if (match[1] === undefined) throw new Error("dashboard canary readiness pattern must capture an origin");
+      return match[1];
+    });
   const expectedRepoHeadSha = opts.expectedRepoHeadSha ?? null;
   const child = spawn(opts.command, opts.args, { cwd: opts.cwd, env: opts.env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
@@ -70,9 +78,10 @@ export async function runDashboardCanary(opts: DashboardCanaryOptions): Promise<
       const timer = setTimeout(() => reject(new Error(`dashboard canary timed out waiting for readiness:\n${output}`)), timeoutMs);
       const check = () => {
         const match = readinessPattern.exec(output);
-        if (match?.[1] !== undefined) {
+        const origin = match === null ? undefined : readinessOrigin(match);
+        if (origin !== undefined) {
           clearTimeout(timer);
-          resolvePromise(match[1]);
+          resolvePromise(origin);
         }
       };
       child.stdout.on("data", check);

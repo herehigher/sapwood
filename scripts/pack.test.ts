@@ -66,6 +66,7 @@ async function assertCleanWorkspaceDashboardLaunch(checkoutDir: string): Promise
       cwd,
       timeoutMs: 30_000,
       readinessPattern: /\{"ok":true,"port":(\d+)\}/,
+      readinessOrigin: (match) => `http://127.0.0.1:${match[1]}`,
       expectedRepoHeadSha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: checkoutDir, encoding: "utf8" }).trim(),
     });
     assert.equal(canary.origin, `http://127.0.0.1:${port}`);
