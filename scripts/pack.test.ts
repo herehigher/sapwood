@@ -6,11 +6,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { availableDashboardPort, runDashboardCanary } from "./dashboard-canary.ts";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
-test("packed engine tarball is fresh, map-free, and runnable from a clean checkout", { timeout: 600_000 }, () => {
+test("packed engine tarball is fresh, map-free, and runnable from a clean checkout", { timeout: 600_000 }, async () => {
   const checkoutParent = mkdtempSync(join(tmpdir(), "sapwood-pack-checkout-"));
   const checkoutDir = join(checkoutParent, "repo");
   const packDir = mkdtempSync(join(tmpdir(), "sapwood-pack-"));
@@ -19,6 +20,24 @@ test("packed engine tarball is fresh, map-free, and runnable from a clean checko
   const npmEnv = { ...process.env, npm_config_cache: npmCacheDir };
   let checkoutAdded = false;
   try {
+    execFileSync("git", ["init", "-q"], { cwd: installDir, stdio: "pipe", timeout: 15_000 });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.email=t@example.com",
+        "-c",
+        "user.name=t",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--allow-empty",
+        "-q",
+        "-m",
+        "unrelated",
+      ],
+      { cwd: installDir, stdio: "pipe", timeout: 15_000 },
+    );
     execFileSync("git", ["worktree", "add", "--detach", checkoutDir, "HEAD"], { cwd: REPO_ROOT, stdio: "pipe", timeout: 30_000 });
     checkoutAdded = true;
     assert.equal(existsSync(join(checkoutDir, "engine", "dist")), false, "the staged checkout must start without build output");
@@ -27,12 +46,20 @@ test("packed engine tarball is fresh, map-free, and runnable from a clean checko
     const staleOutput = join(checkoutDir, "engine", "dist", "review-stale.js");
     mkdirSync(dirname(staleOutput), { recursive: true });
     writeFileSync(staleOutput, "export default 'stale';\n");
-    execFileSync("npm", ["pack", "--workspace", "engine", "--pack-destination", packDir], {
+    const packOutput = execFileSync("npm", ["pack", "--json", "--workspace", "engine", "--pack-destination", packDir], {
       cwd: checkoutDir,
       env: npmEnv,
-      stdio: "pipe",
+      encoding: "utf8",
       timeout: 180_000,
     });
+    // `release.ts stamp` intentionally reports the fresh stamp on stdout during prepack; npm's
+    // JSON manifest is therefore the final JSON value rather than the entire command output.
+    const manifestOffset = packOutput.lastIndexOf("\n[");
+    assert.ok(manifestOffset !== -1, "npm pack --json did not emit a manifest array");
+    const packManifest = JSON.parse(packOutput.slice(manifestOffset + 1)) as Array<{
+      files?: Array<{ path: string }>;
+      unpackedSize?: number;
+    }>;
 
     const manifestVersion = (JSON.parse(readFileSync(join(checkoutDir, "engine", "package.json"), "utf8")) as { version: string }).version;
     const tarballPath = join(packDir, `sapwood-${manifestVersion}.tgz`);
@@ -44,6 +71,24 @@ test("packed engine tarball is fresh, map-free, and runnable from a clean checko
       false,
       "the published tarball must not contain source maps",
     );
+    const packed = packManifest[0];
+    assert.ok(packed, "npm pack --json must report one package manifest");
+    const packedFiles = new Set(packed.files?.map((file) => file.path));
+    for (const required of ["dashboard-dist/dist/index.html", "dashboard-dist/dist-server/start.js", "THIRD_PARTY_NOTICES"]) {
+      assert.ok(packedFiles.has(required), `npm pack manifest is missing ${required}`);
+    }
+    assert.equal(
+      [...packedFiles].some((path) => path.endsWith(".map")),
+      false,
+      "npm pack manifest must not contain source maps",
+    );
+    // The dashboard's static payload is about 1.1 MiB today; 10 MiB leaves room for deliberate UI
+    // growth while still catching an accidental node_modules/source-tree inclusion.
+    assert.ok(
+      (packed.unpackedSize ?? Infinity) <= 10_000_000,
+      `unpacked size ${packed.unpackedSize} exceeds the 10,000,000-byte package ceiling`,
+    );
+    assert.equal(existsSync(join(checkoutDir, "engine", "dashboard-dist")), false, "postpack must remove its owned staging tree");
 
     execFileSync(
       "npm",
@@ -74,6 +119,32 @@ test("packed engine tarball is fresh, map-free, and runnable from a clean checko
       execFileSync(binPath, ["validate", validConfig], { cwd: installDir, encoding: "utf8", timeout: 15_000 }),
       /sapwood validate: OK/,
     );
+
+    const canaryDir = mkdtempSync(join(tmpdir(), "sapwood-dashboard-canary-"));
+    try {
+      const dbPath = join(canaryDir, "data", "sapwood.sqlite");
+      execFileSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "--eval",
+          `import { State } from ${JSON.stringify(pathToFileURL(join(installedRoot, "dist", "state", "state.js")).href)}; ` +
+            `const state = new State(${JSON.stringify(dbPath)}); state.close();`,
+        ],
+        { cwd: canaryDir, stdio: "pipe", timeout: 15_000 },
+      );
+      const port = await availableDashboardPort();
+      const canary = await runDashboardCanary({
+        command: binPath,
+        args: ["dashboard", "--port", String(port)],
+        cwd: canaryDir,
+        env: npmEnv,
+        timeoutMs: 30_000,
+      });
+      assert.match(canary.output, /serving at http:\/\/127\.0\.0\.1:/);
+    } finally {
+      rmSync(canaryDir, { recursive: true, force: true });
+    }
   } finally {
     if (checkoutAdded)
       execFileSync("git", ["worktree", "remove", "--force", checkoutDir], { cwd: REPO_ROOT, stdio: "pipe", timeout: 30_000 });

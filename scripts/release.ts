@@ -506,6 +506,13 @@ export const PUBLISH_STEPS: PublishStep[] = [
       deps.exec("npm", ["publish", "--workspace", "engine", "--tag", npmDistTag(ctx)]);
     },
   },
+  {
+    name: "dashboard-canary",
+    describe: (ctx) => `node scripts/dashboard-canary.ts ${ctx.version}`,
+    run: (ctx, deps) => {
+      deps.exec("node", ["scripts/dashboard-canary.ts", ctx.version]);
+    },
+  },
 ];
 
 // npm's own dist-tag equivalent of gh-release's `--prerelease` flag: a plain release always
