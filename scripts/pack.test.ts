@@ -39,7 +39,11 @@ test("packed engine tarball is fresh, map-free, and runnable from a clean checko
     assert.ok(existsSync(tarballPath), `expected \`npm pack\` to produce ${tarballPath}`);
     const tarEntries = execFileSync("tar", ["-tzf", tarballPath], { encoding: "utf8", timeout: 15_000 }).trim().split("\n");
     assert.equal(tarEntries.includes("package/dist/review-stale.js"), false, "prepack must remove stale dist output before building");
-    assert.equal(tarEntries.some((entry) => entry.endsWith(".map")), false, "the published tarball must not contain source maps");
+    assert.equal(
+      tarEntries.some((entry) => entry.endsWith(".map")),
+      false,
+      "the published tarball must not contain source maps",
+    );
 
     execFileSync(
       "npm",
@@ -66,9 +70,13 @@ test("packed engine tarball is fresh, map-free, and runnable from a clean checko
     const versionOut = execFileSync(binPath, ["--version"], { cwd: installDir, encoding: "utf8", timeout: 15_000 }).trim();
     assert.match(versionOut, new RegExp(`^${manifestVersion.replaceAll(".", "\\.")}\\+\\d{8}\\.[0-9a-f]{7}$`));
     assert.match(execFileSync(binPath, ["init", "--help"], { cwd: installDir, encoding: "utf8", timeout: 15_000 }), /usage: sapwood init/);
-    assert.match(execFileSync(binPath, ["validate", validConfig], { cwd: installDir, encoding: "utf8", timeout: 15_000 }), /sapwood validate: OK/);
+    assert.match(
+      execFileSync(binPath, ["validate", validConfig], { cwd: installDir, encoding: "utf8", timeout: 15_000 }),
+      /sapwood validate: OK/,
+    );
   } finally {
-    if (checkoutAdded) execFileSync("git", ["worktree", "remove", "--force", checkoutDir], { cwd: REPO_ROOT, stdio: "pipe", timeout: 30_000 });
+    if (checkoutAdded)
+      execFileSync("git", ["worktree", "remove", "--force", checkoutDir], { cwd: REPO_ROOT, stdio: "pipe", timeout: 30_000 });
     rmSync(checkoutParent, { recursive: true, force: true });
     rmSync(packDir, { recursive: true, force: true });
     rmSync(installDir, { recursive: true, force: true });
