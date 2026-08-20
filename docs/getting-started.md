@@ -79,8 +79,7 @@ tiers, not `init` or `validate` — those still need Channel A or C.
 
 The engine publishes to npm as the bare package `sapwood` (the `@sapwood` scope is reserved
 for future split packages — see [`10-releasing.md`](dev-guide/10-releasing.md)). This is the
-no-clone path: no build step, nothing to link. The package is not yet on the registry; after
-publishing, these forms are verified against the [packed tarball test](../scripts/pack.test.ts).
+no-clone path: no build step, nothing to link. The package is not yet on the registry.
 
 ```
 npx sapwood@<version> init
