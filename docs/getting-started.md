@@ -679,10 +679,10 @@ before you hit `Ready`, not a label after.
 
 sapwood ships a web dashboard over the same state DB `sapwood status` reads. Its data
 views are always read-only; a single write route also lets it issue pause/stop/estop
-control actions, which is enabled by default. Build the bundle once, then launch it:
+control actions, which is enabled by default. Every channel ships the dashboard already
+built — launch it directly:
 
 ```
-npm run build -w dashboard
 sapwood dashboard
 ```
 
