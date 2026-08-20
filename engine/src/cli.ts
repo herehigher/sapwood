@@ -32,6 +32,7 @@ import { createBranchProtectionDetector } from "./loop/branch-protection-warning
 import { detectBypassPermissionsMode } from "./loop/bypass-permissions-warning.js";
 import { detectClaudeVersionStartupTier } from "./loop/claude-version-startup-check.js";
 import { type FixLegResumeDeps, orderForDispatch, type TickResult } from "./loop/conductor.js";
+import { cwdContractError } from "./loop/cwd-contract.js";
 import {
   type BrowserOpenResult,
   type DashboardServerHandle,
@@ -3415,7 +3416,12 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
   }
 }
 
-async function main(argv: string[]): Promise<number> {
+export async function main(argv: string[]): Promise<number> {
+  const cwdError = cwdContractError(argv);
+  if (cwdError !== undefined) {
+    process.stderr.write(cwdError);
+    return 1;
+  }
   const { stdout, stderr, code, validatedRun, validatedDashboard } = runCli(argv);
   if (stdout) process.stdout.write(stdout);
   if (stderr) process.stderr.write(stderr);

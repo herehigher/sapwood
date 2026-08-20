@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import {
@@ -16,6 +17,7 @@ import {
   formatStopConditionLine,
   formatTickSummary,
   formatVersionString,
+  main,
   normalizeUnplacedBoardItems,
   parseMilestoneFlag,
   parseRunConfigFlag,
@@ -44,6 +46,66 @@ import { requiredLabels } from "./init.js";
  *  that DOES seed a date must inject that seeded clock here, not this one. Named (not inlined)
  *  so every deliberate real-clock read in this suite greps as one decision. */
 const realClock = (): Date => new Date();
+
+function git(cwd: string, args: string[]): void {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+}
+
+function makeGitRepo(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  git(dir, ["init", "--quiet"]);
+  git(dir, ["config", "user.email", "sapwood-test@example.invalid"]);
+  git(dir, ["config", "user.name", "Sapwood test"]);
+  git(dir, ["config", "commit.gpgsign", "false"]);
+  writeFileSync(join(dir, "sapwood.config.yaml"), "board: { owner: acme, repo: widgets, projectNumber: 7 }\n");
+  git(dir, ["add", "sapwood.config.yaml"]);
+  git(dir, ["commit", "--quiet", "-m", "test fixture"]);
+  return realpathSync(dir);
+}
+
+function expectedRootError(command: string, root: string): string {
+  return `sapwood ${command}: Run sapwood from the repository root. ${root}\n`;
+}
+
+async function runMainAtCwd(
+  cwd: string,
+  argv: string[],
+  environment: Record<string, string | undefined> = {},
+): Promise<{ code: number; stderr: string }> {
+  const originalCwd = process.cwd();
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  const originalEnvironment = new Map(Object.keys(environment).map((key) => [key, process.env[key]]));
+  let stderr = "";
+  for (const [key, value] of Object.entries(environment)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  process.chdir(cwd);
+  process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+    stderr += chunk.toString();
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    return { code: await main(argv), stderr };
+  } finally {
+    process.stderr.write = originalWrite;
+    process.chdir(originalCwd);
+    for (const [key, value] of originalEnvironment) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+function assertNoStateFiles(dir: string): void {
+  assert.equal(existsSync(join(dir, "data")), false, "no state directory");
+  assert.deepEqual(
+    readdirSync(dir, { recursive: true }).filter((path) => String(path).endsWith(".sqlite") || String(path).includes(".sqlite-")),
+    [],
+    "no SQLite file or sidecar",
+  );
+}
 
 test("--version prints package version and exits 0", () => {
   const r = runCli(["node", "sapwood", "--version"]);
@@ -95,6 +157,26 @@ test("run: falls through to the async engine-wiring path (code -1), same as init
   assert.equal(r.code, -1);
   assert.equal(r.stdout, "");
   assert.equal(r.stderr, "");
+});
+
+test("cwd contract: real linked worktrees, including a Claude lane with its tracked config, refuse before state can be written", async () => {
+  const repo = makeGitRepo("sapwood-cwd-contract-");
+  const claudeLane = join(repo, ".claude", "worktrees", "lane");
+  try {
+    mkdirSync(dirname(claudeLane), { recursive: true });
+    git(repo, ["worktree", "add", "--quiet", "-b", "claude-lane", claudeLane, "HEAD"]);
+
+    assert.equal(existsSync(join(claudeLane, "sapwood.config.yaml")), true, "the lane fixture must include the tracked config");
+    const pause = await runMainAtCwd(claudeLane, ["node", "sapwood", "pause"]);
+    assert.equal(pause.code, 1);
+    assert.match(pause.stderr, new RegExp(expectedRootError("pause", repo).trim()));
+    const status = await runMainAtCwd(claudeLane, ["node", "sapwood", "status"]);
+    assert.equal(status.code, 1);
+    assert.match(status.stderr, new RegExp(expectedRootError("status", repo).trim()));
+    assertNoStateFiles(claudeLane);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 // ── #638: `init` gets the same synchronous fail-closed argument boundary as run/status/park ──

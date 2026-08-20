@@ -103,6 +103,10 @@ the engine itself); Channel C is the consumer path (run a published version, no 
 
 ## Bootstrap the target repo, then run `sapwood init`
 
+Run sapwood from the repository root. In a Git repository, sapwood refuses commands that use
+engine state from a subdirectory or linked worktree; run them from the canonical main worktree
+root instead. Non-Git directories retain their exact-cwd behaviour.
+
 `init` loads an existing config before it can provision anything. From the repo you want
 sapwood to operate on, create its ProjectV2 board first and note the number:
 
