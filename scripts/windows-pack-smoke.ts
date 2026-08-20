@@ -29,6 +29,7 @@ async function main(): Promise<void> {
   const prefix = join(root, "prefix");
   const canaryDir = join(root, "canary");
   try {
+    mkdirSync(packDir, { recursive: true });
     mkdirSync(canaryDir, { recursive: true });
     const packOutput = execFileSync("npm", ["pack", "--json", "--workspace", "engine", "--pack-destination", packDir], {
       cwd: REPO_ROOT,
