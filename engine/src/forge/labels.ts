@@ -62,14 +62,14 @@ export function holdLabelDefault(prefix: string): string {
 }
 
 export const TAXONOMY_SPECS = [
-  { name: "type:feature", color: "1d76db", description: "Feature work (1 issue = 1 PR)" },
-  { name: "type:bug", color: "d73a4a", description: "Defect" },
-  { name: "type:infra", color: "6e7781", description: "Infra / CI / tooling" },
-  { name: "type:docs", color: "0075ca", description: "Documentation" },
-  { name: "prio:0", color: "b60205", description: "Priority 0 — governance/blocking (highest)" },
-  { name: "prio:1", color: "d93f0b", description: "Priority 1 — high" },
-  { name: "prio:2", color: "fbca04", description: "Priority 2 — medium" },
-  { name: "prio:3", color: "0e8a16", description: "Priority 3 — feature (default)" },
+  { name: "type:feature", color: "1d76db", description: "New feature work — one issue, one PR" },
+  { name: "type:bug", color: "d73a4a", description: "A bug or defect to fix" },
+  { name: "type:infra", color: "6e7781", description: "Infrastructure, CI, or tooling work" },
+  { name: "type:docs", color: "0075ca", description: "Documentation work" },
+  { name: "prio:0", color: "b60205", description: "Priority 0 — governance or blocking issue (highest)" },
+  { name: "prio:1", color: "d93f0b", description: "Priority 1 — high priority" },
+  { name: "prio:2", color: "fbca04", description: "Priority 2 — medium priority" },
+  { name: "prio:3", color: "0e8a16", description: "Priority 3 — standard priority (default)" },
 ] as const;
 
 export function taxonomyLabels(prefix: string) {
@@ -280,7 +280,7 @@ export const LABEL_SEMANTICS = {
       "Engine, at any of many escalation write sites (conductor.ts, escalation-writer.ts, decompose.ts, fix-response.ts, " +
       "architect.ts's contradiction pass), or a human directly.",
     remover:
-      "A human, by removing the label — the #147 gated-reentry handshake that reclaims and re-drives the lane. Also the " +
+      "A human, by removing the label — the gated-reentry handshake that reclaims and re-drives the lane. Also the " +
       "engine itself, via escalation-sweep.ts's `sweepResolvedHolds`: it removes ONLY a `needs-human` the ledger PROVES the " +
       "engine itself applied (an `always`-proof or proven-`payload` source, per escalation-reconcile.ts's `ESCALATION_SOURCES`), " +
       "once the escalation is ledger-resolved AND an authorizing witness (merge or issue close, never a mere PR close) confirms " +
@@ -290,7 +290,7 @@ export const LABEL_SEMANTICS = {
       "the label by hand in the narrow window between the engine's resolution and the sweep running loses it anyway — that " +
       "reapplied, now ledger-co-owned physical label IS swept.",
     gates:
-      "Bucket 1 escalation (#397): holds dispatch. Whether it also vetoes the merge gate when present on a PR depends on " +
+      "Bucket 1 escalation: holds dispatch. Whether it also vetoes the merge gate when present on a PR depends on " +
       "`escalation.humanLabels` membership — see the rendered Merge veto line below for THIS repo's resolved answer.",
     distinguishFrom:
       "Means 'the machine STOPPED; a human owes the NEXT decision' — unlike `humanMergeOnly` ('a human must MERGE this PR', " +
@@ -299,10 +299,10 @@ export const LABEL_SEMANTICS = {
   },
   blocked: {
     writer: "Engine (the architect's severe-contradiction pass, `roles/architect.ts`) or a human.",
-    remover: "A human only — the same #147 gated-reentry handshake as `needsHuman`.",
+    remover: "A human only — the same gated-reentry handshake as `needsHuman`.",
     gates:
       "Bucket 1 escalation, same tier as `needsHuman`: holds dispatch. Whether it also vetoes the merge gate on a PR (the " +
-      "PR-side human-veto channel, #399) depends on `escalation.humanLabels` membership — see the rendered Merge veto line " +
+      "PR-side human-veto channel) depends on `escalation.humanLabels` membership — see the rendered Merge veto line " +
       "below for THIS repo's resolved answer.",
     distinguishFrom: "An external wait rather than 'the machine stopped', but every gate treats it identically to `needsHuman`.",
   },
@@ -322,7 +322,7 @@ export const LABEL_SEMANTICS = {
     gates:
       "Marks an issue inherently unverifiable by tests; substitutes for a verification plan + `planApproved` in the " +
       "dispatchability gate (`getReadyIssues`), routing through the doc-gate path instead.",
-    distinguishFrom: "`verifyNa` + `planApproved` together is a forbidden mixed state (#94) — the dispatch gate refuses to dispatch it.",
+    distinguishFrom: "`verifyNa` + `planApproved` together is a forbidden mixed state — the dispatch gate refuses to dispatch it.",
   },
   planApproved: {
     writer:
@@ -330,7 +330,7 @@ export const LABEL_SEMANTICS = {
       "`roles.verificationPlanReviewer.enabled` is false (round-defaults.ts's plan_review-disabled fallback warning), a " +
       "human/external process, since nothing in the engine applies it in that configuration. Never self-applied by a worker.",
     remover:
-      "Never removed by the engine. Not 'approved forever' (#214): a pool member carrying it from a PRIOR round is " +
+      "Never removed by the engine. Not 'approved forever': a pool member carrying it from a PRIOR round is " +
       "RE-CONFIRMED (a lightweight freshness pass), never re-applied, at every round-pool entry.",
     gates:
       "Required — together with a genuine verification-plan section and a non-malformed acceptance-criteria checklist — " +
@@ -343,11 +343,11 @@ export const LABEL_SEMANTICS = {
   },
   split: {
     writer:
-      "Engine-initiated by default (#874: gate⓪'s early `too_large` decision; #965: the resume-cap late trigger) — a human " +
+      "Engine-initiated by default — gate⓪'s early `too_large` decision, or the resume-cap's late trigger — a human " +
       "may still apply it directly as an override channel, but it is no longer the main path.",
     remover: "Never removed by the engine.",
     gates:
-      "Unconditionally holds dispatch (#874) — the same composed exclusion set `decomposed`/`needsHuman`/`blocked` join, " +
+      "Unconditionally holds dispatch — the same composed exclusion set `decomposed`/`needsHuman`/`blocked` join, " +
       "so a plan-review race (a stale or concurrent `planApproved`) can never dispatch a mid-decomposition issue. On an " +
       "`origin:agent` child, permits decomposition. Label-application time does NOT define attempt freshness: freshness " +
       "is derived from the issue title/body signature, so an edited body re-arms a new attempt without a fresh label.",
@@ -372,12 +372,12 @@ export const LABEL_SEMANTICS = {
     distinguishFrom: "Config load rejects `labels.roundPool` aliasing any other protected label.",
   },
   humanMergeOnly: {
-    writer: "Engine only, on the PR, exactly once — the instruction-path trust chain (#292).",
+    writer: "Engine only, on the PR, exactly once — the instruction-path trust chain.",
     remover: "Never removed or re-decided by any automated act.",
-    gates: "Bucket 2 escalation (#397): the merge decision for this PR belongs to a human, unconditionally.",
+    gates: "Bucket 2 escalation: the merge decision for this PR belongs to a human, unconditionally.",
     distinguishFrom:
       "Unlike `needsHuman`, the PR is not 'stuck' — its merge decision simply isn't the loop's to take. Deliberately NOT a " +
-      "member of `escalation.humanLabels`, so a lane settling here is structurally invisible to #147 gated reclaim: it can " +
+      "member of `escalation.humanLabels`, so a lane settling here is structurally invisible to gated reclaim: it can " +
       "never be re-escalated to `needsHuman` or gate-reclaimed.",
   },
   laneState: {
@@ -399,14 +399,14 @@ export const LABEL_SEMANTICS = {
     remover: "A human, once a verification plan exists.",
     gates: "Excluded from `isPoolEligible`/`needsPlanReview`/`needsPlanTriage`/the standby probe, exactly as `needsHuman` is.",
     distinguishFrom:
-      "NOT an escalation at all (#397 class 6) — nobody owes a decision; it is a routing fence, off every queue until a " +
+      "NOT an escalation at all — nobody owes a decision; it is a routing fence, off every queue until a " +
       "plan exists. Not a member of `escalation.humanLabels`.",
   },
   hold: {
     writer: "Human only — applied by a human actively reviewing a PR to pause automation on it.",
     remover: "Human only, by removing it, to resume automation.",
     gates:
-      "The WAIT tier (#248, three-tier escalation model): suppresses MERGE, FIXABLE, and the ordinary drive switch in " +
+      "The WAIT tier of the three-tier escalation model: suppresses MERGE, FIXABLE, and the ordinary drive switch in " +
       "`deriveGate` while present. No effect on issues — it is a PR-only signal.",
     distinguishFrom:
       "`hold` ≠ `needsHuman`: a hold is a human PROACTIVELY pausing an in-progress review (nothing is stuck), while " +

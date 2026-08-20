@@ -578,14 +578,18 @@ test("#397: requiredLabels provisions both new labels", () => {
 
 test("#397 AC: every escalation-tier label description states writer / required action / removal effect, fits GitHub's 100-char cap, and is quoted VERBATIM in docs/configuration.md", () => {
   const doc = readFileSync(join(REPO_ROOT, "docs", "configuration.md"), "utf8");
+  // #1049: user-perspective rewrite dropped the "Engine-applied:"/"Human-applied:" jargon prefix
+  // (a user browsing their repo's label list has no notion of "the engine") in favor of naming
+  // sapwood or "a human" directly in prose — the writer signal survives, the internal vocabulary
+  // doesn't.
   const tier: Array<[string, RegExp]> = [
     // [label, a pattern proving the description names WHO writes it]
-    ["sapwood:needs-human", /engine-applied/i],
-    ["sapwood:blocked", /applied/i],
-    ["sapwood:reserve", /applied/i],
+    ["sapwood:needs-human", /sapwood/i],
+    ["sapwood:blocked", /sapwood|human/i],
+    ["sapwood:reserve", /human/i],
     ["sapwood:hold", /human is reviewing/i],
-    ["sapwood:human-merge-only", /engine-applied/i],
-    ["sapwood:planless", /engine-applied/i],
+    ["sapwood:human-merge-only", /human|sapwood/i],
+    ["sapwood:planless", /sapwood/i],
   ];
   for (const [name, writer] of tier) {
     const spec = requiredLabels(cfg).find((l) => l.name === name);

@@ -96,29 +96,29 @@ export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
   const l = cfg.labels;
   const base: LabelSpec[] = [
     ...taxonomyLabels(l.prefix),
-    { name: l.inProgress, color: "0e8a16", description: "Claimed by a worker (in flight)" },
+    { name: l.inProgress, color: "0e8a16", description: "sapwood has claimed this issue and is working on it" },
     // #397: every escalation-tier description answers the same three questions a human staring at
     // the label needs — WHO writes it / WHAT the human must do / WHAT removing it does — inside
     // GitHub's 100-char description limit, and identical to the row in docs/configuration.md
     // (init.test.ts pairs them, the same check #400 introduced for `hold`).
-    { name: l.needsHuman, color: "5319e7", description: "Engine-applied: autonomy stopped, a human decides; remove to hand it back." },
-    { name: l.blocked, color: "5319e7", description: "Engine- or human-applied: an external wait; remove once it clears." },
-    { name: l.reserve, color: "5319e7", description: "Human-applied: parked out of dispatch; remove to make it dispatchable again." },
-    { name: l.verifyNa, color: "c5def5", description: "Verification N/A — skips the Decision #8 gate" },
-    { name: l.planApproved, color: "0e8a16", description: "Verification plan approved by gate zero" },
-    { name: l.originAgent, color: "bfd4f2", description: "Issue was created by an agent, not a human" },
-    { name: l.split, color: "fbca04", description: "Human request to decompose this issue once" },
-    { name: l.decomposed, color: "6e7781", description: "Parent retired as a decomposition tracking container" },
+    { name: l.needsHuman, color: "5319e7", description: "sapwood has stopped and is waiting on a human decision; remove to resume" },
+    { name: l.blocked, color: "5319e7", description: "sapwood or a human blocked this on something external; remove once it's resolved" },
+    { name: l.reserve, color: "5319e7", description: "A human parked this out of sapwood's work queue; remove to make it available again" },
+    { name: l.verifyNa, color: "c5def5", description: "Not verifiable by automated tests; reviewed and verified manually instead" },
+    { name: l.planApproved, color: "0e8a16", description: "This issue's verification plan has been reviewed and approved" },
+    { name: l.originAgent, color: "bfd4f2", description: "This issue was created automatically, not by a human" },
+    { name: l.split, color: "fbca04", description: "Marks this issue for splitting into smaller issues" },
+    { name: l.decomposed, color: "6e7781", description: "This issue was split into smaller issues; kept open only to track them" },
     // #212: round-pool membership — applied by the aligning phase's pool-selection pass,
     // cleared by the engine at round close (never by a session — see removeRoundPoolLabel).
-    { name: l.roundPool, color: "5319e7", description: "In this round's dispatch-eligible pool" },
+    { name: l.roundPool, color: "5319e7", description: "Selected for sapwood's current work round" },
     // #397 bucket 2 — the ONE meaning `needs-human` could never express: not "the machine is
     // stuck", but "this PR's merge decision belongs to a human." Written once, on the PR, and
     // never re-evaluated, so the description says the loop will not take it back.
     {
       name: l.humanMergeOnly,
       color: "b60205",
-      description: "Engine-applied on the PR: a human must merge it. The loop never removes or re-decides this.",
+      description: "A human must merge this PR by hand; sapwood never removes this label",
     },
     // #399: the PR-side lane-state mirror. The description answers the same three questions every
     // escalation-tier description does — WHO writes it / WHAT it means / WHAT removal does — and
@@ -127,14 +127,14 @@ export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
     {
       name: l.laneState,
       color: "0e8a16",
-      description: "Engine-applied on the PR: a lane is actively working it. Removed automatically when the lane ends.",
+      description: "sapwood is actively working on this PR; removed automatically when done",
     },
     // #397 class 6 — explicitly NOT an escalation, so the description says so: nobody is on the
     // hook, it just keeps a plan-less issue off every queue until a plan exists.
     {
       name: l.planless,
       color: "6e7781",
-      description: "Engine-applied: no verification plan — off every queue. Not an escalation; add one, then remove.",
+      description: "sapwood found no verification plan yet; add one, then remove this label",
     },
   ];
   // #248 review round 1 (G2): the shipped `escalation.holdLabels` default (sapwood:hold) is
