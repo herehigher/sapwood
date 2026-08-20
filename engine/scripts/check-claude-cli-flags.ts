@@ -1,24 +1,22 @@
 #!/usr/bin/env -S npx tsx
-// check-claude-cli-flags.ts (#799 — invoked by ci.yml's human-merge-only `claude-cli-floor`
-// job): the CI-side half of
-// docs/PLAN.md:129 ("state a minimum Claude Code CLI version and test against it in CI"). Asserts
-// the INSTALLED `claude` binary's `--help` output offers EVERY long flag the engine's OWN `claude`
-// invocations can ever emit — `worker.ts`'s `ENGINE_CLAUDE_LONG_FLAGS`, itself DERIVED by calling
-// `claudeArgs` (fresh + resume shapes), the LLM-ping probe's own argv builder, AND the
-// version-floor probe's own argv builder (`probeClaudeVersion`'s `["--version"]`) — every shape
-// the engine ever spawns `claude` in, not a hand-maintained list (#799 gate② P1 #4 round 1: an
-// earlier 5-flag hand list omitted 19 real flags, including probeLlmPing's own
-// `--model`/`--output-format`; round 2: the derivation itself still omitted the version-probe's
-// OWN `--version` flag until this fix). Zero spend: `--help` only — no `-p`, no `--model`, no
-// auth, no network call to Anthropic. Not itself the startup WARN (that is
-// claude-version-startup-check.ts, invoked once per engine start); this is a BUILD-TIME
-// regression guard — a future engine change that adds a flag the pinned floor's CLI does not
-// support fails CI here, instead of failing silently for every operator on the floor version.
+// check-claude-cli-flags.ts (#799): MANUAL floor check — run by a human when moving
+// MIN_CLAUDE_CLI_VERSION or when the engine starts emitting a new `claude` flag. Not wired into
+// CI: the former `claude-cli-floor` job downloaded the full ~140MB CLI package on every run for
+// a check whose inputs (the floor pin and the engine's flag surface) change a few times a year.
+// Asserts the INSTALLED `claude` binary's `--help` output offers EVERY long flag the engine's
+// OWN `claude` invocations can ever emit — `worker.ts`'s `ENGINE_CLAUDE_LONG_FLAGS`, itself
+// DERIVED by calling `claudeArgs` (fresh + resume shapes), the LLM-ping probe's own argv
+// builder, AND the version-floor probe's own argv builder (`probeClaudeVersion`'s
+// `["--version"]`) — every shape the engine ever spawns `claude` in, not a hand-maintained list
+// (#799 gate② P1 #4 round 1: an earlier 5-flag hand list omitted 19 real flags, including
+// probeLlmPing's own `--model`/`--output-format`; round 2: the derivation itself still omitted
+// the version-probe's OWN `--version` flag until this fix). Zero spend: `--help` only — no `-p`,
+// no `--model`, no auth, no network call to Anthropic. Not itself the startup WARN (that is
+// claude-version-startup-check.ts, invoked once per engine start).
 //
-// Invoked by the patch's own CI job AFTER `npm i -g @anthropic-ai/claude-code@<MIN_CLAUDE_CLI_
-// VERSION>` — so CLAUDE_BIN is left unset on purpose (this MUST check the globally-installed
-// pinned version, not some other resolved binary) unless a caller explicitly wants to point it at
-// a different install for local reproduction.
+// To reproduce the floor check: `npm i -g @anthropic-ai/claude-code@<MIN_CLAUDE_CLI_VERSION>`
+// then `npx tsx engine/scripts/check-claude-cli-flags.ts`. CLAUDE_BIN points it at a different
+// install; unset, it checks the globally-installed `claude`.
 import { execFileSync } from "node:child_process";
 import { ENGINE_CLAUDE_LONG_FLAGS, MIN_CLAUDE_CLI_VERSION } from "../src/roles/worker.js";
 

@@ -140,7 +140,7 @@ Concurrency and dispatch shape.
 
 Per-worker execution.
 
-**Minimum Claude Code CLI version: 2.1.209** (see [`docs/PLAN.md:129`](PLAN.md)).
+**Minimum Claude Code CLI version: 2.1.209** (see [`docs/PLAN.md:123`](PLAN.md)).
 `2.1.209` is the ONLY version this repo has evidence for — the exact
 CLI the engine's worker/probe argv (`--no-session-persistence`, `--strict-mcp-config`, `--tools`,
 `--max-budget-usd`, `--system-prompt`) was verified against (`engine/src/roles/worker.ts`'s

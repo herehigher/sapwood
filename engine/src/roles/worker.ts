@@ -954,8 +954,8 @@ export function discoverClaudeBin(env: Record<string, string | undefined>): stri
   return b ? b : "claude";
 }
 
-/** #799 (PLAN.md:129 — "state a minimum Claude Code CLI version and test against it in CI",
- *  never previously built): the minimum Claude Code CLI version this engine's worker/probe argv
+/** #799 (PLAN.md:123 — "state a minimum Claude Code CLI version", never previously built): the
+ *  minimum Claude Code CLI version this engine's worker/probe argv
  *  is verified against — the ONLY version this repo has evidence for. probeLlmPing's own doc
  *  below states it: "verified working against claude CLI 2.1.209" for `--no-session-persistence`,
  *  `--strict-mcp-config`, `--tools`, `--max-budget-usd`, `--system-prompt`. An older CLI missing
@@ -969,8 +969,8 @@ export function discoverClaudeBin(env: Record<string, string | undefined>): stri
  *  `worker` section (claude-version-startup-check.test.ts's AC1/AC2 test) — changing this value
  *  without updating both docs to the SAME exact string fails that test. Consumed by
  *  claude-version-startup-check.ts's once-per-engine-start WARN-only startup detector — never a
- *  gate, see that module's own doc — and by the CI floor-check job (ci.yml's `claude-cli-floor`)
- *  via `ENGINE_CLAUDE_LONG_FLAGS` below. */
+ *  gate, see that module's own doc — and by the manual floor-check script
+ *  (`engine/scripts/check-claude-cli-flags.ts`) via `ENGINE_CLAUDE_LONG_FLAGS` below. */
 export const MIN_CLAUDE_CLI_VERSION = "2.1.209";
 
 /** #168: the ping probe's outcome. `detail` is set on FAILURE only — the first stderr (or
@@ -1582,10 +1582,10 @@ function isLongFlag(token: string): boolean {
  *  + the LLM-ping probe (23 flags); round 2 closes the gap sol-high's reproduction found — the
  *  version-floor startup check ALSO spawns `claude` (`probeClaudeVersion`, `["--version"]`), and
  *  that argv had never been folded in, so a real installed CLI's true fresh+resume+ping+version
- *  union (24 flags) exceeded what this set asserted (23). This is what the CI floor-check
- *  (`engine/scripts/check-claude-cli-flags.ts`, run by ci.yml's `claude-cli-floor` job) asserts
- *  `claude --help` advertises — its own promise to check EVERY long
- *  flag the engine emits across EVERY shape it spawns `claude` in, not a curated subset. */
+ *  union (24 flags) exceeded what this set asserted (23). This is what the manual floor-check
+ *  script (`engine/scripts/check-claude-cli-flags.ts`) asserts `claude --help` advertises — its
+ *  own promise to check EVERY long flag the engine emits across EVERY shape it spawns `claude`
+ *  in, not a curated subset. */
 export const ENGINE_CLAUDE_LONG_FLAGS: readonly string[] = (() => {
   const { resumeSessionId: _resumeSessionId, ...freshOpts } = MAXIMAL_CLAUDE_ARGS_OPTS;
   const freshArgv = claudeArgs(freshOpts);
