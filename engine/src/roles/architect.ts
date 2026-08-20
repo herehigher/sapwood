@@ -82,11 +82,9 @@ export interface ArchitectDeps {
   now: () => Date;
   log?: (message: string) => void;
   /** Path to the repo's north-star goal file — the architecture-chapter source. Override for
-   *  tests; a real caller omits this and gets `cfg.goal.file` (#128, promoted out of the
-   *  #104-era `roles.architect.planMdPath` — was a hardcoded `<cwd>/docs/PLAN.md`, which broke
-   *  for any target repo keeping its architecture doc elsewhere; now a real,
+   *  tests; a real caller omits this and gets `cfg.goal.file` (#128), a real,
    *  config-file-relative-resolved top-level config key, the same one align.ts's goal-file read
-   *  honors). Architecture review stays advisory either way: a missing/unreadable file degrades
+   *  honors. Architecture review stays advisory either way: a missing/unreadable file degrades
    *  to an explicit placeholder (see loadArchitectureChapter) rather than failing the round. */
   planMdPath?: string;
   /** The round's aligned-goals text from the (not yet shipped, #89) PO/goal-alignment
@@ -635,9 +633,7 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
 
       const template = loadRolePromptTemplate(deps.cfg.roles.architect.promptFile, defaultArchitectPromptPath());
       // #128: deps.planMdPath is a TEST override only now — a real caller omits it and gets
-      // cfg.goal.file (config-file-relative resolved, default DEFAULT_GOAL_FILE; was a hardcoded
-      // <cwd>/docs/PLAN.md, then roles.architect.planMdPath (#104), which broke for any target
-      // repo keeping its architecture doc elsewhere).
+      // cfg.goal.file (config-file-relative resolved, default DEFAULT_GOAL_FILE).
       const architecturePath = deps.planMdPath ?? deps.cfg.goal.file;
       // #251 gate② review round 3 (F2): ONE read (loadArchitectureChapterWithStatus, above),
       // consumed by both the prompt substitution and the architecture-chapter manifest row below

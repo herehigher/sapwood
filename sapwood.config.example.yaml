@@ -263,8 +263,6 @@ merge:
 #     effort: medium # default: medium
 #     fallbackModel: sonnet # default: sonnet
 #     promptFile: prompts/my-architect.md # default: unset — shipped prompts/architect.md
-#     planMdPath: docs/PLAN.md # DEPRECATED (#128) — use the top-level goal.file above
-      #                           # instead; default: unset
 #     lastMergedMaxChars: 10000 # default: 10000 — cap on the previous round's merged-PR
       #                          # summary substituted into the prompt
 #     poolDigestMaxChars: 20000 # default: 20000 — cap on this round's pool digest substituted

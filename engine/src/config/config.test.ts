@@ -1682,12 +1682,12 @@ test("round.directiveFile: defaults to data/DIRECTIVE.md", () => {
   assert.equal(cfg.round.directiveFile, "data/DIRECTIVE.md");
 });
 
-test("round.directiveFile: overridable, and NOT resolved relative to the config file (unlike roles.*.promptFile/planMdPath) — same cwd-relative convention as the engine's own data/sapwood.sqlite default", () => {
+test("round.directiveFile: overridable, and NOT resolved relative to the config file (unlike roles.*.promptFile) — same cwd-relative convention as the engine's own data/sapwood.sqlite default", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { directiveFile: custom/STEER.md }");
   assert.equal(cfg.round.directiveFile, "custom/STEER.md");
 });
 
-test("round.directiveFile: an empty string is rejected (always has a value, same shape as roles.architect.planMdPath)", () => {
+test("round.directiveFile: an empty string is rejected (always has a value, same shape as goal.file)", () => {
   assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { directiveFile: '' }"), /directiveFile/);
 });
 
@@ -1700,59 +1700,24 @@ test("round.directiveMaxChars: zero/negative rejected (same positive-int contrac
   assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { directiveMaxChars: 0 }"), /directiveMaxChars/);
 });
 
-// ── #128: goal.file (top-level north-star goal file, promoted out of the #104-era
-// roles.architect.planMdPath) — precedence, deprecation, config-file-relative resolution ───────
+// ── #128: goal.file (top-level north-star goal file) — default + config-file-relative
+// resolution ─────────────────────────────────────────────────────────────────────────────────
 
-test("goal.file: defaults to docs/GOAL.md when neither key is set", () => {
+test("goal.file: defaults to docs/GOAL.md when unset", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.goal.file, DEFAULT_GOAL_FILE);
   assert.equal(cfg.goal.file, "docs/GOAL.md");
 });
 
-test("goal.file: only the new key set — it wins, no error, no deprecation noise", () => {
-  const calls: unknown[][] = [];
-  const orig = console.error;
-  console.error = (...args: unknown[]) => calls.push(args);
-  try {
-    const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\ngoal: { file: notes/GOAL.md }");
-    assert.equal(cfg.goal.file, "notes/GOAL.md");
-    assert.equal(calls.length, 0, "no deprecation line when only the new key is set");
-  } finally {
-    console.error = orig;
-  }
+test("goal.file: an explicit value is used as set", () => {
+  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\ngoal: { file: notes/GOAL.md }");
+  assert.equal(cfg.goal.file, "notes/GOAL.md");
 });
 
-test("goal.file: only the OLD key (roles.architect.planMdPath) set — it wins, and exactly ONE deprecation line is logged", () => {
-  const calls: unknown[][] = [];
-  const orig = console.error;
-  console.error = (...args: unknown[]) => calls.push(args);
-  try {
-    const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { planMdPath: notes/ARCH.md } }");
-    assert.equal(cfg.goal.file, "notes/ARCH.md");
-    assert.equal(calls.length, 1, "exactly one deprecation line");
-    assert.match(String(calls[0]![0]), /goal\.file/);
-    assert.match(String(calls[0]![0]), /roles\.architect\.planMdPath|deprecat/i);
-  } finally {
-    console.error = orig;
-  }
-});
-
-test("goal.file: both keys set and they AGREE — resolves cleanly, no error", () => {
-  const cfg = parseConfig(
-    "board: { owner: a, repo: r, projectNumber: 1 }\n" +
-      "goal: { file: notes/SAME.md }\nroles: { architect: { planMdPath: notes/SAME.md } }",
-  );
-  assert.equal(cfg.goal.file, "notes/SAME.md");
-});
-
-test("goal.file: both keys set and they DISAGREE — hard config error naming both keys", () => {
+test("roles.architect.planMdPath: retired — rejected like any other unrecognized key (.strict())", () => {
   assert.throws(
-    () =>
-      parseConfig(
-        "board: { owner: a, repo: r, projectNumber: 1 }\n" +
-          "goal: { file: notes/NEW.md }\nroles: { architect: { planMdPath: notes/OLD.md } }",
-      ),
-    (e: Error) => /goal\.file/.test(e.message) && /roles\.architect\.planMdPath/.test(e.message),
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { planMdPath: notes/ARCH.md } }"),
+    /planMdPath|[Uu]nrecognized/,
   );
 });
 
@@ -1780,21 +1745,6 @@ test("goal.file: the DEFAULT value is also resolved relative to the config file'
   }
 });
 
-test("goal.file: resolved from the deprecated old key is ALSO config-file-relative resolved", () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
-  const orig = console.error;
-  console.error = () => {}; // silence the expected deprecation line for this test
-  try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
-    writeFileSync(cfgPath, "board: { owner: a, repo: r, projectNumber: 1 }\nroles: { architect: { planMdPath: notes/ARCH.md } }\n");
-    const cfg = loadConfig(cfgPath);
-    assert.equal(cfg.goal.file, join(dir, "notes", "ARCH.md"));
-  } finally {
-    console.error = orig;
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test("goal.file: an absolute path is left untouched", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
   try {
@@ -1808,8 +1758,8 @@ test("goal.file: an absolute path is left untouched", () => {
   }
 });
 
-// ── #167: doctrine.file (repo-level review doctrine) — same top-level, always-resolved shape
-// as goal.file, but with a real .default() (no deprecated back-compat key to reconcile) ────────
+// ── #167: doctrine.file (repo-level review doctrine) — same top-level, always-resolved,
+// real-.default() shape as goal.file ────────────────────────────────────────────────────────
 
 test("doctrine.file: defaults to docs/REVIEW-DOCTRINE.md and doctrine.maxChars defaults to 20000", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
