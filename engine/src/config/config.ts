@@ -1673,8 +1673,9 @@ export function resolveLabelDefaults(cfg: z.infer<typeof ConfigSchemaRaw>): Sapw
   return cfg as SapwoodConfig;
 }
 
-/** The schema every real caller uses: raw validation followed by label-prefix/default and
- * goal-file resolution, then cross-field validation on the fully resolved values. */
+/** The schema every real caller uses: raw validation (goal.file's default already applied at
+ * this layer) followed by label-prefix/default resolution, then cross-field validation on the
+ * fully resolved values. */
 export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).superRefine((cfg, ctx) => {
   // #170 review-silence escalation writes labels.needsHuman, while the existing PR gate
   // and the issue-side gated-reentry hold both recognize escalation.humanLabels. Reject drift
@@ -2145,9 +2146,9 @@ export function loadConfig(path?: string): SapwoodConfig {
   if (!isAbsolute(cfg.goal.file)) {
     cfg.goal.file = resolve(dirname(file), cfg.goal.file);
   }
-  // #167: same rule for the resolved review-doctrine file — always has a value (it carries a
-  // real `.default()`, not `goal.file`'s optional-then-resolved shape), so every non-absolute
-  // value, default or explicit, resolves against the config file's directory, not the CLI's cwd.
+  // #167: same rule for the resolved review-doctrine file — always has a value (same real
+  // `.default()` shape as goal.file above), so every non-absolute value, default or explicit,
+  // resolves against the config file's directory, not the CLI's cwd.
   // #167 review (Codex P2+P3): capture the RAW pre-resolution value FIRST — conductor.ts's
   // gated-reentry-cap escalation comment cites this (never the resolved absolute path below) so
   // a public GitHub comment never leaks this machine's local directory layout. See
