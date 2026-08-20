@@ -595,12 +595,12 @@ export async function materializeWithExternalFetch(
   if (await objectPresentInClone(opts.clone.dir, opts.oid, timeoutMs)) return first;
   const remoteUrl = await sourceOriginUrl(opts.sourceRepoDir, timeoutMs);
   if (remoteUrl == null) return first;
-  opts.log?.(`[sapwood:review] head ${opts.oid} is absent from the local object store — fetching external heads from origin (#499)`);
+  opts.log?.(`[sapwood:review] head ${opts.oid} is absent from the local object store — fetching external heads from origin`);
   const { args, env } = buildExternalHeadFetchInvocation(opts.clone.dir, remoteUrl);
   try {
     await pexecFile("git", args, { env, timeout: timeoutMs });
   } catch (err) {
-    opts.log?.(`[sapwood:review] external-head fetch failed: ${(err as Error).message} (#499)`);
+    opts.log?.(`[sapwood:review] external-head fetch failed: ${(err as Error).message}`);
     return first;
   }
   const retry = await materialize(opts);
@@ -608,6 +608,6 @@ export async function materializeWithExternalFetch(
   // #506 review P2: a failed retry returns the ORIGINAL failure — the contract callers and
   // tests pin ("otherwise return the original failure"). The retry's own reason is still
   // surfaced through the log so a divergent second failure is not silently flattened.
-  opts.log?.(`[sapwood:review] retry after external-head fetch still failed: ${retry.reason} (#499)`);
+  opts.log?.(`[sapwood:review] retry after external-head fetch still failed: ${retry.reason}`);
   return first;
 }

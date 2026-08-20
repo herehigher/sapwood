@@ -16,7 +16,13 @@ import { defaultDoctrineTemplatePath } from "../loop/init.js";
 import { allowedToolsForRole, PROXY_ROLE_TOOL_MATRIX } from "../proxy/access.js";
 import { defaultRetroPromptPath, RETRO_ALLOWED_TOOLS, RETRO_DISALLOWED_TOOLS } from "../retro/retro.js";
 import { defaultEngineReviewerPromptPath } from "../review/engine-agent.js";
-import { BODY_BLOCK_END, parseStructuredBlock, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
+import {
+  BODY_BLOCK_END,
+  BODY_BLOCK_START,
+  parseStructuredBlock,
+  RESULT_BLOCK_END,
+  RESULT_BLOCK_START,
+} from "../state/structured-output.js";
 import { defaultArchitectPromptPath } from "./architect.js";
 import {
   ARCHITECT_ALLOWED_TOOLS,
@@ -862,3 +868,64 @@ test("#701 (Tier B): no shipped role prompt hardcodes 'English' as a literal wor
 // static `.includes("{{lang.*}}")` check on the raw template proves only that the LITERAL TOKEN
 // sits somewhere in the file — never that a real render actually threads the configured value
 // through it, and it is itself a single-file prose pin (PROSE-PIN, docs/REVIEW-DOCTRINE.md).
+
+// ── Negative lint: no sapwood-dev issue/PR archaeology on the agent-facing release surface ────
+//
+// engine/prompts/*.md and commands/*.md are injected into (or surfaced inside) Claude sessions
+// running on a TARGET repo — a bare `#874`-style reference is read there as THAT repo's own
+// issue/PR number, not sapwood's. The handful of numbers this repo deliberately KEEPS are
+// output-format placeholders inside a structured-output example (architect.md's `#21`/`#34`
+// CONTRADICTION/VERDICT block, po.md's example `"issue": 42`) or an inline code span illustrating
+// a truncation marker's shape (po-pool.md's `` `[... candidate issues #41, #57 omitted ...]` ``)
+// — stripped below the same way a fenced/backtick code sample is, so this lint only fires on a
+// bare reference sitting in ordinary rule prose.
+
+function stripBetweenAll(text: string, startTag: string, endTag: string): string {
+  let result = "";
+  let idx = 0;
+  for (;;) {
+    const start = text.indexOf(startTag, idx);
+    if (start < 0) {
+      result += text.slice(idx);
+      return result;
+    }
+    result += text.slice(idx, start);
+    const end = text.indexOf(endTag, start + startTag.length);
+    if (end < 0) {
+      // Malformed sentinel pair (should never ship) — keep the rest verbatim rather than eat it
+      // silently; a genuinely malformed file fails elsewhere (the sentinel-balance test above).
+      result += text.slice(start);
+      return result;
+    }
+    idx = end + endTag.length;
+  }
+}
+
+function stripExampleAndCodeSpans(text: string): string {
+  let stripped = stripBetweenAll(text, RESULT_BLOCK_START, RESULT_BLOCK_END);
+  stripped = stripBetweenAll(stripped, BODY_BLOCK_START, BODY_BLOCK_END);
+  stripped = stripped.replace(/```[\s\S]*?```/g, ""); // fenced code blocks
+  stripped = stripped.replace(/`[^`\n]*`/g, ""); // inline code spans (single-line, by markdown's own rule)
+  return stripped;
+}
+
+test("negative lint: no shipped engine/prompts or commands file carries a bare sapwood-dev issue/PR reference (#NNN) outside an example/code span — misread on a target repo as THAT repo's own issue number", () => {
+  const promptsDir = dirname(defaultPromptPath());
+  const shippedPrompts = readdirSync(promptsDir, { recursive: true })
+    .filter((f): f is string => typeof f === "string" && f.endsWith(".md"))
+    .map((f) => join(promptsDir, f));
+  const commandsDir = join(promptsDir, "..", "..", "commands");
+  const shippedCommands = readdirSync(commandsDir)
+    .filter((f) => f.endsWith(".md"))
+    .map((f) => join(commandsDir, f));
+  const allFiles = [...shippedPrompts, ...shippedCommands];
+  assert.ok(allFiles.length >= 17, `sanity: expected the full prompts+commands set, got ${allFiles.length} .md files`);
+  for (const path of allFiles) {
+    const stripped = stripExampleAndCodeSpans(readFileSync(path, "utf8"));
+    assert.doesNotMatch(
+      stripped,
+      /#\d{2,4}/,
+      `${path}: a bare #NNN reference reads on a target repo as that repo's own issue/PR number — restate self-contained prose or drop the parenthetical provenance instead`,
+    );
+  }
+});

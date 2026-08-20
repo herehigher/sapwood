@@ -159,7 +159,7 @@ export function defaultArchitectPromptPath(): string {
 }
 
 const NO_ALIGNED_GOALS_YET =
-  "(No PO/goal-alignment peripheral output is available yet — #89 has not shipped. Proceed " +
+  "(No PO/goal-alignment peripheral output is available yet for this round. Proceed " +
   "using only the architecture chapter and this round's candidate issues below.)";
 
 /** #213: the explicit placeholder for an empty round pool (deps.poolIssues omitted, or the round

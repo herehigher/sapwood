@@ -1806,8 +1806,8 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
         code: z.ZodIssueCode.custom,
         path: ["labels", name],
         message:
-          `labels.${name} ("${value}") collides with ${key} ("${other}") — #397 split the escalation ` +
-          `action-buckets apart precisely so one label carries one required human action; aliasing them ` +
+          `labels.${name} ("${value}") collides with ${key} ("${other}") — the escalation ` +
+          `action-buckets are split apart precisely so one label carries one required human action; aliasing them ` +
           `re-merges those meanings. Use a distinct value for labels.${name}.`,
       });
     }
@@ -2019,12 +2019,12 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
       code: z.ZodIssueCode.custom,
       path: ["reviewer", "agent", "model"],
       message: wasDefaulted
-        ? `reviewer.agent.model was DEFAULTED to "${cfg.reviewer.agent.model}" (#501's zero-config engine-agent ` +
+        ? `reviewer.agent.model was DEFAULTED to "${cfg.reviewer.agent.model}" (the zero-config engine-agent ` +
           `default — no reviewer.agent block was configured) and collides with worker.model ` +
-          `("${cfg.worker.model}") — a same-model review can never gate its own producer (D5, design #279); ` +
+          `("${cfg.worker.model}") — a same-model review can never gate its own producer (D5); ` +
           "the one-line fix: set reviewer.agent.model to a different Claude model than worker.model."
         : `reviewer.agent.model ("${cfg.reviewer.agent.model}") must differ from worker.model ` +
-          `("${cfg.worker.model}") — a same-model review can never gate its own producer (D5, design #279); ` +
+          `("${cfg.worker.model}") — a same-model review can never gate its own producer (D5); ` +
           "choose a different Claude model for reviewer.agent.model.",
     });
   }
@@ -2043,7 +2043,7 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
       path: ["worker", missing],
       message:
         `worker.${missing} is unset but worker.${present} is set — these two form ONE local anchor ` +
-        `pair (#606 owner ruling) and must be BOTH set or BOTH unset. Re-run "sapwood init", which ` +
+        `pair (an owner ruling) and must be BOTH set or BOTH unset. Re-run "sapwood init", which ` +
         `always writes or clears them together, or remove worker.${present} by hand.`,
     });
   }
@@ -2057,7 +2057,7 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
     console.warn(
       "[sapwood:config] reviewer.mode is engine-agent but ci.requiredChecks is empty — code-verifiable " +
         "acceptance criteria can at best be claim-based (no trusted CI execution evidence exists to confirm " +
-        "against, design #279 §4.3); configure ci.requiredChecks to enable confirmed verdicts.",
+        "against); configure ci.requiredChecks to enable confirmed verdicts.",
     );
   }
   // #395 (gate② round 3, P2): the liveness watchdog's window (engine.tickIntervalSec x
@@ -2127,7 +2127,7 @@ export function parseConfig(text: string): SapwoodConfig {
     for (const [dead, live] of Object.entries(RENAMED_ROLE_KEYS)) {
       if (dead in (roles as Record<string, unknown>)) {
         throw new Error(
-          `roles.${dead} was renamed to roles.${live} (#413): the gate⓪ role reviews an issue's ` +
+          `roles.${dead} was renamed to roles.${live}: the gate⓪ role reviews an issue's ` +
             `VERIFICATION PLAN — its acceptance criteria and proof method — not the plan of work. ` +
             `Rename the key in your config; its sub-keys are unchanged.`,
         );

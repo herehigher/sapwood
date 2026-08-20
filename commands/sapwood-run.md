@@ -12,7 +12,7 @@ back to the user verbatim, unedited:
 sh "$CLAUDE_PLUGIN_ROOT/bin/sapwood-plugin.sh" run $ARGUMENTS
 ```
 
-(The wrapper uses a local `engine/dist/cli.js` when one exists — a contributor/dogfood
+(The wrapper uses a local `engine/dist/cli.js` when one exists — a contributor
 checkout or a Channel A clone that's been built — and otherwise falls back to
 `npx sapwood@<version>` pinned to this plugin's own version, since a marketplace install
 only runs `npm ci --ignore-scripts` and never builds `engine/dist`. cwd stays the target
@@ -23,8 +23,8 @@ Notes for the user, only if they ask or the output needs context:
   (aligning/architecting/plan_review/harvesting/retro) wrapped around the dispatch-and-
   drain tick engine, one round at a time, until a signal or a `stop.*` condition winds
   the run down (the in-flight round always finishes, including harvest, before exit).
-- `--once` / `--until-idle` are tick-driver-only (`engine.driver: tick` in config, the
-  pre-#106 escape hatch): `--once` runs exactly one tick then exits (exit 1 if that tick
+- `--once` / `--until-idle` are tick-driver-only (`engine.driver: tick` in config):
+  `--once` runs exactly one tick then exits (exit 1 if that tick
   failed); `--until-idle` keeps ticking until nothing dispatches, then exits. Under the
   default rounds driver, passing either is a startup ERROR (exit 1, before any dispatch)
   — never silently ignored, since rounds has no single-tick concept.

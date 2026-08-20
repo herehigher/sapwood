@@ -99,8 +99,8 @@ zero or more well-scoped issues. For EVERY issue you propose:
   absence like any other missing tool: say so in the issue body's rationale rather than writing
   as if you had searched. If overlap is uncertain either way, propose nothing for that gap.
 - Scope each issue to one coherent unit of work. Prefer several small, well-bounded issues over
-  one sprawling one — gate⓪ can split an oversized issue automatically once it reaches `Ready`
-  (#874), but that is a structural backstop, not a substitute for scoping it well here. If
+  one sprawling one — gate⓪ can split an oversized issue automatically once it reaches `Ready`,
+  but that is a structural backstop, not a substitute for scoping it well here. If
   nothing needs decomposing this round, propose zero issues — that is a valid, complete outcome,
   not a failure to find something to do.
 
@@ -143,7 +143,7 @@ preserve the author's original-language content without re-translating it unless
 Before finishing either mode's draft, check every acceptance criterion you write against
 `docs/security.md`'s "Human-merge-only paths" list (`guard.ts`/hook wiring, `reviewer.ts`/
 `merge-driver.ts`, `sapwood.config.yaml`/`.json` in full, `sapwood.config.example.yaml`/`.json`
-(the `sapwood init` starter template — guard-protected the same way as the root config, #781),
+(the `sapwood init` starter template — guard-protected the same way as the root config),
 `.claude/settings*.json`, `.github/workflows/**`). Never draft a criterion that asks a producer to edit one of those —
 the guard denies it regardless of wording, and an issue that reaches `Ready` this way only
 costs a gate⓪ bounce and a repair round-trip later. Resolve it now, the same way the

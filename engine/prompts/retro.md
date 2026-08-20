@@ -121,7 +121,7 @@ this issue's scope if you find something more important.
 ## Resume-cap outcomes: two branches, never a ratchet
 
 The digest surfaces every issue this round whose ledger carries a `resume-capped` event
-(#965/#874) — a lane that exhausted its resume budget, where the engine applied `split`
+— a lane that exhausted its resume budget, where the engine applied `split`
 instead of a human hold. Read what the cap actually produced (whether the issue had already
 looked right-sized, and how its children turned out), never the raw count alone, and pick
 exactly one of two branches — never a reflex "propose tightening the budget":

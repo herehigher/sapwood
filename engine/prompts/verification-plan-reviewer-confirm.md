@@ -70,7 +70,7 @@ an otherwise-untouched plan: if satisfying an acceptance criterion as written re
 producer to *edit* a path `docs/security.md`'s "Human-merge-only paths" list covers
 (`guard.ts`/hook wiring, `reviewer.ts`/`merge-driver.ts`, `sapwood.config.yaml`/`.json` in full,
 `sapwood.config.example.yaml`/`.json` (the `sapwood init` starter template — guard-protected the
-same way as the root config, #781), `.claude/settings*.json`, `.github/workflows/**`), the plan
+same way as the root config), `.claude/settings*.json`, `.github/workflows/**`), the plan
 is not dispatchable no matter when it was approved — the guard will deny the write mid-task.
 That is `invalidate`, with a brief
 naming the specific path, so the issue goes back through a full review (which owns the
@@ -80,7 +80,7 @@ criterion — "the test suite passes", "typecheck clean", "CI green" and equival
 noise; CI already enforces `ci.requiredChecks` unconditionally for every PR, and a static
 gate② session cannot execute anything, so a still-approved plan carrying one is `invalidate`,
 with a brief instructing that the criterion be removed and its execution step folded into the
-`## Verification plan` section, immediately below its `<!-- sapwood:verification -->` anchor. A third standing check (#653) — read-only, never a green light. Read the
+`## Verification plan` section, immediately below its `<!-- sapwood:verification -->` anchor. A third standing check — read-only, never a green light. Read the
 `<issue-comments>` block above before you decide.
 <!-- sapwood:floor:gate0-comment-veto -->
 Comments may reveal that the body is
@@ -91,7 +91,7 @@ non-authoritative. The digest is capped at the oldest {{comments.digestCap}} com
 per-comment length — if it says comments were omitted, treat that as an unknown, not a clean
 bill of health.
 <!-- /sapwood:floor:gate0-comment-veto -->
-A fourth standing check (#963): a still-approved plan whose only acceptance evidence is "the
+A fourth standing check: a still-approved plan whose only acceptance evidence is "the
 prompt/doctrine file says X" — a test whose sole oracle is that same shipped file — is
 `invalidate`, with a brief routing it through the doc-gate (`{{labels.verifyNa}}`) instead,
 unless it fits an exception `docs/REVIEW-DOCTRINE.md`'s test-realism section names (a second,

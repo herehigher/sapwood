@@ -162,13 +162,13 @@ Commands:
     --dry-run      Preview what would be dispatched + a cost estimate, then exit
                    (no worker spawned, no state written)
   status [db-path]  Read engine state straight from SQLite (no live session needed)
-    --config PATH  Load config from this path instead of probing the defaults (#710:
-                   authoritative when given — a bad path is a hard error, never a silent
+    --config PATH  Load config from this path instead of probing the defaults (authoritative
+                   when given — a bad path is a hard error, never a silent
                    fallback to the probe)
     --json         Machine-readable status (formatVersion 1) instead of the text summary
   events [db-path]  Read the event ledger straight from SQLite (the codified monitor recipe)
-    --config PATH      Load config from this path instead of probing the defaults (#710:
-                       same authoritative posture as status's --config, above)
+    --config PATH      Load config from this path instead of probing the defaults (same
+                       authoritative posture as status's --config, above)
     --since-id N       Only events with id > N (default 0)
     --kind K           Only this kind (repeatable; not combinable with --exclude-kind)
     --exclude-kind K   Every kind EXCEPT this one (repeatable; not combinable with --kind)
@@ -184,7 +184,7 @@ Commands:
                  drain, in-flight WIP is lost. Activating REQUIRES --confirm (see --help)
   dashboard      Start the read-only dashboard server and open it in a browser (see --help)
     --port PORT    Bind this port instead of the default (see --help)
-    --config PATH  Load config from this path instead of probing the defaults (#710)
+    --config PATH  Load config from this path instead of probing the defaults
   validate [path]  Load + validate a sapwood config file, report OK or the issues
 
 Flags:
@@ -214,7 +214,7 @@ same dispatch-and-drain tick engine, one round at a time, until a signal or a \`
 final condition winds the run down (the in-flight round always finishes, including
 harvest, before the process exits). Set \`engine.driver: tick\` in config to run the bare
 M4 loop driver instead: tick (reclaim -> drive -> resume -> dispatch) on
-cfg.engine.tickIntervalSec's cadence, no peripherals — the pre-#106 behavior, kept
+cfg.engine.tickIntervalSec's cadence, no peripherals — the original tick-only behavior, kept
 reachable as an explicit escape hatch.
 
 Flags:
@@ -235,7 +235,7 @@ Flags:
                  and a cost preview (per-worker soft budget x candidate count, daily
                  ceiling), then exit. Never spawns a worker or writes state — the
                  first-run trust ramp's "see before you run" step. Driver-agnostic.
-  --milestone NAME  Shortcut (#129): scope AND stop on one milestone in a single flag —
+  --milestone NAME  Shortcut: scope AND stop on one milestone in a single flag —
                  exactly \`round.milestone=NAME\` (this run's dispatch scope: only issues in
                  that milestone are candidates) PLUS \`--stop-on-milestone NAME\` (this run's
                  final stop condition: wind down once it has zero open issues left),
@@ -250,7 +250,7 @@ Flags:
                  rejected, exit 1, before any dispatch, even when the two names match) or
                  with --dry-run (same as every --stop-* flag, below).
 
-Goal-based stop conditions (#76) — each optional; hitting ANY of them (OR semantics, first hit
+Goal-based stop conditions — each optional; hitting ANY of them (OR semantics, first hit
 wins) winds the run down: stop dispatching new lanes, let in-flight lanes finish, exit cleanly,
 naming the condition that fired. Override the config's \`stop.*\` section when given. Apply to
 both drivers. Combine with --once/--until-idle/--forever (the default) freely; NOT with
@@ -397,9 +397,9 @@ best-effort default probe order \`validate\` uses (sapwood.config.yaml/.yml/.jso
 missing/invalid config there still prints every DB-derived field, with the config-derived
 ones shown as "unknown", and the TEXT summary now stamps which path (if any) it resolved
 on its own "config:" line, so an operator can see at a glance whether the numbers below it
-came from the config they meant (#710 — the live trap this closes: \`status\` silently
+came from the config they meant — the live trap this closes: \`status\` silently
 reading the repo's committed config instead of a differently-named run config, rendering
-the WRONG daily budget cap with no visible sign anything was off).
+the WRONG daily budget cap with no visible sign anything was off.
 
 Flags:
   --config <path>  Load config from THIS path instead of probing the defaults — same
@@ -413,11 +413,11 @@ Flags:
                     summary above — a DOCUMENTED PROJECTION (never a raw DB row), additive-
                     only: a future sapwood may add fields to this shape, never remove/rename/
                     retype one at this format version, and a client MUST ignore fields it
-                    does not recognize rather than fail on them (#642). Spend is reported as
+                    does not recognize rather than fail on them. Spend is reported as
                     settled-per-worker + unclassified + an explicit incompleteness flag —
                     never a fabricated $0.00 for spend this DTO could not attribute (e.g.
-                    #612's engine-review sessions, until #645's follow-up gives them their
-                    own line). The config section is available (with provenance = the
+                    engine-review sessions not yet given their own line). The config
+                    section is available (with provenance = the
                     resolved path) only when loadConfig actually succeeded — same "unknown
                     on a config error" stance the text summary above already has, now
                     structural (\`{available: false}\`) instead of the string "unknown".
@@ -426,7 +426,7 @@ Flags:
 On a DB whose schema version this build does not understand (older OR newer than what it
 migrates to), both status and events REFUSE to interpret rows (never migrate, never guess)
 but still report a schema-independent read: the two schema versions plus the raw event
-ledger's row count and max id (#710) — a SELECT COUNT(*)/MAX(id) FROM events and nothing
+ledger's row count and max id — a SELECT COUNT(*)/MAX(id) FROM events and nothing
 else, so the rebuild -> first-run window is degraded, not blind.
 `;
 
@@ -457,7 +457,7 @@ function reviewerTierWarning(cfg: SapwoodConfig, pricing: PricingTable): string 
     `sapwood validate: WARNING — reviewer is cheaper/weaker than worker: reviewer.agent.model ` +
     `"${reviewerModel}" ($${reviewer.input}/$${reviewer.output} per MTok in/out) is priced below worker.model ` +
     `"${cfg.worker.model}" ($${worker.input}/$${worker.output}) — gate quality expectation is inverted. ` +
-    `The reviewer's tier should sit AT OR ABOVE the producer's (docs/configuration.md, #582); rates are only a ` +
+    `The reviewer's tier should sit AT OR ABOVE the producer's (see docs/configuration.md); rates are only a ` +
     `proxy, so this is advice, not a rejection.\n`
   );
 }
@@ -1036,7 +1036,7 @@ const EVENTS_USAGE = `\
 usage: sapwood events [db-path] [--config PATH] [options]
 
 Read the engine's event ledger straight from SQLite (no live engine session required) — the
-codified dogfood "monitor recipe" (#642): the same kind-filtered, id-cursor read a hand-rolled
+codified dogfood "monitor recipe": the same kind-filtered, id-cursor read a hand-rolled
 polling loop used to reimplement per session, now one contract shared with the dashboard's own
 \`/api/events\`.
 
@@ -1044,7 +1044,7 @@ Defaults to data/sapwood.sqlite (the same path \`sapwood run\` writes to).
 
 Flags:
   --config PATH      Load config from THIS path instead of probing the defaults — same
-                     resolution semantics as \`status --config\`/\`run --config\` (#710).
+                     resolution semantics as \`status --config\`/\`run --config\`.
                      \`events\` itself reads no config-derived value today; this exists so an
                      operator running \`events --config X\` alongside \`status --config X\` gets
                      the SAME resolved-config story on both, stamped in the "config:" TEXT
@@ -1054,14 +1054,14 @@ Flags:
   --since-id N       Only events with id > N (default 0; must be a non-negative integer)
   --kind K           Only events of this kind (repeatable — ORs together). Not combinable
                      with --exclude-kind (ambiguous precedence — pick one). An unknown kind
-                     name is a REJECTED argument, naming the valid kinds from the #425
+                     name is a REJECTED argument, naming the valid kinds from the event-kind
                      registry — an unrecognized kind ON A DB ROW (e.g. one a newer engine
                      wrote) is a different case and is always passed through opaque, never
                      rejected.
   --exclude-kind K   Every kind EXCEPT this one (repeatable). Not combinable with --kind.
   --issue N          Only events whose payload \`issue\` field equals N (a non-negative
                      integer). Composes with --kind/--exclude-kind (an AND, not an OR) — the
-                     one-command answer to "why does issue N carry needs-human" (#655).
+                     one-command answer to "why does issue N carry needs-human".
   --limit N          Page size (default ${DEFAULT_EVENTS_LIMIT}). Must be a positive integer,
                      hard-capped at ${MAX_PAGE_LIMIT} — a request above the cap is REJECTED
                      (not silently clamped): a script that asked for N and silently got fewer
@@ -1070,7 +1070,7 @@ Flags:
                      above), instead of paging forward from --since-id — a non-negative
                      integer, hard-capped at ${MAX_PAGE_LIMIT} same as --limit. \`--tail 0
                      --json\` returns an empty \`events\` array plus \`nextSinceId\` set to the
-                     ledger's CURRENT head: the canonical monitor cursor BOOTSTRAP (#709) —
+                     ledger's CURRENT head: the canonical monitor cursor BOOTSTRAP —
                      \`sapwood events --tail 0 --json\` once to learn where "now" is, with no
                      history read at all, then poll \`sapwood events --since-id <nextSinceId>\`
                      from there, instead of a raw \`select max(id)\` against the sqlite file.
@@ -1078,7 +1078,7 @@ Flags:
                      invented interaction between "the N newest" and "everything after id X".
   --json             Print a machine-readable DTO (formatVersion 1) instead of the text
                      listing below — same additive-only/clients-ignore-unknown contract as
-                     \`status --json\` (#642). Includes \`nextSinceId\`: the cursor for the NEXT
+                     \`status --json\`. Includes \`nextSinceId\`: the cursor for the NEXT
                      call — defined even on an empty filtered page (advances to the ledger's
                      current tail rather than leaving a poller stuck rescanning the same
                      range forever), and \`snapshot.mode\` ("live" or "immutable-fallback" —
@@ -1104,7 +1104,7 @@ were a live read.
 On a DB whose schema version this build does not understand (older OR newer than what it
 migrates to), \`events\` REFUSES to interpret rows (never migrates, never guesses) but still
 reports a schema-independent read: the two schema versions plus the raw event ledger's row
-count and max id (#710) — a SELECT COUNT(*)/MAX(id) FROM events and nothing else, so the
+count and max id — a SELECT COUNT(*)/MAX(id) FROM events and nothing else, so the
 rebuild -> first-run window is degraded, not blind.
 `;
 
@@ -1390,7 +1390,7 @@ receipt (\`via: operator-clear\`) FIRST, then delete the park_state row, then ta
 the data/ESCALATION marker — the same order the engine's startup path uses, so a kill
 mid-clear can never leave dispatch un-gated with no receipt in the ledger.
 
-Refuses when a live engine holds the data dir (the single-instance lock, #382): clearing
+Refuses when a live engine holds the data dir (the single-instance lock): clearing
 under a running engine is exactly the race this verb exists to remove. Stop the engine,
 clear, start it again.
 
@@ -1403,7 +1403,7 @@ Flags:
                      echoed in stdout — the OPERATOR's reason for clearing, distinct from
                      the episode's own reason for entering park. Optional for a human running
                      this by hand; docs/supervision.md's governance section makes it REQUIRED
-                     practice for an agent supervisor (#644). Rejected if empty or
+                     practice for an agent supervisor. Rejected if empty or
                      whitespace-only text. Omitted entirely: behavior is unchanged from before
                      this flag existed.
   --help, -h       Print this help and exit
@@ -1656,7 +1656,7 @@ const SENTINEL_SPECS: Record<SentinelTier, SentinelSpec> = {
     usage: `\
 usage: sapwood pause [clear] [db-path] [--config PATH]
 
-The gentle stop tier (#75): creates/removes the data/PAUSE file sentinel — a thin wrapper,
+The gentle stop tier: creates/removes the data/PAUSE file sentinel — a thin wrapper,
 identical in effect to \`touch data/PAUSE\` / \`rm -f data/PAUSE\`. Freezes NEW lane dispatch
 only, as of the engine's next tick-top gate: no in-flight lane is affected — running workers
 keep working, and PRs already open keep moving through the review/merge gate. No drain, no
@@ -1666,7 +1666,7 @@ freeze, nothing killed.
   sapwood pause clear    Remove data/PAUSE (idempotent: already-inactive is a no-op, exit 0)
 
 Flags:
-  --config PATH  Load config from this path instead of probing the defaults — same #710
+  --config PATH  Load config from this path instead of probing the defaults — same
                  resolution semantics as \`status --config\`: authoritative once given, a
                  missing/invalid path is a hard error, never a silent fallback. Never changes
                  WHICH file gets touched (that is always [db-path]'s directory) — config is
@@ -1694,7 +1694,7 @@ exposure, a destructive call, or a cost blowout).
   sapwood stop clear    Remove data/KILL_SWITCH (idempotent: already-inactive is a no-op, exit 0)
 
 Flags:
-  --config PATH  Load config from this path instead of probing the defaults — same #710
+  --config PATH  Load config from this path instead of probing the defaults — same
                  resolution semantics as \`status --config\`: authoritative once given, a
                  missing/invalid path is a hard error, never a silent fallback. Never changes
                  WHICH file gets touched (that is always [db-path]'s directory); when it
@@ -1719,7 +1719,7 @@ Flags:
     usage: `\
 usage: sapwood estop --confirm [clear] [db-path] [--config PATH]
 
-The strictest stop tier (#293): creates/removes the data/EMERGENCY_STOP file sentinel — a
+The strictest stop tier: creates/removes the data/EMERGENCY_STOP file sentinel — a
 thin wrapper, identical in effect to \`touch data/EMERGENCY_STOP\` / \`rm -f data/EMERGENCY_STOP\`.
 Checked BEFORE the kill switch every tick and wins when both are present. In the normal path
 it hard-kills every running/fixing lane's process group on that SAME tick: there is NO drain
@@ -1736,7 +1736,7 @@ Flags:
                  review) — non-interactive, no TTY prompt, agent-friendly. Restates the
                  destructive consequence above; omitting it is a hard refusal, exit 1, no
                  sentinel written.
-  --config PATH  Load config from this path instead of probing the defaults — same #710
+  --config PATH  Load config from this path instead of probing the defaults — same
                  resolution semantics as \`status --config\`. Never changes WHICH file gets
                  touched (that is always [db-path]'s directory).
   --help, -h     Print this help and exit
@@ -1828,7 +1828,7 @@ is printed instead, and the process keeps serving until you press Ctrl+C.
 Flags:
   --port PORT    Bind this port instead of the default (${DEFAULT_DASHBOARD_PORT}). Overrides
                  SAPWOOD_DASHBOARD_PORT below when both are given.
-  --config PATH  Load config from this path instead of probing the defaults — same #710
+  --config PATH  Load config from this path instead of probing the defaults — same
                  resolution semantics as \`status --config\`/\`events --config\`: authoritative
                  once given, a missing/invalid path is a hard error, never a silent fallback.
   --help, -h     Print this help and exit
@@ -2020,9 +2020,9 @@ const INIT_USAGE = `\
 usage: sapwood init
 
 Scaffold .sapwood config and verify GitHub auth: creates labels/milestones, the
-project board, the starter config + goal/doctrine/issue templates, and (per #351)
+project board, the starter config + goal/doctrine/issue templates, and
 provisions the worker's write deploy key and related gh-side resources — credentialed
-network writes, so a bare \`--help\` must never trigger them (#638).
+network writes, so a bare \`--help\` must never trigger them.
 
 init takes no options today; any flag or extra argument is rejected rather than
 silently ignored.
@@ -2511,7 +2511,7 @@ export function checkWebAccessSettingsDenial(
     );
     if (denied.length === 0) return;
     log(
-      `[sapwood:startup] operator settings (${settingsPath}) deny ${denied.join(", ")} — the #410 web-access grant to ` +
+      `[sapwood:startup] operator settings (${settingsPath}) deny ${denied.join(", ")} — the web-access grant to ` +
         "architect/po-align/po-triage will be silently stripped from these sessions (zero permission-denial signal); " +
         "a granted session should abstain, per its prompt's first-class-abstention wording, rather than guess when the tool turns out absent",
     );

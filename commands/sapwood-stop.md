@@ -12,7 +12,7 @@ state DB (`engine/src/state/state.ts`) — no config edit needed for any of them
   it hard-kills every running/fixing lane's process group on that same tick: there is no drain
   window, in-flight WIP is lost, and killed lanes escalate to `needs-human` with their evidence
   preserved. The kill itself is forge-free — a synchronous durable-PID signal that runs before any
-  forge call, so a hung or rejecting forge call can never delay or prevent it (#778). Everything
+  forge call, so a hung or rejecting forge call can never delay or prevent it. Everything
   AFTER the kill — terminal-state classification/probing, drain escalation, and the
   `needs-human` labels/comments — may still touch the forge, and is best-effort; none of it gates
   process termination anymore. Use it only for credential exposure, destructive calls, or a cost
@@ -21,7 +21,7 @@ state DB (`engine/src/state/state.ts`) — no config edit needed for any of them
   dispatch and merges; running workers are asked to hand off gracefully within
   `cfg.cost.drainWindowSec`, then the conductor escalates to a hard kill. Use this to stop
   the engine unless the emergency-stop conditions above apply.
-- **pause** (`data/PAUSE`, `pausePath`, #75) — the gentle tier. Freezes new lane dispatch
+- **pause** (`data/PAUSE`, `pausePath`) — the gentle tier. Freezes new lane dispatch
   ONLY: no new work is claimed or launched. Everything already in flight keeps going exactly
   as normal — running workers finish their work, and PRs already open keep moving through the
   review/merge gate. No drain, no freeze, nothing killed. Use this to stop taking on new
@@ -32,13 +32,13 @@ The precedence order is emergency stop, then kill switch, then pause. If both
 `data/EMERGENCY_STOP` and `data/KILL_SWITCH` are present, emergency stop wins; either strict tier
 already subsumes pause's dispatch restriction.
 
-(#731) The same three tiers are also reachable as first-class `sapwood` CLI verbs — outside a
+The same three tiers are also reachable as first-class `sapwood` CLI verbs — outside a
 Claude Code session, or for scripting/an agent supervisor: `sapwood pause` / `sapwood pause
 clear`, `sapwood stop` / `sapwood stop clear`, and `sapwood estop --confirm` / `sapwood estop
 clear` (activating `estop` refuses without `--confirm` — no TTY prompt, agent-friendly; see
 `sapwood estop --help`). This slash command still shells the raw `touch`/`rm` below rather than
 the CLI verbs — both act on the exact same three sentinel files, so either path is equally valid;
-they are not shown as commands here only because this file's flag-per-tier shape predates #731.
+this file documents the flag-per-tier shape, not the CLI-verb shape shown above.
 
 Note for `sapwood run --until-idle`: a paused engine dispatches nothing, so once its
 in-flight lanes finish it counts as idle and the run EXITS ("finish the round, then

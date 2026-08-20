@@ -875,7 +875,7 @@ function persistTriageDecision(
   } catch (e) {
     const reason = String(e);
     warn(
-      `[sapwood:po] round ${roundId}: failed to persist the triage decision for #${issue} — write is SKIPPED this pass (fail-closed, #232): ${reason}`,
+      `[sapwood:po] round ${roundId}: failed to persist the triage decision for #${issue} — write is SKIPPED this pass (fail-closed): ${reason}`,
     );
     try {
       state.appendEvent("triage-decision-lost", { round_id: roundId, issue, attempt, reason });
@@ -1093,7 +1093,7 @@ function persistPoolSelection(state: State, roundId: number, target: readonly Is
     const reason = String(e);
     warn(
       `[sapwood:pool] round ${roundId}: failed to persist the pool-selection record — label reconcile is SKIPPED ` +
-        `this pass (fail-closed, #232): ${reason}`,
+        `this pass (fail-closed): ${reason}`,
     );
     try {
       state.appendEvent("pool-selection-decision-lost", { round_id: roundId, reason });
