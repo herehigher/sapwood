@@ -681,7 +681,7 @@ terminal sentinel, threaded through `LaneProbe.costEstimated`, and lands in
 worker/fix-leg row's `estimated` is `NULL` for older/legacy lane rows or when the
 sentinel never classified the distinction (still never guessed). A
 `peripheral-role` row's `estimated` is still `NULL` always — `peripheral.ts`'s
-`runSessionWithRetry` does not yet thread this signal through — so the dogfood
+`runSessionWithRetry` does not yet thread this signal through — so the live
 estimator-bias series (opus vs. sonnet, per-leg) can be run by query for
 worker/fix-leg/engine-review lanes; peripheral-role rows still need to be wired in
 a later change.
@@ -697,13 +697,13 @@ no new engine machinery backs it, and none should: the per-lane reconciliation t
 engine already does is the authoritative number.
 
 The estimator itself (`parseAssistantUsageDeltas` + `estimateUsd`) carries synthetic unit
-coverage in-repo; validating it against a REAL captured dogfood transcript is an operator step,
+coverage in-repo; validating it against a real captured run transcript is an operator step,
 not a repo test — real transcripts are one issue's dev-time artefacts and live in the deploy's
 own `data/fixtures/estimator/`, never this repo. Run `npx tsx scripts/estimator-replay.ts <dir>`
 from `engine/` against such a directory; it prints each file's estimate/real/signed error and
 exits non-zero if any file lands outside the adjudicated [-12%, +5%] band.
 
-## UX dogfood harness: simulated-user supervision
+## UX harness: simulated-user supervision
 
 Everything above watches the **ENGINE** loop — dispatch, gates, budgets. This section is the
 second, parallel channel: a **sonnet 5 session simulating a real
@@ -757,8 +757,8 @@ control?
   above against the demo fixture / replay data (`?demo`, or a recorded round played back through
   the transport scrubber). Bounded, single-journey-set sessions.
 - **Live phase.** Once the panel attaches to a real engine run: continuous observation during the
-  flagship recorded dogfood run ([`docs/PLAN.md`](PLAN.md)'s dashboard dogfood), operator persona
-  first. Runs only during an owner-authorized dogfood run, never ad hoc.
+  project's own flagship recorded dashboard run, operator persona
+  first. Runs only during an owner-authorized live run, never ad hoc.
 
 ### Report contract
 
@@ -878,4 +878,4 @@ triage and the owner why/what gate as agent-origin, the same as any other propos
   (`.claude-plugin/skills/sapwood-event-glossary/SKILL.md`) — what every event
   kind/park source/escalation bucket means and how actionable it is.
 - [`docs/prompts/ux-simulated-user.md`](prompts/ux-simulated-user.md) — the session prompt for
-  the [UX dogfood harness](#ux-dogfood-harness-simulated-user-supervision) above.
+  the [UX harness](#ux-harness-simulated-user-supervision) above.

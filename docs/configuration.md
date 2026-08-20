@@ -89,7 +89,7 @@ Identifies the repo and ProjectV2 board the loop drives.
 ## `liveness`
 
 A host sleeping mid-round with a forge/spawn call in flight has to wake into a working
-engine, not a silently wedged one — a dogfood run once sat ~30 minutes after wake with zero
+engine, not a silently wedged one — a live run once sat ~30 minutes after wake with zero
 events because an in-flight `gh` call / role-session spawn confirmation had no bound at all.
 Every key here closes exactly that class of hang.
 
@@ -176,7 +176,7 @@ dispatch. Upgrade with `npm i -g @anthropic-ai/claude-code@latest`. See also
 and issue size — a per-leg cost, not a safety boundary. The shipped `10` is deliberately
 conservative and is *not* the right number for every profile.
 
-**Observed cost, sapwood's own dogfood runs:** with the
+**Observed cost, sapwood's own live runs:** with the
 shipped `worker.model: opus` + `effort: high` defaults, one leg of a *substantive
 implementation* issue cost roughly **$8–20**.
 At `budgetUsdSoft: 10` every substantive first leg crossed the
@@ -185,7 +185,7 @@ to a PR in one go. Nothing malfunctioned — the graceful handoff did exactly wh
 and `maxResumes` picked the work back up. The cap was simply below the cost of the work.
 
 **The live estimate runs high, not exact — denominate the cap accordingly.**
-Three consecutive supervised dogfood runs measured the live estimate that enforces `budgetUsdSoft` against
+Three consecutive supervised live runs measured the live estimate that enforces `budgetUsdSoft` against
 each leg's reconciled real `total_cost_usd` and found the estimate consistently OVER-predicts,
 by **+10% to +77% per leg**, worst on small legs (mean +23% on the smallest batch). Practical effect:
 `budgetUsdSoft` is denominated in *estimated* dollars, so a cap sized to a target *real*
@@ -1118,7 +1118,7 @@ state event), it never blocks startup or restores the capability.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `mode` | `hard` | `hard`: fail-closed deny — the actual producer≠merger/boundary-write enforcement. `soft`: observe-only — log what would be blocked, but allow it. `soft` is a first-run/dogfood affordance only, never the shipped default; it reaches the hook via a spawn env a worker cannot itself rewrite. |
+| `mode` | `hard` | `hard`: fail-closed deny — the actual producer≠merger/boundary-write enforcement. `soft`: observe-only — log what would be blocked, but allow it. `soft` is a first-run affordance only, never the shipped default; it reaches the hook via a spawn env a worker cannot itself rewrite. |
 
 ## `host`
 
