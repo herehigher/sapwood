@@ -15566,7 +15566,7 @@ test("#824 AC5: at most one PR read per parked human-merge-only lane per sweep c
 // whichever the code structure makes robust"):
 //
 //  1. An AST-based sweep (gate② round 1, Codex sol-high P2 F1+F2) of every string/template
-//     literal EMITTED by this hazard's five source files — syntax-aware, not regex-over-text: a
+//     literal EMITTED by this hazard's source files — syntax-aware, not regex-over-text: a
 //     `//`/`/*` sequence living inside a string literal can never be misread as a comment start
 //     (the false-negative a naive text stripper risks), and a code comment is exempt from the
 //     sweep BY CONSTRUCTION (it is never a StringLiteral/TemplateLiteral AST node at all — the
@@ -15586,12 +15586,13 @@ test("#824 AC5: at most one PR read per parked human-merge-only lane per sweep c
 //     future edit that accidentally drops the interpolation fails this test instead of silently
 //     passing the absence-only half of the check. ──
 
-/** The five files #1048's own map names as building strings posted to (or, for engine-agent.ts,
+/** The files #1048's own map names as building strings posted to (or, for engine-agent.ts,
  *  feeding a string posted to) the user's GitHub repo — `forge/labels.ts` is out of scope, owned
  *  by the sibling issue #1049. Listed once, as data, so the AST sweep below stays a single
  *  reusable check rather than five near-duplicate tests. */
 const DEV_REF_SWEEP_FILES = [
   "conductor.ts",
+  "init.ts",
   "reconcile.ts",
   "../review/drive.ts",
   "../review/instruction-path-escalation.ts",
@@ -15637,7 +15638,7 @@ function findHardcodedDevRefs(filePath: string): string[] {
   return hits;
 }
 
-test("#1048: no string/template literal in the five files that build (or feed) an engine-posted GitHub comment carries a hardcoded #NNN dev reference — AST-based, not regex-over-text", () => {
+test("#1048: no string/template literal in the files that build (or feed) an engine-posted GitHub comment carries a hardcoded #NNN dev reference — AST-based, not regex-over-text", () => {
   const dir = dirname(fileURLToPath(import.meta.url));
   const hits = DEV_REF_SWEEP_FILES.flatMap((relPath) => findHardcodedDevRefs(join(dir, relPath)));
   assert.deepEqual(
