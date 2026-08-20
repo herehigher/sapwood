@@ -299,8 +299,7 @@ export function buildCiInertEscalationComment(head: string, checks: readonly CiI
     `sapwood: gate① concluded on \`${head}\` without ever going green — ${named} concluded without passing, ` +
     "and nothing in the rollup is still running, so this PR can never resolve on its own. Remedy: make the " +
     "job always run and skip its STEPS (so it reports SUCCESS instead of SKIPPED), or move it to a dedicated " +
-    "push-only workflow — see docs/configuration.md's `ci` section for the pattern, and PR #769 for the " +
-    "worked example."
+    "push-only workflow — see docs/configuration.md's `ci` section for the pattern."
   );
 }
 
@@ -310,7 +309,7 @@ export function buildCiInertEscalationComment(head: string, checks: readonly CiI
  *  comment builder (`buildCiInertEscalationComment`) — never fetches or decides anything itself. */
 export function buildAdvisoryReviewComment(result: ApprovalResult): string {
   const banner =
-    "**instruction-path change: human-merge-only — ADVISORY, not consumed by the merge driver** (#292, #823)\n\n" +
+    "**instruction-path change: human-merge-only — ADVISORY, not consumed by the merge driver**\n\n" +
     "This PR edits a reviewer-instruction path, so a human reviews and merges it regardless of the " +
     "verdict below — the merge driver never reads or acts on this comment. The engine-agent review " +
     "that follows is informational labor for that human reviewer only.";
@@ -980,7 +979,7 @@ export async function driveEngineAgentReview(deps: EngineAgentDriveDeps, pr: num
   if (approvalResult.headOid !== H) {
     return {
       kind: "queued",
-      reason: `engine-agent: decisive verdict headOid (${approvalResult.headOid}) != this attempt's resolved head H (${H}) — refusing to consume (OID-binding violation, #273's lesson)`,
+      reason: `engine-agent: decisive verdict headOid (${approvalResult.headOid}) != this attempt's resolved head H (${H}) — refusing to consume (OID-binding violation)`,
     };
   }
 

@@ -311,13 +311,12 @@ test("refetchStillValid: the ci-inert reason string is also capped, with the sam
   assert.match((r as { reason: string }).reason, /\+2 more$/);
 });
 
-test("buildCiInertEscalationComment: names the remedy, cites docs/configuration.md's ci section, and cites PR #769", () => {
+test("buildCiInertEscalationComment: names the remedy and cites docs/configuration.md's ci section", () => {
   const comment = buildCiInertEscalationComment("abc123", [{ name: "lint", conclusion: "SKIPPED" }]);
   assert.match(comment, /lint \(SKIPPED\)/);
   assert.match(comment, /always run and skip its STEPS/);
   assert.match(comment, /push-only workflow/);
   assert.match(comment, /docs\/configuration\.md/);
-  assert.match(comment, /PR #769/);
   assert.match(comment, /`abc123`/);
 });
 
@@ -536,7 +535,7 @@ test("#292/#823 driveEngineAgentReview: instruction edit labels/comments, makes 
   assert.equal(evaluateCount, 1, "#823: reviewerAdapter.evaluate() is now called once (one logical advisory evaluation) on this route");
   assert.equal(diffFetches, 1);
   assert.equal(comments.length, 2, "#292's own escalation comment, plus #823's advisory-review comment");
-  assert.match(comments[0]!, /\.claude\/rules\/team\/reviewer\?\?\?\.md.*#292/);
+  assert.match(comments[0]!, /\.claude\/rules\/team\/reviewer\?\?\?\.md.*must never reach autonomous merge/);
   assert.match(comments[1]!, /ADVISORY, not consumed by the merge driver/);
   assert.match(comments[1]!, /no blocking findings/i);
   assert.equal(recorded.wal, null, "#823: the advisory evaluate() call must never write the decisive WAL/pin machinery");

@@ -462,7 +462,7 @@ test("#292 MergeDriver: instruction-path change escalates once before review, th
   // `human-merge-only`. `needs-human` is never written on this path, on the PR or the issue.
   assert.deepEqual(forge.prLabelsAdded, [[7, "sapwood:human-merge-only"]]);
   assert.equal(forge.comments.length, 1);
-  assert.match(forge.comments[0]?.[1] ?? "", /human-vetted reviewer authority.*#292/);
+  assert.match(forge.comments[0]?.[1] ?? "", /human-vetted reviewer authority.*must never reach autonomous merge/);
   assert.deepEqual(reviewer.triggered, []);
 
   const second = await driver.driveOne(7, 46, ALREADY_TRIGGERED, noopRecord);

@@ -997,10 +997,7 @@ test("#384 F12: a dead lane's still-open engine PR is detected mid-run and dispo
     assert.equal(forge.issueComments[207]?.length, 1);
     assert.match(forge.issueComments[207]![0]!.body, /<!-- sapwood:needs-human-reason:orphan-pr-escalated:207 -->/);
     assert.match(forge.issueComments[207]![0]!.body, /PR #365/);
-    assert.match(
-      forge.issueComments[207]![0]!.body,
-      /Remove `sapwood:needs-human` from this issue once resolved to retry \(#147 gated reentry\)/,
-    );
+    assert.match(forge.issueComments[207]![0]!.body, /Remove `sapwood:needs-human` from this issue once resolved to retry\./);
   } finally {
     state.close();
     rmSync(root, { recursive: true, force: true });

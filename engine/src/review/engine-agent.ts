@@ -239,7 +239,7 @@ export class EngineAgentReviewer implements ReviewerAdapter {
       return {
         kind: "unavailable",
         headOid,
-        reason: `no AC snapshot recorded for issue #${ctx.issue} — dispatch-time snapshot missing (design #279 §5, fail closed)`,
+        reason: `no AC snapshot recorded for issue #${ctx.issue} — dispatch-time snapshot missing, fail closed`,
       };
     }
 

@@ -606,7 +606,7 @@ export async function sweepMidRunOrphanPrs(
         // #655: reason visibility — the label write outcome/terminal event are unaffected by a
         // failed comment (escalateToNeedsHuman's own doc).
         `sapwood: PR #${pr} is open but this issue's lane (${w.name}) is dead (${via}) — held for a human rather than left for the ` +
-          `next requeue to duplicate the work. Remove \`${cfg.labels.needsHuman}\` from this issue once resolved to retry (#147 gated reentry).`,
+          `next requeue to duplicate the work. Remove \`${cfg.labels.needsHuman}\` from this issue once resolved to retry.`,
       );
       orphans.push({ pr, issue: w.issue, worker: w.name, via });
       claimedThisPass.add(pr);
