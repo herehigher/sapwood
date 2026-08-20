@@ -44,4 +44,5 @@ jobs:
       - run: timeout --kill-after=30s 300 npm --workspace dashboard test
       # Root scripts/*.test.ts (release-manifest lockstep, publish argv, packed-tarball
       # install/run). Builds the engine itself, hence its own step (#1030/#1032).
+      - run: claude --version || true
       - run: timeout --kill-after=30s 300 node --test scripts/*.test.ts

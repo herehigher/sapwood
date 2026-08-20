@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -34,14 +34,22 @@ import {
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
-const CLAUDE_CLI_AVAILABLE = (() => {
-  try {
-    execFileSync("claude", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
+function runClaude(args: string[], cwd = REPO_ROOT): { status: number | null; stdout: string; stderr: string; error: string } {
+  const result = spawnSync("claude", args, { cwd, encoding: "utf8" });
+  return {
+    status: result.status,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    error: result.error?.message ?? "",
+  };
+}
+
+const CLAUDE_VERSION = runClaude(["--version"]);
+const CLAUDE_CLI_AVAILABLE = CLAUDE_VERSION.status === 0;
+
+function formatClaudeResult(label: string, result: ReturnType<typeof runClaude>): string {
+  return `${label} exit: ${result.status}\n${label} stdout:\n${result.stdout}\n${label} stderr:\n${result.stderr}${result.error ? `\n${label} error: ${result.error}` : ""}`;
+}
 
 function tmpRepo(): string {
   return mkdtempSync(join(tmpdir(), "sapwood-release-test-"));
@@ -575,8 +583,16 @@ test("catalog promotion: local bare remote is idempotent and stamps the release 
 });
 
 test("catalog promotion: strict manifest-file validation rejects an unknown field", {
-  skip: CLAUDE_CLI_AVAILABLE ? false : "claude CLI is not on PATH",
-}, () => {
+  skip: CLAUDE_CLI_AVAILABLE ? false : `claude CLI is not on PATH\n${formatClaudeResult("claude --version", CLAUDE_VERSION)}`,
+}, (t) => {
+  const baseline = runClaude(["plugin", "validate", ".claude-plugin/plugin.json", "--strict"]);
+  if (baseline.status !== 0) {
+    t.skip(
+      `committed plugin manifest is not strict-valid for this Claude CLI; validator is not the contract under test\n${formatClaudeResult("claude --version", CLAUDE_VERSION)}\n${formatClaudeResult("committed manifest validator", baseline)}`,
+    );
+    return;
+  }
+
   const { repoRoot, catalogRemote } = setupCatalogPromotionRepo();
   const clone = tmpRepo();
   try {
@@ -584,24 +600,20 @@ test("catalog promotion: strict manifest-file validation rejects an unknown fiel
     assert.equal(promoted.code, 0, promoted.output);
     git(clone, ["clone", catalogRemote, "."]);
     const manifestPath = join(clone, ".claude-plugin", "plugin.json");
-    assert.doesNotThrow(() =>
-      execFileSync("claude", ["plugin", "validate", ".claude-plugin/plugin.json", "--strict"], {
-        cwd: clone,
-        encoding: "utf8",
-        stdio: "pipe",
-      }),
+    const promotedValidation = runClaude(["plugin", "validate", ".claude-plugin/plugin.json", "--strict"], clone);
+    assert.equal(
+      promotedValidation.status,
+      0,
+      `promoted plugin manifest failed strict validation\n${formatClaudeResult("claude --version", CLAUDE_VERSION)}\n${formatClaudeResult("promoted manifest validator", promotedValidation)}`,
     );
     const plugin = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
     plugin.unknownField = true;
     writeFileSync(manifestPath, `${JSON.stringify(plugin, null, 2)}\n`);
-    assert.throws(
-      () =>
-        execFileSync("claude", ["plugin", "validate", ".claude-plugin/plugin.json", "--strict"], {
-          cwd: clone,
-          encoding: "utf8",
-          stdio: "pipe",
-        }),
-      (error: unknown) => (error as { status?: unknown }).status === 1,
+    const invalidValidation = runClaude(["plugin", "validate", ".claude-plugin/plugin.json", "--strict"], clone);
+    assert.equal(
+      invalidValidation.status,
+      1,
+      `unknown field must fail strict validation\n${formatClaudeResult("claude --version", CLAUDE_VERSION)}\n${formatClaudeResult("unknown-field validator", invalidValidation)}`,
     );
   } finally {
     rmSync(clone, { recursive: true, force: true });
