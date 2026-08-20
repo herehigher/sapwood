@@ -129,7 +129,7 @@ work is worse than leaving it on disk. Instead:
   awaits salvage).
 - An issue comment is posted naming the exact worktree path:
   > "sapwood: lane `<name>` was torn down with possibly-uncommitted changes in its
-  > worktree. Automation never deletes work it can't prove is clean (#69) — the
+  > worktree. Automation never deletes work it can't prove is clean — the
   > worktree was left on disk at: `<path>`. Salvage or discard it by hand, then remove
   > the `<configured labels.needsHuman value>` label."
 
@@ -619,7 +619,7 @@ Every `sapwood run` startup reports (never places) open issues that no one has t
 project board:
 
 ```
-[sapwood:startup] 3 open issue(s) on no project board at all: #53, #512, #513 (a further 32 sit on another board — placed, not a gap)
+[sapwood:startup] 3 open issue(s) on no project board at all: #12, #34, #56 (a further 32 sit on another board — placed, not a gap)
 ```
 
 Only issues on **no project at all** are listed — those are the actionable ones, typically

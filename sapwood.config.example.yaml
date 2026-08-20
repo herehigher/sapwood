@@ -200,7 +200,7 @@ merge:
 #   needsHuman: sapwood:needs-human # default shown — ESCALATE-tier (escalation.humanLabels member)
 #   blocked: sapwood:blocked # default shown — ESCALATE-tier (escalation.humanLabels member)
 #   reserve: sapwood:reserve # default shown
-#   verifyNa: "sapwood:verify:n/a" # default shown — Decision #8: skips the verification-plan gate
+#   verifyNa: "sapwood:verify:n/a" # default shown — skips the verification-plan gate
 #   planApproved: "sapwood:plan:approved" # default shown — gate⓪'s own approval stamp
 #   originAgent: sapwood:origin:agent # default shown — provenance stamp for agent-created issues
 #   split: sapwood:split # default shown — human firing signal for a decompose pass

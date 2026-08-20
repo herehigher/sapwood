@@ -64,7 +64,7 @@ there. `/sapwood-run` and `/sapwood-status` resolve this by falling back to
 `npx sapwood@<version>` (the plugin's own version) the first time they're invoked; that
 first call downloads the package (**Node.js ≥ 24 required**), and subsequent calls reuse
 npm's local cache. A checkout that already has a local `engine/dist` build — Channel A,
-or this repo's own dogfood checkout — is used instead when present, no npx involved.
+or a contributor checkout — is used instead when present, no npx involved.
 The marketplace entry pins a released tag once the first release is cut (before that
 the entry points at `main`, and the wrapper refuses the unreleased `0.0.0` rather than
 guessing at a package that doesn't exist yet). A checkout of `main` between releases has
@@ -623,10 +623,9 @@ issue is checked against, not decoration: the architect peripheral flags an issu
 contradicts the Architecture section, the PO's own dissent channel raises the same kind of
 concern about a Ready issue, and the aligning pass derives new issues directly from the gap
 between Current milestone and what the codebase already does. Nothing downstream points back at
-a spec section as its own proof of done, though — a decomposed parent's acceptance plan (see "PO
-decomposition and issue granularity" in [`PLAN.md`](PLAN.md)) names an executable CI check on
-`main`, never "matches the Architecture section" or similar: the goal file is what work is
-checked against, never what a passing check cites as its evidence.
+a spec section as its own proof of done, though — a decomposed parent's acceptance plan names an
+executable CI check on `main`, never "matches the Architecture section" or similar: the goal file
+is what work is checked against, never what a passing check cites as its evidence.
 
 ### The `Origin:` line on agent-filed issues
 

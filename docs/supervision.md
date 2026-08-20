@@ -410,7 +410,7 @@ Before ending a supervision session:
    before the next viewing (`npm run build -w dashboard`) and restart the running
    `sapwood dashboard` process (stop it, then re-run `sapwood dashboard`) rather than
    leaving the old one up. An in-place rebuild alone already reaches the build-identity
-   chip (#894) — the server rereads its dist statics per request and its build-meta
+   chip — the server rereads its dist statics per request and its build-meta
    sidecar per poll, so it never needs a restart just to notice a fresher `dist/`.
    Restart anyway: it's the only way to run this session's own server-code changes
    (`server.ts`/`start.ts` — Node doesn't hot-reload a running process) and to cover a
@@ -530,7 +530,7 @@ repeatedly (worth reading the surrounding `investigate`/`intervene` events for w
 actually wrong upstream). This is a supervisor-side read, not an engine threshold — no
 kind is reclassified by count; you are just choosing where to look next.
 
-**`permission-mode-mismatch` (#1010).** A lane/session's own init line reported an
+**`permission-mode-mismatch`.** A lane/session's own init line reported an
 effective host permission mode different from the one the engine requested (today:
 always `auto`) — Claude Code silently falling back to a different mode (e.g. Manual,
 when auto is unavailable) can leave a headless leg under-delivering with no other
@@ -548,7 +548,7 @@ as an escalation.
 attempt, not just a transient one. There is deliberately no consecutive-failure escalation
 cap: distinguishing "permanently broken" from "rate-limited/network-blip" by a bare retry
 count would either escalate a healthy lane on a bad day or need a second knob to avoid
-that, and no dogfood evidence of an actual silent wedge has shown up to justify the
+that, and no evidence of an actual silent wedge has shown up to justify the
 complexity (marginal-complexity doctrine — see `REVIEW-DOCTRINE.md`'s adjudication
 principles). The containment is honest visibility —
 one `drive-queued` event per reason change (never per-tick spam) plus this
@@ -607,7 +607,7 @@ gh pr list    --repo OWNER/REPO --label "sapwood:blocked" --state open
 # hold:
 gh pr list    --repo OWNER/REPO --label "sapwood:hold" --state open
 
-# split (awaiting po-decompose): human-applied, or engine-applied at the resume cap (#965) —
+# split (awaiting po-decompose): human-applied, or engine-applied at the resume cap —
 # either origin, po-decompose picks it up next round with no other change:
 gh issue list --repo OWNER/REPO --label "sapwood:split" --state open
 ```
@@ -696,7 +696,7 @@ does not replay exact next-tick occupancy). This is pure supervisor-side bookkee
 no new engine machinery backs it, and none should: the per-lane reconciliation the
 engine already does is the authoritative number.
 
-The estimator itself (`parseAssistantUsageDeltas` + `estimateUsd`, #935) carries synthetic unit
+The estimator itself (`parseAssistantUsageDeltas` + `estimateUsd`) carries synthetic unit
 coverage in-repo; validating it against a REAL captured dogfood transcript is an operator step,
 not a repo test — real transcripts are one issue's dev-time artefacts and live in the deploy's
 own `data/fixtures/estimator/`, never this repo. Run `npx tsx scripts/estimator-replay.ts <dir>`
@@ -706,8 +706,8 @@ exits non-zero if any file lands outside the adjudicated [-12%, +5%] band.
 ## UX dogfood harness: simulated-user supervision
 
 Everything above watches the **ENGINE** loop — dispatch, gates, budgets. This section is the
-second, parallel channel (#700, owner design 2026-08-06): a **sonnet 5 session simulating a real
-user watches the FRONTEND** (the dashboard, #146/#144/#145) — walking the panel the way a person
+second, parallel channel: a **sonnet 5 session simulating a real
+user watches the FRONTEND** (the dashboard and its content modules) — walking the panel the way a person
 would and reporting what the experience is actually like. It separates "is the panel's code
 correct" (gate②'s job, ordinary review) from "is the panel usable" (nobody's job otherwise), and
 reuses this doc's own separation discipline: the simulated user observes and reports **one-way**;
@@ -715,13 +715,13 @@ it never produces, approves, merges, or files.
 
 ### Activation threshold
 
-Capability-gated, not milestone-gated (owner ruling 2026-08-07): the replay phase below activates
-once [`sapwood dashboard`](#146) AND at least one content module ([hero](#144) or
-[lane board](#145)) are merged to `main`, **and** the dev server renders the seeded demo fixture
+Capability-gated, not milestone-gated: the replay phase below activates
+once `sapwood dashboard` AND at least one content module (hero or
+lane board) are merged to `main`, **and** the dev server renders the seeded demo fixture
 end-to-end (panel paints; not a blank shell). No calendar gate, no dedicated hardening milestone —
 the first walk is scheduled by the PM immediately after the second of those two PRs merges,
 PO-supervised. Met as of this writing: `sapwood dashboard` (the launcher), `Hero`, `LaneBoard`,
-and the `?demo` fixture (`dashboard/src/demo/source.ts`, round 5001) all ship on `main`.
+and the `?demo` fixture (`dashboard/src/demo/source.ts`) all ship on `main`.
 
 ### Personas and journey scripts
 
