@@ -80,8 +80,8 @@ import {
   buildRenderPrompt,
   type ClaudeVersionProbeResult,
   discoverClaudeBin,
+  mkProbeLlmReachable,
   probeClaudeVersion,
-  probeLlmPing,
   WorkerSupervisor,
 } from "./roles/worker.js";
 // #642: event-kinds registry validation for `events --kind`/`--exclude-kind` arguments (the
@@ -2960,19 +2960,10 @@ async function runTickEngine(
     // maxWallClockSec / KILL_SWITCH) is fully live regardless — that's the actual hard safety
     // boundary; roundBudgetUsd is a softer per-round throttle.
     // #168 (P1-1 amendment): the real LLM-source park probe — a minimal inference ping on the
-    // cheapest model (worker.ts's probeLlmPing), resolved against the SAME claude binary
-    // WorkerSupervisor's dispatch() would use. The rich {ok, detail} result flows into the
-    // park-probe event so a failing probe names its own cause.
-    const probeLlmReachable = () =>
-      probeLlmPing(
-        discoverClaudeBin(process.env),
-        cfg.envFailure.probeModel,
-        cfg.envFailure.probeMaxBudgetUsd,
-        cfg.envFailure.probeTimeoutSec,
-        // #1011: the ping is a claude session the engine spawns same as any other — it requests
-        // the CONFIGURED host.permissionMode too, never a hardcoded mode.
-        cfg.host.permissionMode,
-      );
+    // cheapest model (worker.ts's probeLlmPing via mkProbeLlmReachable), resolved against the
+    // SAME claude binary WorkerSupervisor's dispatch() would use. The rich {ok, detail} result
+    // flows into the park-probe event so a failing probe names its own cause.
+    const probeLlmReachable = mkProbeLlmReachable(cfg, discoverClaudeBin(process.env));
     const result = await runDriver({
       forge,
       state,
@@ -3212,16 +3203,7 @@ async function runRoundsEngine(
     });
     log(`[sapwood:run] driver=rounds tickIntervalSec=${cfg.engine.tickIntervalSec}`);
     // #168 (P1-1 amendment): same real LLM-source ping probe as the tick driver above.
-    const probeLlmReachable = () =>
-      probeLlmPing(
-        discoverClaudeBin(process.env),
-        cfg.envFailure.probeModel,
-        cfg.envFailure.probeMaxBudgetUsd,
-        cfg.envFailure.probeTimeoutSec,
-        // #1011: the ping is a claude session the engine spawns same as any other — it requests
-        // the CONFIGURED host.permissionMode too, never a hardcoded mode.
-        cfg.host.permissionMode,
-      );
+    const probeLlmReachable = mkProbeLlmReachable(cfg, discoverClaudeBin(process.env));
     const result = await runRounds({
       forge,
       state,

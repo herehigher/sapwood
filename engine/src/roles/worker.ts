@@ -1128,6 +1128,25 @@ export function probeLlmPing(
   });
 }
 
+/** #1011: cli.ts's TWO production driver call sites (tick + rounds) each need a
+ *  `TickDeps.probeLlmReachable`-shaped closure over the SAME five config values — a
+ *  per-call-site argument list is exactly the kind of duplication a later edit (e.g. this
+ *  helper's own permissionMode fix) can update at one site and silently miss the other. One
+ *  shared builder makes both call sites identical one-liners instead. `claudeBin` stays a
+ *  caller-supplied param (not read from `process.env` here) so this function stays pure and
+ *  testable without env mutation — cli.ts resolves it once via `discoverClaudeBin` and passes
+ *  it in. */
+export function mkProbeLlmReachable(cfg: SapwoodConfig, claudeBin: string): () => Promise<LlmPingResult> {
+  return () =>
+    probeLlmPing(
+      claudeBin,
+      cfg.envFailure.probeModel,
+      cfg.envFailure.probeMaxBudgetUsd,
+      cfg.envFailure.probeTimeoutSec,
+      cfg.host.permissionMode,
+    );
+}
+
 // ── #799: the version probe — claude-version-startup-check.ts's own detector logic lives in
 // loop/, but the ACTUAL spawn lives HERE, next to probeLlmPing, on purpose: this file's own
 // `#69 grep-invariant` test (below, "the ONLY child_process importers are worker.ts...") is a

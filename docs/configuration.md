@@ -1181,7 +1181,8 @@ validate` catches all three).
   dispatch):
 
   ```
-  claude -p --model <probeModel> --no-session-persistence \
+  claude -p --model <probeModel> --permission-mode <host.permissionMode> \
+    --no-session-persistence \
     --system-prompt "You are a heartbeat responder. Only output the requested word." \
     --strict-mcp-config --tools "" \
     --max-budget-usd <probeMaxBudgetUsd> --output-format text \

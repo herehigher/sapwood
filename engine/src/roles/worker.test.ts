@@ -51,6 +51,7 @@ import {
   MAX_EGRESS_SUSPECTS_PER_LEG,
   MAX_INCONCLUSIVE_PR_PROBES,
   MIN_CLAUDE_CLI_VERSION,
+  mkProbeLlmReachable,
   parseAssistantUsageDeltas,
   parseCostUsd,
   parseCostUsdOrNull,
@@ -1697,6 +1698,32 @@ test("probeLlmPing (#1011): a configured non-'auto' host.permissionMode reaches 
   }
 });
 
+// #1011: mkProbeLlmReachable is the SAME closure cli.ts's two production driver call sites
+// (tick + rounds) build — testing it directly, rather than only probeLlmPing's own lower-level
+// argv, is what actually catches a call site regressing to a hardcoded mode: both cli.ts call
+// sites are one-line calls into this shared builder, so this is the one place that config-to-argv
+// wiring can drift.
+test("mkProbeLlmReachable (#1011): the closure it returns spawns the ping with the CONFIGURED host.permissionMode, not REQUESTED_PERMISSION_MODE", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  const argsFile = join(dir, "args.txt");
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\0' "$@" > "${argsFile}"\necho pong\nexit 0\n`);
+    const scfg = ConfigSchema.parse({
+      board: { owner: "o", repo: "r", projectNumber: 4 },
+      host: { permissionMode: "dontAsk" },
+    });
+    const probe = mkProbeLlmReachable(scfg, bin);
+    assert.deepEqual(await probe(), { ok: true });
+    const argv = readFileSync(argsFile, "utf8").split("\0").slice(0, -1);
+    const modeIdx = argv.indexOf("--permission-mode");
+    assert.ok(modeIdx >= 0);
+    assert.equal(argv[modeIdx + 1], "dontAsk");
+    assert.notEqual(argv[modeIdx + 1], REQUESTED_PERMISSION_MODE);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("#799 gate② P1 #4 (round 2): ENGINE_CLAUDE_LONG_FLAGS covers the version-probe argv too — includes '--version', the flag round 1's derivation omitted (sol-high reproduction: a real fresh+resume+ping+version union is 24 flags, not 23)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-version-probe-argv-"));
   try {
@@ -1948,12 +1975,10 @@ test("#1010 wiring: an init line reporting the SAME (requested) permission mode 
   }
 });
 
-// #1011 (mutation-unkillable otherwise, Codex sol review of PR #1017): every test above runs
-// with the DEFAULT `auto` config, where the configured value happens to equal
-// REQUESTED_PERMISSION_MODE — so a regression reverting recordPermissionModeMismatch's
-// comparison back to the bare constant would still pass every test above. These two pin a
-// NON-`auto` configured mode, proving the comparison reads `cfg.host.permissionMode`, not the
-// constant.
+// #1011: every test above runs with the DEFAULT `auto` config, where the configured value
+// happens to equal REQUESTED_PERMISSION_MODE — a comparison reverted to the bare constant would
+// still pass every test above. These two pin a NON-`auto` configured mode, proving
+// recordPermissionModeMismatch reads `cfg.host.permissionMode`, not the constant.
 test("#1010/#1011 wiring: configured host.permissionMode 'dontAsk' with a MATCHING effective mode emits no event", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let state: State | undefined;

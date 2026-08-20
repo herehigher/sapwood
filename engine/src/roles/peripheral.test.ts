@@ -1192,11 +1192,10 @@ test("#1010 AC3: a peripheral session's init line reporting a DIFFERENT effectiv
   }
 });
 
-// #1011 (mutation-unkillable otherwise, Codex sol review of PR #1017): the AC3 test above runs
-// with the DEFAULT `auto` config, where the configured value happens to equal
-// REQUESTED_PERMISSION_MODE — so a regression reverting recordPermissionModeMismatch's
-// comparison back to the bare constant would still pass it. This pins a NON-`auto` configured
-// mode, proving the comparison reads `cfg.host.permissionMode`, not the constant.
+// #1011: the AC3 test above runs with the DEFAULT `auto` config, where the configured value
+// happens to equal REQUESTED_PERMISSION_MODE — a comparison reverted to the bare constant would
+// still pass it. This pins a NON-`auto` configured mode, proving recordPermissionModeMismatch
+// reads `cfg.host.permissionMode`, not the constant.
 test("#1010/#1011 AC3: configured host.permissionMode 'dontAsk' — a MATCHING effective mode emits no event, a DIFFERENT one emits one whose requested field is the CONFIGURED mode", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
   try {
