@@ -68,7 +68,10 @@ export function parseSemver(version: string): ParsedSemver {
   const m = SEMVER_RE.exec(version);
   if (!m) throw new Error(`"${version}" is not a valid SemVer 2.0.0 version`);
   const [, major, minor, patch, prerelease] = m;
-  return { major, minor, patch, prerelease: prerelease ? prerelease.split(".") : [] };
+  // major/minor/patch are required (non-optional) capture groups in SEMVER_RE, so a
+  // successful match always populates them — the `!`s tell noUncheckedIndexedAccess
+  // what the regex grammar already guarantees.
+  return { major: major!, minor: minor!, patch: patch!, prerelease: prerelease ? prerelease.split(".") : [] };
 }
 
 // SemVer 2.0.0 §11 precedence: numeric identifiers compare numerically, alphanumeric
@@ -110,7 +113,8 @@ export function compareSemver(a: string, b: string): number {
   if (pb.prerelease.length === 0) return -1;
   const len = Math.min(pa.prerelease.length, pb.prerelease.length);
   for (let i = 0; i < len; i++) {
-    const c = compareIdentifier(pa.prerelease[i], pb.prerelease[i]);
+    // i < len <= both arrays' lengths, so both indices are always in bounds.
+    const c = compareIdentifier(pa.prerelease[i]!, pb.prerelease[i]!);
     if (c !== 0) return c;
   }
   return pa.prerelease.length - pb.prerelease.length;
@@ -122,7 +126,7 @@ export function readManifestVersion(path: string): string {
   const text = readFileSync(path, "utf8");
   const m = text.match(/"version"\s*:\s*"([^"]*)"/);
   if (!m) throw new Error(`no "version" field found in ${path}`);
-  return m[1];
+  return m[1]!; // the capture group always matches once `m` is non-null
 }
 
 // Edits the `"version"` line's value in place instead of JSON.parse + stringify, so a
@@ -216,6 +220,7 @@ export type LockstepResult = { ok: true; version: string } | { ok: false; messag
 export function checkManifestLockstep(paths: string[]): LockstepResult {
   const versions = paths.map((path) => ({ path, version: readManifestVersion(path) }));
   const first = versions[0];
+  if (!first) return { ok: false, message: "no manifest paths given" };
   const mismatched = versions.filter((v) => v.version !== first.version);
   if (mismatched.length > 0) {
     return { ok: false, message: `manifest versions disagree: ${versions.map((v) => `${v.path}=${v.version}`).join(", ")}` };
