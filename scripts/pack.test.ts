@@ -55,6 +55,31 @@ const EXPECTED_BUNDLED_NOTICES = [
   ["use-sidecar", "Copyright (c) 2017 Anton Korzunov"],
 ] as const;
 
+const REQUIRED_FONT_NOTICE_TEXT = ["JetBrains Mono Variable", "Fraunces", "SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007"] as const;
+
+function assertRequiredNoticeContent(notices: string): void {
+  for (const [packageName, copyright] of EXPECTED_BUNDLED_NOTICES) {
+    assert.ok(notices.includes(`## ${packageName}@`), `notice omits bundled ${packageName}`);
+    assert.ok(notices.includes(copyright), `notice omits ${packageName}'s copyright holder`);
+  }
+  for (const requiredFontText of REQUIRED_FONT_NOTICE_TEXT) {
+    assert.ok(notices.includes(requiredFontText), `notice omits required font attribution: ${requiredFontText}`);
+  }
+}
+
+test("literal notice inventory kills react and Fraunces omissions", () => {
+  const complete = [
+    ...EXPECTED_BUNDLED_NOTICES.flatMap(([packageName, copyright]) => [`## ${packageName}@`, copyright]),
+    ...REQUIRED_FONT_NOTICE_TEXT,
+  ].join("\n");
+  assert.doesNotThrow(() => assertRequiredNoticeContent(complete));
+  assert.throws(() => assertRequiredNoticeContent(complete.replace("## react@", "## removed-react@")), /notice omits bundled react/);
+  assert.throws(
+    () => assertRequiredNoticeContent(complete.replace("Fraunces", "removed-font")),
+    /notice omits required font attribution: Fraunces/,
+  );
+});
+
 async function assertCleanWorkspaceDashboardLaunch(checkoutDir: string): Promise<void> {
   const cwd = mkdtempSync(join(tmpdir(), "sapwood-clean-dashboard-cwd-"));
   const dbPath = join(cwd, "data", "sapwood.sqlite");
@@ -165,13 +190,7 @@ test("packed engine tarball is fresh, map-free, and runnable from a clean checko
     // This independent literal inventory must be updated deliberately when Vite/esbuild's graph
     // changes. Reading the generator's own dependency discovery here would make a deleted package
     // notice look correct by deleting its expectation too.
-    for (const [packageName, copyright] of EXPECTED_BUNDLED_NOTICES) {
-      assert.ok(notices.includes(`## ${packageName}@`), `notice omits bundled ${packageName}`);
-      assert.ok(notices.includes(copyright), `notice omits ${packageName}'s copyright holder`);
-    }
-    for (const requiredFontText of ["JetBrains Mono Variable", "Fraunces", "SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007"]) {
-      assert.ok(notices.includes(requiredFontText), `notice omits required font attribution: ${requiredFontText}`);
-    }
+    assertRequiredNoticeContent(notices);
     assert.equal(
       [...packedFiles].some((path) => path.endsWith(".map")),
       false,
