@@ -22,8 +22,7 @@ engine CLI:
   `bin/sapwood-plugin.sh <verb> $ARGUMENTS`: it runs a local `engine/dist/cli.js` when
   one exists (a contributor/dogfood checkout or a built Channel A clone), and otherwise
   falls back to `npx sapwood@<version>` pinned to the plugin's own version — a
-  marketplace install only runs `npm ci --ignore-scripts` at the plugin root, so
-  `engine/dist` is never built there. The working directory stays the *target* repo in
+  marketplace install has no local engine build. The working directory stays the *target* repo in
   both branches, so `sapwood.config.yaml` and `data/` resolve where the operator runs
   the command. Their `allowed-tools` is `Bash(sh:*)`, not a narrower pin on the wrapper's
   own path: permission-rule matching is a literal-text prefix match against the command

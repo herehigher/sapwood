@@ -4,10 +4,9 @@
 #   1. A local build exists ($CLAUDE_PLUGIN_ROOT/engine/dist/cli.js) — a contributor/dogfood
 #      checkout or a Channel A clone with `npm --workspace engine run build` already run. Use it
 #      directly: no network, no version drift from whatever's on disk.
-#   2. No local build — the plugin was installed from the marketplace, which only ever runs
-#      `npm ci --ignore-scripts` at the plugin root, so `engine/dist` never gets built. Fall back
-#      to the published npm package pinned to this exact plugin's own version, so the commands
-#      invoked never silently drift from what `/plugin install` fetched.
+#   2. No local build — the plugin was installed from the marketplace. Fall back to the published
+#      npm package pinned to this exact plugin's own version, so the commands invoked never
+#      silently drift from what `/plugin install` fetched.
 # cwd is deliberately left untouched in both branches: the target repo's sapwood.config.yaml and
 # data/ must resolve from wherever the operator ran the slash command, not from this script's
 # location.
