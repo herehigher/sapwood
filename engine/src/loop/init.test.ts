@@ -151,8 +151,6 @@ test("requiredLabels: two holdLabels entries that normalize to the SAME name ded
 // #1049: the actual shipped label list (`requiredLabels`, not just `TAXONOMY_SPECS`) is what
 // `sapwood init` writes to a user's repo as real GitHub label descriptions — this is the
 // full-coverage counterpart to labels.test.ts's own #1049 guard, which only sees `TAXONOMY_SPECS`.
-// A single-digit reference like `PLAN Decision #8` is a stable cross-reference into this repo's
-// own shipped docs, not an ephemeral sapwood-dev issue number, so it stays outside this pattern.
 test("#1049: no sapwood-dev #NNN reference in any requiredLabels() description, and every description fits GitHub's 100-char limit", () => {
   const devRef = /#\d{2,4}\b/;
   for (const spec of requiredLabels(cfg)) {

@@ -334,7 +334,7 @@ export const LABEL_SEMANTICS = {
       "RE-CONFIRMED (a lightweight freshness pass), never re-applied, at every round-pool entry.",
     gates:
       "Required — together with a genuine verification-plan section and a non-malformed acceptance-criteria checklist — " +
-      "for `getReadyIssues` to dispatch a non-`verifyNa` issue (gate⓪ / PLAN Decision #8's dispatch key).",
+      "for `getReadyIssues` to dispatch a non-`verifyNa` issue — deliberately, by design: gate⓪'s dispatch key.",
   },
   originAgent: {
     writer: "The PO/align orchestrator, applied to agent-created issues at creation time.",
@@ -617,7 +617,7 @@ export function renderLabelsSkillBody(cfg: ResolvedLabelsForSkill): string {
       "approximation — and they take PRECEDENCE over the prose above whenever the two would ever " +
       "disagree. **Merge veto** is `escalation.humanLabels` membership alone. **Dispatch hold** " +
       "is the WIDER composed exclusion set gate⓪ and dispatch actually apply: `needsHuman` / " +
-      "`blocked` / `reserve` / `decomposed` / `split` (#874) hold dispatch UNCONDITIONALLY, in " +
+      "`blocked` / `reserve` / `decomposed` / `split` hold dispatch UNCONDITIONALLY, in " +
       "every config, regardless of `escalation.humanLabels` membership; every other row holds " +
       "dispatch only if it is an EXACT member of the resolved `escalation.humanLabels` list.",
     "",

@@ -313,23 +313,31 @@ test("#658 round 2 (A): a taxonomy label added to escalation.humanLabels renders
 //
 // `TAXONOMY_SPECS`' descriptions ship verbatim as real GitHub label descriptions (via
 // `createMissingLabels`/`describeLabelDrift`), and `LABEL_SEMANTICS`' writer/remover/gates/
-// distinguishFrom prose is rendered into the `sapwood-labels` skill every role session reads —
-// neither is a place for an ephemeral sapwood-dev issue number (`#874`, `#94`, ...): a user
+// distinguishFrom prose — PLUS the surrounding header/preamble text `renderLabelsSkillBody`
+// builds around it — is rendered into the `sapwood-labels` skill every role session reads.
+// Neither is a place for an ephemeral sapwood-dev issue number (`#874`, `#94`, ...): a user
 // reading their repo's label list, or a role session reading the skill, has no way to resolve
-// one. A single-digit reference like `PLAN Decision #8` is a stable cross-reference into this
-// repo's own shipped docs, not an ephemeral issue number, so it is deliberately outside this
-// guard's `#\d{2,4}` pattern.
-test("#1049: no sapwood-dev #NNN reference in TAXONOMY_SPECS descriptions or LABEL_SEMANTICS prose", () => {
-  const devRef = /#\d{2,4}\b/;
+// one. A per-field check over `LABEL_SEMANTICS` alone would miss a ref planted in the header
+// preamble (a live example: `renderLabelsSkillBody`'s "unconditional exclusion set" paragraph
+// once carried a bare `(#874)`) — so the load-bearing assertion below scans the FULL rendered
+// skill body, not just the registry's own fields.
+const DEV_REF = /#\d{2,4}\b/;
+
+test("#1049: the FULL rendered sapwood-labels skill body carries no sapwood-dev #NNN reference", () => {
+  const body = renderLabelsSkillBody(resolvedLabelsForSkill("sapwood:"));
+  assert.doesNotMatch(body, DEV_REF, "renderLabelsSkillBody output carries a dev reference");
+});
+
+test("#1049: no sapwood-dev #NNN reference in TAXONOMY_SPECS descriptions or LABEL_SEMANTICS prose (per-field, for a precise failure message)", () => {
   for (const spec of TAXONOMY_SPECS) {
-    assert.doesNotMatch(spec.description, devRef, `TAXONOMY_SPECS["${spec.name}"].description carries a dev reference`);
+    assert.doesNotMatch(spec.description, DEV_REF, `TAXONOMY_SPECS["${spec.name}"].description carries a dev reference`);
   }
   for (const [key, entry] of Object.entries(LABEL_SEMANTICS)) {
-    assert.doesNotMatch(entry.writer, devRef, `LABEL_SEMANTICS["${key}"].writer carries a dev reference`);
-    assert.doesNotMatch(entry.remover, devRef, `LABEL_SEMANTICS["${key}"].remover carries a dev reference`);
-    assert.doesNotMatch(entry.gates, devRef, `LABEL_SEMANTICS["${key}"].gates carries a dev reference`);
+    assert.doesNotMatch(entry.writer, DEV_REF, `LABEL_SEMANTICS["${key}"].writer carries a dev reference`);
+    assert.doesNotMatch(entry.remover, DEV_REF, `LABEL_SEMANTICS["${key}"].remover carries a dev reference`);
+    assert.doesNotMatch(entry.gates, DEV_REF, `LABEL_SEMANTICS["${key}"].gates carries a dev reference`);
     if ("distinguishFrom" in entry && entry.distinguishFrom) {
-      assert.doesNotMatch(entry.distinguishFrom, devRef, `LABEL_SEMANTICS["${key}"].distinguishFrom carries a dev reference`);
+      assert.doesNotMatch(entry.distinguishFrom, DEV_REF, `LABEL_SEMANTICS["${key}"].distinguishFrom carries a dev reference`);
     }
   }
 });
