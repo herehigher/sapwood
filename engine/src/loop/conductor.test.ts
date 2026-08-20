@@ -15589,7 +15589,7 @@ test("#824 AC5: at most one PR read per parked human-merge-only lane per sweep c
 /** The files #1048's own map names as building strings posted to (or, for engine-agent.ts,
  *  feeding a string posted to) the user's GitHub repo — `forge/labels.ts` is out of scope, owned
  *  by the sibling issue #1049. Listed once, as data, so the AST sweep below stays a single
- *  reusable check rather than five near-duplicate tests. */
+ *  reusable check rather than a pile of per-file near-duplicate tests. */
 const DEV_REF_SWEEP_FILES = [
   "conductor.ts",
   "init.ts",
