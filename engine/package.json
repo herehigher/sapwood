@@ -6,14 +6,13 @@
   "engines": { "node": ">=24.0.0" },
   "main": "dist/index.js",
   "bin": { "sapwood": "dist/cli.js" },
-  "files": ["dist", "prompts", "pricing.yaml", "sapwood.config.example.yaml"],
+  "files": ["dist", "!dist/**/*.map", "prompts", "pricing.yaml", "sapwood.config.example.yaml"],
   "scripts": {
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "lint": "biome ci src",
     "build": "tsc",
     "test": "sh scripts/run-tests.sh",
-    "prepublishOnly": "npm run build",
-    "prepack": "node -e \"require('node:fs').copyFileSync('../sapwood.config.example.yaml','sapwood.config.example.yaml')\"",
+    "prepack": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && npm run build && node ../scripts/release.ts stamp && node -e \"require('node:fs').copyFileSync('../sapwood.config.example.yaml','sapwood.config.example.yaml')\"",
     "postpack": "node -e \"require('node:fs').rmSync('sapwood.config.example.yaml',{force:true})\""
   },
   "repository": { "type": "git", "url": "git+https://github.com/herehigher/sapwood.git" },

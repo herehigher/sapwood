@@ -709,12 +709,21 @@ test("npmDistTag: a non-alphabetic first pre-release identifier falls back to ne
 test("runPublish --dry-run: prints --prerelease for an alpha version, runs nothing", () => {
   const dir = setupPublishRepo("0.3.0-alpha.1", "## [Unreleased]\n\n## [0.3.0-alpha.1] - 2026-08-19\n\n### Added\n- x\n");
   try {
-    const deps: Deps = { repoRoot: dir, exec: fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }) };
+    const { exec, calls } = withRecorder(fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }));
+    const deps: Deps = { repoRoot: dir, exec };
     const r = runPublish(deps, { dryRun: true });
     assert.equal(r.code, 0);
     assert.match(r.output, /--dry-run/);
     assert.match(r.output, /--prerelease/);
     assert.match(r.output, /npm publish --workspace engine --tag alpha/);
+    assert.deepEqual(calls, [
+      { file: "git", args: ["fetch", "origin", "main"] },
+      { file: "git", args: ["rev-parse", "HEAD"] },
+      { file: "git", args: ["rev-parse", "origin/main"] },
+      { file: "git", args: ["status", "--porcelain"] },
+      { file: "git", args: ["tag", "-l", "v0.3.0-alpha.1"] },
+      { file: "git", args: ["ls-remote", "--exit-code", "--tags", "origin", "refs/tags/v0.3.0-alpha.1"] },
+    ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

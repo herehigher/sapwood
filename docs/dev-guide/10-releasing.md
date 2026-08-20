@@ -98,11 +98,10 @@ a bare `npm install sapwood` (no version) and `npx sapwood@latest` resolve, so a
 pre-release landing there would silently become the default install for everyone.
 
 **npm publish token: lives on the publishing human's machine.** `npm publish`
-authenticates via `npm login` run once, locally, by whoever executes `publish` —
-there is no `NPM_TOKEN` CI secret and no automated npm-publish workflow today
-(the loop cannot publish either way: guard denies `gh release` and a direct push
-to the default branch from any session it governs, and the npm step only runs as
-part of this same human-triggered `publish` command).
+authenticates via `npm login` run once, locally, by whoever executes `publish`.
+There is no `NPM_TOKEN` CI secret or automated npm-publish workflow today. An
+`NPM_TOKEN` workflow remains an open, human-merge-only owner decision; this
+release path stays human-triggered unless the owner makes and merges that change.
 
 **Pre-releases always pass `--prerelease`.** `gh release create` does not infer
 pre-release status from a `-` in the tag name, so `publish` passes `--prerelease`
