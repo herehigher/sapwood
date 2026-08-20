@@ -73,7 +73,8 @@ ever pushed.
 catalog repository. After npm publish and the dashboard canary, `publish` exact-matches
 `npm view sapwood@<version> version` before it writes the catalog. The promotion copies
 only `.claude-plugin/`, `commands/`, and `bin/` from the release commit, stamps its
-manifest with the version and source commit, and pushes the catalog. Its catalog CI
+manifest with the version, records the source commit in the catalog promotion commit
+message, and pushes the catalog. Its catalog CI
 rejects files outside that shell and validates the two manifest versions.
 
 **Package name: bare `sapwood`, not `@sapwood/engine`.** The `engine` workspace

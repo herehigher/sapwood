@@ -387,15 +387,12 @@ function releaseCommitFor(deps: Deps, version: string): string {
   return commit;
 }
 
-function writeCatalogManifests(catalogRoot: string, version: string, sourceCommit: string): void {
+function writeCatalogManifests(catalogRoot: string, version: string): void {
   const pluginPath = join(catalogRoot, ".claude-plugin", "plugin.json");
   const plugin = JSON.parse(readFileSync(pluginPath, "utf8")) as Record<string, unknown>;
   plugin.version = version;
-  const metadata =
-    typeof plugin.metadata === "object" && plugin.metadata !== null && !Array.isArray(plugin.metadata) ? plugin.metadata : {};
-  (metadata as Record<string, unknown>).sourceCommit = sourceCommit;
-  plugin.metadata = metadata;
   delete plugin.sourceCommit;
+  delete plugin.metadata;
   writeFileSync(pluginPath, `${JSON.stringify(plugin, null, 2)}\n`);
 
   const marketplacePath = join(catalogRoot, ".claude-plugin", "marketplace.json");
@@ -499,9 +496,9 @@ function catalogPromotionPlan(
       },
     },
     {
-      describe: `stamp ${join(catalogRoot, ".claude-plugin", "plugin.json")} (version ${version}, metadata.sourceCommit) and marketplace.json (version ${version}, source ./)`,
+      describe: `stamp ${join(catalogRoot, ".claude-plugin", "plugin.json")} (version ${version}) and marketplace.json (version ${version}, source ./)`,
       run: () => {
-        writeCatalogManifests(catalogRoot, version, requireReleaseCommit());
+        writeCatalogManifests(catalogRoot, version);
       },
     },
     {
@@ -524,9 +521,14 @@ function catalogPromotionPlan(
       },
     },
     {
-      describe: `git ${CATALOG_COMMIT_CONFIG.join(" ")} commit -m "chore: promote sapwood v${version}" (cwd: ${catalogRoot}; if changed)`,
+      describe: `git ${CATALOG_COMMIT_CONFIG.join(" ")} commit -m "chore: promote sapwood v${version} from <source-commit-sha>" (cwd: ${catalogRoot}; if changed)`,
       run: (deps) => {
-        if (catalogChanged) deps.exec("git", [...CATALOG_COMMIT_CONFIG, "commit", "-m", `chore: promote sapwood v${version}`], catalogRoot);
+        if (catalogChanged)
+          deps.exec(
+            "git",
+            [...CATALOG_COMMIT_CONFIG, "commit", "-m", `chore: promote sapwood v${version} from ${requireReleaseCommit()}`],
+            catalogRoot,
+          );
       },
     },
     {

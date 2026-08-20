@@ -571,13 +571,17 @@ test("catalog promotion: local bare remote is idempotent and stamps the release 
     const plugin = JSON.parse(readFileSync(join(clone, ".claude-plugin", "plugin.json"), "utf8")) as {
       version: string;
       sourceCommit?: string;
-      metadata?: { sourceCommit?: string };
+      metadata?: unknown;
     };
     assert.equal(plugin.version, "0.3.0");
-    assert.equal(plugin.metadata?.sourceCommit, git(repoRoot, ["rev-list", "-n", "1", "v0.3.0"]).trim());
     assert.equal(plugin.sourceCommit, undefined);
+    assert.equal(plugin.metadata, undefined);
     assert.deepEqual(JSON.parse(readFileSync(join(clone, ".claude-plugin", "marketplace.json"), "utf8")).plugins[0].source, "./");
     assert.equal(git(clone, ["log", "-1", "--format=%an <%ae>"]).trim(), "sapwood-release <release@sapwood.invalid>");
+    assert.equal(
+      git(clone, ["log", "-1", "--format=%s"]).trim(),
+      `chore: promote sapwood v0.3.0 from ${git(repoRoot, ["rev-list", "-n", "1", "v0.3.0"]).trim()}`,
+    );
     rmSync(clone, { recursive: true, force: true });
 
     const second = runCatalogPromote(deps, { catalogRemote, dryRun: false });
@@ -639,11 +643,11 @@ test("catalog promotion: dry-run renders the complete execution plan", () => {
         `  rm -rf <temp>/catalog/.claude-plugin <temp>/catalog/commands <temp>/catalog/bin\n` +
         `  cp -R <temp>/source/.claude-plugin <temp>/catalog/.claude-plugin; cp -R <temp>/source/commands <temp>/catalog/commands; cp -R <temp>/source/bin <temp>/catalog/bin\n` +
         `  mkdir -p <temp>/catalog/.github/workflows; cp <temp>/source/scripts/catalog/ci.yml <temp>/catalog/.github/workflows/ci.yml\n` +
-        `  stamp <temp>/catalog/.claude-plugin/plugin.json (version 0.3.0, metadata.sourceCommit) and marketplace.json (version 0.3.0, source ./)\n` +
+        `  stamp <temp>/catalog/.claude-plugin/plugin.json (version 0.3.0) and marketplace.json (version 0.3.0, source ./)\n` +
         `  validate catalog CI allowlist (cwd: <temp>/catalog)\n` +
         `  git status --porcelain (cwd: <temp>/catalog)\n` +
         `  git add -- .claude-plugin commands bin .github/workflows/ci.yml (cwd: <temp>/catalog; if changed)\n` +
-        `  git -c commit.gpgsign=false -c user.name=sapwood-release -c user.email=release@sapwood.invalid commit -m "chore: promote sapwood v0.3.0" (cwd: <temp>/catalog; if changed)\n` +
+        `  git -c commit.gpgsign=false -c user.name=sapwood-release -c user.email=release@sapwood.invalid commit -m "chore: promote sapwood v0.3.0 from <source-commit-sha>" (cwd: <temp>/catalog; if changed)\n` +
         `  git push origin HEAD:main (cwd: <temp>/catalog; if changed)\n`,
     );
   } finally {
