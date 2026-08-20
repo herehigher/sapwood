@@ -169,6 +169,13 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   docs-only PR has no test suite to catch a false claim the way code does, so name the exact
   symbol/branch backing a claim rather than writing it from memory of "roughly how it works"
   (#854, #700).
+- **Comment discipline** (reviewer bar; producer baseline:
+  `engine/prompts/worker.md`'s “Working language & comments”). A source comment says a
+  non-obvious **why**, never a code-narrating **what**; the latter is a finding. No
+  production-source archaeology: origin stories, review/fix-round chronicles, or reviewer
+  attributions belong in issue/PR; a bare `#NNN` anchors a rule's provenance only. Each
+  `ponytail:` deliberate simplification names its ceiling and upgrade path; either omission is
+  a finding.
 
 ### Signal classification & escalation
 
@@ -248,11 +255,6 @@ applied clause-by-clause, not file-by-file. Worked example:
    guard could enforce (or already does — a drifting duplicate). Disposition: name the target
    carrier and file a follow-up to move it there — never "fix" by rewording.
 
-**Q3 safety-floor exception.** A rule whose omission produces unsafe output (the AC-evidence-tier
-floor; the human-merge-only-paths enumeration) stays prompt-resident even where a pull-model
-channel (`skills-plugin.ts`, #639/#640, serving the same `docs/security.md` content) also
-exists: a session must actively invoke a skill, so it is never a load-bearing substitute for
-content that must be unconditionally seen. Where principle 3 collides with a floor like this,
-record the tension and the proposed carrier instead of deleting — a mechanically-pinned
-mirror-pair test against the canonical source (`prompts.test.ts`'s `#628`/`#653` tests) is the
-shipped answer when a floor has more than one hand-maintained carrier.
+**Q3 safety-floor exception.** A pull-model skill cannot replace prompt-resident content whose
+omission is unsafe. `engine/src/roles/prompts.test.ts` pins each current floor's marker/mirror
+carrier.
