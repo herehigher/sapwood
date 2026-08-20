@@ -1667,10 +1667,9 @@ export interface AlignDeps {
   now: () => Date;
   log?: (message: string) => void;
   /** Override for readPlanMd's path — tests inject a fixed string via a temp file. A real
-   *  caller omits this and gets `cfg.goal.file` (#128, promoted out of the #104-era
-   *  `roles.architect.planMdPath`): align.ts and architect.ts both read the project's
-   *  north-star goal file, so they honor the SAME resolved config value rather than each
-   *  hardcoding their own default. */
+   *  caller omits this and gets `cfg.goal.file` (#128): align.ts and architect.ts both read the
+   *  project's north-star goal file, so they honor the SAME resolved config value rather than
+   *  each hardcoding their own default. */
   planMdPath?: string;
 }
 

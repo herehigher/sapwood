@@ -504,7 +504,7 @@ const Reviewer = z
     if (r.mode === "engine-agent" && r.agent === undefined) {
       const agent = ReviewerAgent.parse({ model: DEFAULT_REVIEWER_AGENT_MODEL });
       injectedReviewerAgents.add(agent);
-      r.agent = agent; // mutate-and-return, same pattern as resolveGoalFile/resolveLabelDefaults
+      r.agent = agent; // mutate-and-return, same pattern as resolveLabelDefaults
       // below — keeps the inferred type identical to the pre-transform shape (agent stays
       // OPTIONAL in the TYPE; only the runtime value gains the default).
     }
@@ -647,23 +647,6 @@ const Roles = z
     // above, #87/#99): never reviews PR code, never merges. Same #74 promptFile shape too.
     architect: RoleSession.extend({
       promptFile: z.string().optional(),
-      // #104 (#100 gate② P3): the architecture-doc path — was hardcoded to
-      // `<cwd>/docs/PLAN.md` (architect.ts's old defaultPlanMdPath), which breaks for any target
-      // repo sapwood runs against that doesn't keep its architecture doc at that exact path.
-      // Defaults to DEFAULT_GOAL_FILE ("docs/GOAL.md") but is now a real config key, ALWAYS
-      // resolved relative to the CONFIG FILE's directory (see loadConfig below) — same #74
-      // promptFile pattern, except this key always has a value (never "unset -> engine-shipped
-      // default": the target repo's own doc, not a file sapwood ships). align.ts's PLAN.md read
-      // honors this same key (the two peripherals must read the SAME architecture doc).
-      // #128 DEPRECATED: the top-level `goal.file` key (below) is the current interface — this
-      // key is accepted ONLY for back-compat (see resolveGoalFile). Left `.optional()` (no
-      // `.default()`) deliberately: a defaulted value would be indistinguishable from an
-      // explicit one, and resolveGoalFile's precedence (both-set-and-disagree is a hard error;
-      // only-old-set wins with one deprecation log line; neither-set falls through to
-      // goal.file's own default) depends on being able to tell "unset" apart from "set to the
-      // default string". align.ts/architect.ts no longer read this field directly — every
-      // consumer reads the single resolved `cfg.goal.file` instead.
-      planMdPath: z.string().min(1).optional(),
       // #132: cap on the {{round.lastMerged}} text substituted into the architect prompt — the
       // engine-assembled post-review context (the PREVIOUS round's merged-PR outcomes, read from
       // its persisted round_artifacts row, #123). Same user-tunable-in-config, marked-cut contract
@@ -1277,9 +1260,9 @@ const Round = z
     // architecting prompts at round open (directive.ts's resolveRoundDirective). Resolved like
     // other DATA paths in this repo — relative to the process cwd, the same convention
     // state.ts's own dbPath default ("data/sapwood.sqlite") uses — NOT config-file-relative like
-    // roles.*.promptFile/planMdPath, since this file lives beside the engine's own runtime data
-    // (and gets archived to a sibling `directives/` dir there), not beside a role's shipped
-    // prompt. Always has a value (never "unset"), same shape as roles.architect.planMdPath.
+    // roles.*.promptFile, since this file lives beside the engine's own runtime data (and gets
+    // archived to a sibling `directives/` dir there), not beside a role's shipped prompt. Always
+    // has a value (never "unset"), same shape as goal.file.
     directiveFile: z.string().min(1).default("data/DIRECTIVE.md"),
     // Deterministic-truncation cap (never a silent drop — the cut is marked in the text itself,
     // directive.ts reuses retro-digest.ts's capDigest) on the directive text substituted into the
@@ -1306,19 +1289,16 @@ const Round = z
   })
   .strict();
 
-// #128: the loop's north-star goal file — promoted out of `roles.architect.planMdPath` (#104)
-// to a top-level key, since it is read by more than just the architect (aligning too, and now
-// documented as such rather than piggy-backing on an architect-scoped name). `file` is left
-// `.optional()` (no `.default()`) for the same "must tell unset apart from default" reason as
-// `roles.architect.planMdPath` above — resolveGoalFile is the ONE place that applies the actual
-// default (DEFAULT_GOAL_FILE, "docs/GOAL.md" — deliberately NOT "docs/PLAN.md": that name
-// collides with sapwood's own docs/PLAN.md, a different file, and the two were being confused)
-// and reconciles the two keys; every other reader sees the resolved
-// `cfg.goal.file`, which is ALWAYS a string after parseConfig returns (see the SapwoodConfig
-// type override below the schema).
+export const DEFAULT_GOAL_FILE = "docs/GOAL.md";
+
+// #128: the loop's north-star goal file — a top-level key since it is read by more than just
+// the architect (aligning too). Carries a real `.default()` (DEFAULT_GOAL_FILE, "docs/GOAL.md" —
+// deliberately NOT "docs/PLAN.md": that name collides with sapwood's own docs/PLAN.md, a
+// different file, and the two were being confused), same shape as `doctrine.file` below — every
+// reader always sees a concrete, config-file-relative-resolved path (see loadConfig).
 const Goal = z
   .object({
-    file: z.string().min(1).optional(),
+    file: z.string().min(1).default(DEFAULT_GOAL_FILE),
   })
   .strict();
 
@@ -1327,10 +1307,8 @@ const Goal = z
 // authored as prose for LLM readers, deliberately never a lint/DSL. Top-level (not scoped under
 // `roles.*`) since it's injected into more than one role's prompt (worker brief + architect
 // pass) and cited by name in the prFixCap-style escalation comment — same rationale #128 moved
-// `goal.file` out of `roles.architect`. UNLIKE `goal.file`, `file` here carries a real
-// `.default()` rather than `.optional()` + a separate resolution step: there is no deprecated
-// back-compat key to reconcile against, so there's nothing gained by telling "unset" apart from
-// "defaulted" — every reader always sees a concrete path.
+// `goal.file` out of `roles.architect`. Same real-`.default()` shape as `goal.file` above: every
+// reader always sees a concrete path.
 const Doctrine = z
   .object({
     file: z.string().min(1).default("docs/REVIEW-DOCTRINE.md"),
@@ -1488,14 +1466,14 @@ const EnvFailure = z
     }
   });
 
-// Raw (untransformed) schema — kept internal. `goal.file`, `roles.architect.planMdPath`, the
-// workflow-label values, and escalation.humanLabels are still optional here; `ConfigSchema`
-// below resolves them in one transform so EVERY caller of `ConfigSchema.parse`/`.safeParse` — not just
-// this module's own `parseConfig` — gets the single resolved `cfg.goal.file`, including the many
-// test files across this codebase that build a `SapwoodConfig` via `ConfigSchema.parse({...})`
-// directly rather than through `parseConfig`/`loadConfig`. Doing the resolution as a schema-level
-// transform (rather than only inside `parseConfig`) means there is no second, easy-to-forget
-// call site for a future test or caller to miss.
+// Raw (untransformed) schema — kept internal. The workflow-label values and
+// escalation.humanLabels are still optional here; `ConfigSchema` below resolves them in one
+// transform so EVERY caller of `ConfigSchema.parse`/`.safeParse` — not just this module's own
+// `parseConfig` — gets the single resolved values, including the many test files across this
+// codebase that build a `SapwoodConfig` via `ConfigSchema.parse({...})` directly rather than
+// through `parseConfig`/`loadConfig`. Doing the resolution as a schema-level transform (rather
+// than only inside `parseConfig`) means there is no second, easy-to-forget call site for a
+// future test or caller to miss.
 const InstructionPath = z.string().superRefine((path, ctx) => {
   if (path.trim().length === 0) {
     ctx.addIssue({ code: "custom", message: "escalation.instructionPaths entries must be non-empty after trim" });
@@ -1633,12 +1611,6 @@ const ConfigSchemaRaw = z
   })
   .strict();
 
-// #128: `goal.file` is ALWAYS a string once ConfigSchema.parse has run (resolveGoalFile below
-// either takes the explicit value, falls back to the deprecated `roles.architect.planMdPath`, or
-// applies the shipped default) — the raw schema itself leaves it `.optional()` (see the Goal
-// comment above) so the two keys' presence can be told apart during resolution. This override
-// is the "single resolved value" the CLAUDE.md/issue #128 design calls for: every consumer
-// reads `cfg.goal.file: string`, never the schema-inferred `string | undefined`.
 // #167 review (Codex P2+P3 adjudication): `doctrine.fileRaw` is NOT a schema field — it's a
 // loadConfig-only annotation (see loadConfig below) preserving the pre-resolution path exactly
 // as the user wrote it in config, for callers that need to cite the path back to the user
@@ -1658,62 +1630,13 @@ const ConfigSchemaRaw = z
 // still the raw value when cfg came from `ConfigSchema.parse` directly.
 type RawReviewer = z.infer<typeof ConfigSchemaRaw>["reviewer"];
 
-export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "goal" | "doctrine" | "labels" | "escalation" | "notify" | "reviewer"> & {
-  goal: { file: string };
+export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "doctrine" | "labels" | "escalation" | "notify" | "reviewer"> & {
   doctrine: { file: string; maxChars: number; fileRaw?: string };
   reviewer: Omit<RawReviewer, "agent"> & { agent?: NonNullable<RawReviewer["agent"]> & { promptFileRaw?: string } };
   labels: ReturnType<typeof workflowLabelDefaults> & { prefix: string };
   escalation: { humanLabels: string[]; holdLabels: string[]; instructionPaths: string[] };
   notify: { mentions: string[] };
 };
-
-export const DEFAULT_GOAL_FILE = "docs/GOAL.md";
-
-/** #128: reconcile the top-level `goal.file` key with the deprecated
- *  `roles.architect.planMdPath` back-compat key into the single resolved `cfg.goal.file`.
- *  Precedence (CTO design, issue #128):
- *    - both set and they DISAGREE -> hard config error naming both keys (never silently pick
- *      one over the other — an operator who set both almost certainly meant to change one and
- *      forgot the other was still there).
- *    - both set and they AGREE -> no error, no deprecation noise (nothing to warn about beyond
- *      "stop setting the old key eventually").
- *    - only the OLD key set -> it wins (today's behavior, unbroken), and exactly ONE
- *      deprecation line is logged pointing at `goal.file`.
- *    - only the NEW key set, or neither -> `goal.file` (defaulting to DEFAULT_GOAL_FILE when
- *      neither is set) — already what `cfg.goal.file` holds coming in, nothing to do.
- *  Either way, `roles.architect.planMdPath` is CLEARED (set to `undefined`) on the way out — it
- *  has been fully consumed into `cfg.goal.file`, no consumer reads it again (align.ts/
- *  architect.ts both moved to `cfg.goal.file`), and clearing it makes this function idempotent
- *  under a second pass (e.g. init.ts's `ConfigSchema.parse(cfg)` boundary re-validation of an
- *  already-loaded, already-resolved config): a second transform sees the old key already gone
- *  and leaves `cfg.goal.file` untouched, rather than re-comparing a since-resolved absolute
- *  `goal.file` against a still-relative `planMdPath` and spuriously erroring.
- *  Exported for testing; mutates and returns the same object (ConfigSchemaRaw.parse's output is
- *  a fresh plain object per call, never shared/frozen, so this is safe). */
-export function resolveGoalFile(cfg: z.infer<typeof ConfigSchemaRaw>): SapwoodConfig {
-  const newKey = cfg.goal.file;
-  const oldKey = cfg.roles.architect.planMdPath;
-  if (newKey !== undefined && oldKey !== undefined) {
-    if (newKey !== oldKey) {
-      throw new Error(
-        `config error: both goal.file ("${newKey}") and the deprecated roles.architect.planMdPath ` +
-          `("${oldKey}") are set and disagree — remove one (goal.file is the current key; ` +
-          `roles.architect.planMdPath is back-compat only) or make them match.`,
-      );
-    }
-    // Both set and they agree: nothing to warn about, cfg.goal.file already holds the value.
-  } else if (oldKey !== undefined) {
-    console.error(
-      "[sapwood:config] deprecation: roles.architect.planMdPath is deprecated — set goal.file " +
-        `instead (still honored for back-compat this run, resolved to "${oldKey}").`,
-    );
-    cfg.goal.file = oldKey;
-  } else if (newKey === undefined) {
-    cfg.goal.file = DEFAULT_GOAL_FILE;
-  }
-  cfg.roles.architect.planMdPath = undefined; // consumed — see doc comment above
-  return cfg as SapwoodConfig;
-}
 
 /** Resolve the configured namespace before deriving omitted workflow and escalation labels.
  * Explicit per-label values and an explicit humanLabels array pass through verbatim. */
@@ -1747,11 +1670,12 @@ export function resolveLabelDefaults(cfg: z.infer<typeof ConfigSchemaRaw>): Sapw
   // "explicit array passes through verbatim, omitted derives from another already-resolved
   // field" shape as escalation.humanLabels just above.
   cfg.notify.mentions ??= [cfg.board.owner];
-  return resolveGoalFile(cfg);
+  return cfg as SapwoodConfig;
 }
 
-/** The schema every real caller uses: raw validation followed by label-prefix/default and
- * goal-file resolution, then cross-field validation on the fully resolved values. */
+/** The schema every real caller uses: raw validation (goal.file's default already applied at
+ * this layer) followed by label-prefix/default resolution, then cross-field validation on the
+ * fully resolved values. */
 export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).superRefine((cfg, ctx) => {
   // #170 review-silence escalation writes labels.needsHuman, while the existing PR gate
   // and the issue-side gated-reentry hold both recognize escalation.humanLabels. Reject drift
@@ -2050,9 +1974,9 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
   // #286 (E4a, design #279 §4.3): mode: engine-agent with an empty/absent ci.requiredChecks is
   // legal (parse still succeeds — an operator may be mid-adoption) but WEAK: code-verifiable AC
   // can then at best be claim-based (no trusted CI execution evidence exists to confirm against),
-  // never `confirmed`. A WARNING, not a rejection — console.warn is this module's existing
-  // parse-boundary channel for a non-fatal note (see resolveGoalFile's deprecation line above);
-  // there is no dedicated warning surface elsewhere in this file to reuse instead.
+  // never `confirmed`. A WARNING, not a rejection — console.warn is the parse-boundary channel
+  // for a non-fatal note here; there is no dedicated warning surface elsewhere in this file to
+  // reuse instead.
   if (cfg.reviewer.mode === "engine-agent" && cfg.ci.requiredChecks.length === 0) {
     console.warn(
       "[sapwood:config] reviewer.mode is engine-agent but ci.requiredChecks is empty — code-verifiable " +
@@ -2216,17 +2140,15 @@ export function loadConfig(path?: string): SapwoodConfig {
     cfg.roles.architect.promptFile = resolve(dirname(file), cfg.roles.architect.promptFile);
   }
   // #128: same rule for the resolved north-star goal file — UNLIKE promptFile this key always
-  // has a value by the time loadConfig runs (parseConfig's resolveGoalFile step already applied
-  // the old-key/new-key precedence and the default), so there's no `!== undefined` guard: every
-  // non-absolute value, default or explicit, resolves against the config file's directory, not
-  // the CLI's cwd. Supersedes the old roles.architect.planMdPath resolution (deleted here) —
-  // align.ts/architect.ts now read cfg.goal.file only.
+  // has a value (schema `.default()`, same shape as doctrine.file below), so there's no
+  // `!== undefined` guard: every non-absolute value, default or explicit, resolves against the
+  // config file's directory, not the CLI's cwd. align.ts/architect.ts both read cfg.goal.file.
   if (!isAbsolute(cfg.goal.file)) {
     cfg.goal.file = resolve(dirname(file), cfg.goal.file);
   }
-  // #167: same rule for the resolved review-doctrine file — always has a value (it carries a
-  // real `.default()`, not `goal.file`'s optional-then-resolved shape), so every non-absolute
-  // value, default or explicit, resolves against the config file's directory, not the CLI's cwd.
+  // #167: same rule for the resolved review-doctrine file — always has a value (same real
+  // `.default()` shape as goal.file above), so every non-absolute value, default or explicit,
+  // resolves against the config file's directory, not the CLI's cwd.
   // #167 review (Codex P2+P3): capture the RAW pre-resolution value FIRST — conductor.ts's
   // gated-reentry-cap escalation comment cites this (never the resolved absolute path below) so
   // a public GitHub comment never leaks this machine's local directory layout. See
