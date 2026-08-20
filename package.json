@@ -12,7 +12,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "typecheck": "npm run -ws typecheck",
+    "typecheck": "npm run -ws typecheck && tsc -p scripts",
     "lint": "biome ci .",
     "test": "npm run -ws test && node --test scripts/*.test.ts",
     "build": "npm run -ws build",

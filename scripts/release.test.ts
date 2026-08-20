@@ -91,8 +91,10 @@ test("formatBuildStamp: version+date.sha", () => {
 test("compareSemver: the pre-1.0 ladder orders as alpha.1 < alpha.2 < beta.1 < release < patch < minor", () => {
   const order = ["0.3.0-alpha.1", "0.3.0-alpha.2", "0.3.0-beta.1", "0.3.0", "0.3.1", "0.10.0"];
   for (let i = 0; i < order.length - 1; i++) {
-    assert.ok(compareSemver(order[i], order[i + 1]) < 0, `expected ${order[i]} < ${order[i + 1]}`);
-    assert.ok(compareSemver(order[i + 1], order[i]) > 0, `expected ${order[i + 1]} > ${order[i]}`);
+    const a = order[i]!;
+    const b = order[i + 1]!;
+    assert.ok(compareSemver(a, b) < 0, `expected ${a} < ${b}`);
+    assert.ok(compareSemver(b, a) > 0, `expected ${b} > ${a}`);
   }
 });
 
@@ -168,7 +170,7 @@ test("writeMarketplaceRef: rewrites only plugins[0].source.ref — every sibling
     writeMarketplaceRef(path, "v0.3.0-alpha.1");
 
     const expected = structuredClone(original);
-    expected.plugins[0].source.ref = "v0.3.0-alpha.1";
+    expected.plugins[0]!.source.ref = "v0.3.0-alpha.1";
     // The write's output is byte-identical to re-serializing the mutated object in the same
     // canonical form — not just "parses to the same data" — so a rewrite really is a one-line
     // diff on disk, never a silent reformat of the rest of the file.
@@ -550,7 +552,7 @@ function withRecorder(inner: Exec): { exec: Exec; calls: Array<{ file: string; a
     calls.push({ file, args: [...args] });
     const notesIdx = args.indexOf("--notes-file");
     if (file === "gh" && notesIdx !== -1) {
-      notesFileContents.push(readFileSync(args[notesIdx + 1], "utf8"));
+      notesFileContents.push(readFileSync(args[notesIdx + 1]!, "utf8"));
     }
     return inner(file, args);
   };
@@ -823,7 +825,7 @@ function fakePrepareExec(opts: { head: string; origin: string; dirty: string; re
       writeFakeLockfile(opts.repoRoot, opts.version);
       return "";
     }
-    if (file === "git" && ["checkout", "add", "commit", "push"].includes(args[0])) return "";
+    if (file === "git" && ["checkout", "add", "commit", "push"].includes(args[0]!)) return "";
     if (file === "gh") return "";
     throw new Error(`unexpected exec in test: ${file} ${args.join(" ")}`);
   };
