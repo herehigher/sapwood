@@ -77,17 +77,30 @@ tiers, not `init` or `validate` — those still need Channel A or C.
 
 ### Channel C — npm
 
-The engine will publish to npm as the bare package `sapwood` (the `@sapwood` scope is reserved
-for future split packages — see [`10-releasing.md`](dev-guide/10-releasing.md)). The package is
-not yet on the registry. After publishing, the no-clone forms are `npm i -g sapwood@alpha` and
-`npx sapwood@<version> <cmd>`; `alpha` is the pre-release tag and a plain release uses `latest`.
+The engine publishes to npm as the bare package `sapwood` (the `@sapwood` scope is reserved
+for future split packages — see [`10-releasing.md`](dev-guide/10-releasing.md)). This is the
+no-clone path: no build step, nothing to link. The package is not yet on the registry; after
+publishing, these forms are verified against the [packed tarball test](../scripts/pack.test.ts).
 
-Before publishing, the packed tarball is installed into a local temporary prefix. That check
-verifies its `sapwood --version` output is stamped, `sapwood init --help` exits successfully,
-and `sapwood validate` succeeds with a minimal valid config. The shipped example remains a
-starter that intentionally needs a real `ci.requiredChecks` value before it validates with its
-default `engine-agent` reviewer; see [Configuration](configuration.md#ci). Channel A remains the
-contributor path; Channel C is the post-publish consumer path.
+```
+npx sapwood@<version> init
+npx sapwood@<version> validate
+npx sapwood@<version> run --dry-run
+```
+
+Or install it once and use the bare `sapwood` command from then on:
+
+```
+npm i -g sapwood@alpha
+sapwood --version
+sapwood init --help
+```
+
+`alpha` is the pre-release dist-tag (a pre-release version never becomes `latest` — see
+[`10-releasing.md`](dev-guide/10-releasing.md)); drop it once a plain release ships. Every CLI
+verb Channel A lists above is the same binary
+(`dist/cli.js`) either way — Channel A is the contributor path (build from source, iterate on
+the engine itself); Channel C is the consumer path (run a published version, no clone).
 
 ## Bootstrap the target repo, then run `sapwood init`
 
