@@ -76,7 +76,7 @@ export function kindsTagged<T extends EventTag>(tag: T): KindsWithTag<T>[] {
   ) as KindsWithTag<T>[];
 }
 
-/** `EVENT_KINDS[kind]`'s glossary half — `#643`'s per-kind `meaning`/`actionability`/`see`, with
+/** `EVENT_KINDS[kind]`'s glossary half — `#643`'s per-kind `meaning`/`actionability`, with
  *  `tags` stripped off (the generator's only consumer; nothing runtime-facing needs it). */
 export function kindGlossary(kind: EventKind): KindGlossary {
   const { tags: _tags, ...glossary } = EVENT_KINDS[kind];

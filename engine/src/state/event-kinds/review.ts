@@ -10,15 +10,13 @@ export const REVIEW_EVENT_KINDS = defineKinds({
   // these two and a third transition kind would fail to compile until it is declared here.
   "reviewer-fallback-switch": {
     tags: ["round-artifact"],
-    meaning: "the configured reviewer (e.g. hosted Codex) was unavailable, so gate② fell back to the alternate reviewer for this PR (#54).",
+    meaning: "the configured reviewer (e.g. hosted Codex) was unavailable, so gate② fell back to the alternate reviewer for this PR.",
     actionability: "investigate",
-    see: "#54",
   },
   "reviewer-fallback-revert": {
     tags: ["round-artifact"],
-    meaning: "the configured reviewer became available again; gate② reverted off the fallback reviewer (#54).",
+    meaning: "the configured reviewer became available again; gate② reverted off the fallback reviewer.",
     actionability: "routine",
-    see: "#54",
   },
 
   // The engine-agent review runner's own records (review/codex-exec.ts, review/production.ts).
@@ -30,46 +28,38 @@ export const REVIEW_EVENT_KINDS = defineKinds({
   "engine-review-budget-advisory": {
     tags: [],
     meaning:
-      "announced before an engine-agent review session starts: `reviewer.agent.costCapUsd` is advisory only, since the codex-exec runner has no hard-cap mechanism to enforce it (#443).",
+      "announced before an engine-agent review session starts: `reviewer.agent.costCapUsd` is advisory only, since the codex-exec runner has no hard-cap mechanism to enforce it.",
     actionability: "routine",
-    see: "#443",
   },
   "engine-review-cost-unknown": {
     tags: [],
-    meaning:
-      "an engine-agent review session ended with no usable token/cost telemetry; its spend is UNKNOWN and is never read as $0 (#443).",
+    meaning: "an engine-agent review session ended with no usable token/cost telemetry; its spend is UNKNOWN and is never read as $0.",
     actionability: "investigate",
-    see: "#443",
   },
   "engine-review-containment-gap": {
     tags: [],
     meaning:
-      "recorded at every codex-exec spawn: the named containment blind spots (model-invoked shell execution, host-wide read scope) the sandbox does not close (#443).",
+      "recorded at every codex-exec spawn: the named containment blind spots (model-invoked shell execution, host-wide read scope) the sandbox does not close.",
     actionability: "routine",
-    see: "#443",
   },
   "engine-review-orphaned-group": {
     tags: [],
     meaning:
-      "a timed-out engine-agent review session's process group was still observable after the SIGKILL escalation; the review settles as `timeout` regardless, but something may still be running on the host (#443).",
+      "a timed-out engine-agent review session's process group was still observable after the SIGKILL escalation; the review settles as `timeout` regardless, but something may still be running on the host.",
     actionability: "investigate",
-    see: "#443",
   },
   "engine-review-session-inspection": {
     tags: [],
     meaning:
-      "how many tool/command items an engine-agent review session's own stream reported it ran; evidence only, never a gate — nothing derives a verdict from it (#512).",
+      "how many tool/command items an engine-agent review session's own stream reported it ran; evidence only, never a gate — nothing derives a verdict from it.",
     actionability: "routine",
-    see: "#512",
   },
 
   // Reviewer silence.
   "review-silence-escalated": {
     tags: [],
-    meaning:
-      "a PR's gate② review request produced no verdict past the configured silence bound; labeled needs-human for visibility (#170).",
+    meaning: "a PR's gate② review request produced no verdict past the configured silence bound; labeled needs-human for visibility.",
     actionability: "intervene",
-    see: "#170",
   },
 
   // #451 dispute pricing / #450 convergence stop. Both terminals are `always` — each is appended
@@ -78,9 +68,8 @@ export const REVIEW_EVENT_KINDS = defineKinds({
   // label-first-or-no-event doctrine as `gated-reentry-capped-label-failed`).
   "review-disputed": {
     tags: ["escalation-source:always"],
-    meaning: "successive gate② reviews disagreed past the dispute-pricing bound (#451); always proven by presence.",
+    meaning: "successive gate② reviews disagreed past the dispute-pricing bound; always proven by presence.",
     actionability: "intervene",
-    see: "#451",
   },
   "review-disputed-label-failed": {
     tags: [],
@@ -94,9 +83,8 @@ export const REVIEW_EVENT_KINDS = defineKinds({
   },
   "review-non-convergent": {
     tags: ["escalation-source:always"],
-    meaning: "successive fix-leg review rounds failed to converge past the configured bound (#450); always proven by presence.",
+    meaning: "successive fix-leg review rounds failed to converge past the configured bound; always proven by presence.",
     actionability: "intervene",
-    see: "#450",
   },
   "review-non-convergent-label-failed": {
     tags: [],
@@ -118,8 +106,7 @@ export const REVIEW_EVENT_KINDS = defineKinds({
   "comment-cursor-stale": {
     tags: ["escalation-source:never"],
     meaning:
-      "a checkpoint (gate⓪, dispatch, drive, or fix-leg-spawn — #995 added the last: immediately before a FIXUP action's fix leg actually spawns, not just before gate.driveOne) found the issue's comment-adjudication cursor stale or invalid relative to its own comment thread and refused to spend/dispatch/drive/spawn; needs-human applied with a deduplicated pointer comment.",
+      "a checkpoint (gate⓪, dispatch, drive, or fix-leg-spawn — immediately before a FIXUP action's fix leg actually spawns, not just before gate.driveOne) found the issue's comment-adjudication cursor stale or invalid relative to its own comment thread and refused to spend/dispatch/drive/spawn; needs-human applied with a deduplicated pointer comment.",
     actionability: "intervene",
-    see: "#652",
   },
 });

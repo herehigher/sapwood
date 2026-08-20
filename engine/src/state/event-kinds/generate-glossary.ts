@@ -38,8 +38,7 @@ const ESCALATION_BUCKET_ORDER: readonly EscalationBucket[] = ["needs-human", "hu
  *  cannot collide because the test compares parsed tokens, not regex `.includes`). */
 function renderRow(name: string, glossary: KindGlossary, tags?: readonly string[]): string {
   const tagSuffix = tags && tags.length > 0 ? ` [${tags.join(", ")}]` : "";
-  const seeSuffix = glossary.see ? ` (see ${glossary.see})` : "";
-  return `- \`${name}\` — **${glossary.actionability}**${tagSuffix}: ${glossary.meaning}${seeSuffix}`;
+  return `- \`${name}\` — **${glossary.actionability}**${tagSuffix}: ${glossary.meaning}`;
 }
 
 const DOMAIN_HEADINGS: Record<keyof typeof EVENT_KIND_DOMAINS, string> = {
@@ -61,7 +60,7 @@ export function renderGlossarySkill(): string {
   lines.push("name: sapwood-event-glossary");
   lines.push("description: |");
   lines.push(
-    "  Generated reference for loop supervisors: what every sapwood engine event kind, park source, and escalation bucket MEANS and how actionable it is (routine / expected-noise / investigate / intervene). Regenerated from engine/src/state/event-kinds/*.ts, state.ts's PARK_SOURCE_GLOSSARY, and loop/escalation-buckets.ts's ESCALATION_BUCKET_GLOSSARY — never hand-edited (#643). Also visible to engine-role sessions since plugin-root skills load ambiently for every session (PLAN.md's ambient posture); it carries interpretation only, nothing role-actionable.",
+    "  Generated reference for loop supervisors: what every sapwood engine event kind, park source, and escalation bucket MEANS and how actionable it is (routine / expected-noise / investigate / intervene). Regenerated from engine/src/state/event-kinds/*.ts, state.ts's PARK_SOURCE_GLOSSARY, and loop/escalation-buckets.ts's ESCALATION_BUCKET_GLOSSARY — never hand-edited. Also visible to engine-role sessions since plugin-root skills load ambiently for every session (PLAN.md's ambient posture); it carries interpretation only, nothing role-actionable.",
   );
   lines.push("---");
   lines.push("");
@@ -111,7 +110,7 @@ export function renderGlossarySkill(): string {
   lines.push("");
   lines.push("## Escalation buckets");
   lines.push("");
-  lines.push("The three action-buckets every escalation label write is classified into (#397).");
+  lines.push("The three action-buckets every escalation label write is classified into.");
   lines.push("");
   for (const bucket of ESCALATION_BUCKET_ORDER) {
     lines.push(renderRow(bucket, ESCALATION_BUCKET_GLOSSARY[bucket]));

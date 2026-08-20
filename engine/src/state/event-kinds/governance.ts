@@ -42,9 +42,8 @@ export const GOVERNANCE_EVENT_KINDS = defineKinds({
   "pool-reconcile-incomplete": {
     tags: [],
     meaning:
-      "removing the round-pool label from one or more issues at pool-close failed (#432 R5); carries the failed issue list for the next reconcile pass.",
+      "removing the round-pool label from one or more issues at pool-close failed; carries the failed issue list for the next reconcile pass.",
     actionability: "investigate",
-    see: "#432",
   },
   "pool-selection-decision-lost": {
     tags: [],
@@ -58,9 +57,8 @@ export const GOVERNANCE_EVENT_KINDS = defineKinds({
   // cross-list-omission class the registry's completeness test now guards.
   "pool-degraded": {
     tags: ["round-artifact"],
-    meaning: "the PO's round-pool selection session degraded/failed this round (#374).",
+    meaning: "the PO's round-pool selection session degraded/failed this round.",
     actionability: "investigate",
-    see: "#374",
   },
   "round-pool-removal-capped": {
     tags: ["escalation-source:payload"],
@@ -142,15 +140,13 @@ export const GOVERNANCE_EVENT_KINDS = defineKinds({
   // `round-artifact` (#237): concerns actually DELIVERED this round (dissent.ts's postConcerns).
   "concern-posted": {
     tags: ["round-artifact", "dissent-receipt"],
-    meaning: "a PO structured-dissent concern (#237) was delivered — posted to the issue this round.",
+    meaning: "a PO structured-dissent concern was delivered — posted to the issue this round.",
     actionability: "investigate",
-    see: "#237",
   },
   "concern-adjudicated": {
     tags: [],
     meaning: "a previously posted dissent concern was resolved (external reply, label change, or another recognized adjudication signal).",
     actionability: "routine",
-    see: "#237",
   },
   "concern-post-failed": {
     tags: [],
@@ -168,9 +164,8 @@ export const GOVERNANCE_EVENT_KINDS = defineKinds({
   // see ESCALATION_SOURCES' own note for the false-clear risk `always` would have created.
   "plan-approved": {
     tags: [],
-    meaning: "the plan-review session approved an issue's verification plan for this round (#214).",
+    meaning: "the plan-review session approved an issue's verification plan for this round.",
     actionability: "routine",
-    see: "#214",
   },
   "plan-review-escalated": {
     tags: ["retro", "round-artifact", "escalation-source:never"],
@@ -183,7 +178,6 @@ export const GOVERNANCE_EVENT_KINDS = defineKinds({
     meaning:
       "the plan-review session proposed `verify:n/a` for an issue (unverifiable work, doc-gate path) and applied the label; a human must adjudicate the proposal — always proven by presence.",
     actionability: "intervene",
-    see: "#296",
   },
   // #874: NOT an escalation-source — unlike `verify-na-proposed`/`plan-review-escalated` above,
   // no human action is required: the engine already applied `labels.split` itself, the SAME
@@ -193,16 +187,14 @@ export const GOVERNANCE_EVENT_KINDS = defineKinds({
   "plan-review-too-large-split": {
     tags: ["retro", "round-artifact"],
     meaning:
-      "gate⓪ judged an approved-shape issue structurally too large for one PR/lane (#874) and applied `labels.split` directly — the engine-initiated EARLY split trigger, as opposed to `resume-capped{split:true}`'s LATE one (#965); po-decompose picks the issue up next round, no human action required.",
+      "gate⓪ judged an approved-shape issue structurally too large for one PR/lane and applied `labels.split` directly — the engine-initiated EARLY split trigger, as opposed to `resume-capped{split:true}`'s LATE one; po-decompose picks the issue up next round, no human action required.",
     actionability: "routine",
-    see: "#874, #965",
   },
   "operator-fence-violated": {
     tags: [],
     meaning:
       "a role-proposed issue-body rewrite altered or removed bytes inside an operator-owned `<!-- sapwood:operator-owned -->` fence, or the current body's own fence boundary was already malformed (an unclosed opener); the write was refused (plan-review's reviewer/drafter paths escalate needs-human via `plan-review-escalated`, po-triage logs and skips the write).",
     actionability: "intervene",
-    see: "#827",
   },
 
   // Architect.
@@ -229,9 +221,8 @@ export const GOVERNANCE_EVENT_KINDS = defineKinds({
   "architect-repeat-drop-escalated": {
     tags: ["escalation-source:payload"],
     meaning:
-      "an issue was dropped repeatedly for the same reason with no body edit in between (same-reason re-drop churn, #666); escalated to needs-human via the shared writer instead of a duplicate drop comment, proof of the label write rides in the payload.",
+      "an issue was dropped repeatedly for the same reason with no body edit in between (same-reason re-drop churn); escalated to needs-human via the shared writer instead of a duplicate drop comment, proof of the label write rides in the payload.",
     actionability: "intervene",
-    see: "#666",
   },
 
   // Harvest + retro.
@@ -259,7 +250,6 @@ export const GOVERNANCE_EVENT_KINDS = defineKinds({
     tags: ["round-artifact", "retro-pr-lifecycle"],
     meaning: "retro pushed a repair to a PR it had already opened (in this round or a prior one) instead of opening a duplicate.",
     actionability: "routine",
-    see: "#964",
   },
   "retro-pr-degraded": {
     tags: ["round-artifact"],
@@ -269,8 +259,7 @@ export const GOVERNANCE_EVENT_KINDS = defineKinds({
   "retro-quiet-skipped": {
     tags: [],
     meaning:
-      "the retro session was skipped because the round was quiet (zero retro/pr-touched-tagged events, zero lanes dispatched) — the phase still closed (#961).",
+      "the retro session was skipped because the round was quiet (zero retro/pr-touched-tagged events, zero lanes dispatched) — the phase still closed.",
     actionability: "routine",
-    see: "#961",
   },
 });

@@ -18,22 +18,19 @@ export const RUN_EVENT_KINDS = defineKinds({
   },
   "instance-lock-taken-over": {
     tags: [],
-    meaning: "a stale instance lock from a dead PID was taken over so this run could proceed (#382).",
+    meaning: "a stale instance lock from a dead PID was taken over so this run could proceed.",
     actionability: "investigate",
   },
   "deploy-key-tier-detected": {
     tags: [],
-    meaning:
-      "startup recorded the effective worker-credential tier (L0/L1) and which deploy-key arm produced it — visibility, not a gate (#671).",
+    meaning: "startup recorded the effective worker-credential tier (L0/L1) and which deploy-key arm produced it — visibility, not a gate.",
     actionability: "routine",
-    see: "#671",
   },
   "claude-cli-version-checked": {
     tags: [],
     meaning:
-      "startup recorded the installed Claude Code CLI version against the engine's declared floor (ok/below-floor/indeterminate) — visibility, not a gate (#799).",
+      "startup recorded the installed Claude Code CLI version against the engine's declared floor (ok/below-floor/indeterminate) — visibility, not a gate.",
     actionability: "routine",
-    see: "#799",
   },
 
   // Liveness watchdog + the run-level breakers (rapid-restart, consecutive-stalls, idle-churn).
@@ -51,28 +48,24 @@ export const RUN_EVENT_KINDS = defineKinds({
     meaning:
       'the crash-loop breaker tripped on restart cadence; enters a probe-less "rapid-restart" park episode that clears only when a later start observes the birth window drained, or a human clears it.',
     actionability: "intervene",
-    see: "#431",
   },
   "consecutive-stalls-detected": {
     tags: [],
     meaning:
-      'the stall breaker (#407) tripped on a run of consecutive stalls; enters a probe-less "consecutive-stalls" park episode that clears only when a later start observes the streak broken, or a human clears it.',
+      'the stall breaker tripped on a run of consecutive stalls; enters a probe-less "consecutive-stalls" park episode that clears only when a later start observes the streak broken, or a human clears it.',
     actionability: "intervene",
-    see: "#407",
   },
   "idle-churn-detected": {
     tags: [],
     meaning:
-      'the idle-churn breaker (#470) tripped: rounds are opening and closing cleanly but nothing consumable exists upstream, K times over; enters a probe-less "idle-churn" park episode that clears only when a human clears it.',
+      'the idle-churn breaker tripped: rounds are opening and closing cleanly but nothing consumable exists upstream, K times over; enters a probe-less "idle-churn" park episode that clears only when a human clears it.',
     actionability: "intervene",
-    see: "#470",
   },
   "empty-spin-park": {
     tags: [],
     meaning:
-      'the empty-spin breaker (#374) tripped after N consecutive rounds dispatched nothing with a fully degraded peripheral session; enters an "llm" park episode.',
+      'the empty-spin breaker tripped after N consecutive rounds dispatched nothing with a fully degraded peripheral session; enters an "llm" park episode.',
     actionability: "intervene",
-    see: "#374",
   },
 
   // Park episode lifecycle (shared by every breaker + the canary probe).
@@ -117,13 +110,13 @@ export const RUN_EVENT_KINDS = defineKinds({
   // Standby.
   "standby-wait": {
     tags: [],
-    meaning: "the loop entered a backoff wait because the prior round dispatched nothing (the idle-round precondition, #125).",
+    meaning: "the loop entered a backoff wait because the prior round dispatched nothing (the idle-round precondition).",
     actionability: "routine",
   },
   "standby-exit": { tags: [], meaning: "standby ended and the loop resumed normal round ticking.", actionability: "routine" },
   "standby-heartbeat": {
     tags: [],
-    meaning: "a per-slice heartbeat emitted during a long standby wait, separate from standby-wait's own per-backoff-step event (#395).",
+    meaning: "a per-slice heartbeat emitted during a long standby wait, separate from standby-wait's own per-backoff-step event.",
     actionability: "routine",
   },
 
@@ -151,9 +144,8 @@ export const RUN_EVENT_KINDS = defineKinds({
   "worktree-janitor-rollup": {
     tags: [],
     meaning:
-      "one dead-owner/unlocked present-directory worktree sweep cycle finished — carries reaped/retained/skipped/failed counts, never a per-directory event for the stock (#834 Phase 2).",
+      "one dead-owner/unlocked present-directory worktree sweep cycle finished — carries reaped/retained/skipped/failed counts, never a per-directory event for the stock (Phase 2).",
     actionability: "routine",
-    see: "#834",
   },
 
   // Cost ceiling (the breach state itself; the per-lane `ceiling-escalated` lives in lane.ts).
@@ -174,9 +166,8 @@ export const RUN_EVENT_KINDS = defineKinds({
   // mirroring recordCeilingBreach's own first-detection framing.
   "emergency-stop": {
     tags: [],
-    meaning: "the EMERGENCY_STOP sentinel was detected — every running/fixing lane was hard-killed immediately, no drain window (#293).",
+    meaning: "the EMERGENCY_STOP sentinel was detected — every running/fixing lane was hard-killed immediately, no drain window.",
     actionability: "intervene",
-    see: "#293",
   },
 
   // Base-branch CI observation (#502). `base-ci-red-escalated` is deliberately NOT an
@@ -184,22 +175,19 @@ export const RUN_EVENT_KINDS = defineKinds({
   // its resolution is escalation-reconcile.ts's own base-green observer.
   "base-ci-red-observed": {
     tags: [],
-    meaning: "the default branch's CI was observed red (#502); opens the standing base-red episode.",
+    meaning: "the default branch's CI was observed red; opens the standing base-red episode.",
     actionability: "investigate",
-    see: "#502",
   },
   "base-ci-red-escalated": {
     tags: [],
     meaning:
       "the standing base-red episode persisted long enough to escalate; not issue-keyed, so it is not an escalation-source (no needs-human label to remove).",
     actionability: "intervene",
-    see: "#502",
   },
   "base-ci-red-cleared": {
     tags: [],
     meaning: "a NEWER base-ci-red-observed/cleared pair showed the default branch's CI green again; closes the standing episode.",
     actionability: "routine",
-    see: "#502",
   },
 
   // Config / forge / proxy plumbing that reports at run scope.
@@ -226,9 +214,8 @@ export const RUN_EVENT_KINDS = defineKinds({
   },
   "fix-loop-unattached": {
     tags: [],
-    meaning: "startup recorded that `prFixCap > 0` but the forge proxy is unavailable, so the fix loop cannot attach this run (#385).",
+    meaning: "startup recorded that `prFixCap > 0` but the forge proxy is unavailable, so the fix loop cannot attach this run.",
     actionability: "investigate",
-    see: "#385",
   },
   "labels-reconciled": {
     tags: [],
@@ -248,22 +235,19 @@ export const RUN_EVENT_KINDS = defineKinds({
   "proxy-mint-failed": {
     tags: [],
     meaning:
-      "the forge MCP proxy failed to mint a scoped token for a lane/role; the caller degrades per its own fail-open/fail-closed branch (#244).",
+      "the forge MCP proxy failed to mint a scoped token for a lane/role; the caller degrades per its own fail-open/fail-closed branch.",
     actionability: "investigate",
-    see: "#244",
   },
   "egress-suspect": {
     tags: ["round-artifact"],
     meaning:
-      "a worker or peripheral session's transcript showed a network-egress-shaped tool call (curl, WebFetch/WebSearch, ...) — informational, never an escalation (#341, #410).",
+      "a worker or peripheral session's transcript showed a network-egress-shaped tool call (curl, WebFetch/WebSearch, ...) — informational, never an escalation.",
     actionability: "investigate",
-    see: "#410",
   },
   "bypass-permissions-mode-configured": {
     tags: [],
     meaning:
-      "startup detected host.permissionMode: bypassPermissions — every claude session runs unchecked on the operator's own say-so; disclosure only, never a gate (#1011).",
+      "startup detected host.permissionMode: bypassPermissions — every claude session runs unchecked on the operator's own say-so; disclosure only, never a gate.",
     actionability: "investigate",
-    see: "#1011",
   },
 });

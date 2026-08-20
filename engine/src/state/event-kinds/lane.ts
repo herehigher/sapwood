@@ -24,16 +24,13 @@ export const LANE_EVENT_KINDS = defineKinds({
   "reclaim-done": {
     tags: ["round-artifact", "escalation-source:always"],
     meaning:
-      "a finished worker lane was reclaimed cleanly; whether it needs attention is a predicate over the payload (#404), not the kind alone.",
+      "a finished worker lane was reclaimed cleanly; whether it needs attention is a predicate over the payload, not the kind alone.",
     actionability: "investigate",
-    see: "#404",
   },
   "reclaim-failed": {
     tags: ["round-artifact", "escalation-source:always"],
-    meaning:
-      "reclaiming a finished worker lane failed; whether it needs attention is a predicate over the payload (#404), not the kind alone.",
+    meaning: "reclaiming a finished worker lane failed; whether it needs attention is a predicate over the payload, not the kind alone.",
     actionability: "investigate",
-    see: "#404",
   },
   "reclaim-dead": {
     tags: ["round-artifact"],
@@ -44,7 +41,6 @@ export const LANE_EVENT_KINDS = defineKinds({
     tags: [],
     meaning: "the explanatory PR comment for an engine-opened dead-lane rescue failed; the needs-human labels remain applied.",
     actionability: "routine",
-    see: "#719",
   },
   // #724 gate② P1: EMERGENCY_STOP's own durable-pid sweep (round.ts) — a `driving`/`handoff`
   // row whose DURABLE persisted process identity (never the in-memory supervisor, which a
@@ -71,7 +67,6 @@ export const LANE_EVENT_KINDS = defineKinds({
     meaning:
       "under EMERGENCY_STOP, a driving/handoff lane's durable process identity was found alive and signalled directly (TERM then KILL), then the row was settled to `failed` in the same step so no later reconciliation can revive it; confirmedDead records whether a post-signal check verified the kill. Needs-human, but never label-proven — no forge write ever backs it.",
     actionability: "intervene",
-    see: "#293",
   },
   // #724 gate② round 4, P1-1: the crash-rerun safety marker — appended BEFORE the sweep's first
   // signal, never after. A crash between this event and the eventual `estop-lane-swept`
@@ -86,7 +81,6 @@ export const LANE_EVENT_KINDS = defineKinds({
     meaning:
       "the E-STOP durable-pid sweep (round.ts) decided a driving/handoff lane is confirmed alive and is about to signal it — written before the first signal, for crash-rerun safety.",
     actionability: "routine",
-    see: "#293",
   },
   // #724 gate② round 4, P2-3: durablePidAlive/signalDurablePid are ONE capability on a
   // Supervisor — a lane whose OPEN pre-kill intent (above) this run's supervisor cannot verify
@@ -99,7 +93,6 @@ export const LANE_EVENT_KINDS = defineKinds({
     meaning:
       "a lane carries an open E-STOP sweep intent, but this run's Supervisor cannot verify or signal its durable pid (missing durablePidAlive/signalDurablePid) — left unsettled, never a fabricated outcome.",
     actionability: "intervene",
-    see: "#293",
   },
 
   // Handoff / resume.
@@ -127,12 +120,12 @@ export const LANE_EVENT_KINDS = defineKinds({
   "resume-capped": {
     tags: ["retro", "escalation-source:always"],
     meaning:
-      "a handed-off lane exhausted its resume-attempt budget (#172). `split: false` (or absent, every pre-#965 " +
-      "event): needs-human, always proven by presence. `split: true` (#965): the engine applied `labels.split` " +
-      "instead — the WIP branch is evidence for po-decompose, not an attention item; escalation-reconcile.ts's " +
-      "resumeCappedNeedsAttention predicate narrows ESCALATION_SOURCES to the non-split occurrences only.",
+      "a handed-off lane exhausted its resume-attempt budget. `split: false` (or absent, on any event recorded " +
+      "before the split behavior existed): needs-human, always proven by presence. `split: true` (once the split " +
+      "behavior existed): the engine applied `labels.split` instead — the WIP branch is evidence for po-decompose, " +
+      "not an attention item; escalation-reconcile.ts's resumeCappedNeedsAttention predicate narrows " +
+      "ESCALATION_SOURCES to the non-split occurrences only.",
     actionability: "intervene",
-    see: "#172, #965",
   },
   "resume-capped-label-failed": {
     tags: [],
@@ -141,20 +134,19 @@ export const LANE_EVENT_KINDS = defineKinds({
   },
   "resume-cap-split-label-failed": {
     tags: [],
-    meaning: "the `labels.split` write for an engine-applied resume-cap split (#965) failed; retried next tick.",
+    meaning: "the `labels.split` write for an engine-applied resume-cap split failed; retried next tick.",
     actionability: "investigate",
   },
   "resume-cap-split-comment-failed": {
     tags: [],
     meaning:
-      "the WIP-pointer evidence comment for an engine-applied resume-cap split (#965) failed (or the PR/diff read behind it did) — the split itself, its `resume-capped{split:true}` event, and the row's latch already landed and are unaffected; this row is never revisited (same 'the terminal is the row, this is bookkeeping-only retry noise' treatment as its `-label-failed` sibling, except this one never retries — the lane has already left handoffWorkers()).",
+      "the WIP-pointer evidence comment for an engine-applied resume-cap split failed (or the PR/diff read behind it did) — the split itself, its `resume-capped{split:true}` event, and the row's latch already landed and are unaffected; this row is never revisited (same 'the terminal is the row, this is bookkeeping-only retry noise' treatment as its `-label-failed` sibling, except this one never retries — the lane has already left handoffWorkers()).",
     actionability: "investigate",
   },
   "resume-undecidable": {
     tags: ["escalation-source:always"],
-    meaning: "a handoff lane's resume outcome could not be determined (#172); needs-human, always proven by presence.",
+    meaning: "a handoff lane's resume outcome could not be determined; needs-human, always proven by presence.",
     actionability: "intervene",
-    see: "#172",
   },
   "resume-undecidable-label-failed": {
     tags: [],
@@ -167,9 +159,8 @@ export const LANE_EVENT_KINDS = defineKinds({
   "resume-held": {
     tags: [],
     meaning:
-      "a handoff lane's resume was skipped because the issue already carries a human hold label (#441) — an observation, not a new escalation.",
+      "a handoff lane's resume was skipped because the issue already carries a human hold label — an observation, not a new escalation.",
     actionability: "routine",
-    see: "#441",
   },
 
   // Environment failure / lane revival.
@@ -191,29 +182,25 @@ export const LANE_EVENT_KINDS = defineKinds({
   },
   "lane-pr-unknown": {
     tags: [],
-    meaning: "a lane's PR association came back UNKNOWN (transient forge write failure); the lane is deferred rather than settled (#377).",
+    meaning: "a lane's PR association came back UNKNOWN (transient forge write failure); the lane is deferred rather than settled.",
     actionability: "expected-noise",
-    see: "#377",
   },
   "lane-revived": {
     tags: ["escalation-clear"],
-    meaning: "an env-failed lane holding an OPEN PR was revived back to `driving` rather than left stranded between owners (#447).",
+    meaning: "an env-failed lane holding an OPEN PR was revived back to `driving` rather than left stranded between owners.",
     actionability: "routine",
-    see: "#447",
   },
   "lane-revival-terminal": {
     tags: ["merged-witness"],
     meaning:
-      "the revival pass found the lane's PR already MERGED (recorded for the merged case only) and closed it out instead of reviving it (#447).",
+      "the revival pass found the lane's PR already MERGED (recorded for the merged case only) and closed it out instead of reviving it.",
     actionability: "routine",
-    see: "#447",
   },
   "human-merge-only-closed": {
     tags: ["merged-witness", "escalation-clear"],
     meaning:
-      "a parked human-merge-only lane's PR (#397 bucket 2) was found MERGED and closed out — in-progress cleared, board set done, worktree run through the same mtime/ctime reclaim policy the DEAD path uses, worker row terminalized. Never re-drives the lane (#824). `escalation-clear` (#933): this IS the engine's own terminal witness for the `drive-human-merge-only` attention item — the dashboard strip fold must retire it here, not leave it waiting on a resolution nothing ever observes.",
+      "a parked human-merge-only lane's PR (bucket 2) was found MERGED and closed out — in-progress cleared, board set done, worktree run through the same mtime/ctime reclaim policy the DEAD path uses, worker row terminalized. Never re-drives the lane. `escalation-clear`: this IS the engine's own terminal witness for the `drive-human-merge-only` attention item — the dashboard strip fold must retire it here, not leave it waiting on a resolution nothing ever observes.",
     actionability: "routine",
-    see: "#824",
   },
 
   // Cost ceiling, per lane (the run-level breach state lives in run.ts).
@@ -238,31 +225,27 @@ export const LANE_EVENT_KINDS = defineKinds({
   "merged-lane-worktree-settled": {
     tags: [],
     meaning:
-      "a MERGED lane's worktree was clean at close-out — deleted, and its git-worktree registration pruned (#834 Phase 1, the merged-lane close-out settlement).",
+      "a MERGED lane's worktree was clean at close-out — deleted, and its git-worktree registration pruned (the merged-lane close-out settlement).",
     actionability: "routine",
-    see: "#834",
   },
   "merged-lane-worktree-retained": {
     tags: [],
     meaning:
-      "a MERGED lane's worktree held possibly-uncommitted state at close-out and was left in place — event-only, no needs-human label: the PR is already merged and nothing is blocked (#834 Phase 1).",
+      "a MERGED lane's worktree held possibly-uncommitted state at close-out and was left in place — event-only, no needs-human label: the PR is already merged and nothing is blocked.",
     actionability: "investigate",
-    see: "#834",
   },
   "merged-lane-worktree-settle-failed": {
     tags: [],
     meaning:
-      "a MERGED lane's worktree was purity-clean but its deletion did not complete cleanly (TOCTOU re-verify or the removal itself failed) — surviving residue, if any, is at the recorded `tombstonePath` rather than the original `worktreePath` (present whenever the rename already succeeded before the failure; deletion may be only partially complete, never assume full recovery), its git-worktree registration left dangling for the #825 missing-directory pass to eventually reap; carries a `reason` (#834 Phase 1, gate② round 1 F1/F4, round 2 G2, round 3 W1).",
+      "a MERGED lane's worktree was purity-clean but its deletion did not complete cleanly (TOCTOU re-verify or the removal itself failed) — surviving residue, if any, is at the recorded `tombstonePath` rather than the original `worktreePath` (present whenever the rename already succeeded before the failure; deletion may be only partially complete, never assume full recovery), its git-worktree registration left dangling for the missing-directory pass to eventually reap; carries a `reason`.",
     actionability: "investigate",
-    see: "#834",
   },
 
   // Orphan detection + the mid-run orphan sweep (#384).
   "orphan-detected": {
     tags: [],
-    meaning: "a worktree/branch with no matching worker row was found (#384 mid-run sweep or startup reconcile).",
+    meaning: "a worktree/branch with no matching worker row was found (mid-run sweep or startup reconcile).",
     actionability: "investigate",
-    see: "#384",
   },
   "orphan-healed": { tags: [], meaning: "a detected orphan was reconciled back into a tracked lane.", actionability: "routine" },
   "orphan-heal-failed": {
@@ -272,9 +255,8 @@ export const LANE_EVENT_KINDS = defineKinds({
   },
   "orphan-sweep-checked": {
     tags: [],
-    meaning: "the mid-run orphan sweep (#384) ran and found nothing new to heal.",
+    meaning: "the mid-run orphan sweep ran and found nothing new to heal.",
     actionability: "routine",
-    see: "#384",
   },
   "orphan-pr-escalated": {
     tags: ["escalation-source:payload"],
@@ -284,22 +266,19 @@ export const LANE_EVENT_KINDS = defineKinds({
   "gated-flag-unprovable": {
     tags: [],
     meaning:
-      "a gated-reentry lane's escalation label could not be found on either carrier (#391/#398) — a standing alarm, one per engine start, for a lane only a human can move.",
+      "a gated-reentry lane's escalation label could not be found on either carrier — a standing alarm, one per engine start, for a lane only a human can move.",
     actionability: "intervene",
-    see: "#391",
   },
   "gated-flag-healed": {
     tags: [],
-    meaning: "a gated-reentry lane's escalation label was found on one carrier and the local flag was corrected to match (#391/#398).",
+    meaning: "a gated-reentry lane's escalation label was found on one carrier and the local flag was corrected to match.",
     actionability: "routine",
-    see: "#391",
   },
   "gated-lane-retired": {
     tags: ["escalation-clear"],
     meaning:
-      "a gated-reentry lane was retired (not reentered) because the audit proved it terminal by merge or issue-close (#593) — nothing left to reenter. `escalation-clear` (#933): this IS the engine's own terminal witness for the `gated-flag-unprovable` attention item — the dashboard strip fold must retire it here.",
+      "a gated-reentry lane was retired (not reentered) because the audit proved it terminal by merge or issue-close — nothing left to reenter. `escalation-clear`: this IS the engine's own terminal witness for the `gated-flag-unprovable` attention item — the dashboard strip fold must retire it here.",
     actionability: "routine",
-    see: "#593",
   },
 
   // Worker + peripheral-role session telemetry.
@@ -342,7 +321,6 @@ export const LANE_EVENT_KINDS = defineKinds({
       "a worker lane got a NEW live child process (fresh dispatch, an ordinary/fix-leg resume, or a cross-restart " +
       "adoption of an already-confirmed spawn) — carries the pid + worktree path `status` folds newest-per-lane.",
     actionability: "routine",
-    see: "#705",
   },
 
   // #1010: the shared observability floor the permission-mode/Bash-sandbox profile work (DR
@@ -355,6 +333,5 @@ export const LANE_EVENT_KINDS = defineKinds({
       "different from the one the engine requested — informational only, fail-safe in the allow " +
       "direction, and never affects the lane/session's own outcome.",
     actionability: "investigate",
-    see: "#1010",
   },
 });
