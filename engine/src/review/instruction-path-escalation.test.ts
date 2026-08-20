@@ -65,7 +65,10 @@ test("#292 escalation helper: label-presence latch writes label then one comment
   assert.equal(calls.filter((call) => call === "files").length, 1);
   assert.equal(calls.filter((call) => call.startsWith("label:")).length, 1);
   assert.equal(calls.filter((call) => call.startsWith("comment:")).length, 1);
-  assert.match(calls.find((call) => call.startsWith("comment:")) ?? "", /`AGENTS\.md`.*human-vetted reviewer authority.*#292/);
+  assert.match(
+    calls.find((call) => call.startsWith("comment:")) ?? "",
+    /`AGENTS\.md`.*human-vetted reviewer authority.*must never reach autonomous merge/,
+  );
   // #397 bucket 2: this path's verdict is "a human must MERGE this PR", so the label it writes —
   // and the latch that proves the second tick was suppressed — is `human-merge-only`. `needs-human`
   // is never written here, on the PR or anywhere else.

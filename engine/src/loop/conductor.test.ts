@@ -5,10 +5,12 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { ConfigSchema, loadConfig, type SapwoodConfig } from "../config/config.js";
 import {
   associateLanePr,
@@ -3798,7 +3800,7 @@ test("#655 AC1: the FIRST needs-human escalation for a lane posts exactly one ma
   assert.equal(commentPr, 55);
   assert.match(commentBody, /<!-- sapwood:needs-human-reason:lane-a:55 -->/);
   assert.match(commentBody, /gate:HUMAN:HANDLE_THREADS/);
-  assert.match(commentBody, /Remove `needs-human` from this pull request to retry \(#147 gated reentry\)/);
+  assert.match(commentBody, /Remove `needs-human` from this pull request to retry\./);
   st.close();
 });
 
@@ -7355,7 +7357,7 @@ test("tick DRIVE (#450, escalation comment content): cites the signal, both roun
   assert.match(comment, /adjudication principle 4/i, "design re-entry citation");
   assert.match(comment, /REVIEW-DOCTRINE\.md/, "the doctrine file, by name");
   assert.match(comment, /design re-entry/i, "design re-entry, not merely human escalation");
-  assert.match(comment, /#147 gated reentry/, "the existing return path — no new re-entry channel");
+  assert.match(comment, /to reclaim\./, "the existing return path — no new re-entry channel");
   st.close();
 });
 
@@ -8188,7 +8190,7 @@ test("tick DRIVE: a driving lane with no known PR number fails safe to needs-hum
   assert.equal(forge.issueComments.length, 1);
   assert.equal(forge.issueComments[0]![0], 2);
   assert.match(forge.issueComments[0]![1], /<!-- sapwood:needs-human-reason:drive-no-pr:2 -->/);
-  assert.match(forge.issueComments[0]![1], /Remove `needs-human` from this issue once resolved to retry \(#147 gated reentry\)/);
+  assert.match(forge.issueComments[0]![1], /Remove `needs-human` from this issue once resolved to retry\./);
   st.close();
 });
 
@@ -8498,7 +8500,7 @@ test("tick: KILL_SWITCH drain — a driving lane AT the fix-rounds cap is TERMIN
     assert.match(forge.issueComments[0]![1], /kill-switch drain/);
     assert.match(forge.issueComments[0]![1], /drain-fix-rounds-capped:2\/2/);
     assert.match(forge.issueComments[0]![1], /2 fix round\(s\) spent of 2/);
-    assert.match(forge.issueComments[0]![1], /#147 gated reentry/);
+    assert.match(forge.issueComments[0]![1], /once resolved to reclaim the same PR\./);
     assert.equal(st.activeWorkers().length, 0); // #375 AC2: wind-down's activeWorkers()===0 loop can now exit
     st.close();
   } finally {
@@ -11338,7 +11340,7 @@ test("#782 gate② round 1 (P2, AC3c): the SAME evidence-wait wedge is drain-ter
 // the exact branch #783 wiring added without needing the full driveOne pipeline (already covered
 // by merge-driver.test.ts's own #783-wiring suite). ──
 
-test("#783 wiring: an INERT escalation posts the actionable inert comment (remedy, docs/configuration.md citation, PR #769 worked example), labels needs-human, and records ci-inert-escalated — NEVER ci-pending-escalated", async () => {
+test("#783 wiring: an INERT escalation posts the actionable inert comment (remedy, docs/configuration.md citation), labels needs-human, and records ci-inert-escalated — NEVER ci-pending-escalated", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
@@ -11374,7 +11376,6 @@ test("#783 wiring: an INERT escalation posts the actionable inert comment (remed
   assert.match(comment, /without ever going green/);
   assert.match(comment, /always run and skip its STEPS/);
   assert.match(comment, /docs\/configuration\.md/);
-  assert.match(comment, /PR #769/);
   assert.match(comment, /Escalating to `needs-human`/);
   assert.doesNotMatch(comment, /gate② is already decisive/); // never the classic pending wording
   assert.doesNotMatch(comment, /has been PENDING for/); // never the classic pending wording either
@@ -15555,4 +15556,113 @@ test("#824 AC5: at most one PR read per parked human-merge-only lane per sweep c
     rmSync(dir, { recursive: true, force: true });
     st.close();
   }
+});
+
+// ── #1048: engine-posted GitHub comments must never carry a sapwood-dev issue/PR/design-doc
+// reference — GitHub autolinks a bare `#NNN` posted in a comment against the TARGET repo (the
+// user's own issue #NNN, almost certainly unrelated) and leaves a "mentioned" back-reference on
+// it, polluting a stranger's issue timeline with sapwood's own development chatter. Two
+// complementary guards, per #1048's own verification plan ("assert on the template constants,
+// whichever the code structure makes robust"):
+//
+//  1. An AST-based sweep (gate② round 1, Codex sol-high P2 F1+F2) of every string/template
+//     literal EMITTED by this hazard's five source files — syntax-aware, not regex-over-text: a
+//     `//`/`/*` sequence living inside a string literal can never be misread as a comment start
+//     (the false-negative a naive text stripper risks), and a code comment is exempt from the
+//     sweep BY CONSTRUCTION (it is never a StringLiteral/TemplateLiteral AST node at all — the
+//     parser already drew that line, so this test doesn't have to). This directly encodes the
+//     actual invariant ("emitted string content carries no hardcoded dev ref") rather than a
+//     regex approximation of it, and reaches every literal uniformly,
+//     including the many built inside private, not-independently-renderable escalation
+//     functions. Deliberately whole-FILE, not "only the ones posted to GitHub": #1048's own scope
+//     is every string these files emit (log lines and internal `reason` fields included — one of
+//     them, engine-agent.ts's AC-snapshot-missing reason, flows straight into a POSTED comment via
+//     drive.ts, which is exactly the class of indirection a narrower "only comment builders" sweep
+//     would have missed).
+//  2. A dynamic render of a representative escalation comment through a real `tick()`, with
+//     sentinel issue/PR numbers picked OUTSIDE the 2-4-digit range (single digits) so a
+//     legitimate `#${issue}`/`#${pr}` interpolation can never trip the same `#\d{2,4}` probe —
+//     AND (P3) asserting the sentinel numbers actually round-trip into the rendered comment, so a
+//     future edit that accidentally drops the interpolation fails this test instead of silently
+//     passing the absence-only half of the check. ──
+
+/** The five files #1048's own map names as building strings posted to (or, for engine-agent.ts,
+ *  feeding a string posted to) the user's GitHub repo — `forge/labels.ts` is out of scope, owned
+ *  by the sibling issue #1049. Listed once, as data, so the AST sweep below stays a single
+ *  reusable check rather than five near-duplicate tests. */
+const DEV_REF_SWEEP_FILES = [
+  "conductor.ts",
+  "reconcile.ts",
+  "../review/drive.ts",
+  "../review/instruction-path-escalation.ts",
+  "../review/engine-agent.ts",
+] as const;
+
+/** Every kind of AST node whose `.text` is literal string content a `#\d{2,4}` dev-ref could hide
+ *  in: a plain `"..."`/`'...'` string, a backtick literal with no substitutions, and the three
+ *  literal-text pieces of a template WITH substitutions (`` `a${x}b${y}c` `` parses as a
+ *  TemplateHead "a", a TemplateMiddle "b", and a TemplateTail "c" — the `${x}`/`${y}` pieces are
+ *  separate, non-literal AST nodes this check never touches, which is exactly why a REAL
+ *  `#${issue}` interpolation can never trip it: the digits never exist as literal text at all). */
+function isLiteralTextNode(
+  node: ts.Node,
+): node is ts.StringLiteral | ts.NoSubstitutionTemplateLiteral | ts.TemplateHead | ts.TemplateMiddle | ts.TemplateTail {
+  return (
+    ts.isStringLiteral(node) ||
+    ts.isNoSubstitutionTemplateLiteral(node) ||
+    node.kind === ts.SyntaxKind.TemplateHead ||
+    node.kind === ts.SyntaxKind.TemplateMiddle ||
+    node.kind === ts.SyntaxKind.TemplateTail
+  );
+}
+
+/** Parses `filePath` and returns one description per literal-text node whose decoded `.text`
+ *  contains a `#\d{2,4}` run — empty for a clean file. `ts.createSourceFile` never touches disk
+ *  or the type checker (pure syntax parse), so this is cheap and needs no tsconfig/program. */
+function findHardcodedDevRefs(filePath: string): string[] {
+  const source = readFileSync(filePath, "utf8");
+  const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  const hits: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (isLiteralTextNode(node)) {
+      const found = node.text.match(/#\d{2,4}/g);
+      if (found) {
+        const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+        hits.push(`${filePath}:${line + 1}: ${found.join(", ")} in ${JSON.stringify(node.text.slice(0, 120))}`);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return hits;
+}
+
+test("#1048: no string/template literal in the five files that build (or feed) an engine-posted GitHub comment carries a hardcoded #NNN dev reference — AST-based, not regex-over-text", () => {
+  const dir = dirname(fileURLToPath(import.meta.url));
+  const hits = DEV_REF_SWEEP_FILES.flatMap((relPath) => findHardcodedDevRefs(join(dir, relPath)));
+  assert.deepEqual(
+    hits,
+    [],
+    "a literal #NNN inside a string/template-literal AST node can only be a hardcoded sapwood-dev " +
+      "reference — every real issue/PR number these files emit is a template substitution, which " +
+      "never appears as literal text in a StringLiteral/TemplateHead/TemplateMiddle/TemplateTail node",
+  );
+});
+
+test("#1048: an engine-built needs-human escalation comment interpolates the user's OWN pr/issue number (round-tripped, not just absence-checked), never a hardcoded sapwood-dev one — rendered end-to-end via tick() with sentinel numbers outside the #NNN probe's 2-4-digit range", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedRunning(st, "lane-x", 3); // single-digit sentinel issue — can never collide with \d{2,4}
+  sup.probes["lane-x"] = { ...DEFAULT_PROBE, done: true, hasPr: true, prNumber: 6 }; // single-digit sentinel PR
+  const gate = new FakeMergeGate();
+  gate.outcomes[6] = { kind: "needs-human", pr: 6, reason: "gate:HUMAN:HANDLE_THREADS" };
+  await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
+  assert.equal(forge.prComments.length, 1);
+  const [, body] = forge.prComments[0]!;
+  // P3 (gate② round 1, Codex sol-high): the interpolation must actually be THERE — an absence-only
+  // check (below) would still pass if a future edit accidentally dropped `#${pr}` entirely.
+  assert.match(body, /PR #6\b/, "the user's own sentinel PR number must round-trip into the rendered comment");
+  assert.doesNotMatch(body, /#\d{2,4}/, "no hardcoded sapwood-dev #NNN reference in the posted escalation comment");
+  st.close();
 });

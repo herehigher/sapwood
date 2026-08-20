@@ -2226,7 +2226,7 @@ async function reportRetainedWorktree(
     .addIssueComment(
       issue,
       `sapwood: lane \`${worker}\` was torn down with possibly-uncommitted changes in its ` +
-        `worktree. Automation never deletes work it can't prove is clean (#69) — the worktree ` +
+        `worktree. Automation never deletes work it can't prove is clean — the worktree ` +
         `was left on disk at:\n\n\`${worktreePath}\`\n\nSalvage or discard it by hand, then ` +
         `remove the \`${needsHumanLabel}\` label.`,
     )
@@ -2480,12 +2480,12 @@ async function drainThenEscalate(
           ? `This is gated-reentry attempt ${gatedAttempts}/${cfg.lanes.gatedReentryCap} for this PR. ` +
             (gatedAttempts >= cfg.lanes.gatedReentryCap
               ? capHitEscalationNote(cfg)
-              : `Remove \`${cfg.labels.needsHuman}\` again once resolved to retry (#147 gated reentry).`)
-          : `Remove \`${cfg.labels.needsHuman}\` once resolved to reclaim the same PR (#147 gated reentry).`;
+              : `Remove \`${cfg.labels.needsHuman}\` again once resolved to retry.`)
+          : `Remove \`${cfg.labels.needsHuman}\` once resolved to reclaim the same PR.`;
       try {
         await forge.addIssueComment(
           w.issue,
-          `sapwood: ${reasons.join("+")} drain (#375) — PR #${w.pr} could not progress this tick ` +
+          `sapwood: ${reasons.join("+")} drain — PR #${w.pr} could not progress this tick ` +
             `(${reason}), ${fixRounds} fix round(s) spent of ${cfg.lanes.prFixCap}. Escalating to ` +
             `\`${cfg.labels.needsHuman}\` rather than wedge the bounded drain. ${reentryNote}`,
         );
@@ -3496,7 +3496,7 @@ async function escalateNeedsHuman(
     const body =
       `${marker}\n` +
       `sapwood: PR #${pr} escalated to \`${cfg.labels.needsHuman}\` — ${reason}. ` +
-      `Remove \`${cfg.labels.needsHuman}\` ${carrierNoun(carrier)} to retry (#147 gated reentry).`;
+      `Remove \`${cfg.labels.needsHuman}\` ${carrierNoun(carrier)} to retry.`;
     await commentOnEscalationCarrier(forge, cfg, carrier, w.issue, pr, marker, body).catch(() => {});
   }
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason };
@@ -3696,7 +3696,7 @@ async function checkAcDriftBeforeDrive(
     .addIssueComment(
       w.issue,
       `sapwood: this issue's body changed after its acceptance-criteria snapshot was taken for ` +
-        `PR #${pr} (${reason}). Per design #279 §5, drift fails the review gate closed — this PR ` +
+        `PR #${pr} (${reason}). Drift fails the review gate closed — this PR ` +
         `will not be driven through gate②/merge while its AC authority cannot be verified. ` +
         `${labelNote} — a human must re-adjudicate (a renewed gate⓪ pass): either restore the ` +
         `original acceptance criteria/verification plan, or explicitly re-approve the new body.`,
@@ -5043,7 +5043,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           `${noPrMarker}\n` +
           `sapwood: this driving lane lost track of its PR number (an engine invariant violation, not a normal ` +
           `escalation) — held for a human rather than left silently stuck. Remove \`${cfg.labels.needsHuman}\` from ` +
-          `this issue once resolved to retry (#147 gated reentry).`;
+          `this issue once resolved to retry.`;
         await commentOnEscalationCarrier(forge, cfg, "issue", w.issue, -1, noPrMarker, noPrBody).catch(() => {});
         driven.push({ kind: "needs-human", worker: w.name, issue: w.issue, pr: -1, reason: "driving-lane-missing-pr" });
         continue;
@@ -5130,10 +5130,9 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           state.appendEvent(evKind, { worker: w.name, issue: w.issue, pr, mode: t.mode, head: t.head });
           const note =
             t.kind === "switch"
-              ? `⚠️ Reviewer failover (#54): the primary reviewer has been unavailable past the ` +
+              ? `⚠️ Reviewer failover: the primary reviewer has been unavailable past the ` +
                 `configured threshold — gate② is now gated by **${t.mode}** until it recovers.`
-              : `✅ Reviewer failover (#54): the primary reviewer is available again — gate② is ` +
-                `gated by **${t.mode}** for new verdicts.`;
+              : `✅ Reviewer failover: the primary reviewer is available again — gate② is ` + `gated by **${t.mode}** for new verdicts.`;
           // Best-effort courtesy copy of the audit trail: the structured event above is the
           // durable record and has already landed; a comment-post hiccup must not crash the
           // DRIVE loop or mark the lane failed over an announcement.
@@ -5278,7 +5277,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
               marker,
               `${marker}\n${buildCiInertEscalationComment(s.head, s.inert.checks, s.inert.truncated)} Escalating to ` +
                 `\`${cfg.labels.needsHuman}\`: fix the check, then remove the label ${carrierNoun(carrier)} to ` +
-                `reclaim this PR (#147 gated reentry).`,
+                `reclaim this PR.`,
             );
             posted = true;
           } catch {
@@ -5335,13 +5334,12 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
                     `${cfg.ci.pendingEscalateAfterSec}s) — the configured \`ci.requiredChecks\` evidence has ` +
                     `not been satisfied, so no review session has started yet and this PR can never progress ` +
                     `on its own (${evidence.note}). Escalating to \`${cfg.labels.needsHuman}\`: re-run or fix ` +
-                    `the stuck check, then remove the label ${carrierNoun(carrier)} to reclaim this PR (#147 ` +
-                    `gated reentry).`
+                    `the stuck check, then remove the label ${carrierNoun(carrier)} to reclaim this PR.`
                   : `sapwood: gate① has been PENDING for ${s.pendingSec}s on \`${s.head}\` (bound: ` +
                     `${cfg.ci.pendingEscalateAfterSec}s) while gate② is already decisive — CI is neither green ` +
                     `nor red, so this PR can never progress on its own (${evidence.note}). Escalating to ` +
                     `\`${cfg.labels.needsHuman}\`: re-run or fix the stuck check, then remove the label ` +
-                    `${carrierNoun(carrier)} to reclaim this PR (#147 gated reentry).`),
+                    `${carrierNoun(carrier)} to reclaim this PR.`),
             );
             posted = true;
           } catch {
@@ -5830,10 +5828,10 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
               `producer-fixable (${outcome.reason}). If that leg committed work whose push failed, it is still ` +
               `in the lane's preserved worktree — check there for unpushed commits before adjudicating. ` +
               `Escalating to \`${cfg.labels.needsHuman}\` for ` +
-              `adjudication: resolve the signal, then remove the label to reclaim the PR (#147 gated reentry).`
+              `adjudication: resolve the signal, then remove the label to reclaim the PR.`
             : `sapwood: fix-round cap (${cap}) reached for PR #${pr} — ${fixRounds} round(s) spent, ` +
               `standing fixable signal unresolved (${outcome.reason}). Escalating to \`${cfg.labels.needsHuman}\` for ` +
-              `adjudication: resolve the signal, then remove the label to reclaim the PR (#147 gated reentry).`;
+              `adjudication: resolve the signal, then remove the label to reclaim the PR.`;
           // Cap exhausted (or verdict rerun). Hard rule (#69/#147 forge-before-terminal-upsert): the needs-human
           // label AND the escalation comment (naming rounds spent + the standing signal) land
           // BEFORE the terminal upsert. A label-write failure leaves the row untouched (still
@@ -6277,7 +6275,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           `${noPrMarker}\n` +
           `sapwood: a fixing-origin handoff resumed with no PR on record (an engine invariant violation, not a ` +
           `normal escalation) — held for a human rather than silently dropping the fix attempt. Remove ` +
-          `\`${cfg.labels.needsHuman}\` from this issue once resolved to retry (#147 gated reentry).`;
+          `\`${cfg.labels.needsHuman}\` from this issue once resolved to retry.`;
         await commentOnEscalationCarrier(forge, cfg, "issue", w.issue, -1, noPrMarker, noPrBody).catch(() => {});
         continue;
       }
@@ -6861,12 +6859,12 @@ async function escalateReviewDisputed(
     escalation.source === "thread"
       ? `sapwood: PR #${pr} — every unresolved review thread on the current head (\`${escalation.headOid}\`) carries a ` +
         `recorded **disputed** resolution (${fixRoundsSpent} fix round(s) already spent). A dispute is a producer/reviewer ` +
-        `disagreement, not something more fix rounds can resolve (design #402 §4/D4) — escalating directly to ` +
+        `disagreement, not something more fix rounds can resolve — escalating directly to ` +
         `\`${cfg.labels.needsHuman}\` for adjudication instead of dispatching another fix leg. Evidence per thread ` +
         `(excerpted — the full text is on each thread by id):`
       : `sapwood: PR #${pr} — the fix leg DISPUTED ${escalation.items.length} engine-agent review finding(s) raised against the ` +
         `current head (\`${escalation.headOid}\`) instead of changing code for them (${fixRoundsSpent} fix round(s) already ` +
-        `spent). A dispute is a producer/reviewer disagreement, not something more fix rounds can resolve (#461) — escalating ` +
+        `spent). A dispute is a producer/reviewer disagreement, not something more fix rounds can resolve — escalating ` +
         `directly to \`${cfg.labels.needsHuman}\` for adjudication instead of dispatching another fix leg. The review verdict ` +
         `is UNCHANGED: a dispute is heard, never honored, by the engine. Evidence per finding, keyed \`<runId>#<index>\` ` +
         `(excerpted — the full text is in this PR's sapwood engine review audit comment for that run):`;
@@ -6874,8 +6872,7 @@ async function escalateReviewDisputed(
     capDigest(
       `${preamble}\n\n${evidence}\n\n` +
         `Adjudicate each: side with the reviewer (${escalation.source === "thread" ? "resolve the thread yourself, or " : ""}ask for another fix round) or side with the ` +
-        `producer (${escalation.source === "thread" ? "resolve it as not-a-defect" : "accept the dispute and merge, or narrow the finding"}). Remove \`${cfg.labels.needsHuman}\` ${carrierNoun(carrier)} once done to reclaim ` +
-        `(#147 gated reentry).`,
+        `producer (${escalation.source === "thread" ? "resolve it as not-a-defect" : "accept the dispute and merge, or narrow the finding"}). Remove \`${cfg.labels.needsHuman}\` ${carrierNoun(carrier)} once done to reclaim.`,
       REVIEW_DISPUTED_COMMENT_MAX_CHARS,
     ) + `\n\n${marker}`;
   // #451 gate② round 3 (Codex P2): a live read for the marker BEFORE every post attempt — the
@@ -7030,7 +7027,7 @@ async function escalateNonConvergent(
   const comment =
     capDigest(
       `sapwood: PR #${pr}'s review is not converging — the progress signal is **${signal}** ` +
-        `(${fixRoundsSpent} fix round(s) already spent; design #402 §3b). Escalating directly to ` +
+        `(${fixRoundsSpent} fix round(s) already spent). Escalating directly to ` +
         `\`${cfg.labels.needsHuman}\` instead of dispatching another fix leg, per ` +
         `docs/REVIEW-DOCTRINE.md's adjudication principle 4: runaway complexity escalates to the ` +
         `top of the loop, not more patches — the intended response is DESIGN RE-ENTRY ` +
@@ -7040,7 +7037,7 @@ async function escalateNonConvergent(
         `Current round finding keys${boundedCurr.truncated ? " (truncated)" : ""}:\n` +
         `${boundedCurr.entries.map((k) => `- \`${k}\``).join("\n") || "(none)"}\n\n` +
         `Adjudicate: resolve the underlying design/technical direction, then remove ` +
-        `\`${cfg.labels.needsHuman}\` ${carrierNoun(carrier)} to reclaim (#147 gated reentry).`,
+        `\`${cfg.labels.needsHuman}\` ${carrierNoun(carrier)} to reclaim.`,
       REVIEW_NON_CONVERGENT_COMMENT_MAX_CHARS,
     ) + `\n\n${marker}`;
   try {

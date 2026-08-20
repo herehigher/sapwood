@@ -239,7 +239,7 @@ export class EngineAgentReviewer implements ReviewerAdapter {
       return {
         kind: "unavailable",
         headOid,
-        reason: `no AC snapshot recorded for issue #${ctx.issue} — dispatch-time snapshot missing (design #279 §5, fail closed)`,
+        reason: `no AC snapshot recorded for issue #${ctx.issue} — dispatch-time snapshot missing, fail closed`,
       };
     }
 
@@ -274,7 +274,7 @@ export class EngineAgentReviewer implements ReviewerAdapter {
       return {
         kind: "unavailable",
         headOid,
-        reason: "ReviewContext.diffText missing — the engine-agent adapter never fetches its own diff (design #279 §1, #303 review P1)",
+        reason: "ReviewContext.diffText missing — the engine-agent adapter never fetches its own diff",
       };
     }
     const prompt = this.buildPrompt(ctx.diffText, snapshot);

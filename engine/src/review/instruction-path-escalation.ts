@@ -168,14 +168,14 @@ export async function escalateInstructionPathChanges(input: {
       await input.forge.addPRComment(
         input.pr,
         "Sapwood escalated this PR for human review because its changed-file list exceeded the GitHub API ceiling and could not be verified. " +
-          "The reviewer instruction graph may therefore be incomplete (instruction-path-list-incomplete, #292).",
+          "The reviewer instruction graph may therefore be incomplete (instruction-path-list-incomplete).",
       );
     } else {
       const renderedPaths = matchedPaths.map((path) => `\`${path}\``).join(", ");
       await input.forge.addPRComment(
         input.pr,
         `Sapwood escalated this PR for human review because it changes reviewer instruction path(s): ${renderedPaths}. ` +
-          "Standing instructions are human-vetted reviewer authority; in-PR instruction-graph edits must never reach autonomous merge (#292).",
+          "Standing instructions are human-vetted reviewer authority; in-PR instruction-graph edits must never reach autonomous merge.",
       );
     }
   } catch {
