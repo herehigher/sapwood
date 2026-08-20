@@ -186,8 +186,9 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   instead on the OUTER safety ceiling (`cost.roundBudgetUsd`/`dailyBudgetUsd`). Prefer narrow
   anyway, naming that outer-layer dependency and the residual blind spot explicitly rather than
   claiming full coverage.
-- **Doctrine self-modification rule.** A PR changing this doctrine is human-merge-only and must be
-  flagged; `instruction-path-escalation.ts` derives its carrier and
+- **Doctrine self-modification rule.** A PR changing this doctrine must be flagged for human
+  confirmation and human merge. With default/enabled instruction-path escalation,
+  `instruction-path-escalation.ts` derives its carrier and
   `instruction-path-escalation.test.ts` pins escalation. The reviewer uses the construction-time
   snapshot, so the change cannot judge itself.
 - **A tier-C cannot-confirm is not a producer stall signal, and it burns spend twice** (#791,
@@ -249,5 +250,5 @@ applied clause-by-clause, not file-by-file. Worked example:
 remain in prompt text even when a pull-model skill serves the same source: sessions may not invoke
 it, so it is not load-bearing. If principle 3 collides, record the tension and proposed carrier
 instead of deleting. For multi-carrier floors enumerated by `engine/src/roles/prompts.test.ts`
-(#628/#653), its marker/mirror test against the canonical source is the shipped mechanism;
-otherwise retain the carrier tension.
+(#628/#653), its marker/mirror test requires byte-equal blocks across the enumerated prompt
+carriers; otherwise retain the carrier tension.
