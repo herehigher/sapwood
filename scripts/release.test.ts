@@ -537,6 +537,7 @@ function fakeExec(opts: { head: string; origin: string; dirty: string; tagOut: s
     if (file === "git" && (args[0] === "tag" || args[0] === "push")) return "";
     if (file === "gh") return "";
     if (file === "npm" && args[0] === "publish") return "";
+    if (file === "node" && args[0] === "scripts/dashboard-canary.ts") return "";
     throw new Error(`unexpected exec in test: ${file} ${args.join(" ")}`);
   };
 }
@@ -716,6 +717,7 @@ test("runPublish --dry-run: prints --prerelease for an alpha version, runs nothi
     assert.match(r.output, /--dry-run/);
     assert.match(r.output, /--prerelease/);
     assert.match(r.output, /npm publish --workspace engine --tag alpha/);
+    assert.match(r.output, /node scripts\/dashboard-canary\.ts 0\.3\.0-alpha\.1/);
     assert.deepEqual(calls, [
       { file: "git", args: ["fetch", "origin", "main"] },
       { file: "git", args: ["rev-parse", "HEAD"] },
@@ -784,9 +786,12 @@ test("runPublish (real run, not dry-run): exact tag/push/gh-release argv, --prer
 
     const npmCall = calls.find((c) => c.file === "npm");
     assert.deepEqual(npmCall?.args, ["publish", "--workspace", "engine", "--tag", "alpha"]);
+    const canaryCall = calls.find((c) => c.file === "node");
+    assert.deepEqual(canaryCall?.args, ["scripts/dashboard-canary.ts", version]);
     // never `latest` for a pre-release, and the npm step is the LAST step run — it publishes
     // only once the tag + GitHub Release (the durable "this version shipped" record) exist.
     assert.ok(calls.indexOf(npmCall!) > calls.indexOf(ghCall!));
+    assert.ok(calls.indexOf(canaryCall!) > calls.indexOf(npmCall!));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

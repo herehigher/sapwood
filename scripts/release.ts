@@ -496,14 +496,22 @@ export const PUBLISH_STEPS: PublishStep[] = [
     // silently become the default install for everyone. Runs after gh-release: the tag +
     // GitHub Release are the durable, always-true record of what was cut, so a step that
     // can still fail for reasons outside this script's control (an npm outage, a stale
-    // local `npm login`) runs last, after everything durable already exists. If it does
-    // fail, `publish` itself is NOT safely re-runnable — `checkPublishPreconditions`
+    // local `npm login`) runs after the durable release record. The canary follows publish
+    // because it verifies the version that registry clients can actually install. If a later
+    // step fails, `publish` itself is NOT safely re-runnable — `checkPublishPreconditions`
     // refuses once the tag exists — see docs/dev-guide/10-releasing.md's Rollback section
     // for the manual one-line retry instead.
     name: "npm-publish",
     describe: (ctx) => `npm publish --workspace engine --tag ${npmDistTag(ctx)}`,
     run: (ctx, deps) => {
       deps.exec("npm", ["publish", "--workspace", "engine", "--tag", npmDistTag(ctx)]);
+    },
+  },
+  {
+    name: "dashboard-canary",
+    describe: (ctx) => `node scripts/dashboard-canary.ts ${ctx.version}`,
+    run: (ctx, deps) => {
+      deps.exec("node", ["scripts/dashboard-canary.ts", ctx.version]);
     },
   },
 ];

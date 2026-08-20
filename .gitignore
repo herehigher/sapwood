@@ -26,3 +26,4 @@ dashboard/shots-output/
 # #1032: prepack copies the repo-root example config in for `npm pack`/`npm publish` so it
 # ships inside the installed package — the repo root copy stays the single source of truth.
 engine/sapwood.config.example.yaml
+engine/dashboard-dist/

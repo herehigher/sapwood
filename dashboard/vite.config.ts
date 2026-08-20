@@ -25,8 +25,14 @@ export default defineConfig({
     // writes it as a small sidecar file once the build's other output is already on disk.
     {
       name: "sapwood-build-meta",
-      writeBundle() {
+      writeBundle(_options, bundle) {
         writeFileSync(join("dist", "build-meta.json"), JSON.stringify({ sha: BUILD_SHA, time: BUILD_TIME }));
+        const modules = Object.values(bundle)
+          .filter((output): output is Extract<typeof output, { type: "chunk" }> => output.type === "chunk")
+          .flatMap((chunk) => Object.keys(chunk.modules))
+          .filter((id) => id.includes("node_modules/"))
+          .sort();
+        writeFileSync(join("dist", "third-party-modules.json"), JSON.stringify([...new Set(modules)], null, 2));
       },
     },
   ],

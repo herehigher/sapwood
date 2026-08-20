@@ -16,13 +16,14 @@
 // engine caller) — bundling them in would duplicate code for no reason and risk exactly the kind
 // of CJS/ESM interop breakage a bundled copy of `yaml` hit during development (a dynamic
 // `require("process")` from its CJS build). Node builtins (`node:*`) are external by construction.
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { build } from "esbuild";
 
 const OUT_DIR = "dist-server";
+rmSync(OUT_DIR, { recursive: true, force: true });
 mkdirSync(OUT_DIR, { recursive: true });
 
-await build({
+const result = await build({
   entryPoints: ["start.ts"],
   bundle: true,
   platform: "node",
@@ -30,5 +31,8 @@ await build({
   target: "node24",
   outfile: `${OUT_DIR}/start.js`,
   external: ["yaml", "zod"],
+  legalComments: "inline",
+  metafile: true,
   logLevel: "info",
 });
+writeFileSync(`${OUT_DIR}/third-party-modules.json`, JSON.stringify(Object.keys(result.metafile.inputs).filter((id) => id.includes("node_modules/")).sort(), null, 2));
