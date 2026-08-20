@@ -115,7 +115,7 @@ export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
     {
       name: l.decomposed,
       color: "6e7781",
-      description: "Retired as a parent: sapwood is splitting it into smaller issues; kept open only to track them",
+      description: "sapwood retired this parent in favor of smaller issues; kept open for tracking only",
     },
     // #212: round-pool membership — applied by the aligning phase's pool-selection pass,
     // cleared by the engine at round close (never by a session — see removeRoundPoolLabel).
