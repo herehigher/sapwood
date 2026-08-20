@@ -994,12 +994,20 @@ const LLM_PING_PROMPT = "Respond with the single word 'pong' and nothing else.";
  *  set by actually CALLING this function rather than hand-copying flag names into a second list
  *  that can silently fall behind (sol-high gate② finding: a 5-flag hand list omitted even this
  *  same function's own `--model`/`--output-format`, and 19 more flags `claudeArgs` can emit).
- *  probeLlmPing itself calls this — one source, not two. */
-function llmPingArgv(probeModel: string, probeMaxBudgetUsd: number): string[] {
+ *  probeLlmPing itself calls this — one source, not two.
+ *
+ *  #1011: `permissionMode` follows the same optional-with-`REQUESTED_PERMISSION_MODE`-fallback
+ *  shape `ClaudeArgsOpts.permissionMode` uses — this is a `claude` session the engine spawns
+ *  same as any worker/peripheral session, so it requests the CONFIGURED `host.permissionMode`
+ *  too, never a hardcoded mode. Omitted -> the schema's own default ("auto"), so a caller/fixture
+ *  built before this parameter existed keeps its byte-identical argv. */
+function llmPingArgv(probeModel: string, probeMaxBudgetUsd: number, permissionMode?: string): string[] {
   return [
     "-p",
     "--model",
     probeModel,
+    "--permission-mode",
+    permissionMode ?? REQUESTED_PERMISSION_MODE,
     "--no-session-persistence",
     "--system-prompt",
     LLM_PING_SYSTEM_PROMPT,
@@ -1018,9 +1026,9 @@ function llmPingArgv(probeModel: string, probeMaxBudgetUsd: number): string[] {
  *  park machinery (TickDeps.probeLlmReachable) — a REAL minimal inference ping, verified
  *  working against claude CLI 2.1.209 in exactly this form (returns "pong", exit 0):
  *
- *      claude -p --model <probeModel> --no-session-persistence \
- *        --system-prompt "<LLM_PING_SYSTEM_PROMPT>" --strict-mcp-config --tools "" \
- *        --max-budget-usd <probeMaxBudgetUsd> --output-format text "<LLM_PING_PROMPT>"
+ *      claude -p --model <probeModel> --permission-mode <configured host.permissionMode> \
+ *        --no-session-persistence --system-prompt "<LLM_PING_SYSTEM_PROMPT>" --strict-mcp-config \
+ *        --tools "" --max-budget-usd <probeMaxBudgetUsd> --output-format text "<LLM_PING_PROMPT>"
  *
  *  Flag rationale: --no-session-persistence keeps probe runs off the disk (no session files);
  *  --system-prompt REPLACES the CLI's default full system prompt; --strict-mcp-config +
@@ -1052,8 +1060,18 @@ function llmPingArgv(probeModel: string, probeMaxBudgetUsd: number): string[] {
  *  upgrade (see docs/configuration.md).
  *
  *  Never throws — any spawn error, non-zero exit, non-"pong" output, or a hang past
- *  `timeoutSec` (hard kill) resolves `{ ok: false, detail }`. */
-export function probeLlmPing(claudeBin: string, probeModel: string, probeMaxBudgetUsd: number, timeoutSec: number): Promise<LlmPingResult> {
+ *  `timeoutSec` (hard kill) resolves `{ ok: false, detail }`.
+ *
+ *  #1011: `permissionMode` — same optional-with-fallback shape as `llmPingArgv`'s own param
+ *  (see that function's doc) — threads the configured `host.permissionMode` through to argv;
+ *  cli.ts's two production driver call sites (tick + rounds) both pass it. */
+export function probeLlmPing(
+  claudeBin: string,
+  probeModel: string,
+  probeMaxBudgetUsd: number,
+  timeoutSec: number,
+  permissionMode?: string,
+): Promise<LlmPingResult> {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (r: LlmPingResult): void => {
@@ -1064,7 +1082,7 @@ export function probeLlmPing(claudeBin: string, probeModel: string, probeMaxBudg
     const firstLine = (s: string): string => s.trim().split("\n")[0]?.trim() ?? "";
     let child: ChildProcess;
     try {
-      child = spawn(claudeBin, llmPingArgv(probeModel, probeMaxBudgetUsd), { stdio: ["ignore", "pipe", "pipe"] });
+      child = spawn(claudeBin, llmPingArgv(probeModel, probeMaxBudgetUsd, permissionMode), { stdio: ["ignore", "pipe", "pipe"] });
     } catch (e) {
       finish({ ok: false, detail: `ping spawn failed: ${e instanceof Error ? e.message : String(e)}` });
       return;

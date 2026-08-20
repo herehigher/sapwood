@@ -2969,6 +2969,9 @@ async function runTickEngine(
         cfg.envFailure.probeModel,
         cfg.envFailure.probeMaxBudgetUsd,
         cfg.envFailure.probeTimeoutSec,
+        // #1011: the ping is a claude session the engine spawns same as any other — it requests
+        // the CONFIGURED host.permissionMode too, never a hardcoded mode.
+        cfg.host.permissionMode,
       );
     const result = await runDriver({
       forge,
@@ -3215,6 +3218,9 @@ async function runRoundsEngine(
         cfg.envFailure.probeModel,
         cfg.envFailure.probeMaxBudgetUsd,
         cfg.envFailure.probeTimeoutSec,
+        // #1011: the ping is a claude session the engine spawns same as any other — it requests
+        // the CONFIGURED host.permissionMode too, never a hardcoded mode.
+        cfg.host.permissionMode,
       );
     const result = await runRounds({
       forge,

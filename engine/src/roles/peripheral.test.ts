@@ -1192,6 +1192,44 @@ test("#1010 AC3: a peripheral session's init line reporting a DIFFERENT effectiv
   }
 });
 
+// #1011 (mutation-unkillable otherwise, Codex sol review of PR #1017): the AC3 test above runs
+// with the DEFAULT `auto` config, where the configured value happens to equal
+// REQUESTED_PERMISSION_MODE — so a regression reverting recordPermissionModeMismatch's
+// comparison back to the bare constant would still pass it. This pins a NON-`auto` configured
+// mode, proving the comparison reads `cfg.host.permissionMode`, not the constant.
+test("#1010/#1011 AC3: configured host.permissionMode 'dontAsk' — a MATCHING effective mode emits no event, a DIFFERENT one emits one whose requested field is the CONFIGURED mode", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-role-"));
+  try {
+    const rcfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, host: { permissionMode: "dontAsk" } });
+
+    const matchLine = JSON.stringify({ type: "system", subtype: "init", model: "claude-stub", permissionMode: "dontAsk" });
+    const matchBin = mkStub(dir, `#!/usr/bin/env bash\necho '${matchLine}'\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`);
+    const matchEvents: Array<{ kind: string; payload: unknown }> = [];
+    const matchRunner = mkRunner(dir, matchBin, {
+      cfg: rcfg,
+      state: { appendEvent: (kind: string, payload: unknown) => matchEvents.push({ kind, payload }), maxEventIdForRoleSession: () => 0 },
+    });
+    await matchRunner.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    assert.equal(matchEvents.filter((e) => e.kind === "permission-mode-mismatch").length, 0);
+
+    const mismatchLine = JSON.stringify({ type: "system", subtype: "init", model: "claude-stub", permissionMode: "auto" });
+    const mismatchBin = mkStub(dir, `#!/usr/bin/env bash\necho '${mismatchLine}'\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`);
+    const mismatchEvents: Array<{ kind: string; payload: unknown }> = [];
+    const mismatchRunner = mkRunner(dir, mismatchBin, {
+      cfg: rcfg,
+      state: { appendEvent: (kind: string, payload: unknown) => mismatchEvents.push({ kind, payload }), maxEventIdForRoleSession: () => 0 },
+    });
+    await mismatchRunner.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
+    const mismatches = mismatchEvents.filter((e) => e.kind === "permission-mode-mismatch");
+    assert.equal(mismatches.length, 1);
+    const payload = mismatches[0]!.payload as { requested: string; effective: string };
+    assert.equal(payload.requested, "dontAsk");
+    assert.equal(payload.effective, "auto");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("PLAN_DRAFTER_DISALLOWED_TOOLS (#235 PR-B): now byte-identical to the base deny list — kept as its OWN named export purely for call-site documentation clarity, a regression trip-wire in its own right", () => {
   assert.equal(PLAN_DRAFTER_DISALLOWED_TOOLS, ROLE_DISALLOWED_TOOLS);
   // Before #235 PR-B this carried EXTRA `Bash(gh issue edit *--add-label/--remove-label*)`

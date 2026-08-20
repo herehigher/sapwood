@@ -1639,7 +1639,7 @@ test("probeLlmPing (#578): output still in flight when the process exits is NOT 
   }
 });
 
-test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no-session-persistence, --system-prompt, --strict-mcp-config, --tools '', --max-budget-usd, --output-format text, prompt (and NO --max-tokens, which the CLI rejects)", async () => {
+test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --permission-mode (default 'auto' when omitted), --no-session-persistence, --system-prompt, --strict-mcp-config, --tools '', --max-budget-usd, --output-format text, prompt (and NO --max-tokens, which the CLI rejects)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
   const argsFile = join(dir, "args.txt");
   try {
@@ -1652,6 +1652,8 @@ test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no
       "-p",
       "--model",
       "my-cheap-model",
+      "--permission-mode",
+      "auto",
       "--no-session-persistence",
       "--system-prompt",
       "You are a heartbeat responder. Only output the requested word.",
@@ -1675,6 +1677,21 @@ test("probeLlmPing: invoked with exactly the verified argv — -p, --model, --no
       if (!token.startsWith("--")) continue;
       assert.ok(ENGINE_CLAUDE_LONG_FLAGS.includes(token), `ENGINE_CLAUDE_LONG_FLAGS must name "${token}", sent by this real invocation`);
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeLlmPing (#1011): a configured non-'auto' host.permissionMode reaches the ping's own --permission-mode flag", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-probe-"));
+  const argsFile = join(dir, "args.txt");
+  try {
+    const bin = mkStub(dir, `#!/usr/bin/env bash\nprintf '%s\\0' "$@" > "${argsFile}"\necho pong\nexit 0\n`);
+    assert.deepEqual(await probeLlmPing(bin, "haiku", 0.05, 30, "bypassPermissions"), { ok: true });
+    const argv = readFileSync(argsFile, "utf8").split("\0").slice(0, -1);
+    const modeIdx = argv.indexOf("--permission-mode");
+    assert.ok(modeIdx >= 0);
+    assert.equal(argv[modeIdx + 1], "bypassPermissions");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1923,6 +1940,77 @@ test("#1010 wiring: an init line reporting the SAME (requested) permission mode 
     const { name } = await s.dispatch({ number: 1011, title: "mode match", labels: [] });
     await waitForFile(join(dir, `${name}.done.json`));
     assert.deepEqual(state.eventsSince("1970-01-01T00:00:00.000Z", ["permission-mode-mismatch"]), []);
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    state?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #1011 (mutation-unkillable otherwise, Codex sol review of PR #1017): every test above runs
+// with the DEFAULT `auto` config, where the configured value happens to equal
+// REQUESTED_PERMISSION_MODE — so a regression reverting recordPermissionModeMismatch's
+// comparison back to the bare constant would still pass every test above. These two pin a
+// NON-`auto` configured mode, proving the comparison reads `cfg.host.permissionMode`, not the
+// constant.
+test("#1010/#1011 wiring: configured host.permissionMode 'dontAsk' with a MATCHING effective mode emits no event", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let state: State | undefined;
+  let s: WorkerSupervisor | undefined;
+  try {
+    const initLine = JSON.stringify({ type: "system", subtype: "init", model: "claude-stub", permissionMode: "dontAsk" });
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${initLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
+    state = new State(join(dir, "state.sqlite"));
+    const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, host: { permissionMode: "dontAsk" } });
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg: scfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      state,
+    });
+    const { name } = await s.dispatch({ number: 1013, title: "configured dontAsk, effective dontAsk", labels: [] });
+    await waitForFile(join(dir, `${name}.done.json`));
+    assert.deepEqual(state.eventsSince("1970-01-01T00:00:00.000Z", ["permission-mode-mismatch"]), []);
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    state?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#1010/#1011 wiring: configured host.permissionMode 'dontAsk' with a DIFFERENT effective mode emits one event whose requested field is the CONFIGURED mode, not the bare 'auto' constant", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let state: State | undefined;
+  let s: WorkerSupervisor | undefined;
+  try {
+    const initLine = JSON.stringify({ type: "system", subtype: "init", model: "claude-stub", permissionMode: "auto" });
+    const bin = mkStub(dir, `#!/usr/bin/env bash\necho '${initLine}'\necho '{"type":"result","total_cost_usd":0.0001}'\nexit 0\n`);
+    state = new State(join(dir, "state.sqlite"));
+    const scfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, host: { permissionMode: "dontAsk" } });
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg: scfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "test prompt",
+      heartbeatMs: 50,
+      guardHookPath: mkHook(dir),
+      state,
+    });
+    const { name, sessionId } = await s.dispatch({ number: 1014, title: "configured dontAsk, effective auto", labels: [] });
+    await waitForFile(join(dir, `${name}.done.json`));
+    assert.deepEqual(state.eventsSince("1970-01-01T00:00:00.000Z", ["permission-mode-mismatch"]), [
+      {
+        kind: "permission-mode-mismatch",
+        payload: { worker: name, issue: 1014, session_id: sessionId, requested: "dontAsk", effective: "auto" },
+      },
+    ]);
   } finally {
     killAnyRunningLanes(s);
     s?.dispose();
