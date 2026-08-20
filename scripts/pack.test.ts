@@ -1,61 +1,75 @@
 // pack.test.ts (#1032): proves the engine is packed from a clean checkout, then installed as the
 // bare `sapwood` package into a temporary global prefix.
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { bundledDashboardDependencies } from "../engine/scripts/generate-third-party-notices.ts";
 import { availableDashboardPort, runDashboardCanary } from "./dashboard-canary.ts";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+const EXPECTED_BUNDLED_NOTICES = [
+  ["@floating-ui/core", "Copyright (c) 2021-present Floating UI contributors"],
+  ["@floating-ui/dom", "Copyright (c) 2021-present Floating UI contributors"],
+  ["@floating-ui/react-dom", "Copyright (c) 2021-present Floating UI contributors"],
+  ["@floating-ui/utils", "Copyright (c) 2021-present Floating UI contributors"],
+  ["@fontsource-variable/jetbrains-mono", "Copyright 2020 The JetBrains Mono Project Authors"],
+  ["@radix-ui/primitive", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-arrow", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-compose-refs", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-context", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-dismissable-layer", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-focus-guards", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-focus-scope", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-id", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-popover", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-popper", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-portal", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-presence", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-primitive", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-slot", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-tooltip", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-use-callback-ref", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-use-controllable-state", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-use-effect-event", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-use-layout-effect", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-use-size", "Copyright (c) 2022 WorkOS"],
+  ["@radix-ui/react-visually-hidden", "Copyright (c) 2022 WorkOS"],
+  ["@tanstack/query-core", "Copyright (c) 2021-present Tanner Linsley"],
+  ["@tanstack/react-query", "Copyright (c) 2021-present Tanner Linsley"],
+  ["animejs", "Copyright (c) 2025 Julian Garnier"],
+  ["aria-hidden", "Copyright (c) 2017 Anton Korzunov"],
+  ["get-nonce", "Copyright (c) 2020 Anton Korzunov"],
+  ["lucide-react", "Copyright (c) 2026 Lucide Icons and Contributors"],
+  ["react", "Copyright (c) Meta Platforms, Inc. and affiliates."],
+  ["react-dom", "Copyright (c) Meta Platforms, Inc. and affiliates."],
+  ["react-remove-scroll", "Copyright (c) 2017 Anton Korzunov"],
+  ["react-remove-scroll-bar", "Copyright (c) Anton Korzunov <thekashey@gmail.com>"],
+  ["react-style-singleton", "Copyright (c) 2017 Anton Korzunov"],
+  ["scheduler", "Copyright (c) Meta Platforms, Inc. and affiliates."],
+  ["tslib", "Copyright (c) Microsoft Corporation."],
+  ["use-callback-ref", "Copyright (c) 2017 Anton Korzunov"],
+  ["use-sidecar", "Copyright (c) 2017 Anton Korzunov"],
+] as const;
 
 async function assertCleanWorkspaceDashboardLaunch(checkoutDir: string): Promise<void> {
   const cwd = mkdtempSync(join(tmpdir(), "sapwood-clean-dashboard-cwd-"));
   const dbPath = join(cwd, "data", "sapwood.sqlite");
   const port = await availableDashboardPort();
-  const child = spawn(
-    process.execPath,
-    [join(checkoutDir, "dashboard", "dist-server", "start.js"), "--db-path", dbPath, "--port", String(port)],
-    {
-      cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  let output = "";
-  child.stdout.on("data", (chunk: Buffer) => (output += chunk.toString("utf8")));
-  child.stderr.on("data", (chunk: Buffer) => (output += chunk.toString("utf8")));
   try {
-    const actualPort = await new Promise<number>((resolvePromise, reject) => {
-      const timer = setTimeout(() => reject(new Error(`clean workspace dashboard did not start:\n${output}`)), 30_000);
-      const inspect = () => {
-        const match = /\{"ok":true,"port":(\d+)\}/.exec(output);
-        if (match?.[1] !== undefined) {
-          clearTimeout(timer);
-          resolvePromise(Number(match[1]));
-        }
-      };
-      child.stdout.on("data", inspect);
-      child.stderr.on("data", inspect);
-      child.once("error", (error) => {
-        clearTimeout(timer);
-        reject(error);
-      });
-      child.once("exit", (code) => {
-        clearTimeout(timer);
-        reject(new Error(`clean workspace dashboard exited before readiness (code ${code}):\n${output}`));
-      });
-      inspect();
+    const canary = await runDashboardCanary({
+      command: process.execPath,
+      args: [join(checkoutDir, "dashboard", "dist-server", "start.js"), "--db-path", dbPath, "--port", String(port)],
+      cwd,
+      timeoutMs: 30_000,
+      readinessPattern: /\{"ok":true,"port":(\d+)\}/,
+      expectedRepoHeadSha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: checkoutDir, encoding: "utf8" }).trim(),
     });
-    assert.equal(actualPort, port);
-    assert.equal((await fetch(`http://127.0.0.1:${port}/api/events`)).status, 200);
+    assert.equal(canary.origin, `http://127.0.0.1:${port}`);
   } finally {
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM");
-      await new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise()));
-    }
     rmSync(cwd, { recursive: true, force: true });
   }
 }
@@ -147,15 +161,15 @@ test("packed engine tarball is fresh, map-free, and runnable from a clean checko
     }
     const notices = execFileSync("tar", ["-xOzf", tarballPath, "package/THIRD_PARTY_NOTICES"], { encoding: "utf8", timeout: 15_000 });
     assert.match(notices, /Vite's optimized SPA output does not retain dependency @license banners/);
-    // Rebuild only to recover the two bundles' input metadata. The staged package has already
-    // been created above; this asserts the notice CONTENT against every package Vite/esbuild
-    // actually bundled, not merely that a notice file happened to be included.
-    execFileSync("npm", ["run", "build", "--workspace", "dashboard"], { cwd: checkoutDir, env: npmEnv, stdio: "pipe", timeout: 180_000 });
-    for (const dependency of bundledDashboardDependencies(checkoutDir)) {
-      assert.ok(notices.includes(`## ${dependency.name}@${dependency.version}`), `notice omits bundled ${dependency.name}`);
-      for (const copyrightLine of dependency.copyrightLines) {
-        assert.ok(notices.includes(copyrightLine), `notice omits ${dependency.name}'s copyright line: ${copyrightLine}`);
-      }
+    // This independent literal inventory must be updated deliberately when Vite/esbuild's graph
+    // changes. Reading the generator's own dependency discovery here would make a deleted package
+    // notice look correct by deleting its expectation too.
+    for (const [packageName, copyright] of EXPECTED_BUNDLED_NOTICES) {
+      assert.ok(notices.includes(`## ${packageName}@`), `notice omits bundled ${packageName}`);
+      assert.ok(notices.includes(copyright), `notice omits ${packageName}'s copyright holder`);
+    }
+    for (const requiredFontText of ["JetBrains Mono Variable", "Fraunces", "SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007"]) {
+      assert.ok(notices.includes(requiredFontText), `notice omits required font attribution: ${requiredFontText}`);
     }
     assert.equal(
       [...packedFiles].some((path) => path.endsWith(".map")),

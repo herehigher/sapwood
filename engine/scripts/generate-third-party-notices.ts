@@ -58,9 +58,23 @@ function bundledModuleIds(repoRoot: string): string[] {
   return [...modules].sort();
 }
 
+/** Every legal file published with a package, name-sorted and content-deduplicated. */
+export function packageLegalTexts(packageRoot: string): string[] {
+  const names = readdirSync(packageRoot)
+    .filter((entry) => /^(licen[cs]e|copying|notice)(\.|$)/i.test(entry))
+    .sort();
+  return [
+    ...new Set(
+      names
+        .map((name) => readFileSync(join(packageRoot, name), "utf8").replaceAll("\r\n", "\n").trim())
+        .filter((text) => text.length > 0),
+    ),
+  ];
+}
+
 function packageLicenseText(packageRoot: string, manifest: { name: string; license?: unknown; author?: unknown }): string {
-  const name = readdirSync(packageRoot).find((entry) => /^(licen[cs]e|copying|notice)(\.|$)/i.test(entry));
-  if (name !== undefined) return readFileSync(join(packageRoot, name), "utf8").replaceAll("\r\n", "\n").trim();
+  const legalTexts = packageLegalTexts(packageRoot);
+  if (legalTexts.length > 0) return legalTexts.join("\n\n");
   // A few published packages omit their licence file despite declaring an MIT licence. Preserve
   // their published author attribution and the complete canonical MIT text rather than silently
   // omitting an actually-bundled package. Anything less explicit fails the packaging build.

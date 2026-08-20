@@ -10,6 +10,10 @@ export interface DashboardCanaryOptions {
   cwd: string;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
+  /** Captures the loopback origin from readiness output; defaults to the CLI's human-facing line. */
+  readinessPattern?: RegExp;
+  /** Defaults to null for an installed package; a contributor build names its checkout's HEAD. */
+  expectedRepoHeadSha?: string | null;
 }
 
 export interface DashboardCanaryResult {
@@ -51,6 +55,8 @@ function waitForExit(child: ReturnType<typeof spawn>, timeoutMs: number): Promis
  * both the SPA and API, then reap the exact child process. */
 export async function runDashboardCanary(opts: DashboardCanaryOptions): Promise<DashboardCanaryResult> {
   const timeoutMs = opts.timeoutMs ?? 30_000;
+  const readinessPattern = opts.readinessPattern ?? /serving at (http:\/\/127\.0\.0\.1:\d+)/;
+  const expectedRepoHeadSha = opts.expectedRepoHeadSha ?? null;
   const child = spawn(opts.command, opts.args, { cwd: opts.cwd, env: opts.env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   const append = (chunk: Buffer) => {
@@ -63,7 +69,7 @@ export async function runDashboardCanary(opts: DashboardCanaryOptions): Promise<
     const origin = await new Promise<string>((resolvePromise, reject) => {
       const timer = setTimeout(() => reject(new Error(`dashboard canary timed out waiting for readiness:\n${output}`)), timeoutMs);
       const check = () => {
-        const match = /serving at (http:\/\/127\.0\.0\.1:\d+)/.exec(output);
+        const match = readinessPattern.exec(output);
         if (match?.[1] !== undefined) {
           clearTimeout(timer);
           resolvePromise(match[1]);
@@ -89,7 +95,7 @@ export async function runDashboardCanary(opts: DashboardCanaryOptions): Promise<
     if (!page.ok) throw new Error(`dashboard canary GET / returned ${page.status}`);
     if (!state.ok) throw new Error(`dashboard canary GET /api/loop/state returned ${state.status}`);
     const body = (await state.json()) as { build?: { repoHeadSha?: unknown } };
-    if (body.build?.repoHeadSha !== null)
+    if (body.build?.repoHeadSha !== expectedRepoHeadSha)
       throw new Error(`dashboard canary found an unrelated build identity: ${String(body.build?.repoHeadSha)}`);
     return { origin, output };
   } finally {
