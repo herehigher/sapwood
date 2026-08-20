@@ -309,6 +309,45 @@ test("#658 round 2 (A): a taxonomy label added to escalation.humanLabels renders
   assert.match(section, /\*\*Dispatch hold:\*\* member of `escalation\.humanLabels`/);
 });
 
+// ── #1049: dev-ref / user-perspective regression guard ───────────────────────────────────────
+//
+// `TAXONOMY_SPECS`' descriptions ship verbatim as real GitHub label descriptions (via
+// `createMissingLabels`/`describeLabelDrift`), and `LABEL_SEMANTICS`' writer/remover/gates/
+// distinguishFrom prose — PLUS the surrounding header/preamble text `renderLabelsSkillBody`
+// builds around it — is rendered into the `sapwood-labels` skill every role session reads.
+// Neither is a place for an ephemeral sapwood-dev issue number (`#874`, `#94`, ...): a user
+// reading their repo's label list, or a role session reading the skill, has no way to resolve
+// one. A per-field check over `LABEL_SEMANTICS` alone would miss a ref planted in the header
+// preamble (a live example: `renderLabelsSkillBody`'s "unconditional exclusion set" paragraph
+// once carried a bare `(#874)`) — so the load-bearing assertion below scans the FULL rendered
+// skill body, not just the registry's own fields.
+const DEV_REF = /#\d{2,4}\b/;
+
+test("#1049: the FULL rendered sapwood-labels skill body carries no sapwood-dev #NNN reference", () => {
+  const body = renderLabelsSkillBody(resolvedLabelsForSkill("sapwood:"));
+  assert.doesNotMatch(body, DEV_REF, "renderLabelsSkillBody output carries a dev reference");
+});
+
+test("#1049: no sapwood-dev #NNN reference in TAXONOMY_SPECS descriptions or LABEL_SEMANTICS prose (per-field, for a precise failure message)", () => {
+  for (const spec of TAXONOMY_SPECS) {
+    assert.doesNotMatch(spec.description, DEV_REF, `TAXONOMY_SPECS["${spec.name}"].description carries a dev reference`);
+  }
+  for (const [key, entry] of Object.entries(LABEL_SEMANTICS)) {
+    assert.doesNotMatch(entry.writer, DEV_REF, `LABEL_SEMANTICS["${key}"].writer carries a dev reference`);
+    assert.doesNotMatch(entry.remover, DEV_REF, `LABEL_SEMANTICS["${key}"].remover carries a dev reference`);
+    assert.doesNotMatch(entry.gates, DEV_REF, `LABEL_SEMANTICS["${key}"].gates carries a dev reference`);
+    if ("distinguishFrom" in entry && entry.distinguishFrom) {
+      assert.doesNotMatch(entry.distinguishFrom, DEV_REF, `LABEL_SEMANTICS["${key}"].distinguishFrom carries a dev reference`);
+    }
+  }
+});
+
+test("#1049: every TAXONOMY_SPECS description fits GitHub's 100-char label-description limit", () => {
+  for (const spec of TAXONOMY_SPECS) {
+    assert.ok(spec.description.length <= 100, `TAXONOMY_SPECS["${spec.name}"].description is ${spec.description.length} chars`);
+  }
+});
+
 test("#658 round 2 (A): a bare substring entry ('sapwood') in escalation.humanLabels renders Merge veto MEMBER lines broadly (substring match) but never a Dispatch hold MEMBER line anywhere (exact match never hits a bare substring) — pinning the sane presentation for this footgun entry", () => {
   const cfg: ResolvedLabelsForSkill = {
     labels: { ...workflowLabelDefaults("sapwood:"), prefix: "sapwood:" },
