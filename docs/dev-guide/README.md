@@ -53,6 +53,7 @@ skim it if a term below reads opaque.
 | [08 — Change-risk map](08-change-risk.md) | Human-merge-only surface, high-risk seams, rules that must survive any refactor |
 | [09 — Plugin, commands & prompts](09-plugin-commands-prompts.md) | Plugin packaging, slash commands, role prompt assets |
 | [10 — Releasing](10-releasing.md) | Versioning policy, the four-manifest lockstep rule, and the `scripts/release.ts` runbook |
+| [11 — Writing for audiences](11-writing-for-audiences.md) | The three writing audiences, the `#NNN` misresolution hazard, the edit rule, exemptions, and enforcement |
 
 ## Reading paths by task
 
