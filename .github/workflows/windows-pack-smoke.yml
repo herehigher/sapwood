@@ -1,9 +1,10 @@
 name: Windows package smoke
 
+# Dispatched by `scripts/release.ts publish` as its first step, against origin/main, and waited
+# on: a red run stops the release before the tag exists. Not a per-PR check — the platform
+# surface it proves (npm .cmd shim, `cmd /c start`) does not move with ordinary code changes.
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read

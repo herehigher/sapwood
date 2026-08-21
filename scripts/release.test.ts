@@ -28,7 +28,9 @@ import {
   runCatalogPromote,
   runPrepare,
   runPublish,
+  runWindowsSmoke,
   validateReleaseVersion,
+  WINDOWS_SMOKE_WORKFLOW,
   writeManifestVersion,
 } from "./release.ts";
 
@@ -421,6 +423,7 @@ function fakeExec(opts: { head: string; origin: string; dirty: string; tagOut: s
       throw new FakeExecError(2);
     }
     if (file === "git" && (args[0] === "tag" || args[0] === "push")) return "";
+    if (file === "gh" && args[0] === "run" && args[1] === "list") return JSON.stringify([{ databaseId: 7, headSha: opts.head }]);
     if (file === "gh") return "";
     if (file === "npm" && args[0] === "publish") return "";
     if (file === "node" && args[0] === "scripts/dashboard-canary.ts") return "";
@@ -703,6 +706,39 @@ test("catalog promotion: refuses a nonallowlisted file in the assembled catalog 
   }
 });
 
+test("the Windows smoke gates publish: first step, before the tag exists", () => {
+  const names = PUBLISH_STEPS.map((step) => step.name);
+  assert.equal(names[0], "windows-smoke");
+  assert.ok(names.indexOf("windows-smoke") < names.indexOf("tag"));
+});
+
+test("runWindowsSmoke: dispatches, finds the run for HEAD, watches it with --exit-status", () => {
+  const calls: string[][] = [];
+  let listed = 0;
+  const exec: Exec = (file, args) => {
+    calls.push([file, ...args]);
+    if (file === "git") return "abc123\n";
+    if (args[0] === "run" && args[1] === "list") {
+      // First poll: only a stale run for another sha; the fresh one shows up on the second.
+      return listed++ === 0
+        ? JSON.stringify([{ databaseId: 1, headSha: "old" }])
+        : JSON.stringify([
+            { databaseId: 2, headSha: "abc123" },
+            { databaseId: 1, headSha: "old" },
+          ]);
+    }
+    if (args[0] === "run" && args[1] === "watch" && args[2] !== "2") throw new Error(`watched the wrong run: ${args[2]}`);
+    return "";
+  };
+  runWindowsSmoke({ repoRoot: "/unused", exec });
+  assert.deepEqual(calls[1], ["gh", "workflow", "run", WINDOWS_SMOKE_WORKFLOW, "--ref", "main"]);
+  assert.deepEqual(calls.at(-1), ["gh", "run", "watch", "2", "--exit-status"]);
+  assert.throws(
+    () => runWindowsSmoke({ repoRoot: "/unused", exec: (f, a) => (f === "git" ? "abc123" : a[1] === "list" ? "[]" : "") }, 1),
+    /no windows-pack-smoke.yml run/,
+  );
+});
+
 test("catalog promotion steps follow npm publish and the dashboard canary", () => {
   const names = PUBLISH_STEPS.map((step) => step.name);
   assert.ok(names.indexOf("catalog-promote") > names.indexOf("npm-publish"));
@@ -979,7 +1015,7 @@ test("runPublish (real run, not dry-run): exact tag/push/gh-release argv, --prer
     const pushCall = calls.find((c) => c.file === "git" && c.args[0] === "push");
     assert.deepEqual(pushCall?.args, ["push", "origin", `v${version}`]);
 
-    const ghCall = calls.find((c) => c.file === "gh");
+    const ghCall = calls.find((c) => c.file === "gh" && c.args[0] === "release");
     assert.equal(ghCall?.args[0], "release");
     assert.equal(ghCall?.args[1], "create");
     assert.equal(ghCall?.args[2], `v${version}`);
@@ -1011,7 +1047,7 @@ test("runPublish (real run): --prerelease absent from the gh-release argv for a 
     const deps: Deps = { repoRoot: dir, exec };
     const r = runPublish(deps, { dryRun: false });
     assert.equal(r.code, 0);
-    const ghCall = calls.find((c) => c.file === "gh");
+    const ghCall = calls.find((c) => c.file === "gh" && c.args[0] === "release");
     assert.ok(!ghCall?.args.includes("--prerelease"));
     const npmCall = calls.find((c) => c.file === "npm");
     assert.deepEqual(npmCall?.args, ["publish", "--workspace", "engine", "--tag", "latest"]);

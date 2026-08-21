@@ -70,7 +70,9 @@ ever pushed.
 
 **Delivery channels.** A release ships as (1) a git tag + GitHub Release, (2) the bare
 `sapwood` npm package (including its dashboard), and (3) the thin Claude Code shell promoted
-into the separate catalog repository. The promotion order is npm publish, dashboard canary,
+into the separate catalog repository. `publish` first dispatches the Windows pack/install/dashboard
+smoke workflow against `origin/main` and waits for it — a red run stops the release before the
+tag exists. Then the promotion order is npm publish, dashboard canary,
 exact `npm view sapwood@<version> version` verification, then catalog promotion. The promotion
 copies only `.claude-plugin/`, `commands/`, and `bin/` from the release commit, stamps its
 manifest with the version, records the source commit in the catalog promotion commit message,

@@ -1,4 +1,4 @@
-// Windows CI packs the published surface first: using the installed .cmd shim here, rather than
+// The release-gated Windows workflow packs the published surface first: using the installed .cmd shim here, rather than
 // an engine source path, catches packaging and npm-global-install regressions in the same shape
 // an end user gets.
 import { execFileSync } from "node:child_process";
