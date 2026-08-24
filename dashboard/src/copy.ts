@@ -775,6 +775,26 @@ export const COPY: Partial<Record<EventKind, CopyEntry>> = {
     ],
     attention: true,
   },
+  "comments-withheld": {
+    sentence: (p) => {
+      const target = typeof p.target === "string" ? p.target : "";
+      const [source, rawNumber] = target.split(":", 2);
+      const number = Number(rawNumber);
+      const subject: SentencePart[] =
+        Number.isInteger(number) && number > 0
+          ? source === "issue-comments"
+            ? ["Issue ", issueTok(number)]
+            : ["PR ", prTok(number)]
+          : ["the forge target"];
+      return [
+        typeof p.withheld === "number" ? String(p.withheld) : "Some",
+        " comment",
+        p.withheld === 1 ? " was" : "s were",
+        " withheld on ",
+        ...subject,
+      ];
+    },
+  },
 };
 
 /** The narrative kind list, derived from `COPY` itself rather than re-spelled — the same

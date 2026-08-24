@@ -201,6 +201,11 @@ export const RUN_EVENT_KINDS = defineKinds({
     meaning: "a paginated GitHub read hit its configured page ceiling and returned a truncated result.",
     actionability: "investigate",
   },
+  "comments-withheld": {
+    tags: [],
+    meaning: "a forge comment, review, or review-thread read withheld an aggregate count of authors outside the trusted provenance set.",
+    actionability: "investigate",
+  },
   "web-access-denied-by-operator-settings": {
     tags: [],
     meaning: "a role's WebFetch/WebSearch grant was denied at startup because it conflicts with the operator's own Claude Code settings.",

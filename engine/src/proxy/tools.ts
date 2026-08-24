@@ -258,7 +258,7 @@ export const TOOL_DEFINITIONS: { name: ToolName; description: string; inputSchem
   },
   {
     name: TOOL_PR_REVIEWS,
-    description: "Fetch every review on a pull request, verbatim (author, commit, state, body).",
+    description: "Fetch pull-request reviews; entries from untrusted authors are not returned.",
     inputSchema: {
       type: "object",
       properties: { pr: { type: "integer", minimum: 1 } },
@@ -268,7 +268,7 @@ export const TOOL_DEFINITIONS: { name: ToolName; description: string; inputSchem
   },
   {
     name: TOOL_PR_REVIEW_THREADS,
-    description: "Fetch a pull request's review threads and their comment bodies (optionally bounded to the last N threads).",
+    description: "Fetch pull-request review threads (optionally bounded to the last N); entries from untrusted authors are not returned.",
     inputSchema: {
       type: "object",
       properties: { pr: { type: "integer", minimum: 1 }, lastN: { type: "integer", minimum: 1 } },
@@ -288,8 +288,7 @@ export const TOOL_DEFINITIONS: { name: ToolName; description: string; inputSchem
   },
   {
     name: TOOL_PR_AUDIT_COMMENTS,
-    description:
-      "Fetch only sapwood engine-agent audit comments on a pull request, newest first and bounded to the last N, from a bounded top-level-comment scan.",
+    description: "Fetch sapwood engine-agent audit comments on a pull request; entries from untrusted authors are not returned.",
     inputSchema: {
       type: "object",
       properties: { pr: { type: "integer", minimum: 1 }, lastN: { type: "integer", minimum: 1 } },
@@ -410,6 +409,8 @@ function checkOverCap(tool: ToolName, args: unknown, caps: ProxyCaps): string | 
 export interface CommentsView {
   comments: PRComment[];
   total: number;
+  visibleTotal?: number;
+  withheld?: number;
   returned: number;
   complete: boolean;
   /** 1-based, inclusive index range of the OLDEST comments omitted (comments are kept
@@ -537,8 +538,11 @@ export interface PRReviewsResponse {
   pr: number;
   reviews: PRReviewItem[];
   total: number;
+  visibleTotal?: number;
+  withheld?: number;
   returned: number;
   complete: boolean;
+  pageCapped?: boolean;
 }
 
 /** #244: the pr_review_threads completeness contract — same shape/semantics as CommentsView
@@ -552,6 +556,8 @@ export interface PRReviewsResponse {
 export interface ThreadsView {
   threads: ReviewThreadItem[];
   total: number;
+  visibleTotal?: number;
+  withheld?: number;
   returned: number;
   complete: boolean;
   omittedRange?: { from: number; to: number };
@@ -639,8 +645,17 @@ export async function fetchPRDetailsResponse(forge: Pick<IForge, "getPRDetails">
 }
 
 export async function fetchPRReviewsResponse(forge: Pick<IForge, "getPRReviews">, pr: number, caps: ProxyCaps): Promise<PRReviewsResponse> {
-  const { reviews, total } = await forge.getPRReviews(pr, caps.maxReviewsPerCall);
-  return { pr, reviews, total, returned: reviews.length, complete: reviews.length >= total };
+  const { reviews, total, visibleTotal, withheld, pageCapped } = await forge.getPRReviews(pr, caps.maxReviewsPerCall);
+  return {
+    pr,
+    reviews,
+    total,
+    returned: reviews.length,
+    complete: reviews.length >= (visibleTotal ?? total) && !pageCapped,
+    ...(visibleTotal !== undefined ? { visibleTotal } : {}),
+    ...(withheld !== undefined ? { withheld } : {}),
+    ...(pageCapped !== undefined ? { pageCapped } : {}),
+  };
 }
 
 export async function fetchPRReviewThreadsResponse(
@@ -649,9 +664,14 @@ export async function fetchPRReviewThreadsResponse(
   lastN: number | undefined,
   caps: ProxyCaps,
 ): Promise<PRReviewThreadsResponse> {
-  const { threads: all, pageCapped } = await forge.getPRReviewThreads(pr, caps.maxCommentsPerThread);
+  const { threads: all, pageCapped, visibleTotal, withheld } = await forge.getPRReviewThreads(pr, caps.maxCommentsPerThread);
   const cap = lastN ?? caps.maxReviewThreadsPerCall;
-  return { pr, ...capThreads(all, cap, pageCapped) };
+  return {
+    pr,
+    ...capThreads(all, cap, pageCapped),
+    ...(visibleTotal !== undefined ? { visibleTotal } : {}),
+    ...(withheld !== undefined ? { withheld } : {}),
+  };
 }
 
 export async function fetchPRChecksResponse(forge: Pick<IForge, "getPRChecks">, pr: number, caps: ProxyCaps): Promise<PRChecksResponse> {
@@ -705,7 +725,12 @@ export async function fetchPRAuditCommentsResponse(
     .slice(-cap)
     .reverse()
     .map(({ comment, marker }) => ({ id: comment.id, createdAt: comment.createdAt, ...marker, body: comment.body }));
-  return { pr, comments, returned: comments.length, complete: page.total <= caps.maxAuditCommentScanWindow };
+  return {
+    pr,
+    comments,
+    returned: comments.length,
+    complete: page.comments.length >= (page.visibleTotal ?? page.total) && !page.pageCapped,
+  };
 }
 
 // Re-exported so mcp-server.ts/journal.ts never need their own import of RelatedRef just to

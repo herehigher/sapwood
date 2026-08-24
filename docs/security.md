@@ -1915,6 +1915,10 @@ human-vetted" is stronger than what the second family's mechanism actually deliv
   A derived path that points outside the repo (absolute, or `..`-escaping) is skipped rather than
   smuggled into the pattern list — it could never match a repo-relative changed-file path anyway.
 
+The forge-read provenance mechanism's own carriers, `engine/src/forge/forge.ts` and
+`engine/src/proxy/**`, are also in `escalation.instructionPaths`: an edit to either does not
+reach autonomous merge through this instruction-path channel.
+
 **The second family's protection is delayed by one round, not immediate — say so rather than
 overclaim.** Both the doctrine and the prompt are loaded by the ENGINE from its own
 config-resolved path at construction, never from the materialized tree under review. A PR editing
@@ -2497,9 +2501,8 @@ does that.
 A binding owner ruling recorded as an ISSUE
 COMMENT was once invisible to the worker, which reads only the issue BODY (`{{issue.body}}`,
 `worker.ts`) and faithfully implemented the stale body — 5 P1s resulted in one PR. That body-only boundary
-is correct and stays: the body is maintainer-writable, while comments become world-writable once
-the repo is public (comment PROVENANCE filtering is a separately-deferred v0.3.0 entrance
-criterion). What was missing is a check that the body is CURRENT relative to its
+is correct and stays: the body is maintainer-writable, while public comment entries outside the
+forge provenance filter are not returned. What was missing is a check that the body is CURRENT relative to its
 own comment thread before the engine spends on gate⓪ review or dispatch — adjudications parked in
 comments were a standing trap, closed here.
 
@@ -2817,16 +2820,15 @@ point in its history."
   **L1** is what actually closes this channel: it strips the forge credential and
   the `Bash(gh *)` grant together (`WORKER_ALLOWED_TOOLS_NO_GH`), so there is no credential
   left to read comments through even if a leg tried.
-- **The public/private threat-model split.** In a private repo, everyone who can comment is
-  a collaborator carrying roughly the trust sapwood already extends to the issue body —
-  comment trust ≈ body trust — which is part of why the cursor above can treat
-  "adjudicated" as a deterministic staleness check rather than a provenance check. Once a
-  repo goes public, comments become world-writable while the body stays maintainer-writable,
-  and the two are no longer comparable in trust. This package does not close that gap:
-  comment PROVENANCE filtering (distinguishing a maintainer's comment from an arbitrary
-  public commenter's) is deferred to the v0.3.0 go-public entrance criterion. Editing an
-  already-cursored comment is the separate, already-documented "v1
-  residual: edits are out of scope" case above — this note does not reopen or widen it.
+- **The public/private threat-model split.** In a private repo, comment provenance normally
+  follows repository membership. In a public repo, entries an author outside GitHub
+  `OWNER`/`MEMBER`/`COLLABORATOR`, the authenticated engine actor, or the existing reviewer-bot
+  allowlist posted are dropped at these five forge reads: issue comments, PR comments, reviews,
+  review threads (including nested comments), and review-thread tails. Nothing else in the engine
+  filters comment provenance. Missing author provenance fails the whole read; `CONTRIBUTOR`,
+  `NONE`, null, and unknown associations are dropped. The filter records only an aggregate
+  withheld count and does not write to GitHub. Editing an already-cursored comment remains the
+  separate, already-documented "v1 residual: edits are out of scope" case.
 - **`docs/security.md` itself, and the prompt files, both ride the instruction-path escalation.**
   Prompt edits
   (`engine/prompts/**`, the gate⓪ contract-vs-discussion veto duty) and any PR touching

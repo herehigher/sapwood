@@ -100,6 +100,8 @@ test("#292: escalation.instructionPaths has trust-chain defaults, is configurabl
     // #527: the reviewer's own prompt carrier. Inert for any target repo that isn't the engine's
     // own source tree; closes the carrier for a self-hosting deployment.
     "engine/prompts/**",
+    "engine/src/forge/forge.ts",
+    "engine/src/proxy/**",
     // #539: the mechanism's own carriers — the matcher/escalation implementation itself, and the
     // config file carrying the `escalation.*` schema block + these very defaults. A PR gutting
     // either would previously reach autonomous merge (#538 was the reachable, if benign, instance).

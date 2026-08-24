@@ -56,6 +56,7 @@ This is interpretation, not instruction: it tells a loop supervisor (or any sess
 - `base-ci-red-cleared` — **routine**: a NEWER base-ci-red-observed/cleared pair showed the default branch's CI green again; closes the standing episode.
 - `directive-applied` — **routine**: an operator directive file was read, substituted into this round's align/architect/triage prompts, and archived.
 - `forge-page-ceiling` — **investigate**: a paginated GitHub read hit its configured page ceiling and returned a truncated result.
+- `comments-withheld` — **investigate**: a forge comment, review, or review-thread read withheld an aggregate count of authors outside the trusted provenance set.
 - `web-access-denied-by-operator-settings` — **investigate**: a role's WebFetch/WebSearch grant was denied at startup because it conflicts with the operator's own Claude Code settings.
 - `user-settings-drift-detected` — **investigate**: the operator's Claude Code user settings changed since the engine last observed them (permission/hook drift the loop did not cause).
 - `fix-loop-unattached` — **investigate**: startup recorded that `prFixCap > 0` but the forge proxy is unavailable, so the fix loop cannot attach this run.

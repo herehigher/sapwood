@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import type { PRTopLevelComment } from "../forge/forge.js";
+import { filterTrustedAuthors, type PRTopLevelComment } from "../forge/forge.js";
 import { CLEAN_VERDICT_RE, REVIEWED_HEAD_OID_RE } from "../roles/reviewer.js";
 import {
   buildAuditComment,
@@ -180,6 +180,47 @@ test("#288 crash after post before receipt: restart discovers exact marker and r
   assert.deepEqual(result, { delivered: true });
   assert.equal(posts, 0);
   assert.equal(receipt, "IC_existing");
+});
+
+test("#943 audit discovery sees the engine audit under untrusted marker spam", async () => {
+  const engineComment: PRTopLevelComment = {
+    id: "engine-audit",
+    login: "sapwood-bot",
+    authorAssociation: "NONE",
+    createdAt: "2026-01-01T00:00:01Z",
+    body: buildAuditComment(wal, artifact),
+  };
+  const publicForgery: PRTopLevelComment = {
+    id: "public-forgery",
+    login: "outside",
+    authorAssociation: "NONE",
+    createdAt: "2026-01-01T00:00:02Z",
+    body: buildAuditComment(wal, artifact),
+  };
+  let posts = 0;
+  const result = await deliverEngineReviewAudit({
+    forge: {
+      getPRComments: async () => {
+        const filtered = filterTrustedAuthors([publicForgery, engineComment], "sapwood-bot");
+        return {
+          comments: filtered.entries,
+          total: filtered.visibleTotal,
+          visibleTotal: filtered.visibleTotal,
+          withheld: filtered.withheld,
+        };
+      },
+      addPRComment: async () => {
+        posts++;
+      },
+    },
+    pr: 7,
+    wal,
+    commentsCap: 20,
+    now: () => new Date("2026-01-01T00:00:03Z"),
+    recordReceipt: () => true,
+  });
+  assert.deepEqual(result, { delivered: true });
+  assert.equal(posts, 0);
 });
 
 test("#288 post or receipt-write failure never reports delivered", async () => {
