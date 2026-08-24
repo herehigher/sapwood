@@ -1021,7 +1021,7 @@ This is targeted governance containment, **not general Bash containment**. The d
 not prove an unrecognized command harmless, inspect arbitrary script bodies, confine filesystem
 access performed by a subprocess, or stop a permitted interpreter/package runner from opening
 a socket. In particular it does not contain data exfiltration; see
-[Worker network egress: accepted blind spot](#worker-network-egress-accepted-blind-spot).
+[Worker network egress: Bash-channel containment available as a hardening profile](#worker-network-egress-bash-channel-containment-available-as-a-hardening-profile).
 The lexical egress tripwire described there is post-hoc evidence only, not a missing enforcement
 layer that this denylist silently supplies.
 

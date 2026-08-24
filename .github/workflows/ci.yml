@@ -34,6 +34,7 @@ jobs:
       - run: npm --workspace engine run typecheck
       - run: npm --workspace dashboard run typecheck
       - run: npm run lint
+      - run: npm run check-links
       # Per-step `timeout` (GNU coreutils, from the runner's Linux Docker environment)
       # is not redundant with timeout-minutes: it fails the step RED with output naming
       # what wedged, where the job-level timeout cancels silently. `--kill-after`

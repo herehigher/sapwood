@@ -16,7 +16,8 @@
     "lint": "biome ci .",
     "test": "npm run -ws test && node --test scripts/*.test.ts",
     "build": "npm run -ws build",
-    "release": "node scripts/release.ts"
+    "release": "node scripts/release.ts",
+    "check-links": "python3 scripts/check-links.py --internal-only"
   },
   "license": "MIT",
   "devDependencies": {

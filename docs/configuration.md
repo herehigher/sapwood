@@ -234,7 +234,7 @@ The shipped `egressSuspectCommands` table deliberately omits `git`, `gh`, and pa
 managers: those are loop-owned or governed worker flows and would make poor default signals.
 This key tunes an audit tripwire only; it does not create a denylist or a lane hold. The
 security boundary and the tripwire's known blind spots are documented in
-[Security & trust model](security.md#worker-network-egress-accepted-blind-spot).
+[Security & trust model](security.md#worker-network-egress-bash-channel-containment-available-as-a-hardening-profile).
 
 **`worker.promptFile` template variables:** `{{issue.number}}`, `{{issue.title}}`,
 `{{issue.body}}`, `{{issue.labels}}`, `{{labels.verifyNa}}`. `{{issue.labels}}` renders
@@ -1080,8 +1080,8 @@ proxy mechanism's own scope.
 
 **The built-in `WebSearch`/`WebFetch` grant** — `architect`, `po-align`, and `po-triage`
 only, no other role. Ships **enabled by default**: the capability is read-only, carries no
-credential into any project system, is strictly weaker than the worker's own unrestricted Bash
-egress (see [`security.md`](security.md#worker-network-egress-accepted-blind-spot)), and every
+credential into any project system, is strictly weaker than the worker's own default-unrestricted
+Bash egress (see [`security.md`](security.md#worker-network-egress-bash-channel-containment-available-as-a-hardening-profile)), and every
 call is journalled through the same `egress-suspect` ledger event the worker's own tripwire
 uses (see [`security.md`](security.md#peripheral-network-egress-websearchwebfetch-detected-not-pinned)).
 The review family (`verification-plan-reviewer`, `verification-plan-drafter`, `verification-plan-reviewer-confirm`, and every gate②
