@@ -8,6 +8,7 @@
 
 import { createHash } from "node:crypto";
 import type { SapwoodConfig } from "../config/config.js";
+import { CODEX_REVIEWER_LOGINS, normalizeLogin } from "../roles/reviewer.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import { extractMarkdownSections } from "../util/markdown.js";
 import { sanitizeUpstreamError } from "../util/sanitize.js";
@@ -24,6 +25,35 @@ export const OPEN_ISSUES_LIMIT = 1000;
  *  cadence. ponytail: if a repo ever closes issues faster than the align cadence, raise this
  *  literal (or make it a config key) — nothing else in the design changes. */
 export const RECENTLY_CLOSED_ISSUES_LIMIT = 50;
+
+const TRUSTED_AUTHOR_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+/** The sole forge-read provenance rule for public comments, reviews, and review threads.
+ * GitHub owns the association classification; the two login exceptions are identities the
+ * engine itself already relies on. Missing provenance is a transport failure, never a trust
+ * decision. */
+export function filterTrustedAuthors<T extends { authorAssociation?: string | null; author?: string; login?: string }>(
+  entries: readonly T[],
+  authenticatedActor: string | null,
+): { entries: T[]; visibleTotal: number; withheld: number } {
+  const actor = authenticatedActor?.toLowerCase() ?? null;
+  const bots = new Set(CODEX_REVIEWER_LOGINS.map((login) => normalizeLogin(login).toLowerCase()));
+  const visible: T[] = [];
+  for (const entry of entries) {
+    const author = entry.author ?? entry.login;
+    if (typeof author !== "string" || author.trim() === "" || entry.authorAssociation === undefined) {
+      throw new Error("forge comment provenance is incomplete");
+    }
+    const login = author.toLowerCase();
+    if (
+      (typeof entry.authorAssociation === "string" && TRUSTED_AUTHOR_ASSOCIATIONS.has(entry.authorAssociation)) ||
+      (actor !== null && login === actor) ||
+      bots.has(normalizeLogin(login))
+    )
+      visible.push(entry);
+  }
+  return { entries: visible, visibleTotal: visible.length, withheld: entries.length - visible.length };
+}
 
 /** #237 finding 2: appended to EVERY issue comment GithubForge.addIssueComment posts (see that
  *  method's own doc comment) — the single, unconditional "this engine wrote this" stamp,
@@ -179,6 +209,7 @@ export interface PRReaction {
 /** One top-level PR conversation comment (`gh api .../issues/<pr>/comments`). */
 export interface PRComment {
   login: string;
+  authorAssociation?: string | null;
   createdAt: string; // ISO
   body: string;
   // #652: the REST numeric comment id (stringified), when the underlying read populated it —
@@ -189,6 +220,10 @@ export interface PRComment {
   id?: string;
 }
 
+/** A comment stream remains array-compatible for existing consumers while carrying the only
+ * safe observability metadata from provenance filtering. */
+export type PRCommentRead = PRComment[] & { visibleTotal?: number; withheld?: number };
+
 /** One bounded top-level PR conversation comment. Unlike PRComment (legacy issue-comment
  *  readers), this carries GitHub's opaque node id so #288 can persist a delivery receipt. */
 export interface PRTopLevelComment extends PRComment {
@@ -198,6 +233,8 @@ export interface PRTopLevelComment extends PRComment {
 export interface PRCommentsPage {
   comments: PRTopLevelComment[];
   total: number;
+  visibleTotal?: number;
+  withheld?: number;
 }
 
 /** One commit (`gh api repos/<owner>/<repo>/commits?since=...`) — #111 PR-A's git-log-since
@@ -214,6 +251,7 @@ export interface CommitInfo {
 /** One review on the PR (`gh pr view --json reviews`). */
 export interface PRReview {
   author: string;
+  authorAssociation?: string | null;
   commitOid: string; // the head this review was submitted against
   state: string; // APPROVED | COMMENTED | CHANGES_REQUESTED | DISMISSED | PENDING
   /** ISO timestamp the review was SUBMITTED at (gh's `submittedAt`) — #147 P1: the merge
@@ -450,7 +488,7 @@ export interface IForge {
    *  PRs are issues under the hood). The plan_review orchestrator reads the verification-plan-reviewer's
    *  most recent comment as the verification-plan-drafter's brief (#77 Amendment 2). Newest-last (gh's
    *  default chronological order). */
-  getIssueComments(issue: number): Promise<PRComment[]>;
+  getIssueComments(issue: number): Promise<PRCommentRead>;
   /** #652: the authenticated forge actor's login — the ONLY identity signal the comment-
    *  adjudication cursor's engine-comment exemption may trust (paired with the central
    *  `ENGINE_COMMENT_MARKER`; marker AND actor, never either alone, design adjudicated
@@ -659,6 +697,7 @@ export interface PRDetails {
  *  the raw-data proxy surface uncoupled from the gate-verdict type it must never influence. */
 export interface PRReviewItem {
   author: string;
+  authorAssociation?: string | null;
   commitOid: string;
   state: string;
   body: string;
@@ -671,11 +710,14 @@ export interface PRReviewItem {
 export interface PRReviewsPage {
   reviews: PRReviewItem[];
   total: number;
+  visibleTotal?: number;
+  withheld?: number;
 }
 
 /** #244: one review-thread comment — see IForge.getPRReviewThreads' doc. */
 export interface ReviewThreadComment {
   author: string;
+  authorAssociation?: string | null;
   body: string;
   createdAt: string;
 }
@@ -688,6 +730,8 @@ export interface ReviewThreadComment {
 export interface ReviewThreadItem {
   id: string;
   isResolved: boolean;
+  author?: string;
+  authorAssociation?: string | null;
   comments: ReviewThreadComment[];
   commentsComplete: boolean;
 }
@@ -701,6 +745,8 @@ export interface ReviewThreadItem {
 export interface ReviewThreadsPage {
   threads: ReviewThreadItem[];
   pageCapped: boolean;
+  visibleTotal?: number;
+  withheld?: number;
 }
 
 /** #244: one check-suite entry off a PR's `statusCheckRollup` — see IForge.getPRChecks' doc.
@@ -775,6 +821,8 @@ export interface ForgeDeps {
 }
 
 export class GithubForge implements IForge {
+  private readonly withheldCounts = new Map<string, number>();
+
   constructor(
     private readonly cfg: SapwoodConfig,
     private readonly deps: ForgeDeps = {},
@@ -796,6 +844,20 @@ export class GithubForge implements IForge {
       this.deps.state?.appendEvent("forge-page-ceiling", payload);
     } catch (e) {
       log(`[sapwood:forge] page-ceiling event append failed (non-fatal): ${String(e)}`);
+    }
+  }
+
+  /** Filtering is read-only. This event is the only observable effect, deduplicated until the
+   * aggregate count for the same forge target changes. */
+  private announceWithheld(target: string, withheld: number): void {
+    const previous = this.withheldCounts.get(target);
+    if (previous === withheld) return;
+    this.withheldCounts.set(target, withheld);
+    if (withheld === 0 && previous === undefined) return;
+    try {
+      this.deps.state?.appendEvent("comments-withheld", { target, withheld });
+    } catch (e) {
+      (this.deps.log ?? console.error)(`[sapwood:forge] comments-withheld event append failed (non-fatal): ${String(e)}`);
     }
   }
 
@@ -1222,7 +1284,11 @@ export class GithubForge implements IForge {
       "-F",
       `cap=${cap}`,
     ]);
-    return parsePRCommentsPage(out);
+    const page = parsePRCommentsPage(out);
+    const filtered = filterTrustedAuthors(page.comments, await this.getAuthenticatedActor());
+    this.announceWithheld(`pr-comments:${pr}`, filtered.withheld);
+    const comments = filtered.entries.slice(Math.max(0, filtered.entries.length - cap));
+    return { comments, total: filtered.visibleTotal, visibleTotal: filtered.visibleTotal, withheld: filtered.withheld };
   }
 
   async addIssueComment(issue: number, body: string): Promise<void> {
@@ -1359,7 +1425,20 @@ export class GithubForge implements IForge {
           { source: "review-threads", pr, pages: 50, ...partial },
         ),
     );
-    return assemblePRReviewData(viewJson, reactionsJson, unresolvedThreads, commentsJson, threads);
+    const data = assemblePRReviewData(viewJson, reactionsJson, unresolvedThreads, commentsJson, threads);
+    const actor = await this.getAuthenticatedActor();
+    const reviews = filterTrustedAuthors(data.reviews, actor);
+    const comments = filterTrustedAuthors(data.comments ?? [], actor);
+    const visibleThreads = filterTrustedAuthors(data.threads ?? [], actor);
+    const withheld = reviews.withheld + comments.withheld + visibleThreads.withheld;
+    this.announceWithheld(`pr-review-data:${pr}`, withheld);
+    return {
+      ...data,
+      reviews: reviews.entries,
+      comments: comments.entries,
+      threads: visibleThreads.entries,
+      unresolvedThreads: visibleThreads.entries.filter((thread) => !thread.isResolved).length,
+    };
   }
 
   async countOpenIssuesInMilestone(milestone: string): Promise<number> {
@@ -1418,12 +1497,14 @@ export class GithubForge implements IForge {
     return parseIssueLabels(out);
   }
 
-  async getIssueComments(issue: number): Promise<PRComment[]> {
+  async getIssueComments(issue: number): Promise<PRCommentRead> {
     // Same endpoint shape (and pagination discipline) as getPRReviewData's commentsJson fetch
     // — GitHub's REST API serves issue and PR conversation comments off the same
     // `issues/<n>/comments` route, so parsePRComments parses this unchanged.
     const out = await this.gh(["api", `repos/${this.cfg.board.owner}/${this.repo()}/issues/${issue}/comments`, "--paginate", "--slurp"]);
-    return parsePRComments(out);
+    const filtered = filterTrustedAuthors(parsePRComments(out), await this.getAuthenticatedActor());
+    this.announceWithheld(`issue-comments:${issue}`, filtered.withheld);
+    return Object.assign(filtered.entries, { visibleTotal: filtered.visibleTotal, withheld: filtered.withheld });
   }
 
   /** #652: `gh api user` — the authenticated actor's own login, per GitHub's REST identity
@@ -1735,11 +1816,15 @@ export class GithubForge implements IForge {
       "-F",
       `cap=${cap}`,
     ]);
-    return parsePRReviewsPage(out);
+    const page = parsePRReviewsPage(out);
+    const filtered = filterTrustedAuthors(page.reviews, await this.getAuthenticatedActor());
+    this.announceWithheld(`pr-reviews:${pr}`, filtered.withheld);
+    const reviews = filtered.entries.slice(Math.max(0, filtered.entries.length - cap));
+    return { reviews, total: filtered.visibleTotal, visibleTotal: filtered.visibleTotal, withheld: filtered.withheld };
   }
 
   async getPRReviewThreads(pr: number, commentsCap: number): Promise<ReviewThreadsPage> {
-    return fetchAllReviewThreads((after) =>
+    const page = await fetchAllReviewThreads((after) =>
       this.gh([
         "api",
         "graphql",
@@ -1757,6 +1842,13 @@ export class GithubForge implements IForge {
         ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
       ]),
     );
+    const actor = await this.getAuthenticatedActor();
+    // A thread's origin decides whether it is a finding; every nested comment is still
+    // provenance-checked and filtered so an untrusted reply cannot enter the worker stream.
+    const threads = page.threads.map((thread) => ({ ...thread, comments: filterTrustedAuthors(thread.comments, actor).entries }));
+    const filtered = filterTrustedAuthors(threads, actor);
+    this.announceWithheld(`pr-review-threads:${pr}`, filtered.withheld);
+    return { ...page, threads: filtered.entries, visibleTotal: filtered.visibleTotal, withheld: filtered.withheld };
   }
 
   async getPRChecks(pr: number, cap: number): Promise<PRChecksPage> {
@@ -3497,7 +3589,7 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
           path
           line
           originalLine
-          comments(first: 1) { nodes { body commit { oid } } }
+          comments(first: 1) { nodes { author { login } authorAssociation body commit { oid } } }
         }
       }
     }
@@ -3535,6 +3627,8 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
  */
 export interface ReviewThreadSpan {
   id: string;
+  author?: string;
+  authorAssociation?: string | null;
   isResolved: boolean;
   isOutdated: boolean;
   path: string | null;
@@ -3589,7 +3683,14 @@ export function parseReviewThreadsPage(json: string): {
               path?: string | null;
               line?: number | null;
               originalLine?: number | null;
-              comments?: { nodes?: { body?: string | null; commit?: { oid?: string } }[] };
+              comments?: {
+                nodes?: {
+                  author?: { login?: string };
+                  authorAssociation?: string | null;
+                  body?: string | null;
+                  commit?: { oid?: string };
+                }[];
+              };
             }[];
           };
         };
@@ -3604,6 +3705,8 @@ export function parseReviewThreadsPage(json: string): {
       const origin = n.comments?.nodes?.[0];
       return {
         id: n.id ?? "",
+        author: origin?.author?.login ?? "",
+        ...(origin?.authorAssociation !== undefined ? { authorAssociation: origin.authorAssociation } : {}),
         isResolved: n.isResolved ?? false,
         // Fail-closed (see ReviewThreadSpan): unknown staleness reads as "the span moved", which
         // can only ever keep a finding in gate② input, never remove one from it.
@@ -3681,7 +3784,13 @@ export function parsePRReviewView(json: string): {
     isDraft: boolean;
     labels?: { name: string }[];
     state: string;
-    reviews?: { author?: { login?: string }; commit?: { oid?: string }; state: string; submittedAt?: string }[];
+    reviews?: {
+      author?: { login?: string };
+      authorAssociation?: string | null;
+      commit?: { oid?: string };
+      state: string;
+      submittedAt?: string;
+    }[];
   };
   return {
     headOid: d.headRefOid,
@@ -3692,6 +3801,7 @@ export function parsePRReviewView(json: string): {
     state: d.state as PRStatus["state"],
     reviews: (d.reviews ?? []).map((r) => ({
       author: r.author?.login ?? "",
+      ...(r.authorAssociation !== undefined ? { authorAssociation: r.authorAssociation } : {}),
       commitOid: r.commit?.oid ?? "",
       state: r.state,
       // #147 P1: submittedAt rides the same `--json reviews` payload gh already returns — no
@@ -3719,11 +3829,12 @@ export function parsePRReactions(json: string): PRReaction[] {
 /** Pure parse of `gh api .../issues/<pr>/comments --paginate --slurp` (same page shapes as
  *  parsePRReactions). Malformed/missing fields degrade to ""/empty — never a throw. */
 export function parsePRComments(json: string): PRComment[] {
-  type Raw = { id?: number | string; body?: string; created_at?: string; user?: { login?: string } };
+  type Raw = { id?: number | string; body?: string; created_at?: string; author_association?: string | null; user?: { login?: string } };
   const parsed = JSON.parse(json) as Raw[] | Raw[][];
   const arr = parsed.flatMap((p) => (Array.isArray(p) ? p : [p]));
   return arr.map((c) => ({
     login: c.user?.login ?? "",
+    ...(c.author_association !== undefined ? { authorAssociation: c.author_association } : {}),
     createdAt: c.created_at ?? "",
     body: c.body ?? "",
     ...(c.id != null ? { id: String(c.id) } : {}),
@@ -3958,7 +4069,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cap: Int!) {
     pullRequest(number: $number) {
       reviews(last: $cap) {
         totalCount
-        nodes { author { login } commit { oid } state body submittedAt }
+        nodes { author { login } authorAssociation commit { oid } state body submittedAt }
       }
     }
   }
@@ -3973,7 +4084,14 @@ export function parsePRReviewsPage(json: string): PRReviewsPage {
         pullRequest?: {
           reviews?: {
             totalCount?: number;
-            nodes?: { author?: { login?: string }; commit?: { oid?: string }; state: string; body?: string; submittedAt?: string }[];
+            nodes?: {
+              author?: { login?: string };
+              authorAssociation?: string | null;
+              commit?: { oid?: string };
+              state: string;
+              body?: string;
+              submittedAt?: string;
+            }[];
           };
         };
       };
@@ -3982,6 +4100,7 @@ export function parsePRReviewsPage(json: string): PRReviewsPage {
   const conn = d.data?.repository?.pullRequest?.reviews;
   const reviews: PRReviewItem[] = (conn?.nodes ?? []).map((r) => ({
     author: r.author?.login ?? "",
+    ...(r.authorAssociation !== undefined ? { authorAssociation: r.authorAssociation } : {}),
     commitOid: r.commit?.oid ?? "",
     state: r.state,
     body: r.body ?? "",
@@ -3998,7 +4117,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cap: Int!) {
     pullRequest(number: $number) {
       comments(last: $cap) {
         totalCount
-        nodes { id author { login } createdAt body }
+        nodes { id author { login } authorAssociation createdAt body }
       }
     }
   }
@@ -4011,7 +4130,13 @@ export function parsePRCommentsPage(json: string): PRCommentsPage {
         pullRequest?: {
           comments?: {
             totalCount?: number;
-            nodes?: Array<{ id?: string; author?: { login?: string }; createdAt?: string; body?: string }>;
+            nodes?: Array<{
+              id?: string;
+              author?: { login?: string };
+              authorAssociation?: string | null;
+              createdAt?: string;
+              body?: string;
+            }>;
           };
         };
       };
@@ -4021,6 +4146,7 @@ export function parsePRCommentsPage(json: string): PRCommentsPage {
   const comments = (conn?.nodes ?? []).map((c) => ({
     id: c.id ?? "",
     login: c.author?.login ?? "",
+    ...(c.authorAssociation !== undefined ? { authorAssociation: c.authorAssociation } : {}),
     createdAt: c.createdAt ?? "",
     body: c.body ?? "",
   }));
@@ -4195,7 +4321,7 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String, $commentsC
           comments(first: $commentsCap) {
             totalCount
             pageInfo { hasNextPage }
-            nodes { author { login } body createdAt }
+            nodes { author { login } authorAssociation body createdAt }
           }
         }
       }
@@ -4227,7 +4353,7 @@ export function parsePRReviewThreadsPage(json: string): {
               comments?: {
                 totalCount?: number;
                 pageInfo?: { hasNextPage?: boolean };
-                nodes?: { author?: { login?: string }; body?: string; createdAt?: string }[];
+                nodes?: { author?: { login?: string }; authorAssociation?: string | null; body?: string; createdAt?: string }[];
               };
             }[];
           };
@@ -4244,7 +4370,14 @@ export function parsePRReviewThreadsPage(json: string): {
     return {
       id: n.id,
       isResolved: n.isResolved,
-      comments: commentNodes.map((c) => ({ author: c.author?.login ?? "", body: c.body ?? "", createdAt: c.createdAt ?? "" })),
+      author: commentNodes[0]?.author?.login ?? "",
+      ...(commentNodes[0]?.authorAssociation !== undefined ? { authorAssociation: commentNodes[0].authorAssociation } : {}),
+      comments: commentNodes.map((c) => ({
+        author: c.author?.login ?? "",
+        ...(c.authorAssociation !== undefined ? { authorAssociation: c.authorAssociation } : {}),
+        body: c.body ?? "",
+        createdAt: c.createdAt ?? "",
+      })),
       commentsComplete,
     };
   });

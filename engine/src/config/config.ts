@@ -1547,6 +1547,11 @@ const ConfigSchemaRaw = z
           ".claude/rules/**",
           "AGENTS.md",
           "engine/prompts/**",
+          // Forge provenance filtering and the proxy surfaces that expose its filtered streams
+          // are standing instruction carriers: changing either changes which public comments a
+          // worker can receive.
+          "engine/src/forge/forge.ts",
+          "engine/src/proxy/**",
           // #539: the mechanism's own carriers — the matcher/escalation implementation itself and
           // the config file carrying this very schema block + defaults — join the escalation
           // surface too (escalation, not the guard deny-list: the worker may still produce a

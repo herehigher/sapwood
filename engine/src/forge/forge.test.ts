@@ -18,6 +18,7 @@ import {
   extractVerificationSection,
   fetchAllReviewThreads,
   filterFailureLogLines,
+  filterTrustedAuthors,
   findItemId,
   findingDigest,
   findLaneOwnedPr,
@@ -67,6 +68,31 @@ import {
   selectUnplacedIssues,
   stampPrOwner,
 } from "./forge.js";
+
+test("#943 forge provenance filter: trusted associations, actor, and reviewer bot remain in order while public authors are withheld", () => {
+  const entries = [
+    { author: "owner", authorAssociation: "OWNER" },
+    { author: "member", authorAssociation: "MEMBER" },
+    { author: "collaborator", authorAssociation: "COLLABORATOR" },
+    { author: "outside", authorAssociation: "CONTRIBUTOR" },
+    { author: "none", authorAssociation: "NONE" },
+    { author: "null-association", authorAssociation: null },
+    { author: "Sapwood-Actor", authorAssociation: "NONE" },
+    { author: "chatgpt-codex-connector[bot]", authorAssociation: "NONE" },
+  ];
+  const filtered = filterTrustedAuthors(entries, "sapwood-actor");
+  assert.deepEqual(
+    filtered.entries.map((entry) => entry.author),
+    ["owner", "member", "collaborator", "Sapwood-Actor", "chatgpt-codex-connector[bot]"],
+  );
+  assert.equal(filtered.visibleTotal, 5);
+  assert.equal(filtered.withheld, 3);
+});
+
+test("#943 forge provenance filter: missing author or association fails the whole read", () => {
+  assert.throws(() => filterTrustedAuthors([{ author: "owner", authorAssociation: "OWNER" }, { author: "missing-association" }], null));
+  assert.throws(() => filterTrustedAuthors([{ author: "", authorAssociation: "OWNER" }], null));
+});
 
 const SUB_ISSUE_IDS_JSON = JSON.stringify({
   data: { repository: { parent: { id: "I_parent" }, child: { id: "I_child" } } },
@@ -2773,7 +2799,16 @@ const richThreadsPage = (
               path: n.path ?? null,
               line: n.line ?? null,
               originalLine: n.originalLine ?? null,
-              comments: { nodes: n.oid || n.body ? [{ body: n.body ?? null, commit: { oid: n.oid } }] : [] },
+              comments: {
+                nodes: [
+                  {
+                    author: { login: "maintainer" },
+                    authorAssociation: "MEMBER",
+                    body: n.body ?? null,
+                    commit: { oid: n.oid },
+                  },
+                ],
+              },
             })),
           },
         },
@@ -2792,6 +2827,8 @@ test("#378 parseReviewThreadsPage: parses each thread's span, isOutdated, anchor
   assert.deepEqual(p.threads, [
     {
       id: "T1",
+      author: "maintainer",
+      authorAssociation: "MEMBER",
       isResolved: true,
       isOutdated: false,
       path: "sapwood.config.yaml",
@@ -2802,6 +2839,8 @@ test("#378 parseReviewThreadsPage: parses each thread's span, isOutdated, anchor
     },
     {
       id: "T2",
+      author: "maintainer",
+      authorAssociation: "MEMBER",
       isResolved: false,
       isOutdated: true,
       path: "engine/src/a.ts",
@@ -3491,12 +3530,20 @@ test("getIssueComments: reuses parsePRComments' shape/pagination tolerance off t
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
+    if (args[1] === "user") return "sapwood-actor";
     return JSON.stringify([
-      { body: "please fix the plan", created_at: "2026-01-01T00:00:00Z", user: { login: "verification-plan-reviewer" } },
+      {
+        body: "please fix the plan",
+        created_at: "2026-01-01T00:00:00Z",
+        author_association: "MEMBER",
+        user: { login: "verification-plan-reviewer" },
+      },
     ]);
   };
   const comments = await forge.getIssueComments(9);
-  assert.deepEqual(comments, [{ login: "verification-plan-reviewer", createdAt: "2026-01-01T00:00:00Z", body: "please fix the plan" }]);
+  assert.deepEqual(comments, [
+    { login: "verification-plan-reviewer", authorAssociation: "MEMBER", createdAt: "2026-01-01T00:00:00Z", body: "please fix the plan" },
+  ]);
   assert.ok(seen[0]!.some((a) => a.includes("issues/9/comments")));
   assert.ok(seen[0]!.includes("--paginate") && seen[0]!.includes("--slurp"));
 });
@@ -4337,12 +4384,22 @@ test("#288 getPRComments is a bounded newest-comments GraphQL read and preserves
     return JSON.stringify({
       data: {
         repository: {
-          pullRequest: { comments: { totalCount: 1, nodes: [{ id: "IC1", author: { login: "bot" }, createdAt: "t", body: "audit" }] } },
+          pullRequest: {
+            comments: {
+              totalCount: 1,
+              nodes: [{ id: "IC1", author: { login: "bot" }, authorAssociation: "MEMBER", createdAt: "t", body: "audit" }],
+            },
+          },
         },
       },
     });
   };
-  assert.deepEqual(await forge.getPRComments(9, 20), { comments: [{ id: "IC1", login: "bot", createdAt: "t", body: "audit" }], total: 1 });
+  assert.deepEqual(await forge.getPRComments(9, 20), {
+    comments: [{ id: "IC1", login: "bot", authorAssociation: "MEMBER", createdAt: "t", body: "audit" }],
+    total: 1,
+    visibleTotal: 1,
+    withheld: 0,
+  });
   assert.ok(seen.includes("number=9"));
   assert.ok(seen.includes("cap=20"));
   assert.deepEqual(parsePRCommentsPage(JSON.stringify({ data: { repository: { pullRequest: { comments: { nodes: [] } } } } })), {

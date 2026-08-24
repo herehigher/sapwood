@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { ConfigSchema } from "../config/config.js";
 import { NO_DOCTRINE } from "../config/doctrine.js";
 import type { IForge, PRReview, PRReviewData, ReviewThreadSpan } from "../forge/forge.js";
-import { findingDigest } from "../forge/forge.js";
+import { filterTrustedAuthors, findingDigest } from "../forge/forge.js";
 import type {
   ApprovalResult,
   Finding,
@@ -57,6 +57,39 @@ test("freshThumbCount: only reactions created AFTER the cutoff count (#92 stalen
     { content: "eyes", createdAt: "2026-06-17T13:30:00Z" }, // not a thumb at all
   ];
   assert.equal(freshThumbCount(reactions, cutoff), 1);
+});
+
+test("#943 reviewer blocking signals: untrusted change requests and threads are absent, while a trusted change request still routes HANDLE_THREADS", () => {
+  const untrustedReviews = filterTrustedAuthors(
+    [{ author: "public-user", authorAssociation: "NONE", commitOid: "head", state: "CHANGES_REQUESTED" }],
+    null,
+  ).entries;
+  const untrustedThreads = filterTrustedAuthors([{ author: "public-user", authorAssociation: "NONE", isResolved: false }], null).entries;
+  assert.equal(
+    deriveReviewAction({
+      hasEyesReaction: false,
+      freshApprovingReviews: 0,
+      freshTrustedThumbs: 0,
+      unresolvedThreads: untrustedThreads.length,
+      changesRequestedOnHead: changesRequestedOnHead(untrustedReviews, "head", "producer"),
+    }),
+    "WAIT_REVIEW",
+  );
+
+  const trustedReviews = filterTrustedAuthors(
+    [{ author: "maintainer", authorAssociation: "MEMBER", commitOid: "head", state: "CHANGES_REQUESTED" }],
+    null,
+  ).entries;
+  assert.equal(
+    deriveReviewAction({
+      hasEyesReaction: false,
+      freshApprovingReviews: 0,
+      freshTrustedThumbs: 0,
+      unresolvedThreads: 0,
+      changesRequestedOnHead: changesRequestedOnHead(trustedReviews, "head", "producer"),
+    }),
+    "HANDLE_THREADS",
+  );
 });
 
 test("freshThumbCount: all-stale -> 0", () => {
