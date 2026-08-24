@@ -17,6 +17,7 @@ import type { SapwoodConfig } from "../config/config.js";
 import { loadDoctrine, NO_DOCTRINE } from "../config/doctrine.js";
 import type { IForge, PRReview, PRReviewData, ReviewThreadSpan } from "../forge/forge.js";
 import { extractVerificationPlan } from "../forge/forge.js";
+import { CODEX_REVIEWER_LOGINS, normalizeLogin } from "../forge/trust.js";
 
 export type ReviewAction =
   | "MERGE_OK" // fresh, non-author, accepted-state review on the CURRENT head
@@ -154,16 +155,6 @@ export interface Reviewer {
    *  {head: null, at: null} — no comment can count (fail-closed), same as a lane never triggered. */
   verdictFromData(data: PRReviewData, pin?: ReviewTriggerPin): ReviewVerdict;
 }
-
-/** GitHub bot logins vary by API surface: REST reactions report `foo[bot]`, GraphQL/pr-view
- *  reviews report `foo`. Normalize by stripping the suffix so an allowlist entry written
- *  either way matches (a trusted-reviewer default was historically the `[bot]`-suffixed form). */
-export function normalizeLogin(login: string): string {
-  return login.replace(/\[bot\]$/, "");
-}
-
-/** The Codex review bot's login (normalized form — see normalizeLogin). */
-export const CODEX_REVIEWER_LOGINS = ["chatgpt-codex-connector"] as const;
 
 /**
  * Build the review-trigger comment body (#46, Decision #8): `triggerCommand` (default

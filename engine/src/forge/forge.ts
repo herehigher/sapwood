@@ -8,12 +8,12 @@
 
 import { createHash } from "node:crypto";
 import type { SapwoodConfig } from "../config/config.js";
-import { CODEX_REVIEWER_LOGINS, normalizeLogin } from "../roles/reviewer.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import { extractMarkdownSections } from "../util/markdown.js";
 import { sanitizeUpstreamError } from "../util/sanitize.js";
 import { ghWithTimeout } from "./gh.js";
 import { createMissingLabels, type LabelSpec, labelsInclude } from "./labels.js";
+import { CODEX_REVIEWER_LOGINS, normalizeLogin } from "./trust.js";
 
 // Exported (#415 review, finding 2) so a test can assert against the real ceiling value
 // instead of duplicating the literal 1000.
@@ -228,9 +228,11 @@ export interface PRTopLevelComment extends PRComment {
 
 export interface PRCommentsPage {
   comments: PRTopLevelComment[];
+  /** GitHub's unfiltered connection total; visibleTotal is the trusted stream's size. */
   total: number;
   visibleTotal?: number;
   withheld?: number;
+  pageCapped?: boolean;
 }
 
 /** One commit (`gh api repos/<owner>/<repo>/commits?since=...`) — #111 PR-A's git-log-since
@@ -559,11 +561,10 @@ export interface IForge {
    *  proxy's `pr_details` tool. Read-only; a nonexistent PR number propagates gh's own error
    *  (fail-closed, same stance as every other single-PR read in this file). */
   getPRDetails(pr: number): Promise<PRDetails>;
-  /** #244 (bounded per Codex sol-high PR #260 review, P1): every review on a PR, verbatim
-   *  (author/commitOid/state/body/submittedAt), fetched via a CAPPED GraphQL `reviews(last: cap)`
-   *  read (never an unbounded `gh pr view --json reviews` — a PR with hundreds of reviews would
-   *  otherwise silently pull them all into one response). `total` is the connection's own
-   *  `totalCount`, so the proxy layer can report an honest `complete` flag without a second call.
+  /** #244: every review on a PR, verbatim (author/commitOid/state/body/submittedAt), paged to
+   *  the forge safety ceiling before provenance filtering and the caller's visible cap. `total`
+   *  is GitHub's raw connection `totalCount`; `visibleTotal` names the trusted stream so the
+   *  proxy can report an honest `complete` flag without treating withheld reviews as absent.
    *  Deliberately a SEPARATE gh call from getPRReviewData (which reviewer.ts/merge-driver.ts use
    *  to DERIVE gate② verdicts): this method returns raw review data for a session to read, never
    *  a verdict — no role recomputes "did the review pass" (issue #244's "raw data only" ruling). */
@@ -614,15 +615,9 @@ export interface IForge {
    *  entry — never for `disputed` (that thread stays open on purpose, routed to human
    *  adjudication if the fix-loop's round cap is reached, sibling issue #246). */
   resolveReviewThread(threadId: string): Promise<void>;
-  /** #247 F2(b) (Codex sol-high PR #265 review round 2, P1): a review thread's OWN newest `cap`
-   *  comment bodies (GraphQL `last:`, not `first:`) — fix-response.ts's reply-idempotency marker
-   *  check (D3) needs to see the reply it JUST posted, which is by definition the newest comment
-   *  on the thread; `getPRReviewThreads`' own `first: cap` default-view read exists for a
-   *  different reason (issue #244's completeness contract keeps the OLDEST comments as read
-   *  context) and would hide the marker behind a long thread. Deliberately its own read, scoped
-   *  to ONE thread by its opaque node id (no PR/owner/repo variable — same out-of-repo-scope-by-
-   *  construction shape reply/resolve already have) rather than a param bolted onto the existing
-   *  read. */
+  /** #247 F2(b): a review thread's OWN newest trusted `cap` comment bodies. The reply-marker
+   *  check needs the engine's just-posted reply while a public marker must never suppress one,
+   *  so this dedicated opaque-node read pages then provenance-filters before taking its tail. */
   getReviewThreadCommentsTail(threadId: string, cap: number): Promise<string[]>;
 }
 
@@ -708,6 +703,7 @@ export interface PRReviewsPage {
   total: number;
   visibleTotal?: number;
   withheld?: number;
+  pageCapped?: boolean;
 }
 
 /** #244: one review-thread comment — see IForge.getPRReviewThreads' doc. */
@@ -1269,25 +1265,28 @@ export class GithubForge implements IForge {
 
   async getPRComments(pr: number, cap: number): Promise<PRCommentsPage> {
     const actor = await this.getAuthenticatedActor();
-    const out = await this.gh([
-      "api",
-      "graphql",
-      "-f",
-      `query=${PR_COMMENTS_QUERY}`,
-      "-f",
-      `owner=${this.cfg.board.owner}`,
-      "-f",
-      `repo=${this.repo()}`,
-      "-F",
-      `number=${pr}`,
-      "-F",
-      `cap=${cap}`,
-    ]);
-    const page = parsePRCommentsPage(out);
+    const page = await fetchAllPRComments((after) =>
+      this.gh([
+        "api",
+        "graphql",
+        "-f",
+        `query=${PR_COMMENTS_QUERY}`,
+        "-f",
+        `owner=${this.cfg.board.owner}`,
+        "-f",
+        `repo=${this.repo()}`,
+        "-F",
+        `number=${pr}`,
+        ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
+      ]),
+    );
+    if (page.pageCapped) {
+      this.announcePageCeiling(`PR #${pr} comments stopped at 50 pages`, { source: "pr-comments", pr, pages: 50 });
+    }
     const filtered = filterTrustedAuthors(page.comments, actor);
     this.announceWithheld(`pr-comments:${pr}`, filtered.withheld);
     const comments = filtered.entries.slice(Math.max(0, filtered.entries.length - cap));
-    return { comments, total: filtered.visibleTotal, visibleTotal: filtered.visibleTotal, withheld: filtered.withheld };
+    return { comments, total: page.total, visibleTotal: filtered.visibleTotal, withheld: filtered.withheld, pageCapped: page.pageCapped };
   }
 
   async addIssueComment(issue: number, body: string): Promise<void> {
@@ -1801,29 +1800,28 @@ export class GithubForge implements IForge {
   }
 
   async getPRReviews(pr: number, cap: number): Promise<PRReviewsPage> {
-    // #244 (Codex sol-high PR #260 review, P1): CAPPED GraphQL `reviews(last: cap)` — never the
-    // previous unbounded `gh pr view --json reviews` (a PR with hundreds of reviews would
-    // otherwise pull them all into one response). `last` (not `first`) so the cap keeps the MOST
-    // RECENT reviews, same fail-toward-inclusion stance as every other capped connection here.
-    const out = await this.gh([
-      "api",
-      "graphql",
-      "-f",
-      `query=${PR_REVIEWS_QUERY}`,
-      "-f",
-      `owner=${this.cfg.board.owner}`,
-      "-f",
-      `repo=${this.repo()}`,
-      "-F",
-      `number=${pr}`,
-      "-F",
-      `cap=${cap}`,
-    ]);
-    const page = parsePRReviewsPage(out);
+    const page = await fetchAllPRReviews((after) =>
+      this.gh([
+        "api",
+        "graphql",
+        "-f",
+        `query=${PR_REVIEWS_QUERY}`,
+        "-f",
+        `owner=${this.cfg.board.owner}`,
+        "-f",
+        `repo=${this.repo()}`,
+        "-F",
+        `number=${pr}`,
+        ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
+      ]),
+    );
+    if (page.pageCapped) {
+      this.announcePageCeiling(`PR #${pr} reviews stopped at 50 pages`, { source: "pr-reviews", pr, pages: 50 });
+    }
     const filtered = filterTrustedAuthors(page.reviews, await this.getAuthenticatedActor());
     this.announceWithheld(`pr-reviews:${pr}`, filtered.withheld);
     const reviews = filtered.entries.slice(Math.max(0, filtered.entries.length - cap));
-    return { reviews, total: filtered.visibleTotal, visibleTotal: filtered.visibleTotal, withheld: filtered.withheld };
+    return { reviews, total: page.total, visibleTotal: filtered.visibleTotal, withheld: filtered.withheld, pageCapped: page.pageCapped };
   }
 
   async getPRReviewThreads(pr: number, commentsCap: number): Promise<ReviewThreadsPage> {
@@ -1848,10 +1846,16 @@ export class GithubForge implements IForge {
     const actor = await this.getAuthenticatedActor();
     // A thread's origin decides whether it is a finding; every nested comment is still
     // provenance-checked and filtered so an untrusted reply cannot enter the worker stream.
-    const threads = page.threads.map((thread) => ({ ...thread, comments: filterTrustedAuthors(thread.comments, actor).entries }));
+    let nestedWithheld = 0;
+    const threads = page.threads.map((thread) => {
+      const comments = filterTrustedAuthors(thread.comments, actor);
+      nestedWithheld += comments.withheld;
+      return { ...thread, comments: comments.entries };
+    });
     const filtered = filterTrustedAuthors(threads, actor);
-    this.announceWithheld(`pr-review-threads:${pr}`, filtered.withheld);
-    return { ...page, threads: filtered.entries, visibleTotal: filtered.visibleTotal, withheld: filtered.withheld };
+    const withheld = filtered.withheld + nestedWithheld;
+    this.announceWithheld(`pr-review-threads:${pr}`, withheld);
+    return { ...page, threads: filtered.entries, visibleTotal: filtered.visibleTotal, withheld };
   }
 
   async getPRChecks(pr: number, cap: number): Promise<PRChecksPage> {
@@ -1916,20 +1920,30 @@ export class GithubForge implements IForge {
     await this.gh(["api", "graphql", "-f", `query=${RESOLVE_REVIEW_THREAD_MUTATION}`, "-f", `threadId=${threadId}`]);
   }
 
-  /** #247 F2(b): the newest `cap` comment bodies on ONE review thread — see
-   *  IForge.getReviewThreadCommentsTail's doc for why this exists as its own read. */
+  /** The reply-marker check must only see trusted authors, otherwise a public marker can suppress
+   * a later engine reply. */
   async getReviewThreadCommentsTail(threadId: string, cap: number): Promise<string[]> {
-    const out = await this.gh([
-      "api",
-      "graphql",
-      "-f",
-      `query=${REVIEW_THREAD_COMMENTS_TAIL_QUERY}`,
-      "-f",
-      `threadId=${threadId}`,
-      "-F",
-      `cap=${cap}`,
-    ]);
-    return parseReviewThreadCommentsTail(out);
+    const page = await fetchAllReviewThreadComments((after) =>
+      this.gh([
+        "api",
+        "graphql",
+        "-f",
+        `query=${REVIEW_THREAD_COMMENTS_TAIL_QUERY}`,
+        "-f",
+        `threadId=${threadId}`,
+        ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
+      ]),
+    );
+    if (page.pageCapped) {
+      this.announcePageCeiling(`review thread ${threadId} comments stopped at 50 pages`, {
+        source: "review-thread-tail",
+        threadId,
+        pages: 50,
+      });
+    }
+    const filtered = filterTrustedAuthors(page.comments, await this.getAuthenticatedActor());
+    this.announceWithheld(`review-thread-tail:${threadId}`, filtered.withheld);
+    return filtered.entries.slice(Math.max(0, filtered.entries.length - cap)).map((comment) => comment.body);
   }
 
   private repo(): string {
@@ -1957,37 +1971,63 @@ mutation($threadId: ID!) {
   }
 }`;
 
-/** #247 F2(b) (Codex sol-high PR #265 review round 2, P1): a review thread's OWN newest `cap`
- *  comments, via GraphQL's `node(id:)` root field (a review thread id is a globally-addressable
- *  node — no PR/owner/repo variable needed at all, same out-of-repo-scope-by-construction shape
- *  ADD_REVIEW_THREAD_REPLY_MUTATION/RESOLVE_REVIEW_THREAD_MUTATION already have). `last: $cap`
- *  (not `first:`) is the point: fix-response.ts's crash-safety marker check needs to see the
- *  reply it JUST posted, which is by definition the NEWEST comment on the thread — the proxy's
- *  own `pr_review_threads` tool fetches `first: cap` for an unrelated reason (issue #244's
- *  default-view completeness contract keeps the OLDEST comments as read context), so it cannot
- *  be reused here without risking exactly the marker-hidden-behind-a-long-thread failure this
- *  query exists to avoid. */
+/** The reply-marker tail pages the thread before filtering so an untrusted marker never becomes
+ *  reply-suppression evidence. */
 export const REVIEW_THREAD_COMMENTS_TAIL_QUERY = `
-query($threadId: ID!, $cap: Int!) {
+query($threadId: ID!, $after: String) {
   node(id: $threadId) {
     ... on PullRequestReviewThread {
-      comments(last: $cap) {
-        nodes { body }
+      comments(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { author { login } authorAssociation body }
       }
     }
   }
 }`;
 
-/** Parses REVIEW_THREAD_COMMENTS_TAIL_QUERY's response into a plain array of comment bodies,
- *  oldest-of-the-tail-first (GraphQL's own connection order) — malformed/absent shape (a stale
- *  threadId that no longer resolves to a PullRequestReviewThread, say) degrades to an empty
- *  array rather than throwing; the caller (replyAlreadyPosted) treats "no comments visible" the
- *  same as "marker not found", which is the correct, fail-toward-safe reading either way (a
- *  vanished thread can't have posted-then-lost a reply the code just tried to post). */
+function parseReviewThreadCommentsTailPage(json: string): {
+  comments: Array<{ author: string; authorAssociation?: string | null; body: string }>;
+  hasNextPage: boolean;
+  endCursor: string | null;
+} {
+  const d = JSON.parse(json) as {
+    data?: {
+      node?: {
+        comments?: {
+          pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+          nodes?: { author?: { login?: string }; authorAssociation?: string | null; body?: string }[];
+        };
+      };
+    };
+  };
+  const comments = d.data?.node?.comments;
+  return {
+    comments: (comments?.nodes ?? []).map((node) => ({
+      author: node.author?.login ?? "",
+      ...(node.authorAssociation !== undefined ? { authorAssociation: node.authorAssociation } : {}),
+      body: node.body ?? "",
+    })),
+    hasNextPage: comments?.pageInfo?.hasNextPage ?? false,
+    endCursor: comments?.pageInfo?.endCursor ?? null,
+  };
+}
+
 export function parseReviewThreadCommentsTail(json: string): string[] {
-  const d = JSON.parse(json) as { data?: { node?: { comments?: { nodes?: { body?: string }[] } } } };
-  const nodes = d.data?.node?.comments?.nodes ?? [];
-  return nodes.map((n) => n.body ?? "");
+  return parseReviewThreadCommentsTailPage(json).comments.map((comment) => comment.body);
+}
+
+export async function fetchAllReviewThreadComments(
+  fetchPage: (after: string | null) => Promise<string>,
+): Promise<{ comments: Array<{ author: string; authorAssociation?: string | null; body: string }>; pageCapped: boolean }> {
+  const comments: Array<{ author: string; authorAssociation?: string | null; body: string }> = [];
+  let after: string | null = null;
+  for (let page = 0; page < 50; page++) {
+    const parsed = parseReviewThreadCommentsTailPage(await fetchPage(after));
+    comments.push(...parsed.comments);
+    if (!parsed.hasNextPage || !parsed.endCursor) return { comments, pageCapped: false };
+    after = parsed.endCursor;
+  }
+  return { comments, pageCapped: true };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4061,17 +4101,15 @@ export function parsePRDetails(json: string): PRDetails {
   };
 }
 
-/** #244 (Codex sol-high PR #260 review, P1): the CAPPED reviews query — `reviews(last: $cap)`
- *  keeps the MOST RECENT `cap` reviews (never `first`, which would keep the OLDEST — the same
- *  fail-toward-inclusion stance every other capped connection in this file takes), plus the
- *  connection's own `totalCount` so the proxy layer can report an honest `complete` flag without
- *  a second call. Replaces the previous unbounded `gh pr view --json reviews` read. */
+/** Reviews are paged before provenance filtering so the visible cap cannot be spent by public
+ *  entries that never reach a consumer. */
 export const PR_REVIEWS_QUERY = `
-query($owner: String!, $repo: String!, $number: Int!, $cap: Int!) {
+query($owner: String!, $repo: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
-      reviews(last: $cap) {
+      reviews(first: 100, after: $after) {
         totalCount
+        pageInfo { hasNextPage endCursor }
         nodes { author { login } authorAssociation commit { oid } state body submittedAt }
       }
     }
@@ -4080,13 +4118,14 @@ query($owner: String!, $repo: String!, $number: Int!, $cap: Int!) {
 
 /** Pure parse of PR_REVIEWS_QUERY. A missing `body` degrades to "" — same tolerance as every
  *  other optional string field in this file, never a throw. */
-export function parsePRReviewsPage(json: string): PRReviewsPage {
+function parsePRReviewsConnectionPage(json: string): PRReviewsPage & { hasNextPage: boolean; endCursor: string | null } {
   const d = JSON.parse(json) as {
     data?: {
       repository?: {
         pullRequest?: {
           reviews?: {
             totalCount?: number;
+            pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
             nodes?: {
               author?: { login?: string };
               authorAssociation?: string | null;
@@ -4109,30 +4148,41 @@ export function parsePRReviewsPage(json: string): PRReviewsPage {
     body: r.body ?? "",
     ...(r.submittedAt !== undefined ? { submittedAt: r.submittedAt } : {}),
   }));
-  return { reviews, total: conn?.totalCount ?? reviews.length };
+  return {
+    reviews,
+    total: conn?.totalCount ?? reviews.length,
+    hasNextPage: conn?.pageInfo?.hasNextPage ?? false,
+    endCursor: conn?.pageInfo?.endCursor ?? null,
+  };
 }
 
-/** #288: bounded top-level PR conversation read. `last` keeps the newest audit marker during
- *  dedup/reconciliation and prevents an old, busy PR from creating an unbounded response. */
+export function parsePRReviewsPage(json: string): PRReviewsPage {
+  const { reviews, total } = parsePRReviewsConnectionPage(json);
+  return { reviews, total };
+}
+
+/** Top-level comments are paged before provenance filtering and visible capping. */
 export const PR_COMMENTS_QUERY = `
-query($owner: String!, $repo: String!, $number: Int!, $cap: Int!) {
+query($owner: String!, $repo: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
-      comments(last: $cap) {
+      comments(first: 100, after: $after) {
         totalCount
+        pageInfo { hasNextPage endCursor }
         nodes { id author { login } authorAssociation createdAt body }
       }
     }
   }
 }`;
 
-export function parsePRCommentsPage(json: string): PRCommentsPage {
+function parsePRCommentsConnectionPage(json: string): PRCommentsPage & { hasNextPage: boolean; endCursor: string | null } {
   const d = JSON.parse(json) as {
     data?: {
       repository?: {
         pullRequest?: {
           comments?: {
             totalCount?: number;
+            pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
             nodes?: Array<{
               id?: string;
               author?: { login?: string };
@@ -4153,7 +4203,51 @@ export function parsePRCommentsPage(json: string): PRCommentsPage {
     createdAt: c.createdAt ?? "",
     body: c.body ?? "",
   }));
-  return { comments, total: conn?.totalCount ?? comments.length };
+  return {
+    comments,
+    total: conn?.totalCount ?? comments.length,
+    hasNextPage: conn?.pageInfo?.hasNextPage ?? false,
+    endCursor: conn?.pageInfo?.endCursor ?? null,
+  };
+}
+
+export function parsePRCommentsPage(json: string): PRCommentsPage {
+  const { comments, total } = parsePRCommentsConnectionPage(json);
+  return { comments, total };
+}
+
+/** The connection ceiling is a safety boundary, not a visible-cap boundary: callers filter the
+ * complete read first, then apply their own cap. */
+export async function fetchAllPRComments(
+  fetchPage: (after: string | null) => Promise<string>,
+): Promise<PRCommentsPage & { pageCapped: boolean }> {
+  const comments: PRTopLevelComment[] = [];
+  let total = 0;
+  let after: string | null = null;
+  for (let page = 0; page < 50; page++) {
+    const parsed = parsePRCommentsConnectionPage(await fetchPage(after));
+    comments.push(...parsed.comments);
+    total = parsed.total;
+    if (!parsed.hasNextPage || !parsed.endCursor) return { comments, total, pageCapped: false };
+    after = parsed.endCursor;
+  }
+  return { comments, total, pageCapped: true };
+}
+
+export async function fetchAllPRReviews(
+  fetchPage: (after: string | null) => Promise<string>,
+): Promise<PRReviewsPage & { pageCapped: boolean }> {
+  const reviews: PRReviewItem[] = [];
+  let total = 0;
+  let after: string | null = null;
+  for (let page = 0; page < 50; page++) {
+    const parsed = parsePRReviewsConnectionPage(await fetchPage(after));
+    reviews.push(...parsed.reviews);
+    total = parsed.total;
+    if (!parsed.hasNextPage || !parsed.endCursor) return { reviews, total, pageCapped: false };
+    after = parsed.endCursor;
+  }
+  return { reviews, total, pageCapped: true };
 }
 
 /** #244 (Codex sol-high PR #260 review, P1): the CAPPED checks query — reads the PR's HEAD

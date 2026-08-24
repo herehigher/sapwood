@@ -11,6 +11,7 @@ import { ConfigSchema } from "../config/config.js";
 import { NO_DOCTRINE } from "../config/doctrine.js";
 import type { IForge, PRReview, PRReviewData, ReviewThreadSpan } from "../forge/forge.js";
 import { filterTrustedAuthors, findingDigest } from "../forge/forge.js";
+import { normalizeLogin } from "../forge/trust.js";
 import type {
   ApprovalResult,
   Finding,
@@ -38,7 +39,6 @@ import {
   makeFallbackReviewers,
   makeReviewer,
   NO_FALLBACK_LOCK,
-  normalizeLogin,
   oidAssertionMatchesHead,
   REVIEWER_KINDS,
   resolveReviewVerdict,

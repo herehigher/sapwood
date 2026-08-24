@@ -27,13 +27,14 @@ import {
   type ReviewThreadsPage,
   readPrOwner,
 } from "../forge/forge.js";
+import { CODEX_REVIEWER_LOGINS } from "../forge/trust.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import { mcpToolFullName, TOOL_PR_FAILED_CHECKS } from "../proxy/tools.js";
 import { hashBody, hashBodyForAcAuthority } from "../review/ac-snapshot.js";
 import type { EngineReviewArtifact } from "../review/audit.js";
 import { classicThreadFindingKey, engineAgentFindingKey } from "../review/finding-key.js";
 import { type DriveOutcome, MergeDriver } from "../roles/merge-driver.js";
-import { CODEX_REVIEWER_LOGINS, CodexReviewer, type ReviewFallbackLock, type ReviewTriggerPin } from "../roles/reviewer.js";
+import { CodexReviewer, type ReviewFallbackLock, type ReviewTriggerPin } from "../roles/reviewer.js";
 import { buildRenderFixPrompt, WorkerSupervisor } from "../roles/worker.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import { State, type WorkerRow } from "../state/state.js";

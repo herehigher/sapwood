@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigSchema } from "../config/config.js";
-import { filterTrustedAuthors, type PRComment } from "../forge/forge.js";
+import { GithubForge, type PRComment } from "../forge/forge.js";
 import {
   checkBodyDrift,
   checkCommentCursorFreshness,
@@ -66,21 +66,21 @@ test("unresolvable actor (getAuthenticatedActor -> null) exempts NO comment, eve
   if (result.ok) assert.deepEqual(result.pending, ["1"]); // fail-closed: treated as non-engine
 });
 
-test("#943 cursor gate receives no public comments, while trusted comments retain the existing marker requirement", async () => {
-  const publicOnly = filterTrustedAuthors([comment("public", "outside", "public noise", "NONE")], null).entries;
-  const publicResult = await checkCommentCursorFreshness(
-    { getIssueComments: async () => publicOnly, getAuthenticatedActor: async () => null },
-    9,
-    "body without a cursor marker",
-  );
+test("#943 cursor gate: a real GithubForge hides public-only comments while trusted comments retain the marker requirement", async () => {
+  const forge = new GithubForge(cfg);
+  const responses = [
+    [{ id: 1, user: { login: "outside" }, author_association: "NONE", created_at: "t", body: "public noise" }],
+    [{ id: "trusted", user: { login: "maintainer" }, author_association: "MEMBER", created_at: "t", body: "binding ruling" }],
+  ];
+  let read = 0;
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[1] === "user") return "sapwood-bot\n";
+    return JSON.stringify(responses[read++]!);
+  };
+  const publicResult = await checkCommentCursorFreshness(forge, 9, "body without a cursor marker");
   assert.deepEqual(publicResult, { ok: true, cursor: "0", pending: [] });
 
-  const trustedOnly = filterTrustedAuthors([comment("trusted", "maintainer", "binding ruling", "MEMBER")], null).entries;
-  const trustedResult = await checkCommentCursorFreshness(
-    { getIssueComments: async () => trustedOnly, getAuthenticatedActor: async () => null },
-    9,
-    "<!-- sapwood:comments-adjudicated-through: 0 -->",
-  );
+  const trustedResult = await checkCommentCursorFreshness(forge, 9, "<!-- sapwood:comments-adjudicated-through: 0 -->");
   assert.deepEqual(trustedResult, { ok: true, cursor: "0", pending: ["trusted"] });
 });
 

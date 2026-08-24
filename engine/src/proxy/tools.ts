@@ -542,6 +542,7 @@ export interface PRReviewsResponse {
   withheld?: number;
   returned: number;
   complete: boolean;
+  pageCapped?: boolean;
 }
 
 /** #244: the pr_review_threads completeness contract — same shape/semantics as CommentsView
@@ -644,15 +645,16 @@ export async function fetchPRDetailsResponse(forge: Pick<IForge, "getPRDetails">
 }
 
 export async function fetchPRReviewsResponse(forge: Pick<IForge, "getPRReviews">, pr: number, caps: ProxyCaps): Promise<PRReviewsResponse> {
-  const { reviews, total, visibleTotal, withheld } = await forge.getPRReviews(pr, caps.maxReviewsPerCall);
+  const { reviews, total, visibleTotal, withheld, pageCapped } = await forge.getPRReviews(pr, caps.maxReviewsPerCall);
   return {
     pr,
     reviews,
     total,
     returned: reviews.length,
-    complete: reviews.length >= total,
+    complete: reviews.length >= (visibleTotal ?? total) && !pageCapped,
     ...(visibleTotal !== undefined ? { visibleTotal } : {}),
     ...(withheld !== undefined ? { withheld } : {}),
+    ...(pageCapped !== undefined ? { pageCapped } : {}),
   };
 }
 
@@ -723,7 +725,12 @@ export async function fetchPRAuditCommentsResponse(
     .slice(-cap)
     .reverse()
     .map(({ comment, marker }) => ({ id: comment.id, createdAt: comment.createdAt, ...marker, body: comment.body }));
-  return { pr, comments, returned: comments.length, complete: page.total <= caps.maxAuditCommentScanWindow };
+  return {
+    pr,
+    comments,
+    returned: comments.length,
+    complete: page.comments.length >= (page.visibleTotal ?? page.total) && !page.pageCapped,
+  };
 }
 
 // Re-exported so mcp-server.ts/journal.ts never need their own import of RelatedRef just to

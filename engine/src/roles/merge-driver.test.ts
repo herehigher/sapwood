@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { findingDigest } from "../forge/forge.js";
+import { CODEX_REVIEWER_LOGINS } from "../forge/trust.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { AuditDeliveryResult } from "../review/drive.js";
 import {
@@ -29,7 +30,7 @@ import type {
   ReviewTriggerPin,
   ReviewVerdict,
 } from "./reviewer.js";
-import { CODEX_REVIEWER_LOGINS, CodexReviewer, HumanReviewer, SameModelTrustedReviewer } from "./reviewer.js";
+import { CodexReviewer, HumanReviewer, SameModelTrustedReviewer } from "./reviewer.js";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
 // 1) mergeDecision parity suite (23 assertions)

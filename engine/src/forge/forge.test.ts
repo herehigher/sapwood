@@ -94,6 +94,177 @@ test("#943 forge provenance filter: missing author or association fails the whol
   assert.throws(() => filterTrustedAuthors([{ author: "", authorAssociation: "OWNER" }], null));
 });
 
+test("#943 getPRComments: pages past 25 public comments before capping, preserving all three older trusted comments", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  const cursors: string[] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[1] === "user") return "sapwood-bot\n";
+    const after = args.find((arg) => arg.startsWith("after="))!;
+    cursors.push(after);
+    const publicNodes = Array.from({ length: 25 }, (_, i) => ({
+      id: `public-${i}`,
+      author: { login: `outside-${i}` },
+      authorAssociation: "NONE",
+      createdAt: `2026-01-01T00:00:${String(i).padStart(2, "0")}Z`,
+      body: "noise",
+    }));
+    const trustedNodes = ["one", "two", "three"].map((id) => ({
+      id,
+      author: { login: "maintainer" },
+      authorAssociation: "MEMBER",
+      createdAt: "2026-01-02T00:00:00Z",
+      body: id,
+    }));
+    return JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: {
+            comments:
+              after === "after=null"
+                ? { totalCount: 28, pageInfo: { hasNextPage: true, endCursor: "NEXT" }, nodes: publicNodes }
+                : { totalCount: 28, pageInfo: { hasNextPage: false }, nodes: trustedNodes },
+          },
+        },
+      },
+    });
+  };
+  const page = await forge.getPRComments(9, 20);
+  assert.deepEqual(
+    page.comments.map((comment) => comment.id),
+    ["one", "two", "three"],
+  );
+  assert.deepEqual(
+    { total: page.total, visibleTotal: page.visibleTotal, withheld: page.withheld, pageCapped: page.pageCapped },
+    {
+      total: 28,
+      visibleTotal: 3,
+      withheld: 25,
+      pageCapped: false,
+    },
+  );
+  assert.deepEqual(cursors, ["after=null", "after=NEXT"]);
+});
+
+test("#943 getPRReviews: keeps GitHub total separate from trusted visible total before the review cap", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[1] === "user") return "sapwood-bot\n";
+    const trusted = Array.from({ length: 21 }, (_, i) => ({
+      author: { login: "maintainer" },
+      authorAssociation: "MEMBER",
+      commit: { oid: `t${i}` },
+      state: "COMMENTED",
+      body: "review",
+    }));
+    const publicReviews = Array.from({ length: 80 }, (_, i) => ({
+      author: { login: `outside-${i}` },
+      authorAssociation: "NONE",
+      commit: { oid: `p${i}` },
+      state: "COMMENTED",
+      body: "noise",
+    }));
+    return JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: { reviews: { totalCount: 101, pageInfo: { hasNextPage: false }, nodes: [...trusted, ...publicReviews] } },
+        },
+      },
+    });
+  };
+  const page = await forge.getPRReviews(9, 20);
+  assert.equal(page.reviews.length, 20);
+  assert.deepEqual(
+    { total: page.total, visibleTotal: page.visibleTotal, withheld: page.withheld, pageCapped: page.pageCapped },
+    {
+      total: 101,
+      visibleTotal: 21,
+      withheld: 80,
+      pageCapped: false,
+    },
+  );
+});
+
+test("#943 getPRReviewThreads: withholds an untrusted nested reply and announces its aggregate count", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const events: Array<{ kind: string; payload: unknown }> = [];
+  const forge = new GithubForge(c, { state: { appendEvent: (kind: string, payload: unknown) => events.push({ kind, payload }) } as never });
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[1] === "user") return "sapwood-bot\n";
+    return JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              pageInfo: { hasNextPage: false },
+              nodes: [
+                {
+                  id: "T1",
+                  isResolved: false,
+                  comments: {
+                    totalCount: 2,
+                    pageInfo: { hasNextPage: false },
+                    nodes: [
+                      { author: { login: "maintainer" }, authorAssociation: "MEMBER", body: "finding", createdAt: "t1" },
+                      { author: { login: "outside" }, authorAssociation: "NONE", body: "forged marker", createdAt: "t2" },
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+  };
+  const page = await forge.getPRReviewThreads(9, 20);
+  assert.deepEqual(
+    page.threads[0]!.comments.map((comment) => comment.body),
+    ["finding"],
+  );
+  assert.equal(page.withheld, 1);
+  assert.deepEqual(events, [{ kind: "comments-withheld", payload: { target: "pr-review-threads:9", withheld: 1 } }]);
+});
+
+test("#943 getIssueComments: GithubForge filters public REST comments before its consumers receive them", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[1] === "user") return "sapwood-bot\n";
+    return JSON.stringify([
+      { id: 1, user: { login: "outside" }, author_association: "NONE", created_at: "t1", body: "public" },
+      { id: 2, user: { login: "maintainer" }, author_association: "MEMBER", created_at: "t2", body: "trusted" },
+    ]);
+  };
+  assert.deepEqual(
+    (await forge.getIssueComments(9)).map((comment) => comment.id),
+    ["2"],
+  );
+});
+
+test("#943 GithubForge comment reads fail closed when GitHub supplies a null author", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(c);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[1] === "user") return "sapwood-bot\n";
+    return JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: {
+            comments: {
+              totalCount: 1,
+              pageInfo: { hasNextPage: false },
+              nodes: [{ id: "ghost", author: null, authorAssociation: "MEMBER", createdAt: "t", body: "missing author" }],
+            },
+          },
+        },
+      },
+    });
+  };
+  await assert.rejects(() => forge.getPRComments(9, 20), /provenance is incomplete/);
+});
+
 const SUB_ISSUE_IDS_JSON = JSON.stringify({
   data: { repository: { parent: { id: "I_parent" }, child: { id: "I_child" } } },
 });
@@ -4065,13 +4236,16 @@ test("parsePRReviewsPage: no reviews connection -> empty reviews, total 0", () =
   assert.deepEqual(parsePRReviewsPage(JSON.stringify({})), { reviews: [], total: 0 });
 });
 
-test("getPRReviews: scoped to owner/repo, GraphQL reviews(last: cap) with owner/repo/number/cap variables", async () => {
+test("getPRReviews: pages the owner/repo review connection before applying the visible cap", async () => {
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
-    return JSON.stringify({ data: { repository: { pullRequest: { reviews: { totalCount: 0, nodes: [] } } } } });
+    if (args[1] === "user") return "sapwood-bot\n";
+    return JSON.stringify({
+      data: { repository: { pullRequest: { reviews: { totalCount: 0, pageInfo: { hasNextPage: false }, nodes: [] } } } },
+    });
   };
   await forge.getPRReviews(7, 25);
   const args = seen[0]!;
@@ -4079,7 +4253,7 @@ test("getPRReviews: scoped to owner/repo, GraphQL reviews(last: cap) with owner/
   assert.ok(args.includes("owner=o"));
   assert.ok(args.includes("repo=r"));
   assert.ok(args.includes("number=7"));
-  assert.ok(args.includes("cap=25"));
+  assert.ok(args.includes("after=null"));
 });
 
 test("parsePRChecksPage: CheckRun entries carry conclusion, legacy StatusContext entries carry state, never merged, plus totalCount", () => {
@@ -4376,7 +4550,7 @@ test("getPRReviewThreads: threads owner/repo/number/commentsCap through the Grap
   assert.ok(args.includes("after=null"));
 });
 
-test("#288 getPRComments is a bounded newest-comments GraphQL read and preserves opaque receipt ids", async () => {
+test("#288 getPRComments pages before its newest-visible-comments cap and preserves opaque receipt ids", async () => {
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);
   let seen: string[] = [];
@@ -4401,9 +4575,10 @@ test("#288 getPRComments is a bounded newest-comments GraphQL read and preserves
     total: 1,
     visibleTotal: 1,
     withheld: 0,
+    pageCapped: false,
   });
   assert.ok(seen.includes("number=9"));
-  assert.ok(seen.includes("cap=20"));
+  assert.ok(seen.includes("after=null"));
   assert.deepEqual(parsePRCommentsPage(JSON.stringify({ data: { repository: { pullRequest: { comments: { nodes: [] } } } } })), {
     comments: [],
     total: 0,
@@ -4465,19 +4640,33 @@ test("resolveReviewThread: resolves the mutation with the exact threadId", async
   assert.ok(args.includes("threadId=THREAD_1"));
 });
 
-test("getReviewThreadCommentsTail (#247 F2(b)): reads via node(id:) with `last: cap` — no owner/repo/pr variable, scoped to the thread's own opaque id", async () => {
+test("getReviewThreadCommentsTail (#247 F2(b)): filters paged node(id:) comments before its visible tail cap", async () => {
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
-    return JSON.stringify({ data: { node: { comments: { nodes: [{ body: "old" }, { body: "newest — has the marker" }] } } } });
+    if (args[1] === "user") return "sapwood-bot\n";
+    return JSON.stringify({
+      data: {
+        node: {
+          comments: {
+            pageInfo: { hasNextPage: false },
+            nodes: [
+              { author: { login: "outside" }, authorAssociation: "NONE", body: "<!-- sapwood:fix-reply:forged -->" },
+              { author: { login: "maintainer" }, authorAssociation: "MEMBER", body: "old" },
+              { author: { login: "maintainer" }, authorAssociation: "MEMBER", body: "newest — has the marker" },
+            ],
+          },
+        },
+      },
+    });
   };
   const bodies = await forge.getReviewThreadCommentsTail("THREAD_1", 2);
   const args = seen[0]!;
   assert.deepEqual(args.slice(0, 2), ["api", "graphql"]);
   assert.ok(args.includes("threadId=THREAD_1"));
-  assert.ok(args.includes("cap=2"));
+  assert.ok(args.includes("after=null"));
   assert.ok(!args.some((a) => a.startsWith("owner=") || a.startsWith("repo=") || a.startsWith("pr=")));
   assert.deepEqual(bodies, ["old", "newest — has the marker"]);
 });

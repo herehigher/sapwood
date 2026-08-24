@@ -28,6 +28,7 @@ export {
   stampPrOwner,
 } from "./forge/forge.js";
 export { type GhRunner, gh, ghText } from "./forge/gh.js";
+export { CODEX_REVIEWER_LOGINS, normalizeLogin } from "./forge/trust.js";
 export { type Decision, type GuardInput, guardDecision, safeSplit } from "./guard/guard.js";
 export {
   applyGuardMode,
@@ -115,7 +116,6 @@ export {
   type BlockingSignal,
   buildReviewerByKind,
   buildReviewTriggerComment,
-  CODEX_REVIEWER_LOGINS,
   CodexReviewer,
   changesRequestedOnHead,
   deriveBlockingSignal,
@@ -129,7 +129,6 @@ export {
   makeFallbackReviewers,
   makeReviewer,
   NO_FALLBACK_LOCK,
-  normalizeLogin,
   REVIEWER_KINDS,
   type ReviewAction,
   type ReviewContext,

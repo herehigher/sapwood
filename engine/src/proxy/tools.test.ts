@@ -4,15 +4,16 @@
 // journal.test.ts for those).
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { ConfigSchema } from "../config/config.js";
 import {
   filterTrustedAuthors,
+  GithubForge,
   type IssueMeta,
   type IssueRelations,
   type PRCheckItem,
   type PRComment,
   type PRDetails,
   type PRReviewItem,
-  type PRTopLevelComment,
   type ReviewThreadItem,
 } from "../forge/forge.js";
 import {
@@ -162,33 +163,75 @@ test("#288 audit scan window is independent of the filtered return cap, so newer
   assert.equal(value.complete, true);
 });
 
-test("#943 pr_audit_comments never receives a public comment carrying a well-formed audit marker", async () => {
+test("#943 pr_audit_comments reaches the engine audit receipt but not a public comment carrying the same well-formed marker", async () => {
   const marker = (run: string) =>
     `<!-- sapwood-audit kind=engine-agent head=${"a".repeat(40)} diff=${"b".repeat(64)} run=${run} -->\nAudit`;
-  const raw: PRTopLevelComment[] = [
-    { id: "forgery", login: "outside", authorAssociation: "NONE", createdAt: "t1", body: marker("forgery") },
-    { id: "engine", login: "sapwood-bot", authorAssociation: "NONE", createdAt: "t2", body: marker("engine") },
-  ];
-  const value = await fetchPRAuditCommentsResponse(
-    {
-      getPRComments: async () => {
-        const filtered = filterTrustedAuthors(raw, "sapwood-bot");
-        return {
-          comments: filtered.entries,
-          total: filtered.visibleTotal,
-          visibleTotal: filtered.visibleTotal,
-          withheld: filtered.withheld,
-        };
+  const forge = new GithubForge(ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } }));
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[1] === "user") return "sapwood-bot\n";
+    return JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: {
+            comments: {
+              totalCount: 2,
+              pageInfo: { hasNextPage: false },
+              nodes: [
+                { id: "forgery", author: { login: "outside" }, authorAssociation: "NONE", createdAt: "t1", body: marker("forgery") },
+                { id: "engine", author: { login: "sapwood-bot" }, authorAssociation: "NONE", createdAt: "t2", body: marker("engine") },
+              ],
+            },
+          },
+        },
       },
-    },
-    7,
-    undefined,
-    CAPS,
-  );
+    });
+  };
+  const value = await fetchPRAuditCommentsResponse(forge, 7, undefined, CAPS);
   assert.deepEqual(
     value.comments.map((comment) => comment.runId),
     ["engine"],
   );
+});
+
+test("#943 pr_audit_comments reaches an older trusted receipt after 25 public comments", async () => {
+  const marker = `<!-- sapwood-audit kind=engine-agent head=${"a".repeat(40)} diff=${"b".repeat(64)} run=engine -->\nAudit`;
+  const forge = new GithubForge(ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } }));
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[1] === "user") return "sapwood-bot\n";
+    const publicNodes = Array.from({ length: 25 }, (_, i) => ({
+      id: `public-${i}`,
+      author: { login: `outside-${i}` },
+      authorAssociation: "NONE",
+      createdAt: `t${i}`,
+      body: "noise",
+    }));
+    return JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: {
+            comments: {
+              totalCount: 26,
+              pageInfo: { hasNextPage: false },
+              nodes: [
+                { id: "engine", author: { login: "sapwood-bot" }, authorAssociation: "NONE", createdAt: "t-engine", body: marker },
+                ...publicNodes,
+              ],
+            },
+          },
+        },
+      },
+    });
+  };
+  const value = await fetchPRAuditCommentsResponse(forge, 7, undefined, {
+    ...CAPS,
+    maxAuditCommentsPerCall: 20,
+    maxAuditCommentScanWindow: 100,
+  });
+  assert.deepEqual(
+    value.comments.map((comment) => comment.runId),
+    ["engine"],
+  );
+  assert.equal(value.complete, true);
 });
 
 test("#288 audit comments report complete:false when total top-level comments exceed the scan window", async () => {
@@ -569,6 +612,39 @@ test("fetchPRReviewsResponse: complete is false when the fetch bound cut the con
   const forge = { getPRReviews: async () => ({ reviews, total: 10 }) };
   const r = await fetchPRReviewsResponse(forge, 5, CAPS);
   assert.equal(r.complete, false);
+});
+
+test("#943 fetchPRReviewsResponse: real GithubForge keeps raw total and visible-total completeness separate", async () => {
+  const forge = new GithubForge(ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } }));
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[1] === "user") return "sapwood-bot\n";
+    const trusted = Array.from({ length: 6 }, (_, i) => ({
+      author: { login: "maintainer" },
+      authorAssociation: "MEMBER",
+      commit: { oid: `t${i}` },
+      state: "COMMENTED",
+      body: "review",
+    }));
+    const publicReviews = Array.from({ length: 95 }, (_, i) => ({
+      author: { login: `outside-${i}` },
+      authorAssociation: "NONE",
+      commit: { oid: `p${i}` },
+      state: "COMMENTED",
+      body: "noise",
+    }));
+    return JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: { reviews: { totalCount: 101, pageInfo: { hasNextPage: false }, nodes: [...trusted, ...publicReviews] } },
+        },
+      },
+    });
+  };
+  const response = await fetchPRReviewsResponse(forge, 7, CAPS);
+  assert.deepEqual(
+    { total: response.total, visibleTotal: response.visibleTotal, returned: response.returned, complete: response.complete },
+    { total: 101, visibleTotal: 6, returned: 5, complete: false },
+  );
 });
 
 test("fetchPRChecksResponse: wraps IForge.getPRChecks with the pr number, threads caps.maxChecksPerCall, sets completeness from total", async () => {
