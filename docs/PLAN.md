@@ -39,7 +39,8 @@ fine-grained view of recent work.
   where issue authors are trusted.
 - **Long-term arc:** evolve into a **governance layer for AI-led development** —
   pluggable forge (GitLab/Gitea), pluggable reviewer, public-repo hardening
-  (untrusted-input safe), a real supervisor, and eventually a dashboard. The forge
+  (untrusted-input safe), and a real supervisor (the dashboard is already built and
+  shipping — see "Current milestone" above). The forge
   goal is deliberately scoped: v1 isolates GitHub calls, but its board, review,
   check-ownership, search, relation, and sub-issue semantics are GitHub-shaped. A
   second forge reuses the portable subset and semantically ports the rest; it is

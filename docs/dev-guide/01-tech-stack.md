@@ -38,7 +38,7 @@ Everything else uses Node built-ins, including SQLite, HTTP, crypto, child proce
 
 ## What sapwood is NOT built with
 
-- No web framework: no dashboard implementation exists today; see [07 — Dashboard](07-dashboard.md).
+- No web framework in the engine itself: the dashboard is a separate `dashboard/` workspace (built, on React) with its own stack documented in [07 — Dashboard](07-dashboard.md).
 - No ORM: `State` executes SQL directly through `node:sqlite` (`engine/src/state/state.ts`).
 - No queue or broker: the GitHub ProjectV2 board and labels are the work queue (`CLAUDE.md`, `engine/src/forge/forge.ts`). SQLite stores durable engine state, not a competing task queue.
 - No Docker requirement: neither package scripts nor the documented contributor path invokes Docker (`package.json`, `engine/package.json`, `docs/guide/getting-started.md`).
