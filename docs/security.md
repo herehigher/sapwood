@@ -2821,14 +2821,14 @@ point in its history."
   the `Bash(gh *)` grant together (`WORKER_ALLOWED_TOOLS_NO_GH`), so there is no credential
   left to read comments through even if a leg tried.
 - **The public/private threat-model split.** In a private repo, comment provenance normally
-  follows repository membership. In a public repo, the forge read layer does not return issue
-  comments, PR comments, reviews, review threads, nested thread comments, or review-thread-tail
-  bodies from authors outside GitHub `OWNER`/`MEMBER`/`COLLABORATOR`, the authenticated engine
-  actor, and the existing reviewer-bot allowlist. Missing author provenance fails the entire
-  read; `CONTRIBUTOR`, `NONE`, null, and unknown associations are not returned. The filter
-  records only an aggregate withheld count and does not write to GitHub. Editing an
-  already-cursored comment remains the separate, already-documented "v1 residual: edits are out
-  of scope" case.
+  follows repository membership. In a public repo, entries an author outside GitHub
+  `OWNER`/`MEMBER`/`COLLABORATOR`, the authenticated engine actor, or the existing reviewer-bot
+  allowlist posted are dropped at these five forge reads: issue comments, PR comments, reviews,
+  review threads (including nested comments), and review-thread tails. Nothing else in the engine
+  filters comment provenance. Missing author provenance fails the whole read; `CONTRIBUTOR`,
+  `NONE`, null, and unknown associations are dropped. The filter records only an aggregate
+  withheld count and does not write to GitHub. Editing an already-cursored comment remains the
+  separate, already-documented "v1 residual: edits are out of scope" case.
 - **`docs/security.md` itself, and the prompt files, both ride the instruction-path escalation.**
   Prompt edits
   (`engine/prompts/**`, the gate⓪ contract-vs-discussion veto duty) and any PR touching

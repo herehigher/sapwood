@@ -369,8 +369,9 @@ export interface IForge {
   mergePR(pr: number, headOid: string): Promise<void>;
   /** Post a PR comment (e.g. the `@codex review` trigger). #13 reviewer.ts. */
   addPRComment(pr: number, body: string): Promise<void>;
-  /** #288: newest top-level PR conversation comments, bounded by GraphQL `last: cap`. Raw
-   *  comments only; callers marker-filter them and never derive gate② approval from them. */
+  /** #288: newest trusted top-level PR conversation comments. The forge pages before filtering
+   *  and applying `cap`; a page-ceiling hit throws because audit and escalation marker checks
+   *  must not mistake a partial prefix for a marker's absence. */
   getPRComments(pr: number, cap: number): Promise<PRCommentsPage>;
   /** Post an ISSUE comment (distinct from addPRComment — a reclaimed lane's retained
    *  worktree may have no PR at all yet). #69: the dirty-worktree-retention escalation path
@@ -715,10 +716,9 @@ export interface ReviewThreadComment {
 }
 
 /** #244: one review thread (a GraphQL `PullRequestReviewThread` node) with its own comments —
- *  see IForge.getPRReviewThreads' doc. `commentsComplete` (Codex sol-high PR #260 review, P1):
- *  false when this THREAD's own comments sub-connection carries more than `commentsCap` fetched
- *  (the sub-connection's own `totalCount`/`hasNextPage`) — distinct from `ReviewThreadsPage`'s
- *  `pageCapped`, which is about the OUTER threads connection, not any one thread's comments. */
+ *  see IForge.getPRReviewThreads' doc. `commentsComplete` is false when the trusted stream
+ *  exceeds `commentsCap` or its own paging ceiling; this is distinct from `ReviewThreadsPage`'s
+ *  `pageCapped`, which is about the outer threads connection. */
 export interface ReviewThreadItem {
   id: string;
   isResolved: boolean;
@@ -1282,6 +1282,7 @@ export class GithubForge implements IForge {
     );
     if (page.pageCapped) {
       this.announcePageCeiling(`PR #${pr} comments stopped at 50 pages`, { source: "pr-comments", pr, pages: 50 });
+      throw new Error(`getPRComments: PR #${pr} comments reached the page ceiling; marker absence is not trustworthy`);
     }
     const filtered = filterTrustedAuthors(page.comments, actor);
     this.announceWithheld(`pr-comments:${pr}`, filtered.withheld);
@@ -1837,23 +1838,48 @@ export class GithubForge implements IForge {
         `repo=${this.repo()}`,
         "-F",
         `number=${pr}`,
-        "-F",
-        `commentsCap=${commentsCap}`,
         // Same -F null / -f cursor split as getPRReviewData's own reviewThreads paging.
         ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
       ]),
     );
     const actor = await this.getAuthenticatedActor();
-    // A thread's origin decides whether it is a finding; every nested comment is still
-    // provenance-checked and filtered so an untrusted reply cannot enter the worker stream.
-    let nestedWithheld = 0;
-    const threads = page.threads.map((thread) => {
-      const comments = filterTrustedAuthors(thread.comments, actor);
-      nestedWithheld += comments.withheld;
-      return { ...thread, comments: comments.entries };
-    });
+    // A public reply must not consume the visible budget for a later maintainer reply, so each
+    // thread's connection is exhausted before its own trusted visible cap is applied.
+    const nested = await Promise.all(
+      page.threads.map(async (thread) => {
+        const commentsPage = await fetchAllReviewThreadComments((after) =>
+          this.gh([
+            "api",
+            "graphql",
+            "-f",
+            `query=${REVIEW_THREAD_COMMENTS_TAIL_QUERY}`,
+            "-f",
+            `threadId=${thread.id}`,
+            ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
+          ]),
+        );
+        if (commentsPage.pageCapped) {
+          this.announcePageCeiling(`review thread ${thread.id} comments stopped at 50 pages`, {
+            source: "pr-review-thread-comments",
+            pr,
+            threadId: thread.id,
+            pages: 50,
+          });
+        }
+        const comments = filterTrustedAuthors(commentsPage.comments, actor);
+        return {
+          thread: {
+            ...thread,
+            comments: comments.entries.slice(Math.max(0, comments.entries.length - commentsCap)),
+            commentsComplete: !commentsPage.pageCapped && comments.entries.length <= commentsCap,
+          },
+          withheld: comments.withheld,
+        };
+      }),
+    );
+    const threads = nested.map((entry) => entry.thread);
     const filtered = filterTrustedAuthors(threads, actor);
-    const withheld = filtered.withheld + nestedWithheld;
+    const withheld = filtered.withheld + nested.reduce((total, entry) => total + entry.withheld, 0);
     this.announceWithheld(`pr-review-threads:${pr}`, withheld);
     return { ...page, threads: filtered.entries, visibleTotal: filtered.visibleTotal, withheld };
   }
@@ -1940,6 +1966,7 @@ export class GithubForge implements IForge {
         threadId,
         pages: 50,
       });
+      throw new Error(`getReviewThreadCommentsTail: thread ${threadId} reached the page ceiling; marker absence is not trustworthy`);
     }
     const filtered = filterTrustedAuthors(page.comments, await this.getAuthenticatedActor());
     this.announceWithheld(`review-thread-tail:${threadId}`, filtered.withheld);
@@ -1979,14 +2006,14 @@ query($threadId: ID!, $after: String) {
     ... on PullRequestReviewThread {
       comments(first: 100, after: $after) {
         pageInfo { hasNextPage endCursor }
-        nodes { author { login } authorAssociation body }
+        nodes { author { login } authorAssociation body createdAt }
       }
     }
   }
 }`;
 
 function parseReviewThreadCommentsTailPage(json: string): {
-  comments: Array<{ author: string; authorAssociation?: string | null; body: string }>;
+  comments: Array<{ author: string; authorAssociation?: string | null; body: string; createdAt: string }>;
   hasNextPage: boolean;
   endCursor: string | null;
 } {
@@ -1995,7 +2022,7 @@ function parseReviewThreadCommentsTailPage(json: string): {
       node?: {
         comments?: {
           pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
-          nodes?: { author?: { login?: string }; authorAssociation?: string | null; body?: string }[];
+          nodes?: { author?: { login?: string }; authorAssociation?: string | null; body?: string; createdAt?: string }[];
         };
       };
     };
@@ -2006,6 +2033,7 @@ function parseReviewThreadCommentsTailPage(json: string): {
       author: node.author?.login ?? "",
       ...(node.authorAssociation !== undefined ? { authorAssociation: node.authorAssociation } : {}),
       body: node.body ?? "",
+      createdAt: node.createdAt ?? "",
     })),
     hasNextPage: comments?.pageInfo?.hasNextPage ?? false,
     endCursor: comments?.pageInfo?.endCursor ?? null,
@@ -2016,10 +2044,11 @@ export function parseReviewThreadCommentsTail(json: string): string[] {
   return parseReviewThreadCommentsTailPage(json).comments.map((comment) => comment.body);
 }
 
-export async function fetchAllReviewThreadComments(
-  fetchPage: (after: string | null) => Promise<string>,
-): Promise<{ comments: Array<{ author: string; authorAssociation?: string | null; body: string }>; pageCapped: boolean }> {
-  const comments: Array<{ author: string; authorAssociation?: string | null; body: string }> = [];
+export async function fetchAllReviewThreadComments(fetchPage: (after: string | null) => Promise<string>): Promise<{
+  comments: Array<{ author: string; authorAssociation?: string | null; body: string; createdAt: string }>;
+  pageCapped: boolean;
+}> {
+  const comments: Array<{ author: string; authorAssociation?: string | null; body: string; createdAt: string }> = [];
   let after: string | null = null;
   for (let page = 0; page < 50; page++) {
     const parsed = parseReviewThreadCommentsTailPage(await fetchPage(after));
@@ -4397,17 +4426,14 @@ export function parseDefaultBranchChecksPage(json: string): BranchChecksPage {
 }
 
 /** #244: the review-threads-WITH-COMMENTS query — extends REVIEW_THREADS_QUERY (which only
- *  needs `isResolved` for the unresolved COUNT gate②'s reviewer.ts consumes) with each thread's
- *  own comment bodies, for the proxy's `pr_review_threads` tool. `commentsCap` bounds the
- *  PER-THREAD comments sub-connection (`comments(first: $commentsCap)`) — a config-driven cap
- *  (ProxyCaps.maxCommentsPerThread), never hardcoded. `totalCount`/`pageInfo` on that same
- *  sub-connection (Codex sol-high PR #260 review, P1) let parsePRReviewThreadsPage derive a
- *  per-thread `commentsComplete` flag, so a thread whose OWN comments exceed `commentsCap` is
- *  distinguishable from one that doesn't. Kept as its own query (not a widening of
+ *  needs `isResolved` for the unresolved COUNT gate②'s reviewer.ts consumes) with one origin
+ *  comment per thread for the proxy's `pr_review_threads` tool. getPRReviewThreads pages each
+ *  thread's own connection before applying its visible cap, so public replies cannot crowd out a
+ *  later trusted reply. Kept as its own query (not a widening of
  *  REVIEW_THREADS_QUERY in place) so reviewer.ts's existing unresolved-count path is untouched by
  *  this PR — the two queries evolve independently. */
 export const PR_REVIEW_THREADS_QUERY = `
-query($owner: String!, $repo: String!, $number: Int!, $after: String, $commentsCap: Int!) {
+query($owner: String!, $repo: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $after) {
@@ -4415,7 +4441,7 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String, $commentsC
         nodes {
           id
           isResolved
-          comments(first: $commentsCap) {
+          comments(first: 1) {
             totalCount
             pageInfo { hasNextPage }
             nodes { author { login } authorAssociation body createdAt }
@@ -4426,13 +4452,9 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String, $commentsC
   }
 }`;
 
-/** One page of PR_REVIEW_THREADS_QUERY: the threads on this page plus the cursor — same
- *  terminal-on-malformed-pageInfo tolerance as parseReviewThreadsPage. Each thread's
- *  `commentsComplete` (Codex sol-high PR #260 review, P1) is true when its OWN comments
- *  sub-connection either reports no further page (`hasNextPage: false`) or its `totalCount` is
- *  already within the fetched node count — either signal alone is sufficient; both absent (a
- *  malformed/partial response) degrades to `true` only when nodes were actually returned in full
- *  (empty-and-unknown reads as complete, matching every other tolerant parser in this file). */
+/** One page of PR_REVIEW_THREADS_QUERY: the threads on this page plus the cursor. The one origin
+ * comment only identifies the thread; getPRReviewThreads replaces it with the fully paged,
+ * provenance-filtered visible comments. */
 export function parsePRReviewThreadsPage(json: string): {
   threads: ReviewThreadItem[];
   hasNextPage: boolean;
@@ -4461,9 +4483,6 @@ export function parsePRReviewThreadsPage(json: string): {
   const conn = d.data?.repository?.pullRequest?.reviewThreads;
   const threads: ReviewThreadItem[] = (conn?.nodes ?? []).map((n) => {
     const commentNodes = n.comments?.nodes ?? [];
-    const hasNextPage = n.comments?.pageInfo?.hasNextPage ?? false;
-    const totalCount = n.comments?.totalCount;
-    const commentsComplete = !hasNextPage && (totalCount === undefined || totalCount <= commentNodes.length);
     return {
       id: n.id,
       isResolved: n.isResolved,
@@ -4475,7 +4494,7 @@ export function parsePRReviewThreadsPage(json: string): {
         body: c.body ?? "",
         createdAt: c.createdAt ?? "",
       })),
-      commentsComplete,
+      commentsComplete: false,
     };
   });
   return { threads, hasNextPage: conn?.pageInfo?.hasNextPage ?? false, endCursor: conn?.pageInfo?.endCursor ?? null };
