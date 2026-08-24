@@ -21,6 +21,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { State } from "../state/state.js";
+import { DOC_LINKS } from "../util/doc-links.js";
 
 /** Same injected-seam convention as `checkWebAccessSettingsDenial` (cli.ts) — inject the
  *  collaborator, not the CLI. Omitted -> the real `node:fs`/`node:os` calls. */
@@ -162,7 +163,7 @@ export function createUserSettingsWatch(
                   : "weakening entries changed since last observed"
           } ` +
             `— a worker leg's Bash(node *)/Bash(npm *) grant loads this file with the operator's ` +
-            "REAL $HOME (structurally unconfined, see docs/security.md's HONEST SCOPE note); " +
+            `REAL $HOME (structurally unconfined, see ${DOC_LINKS.security}'s HONEST SCOPE note); ` +
             (unreadable
               ? ""
               : current.weakening.length > 0

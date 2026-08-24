@@ -8,6 +8,7 @@ import { runEngine } from "../cli.js";
 import { engineAgentEmptyCiRequiredChecksError, parseConfig } from "../config/config.js";
 import type { GhRunner } from "../forge/gh.js";
 import { State } from "../state/state.js";
+import { DOC_LINKS } from "../util/doc-links.js";
 import {
   clearDeployKeyConfigFromJson,
   clearDeployKeyConfigFromYaml,
@@ -2112,7 +2113,7 @@ test("init: without repo-admin (gh repo deploy-key add fails during fresh provis
     assert.match(warn!, /Deploy keys/, "names the manual repo Settings -> Deploy keys step");
     assert.match(warn!, /write access/i, "names the allow-write step");
     assert.match(warn!, /worker\.deployKeyPath.*worker\.deployKeyId|worker\.deployKeyId.*worker\.deployKeyPath/, "names both config keys");
-    assert.match(warn!, /docs\/security\.md/, "carries a docs anchor");
+    assert.ok(warn!.includes(DOC_LINKS.security), "carries a docs anchor");
     assert.match(warn!, /L0/, "states the engine stays functional at L0");
     assert.ok(actions.some((a) => /labels already present|created \d+ label/.test(a)));
     const configText = readFileSync(join(dir, "sapwood.config.yaml"), "utf8");
@@ -2166,8 +2167,7 @@ test("init (P1-6/R3-7): .gitignore already ending with the exact rooted rule as 
   });
   const dir = tmpCwd();
   try {
-    const original =
-      "node_modules/\n# sapwood: worker deploy key(s) — kept out of `git add -A` (see docs/security.md)\n/data/worker-deploy-key*\n";
+    const original = `node_modules/\n# sapwood: worker deploy key(s) — kept out of \`git add -A\` (see ${DOC_LINKS.security})\n/data/worker-deploy-key*\n`;
     writeFileSync(join(dir, ".gitignore"), original);
     const { actions } = await init(cfg, {
       run,

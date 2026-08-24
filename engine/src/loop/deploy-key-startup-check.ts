@@ -26,6 +26,7 @@ import { readFileSync } from "node:fs";
 import type { SapwoodConfig } from "../config/config.js";
 import type { LlmPingResult } from "../roles/worker.js";
 import type { State } from "../state/state.js";
+import { DOC_LINKS } from "../util/doc-links.js";
 import { DEPLOY_KEY_TITLE, deployKeyPreflightFailedAction, deployKeyProvisioningFailedAction } from "./init.js";
 
 /** Which of the four shapes the issue names produced the reported tier. */
@@ -69,7 +70,7 @@ export async function detectDeployKeyStartupTier(
     log(
       "[sapwood:startup] worker credential tier: L0 (worker.deployKeyPath unset) — every worker leg dispatches " +
         'with the full credentialed env. Run "sapwood init" to provision a scoped L1 deploy key; see ' +
-        "docs/security.md's worker credential tiers.",
+        `${DOC_LINKS.security}'s worker credential tiers.`,
     );
     return record({ tier: "L0", arm: "unset" });
   }

@@ -23,6 +23,7 @@ import type { OwnerKind } from "../forge/forge.js";
 import { type GhRunner, gh, ghText } from "../forge/gh.js";
 import { createMissingLabels, describeLabelDrift, type LabelSpec, normalizeLabel, taxonomyLabels } from "../forge/labels.js";
 import { type LlmPingResult, probeDeployKeySsh, spawnSshKeygen } from "../roles/worker.js";
+import { DOC_LINKS } from "../util/doc-links.js";
 
 export interface InitDeps {
   run: GhRunner; // generic gh runner (label/milestone/api/graphql)
@@ -510,7 +511,7 @@ export function deployKeyProvisioningFailedAction(repo: string, keyPath: string,
     `\`ssh-keygen -t ed25519 -N "" -f ${keyPath}\`; (2) in the repo's Settings -> Deploy keys, add ` +
     `${keyPath}.pub with write access allowed, title "${title}"; (3) set worker.deployKeyPath/` +
     `worker.deployKeyId in your config (the id shown in that Settings page's key list); (4) re-run ` +
-    `"sapwood init" to confirm the preflight. See docs/security.md's worker credential tiers.`
+    `"sapwood init" to confirm the preflight. See ${DOC_LINKS.security}'s worker credential tiers.`
   );
 }
 
@@ -524,7 +525,7 @@ export function deployKeyPreflightFailedAction(keyPath: string, detail: string |
     `deploy key: WARN — SSH auth preflight failed for ${keyPath}${detail ? `: ${detail}` : ""}. Engine stays at ` +
     `L0 (full credentialed worker env) until this passes. Fix: confirm ${keyPath} is a readable private key ` +
     `matching the deploy key registered on the repo, then re-run "sapwood init" to re-check the preflight. ` +
-    `See docs/security.md's worker credential tiers.`
+    `See ${DOC_LINKS.security}'s worker credential tiers.`
   );
 }
 
@@ -838,7 +839,7 @@ function clearDeployKeyConfig(configFilePath: string): string[] {
 }
 
 const GITIGNORE_DEPLOY_KEY_RULE = "/data/worker-deploy-key*";
-const GITIGNORE_DEPLOY_KEY_COMMENT = "# sapwood: worker deploy key(s) — kept out of `git add -A` (see docs/security.md)";
+const GITIGNORE_DEPLOY_KEY_COMMENT = `# sapwood: worker deploy key(s) — kept out of \`git add -A\` (see ${DOC_LINKS.security})`;
 
 /** #606 gate② round 1 (P1-6), round 2 (R3-7): keeps the private key out of an ordinary
  *  `git add -A` sweep. gitignore semantics are LAST-MATCH-WINS (a later negation can
@@ -1009,7 +1010,7 @@ async function armAuthFailsStaleOrMismatch(
   if (choice === "b") {
     actions.push(
       `deploy key: WARN — ${reasonText}.${staleNote} Proceeding at L0 (full credentialed worker env); every ` +
-        `remote key is left untouched. ${manualSteps} See docs/security.md's worker credential tiers.`,
+        `remote key is left untouched. ${manualSteps} See ${DOC_LINKS.security}'s worker credential tiers.`,
     );
     return actions;
   }
@@ -1378,7 +1379,7 @@ export async function init(cfg: SapwoodConfig, deps: Partial<InitDeps> = {}): Pr
   if (ciConfigError) {
     actions.push(
       `config: WARN — ${ciConfigError} Configure this before your first \`sapwood run\` — see ` +
-        `docs/getting-started.md's "Before your first run: make gate① real" section.`,
+        `${DOC_LINKS.gettingStarted}'s "Before your first run: make gate① real" section.`,
     );
   }
 

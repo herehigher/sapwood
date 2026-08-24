@@ -39,6 +39,7 @@ import { buildRenderFixPrompt, WorkerSupervisor } from "../roles/worker.js";
 import type { EventKind } from "../state/event-kinds/index.js";
 import { State, type WorkerRow } from "../state/state.js";
 import { RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
+import { DOC_LINKS } from "../util/doc-links.js";
 import { BASE_CI_RED_ESCALATED, BASE_CI_RED_OBSERVED, baseRedPin } from "./base-ci.js";
 import { CAP_SPLIT_ORIGIN_MARKER, findCapSplitWipPointer } from "./cap-split.js";
 import {
@@ -11376,7 +11377,7 @@ test("#783 wiring: an INERT escalation posts the actionable inert comment (remed
   assert.match(comment, /aux-lint \(SKIPPED\)/);
   assert.match(comment, /without ever going green/);
   assert.match(comment, /always run and skip its STEPS/);
-  assert.match(comment, /docs\/configuration\.md/);
+  assert.ok(comment.includes(DOC_LINKS.configuration));
   assert.match(comment, /Escalating to `needs-human`/);
   assert.doesNotMatch(comment, /gate② is already decisive/); // never the classic pending wording
   assert.doesNotMatch(comment, /has been PENDING for/); // never the classic pending wording either

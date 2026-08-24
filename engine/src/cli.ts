@@ -113,6 +113,7 @@ import {
   State,
   type WorkerRow,
 } from "./state/state.js";
+import { DOC_LINKS } from "./util/doc-links.js";
 
 const require = createRequire(import.meta.url);
 // ponytail: runtime require avoids JSON-import assertion syntax differences across Node versions
@@ -459,7 +460,7 @@ function reviewerTierWarning(cfg: SapwoodConfig, pricing: PricingTable): string 
     `sapwood validate: WARNING — reviewer is cheaper/weaker than worker: reviewer.agent.model ` +
     `"${reviewerModel}" ($${reviewer.input}/$${reviewer.output} per MTok in/out) is priced below worker.model ` +
     `"${cfg.worker.model}" ($${worker.input}/$${worker.output}) — gate quality expectation is inverted. ` +
-    `The reviewer's tier should sit AT OR ABOVE the producer's (see docs/configuration.md); rates are only a ` +
+    `The reviewer's tier should sit AT OR ABOVE the producer's (see ${DOC_LINKS.configuration}); rates are only a ` +
     `proxy, so this is advice, not a rejection.\n`
   );
 }
@@ -774,9 +775,9 @@ export function formatStatus(s: StatusSnapshot): string {
       // operator-clears-it story as consecutive-stalls.
       const recovery =
         p.source === "rapid-restart"
-          ? "clears on a later start outside the restart window (docs/troubleshooting.md)"
+          ? `clears on a later start outside the restart window (${DOC_LINKS.troubleshooting})`
           : p.source === "consecutive-stalls" || p.source === "idle-churn"
-            ? "stands until the operator clears it — no auto-clear (docs/troubleshooting.md)"
+            ? `stands until the operator clears it — no auto-clear (${DOC_LINKS.troubleshooting})`
             : "probing on backoff, auto-resumes on recovery";
       lines.push(
         `park: PARKED (${p.source}) since ${p.enteredAt} (${durationSec}s) — ` +
@@ -1404,7 +1405,7 @@ Flags:
   --reason "<text>"  Recorded verbatim in the park-resumed receipt (as clearReason) and
                      echoed in stdout — the OPERATOR's reason for clearing, distinct from
                      the episode's own reason for entering park. Optional for a human running
-                     this by hand; docs/supervision.md's governance section makes it REQUIRED
+                     this by hand; ${DOC_LINKS.supervision}'s governance section makes it REQUIRED
                      practice for an agent supervisor. Rejected if empty or
                      whitespace-only text. Omitted entirely: behavior is unchanged from before
                      this flag existed.
@@ -1838,7 +1839,7 @@ Flags:
 Env:
   SAPWOOD_DASHBOARD_PORT  Same effect as --port, lower precedence. Must be a valid port number.
 
-There is no --host/bind flag: the server binds 127.0.0.1 only, always (docs/security.md's
+There is no --host/bind flag: the server binds 127.0.0.1 only, always (${DOC_LINKS.security}'s
 loopback-only posture) — this launcher has no way to change that.
 
 Requires a built dashboard/dist bundle (${DASHBOARD_BUILD_HINT}); refuses to start, before any
@@ -2541,7 +2542,7 @@ export function announceFixLoopUnattached(
     log(
       `[sapwood:startup] lanes.prFixCap=${prFixCap} but the fix loop is not production-attached ` +
         `(proxy.enabled=${enabled}) — every FIXABLE review gate will degrade to a needs-human escalation ` +
-        "(fix-loop-unwired) instead of dispatching a fix leg; set `proxy.enabled: true` (docs/configuration.md, " +
+        `(fix-loop-unwired) instead of dispatching a fix leg; set \`proxy.enabled: true\` (${DOC_LINKS.configuration}, ` +
         "`proxy`) to go live, or `lanes.prFixCap: 0` to make the fold explicit",
     );
     state.appendEvent("fix-loop-unattached", { prFixCap, proxyEnabled: enabled, reason });

@@ -3,6 +3,7 @@
 // No timing-dependent assertions (repo doctrine): a pure config-driven branch, no clock, no wait.
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { DOC_LINKS } from "../util/doc-links.js";
 import { detectBypassPermissionsMode } from "./bypass-permissions-warning.js";
 
 test("host.permissionMode: bypassPermissions -> exactly one warning log line + one durable bypass-permissions-mode-configured event", () => {
@@ -18,7 +19,7 @@ test("host.permissionMode: bypassPermissions -> exactly one warning log line + o
   // Names the mode, the "engine does not gate" stance, and points at the outer-boundary recipe.
   assert.match(logs[0]!, /bypassPermissions/);
   assert.match(logs[0]!, /does not gate/i);
-  assert.match(logs[0]!, /docs\/security\.md#/);
+  assert.ok(logs[0]!.includes(DOC_LINKS.securityExecutionProfiles));
   assert.equal(events.length, 1);
   const [kind, payload] = events[0]!;
   assert.equal(kind, "bypass-permissions-mode-configured");

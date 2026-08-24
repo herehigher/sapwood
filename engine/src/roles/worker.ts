@@ -44,6 +44,7 @@ import type { Issue, LanePrOutcome } from "../forge/forge.js";
 import type { LaneProbe, ReclaimResult, ResumeIntentState, Supervisor, WorktreeSettleOutcome } from "../loop/conductor.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import type { CategorizedTokenUsage, ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
+import { DOC_LINKS } from "../util/doc-links.js";
 import { createHeartbeatGate, type HeartbeatGate } from "../util/heartbeat.js";
 import { sanitizeUpstreamError } from "../util/sanitize.js";
 import { awaitSpawnConfirmation } from "../util/spawn-confirm.js";
@@ -2750,7 +2751,7 @@ export class WorkerSupervisor implements Supervisor {
         if (!r.ok) {
           this.log(
             `[sapwood:deploy-key] L1 preflight failed for ${path}${r.detail ? `: ${r.detail}` : ""} — ` +
-              `re-run "sapwood init" to re-provision the deploy key (see docs/security.md's worker ` +
+              `re-run "sapwood init" to re-provision the deploy key (see ${DOC_LINKS.security}'s worker ` +
               `credential tiers). Dispatch continues at L0 (full credentialed env) until then; nothing wedges.`,
           );
         }

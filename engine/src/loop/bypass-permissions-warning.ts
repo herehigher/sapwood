@@ -11,6 +11,7 @@
 // just stderr scrollback" reason #410's own version carries one.
 import type { SapwoodConfig } from "../config/config.js";
 import type { State } from "../state/state.js";
+import { DOC_LINKS } from "../util/doc-links.js";
 
 const warningMessage =
   `[sapwood:startup] host.permissionMode is "bypassPermissions" — every claude session this engine ` +
@@ -18,7 +19,7 @@ const warningMessage =
   `protected paths. This is an operator call the engine does not gate: whether your own OS-level ` +
   `isolation is adequate is a judgment the engine has no way to verify. Two exits: pair this mode with ` +
   `an outer boundary (a container, a dedicated VM, or @anthropic-ai/sandbox-runtime — see ` +
-  `docs/security.md#execution-profiles-host-permission-mode--bash-sandbox's "Operator recipe for an ` +
+  `${DOC_LINKS.securityExecutionProfiles}'s "Operator recipe for an ` +
   `outer boundary" section for the exact recipes), or consciously accept the unbounded posture. No ` +
   `action is taken automatically.`;
 

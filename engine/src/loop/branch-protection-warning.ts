@@ -9,6 +9,7 @@
 // POSITIVELY VERIFIED unprotected, never on an inconclusive read (a warning operators learn to
 // distrust is worse than none — #560's logic).
 import { type GhRunner, gh } from "../forge/gh.js";
+import { DOC_LINKS } from "../util/doc-links.js";
 
 export type BranchProtectionState = { kind: "protected" } | { kind: "confirmed-unprotected"; branch: string } | { kind: "cannot-verify" };
 
@@ -65,12 +66,12 @@ export async function readBranchProtectionState(run: GhRunner, repo: string): Pr
 const warningMessage = (repo: string, branch: string): string =>
   `[sapwood:startup] default branch "${branch}" on ${repo} has NO branch protection (checked both the ` +
   `legacy branch-protection endpoint and any active ruleset covering the branch) — branch protection is ` +
-  `the mandatory platform backstop docs/security.md's accepted-blind-spots section names for a producer ` +
+  `the mandatory platform backstop ${DOC_LINKS.securityAcceptedBlindSpots}'s section names for a producer ` +
   `leg's inherited host tool surface: even though the engine itself only merges through the reviewed PR ` +
   `path, an inherited host tool can still \`git push\` straight to "${branch}", bypassing review ` +
   `entirely. Two exits: enable branch protection (repo Settings -> Branches, require the merge gate this ` +
   `engine already drives PRs through), or consciously accept this posture. Either way, see ` +
-  `docs/security.md#accepted-blind-spots for the full detail. No action is taken automatically.`;
+  `${DOC_LINKS.securityAcceptedBlindSpots} for the full detail. No action is taken automatically.`;
 
 /** Builds the once-per-engine-start detector. Unlike its filesystem-reading siblings
  *  (detectManagedPermissionMode, checkWebAccessSettingsDenial), this check is a REAL network

@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import type { IForge, PRCheckItem, PRReviewData, PRStatus } from "../forge/forge.js";
 import type { ApprovalResult, ReviewContext } from "../roles/reviewer.js";
+import { DOC_LINKS } from "../util/doc-links.js";
 import {
   ADVISORY_REVIEW_DEADLINE_MS,
   buildAdvisoryReviewComment,
@@ -316,7 +317,7 @@ test("buildCiInertEscalationComment: names the remedy and cites docs/configurati
   assert.match(comment, /lint \(SKIPPED\)/);
   assert.match(comment, /always run and skip its STEPS/);
   assert.match(comment, /push-only workflow/);
-  assert.match(comment, /docs\/configuration\.md/);
+  assert.ok(comment.includes(DOC_LINKS.configuration));
   assert.match(comment, /`abc123`/);
 });
 

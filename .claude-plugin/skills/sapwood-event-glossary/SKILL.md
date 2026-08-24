@@ -8,7 +8,7 @@ description: |
 
 GENERATED FILE — do not hand-edit. Regenerate with `npx tsx engine/src/state/event-kinds/generate-glossary.ts` after any registry/glossary change; `generate-glossary.test.ts`'s drift test fails CI if this file and a fresh regeneration disagree.
 
-This is interpretation, not instruction: it tells a loop supervisor (or any session that reads it) what an event/source/bucket MEANS and how urgently a human should look at it. It is not a source of GitHub label names, protected-path lists, or other machine-enforced facts — those live in code and docs/configuration.md; this glossary only points at them.
+This is interpretation, not instruction: it tells a loop supervisor (or any session that reads it) what an event/source/bucket MEANS and how urgently a human should look at it. It is not a source of GitHub label names, protected-path lists, or other machine-enforced facts — those live in code and https://github.com/herehigher/sapwood/blob/main/docs/configuration.md; this glossary only points at them.
 
 ## Actionability
 

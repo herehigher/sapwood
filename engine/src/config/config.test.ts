@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { DOC_LINKS } from "../util/doc-links.js";
 import {
   configHash,
   DEFAULT_GOAL_FILE,
@@ -973,7 +974,7 @@ test("#784: engineAgentEmptyCiRequiredChecksError fires for engine-agent + empty
   // #801: remedy (2) names the legal reviewer.mode alternatives instead of a vague "something
   // other than" — and the citation is an in-repo doc, not the unreachable "design #279 §4.3".
   assert.match(defaultedError!, /set reviewer\.mode to one of "different-model-codex", "same-model-trusted", or "human"/);
-  assert.match(defaultedError!, /docs\/configuration\.md/);
+  assert.ok(defaultedError!.includes(DOC_LINKS.configuration));
   assert.doesNotMatch(defaultedError!, /design #279/);
 
   // Explicit: the same combination written out by hand must produce the same refusal.

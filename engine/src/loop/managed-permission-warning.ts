@@ -7,6 +7,7 @@
 // naming both operator exits. Fail-open (no warning, no error) when managed settings are
 // absent/unreadable, which is the normal, unmanaged host — zero behavior change there.
 import { readFileSync } from "node:fs";
+import { DOC_LINKS } from "../util/doc-links.js";
 
 /** The three OS locations Claude Code itself deploys `managed-settings.json` to (Claude Code
  *  docs, "Enterprise managed policy settings" — verified 2026-08-03). Not configurable: these
@@ -23,7 +24,7 @@ const warningMessage = (path: string): string =>
   `deny, the Write/Edit/MultiEdit deny, the Agent/Task spawn deny) is VOID on this host; only ` +
   `managed-settings permission rules are respected. Two exits: mirror sapwood's deny rules into ` +
   `managed settings yourself, or consciously accept this posture. Either way, see ` +
-  `docs/security.md#managed-settings-allowmanagedpermissionrulesonly-exception for the exact ` +
+  `${DOC_LINKS.securityManagedSettingsException} for the exact ` +
   `rule list and both options in full. No action is taken automatically.`;
 
 /** Run once per engine start (cli.ts, next to detectRapidRestart/detectConsecutiveStalls). Never
