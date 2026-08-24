@@ -572,10 +572,10 @@ export interface IForge {
   getPRReviews(pr: number, cap: number): Promise<PRReviewsPage>;
   /** #244: every review thread on a PR, each with its own comment bodies, paged to EXHAUSTION
    *  (same Codex PR #42 P2 rationale as countUnresolvedThreads — a first-page-only fetch could
-   *  under-report). `commentsCap` bounds how many comments PER THREAD are fetched (GraphQL
-   *  `comments(first: commentsCap)`) — each thread's own `commentsComplete` flag (from that
-   *  sub-connection's `totalCount`) tells the proxy layer whether commentsCap actually bounded
-   *  it. `pageCapped` (Codex sol-high PR #260 review, P1) is true when the outer thread
+   *  under-report). each thread's comments are paged to the same safety ceiling, provenance-filtered,
+   *  and only then bounded to the last `commentsCap` VISIBLE comments — so public spam cannot
+   *  crowd a trusted reply out of the fetched window. A thread's `commentsComplete` is false
+   *  when either the visible cap or the ceiling truncated it. `pageCapped` (Codex sol-high PR #260 review, P1) is true when the outer thread
    *  connection's own pagination hit ITS hard safety ceiling (50 pages) before exhausting the
    *  connection — a DISTINCT incompleteness reason from the proxy's own lastN capping, which
    *  operates on an already-complete `threads` array. The proxy's own `pr_review_threads` tool
