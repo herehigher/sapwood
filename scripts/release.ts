@@ -537,6 +537,20 @@ function catalogPromotionPlan(
         if (catalogChanged) deps.exec("git", ["push", "origin", "HEAD:main"], catalogRoot);
       },
     },
+    {
+      // The catalog gets the same v<version> tag as the source repo, so "which shell did a
+      // user install" maps to a release with one `git describe`. Deliberately outside the
+      // `catalogChanged` guard: a retried promotion whose previous run pushed the commit but
+      // died before tagging still needs the tag. Existing tags are never moved (rollback rule),
+      // and the fresh clone above means the local tag list is the remote's.
+      describe: `git tag v${version} && git push origin v${version} (cwd: ${catalogRoot}; if absent)`,
+      run: (deps) => {
+        if (deps.exec("git", ["tag", "-l", `v${version}`], catalogRoot).trim() === "") {
+          deps.exec("git", ["tag", `v${version}`], catalogRoot);
+          deps.exec("git", ["push", "origin", `v${version}`], catalogRoot);
+        }
+      },
+    },
   ];
 }
 
@@ -587,7 +601,50 @@ export interface PublishStep {
   run(ctx: PublishContext, deps: Deps): void;
 }
 
+export const WINDOWS_SMOKE_WORKFLOW = "windows-pack-smoke.yml";
+
+// The Windows pack/install/dashboard smoke only runs here, at release time, because the
+// surface it proves (npm `.cmd` shim, `cmd /c start`) does not move with ordinary PRs — a
+// per-PR windows-latest job would be paid for on every push and almost never say anything new.
+// It runs before `tag` so a red run leaves nothing durable behind: nothing to delete, no
+// rollback. `gh workflow run` returns no run id, so the run is found by matching HEAD's sha
+// among the workflow's recent dispatches, and the only sync sleep Node offers is Atomics.wait.
+export function runWindowsSmoke(deps: Deps, attempts = 20): void {
+  const head = deps.exec("git", ["rev-parse", "HEAD"]).trim();
+  deps.exec("gh", ["workflow", "run", WINDOWS_SMOKE_WORKFLOW, "--ref", "main"]);
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);
+    const runs = JSON.parse(
+      deps.exec("gh", [
+        "run",
+        "list",
+        "--workflow",
+        WINDOWS_SMOKE_WORKFLOW,
+        "--event",
+        "workflow_dispatch",
+        "--limit",
+        "5",
+        "--json",
+        "databaseId,headSha",
+      ]),
+    ) as Array<{ databaseId: number; headSha: string }>;
+    const run = runs.find((r) => r.headSha === head);
+    if (run) {
+      deps.exec("gh", ["run", "watch", String(run.databaseId), "--exit-status"]);
+      return;
+    }
+  }
+  throw new Error(`windows-smoke: no ${WINDOWS_SMOKE_WORKFLOW} run appeared for ${head}`);
+}
+
 export const PUBLISH_STEPS: PublishStep[] = [
+  {
+    name: "windows-smoke",
+    describe: () => `gh workflow run ${WINDOWS_SMOKE_WORKFLOW} --ref main && gh run watch <run for HEAD> --exit-status`,
+    run: (_ctx, deps) => {
+      runWindowsSmoke(deps);
+    },
+  },
   {
     name: "tag",
     describe: (ctx) => `git tag -a v${ctx.version} -m "v${ctx.version}"`,

@@ -9,7 +9,7 @@ first autonomous run.
 - **Node.js ≥ 24** (the engine uses the built-in `node:sqlite`, no native build step).
 - **Claude Code CLI ≥ 2.1.209** — the engine's declared minimum (`MIN_CLAUDE_CLI_VERSION`,
   `engine/src/roles/worker.ts`; see [Configuration: `worker`](configuration.md#worker) for why
-  this exact version), authenticated and able to run the configured models with `claude -p` in a
+  this exact version). Authenticate it and make sure it can run the configured models with `claude -p` in a
   non-interactive shell. Workers and the default `engine-agent` reviewer are headless Claude
   sessions; this is a real Anthropic usage path and incurs real spend. A CLI below the floor is
   not refused outright — a once-per-start startup check WARNs (never blocks) when the resolved
@@ -25,59 +25,65 @@ first autonomous run.
 
 ## Install
 
-### Channel A — install from source (current, supported)
-
-Clone sapwood wherever you want it to live, then build its CLI:
-
-```
-git clone https://github.com/herehigher/sapwood
-cd sapwood
-npm ci
-npm --workspace engine run build
-```
-
-This is the supported pre-v1 install channel: the clone stays on disk wherever you placed it,
-and the build creates `engine/dist/` there (it is not shipped in the repository). To put
-`sapwood` on your PATH for the commands below, run:
-
-```
-npm link --workspace engine
-```
-
-Alternatively, do not link it and replace every `sapwood <cmd>` below with
-`node <clone>/engine/dist/cli.js <cmd>`, where `<clone>` is the path to your clone. The available
-CLI verbs include `sapwood init`, `sapwood validate`, `sapwood run`, `sapwood status`,
-`sapwood events`, `sapwood park clear`, and the stop-control verbs `sapwood pause`/`stop`/
-`estop` (each with a `clear` form; `estop` additionally requires `--confirm` to activate —
-see `sapwood estop --help`).
-
-### Channel B — Claude Code plugin/marketplace install
+### Channel B — Claude Code marketplace
 
 ```
 /plugin marketplace add herehigher/sapwood-plugin
 /plugin install sapwood@sapwood
 ```
 
-The catalog becomes available after the owner's first promotion. `/sapwood-run` and
-`/sapwood-status` resolve through
-`npx sapwood@<version>` (the plugin's own version) the first time they're invoked; that
-first call downloads the package (**Node.js ≥ 24 required**), and subsequent calls reuse
-npm's local cache. A checkout that already has a local `engine/dist` build — Channel A,
-or a contributor checkout — is used instead when present, no npx involved.
-Only the three shipped plugin wrappers (`/sapwood-run`, `/sapwood-status`,
-`/sapwood-stop`) are plugin-only; they cover `run`, `status`, and the three stop-control
-tiers, not `init` or `validate` — those still need Channel A or C.
+After the owner's first catalog promotion, the plugin supplies `/sapwood-run`,
+`/sapwood-status`, `/sapwood-stop`, and `/sapwood-dashboard`. They use the released package
+without a build step. The first command invocation may download the package through `npx` and
+therefore needs network access; later calls reuse npm's local cache. `init` and `validate` use
+Channel C (or Channel A), not a slash command.
+
+On Windows, these slash commands need the POSIX `sh` that Claude Code supplies (Git Bash or
+WSL); see the operator [install-scope observations](supervision.md#install-scope-observations).
+`/sapwood-dashboard` starts `sapwood dashboard`; if it cannot open a browser, it prints the
+loopback URL and keeps serving until you stop it with Ctrl+C.
+
+### Plugin-only slash commands (Channel B)
+
+These thin wrappers are available only in a Claude Code session that has loaded the sapwood
+plugin (Channel B, above) — they are **not** loaded by Channel A's contributor checkout or
+Channel C's npm install. Channel A and C users get the same functionality from the linked or
+installed `sapwood` CLI (`run`/`status`/`dashboard`) and, for stop/pause control, the
+file-sentinel commands (raw or the `sapwood pause`/`stop`/`estop` CLI verbs) above.
+
+- **`/sapwood-run [--once|--until-idle|--dry-run]`** — runs `sapwood run` with the given
+  mode and reports its output. No flags = daemon mode.
+- **`/sapwood-status [db-path]`** — runs `sapwood status`, reading the state DB directly
+  (`data/sapwood.sqlite` by default). Works even with no engine session currently
+  running.
+- **`/sapwood-dashboard [--port PORT] [--config PATH]`** — runs `sapwood dashboard`, opening
+  it in your default browser or printing the loopback URL in a headless environment.
+- **`/sapwood-stop [--emergency|--clear-emergency|--pause|--resume|--lift]`** — sapwood's
+  three tiers of human control:
+  - **`--emergency`**: the strictest tier — hard-kills running/fixing lane process groups
+    without a drain window. In-flight WIP is lost; clear it with `--clear-emergency` only after
+    human review.
+  - No argument: trips the **kill switch** — freezes all new dispatch and merges;
+    running workers are asked to hand off gracefully, then the conductor escalates to a
+    hard kill past the drain window. `--lift` reverses it.
+  - **`--pause`**: the gentle tier — freezes new dispatch *only*. Everything already in
+    flight (running workers, PRs moving through the review/merge gate) keeps going
+    normally. `--resume` lifts it.
+
+  See [`security.md`](security.md#human-controls-three-tiers) for the full semantics, including
+  how pause interacts with `--until-idle`.
 
 ### Channel C — npm
 
 The engine publishes to npm as the bare package `sapwood` (the `@sapwood` scope is reserved
 for future split packages — see [`10-releasing.md`](dev-guide/10-releasing.md)). This is the
-no-clone path: no build step, nothing to link. The package is not yet on the registry.
+consumer path: no clone, build, or link step.
 
 ```
 npx sapwood@<version> init
 npx sapwood@<version> validate
 npx sapwood@<version> run --dry-run
+npx sapwood@<version> dashboard
 ```
 
 Or install it once and use the bare `sapwood` command from then on:
@@ -85,14 +91,32 @@ Or install it once and use the bare `sapwood` command from then on:
 ```
 npm i -g sapwood@alpha
 sapwood --version
-sapwood init --help
+sapwood dashboard
 ```
 
 `alpha` is the pre-release dist-tag (a pre-release version never becomes `latest` — see
-[`10-releasing.md`](dev-guide/10-releasing.md)); drop it once a plain release ships. Every CLI
-verb Channel A lists above is the same binary
-(`dist/cli.js`) either way — Channel A is the contributor path (build from source, iterate on
-the engine itself); Channel C is the consumer path (run a published version, no clone).
+[`10-releasing.md`](dev-guide/10-releasing.md)); use the shipped version or `latest` after a
+plain release.
+
+### Channel A — contributor checkout
+
+Only contributors building sapwood itself need this channel. From an existing checkout:
+
+```
+npm ci
+npm run build
+```
+
+This creates `engine/dist/` in the checkout. To put `sapwood` on your PATH for the commands
+below, run:
+
+```
+npm link --workspace engine
+```
+
+Alternatively, skip linking and replace every `sapwood <cmd>` below with
+`node engine/dist/cli.js <cmd>`. `npm run build` already builds every workspace, dashboard
+included, so there is no separate end-user dashboard build step on any channel.
 
 ## Bootstrap the target repo, then run `sapwood init`
 
@@ -537,33 +561,6 @@ On macOS, launchd's equivalents are `KeepAlive` with
 burst, which makes the engine's own two backstops — and checking
 `sapwood status` after any unattended stretch — matter more there.
 
-## Plugin-only slash commands (Channel B)
-
-These thin wrappers are available only in a Claude Code session that has loaded the sapwood
-plugin (Channel B, above) — they are **not** loaded by Channel A's clone/build/link install.
-Channel A users should use the file-sentinel commands (raw or the `sapwood pause`/`stop`/
-`estop` CLI verbs) above for stop/pause control and the linked CLI for run/status.
-
-- **`/sapwood-run [--once|--until-idle|--dry-run]`** — runs `sapwood run` with the given
-  mode and reports its output. No flags = daemon mode.
-- **`/sapwood-status [db-path]`** — runs `sapwood status`, reading the state DB directly
-  (`data/sapwood.sqlite` by default). Works even with no engine session currently
-  running.
-- **`/sapwood-stop [--emergency|--clear-emergency|--pause|--resume|--lift]`** — sapwood's
-  three tiers of human control:
-  - **`--emergency`**: the strictest tier — hard-kills running/fixing lane process groups
-    without a drain window. In-flight WIP is lost; clear it with `--clear-emergency` only after
-    human review.
-  - No argument: trips the **kill switch** — freezes all new dispatch and merges;
-    running workers are asked to hand off gracefully, then the conductor escalates to a
-    hard kill past the drain window. `--lift` reverses it.
-  - **`--pause`**: the gentle tier — freezes new dispatch *only*. Everything already in
-    flight (running workers, PRs moving through the review/merge gate) keeps going
-    normally. `--resume` lifts it.
-
-  See [`security.md`](security.md#human-controls-three-tiers) for the full semantics, including how
-  pause interacts with `--until-idle`.
-
 ## Writing a `Ready` issue
 
 sapwood will not dispatch an issue until it's genuinely ready to hand to an autonomous
@@ -682,10 +679,10 @@ before you hit `Ready`, not a label after.
 
 sapwood ships a web dashboard over the same state DB `sapwood status` reads. Its data
 views are always read-only; a single write route also lets it issue pause/stop/estop
-control actions, which is enabled by default. Build the bundle once, then launch it:
+control actions, which is enabled by default. Every channel ships the dashboard already
+built — launch it directly:
 
 ```
-npm run build -w dashboard
 sapwood dashboard
 ```
 

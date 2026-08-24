@@ -18,7 +18,7 @@ Each `commands/*.md` file defines one slash command as frontmatter
 (description, argument hint, allowed tools) plus instructions that invoke the
 engine CLI:
 
-- `sapwood-run.md` and `sapwood-status.md` resolve the engine through a shared wrapper,
+- `sapwood-run.md`, `sapwood-status.md`, and `sapwood-dashboard.md` resolve the engine through a shared wrapper,
   `bin/sapwood-plugin.sh <verb> $ARGUMENTS`: it runs a local `engine/dist/cli.js` when
   one exists (a contributor/dogfood checkout or a built Channel A clone), and otherwise
   falls back to `npx sapwood@<version>` pinned to the plugin's own version — a
@@ -33,7 +33,8 @@ engine CLI:
   and the wrapper script itself is the actual boundary on what runs.
 - `sapwood-run.md` → `run` (rounds driver by default; `--once`/`--until-idle`
   are tick-driver-only). `sapwood-status.md` → `status` (reads SQLite without
-  an engine). `sapwood-stop.md` manages the `data/EMERGENCY_STOP` /
+  an engine). `sapwood-dashboard.md` → `dashboard` (serves the packaged dashboard and prints
+  its URL when browser opening is unavailable). `sapwood-stop.md` manages the `data/EMERGENCY_STOP` /
   `data/KILL_SWITCH` / `data/PAUSE` control files directly; there is no CLI `stop`
   subcommand.
 

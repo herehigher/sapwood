@@ -1,0 +1,26 @@
+name: Windows package smoke
+
+# Dispatched by `scripts/release.ts publish` as its first step, against origin/main, and waited
+# on: a red run stops the release before the tag exists. Not a per-PR check — the platform
+# surface it proves (npm .cmd shim, `cmd /c start`) does not move with ordinary code changes.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-pack-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: node --import tsx scripts/windows-pack-smoke.ts

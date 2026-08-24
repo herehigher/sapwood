@@ -317,6 +317,20 @@ machinery: `run --detach` or an engine daemon mode is deliberately out of scope 
 whichever of the two forms above matches your launcher, plus the lock-file liveness
 check, already covers the verified failure modes).
 
+## Install-scope observations
+
+- The guard-hook path is resolved once for an engine lifetime. When a live loop uses an npm
+  cache path, running `npm cache clean` during that loop makes guarded calls fail closed with
+  exit 2 in hard mode; do not clear that cache until the loop has stopped.
+- `NODE_OPTIONS=--preserve-symlinks-main` is unsupported for an installed `sapwood` bin: its
+  symlinked entrypoint fails with `ERR_MODULE_NOT_FOUND`.
+- `sapwood status` and `sapwood events` are state-read-only, but SQLite can create `-wal` and
+  `-shm` sidecars beside an existing database. Those files are expected rather than sapwood
+  state writes.
+- The guard-hook wrapper and marketplace slash commands are POSIX `sh`. On Windows, use the
+  shell environment Claude Code provides through Git Bash or WSL; sapwood does not ship a native
+  wrapper.
+
 ## Batch open ritual
 
 Before dispatching a batch of work (starting a new `sapwood run`, or resuming after a
@@ -328,16 +342,12 @@ gap), work through these in order:
    (`ps -p <pid>`), or let `sapwood run`/`sapwood park clear` make the call: both refuse
    with the holder's pid named when a live engine already has the lock. A refusal here
    means stop and investigate, never retry-until-it-works.
-2. **dist/build freshness.** The `/sapwood-run`, `/sapwood-status`, and `/sapwood-stop`
-   slash commands invoke the engine's TypeScript source directly (via `tsx`) and are
-   always fresh. The bare `sapwood events` / `sapwood park clear` verbs used for
-   supervision have no slash-command wrapper yet and, when invoked through a built
-   `dist/cli.js` (`docs/getting-started.md`'s "About the bare `sapwood` command"), can be
-   running against a stale build if engine source changed since the last
-   `npm --workspace engine run build`. Before trusting their output in a batch, either
-   rebuild (`npm ci && npm --workspace engine run build`) or invoke them the same way the
-   slash commands do (`node .../node_modules/.bin/tsx .../engine/src/cli.ts <verb>`),
-   which reads source directly and sidesteps the staleness question entirely.
+2. **Release freshness.** The slash commands (`/sapwood-run`, `/sapwood-status`,
+   `/sapwood-stop`, and `/sapwood-dashboard`) use a local built CLI only in a contributor
+   checkout; a marketplace install resolves the package version pinned by the plugin. For
+   source changes, rebuild with `npm ci && npm run build` before relying on that checkout.
+   For an installed release, update the package or plugin rather than treating source files as
+   its runtime.
 3. **Config provenance.** Run `sapwood status --json` and read its `config` section:
    `{available: true, provenance: <resolved path>, lanesMax, dailyBudgetUsd}` when a
    config loaded, `{available: false}` when it didn't. `provenance` names the *exact*

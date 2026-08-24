@@ -8,6 +8,9 @@ All notable changes to sapwood are documented here. Format:
 ## [Unreleased]
 
 ### Added
+- Bare `sapwood` npm package, including the packaged dashboard; post-publish dashboard canary
+  and catalog promotion of the thin marketplace shell.
+- `/sapwood-dashboard` marketplace slash command and a Windows pack/install/dashboard smoke that `release publish` runs as its first, gating step.
 - Plugin skeleton, YAML/JSON config schema, `IForge` GitHub adapter, WAL-mode
   SQLite state layer; `sapwood init` onboarding — auth preflight, org
   detection, idempotent board/label/milestone provisioning.
