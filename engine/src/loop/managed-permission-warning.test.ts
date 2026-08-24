@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { DOC_LINKS } from "../util/doc-links.js";
 import { detectManagedPermissionMode } from "./managed-permission-warning.js";
 
 function withFixtureDir(fn: (dir: string) => void): void {
@@ -30,7 +31,7 @@ test("allowManagedPermissionRulesOnly: true -> exactly one warning, with resolut
     // Both operator exits named, plus the docs/security.md anchor.
     assert.match(logged[0]!, /mirror/i);
     assert.match(logged[0]!, /accept/i);
-    assert.match(logged[0]!, /docs\/security\.md#/);
+    assert.ok(logged[0]!.includes(DOC_LINKS.securityManagedSettingsException));
   });
 });
 

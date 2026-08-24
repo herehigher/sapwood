@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { GhRunner } from "../forge/gh.js";
+import { DOC_LINKS } from "../util/doc-links.js";
 import { createBranchProtectionDetector, readBranchProtectionState } from "./branch-protection-warning.js";
 
 const REPO = "acme/widgets";
@@ -179,7 +180,7 @@ test("createBranchProtectionDetector: verified-absent -> exactly one warning nam
   assert.equal(logged.length, 1);
   assert.match(logged[0]!, /"main"/);
   assert.match(logged[0]!, /acme\/widgets/);
-  assert.match(logged[0]!, /docs\/security\.md#accepted-blind-spots/);
+  assert.ok(logged[0]!.includes(DOC_LINKS.securityAcceptedBlindSpots));
   // Both operator exits named.
   assert.match(logged[0]!, /enable branch protection/i);
   assert.match(logged[0]!, /consciously accept/i);

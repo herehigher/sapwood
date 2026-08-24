@@ -49,6 +49,7 @@
 // (unrepairable — the exact class codex reproduced in rounds 2-4).
 import type { SapwoodConfig } from "../config/config.js";
 import type { State } from "../state/state.js";
+import { DOC_LINKS } from "../util/doc-links.js";
 
 /** The park episode's source discriminator — state.ts's ParkSource third member. */
 export const RAPID_RESTART_PARK_SOURCE = "rapid-restart" as const;
@@ -115,7 +116,7 @@ export function detectRapidRestart(
     `sapwood: rapid-restart detector tripped — ${reason}. Autonomous dispatch is parked. ` +
     `A crash loop is not a sanctioned restart pattern: stop the supervisor/restart source, fix the cause, ` +
     `and start the engine once the window has drained (a later clean start resumes automatically). ` +
-    `See docs/troubleshooting.md and docs/security.md (supervisor circuit-breaker prerequisite).`;
+    `See ${DOC_LINKS.troubleshooting} and ${DOC_LINKS.security} (supervisor circuit-breaker prerequisite).`;
   /** The immediate local escalation — NOW, not after envFailure.parkEscalateAfterSec: a crash
    *  loop already IS the escalation-worthy fact, and each of its restarts resets this
    *  process's life anyway. Local channel of the existing park ladder (escalatePark's own

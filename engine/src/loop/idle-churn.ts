@@ -67,6 +67,7 @@
 // stall-breaker.ts use, folded over this module's own kind.
 import { createHash } from "node:crypto";
 import type { State } from "../state/state.js";
+import { DOC_LINKS } from "../util/doc-links.js";
 
 /** The park episode's source discriminator — state.ts's ParkSource fifth member. Probe-less, like
  *  `rapid-restart`/`consecutive-stalls`: an idle-churn park has nothing to probe (the engine is
@@ -193,7 +194,7 @@ export function idleChurnMessage(reason: string): string {
     `counting work that nothing enabled can ever consume, so standby never engages. Start from the probe signal(s) ` +
     `named above and ask what would CONSUME that work; if the answer is "nothing", that signal needs its terminal ` +
     `(round.ts's probeHasWork DESIGN RULE). This park does NOT auto-clear: fix the cause, then stop the engine and run ` +
-    `\`sapwood park clear --source ${IDLE_CHURN_PARK_SOURCE}\` (docs/troubleshooting.md).`
+    `\`sapwood park clear --source ${IDLE_CHURN_PARK_SOURCE}\` (${DOC_LINKS.troubleshooting}).`
   );
 }
 

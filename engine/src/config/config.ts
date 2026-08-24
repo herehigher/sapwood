@@ -17,6 +17,7 @@ import {
   workflowLabelDefaults,
 } from "../forge/labels.js";
 import { DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
+import { DOC_LINKS } from "../util/doc-links.js";
 
 export const DEFAULT_EGRESS_SUSPECT_COMMANDS = [
   "curl",
@@ -2078,7 +2079,7 @@ export function engineAgentEmptyCiRequiredChecksError(cfg: SapwoodConfig): strin
   if (cfg.reviewer.mode !== "engine-agent" || cfg.ci.requiredChecks.length > 0) return null;
   return (
     'sapwood run: reviewer.mode is "engine-agent" but ci.requiredChecks is empty — every PR will queue ' +
-    "fail-closed at the CI-evidence preflight forever, and nothing will ever be reviewed (see docs/configuration.md's " +
+    `fail-closed at the CI-evidence preflight forever, and nothing will ever be reviewed (see <${DOC_LINKS.configuration}>'s ` +
     "`ci` section). Fix one of: (1) add at least one entry to ci.requiredChecks naming this repo's required CI " +
     'check(s), or (2) set reviewer.mode to one of "different-model-codex", "same-model-trusted", or "human" instead ' +
     'of "engine-agent".'

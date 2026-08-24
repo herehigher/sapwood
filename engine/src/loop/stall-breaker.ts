@@ -77,6 +77,7 @@
 // rebuilding the row, so a crash can never be mistaken for a human act.
 import type { SapwoodConfig } from "../config/config.js";
 import type { State } from "../state/state.js";
+import { DOC_LINKS } from "../util/doc-links.js";
 
 /** The park episode's source discriminator — state.ts's ParkSource fourth member. */
 export const CONSECUTIVE_STALLS_PARK_SOURCE = "consecutive-stalls" as const;
@@ -162,8 +163,8 @@ export function detectConsecutiveStalls(
     `park does NOT auto-clear. Diagnose the stall (the engine-stalled events name the round/phase ` +
     `and last event), fix the cause, then stop the engine and run ` +
     `\`sapwood park clear --source ${CONSECUTIVE_STALLS_PARK_SOURCE}\` (receipt-first, and it ` +
-    `refuses while an engine holds the data dir; docs/troubleshooting.md keeps the raw-SQL ` +
-    `break-glass). Starting the engine again resumes dispatch. See also docs/getting-started.md ` +
+    `refuses while an engine holds the data dir; ${DOC_LINKS.troubleshooting} keeps the raw-SQL ` +
+    `break-glass). Starting the engine again resumes dispatch. See also ${DOC_LINKS.gettingStarted} ` +
     `("Running under a supervisor").`;
   /** The immediate local escalation — same channel, ordering, and mirror-heal contract as
    *  rapid-restart.ts's escalateLocally (see its own doc): the log-deduped park-escalated event
@@ -287,7 +288,7 @@ export function detectConsecutiveStalls(
         }
         log(
           `[sapwood:startup] consecutive-stalls park still open (episode ${openEpisode.id}, entered ${enteredAtIso}): ` +
-            `autonomous dispatch stays parked until the operator clears it (docs/troubleshooting.md)`,
+            `autonomous dispatch stays parked until the operator clears it (${DOC_LINKS.troubleshooting})`,
         );
         outcome.tripped = true;
       }

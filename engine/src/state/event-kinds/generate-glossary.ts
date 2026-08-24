@@ -20,6 +20,7 @@ import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ESCALATION_BUCKET_GLOSSARY, type EscalationBucket } from "../../loop/escalation-buckets.js";
+import { DOC_LINKS } from "../../util/doc-links.js";
 import { PARK_SOURCE_GLOSSARY } from "../state.js";
 import { EVENT_KIND_DOMAINS, EVENT_KINDS, type EventKind } from "./index.js";
 import type { KindGlossary } from "./types.js";
@@ -75,7 +76,7 @@ export function renderGlossarySkill(): string {
   lines.push(
     "This is interpretation, not instruction: it tells a loop supervisor (or any session that reads it) what an " +
       "event/source/bucket MEANS and how urgently a human should look at it. It is not a source of GitHub label " +
-      "names, protected-path lists, or other machine-enforced facts — those live in code and docs/configuration.md; " +
+      `names, protected-path lists, or other machine-enforced facts — those live in code and <${DOC_LINKS.configuration}>; ` +
       "this glossary only points at them.",
   );
   lines.push("");

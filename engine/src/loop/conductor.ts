@@ -52,6 +52,7 @@ import type {
   State,
   WorkerRow,
 } from "../state/state.js";
+import { DOC_LINKS } from "../util/doc-links.js";
 import { observeBaseCi } from "./base-ci.js";
 import { CAP_SPLIT_ORIGIN_MARKER, type CapSplitWipPointer, renderCapSplitWipComment, summarizeUnifiedDiffStat } from "./cap-split.js";
 import {
@@ -2624,7 +2625,7 @@ export async function escalatePark(
         `This episode has now stood for over the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
         `escalation threshold. There is NO probe for this episode: dispatch stays parked until an ` +
         `engine start observes the restart window drained (or the park is cleared by hand) — see ` +
-        `docs/troubleshooting.md and docs/security.md (supervisor circuit-breaker prerequisite).`
+        `${DOC_LINKS.troubleshooting} and ${DOC_LINKS.security} (supervisor circuit-breaker prerequisite).`
       : park.source === "consecutive-stalls"
         ? // #407: same probe-less honesty as the rapid-restart arm above — this episode's own
           // clearing story (stall-breaker.ts: operator-explicit only, no auto-clear) must be the
@@ -2635,7 +2636,7 @@ export async function escalatePark(
           `This episode has now stood for over the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
           `escalation threshold. There is NO probe and NO auto-clear for this episode: fix the recurring ` +
           `wedge, then stop the engine and run \`sapwood park clear --source consecutive-stalls\` ` +
-          `(docs/troubleshooting.md) — starting the engine again resumes dispatch.`
+          `(${DOC_LINKS.troubleshooting}) — starting the engine again resumes dispatch.`
         : park.source === "idle-churn"
           ? // #470: the third probe-less shape (loop/idle-churn.ts). Same honesty requirement as
             // the two arms above — and the same practical residual: the breaker escalates at trip
@@ -2646,7 +2647,7 @@ export async function escalatePark(
             `escalation threshold. There is NO probe and NO auto-clear for this episode: the loop itself is ` +
             `healthy, so there is nothing down here to re-test — the fault is a probe signal counting work ` +
             `nothing enabled can consume. Fix that, then stop the engine and run ` +
-            `\`sapwood park clear --source idle-churn\` (docs/troubleshooting.md).`
+            `\`sapwood park clear --source idle-churn\` (${DOC_LINKS.troubleshooting}).`
           : `sapwood: engine parked since ${park.enteredAt} due to a ${park.source} environment failure ` +
             `(${park.reason}) — this has exceeded the configured ${cfg.envFailure.parkEscalateAfterSec}s ` +
             `escalation threshold. The engine is still probing on a bounded exponential backoff and will ` +
@@ -7029,7 +7030,7 @@ async function escalateNonConvergent(
       `sapwood: PR #${pr}'s review is not converging — the progress signal is **${signal}** ` +
         `(${fixRoundsSpent} fix round(s) already spent). Escalating directly to ` +
         `\`${cfg.labels.needsHuman}\` instead of dispatching another fix leg, per ` +
-        `docs/REVIEW-DOCTRINE.md's adjudication principle 4: runaway complexity escalates to the ` +
+        `<${DOC_LINKS.reviewDoctrine}>'s adjudication principle 4: runaway complexity escalates to the ` +
         `top of the loop, not more patches — the intended response is DESIGN RE-ENTRY ` +
         `(architect/plan re-review), not merely this human notification.\n\n` +
         `Round r-1 finding keys${boundedPrev.truncated ? " (truncated)" : ""}:\n` +

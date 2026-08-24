@@ -49,6 +49,7 @@ import {
   probeClaudeVersion,
 } from "../roles/worker.js";
 import type { State } from "../state/state.js";
+import { DOC_LINKS } from "../util/doc-links.js";
 
 export type { ClaudeVersionProbeResult } from "../roles/worker.js";
 export { CLAUDE_VERSION_PROBE_TIMEOUT_MS, probeClaudeVersion } from "../roles/worker.js";
@@ -122,7 +123,7 @@ const UPGRADE_COMMAND = "npm i -g @anthropic-ai/claude-code@latest";
 
 const guidance = (installed: string | undefined, floor: string): string =>
   `upgrade with \`${UPGRADE_COMMAND}\` (floor: ${floor}${installed ? `, installed: ${installed}` : ""}); ` +
-  "see docs/getting-started.md's Requirements and docs/configuration.md's `worker` section.";
+  `see <${DOC_LINKS.gettingStarted}>'s Requirements and <${DOC_LINKS.configuration}>'s \`worker\` section.`;
 
 /** #799 gate② P1 #1 fix (a): a throwing collaborator (`log`, `state.appendEvent`) must never
  *  abort this startup VISIBILITY check — swallowed, best-effort. A failure to REPORT the arm is
