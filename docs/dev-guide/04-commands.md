@@ -83,6 +83,7 @@ CI is present at `.github/workflows/ci.yml`. On every pull request and pushes to
 npm ci
 npm --workspace engine run typecheck
 npm run lint
+npm run check-links
 npm --workspace engine test
 ```
 

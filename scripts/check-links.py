@@ -10,6 +10,13 @@ tree) by passing its path:
 
     python3 scripts/check-links.py /path/to/other/checkout
 
+Pass `--internal-only` to skip the external-link section entirely (no
+network, no `gh` call) and check only relative links/anchors. This is the
+mode wired into CI, where a `gh`-authenticated, networked check would be
+flaky and would gate merges on outside URLs sapwood does not control:
+
+    python3 scripts/check-links.py --internal-only
+
 Stdlib only -- no new dependency, nothing to `npm install`.
 
 Scope: README.md + docs/ entry pages -- every top-level `docs/*.md`, plus
@@ -226,7 +233,10 @@ def check_external(external_links):
 
 
 def main():
-    root = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    args = sys.argv[1:]
+    internal_only = '--internal-only' in args
+    positional = [a for a in args if a != '--internal-only']
+    root = os.path.abspath(positional[0]) if positional else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     scope = sorted(collect_scope(root))
     print(f"Scope ({len(scope)} files, root={root}):")
@@ -244,6 +254,9 @@ def main():
         print(f"  [{kind}] {rel} -> {target}  ({detail})")
     if not results:
         print("  (none)")
+
+    if internal_only:
+        return 1 if results else 0
 
     print()
     print(f"=== External links found ({len(external_links)} unique) ===")
