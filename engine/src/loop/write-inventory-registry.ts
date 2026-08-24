@@ -1,5 +1,5 @@
 // #796: the declarative registry backing docs/PLAN.md's "structured-output write inventory"
-// table (section "Validation depth ∝ decision weight") and docs/role-paradigm.md's "Per-role
+// table (section "Validation depth ∝ decision weight") and docs/reference/role-paradigm.md's "Per-role
 // sections". This is the SOURCE OF TRUTH read by write-inventory.test.ts's bidirectional
 // completeness check — see that file's own doc for why bidirectional (a structured-output
 // session with no table row can silently drop its stated validation-depth obligation; a table

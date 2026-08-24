@@ -1,6 +1,6 @@
 # 03 — Running locally
 
-For installation into another repository, use [Getting started](../getting-started.md). This page covers running the checked-out source as a contributor.
+For installation into another repository, use [Getting started](../guide/getting-started.md). This page covers running the checked-out source as a contributor.
 
 ## Prerequisites
 
@@ -9,8 +9,8 @@ For installation into another repository, use [Getting started](../getting-start
 - Git and a repository that can create worktrees (`engine/src/roles/worker.ts`).
 - GitHub CLI authenticated with repository and Project scopes; `sapwood init` performs the preflight (`engine/src/loop/init.ts`).
 - Claude Code CLI available as `claude`, or selected with `CLAUDE_BIN` (`engine/src/roles/worker.ts`).
-- The default reviewer (#501) is the engine-composed `engine-agent` Claude session (`engine/src/review/`) — it runs locally on the same `claude` CLI above, at a per-review dollar cost (`reviewer.agent.costCapUsd`, default $3; see `docs/configuration.md`). Other supported kinds, selectable via `reviewer.mode`, include a Codex-backed GitHub review trigger (`different-model-codex`, not a locally spawned `codex` command — `engine/src/roles/reviewer.ts`) and trusted/human GitHub reviews.
-- Independently of the kind, the `engine-agent` review session has a **runner** dimension (#443, `reviewer.agent.runner`): `claude` (default, the local `claude` CLI) or `codex-exec` — a locally spawned `codex exec` process, which makes gate② cross-vendor and requires the `codex` CLI on `PATH` (or `CODEX_BIN`) plus a codex login. Don't confuse it with the hosted `different-model-codex` mode above: that one spawns nothing and reviews through a PR comment. See `docs/configuration.md` for the runner's advisory-budget and recorded-blind-spot semantics.
+- The default reviewer (#501) is the engine-composed `engine-agent` Claude session (`engine/src/review/`) — it runs locally on the same `claude` CLI above, at a per-review dollar cost (`reviewer.agent.costCapUsd`, default $3; see `docs/guide/configuration.md`). Other supported kinds, selectable via `reviewer.mode`, include a Codex-backed GitHub review trigger (`different-model-codex`, not a locally spawned `codex` command — `engine/src/roles/reviewer.ts`) and trusted/human GitHub reviews.
+- Independently of the kind, the `engine-agent` review session has a **runner** dimension (#443, `reviewer.agent.runner`): `claude` (default, the local `claude` CLI) or `codex-exec` — a locally spawned `codex exec` process, which makes gate② cross-vendor and requires the `codex` CLI on `PATH` (or `CODEX_BIN`) plus a codex login. Don't confuse it with the hosted `different-model-codex` mode above: that one spawns nothing and reviews through a PR comment. See `docs/guide/configuration.md` for the runner's advisory-budget and recorded-blind-spot semantics.
 
 ## Install & build
 
@@ -25,7 +25,7 @@ The root build fans out to the engine workspace. TypeScript emits ESM, declarati
 
 ## Configuration
 
-The checked-in `sapwood.config.yaml` is this repository's live configuration — the loop runs from it with no `--config`; only non-default values are written (see [Configuration — Two config files](../configuration.md#two-config-files)). `loadConfig()` probes, in order, `sapwood.config.yaml`, `sapwood.config.yml`, then `sapwood.config.json`; `sapwood run --config <path>` (including `--dry-run`), `sapwood status --config <path>`, `sapwood events --config <path>`, `sapwood pause|stop|estop --config <path>` (#731), and `sapwood validate [path]` bypass the probe. `status`/`events`/`pause`/`stop`/`estop`'s `--config` is authoritative once given (#710) — a bad path there is a hard error, never a silent fallback. Relative `logging.path`, `promptFile`, `goal.file`, and `doctrine.file` keys resolve from the selected config's directory, so an alternate config's default log lands beside that config; the DB (`data/sapwood.sqlite`), `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, and worktree roots stay cwd-relative. JSON is accepted through the YAML parser. See [Configuration](../configuration.md) for the complete key reference.
+The checked-in `sapwood.config.yaml` is this repository's live configuration — the loop runs from it with no `--config`; only non-default values are written (see [Configuration — Two config files](../guide/configuration.md#two-config-files)). `loadConfig()` probes, in order, `sapwood.config.yaml`, `sapwood.config.yml`, then `sapwood.config.json`; `sapwood run --config <path>` (including `--dry-run`), `sapwood status --config <path>`, `sapwood events --config <path>`, `sapwood pause|stop|estop --config <path>` (#731), and `sapwood validate [path]` bypass the probe. `status`/`events`/`pause`/`stop`/`estop`'s `--config` is authoritative once given (#710) — a bad path there is a hard error, never a silent fallback. Relative `logging.path`, `promptFile`, `goal.file`, and `doctrine.file` keys resolve from the selected config's directory, so an alternate config's default log lands beside that config; the DB (`data/sapwood.sqlite`), `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, and worktree roots stay cwd-relative. JSON is accepted through the YAML parser. See [Configuration](../guide/configuration.md) for the complete key reference.
 
 Environment variables read or propagated by the engine are deliberately narrow:
 
@@ -89,7 +89,7 @@ When a run misbehaves, the evidence trail is layered — read it in this order:
    inspection; its branch and dirty state show exactly what the worker left.
 
 Operator-facing failure semantics (`needs-human` reasons, park/probe, degrade
-paths) are in [Troubleshooting](../troubleshooting.md).
+paths) are in [Troubleshooting](../guide/troubleshooting.md).
 
 ## Resetting local state
 

@@ -8,7 +8,7 @@
 //   4. the D5 (provider, model) runtime matrix, incl. unidentifiable ⇒ unavailable;
 //   5. the default path is byte-for-byte the pre-seam one (regression pin);
 //   6. the three honest-recording event kinds are REGISTERED in the copy map that owns the
-//      engine's event-kind inventory (docs/frontend-design.md §7 — "every engine PR that adds an
+//      engine's event-kind inventory (docs/reference/frontend-design.md §7 — "every engine PR that adds an
 //      event kind must extend this map").
 // Fake executors/runners only: no subprocess, no timers (docs/REVIEW-DOCTRINE.md).
 import assert from "node:assert/strict";
@@ -333,13 +333,16 @@ test("regression pin: with `runner` unset, evaluate() goes through RoleRunner.ru
 // ── 6. event-kind registration ───────────────────────────────────────────────────────────────
 
 test("event-kind registration: every honest-recording kind this feature adds is listed in the §7 copy map — the repo's own rule that a new event kind lands in that map in the SAME PR", () => {
-  const doc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "docs", "frontend-design.md"), "utf8");
+  const doc = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "docs", "reference", "frontend-design.md"),
+    "utf8",
+  );
   for (const kind of [
     ENGINE_REVIEW_BUDGET_ADVISORY,
     ENGINE_REVIEW_COST_UNKNOWN,
     ENGINE_REVIEW_CONTAINMENT_GAP,
     ENGINE_REVIEW_ORPHANED_GROUP,
   ]) {
-    assert.ok(doc.includes(`| \`${kind}\` |`), `event kind ${kind} must have a plain-language row in docs/frontend-design.md §7`);
+    assert.ok(doc.includes(`| \`${kind}\` |`), `event kind ${kind} must have a plain-language row in docs/reference/frontend-design.md §7`);
   }
 });

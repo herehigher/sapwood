@@ -42,12 +42,12 @@
 //    the previous holder died WITHOUT releasing and the OS has since recycled that exact pid onto
 //    an unrelated live process, the liveness check reads ALIVE and this engine REFUSES to start.
 //    The safe failure direction — a false refusal (fixed by deleting the lockfile, see
-//    docs/troubleshooting.md), never a false takeover / double-drive. Closing it would need the
+//    docs/guide/troubleshooting.md), never a false takeover / double-drive. Closing it would need the
 //    holder's process START TIME, which has no portable Node API (per-OS `ps` output parsing) —
 //    rejected as machinery the residual doesn't justify.
 //  * A crash INSIDE the sub-second takeover critical section leaves the mutex directory behind;
 //    every later start that needs a takeover then refuses FAIL-CLOSED with a distinct message
-//    naming the directory, until an operator removes it (docs/troubleshooting.md). This is the
+//    naming the directory, until an operator removes it (docs/guide/troubleshooting.md). This is the
 //    deliberate round-3 conversion of round 2's unbounded silent double-drive hazard into a
 //    bounded, visible refusal — and there is NO recursive stale-mutex takeover machinery on top,
 //    which would recreate the original problem one level down (marginal-complexity principle).

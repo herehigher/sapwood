@@ -39,7 +39,7 @@ const probeOf = (result: ClaudeVersionProbeResult): ((bin: string) => Promise<Cl
 // ── AC1/AC2 (#799 gate② P1 #3 fix): the drift test parses the DECLARATION line specifically ───
 //
 // sol-high gate② reproduction: the prior whole-file `.includes(MIN_CLAUDE_CLI_VERSION)` check
-// was a false negative — docs/configuration.md states "2.1.209" TWICE (the declaration AND the
+// was a false negative — docs/guide/configuration.md states "2.1.209" TWICE (the declaration AND the
 // evidence prose one line later), so mutating ONLY the declaration to "2.1.208" left the
 // evidence occurrence intact and the old test stayed green. Fixed: extract the specific
 // declaration phrase from each doc (never any other occurrence) and assert it appears EXACTLY
@@ -52,18 +52,18 @@ function extractDeclaredVersion(text: string, pattern: RegExp, label: string): s
   return version;
 }
 
-test("AC1/AC2: docs/getting-started.md's declaration line equals MIN_CLAUDE_CLI_VERSION, and states it exactly once", () => {
-  const gettingStarted = readFileSync(join(REPO_ROOT, "docs/getting-started.md"), "utf8");
-  const declared = extractDeclaredVersion(gettingStarted, /\*\*Claude Code CLI ≥ (\d+\.\d+\.\d+)\*\*/g, "docs/getting-started.md");
+test("AC1/AC2: docs/guide/getting-started.md's declaration line equals MIN_CLAUDE_CLI_VERSION, and states it exactly once", () => {
+  const gettingStarted = readFileSync(join(REPO_ROOT, "docs/guide/getting-started.md"), "utf8");
+  const declared = extractDeclaredVersion(gettingStarted, /\*\*Claude Code CLI ≥ (\d+\.\d+\.\d+)\*\*/g, "docs/guide/getting-started.md");
   assert.equal(declared, MIN_CLAUDE_CLI_VERSION);
 });
 
-test("AC1/AC2: docs/configuration.md's declaration line equals MIN_CLAUDE_CLI_VERSION, and states it exactly once (even though the version ALSO appears in evidence prose on the next line)", () => {
-  const configuration = readFileSync(join(REPO_ROOT, "docs/configuration.md"), "utf8");
+test("AC1/AC2: docs/guide/configuration.md's declaration line equals MIN_CLAUDE_CLI_VERSION, and states it exactly once (even though the version ALSO appears in evidence prose on the next line)", () => {
+  const configuration = readFileSync(join(REPO_ROOT, "docs/guide/configuration.md"), "utf8");
   const declared = extractDeclaredVersion(
     configuration,
     /\*\*Minimum Claude Code CLI version: (\d+\.\d+\.\d+)\*\*/g,
-    "docs/configuration.md",
+    "docs/guide/configuration.md",
   );
   assert.equal(declared, MIN_CLAUDE_CLI_VERSION);
   // The false-negative sol-high demonstrated: whole-file `.includes` would still pass if ONLY

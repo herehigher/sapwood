@@ -1,4 +1,4 @@
-# Loop walkthrough (v0.2) — behavior reference, boundaries included
+# Loop walkthrough — behavior reference, boundaries included
 
 > **Process record.** Internal design/research artifact from sapwood's own development history — not end-user documentation.
 
@@ -9,9 +9,9 @@ must render and where the frontend's responsibility ends).
 
 Companions: [`frontend-design.md`](frontend-design.md) owns the UI decisions;
 [`round-artifact.md`](round-artifact.md) owns the round data contract;
-[`system-review-2026-07.md`](system-review-2026-07.md) owns the why. This doc
-owns *behavior*. Code anchors: `round.ts` (round loop), `conductor.ts` (tick),
-`cli.ts` (entry/exit), `state.ts` (durable truth).
+[`../PLAN.md`](../PLAN.md) owns the why (architecture, locked decisions,
+roadmap). This doc owns *behavior*. Code anchors: `round.ts` (round loop),
+`conductor.ts` (tick), `cli.ts` (entry/exit), `state.ts` (durable truth).
 
 ## 1. The main line — a round's life
 

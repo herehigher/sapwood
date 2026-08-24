@@ -36,7 +36,7 @@ export const OPERATOR_CLEAR_VIA = "operator-clear";
  *  `clearReason` (#644): the OPERATOR's free-text reason for clearing — distinct from
  *  `row.reason` (why the episode entered park in the first place). Advisory for a human running
  *  the CLI by hand; the #644 owner ruling makes it REQUIRED practice for an LLM supervisor
- *  session (docs/supervision.md's governance section) — auditability for a trusted-operator
+ *  session (docs/guide/supervision.md's governance section) — auditability for a trusted-operator
  *  intervention, not a machine-enforced gate here. Omitted entirely (never a null/undefined key)
  *  when the caller passes none, so an existing reader of this payload shape sees the exact same
  *  JSON pre-#644 produced — the reverse test cli.ts's runPark relies on. */

@@ -1245,7 +1245,7 @@ test("#676: GATED RECLAIM re-baselines the AC snapshot on supervisor clear — d
   assert.equal(st.getWorker(workerName)?.state, "failed");
   assert.equal(gate.calls.length, 0);
   // The supervisor verifies the fold is additive/benign and clears needs-human — the trusted-
-  // operator adjudication (docs/supervision.md governance).
+  // operator adjudication (docs/guide/supervision.md governance).
   forge.issueLabelsByIssue[7] = [];
   const reentryTick = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
   assert.deepEqual(
@@ -11342,7 +11342,7 @@ test("#782 gate② round 1 (P2, AC3c): the SAME evidence-wait wedge is drain-ter
 // the exact branch #783 wiring added without needing the full driveOne pipeline (already covered
 // by merge-driver.test.ts's own #783-wiring suite). ──
 
-test("#783 wiring: an INERT escalation posts the actionable inert comment (remedy, docs/configuration.md citation), labels needs-human, and records ci-inert-escalated — NEVER ci-pending-escalated", async () => {
+test("#783 wiring: an INERT escalation posts the actionable inert comment (remedy, docs/guide/configuration.md citation), labels needs-human, and records ci-inert-escalated — NEVER ci-pending-escalated", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();

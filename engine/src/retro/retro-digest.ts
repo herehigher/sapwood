@@ -21,7 +21,7 @@
 //
 // BOUNDED (issue #111 acceptance criterion): the whole assembled text is capped at
 // `roles.retro.digestMaxChars` (a config key, per this repo's user-tunables-in-config
-// convention — see docs/configuration.md). Oversize input is truncated DETERMINISTICALLY
+// convention — see docs/guide/configuration.md). Oversize input is truncated DETERMINISTICALLY
 // (always the same prefix for the same content+cap) and the truncation is marked in the
 // digest text itself — never a silent drop. AUDITABLE: every source read here already has a
 // durable engine-side record (the events this module reads FROM, the IForge calls it makes),
@@ -471,7 +471,7 @@ export interface RetroDigestDeps {
 // pathologically small maxChars), but with per-item budgets in place it rarely does more than
 // trim a few trailing bytes.
 // #964: adjusted downward (was 0.25/0.1/0.1) to make room for OUTSTANDING_SHARE below — no new
-// config key, per this repo's user-tunables-in-config convention (docs/configuration.md): the
+// config key, per this repo's user-tunables-in-config convention (docs/guide/configuration.md): the
 // digest still has exactly one cap, `roles.retro.digestMaxChars`, just one more section sharing it.
 const ISSUES_SHARE = 0.2; // reserved fraction of maxChars for the whole issues section
 const COMMITS_SHARE = 0.08; // reserved fraction of maxChars for commit history

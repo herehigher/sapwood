@@ -6,7 +6,7 @@ design's data contract, and the §3 UI modules, replay, the `?demo` fixture
 package, and the `sapwood dashboard` launcher have all landed. Read this
 section as "which pieces are real and where they live", not as a
 specification — the authoritative feature-by-feature spec is
-[frontend-design.md](../frontend-design.md), and this guide deliberately does
+[frontend-design.md](../reference/frontend-design.md), and this guide deliberately does
 not mirror it.
 
 ## What exists today

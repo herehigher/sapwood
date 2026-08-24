@@ -1,4 +1,4 @@
-// server.ts (#142, completed in #360) — the dashboard's data server. docs/frontend-design.md §8
+// server.ts (#142, completed in #360) — the dashboard's data server. docs/reference/frontend-design.md §8
 // is the contract: five READ routes (`/api/loop/state`, `/api/events`, `/api/spend`,
 // `/api/rounds`, `/api/attention/dismissals`), two gated write routes
 // (`POST /api/control` and `POST /api/attention/dismiss`, both gated by

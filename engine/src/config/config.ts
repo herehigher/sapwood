@@ -183,7 +183,7 @@ const Cost = z
     // persisted in State (engine.spend_ledger), so it survives an engine restart mid-day AND
     // renews at the next UTC midnight regardless of restarts — a common misreading (2026-07-13
     // dashboard/cost discussion, #154) is treating this as a run total; it is not (see
-    // stop.afterSpendUsd for the actual per-run cap, and docs/configuration.md's knob table).
+    // stop.afterSpendUsd for the actual per-run cap, and docs/guide/configuration.md's knob table).
     // Breaching it is an engine-wide dispatch freeze + drain, not just a per-tick skip (see
     // conductor.ts evaluateCeiling / tick's CEILING step). Enforced POST-HOC at tick
     // boundaries — cost is only known at worker completion, so bounded overshoot ≈
@@ -202,7 +202,7 @@ const Cost = z
     // can straddle UTC midnight and therefore two dailyBudgetUsd periods (~2x worst-case
     // single-life spend; this existed at the old 4h default with smaller magnitude).
     // Independent of worker.timeoutSec (which bounds a single worker); there is still no
-    // run-duration cap (see docs/configuration.md's knob table). Default: 24h.
+    // run-duration cap (see docs/guide/configuration.md's knob table). Default: 24h.
     maxWallClockSec: z.number().int().positive().default(86400),
     // Bounded grace window (#14) after a ceiling breach (daily budget / wall-clock / kill
     // switch) is first detected, during which running workers are asked to hand off
@@ -582,7 +582,7 @@ const Labels = z
 // and #214's confirm session, retro, and — as of #251 — align.ts's three PO sessions: po-align,
 // po-triage, po-pool), never silently varying between retries. See
 // docs/security.md ("Ambient repo context") and
-// docs/configuration.md for the channel and its rationale; docs/security.md also documents the
+// docs/guide/configuration.md for the channel and its rationale; docs/security.md also documents the
 // clean-directory `--bare`-style isolation recipe for BENCHMARK runs only (never production —
 // `--bare` disables hooks, so the guard can't ship with it).
 // Default to a lighter model/effort than worker.model/effort (which does real implementation
@@ -723,7 +723,7 @@ const Roles = z
       // budget most deployments tune. Since each pool candidate now carries its FULL body, this
       // digest has the same size profile as `roles.architect.poolDigestMaxChars` below — a REAL
       // budget on that path now, not a knob most deployments can ignore (see
-      // `docs/configuration.md`'s row for the consequence when it bites).
+      // `docs/guide/configuration.md`'s row for the consequence when it bites).
       backlogDigestMaxChars: z.number().int().min(200).default(20_000),
       // #127: false -> round-defaults.ts omits the aligning stub; the phase no-ops via
       // round.ts's existing noopPeripheralStub default (see roles.verificationPlanReviewer.enabled above
@@ -1135,7 +1135,7 @@ const Logging = z
   })
   .strict();
 
-// #210 (docs/frontend-design.md §11 follow-up 5): the dashboard's own knobs. Schema only for
+// #210 (docs/reference/frontend-design.md §11 follow-up 5): the dashboard's own knobs. Schema only for
 // now — the v0.2 dashboard reads them; nothing in the engine does yet.
 const Dashboard = z
   .object({
@@ -1365,7 +1365,7 @@ const Recovery = z
 //                     fix.md — a fix leg only receives `{{lang.codeComments}}` (its narrower var
 //                     set, #245 round-2 fix A7); it never touches docs prose.
 //
-// Precedence (docs/configuration.md "Language customization"): this config key takes precedence
+// Precedence (docs/guide/configuration.md "Language customization"): this config key takes precedence
 // over the target repo's own CLAUDE.md prose — #167's CLAUDE.md language entry point remains the
 // FALLBACK carrier for a repo that never sets this section. This key governs the DEFAULT language
 // for content a role ORIGINATES; it does not override a role's separate, pre-existing duty (every
@@ -1429,7 +1429,7 @@ const EnvFailure = z
     // ~$0.016 measured — a cap at or below that floor (e.g. 0.01) makes EVERY probe fail with
     // "Error: Exceeded USD budget (...)" and the engine stays parked until the duration
     // escalation notifies a human (fail-safe, but confusing — which is why the probe's stderr is
-    // surfaced in the park-probe event; see docs/configuration.md). 0.05 is verified passing
+    // surfaced in the park-probe event; see docs/guide/configuration.md). 0.05 is verified passing
     // with real headroom.
     probeMaxBudgetUsd: z.number().finite().positive().default(0.05),
   })

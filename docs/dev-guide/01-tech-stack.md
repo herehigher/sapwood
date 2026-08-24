@@ -1,6 +1,6 @@
 # 01 — Tech stack
 
-This section records the implementation stack. User-facing installation requirements remain in [Getting started](../getting-started.md).
+This section records the implementation stack. User-facing installation requirements remain in [Getting started](../guide/getting-started.md).
 
 ## Languages & runtime
 
@@ -41,4 +41,4 @@ Everything else uses Node built-ins, including SQLite, HTTP, crypto, child proce
 - No web framework: no dashboard implementation exists today; see [07 — Dashboard](07-dashboard.md).
 - No ORM: `State` executes SQL directly through `node:sqlite` (`engine/src/state/state.ts`).
 - No queue or broker: the GitHub ProjectV2 board and labels are the work queue (`CLAUDE.md`, `engine/src/forge/forge.ts`). SQLite stores durable engine state, not a competing task queue.
-- No Docker requirement: neither package scripts nor the documented contributor path invokes Docker (`package.json`, `engine/package.json`, `docs/getting-started.md`).
+- No Docker requirement: neither package scripts nor the documented contributor path invokes Docker (`package.json`, `engine/package.json`, `docs/guide/getting-started.md`).

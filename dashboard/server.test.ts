@@ -1,5 +1,5 @@
 // server.test.ts (#142, extended in #360): the dashboard data server. Covers the whole surface
-// docs/frontend-design.md §8 locks — the engine-state derivation (all seven words plus the
+// docs/reference/frontend-design.md §8 locks — the engine-state derivation (all seven words plus the
 // "staleness beats PAUSE" precedence rule), the four read routes' paging and field shapes, the
 // config allowlist (the no-secrets guarantee is structural, not a promise), the single gated
 // write route (verb allowlist, same-origin defences, sentinel-only side effects, post-signal

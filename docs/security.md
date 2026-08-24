@@ -645,7 +645,7 @@ exactly what a post-hoc tripwire should surface, not suppress.
 
 ## Dashboard: loopback bind, not an auth boundary
 
-`dashboard/server.ts` (contract: [`docs/frontend-design.md` §8](frontend-design.md#8-data-contract))
+`dashboard/server.ts` (contract: [`docs/reference/frontend-design.md` §8](reference/frontend-design.md#8-data-contract))
 serves a local, read-only view of the engine's own ledger. Its posture:
 
 - **Binds `127.0.0.1` only, no CORS.** The listener never binds `0.0.0.0`
@@ -683,7 +683,7 @@ PR, approve a review, or merge — not because a rule says no, but because the c
 does not exist in its environment. This is the tier axis this section describes, with the table
 below naming its L0/L1/L2 implementation. **Naming note:** this is a CREDENTIAL-scope
 axis, distinct from the DISPATCH-autonomy ladder in
-[getting-started.md](getting-started.md#l0l3-autonomy-ladder) (L0 Observe / L1
+[getting-started.md](guide/getting-started.md#l0l3-autonomy-ladder) (L0 Observe / L1
 Supervise / L2 Delegate / L3 Governed unattended merge) — the two share L0/L1 labels by
 coincidence of both starting a tier count at zero, not because they're the same axis; a repo can
 independently be at autonomy-L3 and credential-L0, or autonomy-L1 and credential-L1.
@@ -1141,7 +1141,7 @@ and, because `RoleRunner.run()`'s `reviewMode` branch hardcodes `ROLE_ALLOWED_TO
 `ROLE_DISALLOWED_TOOLS` directly, the `claude`-runner gate② reviewer too. `retro` gets the
 identical `Agent`/`Task` deny by a SEPARATE append to `RETRO_DISALLOWED_TOOLS` (`retro.ts`) —
 that constant is an independent literal, not derived from `ROLE_DISALLOWED_TOOLS`, so the
-addition above did not reach it automatically; see the retro row of `docs/role-paradigm.md`'s
+addition above did not reach it automatically; see the retro row of `docs/reference/role-paradigm.md`'s
 write-scope tier ladder for why retro's own deny matters most (it is the one peripheral role
 with a real write grant).** This is a name-list deny of the ONE known
 spawn channel over a CLI-defined, version-drifting tool surface — the engine denies the tool
@@ -1205,7 +1205,7 @@ output + 125,616 cache-creation + 384,230 cache-read tokens over ~37.5 wall-cloc
 (`engine/pricing.yaml`). The parent's own jsonl recorded the dispatching tool_use at T+0 and the
 next line — the tool_result, once the child fully finished — 43 seconds later: zero new assistant
 lines from the parent in between, the entire 37.5s child run included.
-Against the dogfooded `opus`/`high` worker-leg soft budget of $8–20 (`docs/configuration.md`),
+Against the dogfooded `opus`/`high` worker-leg soft budget of $8–20 (`docs/guide/configuration.md`),
 one subagent call is roughly 3–8% of the whole per-leg budget — small enough that
 accepting it unbounded, rather than building accounting for it, is the marginal-complexity call.
 
@@ -1250,7 +1250,7 @@ its allowedTools:
   the round touched, comments/labels for every escalated issue, commit history since
   round start) *before* the session runs, bounded by a hard, deterministically-
   truncated character cap (`roles.retro.digestMaxChars`), and substitutes it into the
-  prompt. See [`configuration.md`](configuration.md#roles) for the config key and
+  prompt. See [`configuration.md`](guide/configuration.md#roles) for the config key and
   `engine/src/retro/retro-digest.ts` for the assembly.
 - **Write side:** PR creation originates in engine TypeScript, never in
   the session. The session's job ends at commit+push: it writes its intended PR
@@ -1283,7 +1283,7 @@ the engine (`plan-review.ts`), never by a tool call of its own.
 ### The forge MCP proxy's role x tool matrix
 
 `RoleRunner` peripheral sessions and worker legs can be attached (config-gated, ON by default
-— see [`configuration.md`](configuration.md#roles)) to a per-session, revocable,
+— see [`configuration.md`](guide/configuration.md#roles)) to a per-session, revocable,
 read-only forge MCP proxy that returns sanitized forge data verbatim, with no gate/verdict logic
 of its own (fresh-head counting, identity filtering, trigger-pin checks stay in
 `reviewer.ts`/`merge-driver.ts`). The production-attachment path (state: `proxy.enabled: true`)
@@ -1989,7 +1989,7 @@ and review is not something the conductor should be configured to auto-merge.
 
 The path-based denial protects this repository's root `sapwood.config.yaml`: it is the
 configuration the autonomous loop on this repository actually runs from (`sapwood run` from
-the repo root, no `--config` — see [configuration.md "Two config files"](configuration.md#two-config-files)),
+the repo root, no `--config` — see [configuration.md "Two config files"](guide/configuration.md#two-config-files)),
 so its PR history is the audit trail of the governing values, and changing it remains
 human-merge-only through the guard.
 `sapwood init` instead ships `sapwood.config.example.yaml` as the starter template
@@ -2145,7 +2145,7 @@ documented rather than blocked:
 they are their own, distinct class the guard fences separately.** The two bullets above are
 obscure hand-rolled forms a worker would have to construct deliberately. `sapwood pause`,
 `sapwood stop`, and `sapwood estop --confirm` are the opposite: a shipped, operator-
-documented CLI verb (docs/getting-started.md, docs/supervision.md,
+documented CLI verb (docs/guide/getting-started.md, docs/guide/supervision.md,
 commands/sapwood-stop.md all tell an operator to run it) that any worker with ordinary
 Bash access can invoke by name. They resolve the sentinel path internally
 (`dirname(dbPath)` + the fixed filename) rather than taking it as a CLI argument, so no
@@ -2244,7 +2244,7 @@ populated at every terminal settlement, worker/fix-leg rows included: `worker.ts
 `writeTerminalSentinel` persists which of "a real provider-reported `total_cost_usd`" vs. "the
 pinned-price estimator's substitute" fed the recorded cost, threaded through `LaneProbe.costEstimated`
 into `conductor.ts`'s terminal `settleTerminalWorker` calls, alongside the engine-review site's own
-pre-existing `ReviewSessionSpend.kind` distinction — see docs/supervision.md's Est-vs-real cost
+pre-existing `ReviewSessionSpend.kind` distinction — see docs/guide/supervision.md's Est-vs-real cost
 method for how this feeds the estimator-bias query. Pre-v1, plain schema bump: no
 migration/backfill for rows written before this — they read `actor_kind IS NULL` forever,
 rendered `unclassified` by the read-model (`State.spendSummaryForDay`), same "never guess" stance
@@ -2806,7 +2806,7 @@ point in its history."
 
 - **The worker prompt surface is unchanged.** Workers are dispatched with the issue body
   only (`{{issue.body}}`, `worker.ts`); nothing in the cursor mechanism above, in
-  [`docs/supervision.md`](supervision.md)'s owner-ruling recovery ritual, or anywhere else
+  [`docs/guide/supervision.md`](guide/supervision.md)'s owner-ruling recovery ritual, or anywhere else
   in this doc package adds, removes, or otherwise touches what a dispatched worker session
   is shown. The cursor gates gate⓪ approval spend and dispatch, both engine-side, before a
   worker is ever dispatched — it does not reach into the worker's own prompt.
@@ -2837,14 +2837,14 @@ point in its history."
   — `engine/prompts/**` and `docs/security.md` are both entries in
   `escalation.instructionPaths` (the latter [above](#the-mechanisms-own-carriers-join-the-escalation-surface-too)).
   Both are expected to route `sapwood:human-merge-only`; that is the mechanism working as
-  designed, not a defect in either PR. `docs/supervision.md` is not on that list, so its
+  designed, not a defect in either PR. `docs/guide/supervision.md` is not on that list, so its
   own edits are not affected by this note.
 
 ## See also
 
-- [Trust model prerequisites](getting-started.md#trust-model-prerequisites) — the required
+- [Trust model prerequisites](guide/getting-started.md#trust-model-prerequisites) — the required
   GitHub-side and identity setup before unattended merge.
-- [`configuration.md`](configuration.md) — the `guard`, `reviewer`, `merge`, `ci`,
+- [`configuration.md`](guide/configuration.md) — the `guard`, `reviewer`, `merge`, `ci`,
   `escalation`, `cost`, `labels`, and `roles` config sections referenced above.
 - [`PLAN.md`](PLAN.md) — the full architecture, decision log, and the v0.2 round
   orchestrator's self-feed design.

@@ -113,22 +113,29 @@ def headings_of(path):
 
 def collect_scope(root):
     """Seed on README + top-level docs entry pages, then follow relative
-    .md links transitively."""
+    .md links transitively.
+
+    Returns (scope, missing_seeds) -- a seed that does not exist is reported
+    to the caller rather than silently dropped, so a doc move that forgets
+    to update this list fails loudly instead of shrinking the checked scope
+    unnoticed."""
     seeds = [
         "README.md",
         "CONTRIBUTING.md",
         "SECURITY.md",
+        "docs/README.md",
         "docs/PLAN.md",
-        "docs/getting-started.md",
-        "docs/configuration.md",
+        "docs/guide/getting-started.md",
+        "docs/guide/configuration.md",
         "docs/security.md",
-        "docs/role-paradigm.md",
-        "docs/troubleshooting.md",
-        "docs/supervision.md",
+        "docs/reference/role-paradigm.md",
+        "docs/guide/troubleshooting.md",
+        "docs/guide/supervision.md",
         "docs/dev-guide/README.md",
     ]
     scope = set()
-    queue = [f for f in seeds if os.path.exists(os.path.join(root, f))]
+    missing_seeds = [f for f in seeds if not os.path.exists(os.path.join(root, f))]
+    queue = [f for f in seeds if f not in missing_seeds]
     while queue:
         rel = queue.pop()
         if rel in scope:
@@ -149,7 +156,7 @@ def collect_scope(root):
             newpath = os.path.normpath(os.path.join(os.path.dirname(rel), path_part))
             if newpath.endswith('.md') and os.path.exists(os.path.join(root, newpath)) and newpath not in scope:
                 queue.append(newpath)
-    return scope
+    return scope, missing_seeds
 
 
 def check_file(root, rel, results, external_links):
@@ -238,13 +245,17 @@ def main():
     positional = [a for a in args if a != '--internal-only']
     root = os.path.abspath(positional[0]) if positional else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    scope = sorted(collect_scope(root))
+    scope, missing_seeds = collect_scope(root)
+    scope = sorted(scope)
     print(f"Scope ({len(scope)} files, root={root}):")
     for f in scope:
         print(f"  - {f}")
     print()
 
     results = []
+    for f in missing_seeds:
+        results.append((f, '(seed)', 'MISSING SEED', f'seed file does not exist: {f}'))
+
     external_links = {}
     for rel in scope:
         check_file(root, rel, results, external_links)

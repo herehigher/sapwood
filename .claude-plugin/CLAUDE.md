@@ -43,12 +43,12 @@ Validate any edit with `sapwood validate` before running the engine.
 Full documentation lives in the sapwood repo, not here — this plugin install has no
 `docs/` directory of its own:
 
-- [Getting started](https://github.com/herehigher/sapwood/blob/main/docs/getting-started.md) — install, `sapwood init`, the first-run trust ramp, how to
+- [Getting started](https://github.com/herehigher/sapwood/blob/main/docs/guide/getting-started.md) — install, `sapwood init`, the first-run trust ramp, how to
   write a `Ready` issue.
-- [Configuration](https://github.com/herehigher/sapwood/blob/main/docs/configuration.md) — every config key, its default, and its meaning.
+- [Configuration](https://github.com/herehigher/sapwood/blob/main/docs/guide/configuration.md) — every config key, its default, and its meaning.
 - [Security](https://github.com/herehigher/sapwood/blob/main/docs/security.md) — the trust/governance model: producer≠reviewer≠merger, the guard
   hook, human-merge-only paths, the e-stop/kill switch/pause control tiers, cost ceilings.
-- [Troubleshooting](https://github.com/herehigher/sapwood/blob/main/docs/troubleshooting.md) — what common failures (`needs-human`, a dirty-worktree
+- [Troubleshooting](https://github.com/herehigher/sapwood/blob/main/docs/guide/troubleshooting.md) — what common failures (`needs-human`, a dirty-worktree
   degrade, tick errors, auth scope problems) mean and how to resolve them.
 - [PLAN](https://github.com/herehigher/sapwood/blob/main/docs/PLAN.md) — full architecture, decision log, and roadmap (contributor-facing;
   read the docs above first for using the tool).

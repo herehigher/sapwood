@@ -37,7 +37,7 @@ export interface ProductionEngineAgentOptions {
 const REVIEW_TREE_NAME = /^([0-9a-f]{40})-.+/i;
 
 /** #489: the event kind announcing a decisive engine-agent gate② verdict. Copy entry lives in
- *  docs/frontend-design.md §7 (every engine PR that adds a kind extends that map). */
+ *  docs/reference/frontend-design.md §7 (every engine PR that adds a kind extends that map). */
 export const ENGINE_REVIEW_VERDICT = "engine-review-verdict";
 
 /** Verbatim status keys (`agent-output.ts`'s own vocabulary), all three always present so a

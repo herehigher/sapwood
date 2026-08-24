@@ -312,7 +312,7 @@ test("refetchStillValid: the ci-inert reason string is also capped, with the sam
   assert.match((r as { reason: string }).reason, /\+2 more$/);
 });
 
-test("buildCiInertEscalationComment: names the remedy and cites docs/configuration.md's ci section", () => {
+test("buildCiInertEscalationComment: names the remedy and cites docs/guide/configuration.md's ci section", () => {
   const comment = buildCiInertEscalationComment("abc123", [{ name: "lint", conclusion: "SKIPPED" }]);
   assert.match(comment, /lint \(SKIPPED\)/);
   assert.match(comment, /always run and skip its STEPS/);

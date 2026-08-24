@@ -14,9 +14,9 @@ implementation, the section says so in place (§4a is the largest such correctio
 
 **Shipped state vs. this document.** Read the docs, not this file, for what is true now:
 [`../PLAN.md`](../PLAN.md)'s fix-loop paragraph (convergence, layering, `prFixCap`
-semantics), [`../configuration.md`](../configuration.md) (`lanes.prFixCap`,
+semantics), [`../guide/configuration.md`](../guide/configuration.md) (`lanes.prFixCap`,
 `roles.retro.tendencyRounds`, `reviewer.agent.promptFile`),
-[`../role-paradigm.md`](../role-paradigm.md) (the reviewer's enforced/judged split), and
+[`../reference/role-paradigm.md`](../reference/role-paradigm.md) (the reviewer's enforced/judged split), and
 the shipped prompt `engine/prompts/engine-reviewer.md` itself. This document remains the
 record of *why* — the alternatives rejected and the blind spots accepted on the way.
 

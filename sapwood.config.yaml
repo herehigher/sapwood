@@ -2,7 +2,7 @@
 # (`sapwood run` from the repo root, no `--config`). Committed so that every governing value
 # has a PR-shaped audit trail; the whole file is human-merge-only (guard rule + docs/security.md
 # "Human-merge-only paths"). Not a starter for another repository — that is
-# sapwood.config.example.yaml (docs/configuration.md "Two config files").
+# sapwood.config.example.yaml (docs/guide/configuration.md "Two config files").
 #
 # Written here: (a) every non-default value, and (b) every value that changes authority,
 # merge/review behaviour, a security boundary, or a governance name — pinned even when it equals
