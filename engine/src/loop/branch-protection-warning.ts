@@ -66,7 +66,7 @@ export async function readBranchProtectionState(run: GhRunner, repo: string): Pr
 const warningMessage = (repo: string, branch: string): string =>
   `[sapwood:startup] default branch "${branch}" on ${repo} has NO branch protection (checked both the ` +
   `legacy branch-protection endpoint and any active ruleset covering the branch) — branch protection is ` +
-  `the mandatory platform backstop ${DOC_LINKS.securityAcceptedBlindSpots}'s section names for a producer ` +
+  `the mandatory platform backstop <${DOC_LINKS.securityAcceptedBlindSpots}>'s section names for a producer ` +
   `leg's inherited host tool surface: even though the engine itself only merges through the reviewed PR ` +
   `path, an inherited host tool can still \`git push\` straight to "${branch}", bypassing review ` +
   `entirely. Two exits: enable branch protection (repo Settings -> Branches, require the merge gate this ` +

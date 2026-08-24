@@ -70,7 +70,7 @@ export async function detectDeployKeyStartupTier(
     log(
       "[sapwood:startup] worker credential tier: L0 (worker.deployKeyPath unset) — every worker leg dispatches " +
         'with the full credentialed env. Run "sapwood init" to provision a scoped L1 deploy key; see ' +
-        `${DOC_LINKS.security}'s worker credential tiers.`,
+        `<${DOC_LINKS.security}>'s worker credential tiers.`,
     );
     return record({ tier: "L0", arm: "unset" });
   }

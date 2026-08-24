@@ -163,7 +163,7 @@ export function createUserSettingsWatch(
                   : "weakening entries changed since last observed"
           } ` +
             `— a worker leg's Bash(node *)/Bash(npm *) grant loads this file with the operator's ` +
-            `REAL $HOME (structurally unconfined, see ${DOC_LINKS.security}'s HONEST SCOPE note); ` +
+            `REAL $HOME (structurally unconfined, see <${DOC_LINKS.security}>'s HONEST SCOPE note); ` +
             (unreadable
               ? ""
               : current.weakening.length > 0

@@ -13,6 +13,10 @@
 // engine happens to be dispatching against — so the pair names WHERE THE DOCS LIVE, a fact about
 // this repo, not about the caller's environment. Matches `engine/package.json`'s own
 // `repository`/`homepage` fields, the existing canonical source for the same pair.
+//
+// `.claude-plugin/CLAUDE.md` cites the same doc set for a session running inside a target repo
+// (it ships in the plugin, so it cannot import this module) — its URLs are hand-kept
+// byte-identical to this module's output; update both together when a path here changes.
 const DOC_BASE_URL = "https://github.com/herehigher/sapwood/blob/main/";
 
 /** Canonical repo-relative path for every doc file a production runtime surface cites. Update
@@ -25,6 +29,7 @@ const DOC_PATHS = {
   security: "docs/security.md",
   supervision: "docs/supervision.md",
   reviewDoctrine: "docs/REVIEW-DOCTRINE.md",
+  plan: "docs/PLAN.md",
 } as const;
 
 function docUrl(doc: keyof typeof DOC_PATHS, anchor?: string): string {
@@ -42,6 +47,7 @@ export const DOC_LINKS = {
   security: docUrl("security"),
   supervision: docUrl("supervision"),
   reviewDoctrine: docUrl("reviewDoctrine"),
+  plan: docUrl("plan"),
   securityAcceptedBlindSpots: docUrl("security", "accepted-blind-spots"),
   securityManagedSettingsException: docUrl("security", "managed-settings-allowmanagedpermissionrulesonly-exception"),
   securityExecutionProfiles: docUrl("security", "execution-profiles-host-permission-mode--bash-sandbox"),

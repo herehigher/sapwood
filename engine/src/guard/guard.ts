@@ -2,8 +2,10 @@
 // merger for the BUILT-IN Bash/file-tool family (exactly the tools worker.ts's guardSettings
 // matcher names; #619 reword). Ambient host MCP tools never reach this hook at all — that
 // residual, and branch protection as its mandatory backstop, are docs/security.md's
-// "Host-delegated capability management" section (DR #616). Pure function: zero IO, zero
-// deps, deterministic.
+// "Host-delegated capability management" section (DR #616). Pure function: zero IO,
+// deterministic; its sole dependency is util/doc-links.ts, a constants-only leaf with zero
+// imports of its own (reviewer-adjudicated: a deterministic no-import constants leaf does not
+// reintroduce the IO/nondeterminism this module's purity guards against).
 //
 // Implements the *generic safety mechanism* — command tokenizing, fragment splitting,
 // exec-prefix stripping, opaque-construct fail-closed detection, and the gh-overreach category
@@ -22,6 +24,7 @@
 // For Write/Edit tools: deny writes to the guard's boundary files.
 // For Read/Grep/Glob/NotebookRead (#235 PR-A): confine the resolved target path to the session's
 // worktree, when the engine told us what that worktree is (worktreeRoot param — see below).
+import { DOC_LINKS } from "../util/doc-links.js";
 
 export interface Decision {
   readonly allow: boolean;
@@ -628,7 +631,7 @@ function checkGitPushDefaultBranch(tokens: string[], defaultBranch: string): str
 
   // Checked before anything else — an alias injection means the "push" token itself is untrustworthy.
   if (gitHasAliasInjection(tokens)) {
-    return `BLOCK [git-push] git -c/--config alias injection makes the effective subcommand opaque — cannot verify this does not reach the default branch (${defaultBranch}); human-merge-only, see docs/security.md`;
+    return `BLOCK [git-push] git -c/--config alias injection makes the effective subcommand opaque — cannot verify this does not reach the default branch (${defaultBranch}); human-merge-only, see ${DOC_LINKS.security}`;
   }
 
   const afterGlobal = gitSkipGlobalFlags(tokens);
@@ -639,10 +642,10 @@ function checkGitPushDefaultBranch(tokens: string[], defaultBranch: string): str
   // --mirror / --all push every ref (or every branch) the remote has room for — either can
   // carry the default branch regardless of what other args are present.
   if (flags.includes("--mirror")) {
-    return `BLOCK [git-push] --mirror can reach the default branch (${defaultBranch}) — raw git-transport push is human-merge-only, see docs/security.md`;
+    return `BLOCK [git-push] --mirror can reach the default branch (${defaultBranch}) — raw git-transport push is human-merge-only, see ${DOC_LINKS.security}`;
   }
   if (flags.includes("--all")) {
-    return `BLOCK [git-push] --all can reach the default branch (${defaultBranch}) — raw git-transport push is human-merge-only, see docs/security.md`;
+    return `BLOCK [git-push] --all can reach the default branch (${defaultBranch}) — raw git-transport push is human-merge-only, see ${DOC_LINKS.security}`;
   }
 
   // positional[0] is the remote/repository (per git's own `push [<repo> [<refspec>…]]` syntax) —
@@ -651,7 +654,7 @@ function checkGitPushDefaultBranch(tokens: string[], defaultBranch: string): str
   const refspecs = repoFromFlag ? positional : positional.slice(1);
   for (const raw of refspecs) {
     if (UNPROVABLE_REFSPEC_RE.test(raw)) {
-      return `BLOCK [git-push] refspec argument "${raw}" cannot be proven safe against the default branch (${defaultBranch}) — contains an unresolved variable, command substitution, or wildcard; human-merge-only, see docs/security.md`;
+      return `BLOCK [git-push] refspec argument "${raw}" cannot be proven safe against the default branch (${defaultBranch}) — contains an unresolved variable, command substitution, or wildcard; human-merge-only, see ${DOC_LINKS.security}`;
     }
     // A bare name ("main"), a "<src>:<dst>" pair (dst after the FIRST colon — also covers the
     // ":main" delete-refspec form, where src is empty), and an optional leading "+" (the
@@ -662,7 +665,7 @@ function checkGitPushDefaultBranch(tokens: string[], defaultBranch: string): str
     if (!dst) continue;
     const normalized = dst.startsWith("refs/heads/") ? dst.slice("refs/heads/".length) : dst;
     if (normalized === defaultBranch) {
-      return `BLOCK [git-push] raw git-transport push reaches the default branch (${defaultBranch}) — producer must not merge via raw git transport (human-merge-only, see docs/security.md)`;
+      return `BLOCK [git-push] raw git-transport push reaches the default branch (${defaultBranch}) — producer must not merge via raw git transport (human-merge-only, see ${DOC_LINKS.security})`;
     }
   }
   return null;
@@ -974,7 +977,7 @@ function checkStopControlVerb(tokens: string[]): string | null {
     if (STOP_CONTROL_VERBS.has(verb)) {
       return (
         `BLOCK [stop-control] sapwood ${verb} is a control-sentinel CLI verb (same boundary as ` +
-        `data/PAUSE, data/KILL_SWITCH, data/EMERGENCY_STOP) — human-merge-only, see docs/security.md`
+        `data/PAUSE, data/KILL_SWITCH, data/EMERGENCY_STOP) — human-merge-only, see ${DOC_LINKS.security}`
       );
     }
   }

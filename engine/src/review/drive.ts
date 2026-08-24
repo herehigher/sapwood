@@ -300,7 +300,7 @@ export function buildCiInertEscalationComment(head: string, checks: readonly CiI
     `sapwood: gate① concluded on \`${head}\` without ever going green — ${named} concluded without passing, ` +
     "and nothing in the rollup is still running, so this PR can never resolve on its own. Remedy: make the " +
     "job always run and skip its STEPS (so it reports SUCCESS instead of SKIPPED), or move it to a dedicated " +
-    `push-only workflow — see ${DOC_LINKS.configuration}'s \`ci\` section for the pattern.`
+    `push-only workflow — see <${DOC_LINKS.configuration}>'s \`ci\` section for the pattern.`
   );
 }
 

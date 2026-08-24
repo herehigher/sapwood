@@ -123,7 +123,7 @@ const UPGRADE_COMMAND = "npm i -g @anthropic-ai/claude-code@latest";
 
 const guidance = (installed: string | undefined, floor: string): string =>
   `upgrade with \`${UPGRADE_COMMAND}\` (floor: ${floor}${installed ? `, installed: ${installed}` : ""}); ` +
-  `see ${DOC_LINKS.gettingStarted}'s Requirements and ${DOC_LINKS.configuration}'s \`worker\` section.`;
+  `see <${DOC_LINKS.gettingStarted}>'s Requirements and <${DOC_LINKS.configuration}>'s \`worker\` section.`;
 
 /** #799 gate② P1 #1 fix (a): a throwing collaborator (`log`, `state.appendEvent`) must never
  *  abort this startup VISIBILITY check — swallowed, best-effort. A failure to REPORT the arm is

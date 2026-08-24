@@ -76,7 +76,7 @@ export function renderGlossarySkill(): string {
   lines.push(
     "This is interpretation, not instruction: it tells a loop supervisor (or any session that reads it) what an " +
       "event/source/bucket MEANS and how urgently a human should look at it. It is not a source of GitHub label " +
-      `names, protected-path lists, or other machine-enforced facts — those live in code and ${DOC_LINKS.configuration}; ` +
+      `names, protected-path lists, or other machine-enforced facts — those live in code and <${DOC_LINKS.configuration}>; ` +
       "this glossary only points at them.",
   );
   lines.push("");

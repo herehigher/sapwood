@@ -19,7 +19,7 @@ const warningMessage =
   `protected paths. This is an operator call the engine does not gate: whether your own OS-level ` +
   `isolation is adequate is a judgment the engine has no way to verify. Two exits: pair this mode with ` +
   `an outer boundary (a container, a dedicated VM, or @anthropic-ai/sandbox-runtime — see ` +
-  `${DOC_LINKS.securityExecutionProfiles}'s "Operator recipe for an ` +
+  `<${DOC_LINKS.securityExecutionProfiles}>'s "Operator recipe for an ` +
   `outer boundary" section for the exact recipes), or consciously accept the unbounded posture. No ` +
   `action is taken automatically.`;
 

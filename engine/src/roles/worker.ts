@@ -2751,7 +2751,7 @@ export class WorkerSupervisor implements Supervisor {
         if (!r.ok) {
           this.log(
             `[sapwood:deploy-key] L1 preflight failed for ${path}${r.detail ? `: ${r.detail}` : ""} — ` +
-              `re-run "sapwood init" to re-provision the deploy key (see ${DOC_LINKS.security}'s worker ` +
+              `re-run "sapwood init" to re-provision the deploy key (see <${DOC_LINKS.security}>'s worker ` +
               `credential tiers). Dispatch continues at L0 (full credentialed env) until then; nothing wedges.`,
           );
         }

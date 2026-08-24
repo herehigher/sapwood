@@ -1405,7 +1405,7 @@ Flags:
   --reason "<text>"  Recorded verbatim in the park-resumed receipt (as clearReason) and
                      echoed in stdout — the OPERATOR's reason for clearing, distinct from
                      the episode's own reason for entering park. Optional for a human running
-                     this by hand; ${DOC_LINKS.supervision}'s governance section makes it REQUIRED
+                     this by hand; <${DOC_LINKS.supervision}>'s governance section makes it REQUIRED
                      practice for an agent supervisor. Rejected if empty or
                      whitespace-only text. Omitted entirely: behavior is unchanged from before
                      this flag existed.
@@ -1839,7 +1839,7 @@ Flags:
 Env:
   SAPWOOD_DASHBOARD_PORT  Same effect as --port, lower precedence. Must be a valid port number.
 
-There is no --host/bind flag: the server binds 127.0.0.1 only, always (${DOC_LINKS.security}'s
+There is no --host/bind flag: the server binds 127.0.0.1 only, always (<${DOC_LINKS.security}>'s
 loopback-only posture) — this launcher has no way to change that.
 
 Requires a built dashboard/dist bundle (${DASHBOARD_BUILD_HINT}); refuses to start, before any
