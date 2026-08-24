@@ -7,10 +7,11 @@ itself.
 ## Ground rules
 
 - **Branch + pull request, always.** Nothing is committed directly to `main`.
-- **Every PR passes the quality gate**: `npm test`, `npm run lint`, and
-  `npm run typecheck` green (CI runs these on every PR — see
-  [dev-guide 04](docs/dev-guide/04-commands.md)). New behavior ships with
-  colocated `*.test.ts` coverage.
+- **Every PR passes the quality gate**: `npm run build && npm run typecheck &&
+  npm run test && npm run lint` clean locally. CI runs the same families across
+  both workspaces plus an internal link check — see
+  [dev-guide 04](docs/dev-guide/04-commands.md#ci) for what it covers. New
+  behavior ships with colocated `*.test.ts` coverage.
 - **No test assertion depends on real time.** A test that seeds a timestamp
   injects that same clock into the code under test, and no assertion's
   pass/fail may turn on real timer ordering, real subprocess duration, or
