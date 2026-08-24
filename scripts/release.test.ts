@@ -587,10 +587,15 @@ test("catalog promotion: local bare remote is idempotent and stamps the release 
     );
     rmSync(clone, { recursive: true, force: true });
 
+    // The catalog carries the release tag, pointing at the promotion commit.
+    assert.equal(git(catalogRemote, ["rev-list", "-n", "1", "v0.3.0"]).trim(), head);
+
     const second = runCatalogPromote(deps, { catalogRemote, dryRun: false });
     assert.equal(second.code, 0, second.output);
     assert.match(second.output, /already matches/);
     assert.equal(catalogHead(catalogRemote), head);
+    // Idempotent for the tag too: still exactly one v0.3.0, still at the same commit.
+    assert.equal(git(catalogRemote, ["rev-list", "-n", "1", "v0.3.0"]).trim(), head);
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
     rmSync(dirname(catalogRemote), { recursive: true, force: true });
@@ -651,7 +656,8 @@ test("catalog promotion: dry-run renders the complete execution plan", () => {
         `  git status --porcelain (cwd: <temp>/catalog)\n` +
         `  git add -- .claude-plugin commands bin .github/workflows/ci.yml (cwd: <temp>/catalog; if changed)\n` +
         `  git -c commit.gpgsign=false -c user.name=sapwood-release -c user.email=release@sapwood.invalid commit -m "chore: promote sapwood v0.3.0 from <source-commit-sha>" (cwd: <temp>/catalog; if changed)\n` +
-        `  git push origin HEAD:main (cwd: <temp>/catalog; if changed)\n`,
+        `  git push origin HEAD:main (cwd: <temp>/catalog; if changed)\n` +
+        `  git tag v0.3.0 && git push origin v0.3.0 (cwd: <temp>/catalog; if absent)\n`,
     );
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });

@@ -76,7 +76,8 @@ tag exists. Then the promotion order is npm publish, dashboard canary,
 exact `npm view sapwood@<version> version` verification, then catalog promotion. The promotion
 copies only `.claude-plugin/`, `commands/`, and `bin/` from the release commit, stamps its
 manifest with the version, records the source commit in the catalog promotion commit message,
-and pushes the catalog. Its catalog CI rejects files outside that shell and validates the two
+pushes the catalog, and tags it with the same `v<version>` so catalog history maps
+one-to-one onto releases. Its catalog CI rejects files outside that shell and validates the two
 manifest versions.
 
 **Package name: bare `sapwood`, not `@sapwood/engine`.** The `engine` workspace

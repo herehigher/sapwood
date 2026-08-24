@@ -537,6 +537,20 @@ function catalogPromotionPlan(
         if (catalogChanged) deps.exec("git", ["push", "origin", "HEAD:main"], catalogRoot);
       },
     },
+    {
+      // The catalog gets the same v<version> tag as the source repo, so "which shell did a
+      // user install" maps to a release with one `git describe`. Deliberately outside the
+      // `catalogChanged` guard: a retried promotion whose previous run pushed the commit but
+      // died before tagging still needs the tag. Existing tags are never moved (rollback rule),
+      // and the fresh clone above means the local tag list is the remote's.
+      describe: `git tag v${version} && git push origin v${version} (cwd: ${catalogRoot}; if absent)`,
+      run: (deps) => {
+        if (deps.exec("git", ["tag", "-l", `v${version}`], catalogRoot).trim() === "") {
+          deps.exec("git", ["tag", `v${version}`], catalogRoot);
+          deps.exec("git", ["push", "origin", `v${version}`], catalogRoot);
+        }
+      },
+    },
   ];
 }
 
