@@ -77,14 +77,10 @@ existing suite:
 
 ## CI
 
-CI is present at `.github/workflows/ci.yml`. On every pull request and pushes to `main`, its Ubuntu/Node 24 job runs:
-
-```bash
-npm ci
-npm --workspace engine run typecheck
-npm run lint
-npm run check-links
-npm --workspace engine test
-```
-
-The workflow does not run `npm run build` as a separate step; type checking and tests are its compiled-code checks today.
+`.github/workflows/ci.yml` is the authoritative source for CI's step list and order; this
+section describes coverage, not steps, and does not mirror the file. On every pull request
+and push to `main`, the job type-checks both workspaces, lints, checks internal links, and
+runs all three test suites (engine, dashboard, and the root `scripts/*.test.ts`), each test
+step bounded by its own `timeout`. There is no separate `npm run build` step. Pre-public the
+job runs on a self-hosted runner, per the workflow's own comment; #329 moves it to a hosted
+`ubuntu-latest` runner at the public cutover.
