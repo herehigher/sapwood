@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigSchema } from "../config/config.js";
-import type { PRComment } from "../forge/forge.js";
+import { filterTrustedAuthors, type PRComment } from "../forge/forge.js";
 import {
   checkBodyDrift,
   checkCommentCursorFreshness,
@@ -15,8 +15,8 @@ import {
 
 const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
 
-function comment(id: string, login: string, body: string): PRComment {
-  return { id, login, createdAt: "t", body };
+function comment(id: string, login: string, body: string, authorAssociation?: string | null): PRComment {
+  return { id, login, createdAt: "t", body, ...(authorAssociation !== undefined ? { authorAssociation } : {}) };
 }
 
 // ── checkCommentCursorFreshness: engine-comment exemption (marker AND actor, never either alone) ──
@@ -64,6 +64,24 @@ test("unresolvable actor (getAuthenticatedActor -> null) exempts NO comment, eve
   const result = await checkCommentCursorFreshness(forge, 9, body);
   assert.ok(result.ok);
   if (result.ok) assert.deepEqual(result.pending, ["1"]); // fail-closed: treated as non-engine
+});
+
+test("#943 cursor gate receives no public comments, while trusted comments retain the existing marker requirement", async () => {
+  const publicOnly = filterTrustedAuthors([comment("public", "outside", "public noise", "NONE")], null).entries;
+  const publicResult = await checkCommentCursorFreshness(
+    { getIssueComments: async () => publicOnly, getAuthenticatedActor: async () => null },
+    9,
+    "body without a cursor marker",
+  );
+  assert.deepEqual(publicResult, { ok: true, cursor: "0", pending: [] });
+
+  const trustedOnly = filterTrustedAuthors([comment("trusted", "maintainer", "binding ruling", "MEMBER")], null).entries;
+  const trustedResult = await checkCommentCursorFreshness(
+    { getIssueComments: async () => trustedOnly, getAuthenticatedActor: async () => null },
+    9,
+    "<!-- sapwood:comments-adjudicated-through: 0 -->",
+  );
+  assert.deepEqual(trustedResult, { ok: true, cursor: "0", pending: ["trusted"] });
 });
 
 test("checkCommentCursorFreshness: a forge read failure propagates (never caught here) — the caller's own retry/env-failure path handles it", async () => {

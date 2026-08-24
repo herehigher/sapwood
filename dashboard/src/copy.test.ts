@@ -137,6 +137,7 @@ const DOC_TABLE_KINDS = [
   "review-disputed",
   "review-non-convergent",
   "comment-cursor-stale",
+  "comments-withheld",
   "round-pool-removal-capped",
   "concern-post-escalated",
   "operator-fence-violated",
@@ -913,6 +914,7 @@ const SENTENCE_ORACLE: [kind: EventKind, payload: Record<string, unknown>, expec
     { issue: 1 },
     "Issue #1's comment thread moved since the engine last read it, so it refused to spend/dispatch/drive · asks: review the comment thread — this clears once the engine re-reads it",
   ],
+  ["comments-withheld", { target: "pr-comments:10", withheld: 3 }, "3 comments were withheld on PR #10"],
   [
     "round-pool-removal-capped",
     { issue: 1 },

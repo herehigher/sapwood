@@ -4283,10 +4283,11 @@ test("parsePRReviewThreadsPage: parses threads + their own comments + per-thread
     {
       id: "T1",
       isResolved: false,
+      author: "codex",
       comments: [{ author: "codex", body: "fix this", createdAt: "2026-07-18T00:00:00Z" }],
       commentsComplete: true,
     },
-    { id: "T2", isResolved: true, comments: [], commentsComplete: false },
+    { id: "T2", isResolved: true, author: "", comments: [], commentsComplete: false },
   ]);
 });
 
@@ -4381,6 +4382,7 @@ test("#288 getPRComments is a bounded newest-comments GraphQL read and preserves
   let seen: string[] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen = args;
+    if (args[1] === "user") return "sapwood-bot\n";
     return JSON.stringify({
       data: {
         repository: {
@@ -4406,6 +4408,29 @@ test("#288 getPRComments is a bounded newest-comments GraphQL read and preserves
     comments: [],
     total: 0,
   });
+});
+
+test("#943 comments-withheld announces only count changes, including restored visibility", async () => {
+  const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const events: Array<{ kind: string; payload: unknown }> = [];
+  const forge = new GithubForge(c, {
+    state: { appendEvent: (kind: string, payload: unknown) => events.push({ kind, payload }) } as never,
+  });
+  const responses = [
+    [{ id: 1, user: { login: "outside" }, author_association: "NONE", created_at: "t", body: "noise" }],
+    [{ id: 2, user: { login: "maintainer" }, author_association: "MEMBER", created_at: "t", body: "visible" }],
+  ];
+  let read = 0;
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[1] === "user") return "sapwood-bot\n";
+    return JSON.stringify([responses[Math.min(read++, responses.length - 1)]]);
+  };
+  await forge.getIssueComments(7);
+  await forge.getIssueComments(7);
+  assert.deepEqual(events, [
+    { kind: "comments-withheld", payload: { target: "issue-comments:7", withheld: 1 } },
+    { kind: "comments-withheld", payload: { target: "issue-comments:7", withheld: 0 } },
+  ]);
 });
 
 // ── #247: fix-loop write methods — reply to / resolve a review thread ──────────────────────

@@ -428,13 +428,9 @@ export interface CommentsView {
  *  issue_comments rather than being silently denied it. */
 export function capComments(all: PRComment[], cap: number): CommentsView {
   const total = all.length;
-  const metadata = {
-    visibleTotal: (all as PRComment[] & { visibleTotal?: number }).visibleTotal ?? total,
-    withheld: (all as PRComment[] & { withheld?: number }).withheld ?? 0,
-  };
-  if (total <= cap) return { comments: all, total, returned: total, complete: true, ...metadata };
+  if (total <= cap) return { comments: all, total, returned: total, complete: true };
   const kept = all.slice(total - cap);
-  return { comments: kept, total, returned: kept.length, complete: false, omittedRange: { from: 1, to: total - cap }, ...metadata };
+  return { comments: kept, total, returned: kept.length, complete: false, omittedRange: { from: 1, to: total - cap } };
 }
 
 /** Outgoing `#N` mentions in `text` — this repo's own bare-issue-reference convention (same

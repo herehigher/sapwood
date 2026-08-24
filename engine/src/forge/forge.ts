@@ -220,10 +220,6 @@ export interface PRComment {
   id?: string;
 }
 
-/** A comment stream remains array-compatible for existing consumers while carrying the only
- * safe observability metadata from provenance filtering. */
-export type PRCommentRead = PRComment[] & { visibleTotal?: number; withheld?: number };
-
 /** One bounded top-level PR conversation comment. Unlike PRComment (legacy issue-comment
  *  readers), this carries GitHub's opaque node id so #288 can persist a delivery receipt. */
 export interface PRTopLevelComment extends PRComment {
@@ -488,12 +484,12 @@ export interface IForge {
    *  PRs are issues under the hood). The plan_review orchestrator reads the verification-plan-reviewer's
    *  most recent comment as the verification-plan-drafter's brief (#77 Amendment 2). Newest-last (gh's
    *  default chronological order). */
-  getIssueComments(issue: number): Promise<PRCommentRead>;
+  getIssueComments(issue: number): Promise<PRComment[]>;
   /** #652: the authenticated forge actor's login — the ONLY identity signal the comment-
    *  adjudication cursor's engine-comment exemption may trust (paired with the central
    *  `ENGINE_COMMENT_MARKER`; marker AND actor, never either alone, design adjudicated
-   *  2026-08-05). Resolved once per check, never cached across calls by this interface — a
-   *  caller that needs it repeatedly resolves it once itself. `null` when the identity cannot be
+   *  2026-08-05). A GithubForge instance memoizes the lookup because the token identity cannot
+   *  change during its lifetime. `null` when the identity cannot be
    *  established (auth failure, network error, malformed response) — the caller's contract is:
    *  an unresolvable actor exempts NO comment, ever. */
   getAuthenticatedActor(): Promise<string | null>;
@@ -822,6 +818,7 @@ export interface ForgeDeps {
 
 export class GithubForge implements IForge {
   private readonly withheldCounts = new Map<string, number>();
+  private authenticatedActor: Promise<string | null> | undefined;
 
   constructor(
     private readonly cfg: SapwoodConfig,
@@ -848,7 +845,8 @@ export class GithubForge implements IForge {
   }
 
   /** Filtering is read-only. This event is the only observable effect, deduplicated until the
-   * aggregate count for the same forge target changes. */
+   * aggregate count for the same forge target changes. An initial zero is silent because it says
+   * nothing changed; a later N→0 still emits to make restored visibility observable. */
   private announceWithheld(target: string, withheld: number): void {
     const previous = this.withheldCounts.get(target);
     if (previous === withheld) return;
@@ -1270,6 +1268,7 @@ export class GithubForge implements IForge {
   }
 
   async getPRComments(pr: number, cap: number): Promise<PRCommentsPage> {
+    const actor = await this.getAuthenticatedActor();
     const out = await this.gh([
       "api",
       "graphql",
@@ -1285,7 +1284,7 @@ export class GithubForge implements IForge {
       `cap=${cap}`,
     ]);
     const page = parsePRCommentsPage(out);
-    const filtered = filterTrustedAuthors(page.comments, await this.getAuthenticatedActor());
+    const filtered = filterTrustedAuthors(page.comments, actor);
     this.announceWithheld(`pr-comments:${pr}`, filtered.withheld);
     const comments = filtered.entries.slice(Math.max(0, filtered.entries.length - cap));
     return { comments, total: filtered.visibleTotal, visibleTotal: filtered.visibleTotal, withheld: filtered.withheld };
@@ -1497,28 +1496,32 @@ export class GithubForge implements IForge {
     return parseIssueLabels(out);
   }
 
-  async getIssueComments(issue: number): Promise<PRCommentRead> {
+  async getIssueComments(issue: number): Promise<PRComment[]> {
     // Same endpoint shape (and pagination discipline) as getPRReviewData's commentsJson fetch
     // — GitHub's REST API serves issue and PR conversation comments off the same
     // `issues/<n>/comments` route, so parsePRComments parses this unchanged.
     const out = await this.gh(["api", `repos/${this.cfg.board.owner}/${this.repo()}/issues/${issue}/comments`, "--paginate", "--slurp"]);
     const filtered = filterTrustedAuthors(parsePRComments(out), await this.getAuthenticatedActor());
     this.announceWithheld(`issue-comments:${issue}`, filtered.withheld);
-    return Object.assign(filtered.entries, { visibleTotal: filtered.visibleTotal, withheld: filtered.withheld });
+    return filtered.entries;
   }
 
   /** #652: `gh api user` — the authenticated actor's own login, per GitHub's REST identity
    *  endpoint (the same token every other `gh` call in this class already uses). Fails closed to
    *  `null` on ANY error (auth failure, network blip, malformed response) — never throws, per
-   *  IForge.getAuthenticatedActor's contract that an unresolvable actor exempts no comment. */
+   *  IForge.getAuthenticatedActor's contract that an unresolvable actor exempts no comment. The
+   *  promise is memoized so one forge instance does not issue this identity read per comment read. */
   async getAuthenticatedActor(): Promise<string | null> {
-    try {
-      const out = await this.gh(["api", "user", "--jq", ".login"]);
-      const login = out.trim();
-      return login.length > 0 ? login : null;
-    } catch {
-      return null;
-    }
+    this.authenticatedActor ??= (async () => {
+      try {
+        const out = await this.gh(["api", "user", "--jq", ".login"]);
+        const login = out.trim();
+        return login.length > 0 ? login : null;
+      } catch {
+        return null;
+      }
+    })();
+    return this.authenticatedActor;
   }
 
   async createIssue(title: string, body: string): Promise<number> {

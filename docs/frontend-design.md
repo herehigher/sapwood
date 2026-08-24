@@ -1073,6 +1073,7 @@ checklist item**):
 | `review-disputed` | PR #{pr} — successive reviews disagreed past the dispute limit · asks: adjudicate which review is right (#893; #451) |
 | `review-non-convergent` | PR #{pr} — fix-and-review rounds failed to converge · asks: adjudicate — re-ready or close manually (#893; #450) |
 | `comment-cursor-stale` | Issue #{issue}'s comment thread moved since the engine last read it, so it refused to spend/dispatch/drive · asks: review the comment thread — this clears once the engine re-reads it (#893; #652) |
+| `comments-withheld` | {withheld} comments were withheld on PR #{target suffix}; issue-comment targets render Issue #{target suffix} |
 | `round-pool-removal-capped` | Issue #{issue}'s round-pool label couldn't be removed after retrying · asks: remove the label by hand (#893) |
 | `concern-post-escalated` | Issue #{issue}'s PO concern couldn't be posted after retrying · asks: check the issue and post the concern by hand (#893; #237) |
 | `operator-fence-violated` | Issue #{issue}'s body edit was refused — it touched an operator-owned section · asks: review the proposed edit and the operator fence by hand (#893; #827) |
