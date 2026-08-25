@@ -387,23 +387,22 @@ function resolveActiveConfigPath(cwd: string, justWritten: string | null): strin
 // string `sapwood init` itself would produce for the same failure shape.
 export const DEPLOY_KEY_TITLE = "sapwood-worker";
 
-// #1080: the ONE place `cwd` is turned into "where the deploy key(s) live" — every key-path
-// construction below (the base path, arm (a)'s per-host candidates, and pickFreshArmAKeySlot's
-// numeric-suffixed siblings) calls this instead of re-deriving `runtimePaths(defaultRuntimeRoot(cwd))`
-// itself, so a future change to the runtime-root layout can't move two of the three sites and miss
-// the third.
+// #1080: the ONE place `cwd` is turned into "where the deploy key(s) live" — keeps every
+// key-path construction below (base path, per-host candidates, numeric-suffixed siblings)
+// agreeing with `runtimePaths()` by construction.
 function deployKeysDir(cwd: string): string {
   return runtimePaths(defaultRuntimeRoot(cwd)).keysDir;
 }
 
-// #1080: creates `dir` (recursive — the runtime root itself already exists via ensureRuntimeRoot,
-// but its `keys/` child does not until the first key is provisioned) and pins its mode to 0700
-// explicitly — `mkdirSync`'s own `mode` option is still subject to the process umask, which a
-// bare `{ recursive: true, mode: 0o700 }` would silently under- or over-permission depending on
-// the caller's environment; an explicit `chmodSync` after creation is not.
-function ensureDeployKeysDir(dir: string): void {
+// #1080: repairs the key's directory (0700) and, when the private key file itself is present,
+// the file (0600) — called on every path that can leave a key on disk (fresh generation, reuse,
+// reconcile), since neither `mkdirSync`'s own `mode` option nor ssh-keygen's own default is
+// trusted to land on the exact mode regardless of the caller's umask.
+function enforceDeployKeyPermissions(keyPath: string): void {
+  const dir = dirname(keyPath);
   mkdirSync(dir, { recursive: true });
   chmodSync(dir, 0o700);
+  if (existsSync(keyPath)) chmodSync(keyPath, 0o600);
 }
 
 export interface DeployKeyListEntry {
@@ -484,8 +483,10 @@ const MAX_ARM_A_SLOT_ATTEMPTS = 1000;
  *  never reuse whatever happens to already be sitting at the per-host path (a previous
  *  interrupted run) or register under a per-host title already claimed on the repo (foreign —
  *  same never-touch rule as any other unrecognized remote key). Walks `<hostComponent>`,
- *  `<hostComponent>-2`, `<hostComponent>-3`, ... and returns the first suffix where BOTH the
- *  local key path is free AND the title isn't among `knownRemoteTitles`; path and title always
+ *  `<hostComponent>-2`, `<hostComponent>-3`, ... and returns the first suffix where the local key
+ *  path AND its `.pub` counterpart are BOTH free AND the title isn't among `knownRemoteTitles`
+ *  (#1080: EITHER half existing is a collision — ssh-keygen would silently overwrite whichever
+ *  half is missing, so a slot is only "free" when neither half is there); path and title always
  *  share the same suffix. `knownRemoteTitles` should be as fresh as practical (see its caller)
  *  since an interactive prompt can leave an arbitrary gap between the last remote read and this
  *  call.
@@ -507,7 +508,7 @@ export function pickFreshArmAKeySlot(
     const candidateHost = n === 1 ? hostComponent : `${hostComponent}-${n}`;
     const path = join(deployKeysDir(cwd), `worker-deploy-key-${candidateHost}`);
     const title = `${DEPLOY_KEY_TITLE}-${candidateHost}`;
-    if (!existsSync(path) && !knownRemoteTitles.has(title)) return { path, title };
+    if (!existsSync(path) && !existsSync(`${path}.pub`) && !knownRemoteTitles.has(title)) return { path, title };
   }
   throw new Error(
     `could not find a free per-machine deploy-key slot for "${hostComponent}" after ${MAX_ARM_A_SLOT_ATTEMPTS} numeric-suffixed attempts — every candidate path/title is already taken`,
@@ -862,11 +863,9 @@ function clearDeployKeyConfig(configFilePath: string): string[] {
   return configFilePath.endsWith(".json") ? clearDeployKeyConfigFromJson(configFilePath) : clearDeployKeyConfigFromYaml(configFilePath);
 }
 
-// #1080: the pre-#1080 `.gitignore`-append guarantee (GITIGNORE_DEPLOY_KEY_RULE and its ensure
-// routine) is retired — the key now lives under the runtime root's `keys/` subdirectory, and
-// that root's own `.gitignore` (`*`, written by `ensureRuntimeRoot`, #1077) already excludes
-// everything under it. This file never removes an existing rule from a user's `.gitignore`; it
-// simply stops adding a new one, since it no longer needs to.
+// The key lives under the runtime root's own self-ignoring `.gitignore` (`*`, written by
+// `ensureRuntimeRoot`), so no rule ever needs appending to the repo's own `.gitignore` here;
+// this file also never removes an existing rule from a user's `.gitignore`.
 
 /** #606 gate② round 1 (P2-7), round 2 (R3-5): distinguishes protected / confirmed-unprotected /
  *  cannot-verify, checking BOTH the legacy branch-protection endpoint and (when that legacy
@@ -1019,8 +1018,9 @@ async function armAuthFailsStaleOrMismatch(
       `deploy key: operator chose (a) — registering a NEW per-machine deploy key titled "${title}"; every ` +
         `existing remote key is left untouched.`,
     );
-    ensureDeployKeysDir(dirname(keyPath));
+    enforceDeployKeyPermissions(keyPath); // dir ready (0700) before ssh-keygen writes into it
     await deps.sshKeygen(keyPath);
+    enforceDeployKeyPermissions(keyPath); // repair the freshly-written private key's mode too
     newId = await addDeployKeyCapturingNewId(run, repo, keyPath, title);
   } catch (e) {
     actions.push(deployKeyProvisioningFailedAction(repo, fallbackKeyPath, fallbackTitle, e));
@@ -1076,6 +1076,14 @@ async function reconcileDeployKey(
   deps: Pick<InitDeps, "sshKeygen" | "probeSshAuth" | "isInteractive" | "promptOperator" | "hostname">,
 ): Promise<string[]> {
   const localFileOk = existsSync(deployKeyPath);
+  if (localFileOk) {
+    try {
+      enforceDeployKeyPermissions(deployKeyPath);
+    } catch {
+      // Best-effort repair only — a failure here (an unwritable mount, say) must never block
+      // the reconcile checks below, which don't depend on whether the repair itself succeeded.
+    }
+  }
   let listedKeys: DeployKeyListEntry[] = [];
   let matchedEntry: DeployKeyListEntry | undefined;
   try {
@@ -1170,10 +1178,23 @@ export async function ensureDeployKey(
   const actions: string[] = [];
   let newId: number;
   try {
-    if (!existsSync(keyPath)) {
-      ensureDeployKeysDir(dirname(keyPath));
+    const privateExists = existsSync(keyPath);
+    const pubExists = existsSync(`${keyPath}.pub`);
+    if (privateExists !== pubExists) {
+      // Exactly one half present — an interrupted previous run, or a stray file left by hand.
+      // ssh-keygen would silently overwrite whichever half is missing; refuse instead, same as
+      // any other provisioning failure below (WARN, degrade to L0, never touch what's there).
+      throw new Error(
+        pubExists
+          ? `${keyPath}.pub exists but its private half does not — refusing to run ssh-keygen, which would overwrite it`
+          : `${keyPath} exists but its public half (.pub) does not — refusing to register it without a matching .pub`,
+      );
+    }
+    if (!privateExists) {
+      enforceDeployKeyPermissions(keyPath); // dir ready (0700) before ssh-keygen writes into it
       await deps.sshKeygen(keyPath);
     }
+    enforceDeployKeyPermissions(keyPath); // repair mode whether just generated or reused
     newId = await addDeployKeyCapturingNewId(run, repo, keyPath, DEPLOY_KEY_TITLE);
   } catch (e) {
     actions.push(deployKeyProvisioningFailedAction(repo, keyPath, DEPLOY_KEY_TITLE, e));
@@ -1319,18 +1340,16 @@ export async function init(cfg: SapwoodConfig, deps: Partial<InitDeps> = {}): Pr
   const repo = `${cfg.board.owner}/${cfg.board.repo}`;
   const actions: string[] = [];
 
-  // #1080: the runtime root must exist before the deploy key can be provisioned under its
-  // `keys/` subdirectory below — created via the SAME `ensureRuntimeRoot` (#1077) every other
-  // state-touching command uses, so init's root and the engine's own root can never drift apart.
-  // Design review (2026-08-25) rejected any "foreign tree" heuristic here: init is idempotent by
-  // contract (a second run must report zero create actions) and never creates the DB itself, so
-  // a heuristic trying to detect "this isn't sapwood's own directory" would refuse init's own
-  // second run. The ONLY refusal is `.sapwood` already existing as something other than a
-  // directory — a case `ensureRuntimeRoot`'s own recursive `mkdir` cannot recover from — checked
-  // here (not left to that `mkdir`'s raw ENOENT/EEXIST) so the refusal names `sapwood init`
-  // itself rather than an unqualified filesystem error. Every other collision (an existing
-  // directory carrying unrelated content) is handled per owned file, same as init's other
-  // scaffolded files (config/goal/doctrine/issue templates below) — never a tree-level check.
+  // The runtime root must exist before the deploy key can be provisioned under its `keys/`
+  // subdirectory below — created via the SAME `ensureRuntimeRoot` every other state-touching
+  // command uses, so init's root and the engine's own root can never drift apart. No tree-level
+  // "foreign directory" heuristic: init is idempotent by contract (a second run must report zero
+  // create actions) and never creates the DB itself, so a heuristic trying to detect "this isn't
+  // sapwood's own directory" would refuse init's own second run. The ONLY refusal is `.sapwood`
+  // already existing as something other than a directory — checked here (not left to
+  // `ensureRuntimeRoot`'s own `mkdir`) so the message names `sapwood init` itself rather than an
+  // unqualified filesystem error. Every other collision (an existing directory carrying unrelated
+  // content) is handled per owned file, same as init's other scaffolded files below.
   const runtimeRoot = defaultRuntimeRoot(cwd);
   if (existsSync(runtimeRoot) && !statSync(runtimeRoot).isDirectory()) {
     throw new InitError(`${runtimeRoot} already exists and is not a directory — remove or rename it, then re-run "sapwood init".`);

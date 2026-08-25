@@ -8349,6 +8349,10 @@ test("spawnSshKeygen: generates a real ed25519 keypair (private key 0600, public
     const pub = readFileSync(`${keyPath}.pub`, "utf8");
     assert.match(pub, /^ssh-ed25519 /);
     assert.doesNotMatch(priv, /Proc-Type: 4,ENCRYPTED/, 'generated with -N "" -> no passphrase, unattended-readable');
+    // #1080 gate② round 1 P1: the test's own title claims "0600" — assert the real mode bits,
+    // not just that the file exists, so a regression in ssh-keygen's own umask handling (or a
+    // future refactor that stops calling the real binary) cannot pass this test silently.
+    assert.equal(statSync(keyPath).mode & 0o777, 0o600, "ssh-keygen's own private key mode");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
