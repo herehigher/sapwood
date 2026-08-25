@@ -56,7 +56,7 @@ dispatch**):
    opens the PR, or records `retro-pr-degraded`).
 7. **Close.** The round-summary artifact is assembled from the ledger,
    validated, upserted into `round_artifacts`, rendered to
-   `data/rounds/round-<id>.md`; the round row goes `closed`. An idle round
+   `.sapwood/rounds/round-<id>.md`; the round row goes `closed`. An idle round
    waits one tick interval before the loop re-enters at step 1.
 
 Note the asymmetry: **milestone scoping** (`round.milestone`, or the
@@ -118,9 +118,9 @@ Note the asymmetry: **milestone scoping** (`round.milestone`, or the
 | Stop condition | `stop.*` / `--stop-*` hit | **finish fully** | harvest+retro run, round closes | 0 |
 | Signal (1st) | SIGINT/SIGTERM | **drained**: dispatch freezes, live lanes asked to hand off, handoff window (`drainWindowSec`) → hard kill | harvest+retro run, round closes | 0 |
 | Signal (2nd) | SIGINT/SIGTERM while draining | abandoned — no drain, no reclaim | abandoned mid-phase | **128+signum** (143 TERM / 130 INT) |
-| Kill switch | `data/KILL_SWITCH` | handoff window (`drainWindowSec`, default 300 s) → hard kill | **skipped** — round left unclosed | **1** |
+| Kill switch | `.sapwood/KILL_SWITCH` | handoff window (`drainWindowSec`, default 300 s) → hard kill | **skipped** — round left unclosed | **1** |
 | Crash | process death | orphaned; reclaimed by 4-signal logic on restart | round left unclosed | — |
-| (PAUSE) | `data/PAUSE` | not an exit: dispatch freezes, everything else continues | rounds keep cycling | — |
+| (PAUSE) | `.sapwood/PAUSE` | not an exit: dispatch freezes, everything else continues | rounds keep cycling | — |
 
 Kill switch is the only *sentinel* path that skips harvest/retro, and — apart
 from a second signal's hard exit — the only non-zero exit. On restart after
@@ -129,7 +129,7 @@ out *before* any new round opens.
 
 **Signals are the third stop channel, beside the two sentinels** (#380).
 Operators and service managers (systemd, launchd, CI) reach for a signal
-first, so SIGTERM/SIGINT is wired to the *same* code as `data/KILL_SWITCH`:
+first, so SIGTERM/SIGINT is wired to the *same* code as `.sapwood/KILL_SWITCH`:
 one flag threaded into `tick()`'s single top-of-tick gate, so the two can't
 drift apart. From the first tick after the signal, DISPATCH, DRIVE and new
 RESUME are frozen (an already-spawned resume child is adopted, then drained
@@ -172,9 +172,9 @@ from the sentinel:
 | Round (soft) | `cost.roundBudgetUsd` | no further waves; drain continues | never |
 | Engine day (hard) | `cost.dailyBudgetUsd` | freeze all dispatch + drain + escalate | after drain window |
 | Engine process (hard) | `cost.maxWallClockSec` (default **24 h**, #431: a per-process attention alarm — one clock per process life, fresh on every restart) | same freeze+drain | after drain window |
-| Human (hard) | `data/KILL_SWITCH` | freeze + drain + hard kill, exit 1 | after drain window |
+| Human (hard) | `.sapwood/KILL_SWITCH` | freeze + drain + hard kill, exit 1 | after drain window |
 | Human (signal) | SIGTERM / SIGINT (#380) | the same freeze + drain, exit 0 once drained; a second signal exits at once with 128+signum | after drain window |
-| Human (emergency, #293) | `data/EMERGENCY_STOP` | freeze + **immediate** hard kill, exit 1 — no drain window, no handoff request, checked before KILL_SWITCH so it wins if both are present | **on this same tick** |
+| Human (emergency, #293) | `.sapwood/EMERGENCY_STOP` | freeze + **immediate** hard kill, exit 1 — no drain window, no handoff request, checked before KILL_SWITCH so it wins if both are present | **on this same tick** |
 
 Soft tiers preserve work (hard-killing a worker re-burns the same tokens on
 requeue, forever); hard tiers exist so the ceiling is actually a ceiling. The
@@ -202,9 +202,9 @@ one job:
 |---|---|---|---|
 | **Working** | lanes running / PRs driving | `workers` rows in `running`/`driving`; recent `events` | normal: lanes, phase, spend |
 | **Standby** (#125) | provably nothing to do; parked | `standby-wait` events (attempt n, waitSec) newer than any `dispatched`; open round: none | "Standby — nothing Ready; probing every X min (backoff n)". **Not** an error state |
-| **Paused** | human froze dispatch; in-flight work continues | `data/PAUSE` exists | "Paused by operator — in-flight lanes finishing; remove data/PAUSE to resume" |
+| **Paused** | human froze dispatch; in-flight work continues | `.sapwood/PAUSE` exists | "Paused by operator — in-flight lanes finishing; remove .sapwood/PAUSE to resume" |
 | **Ceiling-frozen** | hard tier breached; engine ticks but dispatches nothing | per-reason `ceiling-breach-entered` events (#431) + the `ceiling_breach` row's current reasons; spend ≥ `dailyBudgetUsd`, or process age ≥ `maxWallClockSec` (24 h per process life — a restart starts a fresh clock, so an overnight "hang" here means the process genuinely ran a full day) | "Frozen: daily budget — resumes at midnight" / "wall-clock attention alarm — restart renews". Rust-red, needs a person |
-| **Draining to kill** | KILL_SWITCH tripped, or a stop signal received (#380); handoff window running | `data/KILL_SWITCH` exists (sentinel path), else the `ceiling_breach` row reads `stop-signal`; workers transitioning to handoff. No sentinel is ever written for a signal — the request itself dies with the process, and the breach row lingers until the next run's first healthy tick clears it, so pair it with a live process before calling it "draining" | countdown against `drainWindowSec`; "will exit 1" (sentinel) / "stopping — will exit 0 once drained" (signal) |
+| **Draining to kill** | KILL_SWITCH tripped, or a stop signal received (#380); handoff window running | `.sapwood/KILL_SWITCH` exists (sentinel path), else the `ceiling_breach` row reads `stop-signal`; workers transitioning to handoff. No sentinel is ever written for a signal — the request itself dies with the process, and the breach row lingers until the next run's first healthy tick clears it, so pair it with a live process before calling it "draining" | countdown against `drainWindowSec`; "will exit 1" (sentinel) / "stopping — will exit 0 once drained" (signal) |
 | **Winding down** | stop condition hit; finishing the round | `round-stop`/stop-condition events; dispatch skipped with reason | "Stop condition met (N issues merged) — finishing in-flight work" |
 | **Escalated dry** | board empty because everything needs a human | Ready empty + `needs-human`-labeled issues / `drive-needs-human`, `plan-review-escalated` events | pin the escalation list; "the loop is waiting on YOU, not broken" |
 | **Stalled PR** | lane parked in `driving` on a PR reporting no CI | `driving` lane age ≫ normal; (GitHub: PR mergeable=CONFLICTING builds **no merge ref → zero check-suites** — looks like CI never ran). Since #270 the engine senses CONFLICTING each tick and — in conductor-merge mode with `prFixCap > 0` and no hold — routes it into the conflict fix path, so this state self-heals; `prFixCap: 0` escalates instead (see Escalated), and `produce-pr-and-stop` reports without acting (stays `driving` by design). Persistence in the self-healing config means the fix lane itself is stuck | "PR #N conflicted — in the conflict fix path (round n/cap)", or the applicable held, escalation, or report-only state when the config routes there |
@@ -280,15 +280,15 @@ Done}; `Done` is terminal.
 
 **The dashboard is a read-only truth renderer.** Its entire authority:
 
-- **Reads**: state DB read-only (`node:sqlite`), `data/` sentinel existence,
-  `data/rounds/*.md`. `round_artifacts` **is** the round-history contract
+- **Reads**: state DB read-only (`node:sqlite`), `.sapwood/` sentinel existence,
+  `.sapwood/rounds/*.md`. `round_artifacts` **is** the round-history contract
   (schema-versioned; the UI checks `schemaVersion` and says "newer schema —
   update the dashboard" rather than mis-render).
 - **Writes: none.** No sentinel creation (kill/pause stay CLI/human acts —
   a write path would break the read-only security posture and turn the
   dashboard into an attack surface), no config editing, no GitHub writes.
   The dashboard may *display* the exact command to run (`touch
-  data/KILL_SWITCH`), never a button that runs it.
+  .sapwood/KILL_SWITCH`), never a button that runs it.
 - **Not the frontend's job**: deciding state (the truth table above is
   engine-derived data + fixed derivation rules — no heuristics in JS beyond
   it); aggregating GitHub history (deferred per PLAN.md); enriching from

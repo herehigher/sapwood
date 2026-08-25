@@ -17,7 +17,7 @@ consumes (`{{round.artifact}}`, capped by
 | Form | Location | Notes |
 |---|---|---|
 | JSON (source of truth) | `round_artifacts` table in the state DB, keyed by `round_id` | One row per closed round; upserted, so a crash-rerun of the close path overwrites rather than duplicates. `schema_version` lets readers detect older shapes without parsing. |
-| Markdown (derived view) | `data/rounds/round-<id>.md` | Written at round close for on-disk runs only (an in-memory state has no data dir). Always re-derived from the just-validated JSON. |
+| Markdown (derived view) | `.sapwood/rounds/round-<id>.md` | Written at round close for on-disk runs only (an in-memory state has no runtime root). Always re-derived from the just-validated JSON. |
 
 ## The schema — the dashboard (#17) data contract
 

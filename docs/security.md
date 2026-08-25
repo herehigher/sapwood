@@ -2204,7 +2204,9 @@ so the guard (`engine/src/guard/guard.ts`) adds defense-in-depth on top of that 
 The guard's write-deny rule (`protectedPathLabel`, `checkControlSentinelArg`) no longer
 enumerates individual filenames — it targets the fixed `.sapwood/` runtime root as a whole
 (#1079), so one segment-equality rule covers the three control sentinels together with
-everything else the runtime directory holds, instead of naming each path separately. A
+everything else the runtime directory holds, instead of naming each path separately (see
+[configuration.md "The `.sapwood/` runtime directory"](guide/configuration.md#the-sapwood-runtime-directory)
+for the layout itself, not restated here). A
 write-class built-in tool (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`) or a Bash write vector
 (`touch`/`rm`/`mv`/`sed -i`/`perl -i`/`tee`/`dd`/`cp`/`install`/redirect-to-path, or
 `git rm`/`mv`/`restore`/`checkout`) is denied whenever its lexically normalized target contains an

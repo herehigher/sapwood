@@ -1296,7 +1296,7 @@ served from the operator-owned dismissal JSONL. The two
                   "inputTokens": 0, "outputTokens": 0 }]
   },
   "rings": 27,                      // COUNT(events WHERE kind='merged') — the ring count
-  "logPath": "data/logs/run-….log", // the run-scoped engine log file's path (#193) — shown by
+  "logPath": ".sapwood/logs/run-….log", // the run-scoped engine log file's path (#193) — shown by
                                     // the phase inspector's "view log" entry (§6); live-only,
                                     // path only — the server never serves log content
   "config": { /* ALLOWLISTED subset of resolved config (§3 E) — the server names the

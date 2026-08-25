@@ -216,15 +216,15 @@ a worktree it cannot prove is clean.**
 
 ## Kill switch recovery
 
-If `data/KILL_SWITCH` is set (by a loaded plugin slash command or by hand), all new dispatch and
-merges are frozen and running workers are being drained. The switch is part of the stateful
-data directory; see [Data directory is stateful](configuration.md#data-directory-is-stateful)
-before moving, deleting, or restoring `data/`. Recovery:
+If `.sapwood/KILL_SWITCH` is set (by a loaded plugin slash command or by hand), all new dispatch
+and merges are frozen and running workers are being drained. The switch is part of the stateful
+runtime directory; see [The `.sapwood/` runtime directory](configuration.md#the-sapwood-runtime-directory)
+before moving, deleting, or restoring `.sapwood/`. Recovery:
 
 1. Check `sapwood status` — it reports `kill switch: ACTIVE` and shows any in-flight
    lanes still draining.
 2. Once you're satisfied it's safe to resume, run `sapwood stop clear` (equivalent to
-   `rm -f data/KILL_SWITCH`; or `/sapwood-stop --lift` in a session where the plugin
+   `rm -f .sapwood/KILL_SWITCH`; or `/sapwood-stop --lift` in a session where the plugin
    is loaded — all three act on the exact same file).
 3. Dispatch and merges resume on the **next tick** — a switch lifted mid-tick doesn't
    take effect within that same tick.
@@ -234,11 +234,11 @@ off), that lane's issue/PR will carry `needs-human` — see above.
 
 ## Single-instance lock
 
-Only one `sapwood run` may drive a given data dir (and therefore a given board) at a
+Only one `sapwood run` may drive a given runtime root (and therefore a given board) at a
 time — two concurrent engines double-drive: duplicate dispatch, conflicting merges. At
 startup, before any board read/write or reconcile, the engine takes a lock at
-`data/sapwood.lock` (beside `sapwood.sqlite`) recording its pid; a second start against
-the same data dir exits 1 with a message naming the holder's pid and the lock path.
+`.sapwood/sapwood.lock` (beside `sapwood.sqlite`) recording its pid; a second start against
+the same runtime root exits 1 with a message naming the holder's pid and the lock path.
 
 The lock is released on every normal exit (stop conditions, `--once`, kill switch,
 graceful signals). A **crash** leaves it behind by design — the next start checks
@@ -250,17 +250,17 @@ The one case that can need a hand: the previous engine died without releasing AN
 has since recycled its pid onto some unrelated live process. The liveness check then
 reads "alive" and startup is refused — deliberately the safe direction (a false refusal,
 never a false takeover). If you've confirmed the named pid is not a sapwood engine
-(`ps -p <pid>`), delete `data/sapwood.lock` and start again.
+(`ps -p <pid>`), delete `.sapwood/sapwood.lock` and start again.
 
-Stale-lock takeovers are serialized through a mutex directory, `data/sapwood.lock.takeover`,
+Stale-lock takeovers are serialized through a mutex directory, `.sapwood/sapwood.lock.takeover`,
 held only for the sub-second takeover itself. If an engine **crashes inside that window**, the
 directory is left behind and every later start that needs a takeover refuses with a message
 naming it — deliberately fail-closed (a visible refusal, never a possible double-drive). The
-check: if `data/sapwood.lock.takeover` exists and **no** sapwood engine is running against
-this data dir, remove the directory (`rmdir data/sapwood.lock.takeover`) and start again.
+check: if `.sapwood/sapwood.lock.takeover` exists and **no** sapwood engine is running against
+this runtime root, remove the directory (`rmdir .sapwood/sapwood.lock.takeover`) and start again.
 Ordinary starts (no stale lock to take over) are unaffected by a leftover mutex directory.
 
-A crash can also leave a stray `sapwood.lock.tmp-*` file in `data/` — a sidecar of the lock's
+A crash can also leave a stray `sapwood.lock.tmp-*` file in `.sapwood/` — a sidecar of the lock's
 atomic create. Its name is unique per process start and is never re-matched by a later
 engine: harmless, safe to delete.
 
@@ -326,7 +326,7 @@ The channel depends on what's actually reachable:
   the episode.
 - **Forge unreachable** (a `forge` episode, or any escalation during a mixed storm) — sapwood
   does not attempt a GitHub write at all: it falls back to **local-only** signals: `sapwood
-  status` (above), a plain-text `ESCALATION` file in the engine's data dir (`data/ESCALATION`
+  status` (above), a plain-text `ESCALATION` file in the engine's runtime root (`.sapwood/ESCALATION`
   by default) written by the engine — informational output only, never read back as a control
   input, unlike `KILL_SWITCH`/`PAUSE`, and removed automatically once the outage resolves —
   and a `[sapwood:park]` log line.
@@ -336,7 +336,7 @@ invisibly parked-behind-the-park.
 
 **What to do:**
 
-1. Run `sapwood status` (or `cat data/ESCALATION` if the forge itself is down) to see each
+1. Run `sapwood status` (or `cat .sapwood/ESCALATION` if the forge itself is down) to see each
    episode's source/reason/duration.
 2. If the underlying outage is a known, expected one (a GitHub incident, an account-level rate
    limit reset time you already know), you can just wait — sapwood keeps probing/canarying and
@@ -356,7 +356,7 @@ At startup the engine counts its own recent process births (`run-started` events
 `engine.rapidRestart.windowSec` (default 600s) means a **crash loop**, which is not a
 sanctioned restart pattern. The engine then emits `rapid-restart-detected`, **parks**
 autonomous dispatch (the same park machinery as an environment failure — visible in
-`sapwood status` as `PARKED (rapid-restart)` and in `data/ESCALATION`), and stays up
+`sapwood status` as `PARKED (rapid-restart)` and in `.sapwood/ESCALATION`), and stays up
 without dispatching.
 
 Recovery: stop whatever is restarting the engine (usually a supervisor without its own
@@ -378,7 +378,7 @@ runs (default 3) have **all** ended stalled with **no round closed between them*
 deterministic — the same bug re-wedging every restart — and restarting again would loop forever.
 The engine then emits `consecutive-stalls-detected`, **parks** autonomous dispatch (the same park
 machinery as an environment failure — `PARKED (consecutive-stalls)` in `sapwood status`, plus
-`data/ESCALATION`), and stays up without dispatching.
+`.sapwood/ESCALATION`), and stays up without dispatching.
 
 Recovery is **operator-explicit — this park never auto-clears.** The stall count that *arms*
 the breaker resets only on real progress (a round closing between stalls); how a run exited is
@@ -398,8 +398,8 @@ dispatch surface is gone, so the engine deliberately does not read it as recover
 
    It performs the clear inside the engine's protocol, **receipt-first**: the `park-resumed`
    receipt (`via: operator-clear`) is appended *before* the `park_state` row is deleted, and the
-   `data/ESCALATION` marker comes down last — the same order the engine's startup path uses.
-   It **refuses** while a live engine holds the data dir (the single-instance lock), which
+   `.sapwood/ESCALATION` marker comes down last — the same order the engine's startup path uses.
+   It **refuses** while a live engine holds the runtime root (the single-instance lock), which
    is exactly the case where a raw row deletion could let a dispatch gate see the absent row
    before any receipt is in the ledger.
 3. Start the engine again. The streak restarts from zero — if the wedge was not actually fixed,
@@ -410,7 +410,7 @@ engine's *next start* recognizes a receiptless missing row on an escalated episo
 act, writes the same `park-resumed` receipt, and removes the marker:
 
 ```sh
-sqlite3 data/sapwood.sqlite "DELETE FROM park_state WHERE source = 'consecutive-stalls'"
+sqlite3 .sapwood/sapwood.sqlite "DELETE FROM park_state WHERE source = 'consecutive-stalls'"
 ```
 
 Do this only with the engine **stopped**, and restart it afterwards: between the deletion and the
@@ -435,13 +435,13 @@ The breaker bounds it: once `round.idleChurn.consecutiveIdenticalRoundsThreshold
 5) in a row have closed both **idle** (no dispatch, no lane left in flight) and **state-identical**
 (each appended exactly the same durable facts as the one before — same kinds, same payloads), the
 engine appends `idle-churn-detected`, **parks** dispatch (`PARKED (idle-churn)` in `sapwood
-status`, plus `data/ESCALATION`), and stays up without opening another round.
+status`, plus `.sapwood/ESCALATION`), and stays up without opening another round.
 
 **Read the event first — it names the diagnosis.** Its `probeSignals` field names the standby
 probe signal(s) that held those rounds open:
 
 ```sh
-sqlite3 data/sapwood.sqlite \
+sqlite3 .sapwood/sapwood.sqlite \
   "SELECT payload FROM events WHERE kind = 'idle-churn-detected' ORDER BY id DESC LIMIT 1"
 ```
 
@@ -484,9 +484,9 @@ silent"** — several different truths render identically in a terminal.
 |---|---|---|---|
 | **Working** | lanes running / PRs driving | `workers` rows in `running`/`driving`; recent `events` | Normal operation: lanes, phase, spend. |
 | **Standby** | provably nothing to do; parked | `standby-wait` events (attempt n, waitSec) newer than any `dispatched`; no open round | "Standby — nothing Ready; probing every X min (backoff n)." Not an error state. |
-| **Paused** | human froze dispatch; in-flight work continues | `data/PAUSE` exists | "Paused by operator — in-flight lanes finishing; remove `data/PAUSE` to resume." |
+| **Paused** | human froze dispatch; in-flight work continues | `.sapwood/PAUSE` exists | "Paused by operator — in-flight lanes finishing; remove `.sapwood/PAUSE` to resume." |
 | **Ceiling-frozen** | a hard cost/time ceiling is breached; the engine ticks but dispatches nothing | the current `ceiling_breach` row's reasons; spend ≥ `cost.dailyBudgetUsd`, or process age ≥ `maxWallClockSec` (per process life — a restart starts a fresh clock, so an overnight "hang" here can mean the process genuinely ran a full day) | Needs a person: a daily-budget freeze resumes at midnight; a wall-clock alarm needs a restart to clear. |
-| **Draining to kill** | `KILL_SWITCH` tripped, or a stop signal received; handoff window running | `data/KILL_SWITCH` exists, else the `ceiling_breach` row reads `stop-signal`; workers transitioning to handoff. No sentinel is written for a signal — pair it with a live process before calling it "draining." | Counting down the drain window; exits 1 (sentinel) or 0 once drained (signal). |
+| **Draining to kill** | `KILL_SWITCH` tripped, or a stop signal received; handoff window running | `.sapwood/KILL_SWITCH` exists, else the `ceiling_breach` row reads `stop-signal`; workers transitioning to handoff. No sentinel is written for a signal — pair it with a live process before calling it "draining." | Counting down the drain window; exits 1 (sentinel) or 0 once drained (signal). |
 | **Winding down** | a stop condition hit; finishing the round | `round-stop`/stop-condition events; dispatch skipped with reason | "Stop condition met — finishing in-flight work." |
 | **Escalated dry** | board empty because everything needs a human | Ready empty + `needs-human`-labeled issues | The loop is waiting on a human, not broken — see [`needs-human` label](#needs-human-label). |
 | **Stalled PR** | a lane is parked in `driving` on a PR reporting no CI | `driving` lane age far exceeds normal; a conflicted PR builds no merge ref, so GitHub shows zero check-suites — looks like CI never ran, but the engine detects the conflict each tick and (with `prFixCap > 0` and no hold) routes it into the conflict-fix path automatically | In conductor-merge mode this usually self-heals; `prFixCap: 0` escalates to a human instead, and `produce-pr-and-stop` mode reports the conflict without acting (stays `driving` by design — not a bug). If it persists even with self-healing configured, the fix lane itself is stuck — see [Every lane is waiting on CI at once](#every-lane-is-waiting-on-ci-at-once-base-ci-red). |

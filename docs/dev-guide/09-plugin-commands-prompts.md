@@ -23,7 +23,7 @@ engine CLI:
   one exists (a contributor/dogfood checkout or a built Channel A clone), and otherwise
   falls back to `npx sapwood@<version>` pinned to the plugin's own version — a
   marketplace install has no local engine build. The working directory stays the *target* repo in
-  both branches, so `sapwood.config.yaml` and `data/` resolve where the operator runs
+  both branches, so `sapwood.config.yaml` and `.sapwood/` resolve where the operator runs
   the command. Their `allowed-tools` is `Bash(sh:*)`, not a narrower pin on the wrapper's
   own path: permission-rule matching is a literal-text prefix match against the command
   string as written (`$CLAUDE_PLUGIN_ROOT` unexpanded), and the docs give no example of a
@@ -34,9 +34,9 @@ engine CLI:
 - `sapwood-run.md` → `run` (rounds driver by default; `--once`/`--until-idle`
   are tick-driver-only). `sapwood-status.md` → `status` (reads SQLite without
   an engine). `sapwood-dashboard.md` → `dashboard` (serves the packaged dashboard and prints
-  its URL when browser opening is unavailable). `sapwood-stop.md` manages the `data/EMERGENCY_STOP` /
-  `data/KILL_SWITCH` / `data/PAUSE` control files directly; there is no CLI `stop`
-  subcommand.
+  its URL when browser opening is unavailable). `sapwood-stop.md` calls the `sapwood
+  pause`/`stop`/`estop` CLI verbs, which resolve the `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`
+  sentinel paths internally; the command file never touches `.sapwood/` directly.
 
 Changing a command's behavior usually means changing `engine/src/cli.ts` and
 the command file together, and re-checking `.claude-plugin/CLAUDE.md`'s
