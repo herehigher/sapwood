@@ -183,10 +183,9 @@ sapwood init
    `worker.deployKeyId` into your config: the local `(path, id)` pair is the anchor every later
    `sapwood init` run RECONCILES against — never the bare key title, which may validly belong to
    a different machine (the config schema rejects a config carrying only one half of the pair).
-   `init` also keeps the private key out of an ordinary `git add -A`: it ensures `.gitignore`
-   ends with a rooted `/data/worker-deploy-key*` rule as its LAST line (appending it if it isn't
-   already there — gitignore is last-match-wins, so a rule at the very end always applies
-   regardless of anything earlier in the file); a deliberate `git add -f` can still stage it.
+   `init` writes the key under the self-ignoring `.sapwood/` runtime root, so it never needs to
+   touch your repo's own `.gitignore` to keep the private key out of an ordinary `git add -A`; a
+   deliberate `git add -f` can still stage it.
    From then on, every worker leg — dispatch, resume, AND fix — pushes over git transport ONLY,
    through this key, with **no forge API credential in its environment at all**: it structurally
    cannot open a PR, approve a review, label an issue, or touch the board — the engine does all of
