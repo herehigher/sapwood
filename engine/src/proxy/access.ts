@@ -1,5 +1,5 @@
 // proxy/access.ts — #244: the role x tool allow/deny matrix for the forge MCP proxy, folded into
-// #235's existing allow/deny matrix (docs/security.md's role x tool table). This is the ONE
+// #235's existing allow/deny matrix (docs/security/role-sessions.md's role x tool table). This is the ONE
 // table that decides which of the fixed-algebra tools (tools.ts's TOOL_NAMES) a given session
 // role may call — mcp-server.ts's handleToolCall is the REAL enforcement point (server-side,
 // fail-closed), and startForgeProxyServer's own `toolNames` output (the `--allowedTools` CLI

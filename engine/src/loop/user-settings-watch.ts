@@ -1,12 +1,12 @@
 // user-settings-watch.ts (#615): the owner-ruled arm (2) response to the worker-leg user-settings
 // persistence vector #600 declined to cover — see this issue's recorded ruling and
-// docs/security.md's #285 section / HONEST SCOPE note for the full rationale.
+// docs/security/role-sessions.md's #285 section / HONEST SCOPE note for the full rationale.
 //
 // Every engine-spawned WORKER leg loads every file-based settings source (worker.ts's
 // `claudeArgs` never sets `--setting-sources`, unlike review sessions, which #285 closes with
 // `--setting-sources ""`), including the operator's own `~/.claude/settings.json`. A worker leg's
 // `Bash(node *)`/`Bash(npm *)` grant runs with the operator's REAL `$HOME` and "structurally
-// cannot be filesystem-confined from it" (security.md's `workerCredentialFreeEnv` HONEST SCOPE
+// cannot be filesystem-confined from it" (docs/security/role-sessions.md's `workerCredentialFreeEnv` HONEST SCOPE
 // note) — so a producer leg in round N could in principle write that file, and every LATER worker
 // leg, any lane, any round, inherits whatever that write left behind.
 //

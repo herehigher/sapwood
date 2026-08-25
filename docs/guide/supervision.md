@@ -377,7 +377,7 @@ Before ending a supervision session:
    a follow-up filed) or it's explicitly carried forward, never silently dropped.
 2. **Owner-ruling recovery ritual.** A ruling recorded ONLY as a comment is not evidence a
    worker will ever see — workers read the issue body only (`{{issue.body}}`, see
-   [`docs/security.md`](../security.md#the-comment-adjudication-cursor)), and comments
+   [`docs/security.md`](../security/adjudication.md#the-comment-adjudication-cursor)), and comments
    remain audit evidence, never the contract a worker is dispatched against; the body
    remains the worker contract. Skipping this step has a real, paid-for cost: an owner's
    ruling left only in a comment can go unseen by both a later automated pass (which then
@@ -391,7 +391,7 @@ Before ending a supervision session:
    2. **Rewrite the authoritative body** to fold the ruling in — the comment is evidence
       that a decision was made, not the decision a worker will act on.
    3. **Advance the [adjudication
-      cursor](../security.md#the-comment-adjudication-cursor)**
+      cursor](../security/adjudication.md#the-comment-adjudication-cursor)**
       (`<!-- sapwood:comments-adjudicated-through: <comment-id> -->`) to the ruling
       comment or later, so gate⓪ and dispatch see the body as current rather than stale.
    4. **Remove `needs-human`**, if it was applied for this reason.

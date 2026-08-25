@@ -2331,7 +2331,7 @@ test("parsePRStatus (#401): ciGreen conclusion truth table — only SUCCESS is g
   // repo owner ruled 2026-07-29 that "SUCCESS-only" is scoped to CheckRun CONCLUSIONS and this
   // path stays (design #279 §4 records the ruling).
   // requiredChecksSatisfied rejects status contexts because their owning App can't
-  // be verified, a `ci.requiredChecks`-specific binding (docs/security.md); gate① is the general
+  // be verified, a `ci.requiredChecks`-specific binding (docs/security/adjudication.md); gate① is the general
   // CI signal for every reviewer mode, the Status API has no SKIPPED/NEUTRAL concept to exploit,
   // and rejecting it would permanently wedge every Status-API CI repo (Jenkins, Buildkite).
   const legacy = (state: string) =>

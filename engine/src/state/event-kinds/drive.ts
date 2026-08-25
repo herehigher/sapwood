@@ -300,9 +300,9 @@ export const DRIVE_EVENT_KINDS = defineKinds({
   "ac-snapshot-drift": {
     tags: ["escalation-source:never"],
     meaning:
-      "a PR's issue body changed after its acceptance-criteria snapshot was taken (<" +
-      DOC_LINKS.security +
-      '>\'s "The AC-authority dispatch snapshot"); the lane fails closed and needs-human is applied via its own bespoke label site (escalation-buckets.test.ts\'s SITE_INVENTORY), not the shared addLabel call the other `always`/`payload` sources share — so `never` is the honest proof mode: the reconciler now OBSERVES this kind for external resolution (a merged/closed PR, a closed issue), but `never` keeps escalation-sweep.ts from ever removing the label off this event\'s own say-so. `checkpoint` records which recheck caught it: "drive" (immediately before `gate.driveOne`) or "fix-leg-spawn" (immediately before a FIXUP action\'s fix leg actually spawns — closes the verdict-tick PO-edit window a review\'s own duration used to leave open, waste-window reduction only, not race elimination).',
+      "a PR's issue body changed after its acceptance-criteria snapshot was taken (see <" +
+      DOC_LINKS.securityAcAuthorityDispatchSnapshot +
+      '>, "The AC-authority dispatch snapshot"); the lane fails closed and needs-human is applied via its own bespoke label site (escalation-buckets.test.ts\'s SITE_INVENTORY), not the shared addLabel call the other `always`/`payload` sources share — so `never` is the honest proof mode: the reconciler now OBSERVES this kind for external resolution (a merged/closed PR, a closed issue), but `never` keeps escalation-sweep.ts from ever removing the label off this event\'s own say-so. `checkpoint` records which recheck caught it: "drive" (immediately before `gate.driveOne`) or "fix-leg-spawn" (immediately before a FIXUP action\'s fix leg actually spawns — closes the verdict-tick PO-edit window a review\'s own duration used to leave open, waste-window reduction only, not race elimination).',
     actionability: "intervene",
   },
   "blocked-by-cleared": {

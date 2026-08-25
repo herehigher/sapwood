@@ -28,7 +28,7 @@ test("allowManagedPermissionRulesOnly: true -> exactly one warning, with resolut
     assert.equal(tripped, true);
     assert.equal(logged.length, 1);
     assert.match(logged[0]!, /allowManagedPermissionRulesOnly/);
-    // Both operator exits named, plus the docs/security.md anchor.
+    // Both operator exits named, plus the docs/security/role-sessions.md anchor.
     assert.match(logged[0]!, /mirror/i);
     assert.match(logged[0]!, /accept/i);
     assert.ok(logged[0]!.includes(DOC_LINKS.securityManagedSettingsException));

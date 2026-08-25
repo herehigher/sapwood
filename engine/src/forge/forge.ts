@@ -3287,7 +3287,7 @@ export function parsePRStatus(json: string): PRStatus {
   // requiredChecksSatisfied rejects a legacy commit StatusContext
   // for a reason that is specific to `ci.requiredChecks` — a status context carries no check
   // suite, so its owning App cannot be verified against a configured `{name, app}` pair
-  // (docs/security.md "CI execution evidence for engine-agent review" scopes that rejection to
+  // (docs/security/adjudication.md "CI execution evidence for engine-agent review" scopes that rejection to
   // that chain, not to gate①). Gate① is the general "did this repo's CI pass" signal for EVERY
   // reviewer mode, and the Status API has no SKIPPED/NEUTRAL concept at all (states are
   // error|failure|pending|success), so the hole this change closes cannot exist on that path.

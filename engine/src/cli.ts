@@ -2471,10 +2471,10 @@ export interface WebAccessDenialCheckDeps {
 }
 
 /** #410 amendment (owner ruling 2026-07-28): lightweight startup detection, NOT settings
- *  pinning — see docs/security.md's peripheral-egress section for the full rationale. An
+ *  pinning — see docs/security/egress.md's peripheral-egress section for the full rationale. An
  *  earlier version of this PR pinned `--setting-sources ""` for every peripheral session; a
  *  live measurement found that flag ALSO stops loading the repo's own CLAUDE.md, colliding
- *  with the locked #236 ruling ("Ambient repo context: record, don't seal" — a peripheral
+ *  with the locked #236 ruling (docs/security/ambient-repo-context.md's "Ambient repo context: record, don't seal" — a peripheral
  *  session absorbing the target repo's CLAUDE.md is a deliberately OPEN channel). The #410
  *  decision record's own reserved fallback — "if pinning turns out to have side effects, the
  *  fallback is startup detection and reporting" — is what this function is.

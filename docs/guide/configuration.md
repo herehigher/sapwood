@@ -226,7 +226,7 @@ dispatch. Upgrade with `npm i -g @anthropic-ai/claude-code@latest`. See also
 | `egressSuspectCommands` | `[curl, wget, nc, ncat, netcat, socat, ssh, scp, sftp, rsync, ftp, telnet]` | Executable names recorded by the monitor-only worker-egress tripwire. Matching is lexical at executable position in completed Bash tool calls; each deduplicated match becomes an `egress-suspect` event and never blocks or changes the lane outcome. An override **replaces** the default array entirely (no merging); set `[]` to disable the tripwire. |
 | `promptFile` | unset | Override the worker's prompt template with your own file. A relative path resolves against **the config file's own directory**, not the CLI's cwd — so the same config behaves identically no matter where `sapwood` is invoked from. Unset uses the engine's shipped `prompts/worker.md` (TDD + two-gate method). |
 | `fixPromptFile` | unset | Override the **fix-leg** prompt — the instruction a `fixing`-state resume (same worker row/worktree/branch/session as the original leg, never a new dispatch) receives instead of the ordinary issue-rendered prompt above. Same resolution/fail-fast rules as `promptFile`. Unset uses the engine's shipped `prompts/fix.md` (fetch findings via the PR-facing proxy tools, address them, push to the same branch). |
-| `deployKeyPath` | unset | Path to the per-repo SSH **write deploy key** `sapwood init` provisions — set TOGETHER with `deployKeyId` below (they are the LOCAL anchor pair `sapwood init`'s reconcile pass checks against; a title is never authoritative for "mine"). The config schema REJECTS a config with only one of the pair set (a parse error naming the missing half and pointing at re-running `sapwood init`) — see `deployKeyId`'s own row. Both set + reconciled green activates **L1**: every worker leg — dispatch, resume, AND fix — runs with `GIT_SSH_COMMAND` pinned to this key (composed onto the credential-free base for a fix leg, never replacing its severing) and no forge API credential reachable in its env at all (`Bash(gh *)` drops out of the leg's tool grant too). Unlike `promptFile`, a relative path here resolves against cwd, not the config file's directory (the key file lives beside the engine's own runtime root). Unset (the default) is **L0** — today's full credentialed env, unchanged. A reconcile failure (missing local file, a rotated/foreign remote id, a public-key content mismatch, an SSH auth failure) never blocks dispatch: **the running engine only ever logs a guidance-carrying WARN and runs that leg at L0 — dispatch/resume/fix never write to config.** Only a SEPARATE, later `sapwood init` invocation clears the stale anchor (and, run interactively, offers to register an additional per-machine key); until that happens, every leg keeps re-hitting the same reconcile failure and the same WARN, which is the correct, safe, stable state. See [Security & trust model](../security.md#worker-credential-tiers) for the full tier table, the reconcile state machine, and residuals. |
+| `deployKeyPath` | unset | Path to the per-repo SSH **write deploy key** `sapwood init` provisions — set TOGETHER with `deployKeyId` below (they are the LOCAL anchor pair `sapwood init`'s reconcile pass checks against; a title is never authoritative for "mine"). The config schema REJECTS a config with only one of the pair set (a parse error naming the missing half and pointing at re-running `sapwood init`) — see `deployKeyId`'s own row. Both set + reconciled green activates **L1**: every worker leg — dispatch, resume, AND fix — runs with `GIT_SSH_COMMAND` pinned to this key (composed onto the credential-free base for a fix leg, never replacing its severing) and no forge API credential reachable in its env at all (`Bash(gh *)` drops out of the leg's tool grant too). Unlike `promptFile`, a relative path here resolves against cwd, not the config file's directory (the key file lives beside the engine's own runtime root). Unset (the default) is **L0** — today's full credentialed env, unchanged. A reconcile failure (missing local file, a rotated/foreign remote id, a public-key content mismatch, an SSH auth failure) never blocks dispatch: **the running engine only ever logs a guidance-carrying WARN and runs that leg at L0 — dispatch/resume/fix never write to config.** Only a SEPARATE, later `sapwood init` invocation clears the stale anchor (and, run interactively, offers to register an additional per-machine key); until that happens, every leg keeps re-hitting the same reconcile failure and the same WARN, which is the correct, safe, stable state. See [Security & trust model](../security/credential-tiers.md#worker-credential-tiers) for the full tier table, the reconcile state machine, and residuals. |
 | `deployKeyId` | unset | The GitHub-assigned numeric id of the deploy key at `deployKeyPath` above — written by `sapwood init` alongside it, and always set/cleared TOGETHER with it. This is the other half of the local `(path, id)` anchor `sapwood init`'s reconcile pass keys on (including a public-key CONTENT cross-check against that id's own registered key, not just "is this id registered somewhere"); the bare key TITLE on the repo is never treated as proof of ownership (a `sapwood-worker`-titled key may validly belong to a different machine). The config schema enforces the pair: a config with only `deployKeyPath` or only `deployKeyId` set fails to load at all (a parse error naming the missing half), rather than silently behaving as "nothing configured" or reconciling against a meaningless half-anchor. |
 
 ### Calibrating `budgetUsdSoft`
@@ -293,7 +293,7 @@ The shipped `egressSuspectCommands` table deliberately omits `git`, `gh`, and pa
 managers: those are loop-owned or governed worker flows and would make poor default signals.
 This key tunes an audit tripwire only; it does not create a denylist or a lane hold. The
 security boundary and the tripwire's known blind spots are documented in
-[Security & trust model](../security.md#worker-network-egress-bash-channel-containment-available-as-a-hardening-profile).
+[Security & trust model](../security/egress.md#worker-network-egress-bash-channel-containment-available-as-a-hardening-profile).
 
 **`worker.promptFile` template variables:** `{{issue.number}}`, `{{issue.title}}`,
 `{{issue.body}}`, `{{issue.labels}}`, `{{labels.verifyNa}}`. `{{issue.labels}}` renders
@@ -822,7 +822,7 @@ used verbatim.
 **Per-label semantics (writer/remover/gates/distinguish-from) are a typed registry, not
 just this table's prose.** `engine/src/forge/labels.ts`'s `LABEL_SEMANTICS` — one entry per
 workflow, taxonomy, and hold label, exhaustive at compile time — is rendered into the
-`sapwood-labels` skill (see [`security.md`](../security.md#role-session-skill-injection--an-accident-fence-not-a-jail))
+`sapwood-labels` skill (see [`security.md`](../security/role-sessions.md#role-session-skill-injection--an-accident-fence-not-a-jail))
 against THIS repo's resolved names, so a role session reading it never sees a default or a
 `labels.prefix` template. This table stays the operator-facing reference (defaults, config
 keys); the registry is that same knowledge's role-session-facing, compile-checked twin.
@@ -862,7 +862,7 @@ both sets of explicit pins—before restart.
 | `humanMergeOnly` | `sapwood:human-merge-only` | **Bucket 2: a human must MERGE this PR** — the PR is not stuck, its merge decision simply is not the loop's to take. Written by the engine on the **PR only**, exactly once, by the instruction-path trust chain; never removed and never re-decided by any automated act. Shipped description, verbatim: `sapwood marked this PR for human merge; a human must merge it and sapwood never removes this` Deliberately **not** a member of `escalation.humanLabels` — a lane settling on this verdict terminates without `gated_escalation_labeled`, so it is structurally invisible to `State.gatedFailedWorkers()` and can never be gate-reclaimed or re-escalated to `needs-human`. The name reuses [`security.md`](../security.md#human-merge-only-paths)'s existing *human-merge-only* vocabulary: one fact, one term. |
 | `planless` | `sapwood:planless` | **Not an escalation at all.** A routing fence for an issue that has no verification plan yet — applied by the PO's decomposition remainder path and its no-plan creation path, which both used to borrow `needsHuman` and so put items nobody owed a decision on into the human queue. Shipped description, verbatim: `sapwood found no verification plan yet; add one, then remove this label` It is excluded by `isPoolEligible`, `needsPlanReview`, `needsPlanTriage`, and the standby probe exactly as `needsHuman` is, so pool/triage/dispatch exposure is unchanged from before the rename. Not a member of `escalation.humanLabels`. |
 | `verifyNa` | `sapwood:verify:n/a` | Marks an issue as inherently unverifiable by tests — skips the verification-plan gate and routes through the doc-gate path instead. |
-| `planApproved` | `sapwood:plan:approved` | gate⓪: required, together with a genuine verification-plan section AND a non-malformed checkbox acceptance-criteria set (`- [ ] ...` lines under `## Acceptance criteria`), for `getReadyIssues` to dispatch a non-`verifyNa` issue. Applied by the verification-plan-reviewer peripheral after quality-reviewing the plan — plan *presence* alone is no longer sufficient. **Semantic note:** this label is not "approved forever" — it means *approved when granted, re-endorsed at every round-pool entry before dispatch*. A pool member carrying it from a PRIOR round gets a lightweight confirm pass (see `verificationPlanReviewer.confirmPromptFile` below) checking the plan still holds against current `main` before that approval is trusted again; the label itself is never removed by that pass either way. See [`security.md`](../security.md#the-planapproved-label-and-gate) and [`security.md`](../security.md#the-ac-authority-dispatch-snapshot) (the pre-launch AC snapshot + review-time drift check). |
+| `planApproved` | `sapwood:plan:approved` | gate⓪: required, together with a genuine verification-plan section AND a non-malformed checkbox acceptance-criteria set (`- [ ] ...` lines under `## Acceptance criteria`), for `getReadyIssues` to dispatch a non-`verifyNa` issue. Applied by the verification-plan-reviewer peripheral after quality-reviewing the plan — plan *presence* alone is no longer sufficient. **Semantic note:** this label is not "approved forever" — it means *approved when granted, re-endorsed at every round-pool entry before dispatch*. A pool member carrying it from a PRIOR round gets a lightweight confirm pass (see `verificationPlanReviewer.confirmPromptFile` below) checking the plan still holds against current `main` before that approval is trusted again; the label itself is never removed by that pass either way. See [`security.md`](../security.md#the-planapproved-label-and-gate) and [`security.md`](../security/adjudication.md#the-ac-authority-dispatch-snapshot) (the pre-launch AC snapshot + review-time drift check). |
 | `originAgent` | `sapwood:origin:agent` | Provenance stamp applied by the PO/align orchestrator to agent-created issues. See [`security.md`](../security.md#the-originagent-label-convention). |
 | `split` | `sapwood:split` | Firing signal for PO decomposition — engine-initiated by default, a human-applied label remains an override channel. The engine applies it itself via two triggers: gate⓪'s early `too_large` structured decision (post-Ready, before a lane is ever spent) and the resume-cap CAPPED branch's late trigger (after a lane exhausts `worker.maxResumes`); both are idempotent against an issue already carrying the label, and neither is gated by a per-round allowance. The engine never REMOVES it. **Also an unconditional dispatch exclusion** — the same composed set `decomposed`/`needsHuman`/`blocked` join, closing the race where a concurrent or stale `plan:approved` could otherwise dispatch a mid-decomposition issue before the decomposer fences the parent with `decomposed`. On an `origin:agent` child, applying this label permits decomposition, but label application time does **not** define attempt freshness: the signature is derived from the issue title and body evidence. An unchanged title/body fires at most once; editing the body (or title) changes the signature and re-arms a new attempt. |
 | `decomposed` | `sapwood:decomposed` | Engine-written parent fence. The parent is retired to Todo as a tracking container and excluded from every engine ingestion/dispatch path. The engine never removes this label and never auto-closes the parent. |
@@ -905,7 +905,7 @@ credential-stripped spawn env),
 never content-side (what it can *read*), and repo conventions living in `CLAUDE.md`
 are exactly what a role session should absorb. Sealing this channel (a clean,
 `--bare`-style directory with no ambient `CLAUDE.md`) is reserved for **benchmark**
-runs only — see [`security.md`](../security.md#ambient-repo-context-record-dont-seal)
+runs only — see [`security.md`](../security/ambient-repo-context.md#ambient-repo-context-record-dont-seal)
 for the full rationale, the isolation recipe (which MUST use `--bare`), and why that
 recipe is never acceptable for production dispatch (`--bare` also disables hooks, and
 the guard hook must stay live). Recorded for **all 10/10** `runSessionWithRetry`
@@ -1062,7 +1062,7 @@ response+hash → deliver) before the session ever sees a result, metered agains
 per-session call/byte budget, and — once accepted — bundled content-addressed as frozen
 evidence for later audit/replay. A session's role scopes it to a fixed subset of this
 algebra (deny-by-default for an unrecognized role) — see
-[`security.md`](../security.md#the-forge-mcp-proxys-role-x-tool-matrix)'s
+[`security.md`](../security/role-sessions.md#the-forge-mcp-proxys-role-x-tool-matrix)'s
 role x tool matrix table.
 
 **Ships ON by default — a two-state model.** Engine startup (`cli.ts`'s `runTickEngine`/`runRoundsEngine`,
@@ -1082,7 +1082,7 @@ role x tool matrix table.
 `peripheral.ts`'s `RoleRunner` and `worker.ts`'s `WorkerSupervisor` (the same
 mechanism covers worker legs' `dispatch()`, mirroring `RoleRunner`'s own `proxy` opt,
 and `resume()` too — see
-[`security.md`](../security.md#fix-loop-fixing-lane-state) for the fix-loop consumer
+[`security.md`](../security/role-sessions.md#fix-loop-fixing-lane-state) for the fix-loop consumer
 this exists for) are the two attachment points; a caller-supplied `proxy` opt always
 wins over the RoleRunner-wide default, never silently overridden.
 
@@ -1150,9 +1150,9 @@ proxy mechanism's own scope.
 **The built-in `WebSearch`/`WebFetch` grant** — `architect`, `po-align`, and `po-triage`
 only, no other role. Ships **enabled by default**: the capability is read-only, carries no
 credential into any project system, is strictly weaker than the worker's own default-unrestricted
-Bash egress (see [`security.md`](../security.md#worker-network-egress-bash-channel-containment-available-as-a-hardening-profile)), and every
+Bash egress (see [`security.md`](../security/egress.md#worker-network-egress-bash-channel-containment-available-as-a-hardening-profile)), and every
 call is journalled through the same `egress-suspect` ledger event the worker's own tripwire
-uses (see [`security.md`](../security.md#peripheral-network-egress-websearchwebfetch-detected-not-pinned)).
+uses (see [`security.md`](../security/egress.md#peripheral-network-egress-websearchwebfetch-detected-not-pinned)).
 The review family (`verification-plan-reviewer`, `verification-plan-drafter`, `verification-plan-reviewer-confirm`, and every gate②
 reviewer session) never reads this key at all — refusal is structural, not a `false` this key
 could be set to.
@@ -1182,7 +1182,7 @@ already-granted tools reach the host (execution reach), never WHICH tools a prod
 offered (that stays [host-delegated capability management](../security.md#host-delegated-capability-management),
 unchanged and unrelated — no `capabilities.*` surface is reopened by this key).
 Full mechanics live in [`docs/security.md`'s "Execution
-profiles"](../security.md#execution-profiles-host-permission-mode--bash-sandbox) section —
+profiles"](../security/execution-profiles.md#execution-profiles-host-permission-mode--bash-sandbox) section —
 semantics here are copied verbatim from there.
 
 | Key | Default | Meaning |

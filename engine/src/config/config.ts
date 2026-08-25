@@ -1580,6 +1580,10 @@ const ConfigSchemaRaw = z
           // #539: docs/security.md carries the canonical human-merge-only list and documents this
           // mechanism's own trust chain — the same self-reference class as the two paths above.
           "docs/security.md",
+          // #1094 PR-S: the per-mechanism reference pages split out of docs/security.md are
+          // instruction carriers exactly like the core file — a `**` glob covers every page
+          // without naming each one as it's added.
+          "docs/security/**",
           // #639: the role-session skill-injection renderer — it reads docs/security.md's own
           // marker-delimited sections VERBATIM and is the sole thing deciding what text a
           // `--plugin-dir`-attached session can pull on demand. A change here could shift WHICH

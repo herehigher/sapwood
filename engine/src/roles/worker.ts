@@ -2085,7 +2085,7 @@ export interface WorkerProxyOpts {
  *  lane also needs to run at all) and (2) stripping `Bash(node *)`/`Bash(npm *)` (a fix leg's
  *  whole job requires running the test suite). The upgrade path for a genuinely closed boundary
  *  is OS-level sandboxing — container/chroot/Landlock-style filesystem confinement, available as
- *  the operator-configured Bash-sandbox recipe in docs/security.md's "Execution profiles" section
+ *  the operator-configured Bash-sandbox recipe in docs/security/execution-profiles.md's "Execution profiles" section
  *  — or running fix legs under a dedicated, narrowly-scoped CI identity whose credential store
  *  contains nothing worth stealing; the CI-identity path remains unimplemented. This function
  *  alone (`workerCredentialFreeEnv`) provides no filesystem confinement — an operator who has

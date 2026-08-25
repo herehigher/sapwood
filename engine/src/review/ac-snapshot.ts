@@ -98,7 +98,7 @@ function stripAcAuthorityMarkerLines(body: string): string {
  *
  *  Deliberately excuses TWO classes of whitespace-only difference a plain byte compare would call
  *  "changed": a CRLF/LF line-ending flip (GitHub's own web editor round-trips these
- *  inconsistently — see docs/security.md) and a blank-line-run collapse (any run of 2+ consecutive
+ *  inconsistently — see docs/security/adjudication.md) and a blank-line-run collapse (any run of 2+ consecutive
  *  blank lines reduces to exactly one, and trailing blank lines/whitespace are trimmed). Both are
  *  scoped to the AC-authority hash ONLY, same as the marker strip itself — `hashBody`/
  *  `checkBodyDrift` never call this and stay byte-exact. */

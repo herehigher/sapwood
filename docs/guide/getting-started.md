@@ -190,7 +190,7 @@ sapwood init
    through this key, with **no forge API credential in its environment at all**: it structurally
    cannot open a PR, approve a review, label an issue, or touch the board — the engine does all of
    that from its own, separately-held credential (see
-   [Worker credential tiers](../security.md#worker-credential-tiers) for the full L0/L1
+   [Worker credential tiers](../security/credential-tiers.md#worker-credential-tiers) for the full L0/L1
    picture and honest residuals). If you don't have repo admin, `init` logs exactly what to do by
    hand (or skip — the engine runs fully functional either way, at L0, today's fuller-credentialed
    default) and moves on; it never fails `init` over this. On a LATER run, if the recorded key
@@ -273,7 +273,7 @@ Complete this setup before choosing L3.
   worker the L1 deploy-key path (`worker.deployKeyPath` and `worker.deployKeyId`) rather than
   a forge API credential, and keep the conductor's merger credential outside the worker's
   normal credential lookup paths. Actual unreadability requires the L2 [enterprise posture
-  checklist](../security.md#l2-enterprise-posture-checklist). Both controls
+  checklist](../security/credential-tiers.md#l2-enterprise-posture-checklist). Both controls
   matter: branch protection prevents a producer from bypassing review with a direct push, while
   a distinct merger identity prevents it from acting as the conductor. Without both, producer ≠
   merger is not a fully load-bearing deployment guarantee.
@@ -281,8 +281,8 @@ Complete this setup before choosing L3.
 Credential isolation has deliberate limits: the L1 environment removes the normal forge
 credential path, but it is not OS-level confinement from arbitrary code or the host's
 credential store. Read Security's [Accepted blind spots](../security.md#accepted-blind-spots),
-[Worker credential tiers](../security.md#worker-credential-tiers), and
-[Worker-leg user-settings persistence vector — detect & disclose](../security.md#worker-leg-user-settings-persistence-vector--detect--disclose)
+[Worker credential tiers](../security/credential-tiers.md#worker-credential-tiers), and
+[Worker-leg user-settings persistence vector — detect & disclose](../security/role-sessions.md#worker-leg-user-settings-persistence-vector--detect--disclose)
 before relying on unattended merge.
 
 ## L0–L3 autonomy ladder
@@ -600,7 +600,7 @@ shape into the authoritative AC set a worker is dispatched against; a malformed 
 checkbox set blocks dispatch even with `plan:approved` applied. The engine also snapshots
 the full issue body BEFORE a worker ever spawns, and re-checks it for drift at review
 time — see
-[`security.md`](../security.md#the-ac-authority-dispatch-snapshot) for the
+[`security.md`](../security/adjudication.md#the-ac-authority-dispatch-snapshot) for the
 full mechanism.
 
 Any issue a human didn't personally author — including one an agent role opens on your

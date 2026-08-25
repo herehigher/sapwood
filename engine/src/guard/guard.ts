@@ -1043,7 +1043,7 @@ function checkBashWritePath(tokens: string[], cwd: string): string | null {
 // Read, so the guard never even saw the call, and `/etc/hosts` / `../`-traversal reads to
 // arbitrary host files both succeeded (permission_denials: []). Real FS isolation would
 // need `--bare`, which disables hooks entirely — ruled out for production dispatch
-// (docs/security.md "Benchmark isolation recipe"). So containment has to be this guard's
+// (docs/security/review-session-mode.md "Benchmark isolation recipe"). So containment has to be this guard's
 // job, the same way Write/Edit boundary-file protection already is.
 //
 // Read/Grep/Glob/NotebookRead all resolve to a single filesystem target: Read's `file_path`

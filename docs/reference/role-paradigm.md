@@ -165,7 +165,7 @@ pattern-level deny.
    list, not just the `Agent`/`Task` deny below; whether the engine should detect and refuse that
    mode is open, see issue #554): no `Bash` grant at all, so for them a whole bypass
    class (short-flag aliases, quoting escapes) is structurally moot rather than pattern-denied
-   (#110; see [`security.md`](../security.md#issues-only-role-sessions-read-only-worktree-confined-no-shell)). This is
+   (#110; see [`security.md`](../security/role-sessions.md#issues-only-role-sessions-read-only-worktree-confined-no-shell)). This is
    the strongest tier for writes, for these five, because there is nothing to intercept — the
    write capability doesn't exist to begin with; the read channel itself is contained separately,
    by the guard hook's worktree confinement (`checkReadContainment` in `guard.ts`) — enforced
@@ -206,7 +206,7 @@ pattern-level deny.
    basis as the five roles above: no `Bash` of any kind (no `git`, no `gh`, no shell to reach
    either through), no `Write`/`Edit`/`MultiEdit` — the same "capability doesn't exist" argument
    holds for every write path. See
-   [`security.md`](../security.md#issues-only-role-sessions-read-only-worktree-confined-no-shell)'s own note on this
+   [`security.md`](../security/role-sessions.md#issues-only-role-sessions-read-only-worktree-confined-no-shell)'s own note on this
    session for the full rationale.
 2. **Intercepted** — a tool channel exists, but a fail-closed hook blocks the
    dangerous call before it executes. This is `guard.ts`'s PreToolUse hook, wired into

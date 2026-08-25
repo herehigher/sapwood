@@ -16,7 +16,7 @@
 // manifest names its own blind spots rather than silently pretending to be exhaustive. Ambient
 // drift between retries (a CLAUDE.md edited between attempt 1 and attempt 2, a dirty worktree, a
 // config change) is what this exists to make visible, never to hide. Isolation remains correct —
-// but only for BENCHMARK runs, documented as a separate recipe in docs/security.md, never wired
+// but only for BENCHMARK runs, documented as a separate recipe in docs/security/review-session-mode.md, never wired
 // into production dispatch (it needs `--bare`, which also disables the guard hook).
 //
 // This module is PURE (assembleContextManifest touches no filesystem/subprocess — every input

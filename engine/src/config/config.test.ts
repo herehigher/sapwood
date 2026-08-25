@@ -115,6 +115,9 @@ test("#292: escalation.instructionPaths has trust-chain defaults, is configurabl
     // #539: docs/security.md carries the canonical human-merge-only list and documents this
     // mechanism's own trust chain — the same self-reference class as the two paths above.
     "docs/security.md",
+    // #1094 PR-S: the per-mechanism reference pages split out of docs/security.md are instruction
+    // carriers exactly like the core file — a `**` glob covers every page without naming each one.
+    "docs/security/**",
     // #639: the role-session skill-injection renderer — reads docs/security.md's marker sections
     // verbatim; a change here can shift what gets extracted without touching security.md itself.
     "engine/src/roles/skills-plugin.ts",

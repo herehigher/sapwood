@@ -361,7 +361,7 @@ export const DEFAULT_DASHBOARD_PORT = 4517;
  *  engine-agent reviewer's deliberate-absence posture is structurally possible this run
  *  (`cfg.reviewer.mode === "engine-agent"`, the schema default). (b) exists because a
  *  non-decisive engine-review attempt (failed/unavailable) is deliberately never written to
- *  `spend_ledger` at all (docs/security.md) — a real cost with genuinely NO ledger row to ever
+ *  `spend_ledger` at all (docs/security/cost-ceilings.md) — a real cost with genuinely NO ledger row to ever
  *  render unclassified. Checking `state.hasNonDecisiveEngineReviewAttempt()`-style evidence
  *  cannot substitute for the config check: `engine_review_wal`/the lane's own attempt-pin column
  *  are upsert-by-lane, never append-only (state.ts's own migration doc) — a PAST non-decisive
