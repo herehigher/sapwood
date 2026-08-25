@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -387,6 +387,32 @@ test("findDeployKeyAnchor: a sidecar whose content is not a plain positive decim
       writeFileSync(join(root, "keys", "worker-deploy-key.id"), `${raw}\n`);
       assert.equal(findDeployKeyAnchor(root), undefined, `id text ${JSON.stringify(raw)} must be rejected`);
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("findDeployKeyAnchor: a co-located key path that is a DANGLING symlink is never a candidate (statSync throws, caught, skipped) — a separate valid candidate still wins", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-anchor-"));
+  const root = join(dir, ".sapwood");
+  try {
+    mkdirSync(join(root, "keys"), { recursive: true });
+    const danglingKeyPath = join(root, "keys", "worker-deploy-key-dangling");
+    symlinkSync(join(root, "keys", "target-does-not-exist"), danglingKeyPath);
+    writeFileSync(`${danglingKeyPath}.id`, "7\n");
+    assert.equal(
+      findDeployKeyAnchor(root),
+      undefined,
+      "the only candidate's key path is a dangling symlink -> statSync throws -> skipped -> undefined, never an uncaught throw",
+    );
+
+    writeFileSync(join(root, "keys", "worker-deploy-key"), "fake-private-key");
+    writeFileSync(join(root, "keys", "worker-deploy-key.id"), "8\n");
+    assert.deepEqual(
+      findDeployKeyAnchor(root),
+      { keyPath: join(root, "keys", "worker-deploy-key"), keyId: 8 },
+      "the dangling candidate stays excluded; a genuinely valid sibling is still found",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

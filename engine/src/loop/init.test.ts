@@ -1985,7 +1985,7 @@ test("init (#554 pattern): fresh provisioning succeeds but the SSH auth prefligh
   }
 });
 
-test("ensureDeployKey (#1105, fresh provisioning): the key/dir permission repairs succeed and the preflight is green, but the id-sidecar write itself fails (injected chmod failure scoped to ONLY the sidecar) -> a reported provisioning-failure WARN, never a thrown escape", async () => {
+test("ensureDeployKey (#1105, fresh provisioning): the key/dir permission repairs succeed and the preflight is green, but the sidecar's CHMOD fails (its writeFileSync already succeeded — injected chmod failure scoped to ONLY the sidecar) -> a reported provisioning-failure WARN, never a thrown escape", async () => {
   const dir = tmpCwd();
   const keyPath = cfgKeyPath(dir);
   const { run } = fakeRun({ deployKeyEntries: [] });
@@ -2001,6 +2001,15 @@ test("ensureDeployKey (#1105, fresh provisioning): the key/dir permission repair
     assert.ok(warn, "a sidecar-persistence failure must be reported as an ordinary provisioning-failure WARN");
     assert.match(warn!, /ENOSPC/, "names the underlying error, not just 'something went wrong'");
     assert.ok(!actions.some((a) => /recorded the local anchor/.test(a)), "must never claim the anchor was recorded");
+    // #1105: writeDeployKeyIdSidecar's own writeFileSync already passes { mode: 0o600 } at
+    // create time — the chmod this test fails is a REDUNDANT repair for the process umask, not
+    // the only source of the mode. Proves the create-time mode survives on its own, independent
+    // of the injected chmod failure above.
+    assert.equal(
+      statSync(keyIdSidecarPath(keyPath)).mode & 0o777,
+      0o600,
+      "the sidecar's create-time mode (writeFileSync's own) is still 0600",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

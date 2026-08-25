@@ -2838,22 +2838,23 @@ export class WorkerSupervisor implements Supervisor {
   }
 
   /** #671, #1105: public wrapper around the SAME memoized SSH preflight resolveDeployKeyPath
-   *  uses, for cli.ts's startup deploy-key tier check (deploy-key-startup-check.ts). Triggering
-   *  the preflight here SEEDS `this.deployKeyProbe`, so the first real dispatch()/resume() later
-   *  on this SAME instance just re-awaits the settled promise instead of re-shelling to `ssh` —
-   *  startup + first dispatch cost at most one SSH probe total.
+   *  uses, for cli.ts's startup deploy-key tier check (deploy-key-startup-check.ts). Takes the
+   *  anchor the startup check itself already resolved and remotely reconciled, rather than
+   *  re-resolving one independently — two independent resolutions, one racing a sidecar swap
+   *  between them, could seed the memo with an anchor the startup check never actually
+   *  validated. Triggering the preflight here SEEDS `this.deployKeyProbe` with THIS SAME anchor
+   *  value, so the first real dispatch()/resume() later on this SAME instance just re-awaits the
+   *  settled promise instead of re-shelling to `ssh` — startup + first dispatch cost at most one
+   *  SSH probe total (and resolveDeployKeyPath's own anchor-changed rejection still fires if the
+   *  filesystem anchor moves between this call and that later one).
    *
    *  Unlike resolveDeployKeyPath, this NEVER throws — it reports the outcome instead, so the
-   *  startup check can build its own guidance message per distinct failure shape (no anchor vs.
-   *  preflight failure) before deciding to refuse startup itself. Returns `undefined` when there
-   *  is nothing to probe: `credentialTier` isn't `"L1"`, or L1 with no local anchor yet found
-   *  (the caller is expected to check anchor existence itself — see findDeployKeyAnchor). Called
-   *  exactly once, before any dispatch, so it is always the call that SEEDS the memo — it never
-   *  needs resolveDeployKeyPath's own anchor-changed rejection. */
-  async checkDeployKeyPreflight(): Promise<LlmPingResult | undefined> {
+   *  startup check can build its own guidance message per distinct failure shape before deciding
+   *  to refuse startup itself. Returns `undefined` only when `credentialTier` isn't `"L1"`.
+   *  Called exactly once, before any dispatch, so it is always the call that SEEDS the memo — it
+   *  never needs resolveDeployKeyPath's own anchor-changed rejection itself. */
+  async checkDeployKeyPreflight(anchor: { keyPath: string; keyId: number }): Promise<LlmPingResult | undefined> {
     if (this.deps.cfg.worker.credentialTier !== "L1") return undefined;
-    const anchor = this.deps.deployKeyAnchor ?? findDeployKeyAnchor(defaultRuntimeRoot());
-    if (anchor === undefined) return undefined;
     if (
       this.deployKeyProbe === undefined ||
       this.deployKeyProbe.anchor.keyPath !== anchor.keyPath ||
@@ -2862,6 +2863,35 @@ export class WorkerSupervisor implements Supervisor {
       this.deployKeyProbe = { anchor, probe: (this.deps.probeDeployKeySsh ?? probeDeployKeySsh)(anchor.keyPath) };
     }
     return this.deployKeyProbe.probe;
+  }
+
+  /** #1105: the marker reader deploy-key-startup-check.ts's restart-adoption gate consumes —
+   *  reuses `readJson` (this file's one generic try/catch JSON parser, the same one every
+   *  running.json read in this class already goes through) plus the same directory-listing
+   *  idiom `otherLaneOnBranch` above already establishes, rather than a second implementation of
+   *  either. Scoped to `*.running.json` only (a lane still in flight, per SENTINEL_FILE's own
+   *  extension set) — a terminal sentinel's process has already exited, so its tier provenance
+   *  is moot to a startup adoption-safety check. Never throws: an unreadable state dir or an
+   *  individual unparseable marker is just excluded, the same fail-open-on-read-error stance
+   *  `otherLaneOnBranch` already takes for this exact directory. `tier` is `unknown`, not the
+   *  narrowed `"L0" | "L1"` union — deliberately: the caller decides what counts as a mismatch,
+   *  this method only reports what's on disk (including a legacy marker with the field absent
+   *  entirely). */
+  listRunningCredentialTiers(): Array<{ name: string; tier: unknown }> {
+    let entries: string[];
+    try {
+      entries = readdirSync(this.dir);
+    } catch {
+      return [];
+    }
+    const out: Array<{ name: string; tier: unknown }> = [];
+    for (const entry of entries) {
+      if (!entry.endsWith(".running.json")) continue;
+      const running = this.readJson(join(this.dir, entry));
+      if (!running) continue;
+      out.push({ name: entry.slice(0, -".running.json".length), tier: running.credential_tier });
+    }
+    return out;
   }
 
   /** #244 (Codex sol-high PR #260 review, P2): durable mint-failure observability — a

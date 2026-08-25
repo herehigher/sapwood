@@ -28,26 +28,30 @@ import type { State } from "../state/state.js";
 import { DOC_LINKS } from "../util/doc-links.js";
 import { parseDeployKeys } from "./init.js";
 
-/** Which of the five shapes the issue names produced the reported tier. */
-export type DeployKeyStartupArm = "l0" | "missing" | "stale" | "preflight-failed" | "active";
+/** Which of the shapes the issue names produced the reported tier. */
+export type DeployKeyStartupArm = "l0" | "missing" | "running-tier-mismatch" | "stale" | "preflight-failed" | "active";
 
 export interface DeployKeyStartupResult {
   tier: "L0" | "L1";
   arm: DeployKeyStartupArm;
 }
 
-/** The one method this module needs off WorkerSupervisor — narrowed so tests can inject a fake
+/** The methods this module needs off WorkerSupervisor — narrowed so tests can inject a fake
  *  without constructing a real supervisor. */
 export interface DeployKeyPreflightSupervisor {
-  checkDeployKeyPreflight(): Promise<LlmPingResult | undefined>;
+  checkDeployKeyPreflight(anchor: { keyPath: string; keyId: number }): Promise<LlmPingResult | undefined>;
+  /** #1105: every still-running lane's own `credential_tier` provenance — see
+   *  WorkerSupervisor.listRunningCredentialTiers' own doc for what it scans. */
+  listRunningCredentialTiers(): Array<{ name: string; tier: unknown }>;
 }
 
 /** Run once per engine start (cli.ts, immediately after `WorkerSupervisor` construction — see
  *  this module's own doc for why), strictly BEFORE the driver loop (runDriver/runRounds) can
  *  dispatch anything. `L0` (default) is disclosure only — logs the tier and returns, never
- *  throws. `L1` fails CLOSED: no local anchor, an unreadable key file, a remote id that is no
- *  longer listed or has been demoted to read-only, or a failed SSH preflight each log a
- *  guidance-carrying message AND throw — the caller (runTickEngine/runRoundsEngine's own
+ *  throws. `L1` fails CLOSED: no local anchor, an unreadable key file, a still-running lane whose
+ *  own persisted tier doesn't match, a remote id that is no longer listed or has been demoted to
+ *  read-only, or a failed SSH preflight each log a guidance-carrying message AND throw — the
+ *  caller (runTickEngine/runRoundsEngine's own
  *  try/catch) already turns an uncaught startup error into a non-zero exit, so this is the ONE
  *  place `worker.credentialTier: L1` becomes an actual startup gate rather than a WARN. */
 export async function detectDeployKeyStartupTier(
@@ -106,6 +110,28 @@ export async function detectDeployKeyStartupTier(
     throw new Error(message);
   }
 
+  // #1105: a lane still on disk from BEFORE this restart may have been spawned under a
+  // different tier (an operator flipped worker.credentialTier between the crash and now).
+  // resume()'s own crash-matrix guard catches this for the ONE adoption path it owns, but a
+  // detached lane can also be picked up by ordinary probe()/reconcile classification without
+  // ever going through resume() at all — so this is checked HERE too, once, at the one place
+  // every restart passes through before any dispatch, rather than threaded into every adoption
+  // path individually. A marker with no `credential_tier` recorded at all (pre-#1105) counts as
+  // a mismatch — it was never confirmed L1, so it must never be silently trusted as one.
+  const runningMarkers = supervisor.listRunningCredentialTiers();
+  const mismatched = runningMarkers.filter((m) => m.tier !== "L1");
+  if (mismatched.length > 0) {
+    const names = mismatched.map((m) => m.name).join(", ");
+    const message =
+      `worker.credentialTier is "L1" but ${mismatched.length} lane(s) already running from before this restart ` +
+      `do not carry a matching credential tier (${names}) — adopting them would keep a process this run's L1 ` +
+      `startup gate never validated alive. Let them finish, or run "sapwood estop" to stop them, then restart. ` +
+      `Refusing to start before any dispatch — see <${DOC_LINKS.security}>'s worker credential tiers.`;
+    log(`[sapwood:startup] ${message}`);
+    record({ tier: "L1", arm: "running-tier-mismatch" });
+    throw new Error(message);
+  }
+
   // A green SSH preflight alone doesn't prove the anchor still means what it says: the same
   // keypair authenticates whether or not GitHub still lists this id, and whether or not that id
   // has since been demoted to read-only — SSH auth succeeding says nothing about push access.
@@ -127,11 +153,18 @@ export async function detectDeployKeyStartupTier(
     record({ tier: "L1", arm: "stale" });
     throw new Error(message);
   }
-  if (remoteEntry === undefined || remoteEntry.readOnly === true) {
+  // #1105: require an EXPLICIT `readOnly: false` — a missing/non-boolean field (an older `gh`
+  // that doesn't emit it, or an unexpected response shape) must never be READ as "confirmed
+  // write access". `parseDeployKeys` only ever sets `readOnly` from a genuine JSON boolean, so
+  // "not === false" here catches both the confirmed-true case and every "we don't actually
+  // know" case in one branch.
+  if (remoteEntry === undefined || remoteEntry.readOnly !== false) {
     const reason =
       remoteEntry === undefined
         ? `id ${anchor.keyId} is no longer registered on ${repo}`
-        : `id ${anchor.keyId} on ${repo} is registered read-only (no push access)`;
+        : remoteEntry.readOnly === true
+          ? `id ${anchor.keyId} on ${repo} is registered read-only (no push access)`
+          : `id ${anchor.keyId} on ${repo}'s write access could not be confirmed (no readOnly field in the response)`;
     const message =
       `worker.credentialTier is "L1" but the local anchor is stale — ${reason} — run "sapwood init" to ` +
       `re-provision it. Refusing to start before any dispatch — see <${DOC_LINKS.security}>'s worker credential ` +
@@ -141,7 +174,7 @@ export async function detectDeployKeyStartupTier(
     throw new Error(message);
   }
 
-  const probe = await supervisor.checkDeployKeyPreflight();
+  const probe = await supervisor.checkDeployKeyPreflight(anchor);
   if (!probe?.ok) {
     const message =
       `worker.credentialTier is "L1" but the SSH auth preflight failed for ${anchor.keyPath}` +
