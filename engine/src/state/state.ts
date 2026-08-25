@@ -9,7 +9,7 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
-import { ensureRuntimeRoot, type RuntimePaths, runtimePaths, SAPWOOD_DIR } from "../config/paths.js";
+import { ensureRuntimeRoot, type RuntimePaths, runtimePaths, SAPWOOD_DIR, SAPWOOD_LOCK_FILENAME } from "../config/paths.js";
 import { capDigest } from "../retro/retro-digest.js";
 import type { AcceptanceCriterion, AcSnapshot } from "../review/ac-snapshot.js";
 import { type EventKind, type KindGlossary, kindsTagged } from "./event-kinds/index.js";
@@ -1782,12 +1782,16 @@ export interface ForgeProxyBundleRow {
 /** The default DB path `sapwood run`/`status` use, exported (#382 round 2, codex finding 3) so
  *  cli.ts can derive the data-dir lock path WITHOUT constructing a State — lock arbitration must
  *  precede the DB open/migration a State construction performs, or a refused second engine
- *  (possibly a newer binary) would migrate the live holder's database on its way to exit 1. */
-export const DEFAULT_DB_PATH = `${SAPWOOD_DIR}/sapwood.sqlite`;
+ *  (possibly a newer binary) would migrate the live holder's database on its way to exit 1.
+ *  Derived from runtimePaths() against the bare SAPWOOD_DIR root (#1077 fix round 1, P2, single
+ *  authority) rather than restating "sapwood.sqlite" — byte-identical to what a real
+ *  runtimePaths(dataDir).db call produces for the cwd-relative default case. */
+export const DEFAULT_DB_PATH = runtimePaths(SAPWOOD_DIR).db;
 
 /** #382: the single-instance lockfile's basename, shared by State.instanceLockPath() below and
- *  cli.ts's pre-State lock-path derivation so the two can never drift. */
-export const INSTANCE_LOCK_FILENAME = "sapwood.lock";
+ *  cli.ts's pre-State lock-path derivation so the two can never drift. Re-exported from paths.ts
+ *  (#1077 fix round 1, P2) rather than restated as a second literal. */
+export const INSTANCE_LOCK_FILENAME = SAPWOOD_LOCK_FILENAME;
 
 /** #451 (gate② P2, PM adjudication): the deterministic-truncation cap on a fix leg's `reply`
  *  prose as it's copied into the `fix-response-queued` receipt event (settleTerminalWorker,

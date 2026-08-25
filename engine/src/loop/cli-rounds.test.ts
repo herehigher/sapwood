@@ -1554,6 +1554,48 @@ test("sapwood run (#382 round 2, codex finding 3): a refused start performs ZERO
   }
 });
 
+// #1077 fix round 1 (P2): ensureRuntimeRoot must run before the FIRST write on every
+// write-capable entry point, not just State's own constructor — a crash/refusal/control-only
+// invocation could otherwise leave runtime files with no `.gitignore`/`cache/CACHEDIR.TAG`.
+// This is the "fresh run" entry: NO `state`/`logger` override, so the REAL FileEngineLogger
+// (writing under the schema default `.sapwood/logs/sapwood.log`) and a REAL
+// `roles.skills.enabled: true` render (writing under `.sapwood/cache/generated/role-skills`,
+// tagged by `.sapwood/cache/CACHEDIR.TAG`) both run for real, proving the single
+// ensureRuntimeRoot call in runEngine's pre-lock section (which runs strictly BEFORE either)
+// actually lands before both of them, not just before the lock file.
+test("sapwood run (#1077 fix round 1, P2): a fresh run self-declares the runtime root before the log driver and an enabled skills-plugin render ever write under it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-run-root-declare-"));
+  const previousCwd = process.cwd();
+  try {
+    process.chdir(dir);
+    mkdirSync(join(dir, "docs"), { recursive: true });
+    writeFileSync(
+      join(dir, "docs", "security.md"),
+      "# Security & trust model\n\n<!-- sapwood:skill:human-merge-only-paths:start -->\nfixture\n<!-- sapwood:skill:human-merge-only-paths:end -->\n\n<!-- sapwood:skill:ac-evidence-tiers:start -->\nfixture\n<!-- sapwood:skill:ac-evidence-tiers:end -->\n",
+      "utf8",
+    );
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" }, roles: { skills: { enabled: true } } }),
+      forge: new FakeForge(),
+    });
+    assert.equal(code, 0);
+    assert.equal(readFileSync(join(dir, ".sapwood", ".gitignore"), "utf8"), "*\n", "root self-declares");
+    assert.match(
+      readFileSync(join(dir, ".sapwood", "cache", "CACHEDIR.TAG"), "utf8"),
+      /^Signature: 8a477f597d28d172789f06886806bc55\n/,
+      "cache tier self-declares",
+    );
+    assert.ok(existsSync(join(dir, ".sapwood", "logs", "sapwood.log")), "the REAL file logger wrote under the already-stamped root");
+    assert.ok(
+      readdirSync(join(dir, ".sapwood", "cache", "generated", "role-skills")).length > 0,
+      "the REAL enabled skills-plugin render wrote under the already-stamped cache tier",
+    );
+  } finally {
+    process.chdir(previousCwd);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("sapwood run (#382): the lock is held for the whole run and released on normal shutdown", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-lock-"));
   const state = new State(join(dir, "sapwood.sqlite"));

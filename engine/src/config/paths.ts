@@ -11,6 +11,19 @@ import { join } from "node:path";
 // `.gitignore`).
 export const SAPWOOD_DIR = ".sapwood";
 
+// #1077 fix round 1 (P2, single authority): every bare filename `runtimePaths()` joins onto a
+// root, exported so the handful of callers that need the BASENAME alone (state.ts's
+// DEFAULT_DB_PATH/INSTANCE_LOCK_FILENAME, cli.ts's SENTINEL_FILENAME, dashboard's
+// ATTENTION_DISMISSALS_FILE) derive it from here instead of restating the string a second time.
+// `runtimePaths()` itself is built from these same constants below — one spelling, not two.
+export const SAPWOOD_DB_FILENAME = "sapwood.sqlite";
+export const SAPWOOD_LOCK_FILENAME = "sapwood.lock";
+export const SAPWOOD_KILL_SWITCH_FILENAME = "KILL_SWITCH";
+export const SAPWOOD_ESTOP_FILENAME = "EMERGENCY_STOP";
+export const SAPWOOD_PAUSE_FILENAME = "PAUSE";
+export const SAPWOOD_ESCALATION_FILENAME = "ESCALATION";
+export const SAPWOOD_ATTENTION_DISMISSALS_FILENAME = "attention-dismissals.jsonl";
+
 /** The full named layout under a runtime root, computed once so every caller (state.ts,
  *  cli.ts, the role runners, the review materializer/production wiring, skills-plugin.ts,
  *  the dashboard) agrees by construction instead of by repeating a join() convention. Two
@@ -69,21 +82,21 @@ export function runtimePaths(root: string): RuntimePaths {
     root,
     gitignore: join(root, ".gitignore"),
 
-    db: join(root, "sapwood.sqlite"),
-    dbWal: join(root, "sapwood.sqlite-wal"),
-    dbShm: join(root, "sapwood.sqlite-shm"),
-    lock: join(root, "sapwood.lock"),
+    db: join(root, SAPWOOD_DB_FILENAME),
+    dbWal: join(root, `${SAPWOOD_DB_FILENAME}-wal`),
+    dbShm: join(root, `${SAPWOOD_DB_FILENAME}-shm`),
+    lock: join(root, SAPWOOD_LOCK_FILENAME),
     sessionsStateDir: join(sessionsDir, "state"),
     sessionsRolesDir: join(sessionsDir, "roles"),
     sessionsReviewCodexDir: join(sessionsDir, "review-codex"),
     proxyBundlesDir: join(root, "proxy-bundles"),
     roundsDir: join(root, "rounds"),
-    attentionDismissals: join(root, "attention-dismissals.jsonl"),
+    attentionDismissals: join(root, SAPWOOD_ATTENTION_DISMISSALS_FILENAME),
 
-    killSwitch: join(root, "KILL_SWITCH"),
-    estop: join(root, "EMERGENCY_STOP"),
-    pause: join(root, "PAUSE"),
-    escalation: join(root, "ESCALATION"),
+    killSwitch: join(root, SAPWOOD_KILL_SWITCH_FILENAME),
+    estop: join(root, SAPWOOD_ESTOP_FILENAME),
+    pause: join(root, SAPWOOD_PAUSE_FILENAME),
+    escalation: join(root, SAPWOOD_ESCALATION_FILENAME),
 
     directiveMd: join(root, "DIRECTIVE.md"),
     directivesDir: join(root, "directives"),
@@ -117,32 +130,74 @@ const CACHEDIR_TAG_CONTENT =
   "# This file is a cache directory tag created by sapwood.\n" +
   "# For information about cache directory tags, see https://bford.info/cachedir/spec.html\n";
 
+// #1077 fix round 1 (P2/test quality): an injectable fs seam, same pattern as loop/instance-
+// lock.ts's own LockFsOps — a byte-content comparison alone can prove the FINAL state is
+// correct, but not that a no-op call actually SKIPPED the write (an implementation that always
+// re-writes identical content leaves the same bytes behind, so a content-only test can't tell
+// the two apart). Defaults to the real node:fs calls; tests inject a spy instead.
+export interface RuntimeRootFsOps {
+  exists: (path: string) => boolean;
+  readFile: (path: string) => string;
+  writeFile: (path: string, content: string) => void;
+  mkdir: (path: string) => void;
+}
+
+// Exported so tests can wrap the REAL implementation (a positive control proving an injected
+// fake actually records real writes) rather than reimplementing it a second time.
+export const realRuntimeRootFsOps: RuntimeRootFsOps = {
+  exists: existsSync,
+  readFile: (path) => readFileSync(path, "utf8"),
+  writeFile: writeFileSync,
+  mkdir: (path) => {
+    mkdirSync(path, { recursive: true });
+  },
+};
+
 /** Write `path` iff it does not already exist; a pre-existing file is compared byte-for-byte —
  *  identical content is left untouched (repeat calls across a long-lived engine process are a
  *  no-op), DIFFERENT content is preserved as-is (never clobbered) and reported through `log`
  *  once per call so an operator-edited `.gitignore` is never silently overwritten. */
-function writeIfAbsentOrIdentical(path: string, content: string, log: (message: string) => void): void {
-  if (existsSync(path)) {
-    if (readFileSync(path, "utf8") !== content) {
+function writeIfAbsentOrIdentical(path: string, content: string, log: (message: string) => void, fs: RuntimeRootFsOps): void {
+  if (fs.exists(path)) {
+    if (fs.readFile(path) !== content) {
       log(`sapwood: ${path} already exists with different content — leaving it as-is.`);
     }
     return;
   }
-  writeFileSync(path, content);
+  fs.writeFile(path, content);
 }
 
 /** Create `root` (and its `cache/` subdirectory) and stamp both self-declaring markers a fresh
  *  runtime root needs: `.gitignore` (`*` — the whole tree is engine-owned, never committed) and
  *  `cache/CACHEDIR.TAG` (the standard tag, so backup/sync tooling that honors it skips the
  *  cache tier). Idempotent (safe to call on every engine start, not just the first): an
- *  existing root/markers with matching content are a no-op. Called once, from `State`'s
- *  write-mode constructor — the one place every write-capable engine entry point already
- *  passes through before touching the runtime tree; the read-only `status`/`events` path
- *  deliberately never calls this (same "no filesystem mutation" contract it already has). */
-export function ensureRuntimeRoot(root: string, log: (message: string) => void = console.error): void {
-  mkdirSync(root, { recursive: true });
-  writeIfAbsentOrIdentical(join(root, ".gitignore"), GITIGNORE_CONTENT, log);
+ *  existing root/markers with matching content are a no-op — so every write-capable entry point
+ *  that can be the FIRST thing to touch a fresh root calls this before its own first write,
+ *  never a bare mkdirSync: `State`'s write-mode constructor (dispatch, `sapwood status`'s
+ *  bootstrap-if-missing, and the dashboard's own bootstrap all go through it), cli.ts's
+ *  `runEngine` (before the instance lock — this single call also covers the log driver and an
+ *  enabled skills-plugin render, since both run later in that same startup sequence, before any
+ *  State exists), and cli.ts's `runSentinelCommand` (the `pause`/`stop`/`estop` activation
+ *  path — the one mutator that can create a fresh root with no State ever constructed). The
+ *  read-only `status`/`events` path deliberately never calls this (same "no filesystem
+ *  mutation" contract it already has); neither does `sapwood init` (it writes config/goal/
+ *  doctrine/issue-template files elsewhere in the repo, never under the runtime root — the
+ *  deploy key stays under the pre-#1077 `data/` location until #1080 moves it here).
+ *
+ *  `fs` defaults to the real node:fs calls; tests inject a spy (RuntimeRootFsOps) instead of
+ *  monkey-patching node:fs's own exports — this repo's ESM/tsx toolchain does not reliably
+ *  propagate a mock.method() patch on node:fs through to a DIFFERENT module's own `import {
+ *  writeFileSync } from "node:fs"` binding (verified empirically while adding this seam), so
+ *  dependency injection (the same LockFsOps pattern loop/instance-lock.ts already uses) is the
+ *  robust seam, not a builtin-module mock. */
+export function ensureRuntimeRoot(
+  root: string,
+  log: (message: string) => void = console.error,
+  fs: RuntimeRootFsOps = realRuntimeRootFsOps,
+): void {
+  fs.mkdir(root);
+  writeIfAbsentOrIdentical(join(root, ".gitignore"), GITIGNORE_CONTENT, log, fs);
   const cacheDir = join(root, "cache");
-  mkdirSync(cacheDir, { recursive: true });
-  writeIfAbsentOrIdentical(join(cacheDir, "CACHEDIR.TAG"), CACHEDIR_TAG_CONTENT, log);
+  fs.mkdir(cacheDir);
+  writeIfAbsentOrIdentical(join(cacheDir, "CACHEDIR.TAG"), CACHEDIR_TAG_CONTENT, log, fs);
 }

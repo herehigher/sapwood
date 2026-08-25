@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 // `sapwood` CLI. M0.5 shipped `init`; `run` (the M4 loop driver, #46) and `validate` (#49)
 // landed next; `status` + `run --dry-run` (#15) land here. The plugin's slash commands
 // (/sapwood-run, /sapwood-status, /sapwood-stop) are thin wrappers that shell out to this CLI
@@ -17,6 +17,7 @@ import {
   loadConfig,
   type SapwoodConfig,
 } from "./config/config.js";
+import { ensureRuntimeRoot, SAPWOOD_ESTOP_FILENAME, SAPWOOD_KILL_SWITCH_FILENAME, SAPWOOD_PAUSE_FILENAME } from "./config/paths.js";
 import { findRate, loadPricingTable, type PricingTable } from "./config/pricing.js";
 import {
   associateLanePr,
@@ -1577,7 +1578,14 @@ export function runPark(argv: string[]): { stdout: string; stderr: string; code:
 // already-active tier, or clearing an already-inactive one, is a normal exit-0 no-op, same as a
 // second `touch`/`rm -f` on the same path.
 
-const SENTINEL_FILENAME = { pause: "PAUSE", stop: "KILL_SWITCH", estop: "EMERGENCY_STOP" } as const;
+// #1077 fix round 1 (P2, single authority): filenames derived from paths.ts rather than
+// restated — runtimePaths() builds its own killSwitch/estop/pause fields from these same
+// constants, so this table and the real sentinel paths can never drift apart.
+const SENTINEL_FILENAME = {
+  pause: SAPWOOD_PAUSE_FILENAME,
+  stop: SAPWOOD_KILL_SWITCH_FILENAME,
+  estop: SAPWOOD_ESTOP_FILENAME,
+} as const;
 type SentinelTier = keyof typeof SENTINEL_FILENAME;
 
 /** Parsed `sapwood pause|stop|estop [clear] [db-path] [--config PATH] [--confirm]` args. Pure
@@ -1795,7 +1803,11 @@ function runSentinelCommand(argv: string[], spec: SentinelSpec): { stdout: strin
   if (existsSync(sentinelPath)) {
     return { stdout: `sapwood ${spec.tier}: ${sentinelPath} already ACTIVE — no change.\n`, stderr: "", code: 0 };
   }
-  mkdirSync(dirname(sentinelPath), { recursive: true });
+  // #1077 fix round 1 (P2): this is the one mutator that can create a fresh runtime root with
+  // no State ever constructed (a bare `sapwood pause` against a repo that has never run
+  // `sapwood run`) — ensureRuntimeRoot, not a bare mkdirSync, so that root self-declares
+  // (.gitignore + cache/CACHEDIR.TAG) exactly like every other write-capable entry point.
+  ensureRuntimeRoot(dirname(sentinelPath));
   writeFileSync(sentinelPath, "");
   return {
     stdout: `sapwood ${spec.tier}: ${sentinelPath} created — ${spec.activationLine(configResult.cfg)}\n`,
@@ -3364,14 +3376,24 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
   // holder's schema on its way to exit 1 — codex finding 3). The lock path is therefore
   // derived without a State: from the injected test state's own data dir when present
   // (in-memory -> null -> no-op acquire, the killSwitchPath convention), else from the same
-  // DEFAULT_DB_PATH the State default constructor uses, with only the plain data DIR created
-  // up front (the lockfile needs a parent; an empty dir write-conflicts with nobody).
+  // DEFAULT_DB_PATH the State default constructor uses.
+  //
+  // #1077 fix round 1 (P2): ensureRuntimeRoot (never a bare mkdirSync) — this is the single
+  // earliest write-capable chokepoint in the whole `sapwood run` startup sequence, so this ONE
+  // call is also what stamps .gitignore/cache/CACHEDIR.TAG before the log driver's own mkdir
+  // (createRunLogger, inside runTickEngine/runRoundsEngine below) and an enabled skills-plugin
+  // render (resolveSkillsPluginDir, same two functions) ever run — both happen strictly after
+  // this point in the call sequence, before either driver constructs its own State. Still
+  // "an empty/idempotently-marked dir write-conflicts with nobody": a refused second engine
+  // writes only the SAME .gitignore/CACHEDIR.TAG bytes a live holder already wrote (or would
+  // write identically itself), never touches the shared SQLite DB, and the "zero DB writes on
+  // refusal" guarantee (codex finding 3, tested below) is unaffected.
   let lockPath: string | null;
   if (overrides.state !== undefined) {
     lockPath = overrides.state.instanceLockPath();
   } else {
     const dataDir = dirname(DEFAULT_DB_PATH);
-    mkdirSync(dataDir, { recursive: true });
+    ensureRuntimeRoot(dataDir);
     lockPath = join(dataDir, INSTANCE_LOCK_FILENAME);
   }
   const lock = acquireInstanceLock(lockPath, {

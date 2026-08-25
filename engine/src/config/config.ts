@@ -18,7 +18,7 @@ import {
 } from "../forge/labels.js";
 import { DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
 import { DOC_LINKS } from "../util/doc-links.js";
-import { SAPWOOD_DIR } from "./paths.js";
+import { runtimePaths, SAPWOOD_DIR } from "./paths.js";
 
 export const DEFAULT_EGRESS_SUSPECT_COMMANDS = [
   "curl",
@@ -1125,7 +1125,10 @@ const Liveness = z
 
 const Logging = z
   .object({
-    path: z.string().min(1).default(`${SAPWOOD_DIR}/logs/sapwood.log`),
+    // #1077 fix round 1 (P2, single authority): runtimePaths(SAPWOOD_DIR).logFile derives the
+    // exact same cwd-relative string runtimePaths() itself spells for logFile — never a second
+    // "logs/sapwood.log" literal restated here.
+    path: z.string().min(1).default(runtimePaths(SAPWOOD_DIR).logFile),
     teeToStderr: z.boolean().default(true),
     maxBytes: z
       .number()
@@ -1261,11 +1264,12 @@ const Round = z
     // #126: round directive file — human steering (why/what) injected into the aligning +
     // architecting prompts at round open (directive.ts's resolveRoundDirective). Resolved like
     // other runtime-root paths in this repo — relative to the process cwd, the same convention
-    // state.ts's own dbPath default (`${SAPWOOD_DIR}/sapwood.sqlite`) uses — NOT config-file-relative
-    // like roles.*.promptFile, since this file lives beside the engine's own runtime root (and
-    // gets archived to a sibling `directives/` dir there), not beside a role's shipped prompt.
-    // Always has a value (never "unset"), same shape as goal.file.
-    directiveFile: z.string().min(1).default(`${SAPWOOD_DIR}/DIRECTIVE.md`),
+    // state.ts's own DEFAULT_DB_PATH uses — NOT config-file-relative like roles.*.promptFile,
+    // since this file lives beside the engine's own runtime root (and gets archived to a
+    // sibling `directives/` dir there), not beside a role's shipped prompt. Always has a value
+    // (never "unset"), same shape as goal.file. #1077 fix round 1 (P2, single authority):
+    // runtimePaths(SAPWOOD_DIR).directiveMd, never a second "DIRECTIVE.md" literal.
+    directiveFile: z.string().min(1).default(runtimePaths(SAPWOOD_DIR).directiveMd),
     // Deterministic-truncation cap (never a silent drop — the cut is marked in the text itself,
     // directive.ts reuses retro-digest.ts's capDigest) on the directive text substituted into the
     // prompts. Same user-tunable-in-config, marked-cut contract as roles.harvest.artifactMaxChars

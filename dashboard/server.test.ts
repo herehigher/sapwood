@@ -765,6 +765,27 @@ test("/api/loop/state: a missing database starts as an empty read-only dashboard
   }
 });
 
+// #1077 fix round 1 (P2): a first-ever dashboard visit against a repo that has never run
+// `sapwood run` is a write-capable root-acquisition chokepoint too — createDashboardServer's
+// own bootstrap branch (`if (!existsSync(opts.dbPath)) { new State(opts.dbPath); ... }`)
+// constructs a write-mode State, which already stamps the root via ensureRuntimeRoot; this
+// pins that the dashboard's own entry point actually reaches it, on a genuinely fresh root
+// (a custom-root sibling directory, same convention every other State-derived path uses).
+test("createDashboardServer: the missing-database bootstrap self-declares the runtime root (.gitignore + cache/CACHEDIR.TAG)", async () => {
+  const outer = mkdtempSync(join(tmpdir(), "sapwood-dashboard-root-declare-"));
+  const root = join(outer, ".sapwood");
+  const dbPath = join(root, "sapwood.sqlite");
+  const { server, state } = await createDashboardServer({ dbPath, port: 0, now: () => new Date("2026-07-24T12:00:00.000Z") });
+  try {
+    assert.equal(existsSync(join(root, ".gitignore")), true);
+    assert.equal(existsSync(join(root, "cache", "CACHEDIR.TAG")), true);
+  } finally {
+    server.close();
+    state.close();
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
 test("/api/loop/state round is null when no round is open", async () => {
   const fx = await fixture((s) => {
     s.startRound("2026-07-24T10:00:00.000Z");
