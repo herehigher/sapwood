@@ -16,13 +16,17 @@ ambient `CLAUDE.md` content. The measurement, verbatim from the pre-compression 
 ---
 
 This was measured live the same way the earlier measurement recorded in the peripheral-egress
-section was taken — a scratch directory whose `CLAUDE.md` declared a unique marker fact, a
+section above was taken — a scratch directory whose `CLAUDE.md` declared a unique marker fact, a
 one-shot `claude -p` asking for that fact: the default run answered with the marker, the
 identical run with `--setting-sources ""` answered `UNKNOWN`. Same machine, same operator
 settings, one flag changed — so the difference is the flag, not a local settings deny wearing
 platform clothes.
 
 ---
+
+(The "peripheral-egress section above" this refers to is [Peripheral network egress: WebSearch/WebFetch, detected not
+pinned](../security/egress.md#peripheral-network-egress-websearchwebfetch-detected-not-pinned) —
+moved to its own page by #1094 PR-S, after this measurement's own prose was written.)
 
 ## Origin: "The mechanism's own carriers join the escalation surface too" — the live-evidence case
 
