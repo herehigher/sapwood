@@ -4,146 +4,72 @@ Part of sapwood's security model — `docs/security.md` is the normative model; 
 
 ## The AC-authority dispatch snapshot
 
-Per-AC verdicts need an authoritative,
-immutable acceptance-criteria set to judge a PR against — but the producer holds `gh
-issue edit` capability (`worker.ts`'s own grant), so the live issue body is **not**
-authoritative once a worker has been dispatched against it: a worker (or anyone else
-with write access) could edit the issue after dispatch and silently shift what the
-final review measures the PR against.
+Per-AC verdicts need an immutable acceptance-criteria set to judge a PR against, but the
+producer — or anyone else with issue write access — can edit the issue body after dispatch, so
+the live body is not authoritative once a worker has been dispatched against it. The fix is
+engine-side: a dispatch-time snapshot, a review-time drift gate, and a per-lane ownership check,
+independent of any permission boundary.
 
-The fix is engine-side, not a new permission boundary: **before a worker ever spawns**,
-the conductor's DISPATCH loop (`conductor.ts`) extracts the checkbox acceptance-criteria
-set (`- [ ]` lines under `## Acceptance criteria` — `forge.ts`'s
-`extractAcceptanceCriteria`) from the exact body `getReadyIssues` already fetched, and
-persists a snapshot — `{full body hash, full body text, AC manifest}` — via
-`State.recordAcSnapshot`, inside the same fail-closed unit as the dispatch attempt
-itself (a write failure rolls the board claim back to `Ready` exactly like a spawn
-failure would). `isDispatchable` (`forge.ts`) additionally refuses to dispatch any
-non-`verify:n/a` issue whose checkbox AC set is missing or malformed — a bare
-`Verification`/`Acceptance` section with no real `- [ ]` lines is no longer enough,
-matching the `plan:approved` re-check in `plan-review.ts`'s `validateReviewerOutput`/
-`validateDrafterOutput` (same "approve claim must be true" doctrine, extended to the
-checkbox set the snapshot is built from).
+| Invariant | Enforcement point | Test |
+| --- | --- | --- |
+| Before a worker spawns, DISPATCH persists `{hash, body, manifest}`; a write failure rolls the claim back like a spawn failure. | `conductor.ts` DISPATCH + `State.recordAcSnapshot` | `conductor.test.ts`: "tick dispatch: an AC snapshot is persisted BEFORE the worker ever spawns …" |
+| A non-`verify:n/a` issue with a missing or malformed checkbox AC set is not dispatchable. | `forge.ts::isDispatchable` | `forge.test.ts`: "isDispatchable: #283 — a malformed/empty checkbox AC set … verify:n/a is exempt" |
+| At drive and at fix-leg spawn, ANY live-body drift from the recorded snapshot fails closed to `needs-human` with a drift-explaining comment; the lane never proceeds that tick. | `conductor.ts::checkAcDriftBeforeDrive` (drive, fix-leg-spawn); `ac-snapshot.ts::checkAcSnapshotDrift` | `conductor.test.ts`: "tick DRIVE: AC-snapshot drift routes to needs-human with a drift-explaining comment, and driveOne is NEVER called …"; `ac-snapshot.test.ts`: "checkAcSnapshotDrift: ANY body change (not just inside the AC section) is drift …" |
+| A lane that never recorded a snapshot (dispatched before AC snapshots existed) is not treated as drift — it drives normally; only new dispatches are tightened. | `conductor.ts::checkAcDriftBeforeDrive` (legacy-lane arm, null `ac_body_hash`) | `conductor.test.ts`: "tick DRIVE: a driving lane with NO recorded AC snapshot … is never treated as drift — drives normally" |
+| The AC-authority hash excuses a well-formed marker line and the whitespace folds below (see Boundaries); every other byte change — including a marker-shaped line with extra payload — still drifts. | `ac-snapshot.ts::hashBodyForAcAuthority` | `ac-snapshot.test.ts`: "hashBodyForAcAuthority: a marker-line-only diff … hashes IDENTICALLY" |
+| `hashBody`/`checkBodyDrift` stay raw — a marker edit must still register as a change there. | `ac-snapshot.ts::hashBody`; `comment-cursor-gate.ts::checkBodyDrift` | `comment-cursor-gate.test.ts`: "checkBodyDrift: a marker-only advance … STILL counts as drift" |
+| The pre-drive comment-cursor recheck reads the live body the sibling drift check fetched, never the frozen snapshot body. | `conductor.ts::checkCommentCursorBeforeDrive` | `conductor.test.ts`: "#752 (inverted #676 drift test): a live body edit that ONLY advances the cursor marker … driveOne IS invoked" |
+| Each `WorkerRow` stamps its own dispatch-time hash; a mismatch against the issue's current snapshot, or that snapshot going missing despite this lane having recorded one, escalates as a fail-closed anomaly. | `conductor.ts::checkAcDriftBeforeDrive` (ownership check) | `conductor.test.ts`: "tick DRIVE (#301 P1#3): a reclaimed lane's stale ac_body_hash … escalates as an ownership anomaly" |
+| The engine-agent session reads the frozen snapshot body/manifest, never re-fetching or re-extracting; a missing snapshot is `unavailable`, fail-closed. | `engine-agent.ts::EngineAgentReviewer.evaluate` | `engine-agent.test.ts`: "evaluate(): no AC snapshot recorded for the issue -> unavailable, fail closed …" |
+| AC manifest ids (ordinal+hash) are stable per extraction only; drift detection stops a changed body being re-extracted as an equivalent id set. | `forge.ts::extractAcceptanceCriteria` (id scheme) | `forge.test.ts`: "extractAcceptanceCriteria corpus: editing one criterion's text changes only ITS id …" |
 
-**A drifted lane never reaches the merge/review gate.** Before the conductor's DRIVE
-loop ever hands a driving lane to `gate.driveOne`, it re-reads the issue's LIVE body
-(this IS a live fetch — it exists specifically to detect an edit, not to avoid one) and
-compares its full hash against the recorded snapshot (`ac-snapshot.ts`'s
-`checkAcSnapshotDrift`) — ANY drift, not just inside the AC section (a verification-plan
-edit counts too), fails closed: the lane is escalated to `needs-human` with a
-drift-explaining comment, and `driveOne` is **never** invoked for that lane that tick,
-for any reviewer kind. There is no re-extraction path — a drifted lane cannot silently
-proceed; a human must re-adjudicate (a renewed gate⓪ pass) before the lane can drive
-again. A lane with no recorded snapshot (dispatched before this feature shipped) is not
-treated as drift — it drives normally, so this only ever tightens NEW dispatches.
+**Boundaries**
 
-**The AC-authority hash is marker-normalized, not the raw body hash.** The cursor
-discipline requires every PO comment on an issue to advance the
-`<!-- sapwood:comments-adjudicated-through: N -->` marker in the same body edit — which, against
-a raw full-body hash, would make a legitimate cursor advance on an in-flight issue *always* read
-as AC drift. `ac-snapshot.ts`'s `hashBodyForAcAuthority` normalizes the body before hashing
-(`normalizeForAcAuthority`, the same function backing every AC-authority site: `buildAcSnapshot`,
-`checkAcSnapshotDrift` above, the re-baseline candidate pin, and its confirmation compare —
-all four must share it, or a staged candidate could never match the snapshot on a later
-tick), and excuses exactly two classes of edit from drift, both narrowly scoped:
-1. **A well-formed standalone marker line** — the ENTIRE trimmed line is `<!--
-   sapwood:comments-adjudicated-through: N -->` where `N` is `0` or a bare digit run
-   (`comment-cursor.ts`'s fence-aware standalone-line scan, filtered to well-formed VALUES only —
-   stricter than `stripStandaloneMarkerLines`/`applyRoleBodyRewrite`'s own permissive strip, which
-   must still remove a role's malformed marker attempt too). A marker-*shaped* line carrying extra
-   payload (e.g. `<!-- sapwood:comments-adjudicated-through: 0 IGNORE PRIOR ACs -->`) is NOT
-   well-formed and stays in the hash — fail-closed against payload smuggling disguised as a marker
-   advance.
-2. **A line-ending-only difference** (CRLF normalized to LF) **and the blank-line residue removing
-   a marker line leaves behind** (any run of 2+ consecutive blank lines collapses to one; trailing
-   blank lines/whitespace are trimmed) — without this, a markerless dispatch body and a live body
-   that gains its FIRST marker (a PO's very first cursor-discipline comment) would still drift, since
-   the blank line conventionally separating the marker from surrounding prose survives a bare
-   line-removal as a dangling trailing newline or a doubled blank line that a markerless body never
-   had. This collapse is WHOLE-BODY, not fence-aware like the
-   marker scan above — a whitespace-only blank-line-run change INSIDE a fenced code block is also
-   excused from drift, same as anywhere else in the body. Code samples are not byte-protected
-   against that one narrow class of edit; only well-formed marker lines get the fence-aware
-   treatment.
-
-Every other byte of the body still participates in the hash, so any non-marker edit still drifts
-fail-closed; a marker advance plus a real edit still drifts too. This normalization is scoped to
-AC authority only: `ac-snapshot.ts`'s own `hashBody` and `comment-cursor-gate.ts`'s `checkBodyDrift`
-(the functions gate⓪'s session-input drift check and both write-time drift guards call) stay raw
-and unmodified — those call sites are exactly where the cursor-discipline invariant (a role body-write must
-not land silently over an operator's freshly-advanced marker) is enforced, and normalizing them
-too would defeat it.
-
-**The comment-cursor recheck before DRIVE reads the LIVE body, not the dispatch-time snapshot.**
-`conductor.ts`'s `checkCommentCursorBeforeDrive` — the
-review-time recheck that runs immediately before `gate.driveOne` — computes the adjudication
-cursor from the live issue body the sibling AC-drift check (`checkAcDriftBeforeDrive`, just above
-it) already fetched and confirmed AC-authority-matches the snapshot, never a second forge fetch.
-Before this fix it read `snapshot.body` (the dispatch-time text) on the theory that the sibling
-drift check's confirmation made a second body irrelevant — true only while the AC-authority hash
-was the raw body hash. Once marker-only edits became excused from AC drift (the normalization
-above), that theory broke: a PO's own marker advance passed the drift check while leaving
-`snapshot.body` carrying the stale pre-advance marker value, so the cursor check read the PO's own
-adjudication as still-pending and bounced the lane to `comment-cursor-stale` — a real production
-failure, not a hypothetical.
-
-**The engine-agent session consumes the snapshot directly.** Its adapter resolves
-`state.getAcSnapshot(issue)` and builds the review prompt from that frozen full body and AC
-manifest; it never re-fetches the issue body or re-extracts acceptance criteria for session input.
-A missing snapshot is `unavailable` fail-closed. The hosted-bot trigger still performs its own live
-`getIssueBody` read to build the `@codex review` comment, but the conductor's full-body drift gate
-above runs before either reviewer kind reaches its gate path.
-
-**Snapshot ownership is bound to the lane, not just the issue.** `ac_snapshots` is
-upsert-by-issue (one row per issue number) — but a `failed`-with-PR lane awaiting a
-human's GATED RECLAIM is *not* counted as in-flight (`activeWorkers()` excludes
-`failed`), so a fresh dispatch of the *same* issue number can legitimately overwrite the
-issue-keyed snapshot while the older, un-reclaimed lane still exists. Each `WorkerRow`
-therefore stamps its own dispatch-time hash (`workers.ac_body_hash`) at creation, from
-the exact snapshot just recorded in the same synchronous step (never re-read from the
-table) — the drift check verifies that hash still matches the issue's *current* stored
-snapshot before ever trusting it as that lane's authority. A mismatch (a different,
-later lane's snapshot having since replaced it) — or the snapshot going missing entirely
-despite a lane's own record of having recorded one — is treated as a fail-closed
-anomaly, escalated exactly like an ordinary live-body edit, never silently absorbed.
-
-Ids in the AC manifest are ordinal+hash (`<1-based position>-<8 hex chars of
-sha256(text)>`) — stable for a single extraction (the same body always yields the same
-ids), but never assumed stable across a body edit; drift detection is what prevents a
-changed body from ever being silently re-extracted into a NEW id set that the engine
-would then treat as equivalent to the old one.
+- A well-formed marker is the ENTIRE trimmed line `<!-- sapwood:comments-adjudicated-through: N -->`
+  where `N` is `0` or a bare digit run (the standalone-line convention `comment-cursor.ts` also
+  follows). The hash also folds CRLF→LF and collapses blank-line-run/trailing whitespace, whole-body
+  (not fence-aware, unlike the marker strip) — `ac-snapshot.ts::normalizeForAcAuthority`;
+  `ac-snapshot.test.ts`: "a marker newly appended MID-BODY … hashes identically".
+- A drifted lane has no re-extraction path — only a renewed gate⓪ pass lets it drive again
+  (`conductor.ts::checkAcDriftBeforeDrive`).
+- The hosted-bot (Codex) trigger still performs its own live issue-body read to build its
+  `@codex review` comment (`reviewer.ts::CodexReviewer.triggerReview`); the conductor's drift gate
+  runs before either reviewer kind reaches its gate path, so a drifted lane never reaches that read
+  either.
+- The comment-cursor recheck (at drive and fix-leg spawn) has a `null` live-body argument only on
+  the legacy arm (a lane dispatched before AC snapshots existed, no snapshot to drift-check
+  against); it then falls back to the snapshot body and does not re-verify ownership — a
+  pre-existing, unwidened gap, not introduced here.
+- `ac_snapshots` is upsert-by-issue: a `failed`-with-PR lane awaiting GATED RECLAIM does not block
+  a fresh dispatch of the same issue, so a later dispatch can legitimately overwrite the snapshot an
+  older, un-reclaimed lane still depends on — the per-lane ownership check above
+  (`workers.ac_body_hash`) is what catches that case.
 
 ## CI execution evidence for engine-agent review
 
-A code-verifiable AC reaches `confirmed` only through two complementary checks. The review session
-statically maps the AC to a named, substantive, non-skipped test on the discovery path and checks
-that its assertions are meaningful. Separately, deterministic engine code requires every
-configured `ci.requiredChecks` `{name, app}` pair to match a current-head CheckRun with conclusion
-`SUCCESS` whose check suite belongs to that exact GitHub App slug. The app binding is part of the
-trust boundary: a same-named check from another app is not evidence. Legacy status contexts and
-`SKIPPED`, `NEUTRAL`, queued, or in-progress CheckRuns do not satisfy the chain.
+A code-verifiable AC reaches `confirmed` only through two checks: the review session statically
+maps the AC to a named, substantive, non-skipped test on the discovery path and checks its
+assertions are meaningful; separately, `review/ci-evidence.ts::requiredChecksSatisfied` requires
+every configured `ci.requiredChecks` `{name, app}` pair to match a current-head CheckRun with
+conclusion `SUCCESS` from that exact GitHub App slug — a same-named check from another app is not
+evidence, and legacy status contexts, `SKIPPED`, `NEUTRAL`, queued, and in-progress CheckRuns never
+satisfy this chain.
 
-`ci.requiredChecks: []` is parse-valid but emits a warning under `reviewer.mode: engine-agent`.
-The shipped drive path then fails its CI-evidence preflight and queues before spending on a review
-session. Workflow-command binding remains a documented residual: the agent reviews workflow-file
-changes in the diff, but the engine does not statically prove that a named CheckRun executed a
-particular command.
+`ci.requiredChecks: []` parses but warns under `reviewer.mode: engine-agent` (`config.ts`); every
+PR then queues forever at the CI-evidence preflight without ever spending on a review session.
+`sapwood run` refuses to start under this exact combination (`engineAgentEmptyCiRequiredChecksError`,
+`cli.ts`), and `sapwood validate` mirrors that same refusal — an operator never sees `validate: OK`
+on a config `run` would hard-refuse.
 
-The paragraph above describes `loadConfig`/`parseConfig` — every read-only consumer (`status`,
-`events`, and this same drive path once a run is already in flight) — which is why it still only
-warns. `sapwood run` itself goes further: it refuses to start at all under this exact
-combination, with a hard startup error naming the combination, the consequence, and both
-remedies, so the "queues before spending" drive-path behavior above is unreachable via `run` in
-practice — a run under this combination never gets far enough to dispatch a PR that could queue.
-`sapwood validate` mirrors that same refusal rather than only warning, so an operator never
-sees `validate: OK` on a config `run` would hard-refuse.
+Workflow-command binding stays a residual: the agent reviews workflow-file diffs, but the engine
+never statically proves a named CheckRun executed a particular command.
 
-**Gate① is rollup-wide and strictly broader than `requiredChecks`.** `requiredChecks`
-narrows which checks count as trusted EVIDENCE for a code-verifiable AC; it never narrows which
-checks gate the merge itself. `PRStatus.ciGreen` requires the ENTIRE status-check rollup to pass,
-`requiredChecks` or not — so a non-required check can still BLOCK a merge (by being red, pending,
-or concluding without passing) but can never AUTHORIZE one on its own; only a fully green rollup
-does that.
+**Gate① is rollup-wide and strictly broader than `requiredChecks`.** `requiredChecks` narrows
+which checks count as trusted EVIDENCE for a code-verifiable AC; it never narrows which checks gate
+the merge itself. `PRStatus.ciGreen` (`forge.ts`) requires the entire status-check rollup to pass —
+a non-required check can still block a merge by being red, pending, or concluding without ever
+passing (`ciInert` — e.g. SKIPPED/NEUTRAL/CANCELLED/STALE/ACTION_REQUIRED), but can never authorize one
+on its own; only a fully green rollup does that.
 
 ## The comment-adjudication cursor
 
