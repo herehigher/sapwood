@@ -58,15 +58,17 @@ later phase, gated on GitHub-history extraction work that does not exist yet —
 
 Derived from what the sections below already scope out — nothing here is a new claim:
 
-- **No in-engine capability/tool-permission management.** Producer legs inherit the
-  operator's host Claude Code environment instead; no `capabilities.*` config surface
-  will ever be built (Decision #11 below).
+- **No producer capability-configuration surface.** Producer allowances are
+  host-delegated (Decision #11 below); the engine's governance floor for peripheral
+  and reviewer sessions is not affected — no `capabilities.*` config surface will ever
+  be built for producer legs.
 - **No second task-queue database or intake API.** GitHub itself — the ProjectV2 board
   + issue labels — is the work queue; sapwood adds no separate store or ingestion
   surface for tasks.
-- **No automatic multi-generation decomposition.** A gate⓪ `too_large` or resume-cap
-  trigger admits one oversized issue for one controlled split; a further pass over a
-  remaining container is human-fired, never automatic recursion.
+- **No automatic multi-generation recursion inside one decompose session.** Depth is
+  emergent one generation at a time: a Ready container is re-split by the engine at
+  gate⓪ (the `too_large` decision), while an unresolved remainder waits for a
+  human-applied `split`.
 - **Not (yet) an untrusted-public-repo product.** Trust context is trusted-repos-first
   (Decision #3 below); public-repo hardening is on the long-term arc above, not shipped.
 - **No dashboard-as-product.** The product is the trust/governance layer; the dashboard
@@ -130,41 +132,60 @@ sapwood/
 └── docs/              # getting-started, config ref, security model, dev-guide, troubleshooting
 ```
 
-Maintained module map: [`dev-guide/02-repo-layout.md`](dev-guide/02-repo-layout.md) and
-[`dev-guide/05-core-modules.md`](dev-guide/05-core-modules.md).
+See [`docs/dev-guide/02-repo-layout.md`](dev-guide/02-repo-layout.md) for the maintained module
+map and [`docs/dev-guide/05-core-modules.md`](dev-guide/05-core-modules.md) for what each module
+owns.
 
 **Engine design notes**
 
-- **`IForge` seam.** `GithubForge` implements 44 methods — ~25 portable primitives, ~19
-  GitHub-specific (ProjectV2 lanes/fields, review-thread/raw-check models, `gh search`,
-  sub-issues, GraphQL node IDs). A GitLab/Gitea port is a semantic port, not an endpoint swap;
-  don't regroup while there is one implementation. No repo-specific hard-coding in config —
-  board/label names and the trusted-reviewer login are all configurable.
-- **SQLite (WAL) state** — atomic, single-writer-serial, concurrent reads for `sapwood status`;
-  fully durable, so restart is always a clean resume.
-- **Structured tick results** — a typed discriminated union, not a stringly-typed protocol.
-- **Sentinel-based completion** + heartbeat/PID liveness + a soft-budget `.handoff` terminal
-  state (work preserved, resumable) — see [security.md](security.md).
-- **Drain before kill, always.** A stop signal asks workers to hand off first; a hard
-  process-tree kill is the bounded `cost.drainWindowSec` last resort. Full three-tier model:
-  [Human controls](security.md#human-controls-three-tiers).
-- **Claude CLI coupling isolated in `worker.ts`** — every `claude -p` flag and cost parsing lives
-  in one module; a pinned minimum CLI version is enforced (`MIN_CLAUDE_CLI_VERSION`) and
-  floor-checked (`engine/scripts/check-claude-cli-flags.ts`).
-- **Lifecycle:** the conductor ticks via `ScheduleWakeup` (session-bound; durable SQLite makes
-  restart clean); `sapwood status` reads SQLite with no live session. A real supervisor
-  (launchd/daemon) is a v1.1 item — see [supervision.md](guide/supervision.md).
-- **Skill↔engine IPC** goes only through the `sapwood` CLI / a read-only state read, never
-  bespoke SQLite coupling per skill.
+- **`IForge` seam.** `GithubForge` implements 44 methods; ~25 are portable forge primitives
+  (issues, comments, string labels, PRs/MRs, branches/commits/diffs, milestones, summarized
+  CI/merge status) and ~19 encode GitHub semantics (ProjectV2 lanes/field mutations, the
+  review-thread and raw-check models, `gh search` syntax, issue relations, native sub-issues,
+  GraphQL node-ID operations). A GitLab/Gitea port would be a semantic port, not an endpoint
+  swap; do not regroup the interface while there is exactly one implementation. Config carries
+  no repository-specific hard-coding — `PROJECT_NUMBER`, owner kind, board lane names, and the
+  trusted-reviewer login are all configurable per deployment.
+- **SQLite (WAL) state** — atomic writes, no read-modify-write races. Conductor is
+  single-writer-serial; WAL gives concurrent reads (for `sapwood status`). Fully durable → engine
+  restart is always a clean resume. Schema is versioned (migration path).
+- **Structured tick results** (a typed discriminated union), not a stringly-typed text protocol.
+- **Sentinel-based completion** + heartbeat/PID liveness classification, plus a soft-budget
+  `.handoff` terminal state (work preserved, resumable) — see [`docs/security.md`](security.md).
+- **Kill switch / EMERGENCY_STOP drain before kill, always.** A stop signal asks in-flight
+  workers to hand off gracefully first; a hard process-tree kill (`worker.ts` kills the whole
+  detached process group, never a plain PID kill that leaves orphans running) is the bounded
+  `cost.drainWindowSec` last resort, never the first response. Full three-tier model (PAUSE /
+  KILL_SWITCH / EMERGENCY_STOP): [`docs/security.md`'s "Human controls (three tiers)"](security.md#human-controls-three-tiers).
+- **Claude CLI coupling isolated in `worker.ts`**: every `claude -p` flag, the `stream-json` cost
+  parsing, and `CLAUDE_BIN` discovery live in one module. A pinned minimum Claude Code CLI
+  version is enforced/reported (`worker.ts`'s `MIN_CLAUDE_CLI_VERSION`,
+  `loop/claude-version-startup-check.ts`); a manual floor-check script
+  (`engine/scripts/check-claude-cli-flags.ts`) verifies the pinned floor offers every flag the
+  engine emits, run when the floor or the engine's flag surface moves.
+- **Lifecycle:** the conductor ticks via `ScheduleWakeup` (session-bound — a documented
+  limitation; durable SQLite makes restart clean). `sapwood status` (the CLI, not a skill) reads
+  SQLite directly and works with no live session; it detects a dead engine and prints the
+  restart command. A real supervisor (launchd/daemon) is a v1.1 item — see
+  [`docs/supervision.md`](guide/supervision.md) for the current operator playbook.
+- **Skill↔engine IPC:** skills/commands talk to the engine only through the `sapwood` CLI / a
+  read-only state read — never bespoke SQLite coupling per skill.
 
-Fully shipped; see [core-modules.md](dev-guide/05-core-modules.md), [security.md](security.md),
-and [role-paradigm.md](reference/role-paradigm.md) — this chapter stays a map, not a
-restatement.
+The scheduler (`conductor.ts`), worker lane (`worker.ts`), guard (`guard.ts`), review gate
+(`reviewer.ts`/`merge-driver.ts`), cost ceilings, and the round orchestrator (PO / architect /
+gate⓪ / harvest / retro peripherals wrapped around the tick engine) are all shipped; see
+[`docs/dev-guide/05-core-modules.md`](dev-guide/05-core-modules.md),
+[`docs/security.md`](security.md), and [`docs/reference/role-paradigm.md`](reference/role-paradigm.md)
+for the full mechanism — this chapter stays a map, not a restatement.
 
 **Fix loop (`fixing` lane state).** A gate②/CI finding routes to a bounded, mechanical rework
-pass — `driving → fixing → driving` — before human escalation. Bounded by `lanes.prFixCap` and a
-progress classifier (`review/convergence.ts`): a lane whose findings stop shrinking escalates to
-`needs-human`. Full mechanism: [Fix-loop lane state](security.md#fix-loop-fixing-lane-state).
+pass — `driving → fixing → driving` — before human escalation, instead of folding straight to
+`needs-human`. Bounded by `lanes.prFixCap` (a cost ceiling) and a separate progress classifier
+(`review/convergence.ts`, the quality stop): a lane whose findings stop shrinking escalates to
+`needs-human` before paying another round. Full mechanism, the precedence between a stalled
+review and a byte-identical rerun, the adjudicated-re-raise finding filter, and the
+`cost.roundBudgetUsd` fix-leg exemption: see
+[`docs/security.md`'s "Fix-loop `fixing` lane state"](security.md#fix-loop-fixing-lane-state).
 
 **The three-tier escalation model.** Humans intervene to *review*, never to *resolve reviews* —
 three labels, each encoding exactly one fact:
@@ -175,51 +196,82 @@ three labels, each encoding exactly one fact:
 | `needs-human` | **engine** | ESCALATE marker | released | human queue; removal = sign-off |
 | `blocked` | **engine** or human | veto | released | nobody's queue (external wait) |
 
-`blocked` on a PR is the human veto channel — the merge gate matches `escalation.humanLabels`
-against the PR's own labels before consulting any review/CI signal; a PR-level `hold` sits
-between that check and every review signal, never interrupting an in-flight fix leg. Write-side
-asymmetry is the audit trail: only `needsHuman`/`blocked` are ever engine-applied — a human
-applies and removes `hold` themselves. Full mechanism: [Human controls](security.md#human-controls-three-tiers)
-and [Human-merge-only paths](security.md#human-merge-only-paths).
+Collapsing any two of these loses a bit: escalations would pollute the human queue with
+external-dependency waits (`blocked`), and removing one shared label would sign off two unrelated
+facts at once. `blocked` on a PR is the human veto channel — the merge gate matches
+`escalation.humanLabels` (`needs-human` *and* `blocked`) against the **PR's own** labels before
+consulting any review or CI signal. A PR-level `hold` sits between that check and every review
+signal in `deriveGate`'s ordering — before `MERGE`/`WAIT_REVIEW`/`HANDLE_THREADS`/`FIXABLE`
+alike — and never interrupts an in-flight fix leg (a hold only ever gates the *next* drive
+decision). Write-side asymmetry is the audit trail: the engine never writes a hold label —
+only `needsHuman`/`blocked` are ever engine-applied — a human applies and removes `hold`
+themselves. Accepted, documented bounded blind spot (marginal-complexity principle: zero new
+machinery over a perfect fix): the review-silence clock has no memory of a hold's own
+start/end — while held it's suppressed outright, and once removed the very next tick resumes
+counting off the same, unchanged trigger pin, so a hold outlasting `reviewer.escalateAfterSec`
+can fire the escalation on the very first post-removal tick (a single, tick-scale-imprecise
+evaluation, never a repeated burst). Full mechanism (the `human-merge-only`/`planless` labels
+that round out the ESCALATE tier, the gated-reentry handshake): see
+[`docs/security.md`'s "Human controls (three tiers)"](security.md#human-controls-three-tiers) and
+[`docs/security.md`'s "Human-merge-only paths"](security.md#human-merge-only-paths).
 
 ### Security & trust posture
 
-**Positioning.** sapwood makes autonomous development bounded, inspectable, recoverable, and
-conservatively governed: models get broad read access within a recorded, metered scope, but
-action capabilities stay bounded by role, the guard, engine validation, and review gates —
-humans own why/what at `Ready`, the engine owns durable process and effects.
+**Positioning statement.** sapwood makes autonomous development bounded, inspectable,
+recoverable, and conservatively governed. Models receive broad read access within a recorded,
+metered repository scope; action capabilities remain explicitly bounded by role, the guard,
+engine validation, forge controls, and review gates. Humans own why/what at `Ready`; the engine
+owns durable process and effects; models supply judgment without being treated as deterministic.
+It does not make missing intent or missing evidence deterministic.
 
-**The trust boundary is on the ACTION side, not the content side.** Issue/PR content is
-semi-trusted, and every session is assumed corruptible by injection or drift; the safety claim
-rests on what a session can *do*. The guard hook's fail-closed hard mode constrains worker
-actions; producer≠reviewer≠merger keeps production, review, and merge in separate hands;
-issues-only peripheral sessions hold a shared read-only, worktree-confined, no-shell grant with
-no forge credential — the engine alone writes, from validated structured output. Full mechanism:
-[Issues-only role sessions](security.md#issues-only-role-sessions-read-only-worktree-confined-no-shell).
+**The trust boundary is on the ACTION side, not the content side.** Under the trusted-repos-first
+scope, issue and PR content is semi-trusted input, and every model session — worker or
+peripheral — is assumed corruptible by prompt injection, hallucination, or drift; at the boundary
+those causes are indistinguishable. The safety claim rests on what a session can *do*, not on
+making everything it can *read* trusted: the guard hook's fail-closed hard mode constrains worker
+actions, while producer ≠ reviewer ≠ merger keeps production, gate②'s fresh different-model
+review, and the Conductor's merge in separate hands. Issues-only peripheral sessions carry a
+shared read-only, worktree-confined, no-shell grant with no forge credential of their own; the
+engine alone executes forge writes from schema-validated structured output. Full mechanism
+(`checkReadContainment`, the allow/deny matrix): see
+[`docs/security.md`'s "Issues-only role sessions"](security.md#issues-only-role-sessions-read-only-worktree-confined-no-shell).
 
-**The guardrail/shackle criterion.** A mediation design must never deny a session evidence AND
-still demand a definitive judgment from it — that's a shackle; a guardrail pairs denial with a
-first-class abstention/escalation path instead, which is why sapwood ships an engine-hosted,
-read-only forge MCP proxy, widening what a session may ask for without ever forcing a verdict.
-Full contract: [forge MCP proxy](security.md#the-forge-mcp-proxys-role-x-tool-matrix).
+**The guardrail/shackle criterion.** A mediation design for role-session information access must
+never deny a request AND still demand a definitive judgment from the same session — that
+combination is a shackle: it manufactures confidence from a session denied the evidence to earn
+it. The alternative is a guardrail: explicit denial paired with a first-class
+abstention/escalation path, so a session that cannot get evidence can say so instead of guessing.
+This is why sapwood ships an engine-hosted, read-only forge MCP proxy — built to widen what a
+session may ask for without ever forcing a verdict once it has asked. Full contract: see
+[`docs/security.md`'s forge MCP proxy section](security.md#the-forge-mcp-proxys-role-x-tool-matrix)
+and [`docs/configuration.md`](guide/configuration.md#proxy).
 
-**Ambient repo context — record, don't seal.** Every session runs inside a real repo worktree
-and legitimately absorbs its `CLAUDE.md`/auto-memory; sealing it would move the trust boundary to
-the content side, so it was rejected — every session instead assembles a **context manifest**
-recording every source absorbed. Full model: [record, don't seal](security.md#ambient-repo-context-record-dont-seal).
+**Ambient repo context — record, don't seal.** Every session — worker or peripheral — runs
+`claude -p` inside a real repo worktree and therefore legitimately absorbs that worktree's
+`CLAUDE.md`, the user's global `CLAUDE.md`/auto-memory, and the CLI's other dynamic system-prompt
+sections, same as any interactive session would. Applying the action-side boundary above, sealing
+this channel would be a *content*-side intervention, and the trust boundary stays action-side —
+sealing it was considered and rejected. The obligation is honesty and diagnosability, not
+isolation: every such session attempt assembles a **context manifest** recording every source it
+absorbed. Full model and the isolation recipe (production never seals; only a throwaway benchmark
+run does — `--bare` also disables hooks, and the guard hook is the actual safety boundary): see
+[`docs/security.md`'s "Ambient repo context: record, don't seal"](security.md#ambient-repo-context-record-dont-seal).
 
 **Validation depth ∝ decision weight.** Judgment enters the engine only through a role session's
 validated structured output; the engine validates *format* and *permission*, never *decision
-quality*, so the deeper the write a field drives, the deeper its validation must be — checked by
-gate② on every "bring judgment in" change. Full principle and the write-inventory table:
-[role-paradigm.md's "Validation depth ∝ decision
-weight"](reference/role-paradigm.md#validation-depth--decision-weight-the-structured-output-write-inventory).
+quality*, so the deeper the write a field drives, the deeper its validation must be — the
+standing safety baseline every future "bring judgment in" change updates, checked by gate②. Full
+principle and the write-inventory table: see
+[`docs/reference/role-paradigm.md`'s "Validation depth ∝ decision weight"
+section](reference/role-paradigm.md#validation-depth--decision-weight-the-structured-output-write-inventory).
 
-### Round orchestrator
+## Round orchestrator
 
-A **round orchestrator** sits *above* the tick engine, wrapping peripheral roles (goal alignment,
-architecture review, gate⓪ plan review, harvest, retrospective) around the existing dispatch loop
-without rewriting it:
+v0.2 introduces a **round orchestrator**: a layer *above* the tick engine that adds peripheral
+roles (goal alignment, architecture review, gate⓪ plan review, harvest, retrospective) around the
+existing dispatch loop, without rewriting it. This section is the durable record of that design.
+
+**The model — a round is a batch, wrapped in peripherals:**
 
 ```
 while True:
@@ -232,52 +284,110 @@ while True:
     peripheral: retrospective / self-evolution
 ```
 
-A round dispatches a batch, ticks the engine until it drains, runs the peripherals, then opens
-the next — **`conductor.ts` is not rewritten**; a round is just another caller of `tick()`.
+The round loop dispatches a batch, ticks the existing engine until that batch drains,
+runs the peripherals, then opens the next round. **The tick engine (`conductor.ts`) is
+not rewritten** — a round is a caller of `tick()`, the same relationship `driver.ts`
+already has to it.
 
-**Round bounds.** Round-level conditions (first hit ends *this* round) are the round budget
-(`cost.roundBudgetUsd`), an opened-PR cap (`lanes.roundDispatchCap`), and a round milestone;
-final-level `stop.*` conditions are preemptive — no new round opens, the current winds down, the
-process exits. A driving lane's fix leg is exempt from `cost.roundBudgetUsd`. **The round pool**
-— "this round's tasks" — is an explicit, bounded selection: the PO may select up to
-`ceil(lanes.roundDispatchCap × round.poolFactor)` Ready issues during aligning, returning numbers
-only; the **engine** applies the pool label. Default, or on degrade, the pool is the deterministic
-top-of-candidates set. Full mechanics: [configuration.md](guide/configuration.md#round).
+**Two-level termination.** Round-level conditions (OR'd, first hit ends *this* round, not the
+run) are the round budget (`cost.roundBudgetUsd`) and an opened-PR cap
+(`lanes.roundDispatchCap`), plus a round milestone/theme. Final-level conditions are `stop.*` —
+preemptive: hitting one mid-round means no new round opens, the current one winds down, and the
+process exits. Round-budget accounting anchors to a durable spend-ledger window opened with the
+round, so opening/closing peripherals and worker legs count exactly once across crash/resume —
+see [`docs/dev-guide/06-persistence.md`](dev-guide/06-persistence.md). A driving lane's fix leg
+is exempt from `cost.roundBudgetUsd` outright (fix-loop mechanism, above) — round budget paces
+new work, never finishing a PR already open.
 
-**Peripherals never review or merge, and self-evolution goes through a PR.**
-`guard.ts`/`reviewer.ts`/`merge-driver.ts` stay fixed regardless of orchestration config; only
-the kill switch skips a graceful exit's final harvest+retrospective pass. Peripheral phases
-recover by rerun, not resume — a `rounds` ledger plus idempotent externalized GitHub artifacts
-stand in for mid-conversation model state — and retro proposes any prompt/doc/config change
-through that same gate② PR path; `worker.promptFile` gives it an addressable target.
+**The round pool — explicit per-round task selection.** "This round's tasks" is an explicit,
+bounded selection, not an open-ended per-tick query: the PO selects up to
+`ceil(lanes.roundDispatchCap × round.poolFactor)` issues from Ready during aligning, returning
+issue numbers only — the **engine** applies the pool label from validated output. With
+`roles.po.poolSelection: false` (the default), or on session degrade, the pool is the
+deterministic top-of-candidates set: the selection *bound* never depends on an optional role.
+Full write-ahead/crash-recovery mechanics and the probe-signals registry that keeps a stalled
+milestone from pinning rounds open forever: see [`docs/configuration.md`](guide/configuration.md#round)
+and [`docs/troubleshooting.md`](guide/troubleshooting.md).
 
-**Ready-as-signature.** Moving an issue to `Ready` — confirming an `origin:agent` proposal or
-leaving a human-authored body untouched — is a human signature endorsing that issue's why/what.
-Past `Ready`, **dissent, not revision, is the only agent channel**: a role may raise a premise
-concern but may not itself revise the why/what or hold up dispatch — the one place autonomy is
-deliberately bounded by design.
+**Peripherals never review or merge.** The goal-alignment/PO, architect, gate⓪
+verification-plan-reviewer, harvest, and retrospective roles read and write issues and docs only.
+`guard.ts`, `reviewer.ts`, and `merge-driver.ts` stay fixed and non-configurable
+regardless of orchestration config —
+producer≠reviewer≠merger holds no matter how the round loop is shaped. A graceful exit
+(a final stop condition, or the run simply ending) still runs harvest and retrospective
+once before stopping, so a round's output is never orphaned — only the kill switch skips
+peripherals outright.
 
-**PO decomposition.** Splitting an oversized issue is engine-initiated: gate⓪'s `too_large`
-decision, or the resume-cap CAPPED branch, triggers it; a human may still apply `split` directly,
-but it's no longer the main path either routes around. Child kinds, the `Cut:` grammar, and the
-full mechanics live once, in [`po-decompose.md`](../engine/prompts/po-decompose.md) and
-[role-paradigm.md](reference/role-paradigm.md).
+**Recovery is rerun-not-resume for peripheral phases.** Workers keep the existing
+handoff+resume model (code WIP is expensive to redo). Peripheral phases get a cheaper contract:
+phase-level rerun, backed by a `rounds` ledger (round id, phase, status, artifact reference) plus
+idempotent externalized artifacts on GitHub itself (marker comments/labels a rerun checks for
+before re-posting) — never an attempt to restore a model's mid-conversation state, only its
+externally-visible artifacts. What a fresh peripheral session "remembers" across rounds is never
+conversational continuity — it is externalized institutional memory, held in artifacts a fresh
+session re-reads as relevant to its own role, not a uniform feed every role consumes alike.
 
-**gate⓪ — the verification-plan quality gate.** Decision #8 enforces plan *presence*; gate②
-re-checks the PR against it; plan *quality* needs its own review first, and `verify:n/a` is
-never self-declared. A **verification-plan-reviewer** peripheral runs post-`Ready`, pre-dispatch,
-distinct from both the plan's author and the producer. Approve →
-engine applies `plan:approved`; bounce → its comment briefs a scoped, self-healing plan-draft
-dispatch; unverifiable → it only ever **proposes** `verify:n/a`, paired with `needs-human`, so a
-human finalizes the adjudication. `getReadyIssues` requires the plan **and** `plan:approved`,
-fail-closed. Scoped to the round pool with a freshness re-confirm at every entry —
-**`plan:approved` means re-endorsed each round, not approved forever.** Full self-heal
-mechanics: [The `plan:approved` label and gate⓪](security.md#the-planapproved-label-and-gate).
+**Self-evolution goes through a PR, never a direct write.** When the retrospective role
+proposes a change to a prompt, doc, or config, it opens a PR through the same gate②
+path every other change takes — never a direct write to disk. This is why
+`worker.promptFile` landed in v1: it gives the retrospective role a concrete file
+to open a PR against, rather than an inline prompt with no addressable target.
 
-**The autonomy principle.** Humans decide only the *why/what* of an issue — moving it to
-`Ready`; everything after is agentic, and rare edges degrade to `needs-human` (Decision #9), safe
-because every agent decision is externalized — comments, labels, events — observable and
-traceable. **Dispatch heuristic:** within equal priority, prefer lightweight issues first.
+**Ready-as-signature.** Moving an issue to `Ready` — whether confirming an `origin:agent`
+proposal or leaving a human-authored issue's why/what untouched — is a human signature: it
+endorses that issue's why/what regardless of who typed the body. Past that point, **dissent, not
+revision, is the only agent channel past `Ready`**: a role that believes a `Ready` issue's
+premise is wrong may raise it, but may not itself revise the why/what or hold up/reject dispatch.
+This human confirmation step is the product, not a limitation to be automated away — it is the
+one place autonomy is deliberately bounded by design, matching the positioning statement's
+"humans own why/what at Ready" (Security & trust posture, above).
+
+**PO decomposition and issue granularity.** Granularity is a *how* decision, so splitting an
+oversized issue is engine-initiated, not human-initiated: gate⓪'s `too_large` decision is the
+early trigger (post-Ready, before a lane is ever spent) and the resume-cap CAPPED branch is the
+late one (after a lane exhausts its resume budget); a human may still apply `split` directly as
+an override channel, but it is no longer the main path either trigger routes around. The child
+kinds (leaf / container / remainder), the `Cut:` grammar, and the full trigger mechanics are
+defined once, in the shipped decompose prompt —
+[`engine/prompts/po-decompose.md`](../engine/prompts/po-decompose.md) — and their per-role
+contract in [`docs/reference/role-paradigm.md`](reference/role-paradigm.md); this paragraph never restates them.
+
+**gate⓪ — the verification-plan quality gate.** Decision #8 enforces plan *presence* (dispatch
+refuses a plan-less issue) and gate② re-checks the finished PR against the plan — but plan
+*quality*/feasibility needs its own review before a producer spends budget on it, and
+`verify:n/a` is never self-declared. gate⓪ closes both holes: a **verification-plan-reviewer**
+peripheral runs post-`Ready`, pre-dispatch, in a session distinct from both the plan's author and
+the producer, holding no shell — it computes a decision only. Approve → the engine applies
+`plan:approved`; bounce → the reviewer's comment becomes the brief for a scoped, self-healing
+plan-draft dispatch (never a parked issue); judged inherently unverifiable → it only ever
+**proposes** `verify:n/a`, always paired with `needs-human`, so a human — never the agent —
+finalizes the adjudication by removing `needs-human`. Enforcement is fail-closed in code, never a
+prompt: `getReadyIssues` requires the plan present **and** `plan:approved`; `needs-human`/`blocked`
+never dispatch. Full self-heal mechanics (the plan-drafting session, the
+`maxDraftCycles`-bounded cycle): see
+[`docs/security.md`'s "The `plan:approved` label and gate⓪"](security.md#the-planapproved-label-and-gate).
+
+**gate⓪ is scoped to the round pool, with a freshness re-confirm at every pool entry.** The
+verification-plan-reviewer's candidate set is the round pool itself, not the whole Ready lane: an
+unadjudicated pool member gets the full draft→re-review cycle; a member whose `plan:approved` was
+granted in a **prior** round instead gets a lightweight, zero-forge-write **confirm** session
+("does this plan still hold against current `main`?"), invalid/failed twice escalating
+`needs-human` (this feature's one fail-closed gate, unlike the architect's degrade-open review); a
+member approved **this round** is skipped outright; a `verify:n/a` member is untouched.
+**`plan:approved` is no longer "approved forever" — it means approved when granted, re-endorsed at
+every round-pool entry before dispatch.** Dispatch itself is unaffected: the executing phase's
+pool-scoped forge wrapper still requires gate⓪-passed (`getReadyIssues`).
+
+**The autonomy principle (governs gate⓪ and every future gate).** Humans decide only the
+*why/what* of an issue — the act of moving it to `Ready` (including the initial confirmation of
+`origin:agent` issues). Everything after `Ready` — plan drafting, plan review, execution,
+acceptance — is agentic; the loop never hangs waiting for a human on the normal path, and rare
+edges still degrade to `needs-human` (Decision #9). The precondition that makes this safe: every
+agent decision is externalized — issue comments, labels, the round ledger, structured events —
+observable and traceable, so a human can watch and intervene on unexpected behavior rather than
+being polled for routine approval.
+
+**Dispatch heuristic:** within equal priority, prefer lightweight issues first.
 
 ## Current milestone
 
