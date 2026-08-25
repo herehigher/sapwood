@@ -1165,9 +1165,9 @@ test("worker.deployKeyPath: unset by default, overridable, follows the #74 promp
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.worker.deployKeyPath, undefined);
   const over = parseConfig(
-    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: keys/worker-deploy-key, deployKeyId: 1 }",
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key, deployKeyId: 1 }",
   );
-  assert.equal(over.worker.deployKeyPath, "keys/worker-deploy-key");
+  assert.equal(over.worker.deployKeyPath, "data/worker-deploy-key");
 });
 
 test("worker.deployKeyPath: a RELATIVE path resolves against the CONFIG FILE's directory, exactly like promptFile (#74)", () => {
@@ -1176,10 +1176,10 @@ test("worker.deployKeyPath: a RELATIVE path resolves against the CONFIG FILE's d
     const cfgPath = join(dir, "sapwood.config.yaml");
     writeFileSync(
       cfgPath,
-      "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: keys/worker-deploy-key, deployKeyId: 1 }",
+      "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key, deployKeyId: 1 }",
     );
     const cfg = loadConfig(cfgPath);
-    assert.equal(cfg.worker.deployKeyPath, join(dir, "keys", "worker-deploy-key"));
+    assert.equal(cfg.worker.deployKeyPath, join(dir, "data", "worker-deploy-key"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1203,10 +1203,10 @@ test("worker.deployKeyId: unset by default, overridable to a positive integer, n
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.worker.deployKeyId, undefined);
   const over = parseConfig(
-    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: keys/worker-deploy-key, deployKeyId: 159210179 }",
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key, deployKeyId: 159210179 }",
   );
   assert.equal(over.worker.deployKeyId, 159210179);
-  assert.equal(over.worker.deployKeyPath, "keys/worker-deploy-key");
+  assert.equal(over.worker.deployKeyPath, "data/worker-deploy-key");
 });
 
 test("worker.deployKeyId: rejects zero/negative/non-integer values — a GitHub deploy-key id is always a positive integer", () => {
@@ -1221,7 +1221,7 @@ test("worker.deployKeyId: rejects zero/negative/non-integer values — a GitHub 
 // reconcile against a meaningless half-anchor.
 test("worker.deployKeyPath/deployKeyId (R3-6): rejects a config with ONLY deployKeyPath set, naming deployKeyId as the missing half", () => {
   assert.throws(
-    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: keys/worker-deploy-key }"),
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key }"),
     (e: Error) => /deployKeyId/.test(e.message) && /sapwood init/.test(e.message),
   );
 });
@@ -1236,7 +1236,7 @@ test("worker.deployKeyPath/deployKeyId (R3-6): rejects a config with ONLY deploy
 test("worker.deployKeyPath/deployKeyId (R3-6): BOTH set, or BOTH unset, parse cleanly — only a lone half is rejected", () => {
   assert.doesNotThrow(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }"));
   assert.doesNotThrow(() =>
-    parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: keys/worker-deploy-key, deployKeyId: 42 }"),
+    parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key, deployKeyId: 42 }"),
   );
 });
 
