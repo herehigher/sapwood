@@ -31,3 +31,4 @@ Send doc changes through the same review gate as code.
 - Code-comment discipline (why, not what): `engine/prompts/worker.md` "Working language & comments" — apply it to interactive work in this repo too.
 - Where text renders (target repo vs this repo) and issue-ref rules: `docs/dev-guide/11-writing-for-audiences.md`.
 - Board number, labels, queue mechanics: `sapwood.config.yaml` is authoritative.
+- Build/test/lint commands, including running a focused test subset: `docs/dev-guide/04-commands.md`.
