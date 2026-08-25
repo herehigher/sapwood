@@ -51,8 +51,9 @@ later phase, gated on GitHub-history extraction work that does not exist yet —
   Completion signaled by the wrapper writing `.done.json`/`.failed.json` sentinels
   — **not** the model's self-report (keep this; it's the robust part).
 - **Safety core = fail-closed PreToolUse hook** enforcing **producer≠reviewer≠merger**.
-- **State** = `data/sessions/run-state.json` + per-worker sentinels + per-round
-  `metrics.json`/`events.jsonl`.
+- **State** = the engine's `.sapwood/` runtime directory (SQLite recovery truth + per-worker
+  sentinels + per-round artifacts) — see [Configuration — The `.sapwood/` runtime
+  directory](guide/configuration.md#the-sapwood-runtime-directory).
 
 ## Non-goals
 

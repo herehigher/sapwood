@@ -113,8 +113,8 @@ eventually run out.
 Verified working pattern: `nohup`, backgrounded, and `disown`'d out of the launching
 shell's job table — this defeats `SIGHUP`-on-shell-exit and any other signal the shell
 would otherwise deliver to its own job, nothing more (the pgid/session/cgroup hierarchy
-below says precisely what it does and doesn't cover). `run`'s data dir
-(`data/sapwood.sqlite`, `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, worktree roots) resolves
+below says precisely what it does and doesn't cover). `run`'s runtime root
+(`.sapwood/sapwood.sqlite`, `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, worktree roots) resolves
 **relative to the process's cwd, not to `--config`'s directory** — `run --help`
 names the DB, `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, and worktree roots
 (`docs/guide/configuration.md`'s loader-resolution note carries the full rule) — so `cd` into
@@ -131,11 +131,11 @@ once the engine itself starts (`logger.ts`) — a different file, created too la
 this redirect, which is why `mkdir -p` comes first below:
 
 ```bash
-DEPLOY=/absolute/path/to/deployment-checkout   # the repo root `data/` must resolve under
+DEPLOY=/absolute/path/to/deployment-checkout   # the repo root `.sapwood/` must resolve under
 NODE=/absolute/path/to/node                    # from `node -e 'console.log(process.execPath)'` — see the node gotcha below
-mkdir -p "$DEPLOY"/data/logs
+mkdir -p "$DEPLOY"/.sapwood/logs
 cd "$DEPLOY" && nohup "$NODE" "$DEPLOY"/engine/dist/cli.js run --config <cfg-path> \
-  >> "$DEPLOY"/data/logs/detached.log 2>&1 &
+  >> "$DEPLOY"/.sapwood/logs/detached.log 2>&1 &
 disown
 ```
 
@@ -192,8 +192,8 @@ if os.fork(): raise SystemExit(0)      # orphan the child from this shell
 os.setsid()                            # new session + process group of its own
 if os.fork(): raise SystemExit(0)      # never reacquire a controlling terminal
 
-os.chdir(deploy)                       # `run`'s data dir is cwd-relative — root it here explicitly
-log_dir = os.path.join(deploy, "data", "logs")
+os.chdir(deploy)                       # `run`'s runtime root is cwd-relative — root it here explicitly
+log_dir = os.path.join(deploy, ".sapwood", "logs")
 os.makedirs(log_dir, exist_ok=True)
 log = open(os.path.join(log_dir, "detached.log"), "a")
 os.dup2(log.fileno(), 1); os.dup2(log.fileno(), 2)
@@ -205,9 +205,9 @@ PY
 Then confirm it's actually alive the way [Batch open ritual](#batch-open-ritual)'s
 Single-instance check already tells you to, not by trusting your own memory of having
 started it — same check for either launch form above: read
-`"$DEPLOY"/data/sapwood.lock`'s recorded `pid` and `ps -p <pid>` it yourself — the lock
+`"$DEPLOY"/.sapwood/sapwood.lock`'s recorded `pid` and `ps -p <pid>` it yourself — the lock
 is authoritative, a shell job you believe is running is not. Check it by the SAME
-absolute path you launched under, never a bare `data/sapwood.lock` typed from whatever
+absolute path you launched under, never a bare `.sapwood/sapwood.lock` typed from whatever
 directory the checking shell happens to be in — the lock, like the DB below, is
 cwd-relative by default and resolves to nothing from anywhere else.
 
@@ -240,7 +240,7 @@ not just the launch line above:
   turns a visible typo into a dead poller nobody notices —
   the general lesson, independent of this specific splitting bug, is don't blind an
   unattended script's own stderr.
-- **The state DB path defaults to `data/sapwood.sqlite`, resolved against the
+- **The state DB path defaults to `.sapwood/sapwood.sqlite`, resolved against the
   invoking process's cwd — pass it explicitly, same as the deploy-dir rule above.**
   `status`/`events`/`park clear` all fall back to this cwd-relative default when no
   positional `db-path` is given, and `--config` does **not** change that resolution
@@ -249,7 +249,7 @@ not just the launch line above:
   `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, and worktree roots stay cwd-relative
   regardless). A detached poller's cwd is arbitrary — polling
   from anywhere but the deployment checkout silently prints `sapwood events: no state DB
-  at data/sapwood.sqlite — engine has never run` and **exits 0**, indistinguishable from
+  at .sapwood/sapwood.sqlite — engine has never run` and **exits 0**, indistinguishable from
   "nothing new yet" unless you're reading the message itself. Pass the DB positionally,
   as an absolute path, on every `status`/`events` call a detached script makes.
 
@@ -267,7 +267,7 @@ forever:
 NODE=/absolute/path/to/node          # from `node -e 'console.log(process.execPath)'`, resolved once
 CLI=("$NODE" /absolute/path/to/engine/dist/cli.js)   # array — zsh-safe by construction
 CFG=/absolute/path/to/config.yaml
-DB=/absolute/path/to/deployment-checkout/data/sapwood.sqlite   # NEVER the bare default
+DB=/absolute/path/to/deployment-checkout/.sapwood/sapwood.sqlite   # NEVER the bare default
 
 # One node call does the validation AND the printing: line 1 of stdout is the next
 # cursor, everything after is one event per line — malformed/empty input exits 1 and
@@ -337,8 +337,8 @@ check, already covers the verified failure modes).
 Before dispatching a batch of work (starting a new `sapwood run`, or resuming after a
 gap), work through these in order:
 
-1. **Single-instance check.** Only one `sapwood run` may hold a given data dir
-   (`data/sapwood.lock`, docs/guide/troubleshooting.md's "Single-instance lock"). Don't guess —
+1. **Single-instance check.** Only one `sapwood run` may hold a given runtime root
+   (`.sapwood/sapwood.lock`, docs/guide/troubleshooting.md's "Single-instance lock"). Don't guess —
    either read the lock file's recorded `pid` and confirm liveness yourself
    (`ps -p <pid>`), or let `sapwood run`/`sapwood park clear` make the call: both refuse
    with the holder's pid named when a live engine already has the lock. A refusal here
@@ -432,13 +432,13 @@ Before ending a supervision session:
 
 ## Stop ritual
 
-Emergency stop (`data/EMERGENCY_STOP`), kill switch (`data/KILL_SWITCH`), and pause
-(`data/PAUSE`) are plain file sentinels next to the engine's state DB — see
+Emergency stop (`.sapwood/EMERGENCY_STOP`), kill switch (`.sapwood/KILL_SWITCH`), and pause
+(`.sapwood/PAUSE`) are plain file sentinels next to the engine's state DB — see
 `/sapwood-stop`'s own doc (`commands/sapwood-stop.md`) for the same three tiers and
 their distinct semantics. This section covers the supervision-side placement/removal
 discipline layered on top.
 
-Every `mkdir -p data && touch ...` / `rm -f ...` pair below has an equivalent
+Every `mkdir -p .sapwood && touch ...` / `rm -f ...` pair below has an equivalent
 first-class CLI verb — `sapwood pause`/`pause clear`, `sapwood stop`/`stop clear`,
 `sapwood estop --confirm`/`estop clear` — a thin wrapper over the exact same file, so
 either form is fine; the CLI form additionally prints the tier's live semantics and
@@ -449,11 +449,11 @@ either form is fine; the CLI form additionally prints the tier's live semantics 
   destructive calls, or a cost blowout that cannot wait for the drain window:
 
   ```bash
-  mkdir -p data && touch data/EMERGENCY_STOP
+  mkdir -p .sapwood && touch .sapwood/EMERGENCY_STOP
   # equivalent: sapwood estop --confirm
   ```
 
-  It is checked before `data/KILL_SWITCH` every tick and wins when both are present. In the normal
+  It is checked before `.sapwood/KILL_SWITCH` every tick and wins when both are present. In the normal
   path, it hard-kills every running/fixing lane's process group on that same tick: there is no drain
   window, in-flight WIP is lost, and killed lanes escalate to `needs-human` with their
   evidence preserved. The kill itself is forge-free — a synchronous durable-PID signal that runs
@@ -464,22 +464,22 @@ either form is fine; the CLI form additionally prints the tier's live semantics 
   escalations:
 
   ```bash
-  rm -f data/EMERGENCY_STOP
+  rm -f .sapwood/EMERGENCY_STOP
   # equivalent: sapwood estop clear (no --confirm needed to clear)
   ```
 
 - **Kill-switch placement and clearing.** For any other stop, use the drain-first kill
-  switch. Set `data/KILL_SWITCH` at the point you actually want dispatch/merges to
+  switch. Set `.sapwood/KILL_SWITCH` at the point you actually want dispatch/merges to
   freeze — the engine picks it up at the very next tick-top gate, so there's no reason
   to pre-place it "just in case." The natural placement for a clean stop is **at the
   last expected merge** of a batch: once the lane(s) you're waiting on have merged, set
   the sentinel before anything new could be dispatched into the gap.
 
   ```bash
-  mkdir -p data && touch data/KILL_SWITCH
+  mkdir -p .sapwood && touch .sapwood/KILL_SWITCH
   # equivalent: sapwood stop
   # After the drain/stop is complete and you intend to allow dispatch again:
-  rm -f data/KILL_SWITCH
+  rm -f .sapwood/KILL_SWITCH
   # equivalent: sapwood stop clear
   ```
 
@@ -508,13 +508,13 @@ either form is fine; the CLI form additionally prints the tier's live semantics 
   the queue while triaging or before a maintenance window, not to stop unsafe work.
 
   ```bash
-  mkdir -p data && touch data/PAUSE
+  mkdir -p .sapwood && touch .sapwood/PAUSE
   # equivalent: sapwood pause
-  rm -f data/PAUSE
+  rm -f .sapwood/PAUSE
   # equivalent: sapwood pause clear
   ```
 
-- **Sentinel removal.** `data/EMERGENCY_STOP`, `data/KILL_SWITCH`, and `data/PAUSE` are
+- **Sentinel removal.** `.sapwood/EMERGENCY_STOP`, `.sapwood/KILL_SWITCH`, and `.sapwood/PAUSE` are
   OUT-OF-BAND controls — the engine never removes any of them itself. Remove a sentinel
   only once you intend the *next* `sapwood run` (or the next tick, if the process is
   still alive under a signal stop rather than a hard exit) to resume the control tier it
@@ -709,10 +709,11 @@ engine already does is the authoritative number.
 
 The estimator itself (`parseAssistantUsageDeltas` + `estimateUsd`) carries synthetic unit
 coverage in-repo; validating it against a real captured run transcript is an operator step,
-not a repo test — real transcripts are one issue's dev-time artefacts and live in the deploy's
-own `data/fixtures/estimator/`, never this repo. Run `npx tsx scripts/estimator-replay.ts <dir>`
-from `engine/` against such a directory; it prints each file's estimate/real/signed error and
-exits non-zero if any file lands outside the adjudicated [-12%, +5%] band.
+not a repo test — real transcripts are one issue's dev-time artefacts and live in operator
+scratch outside `.sapwood/` (the engine never reads them), never this repo. Run `npx tsx
+scripts/estimator-replay.ts <dir>` from `engine/` against such a directory; it prints each
+file's estimate/real/signed error and exits non-zero if any file lands outside the
+adjudicated [-12%, +5%] band.
 
 ## UX harness: simulated-user supervision
 
@@ -787,13 +788,14 @@ One ledger per supervised session, one-way to the PM supervisor. Per finding:
 A session that finds nothing records an explicit clean pass — "no findings" is a valid, complete
 ledger, not an omission.
 
-Ledgers are archived at `data/review/ux/` (one file per session), each pinned with the dashboard
+Ledgers are archived in operator scratch (one file per session), each pinned with the dashboard
 commit SHA and the fixture/replay id (e.g. the demo fixture's round id, or a recorded round's own
 id) the walk was run against — so a finding is reproducible against the exact panel state it
 describes, not a moving target.
 
-That path lives inside the engine's runtime `data/` directory, gitignored repo-wide by design — the
-ledger is an operator-side artifact, never a tracked file a PR tree could contain. A reviewer
+That scratch area lives outside the engine's `.sapwood/` runtime root — the engine never reads
+it — gitignored repo-wide by design; the ledger is an operator-side artifact, never a tracked
+file a PR tree could contain. A reviewer
 cannot confirm a walk by inspecting the tree; the reviewable evidence for any given session is the
 operator's witness record folded into the relevant issue **body** (actor, steps, timestamp,
 findings summary, artifact path) — a PR or issue comment is an operator inbox/audit item, never
@@ -826,11 +828,14 @@ recipe below is that same mechanism, not new machinery:
 # to inherit from the operator's own logged-in browser.
 DASHBOARD_ORIGIN="http://localhost:4517"
 MCP_CONFIG='{"mcpServers":{"browser":{"command":"npx","args":["@playwright/mcp@latest","--isolated","--allowed-origins","'"$DASHBOARD_ORIGIN"'","--blocked-origins","https://github.com;https://api.github.com;https://*.github.com"]}}}'
+# Wherever the operator keeps this walk's ledgers — anywhere OUTSIDE .sapwood/, since the
+# engine never reads operator scratch.
+LEDGER_DIR="/absolute/path/to/operator-scratch/review/ux"
 
 claude \
   --strict-mcp-config --mcp-config "$MCP_CONFIG" \
   --setting-sources "" \
-  --allowedTools "Read,Edit(data/review/ux/**),mcp__browser__*" \
+  --allowedTools "Read,Edit($LEDGER_DIR/**),mcp__browser__*" \
   --disallowedTools "Bash,mcp__forge__*,mcp__github__*" \
   --append-system-prompt "$(cat docs/testing/ux-simulated-user.md)"
 ```
@@ -855,8 +860,8 @@ claude \
   MCP server's own origin-enforcement behaving as documented, not sapwood's PreToolUse guard hook
   — a bug in that enforcement is a channel this doesn't defend against. It is a real, configured
   control, though, not merely an unenforced instruction.
-- `--allowedTools "Read,Edit(data/review/ux/**),mcp__browser__*"` grants exactly: reading any
-  file (to consult its own report contract), writing only under `data/review/ux/` (to file its
+- `--allowedTools "Read,Edit($LEDGER_DIR/**),mcp__browser__*"` grants exactly: reading any
+  file (to consult its own report contract), writing only under `$LEDGER_DIR` (to file its
   ledger, nothing else), and the browser-automation tools to walk the journeys.
 - `--disallowedTools "Bash,mcp__forge__*,mcp__github__*"` is a third, belt-and-suspenders veto —
   in case a future edit to `$MCP_CONFIG` ever names a forge-authority or exec-capable server, this

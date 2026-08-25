@@ -54,7 +54,7 @@ file-sentinel commands (raw or the `sapwood pause`/`stop`/`estop` CLI verbs) abo
 - **`/sapwood-run [--once|--until-idle|--dry-run]`** — runs `sapwood run` with the given
   mode and reports its output. No flags = daemon mode.
 - **`/sapwood-status [db-path]`** — runs `sapwood status`, reading the state DB directly
-  (`data/sapwood.sqlite` by default). Works even with no engine session currently
+  (`.sapwood/sapwood.sqlite` by default). Works even with no engine session currently
   running.
 - **`/sapwood-dashboard [--port PORT] [--config PATH]`** — runs `sapwood dashboard`, opening
   it in your default browser or printing the loopback URL in a headless environment.
@@ -457,26 +457,28 @@ shapes are:
 
 At every level, `sapwood status` tells you what's happening without needing a live
 session. Channel A's controls are file sentinels in the target repo (the repo containing
-`data/`), reachable either as raw `touch`/`rm` or as first-class `sapwood` CLI
-verbs — both act on the exact same three files:
+`.sapwood/`), reached through the first-class `sapwood` CLI verbs — all three act on the
+exact same three files:
 
 ```sh
-mkdir -p data
-touch data/EMERGENCY_STOP  # strictest: no-drain hard kill; use only for emergencies
-rm -f data/EMERGENCY_STOP # clear only after human review
-touch data/KILL_SWITCH    # drain-first: freeze new dispatch and merges; drain workers
-rm -f data/KILL_SWITCH    # lift the kill switch on the next tick
-touch data/PAUSE          # gentle: stop new dispatch; in-flight work continues
-rm -f data/PAUSE          # remove PAUSE; dispatch resumes next tick only if no EMERGENCY_STOP or KILL_SWITCH remains
+sapwood estop --confirm   # strictest: no-drain hard kill; --confirm is REQUIRED
+sapwood estop clear       # clear only after human review
+sapwood stop              # drain-first: freeze new dispatch and merges; drain workers
+sapwood stop clear        # lift the kill switch on the next tick
+sapwood pause             # gentle: stop new dispatch; in-flight work continues
+sapwood pause clear       # remove PAUSE; dispatch resumes next tick only if no EMERGENCY_STOP or KILL_SWITCH remains
 ```
 
+Each verb is equivalent to a raw file operation on the runtime root, reachable directly if the
+CLI is unavailable:
+
 ```sh
-sapwood estop --confirm   # equivalent to touch data/EMERGENCY_STOP — --confirm is REQUIRED
-sapwood estop clear       # equivalent to rm -f data/EMERGENCY_STOP
-sapwood stop              # equivalent to touch data/KILL_SWITCH
-sapwood stop clear        # equivalent to rm -f data/KILL_SWITCH
-sapwood pause             # equivalent to touch data/PAUSE
-sapwood pause clear       # equivalent to rm -f data/PAUSE
+sapwood estop --confirm   # equivalent to: mkdir -p .sapwood && touch .sapwood/EMERGENCY_STOP
+sapwood estop clear       # equivalent to: rm -f .sapwood/EMERGENCY_STOP
+sapwood stop              # equivalent to: mkdir -p .sapwood && touch .sapwood/KILL_SWITCH
+sapwood stop clear        # equivalent to: rm -f .sapwood/KILL_SWITCH
+sapwood pause             # equivalent to: mkdir -p .sapwood && touch .sapwood/PAUSE
+sapwood pause clear       # equivalent to: rm -f .sapwood/PAUSE
 ```
 
 The CLI form additionally prints the tier's live semantics on activation (and, for
@@ -537,7 +539,7 @@ StartLimitIntervalSec=600
 StartLimitBurst=5
 
 [Service]
-# The repo the engine drives; config, data/ and logs resolve from here.
+# The repo the engine drives; config, .sapwood/ and logs resolve from here.
 WorkingDirectory=/srv/my-repo
 ExecStart=/usr/bin/env sapwood run
 # Restart the watchdog's nonzero stall exit; a clean signal stop stays stopped.

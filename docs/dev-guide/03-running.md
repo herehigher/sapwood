@@ -25,7 +25,7 @@ The root build fans out to the engine workspace. TypeScript emits ESM, declarati
 
 ## Configuration
 
-The checked-in `sapwood.config.yaml` is this repository's live configuration — the loop runs from it with no `--config`; only non-default values are written (see [Configuration — Two config files](../guide/configuration.md#two-config-files)). `loadConfig()` probes, in order, `sapwood.config.yaml`, `sapwood.config.yml`, then `sapwood.config.json`; `sapwood run --config <path>` (including `--dry-run`), `sapwood status --config <path>`, `sapwood events --config <path>`, `sapwood pause|stop|estop --config <path>` (#731), and `sapwood validate [path]` bypass the probe. `status`/`events`/`pause`/`stop`/`estop`'s `--config` is authoritative once given (#710) — a bad path there is a hard error, never a silent fallback. Relative `promptFile`, `goal.file`, and `doctrine.file` keys, and a SET `logging.path`, resolve from the selected config's directory, so an alternate config's own log lands beside it when one is explicitly given. An UNSET `logging.path` instead resolves to the runtime default `.sapwood/logs/sapwood.log` under the repo root, regardless of where the config file lives — the same cwd-relative convention the DB (`data/sapwood.sqlite`), `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, and worktree roots already use. JSON is accepted through the YAML parser. See [Configuration](../guide/configuration.md) for the complete key reference.
+The checked-in `sapwood.config.yaml` is this repository's live configuration — the loop runs from it with no `--config`; only non-default values are written (see [Configuration — Two config files](../guide/configuration.md#two-config-files)). `loadConfig()` probes, in order, `sapwood.config.yaml`, `sapwood.config.yml`, then `sapwood.config.json`; `sapwood run --config <path>` (including `--dry-run`), `sapwood status --config <path>`, `sapwood events --config <path>`, `sapwood pause|stop|estop --config <path>` (#731), and `sapwood validate [path]` bypass the probe. `status`/`events`/`pause`/`stop`/`estop`'s `--config` is authoritative once given (#710) — a bad path there is a hard error, never a silent fallback. Relative `promptFile`, `goal.file`, and `doctrine.file` keys, and a SET `logging.path`, resolve from the selected config's directory, so an alternate config's own log lands beside it when one is explicitly given. An UNSET `logging.path` instead resolves to the runtime default `.sapwood/logs/sapwood.log` under the repo root, regardless of where the config file lives — the same cwd-relative convention the DB (`.sapwood/sapwood.sqlite`), `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, and worktree roots already use. JSON is accepted through the YAML parser. See [Configuration](../guide/configuration.md) for the complete key reference.
 
 Environment variables read or propagated by the engine are deliberately narrow:
 
@@ -37,7 +37,7 @@ Environment variables read or propagated by the engine are deliberately narrow:
 | `SAPWOOD_GUARD_MODE` | Engine-set spawn variable carrying configured hard/soft guard mode; do not use it as a contributor override (`engine/src/guard/guard-hook.ts`). |
 | `SAPWOOD_WORKTREE_ROOT` | Engine-set absolute containment root for guarded session reads (`engine/src/guard/guard.ts`). |
 
-Human controls are three cwd-relative files, not environment variables: `data/EMERGENCY_STOP`, `data/KILL_SWITCH`, and `data/PAUSE` (`State.estopPath()`, `State.killSwitchPath()`, and `State.pausePath()` in `engine/src/state/state.ts`). Reachable via raw `touch`/`rm` or the first-class `sapwood pause`/`stop`/`estop` CLI verbs, each with a `clear` form (#731) — `estop` additionally requires `--confirm` to activate. `.sapwood/DIRECTIVE.md` is an optional round input at a fixed path (no config key), not a stop control.
+Human controls are three cwd-relative files, not environment variables: `.sapwood/EMERGENCY_STOP`, `.sapwood/KILL_SWITCH`, and `.sapwood/PAUSE` (`State.estopPath()`, `State.killSwitchPath()`, and `State.pausePath()` in `engine/src/state/state.ts`). Reachable via raw `touch`/`rm` or the first-class `sapwood pause`/`stop`/`estop` CLI verbs, each with a `clear` form (#731) — `estop` additionally requires `--confirm` to activate. `.sapwood/DIRECTIVE.md` is an optional round input at a fixed path (no config key), not a stop control.
 
 ## Running the loop from source
 
@@ -62,9 +62,9 @@ For a single scheduling tick, set `engine.driver: tick` in `sapwood.config.yaml`
 node --import tsx engine/src/cli.ts run --once
 ```
 
-`--once` and `--until-idle` are rejected under the rounds driver (`engine/src/cli.ts`, `commands/sapwood-run.md`). `--dry-run` does not create state or spawn a worker. A live run creates `data/sapwood.sqlite` and SQLite WAL sidecars as needed, `data/logs/sapwood.log`, worker streams/sentinels in `data/sessions/state/`, role streams/sentinels in `data/sessions/roles/`, and derived round views in `data/rounds/` (`engine/src/state/state.ts`, `engine/src/loop/logger.ts`, `engine/src/roles/worker.ts`, `engine/src/roles/peripheral.ts`).
+`--once` and `--until-idle` are rejected under the rounds driver (`engine/src/cli.ts`, `commands/sapwood-run.md`). `--dry-run` does not create state or spawn a worker. A live run creates `.sapwood/sapwood.sqlite` and SQLite WAL sidecars as needed, `.sapwood/logs/sapwood.log`, worker streams/sentinels in `.sapwood/sessions/state/`, role streams/sentinels in `.sapwood/sessions/roles/`, and derived round views in `.sapwood/rounds/` (`engine/src/state/state.ts`, `engine/src/loop/logger.ts`, `engine/src/roles/worker.ts`, `engine/src/roles/peripheral.ts`).
 
-To exercise drain behavior safely, create `data/KILL_SWITCH` before the tick. The tick observes the switch and does not dispatch or merge; remove it only when the test is complete (`commands/sapwood-stop.md`, `engine/src/loop/conductor.ts`).
+To exercise drain behavior safely, create `.sapwood/KILL_SWITCH` before the tick. The tick observes the switch and does not dispatch or merge; remove it only when the test is complete (`commands/sapwood-stop.md`, `engine/src/loop/conductor.ts`).
 
 ## Debugging a failed run
 
@@ -73,15 +73,15 @@ When a run misbehaves, the evidence trail is layered — read it in this order:
 1. **`node --import tsx engine/src/cli.ts status`** — lane states, PRs in the
    gate, spend vs. ceiling, e-stop/kill switch/pause state; works read-only with no engine
    running.
-2. **`data/logs/sapwood.log`** — the engine's own diagnostic log
+2. **`.sapwood/logs/sapwood.log`** — the engine's own diagnostic log
    (`engine/src/loop/logger.ts`).
 3. **The `events` table** — the append-only decision history
-   (`sqlite3 data/sapwood.sqlite "SELECT ts,kind,payload FROM events ORDER BY id DESC LIMIT 40"`);
+   (`sqlite3 .sapwood/sapwood.sqlite "SELECT ts,kind,payload FROM events ORDER BY id DESC LIMIT 40"`);
    dispatch, gate outcomes, degrades, escalations, and reconciliation all land
    here with reasons.
-4. **Per-session evidence** — flat files under `data/sessions/state/` named
+4. **Per-session evidence** — flat files under `.sapwood/sessions/state/` named
    per lane (`<lane>.jsonl`, `<lane>.running.json`, terminal sentinels) and
-   `data/sessions/roles/` (peripherals): the JSONL stream is the session
+   `.sapwood/sessions/roles/` (peripherals): the JSONL stream is the session
    transcript; sentinel files (`.running`/`.done`/`.failed`/`.handoff`) are the
    wrapper's ground truth about how it ended, independent of the model's
    self-report.
@@ -93,14 +93,14 @@ paths) are in [Troubleshooting](../guide/troubleshooting.md).
 
 ## Resetting local state
 
-Stop the local engine before deleting runtime files. All of the following are generated under `data/` and can be removed between isolated development runs, but deletion is irreversible and changes recovery behavior:
+Stop the local engine before deleting runtime files. All of the following are generated under `.sapwood/` and can be removed between isolated development runs, but deletion is irreversible and changes recovery behavior:
 
 | Path | What deletion loses |
 | --- | --- |
-| `data/sapwood.sqlite`, `-wal`, `-shm` | Worker/round state, events, spend, pending recovery writes, proxy audit records, and schema version. Delete the three only as one stopped-engine set. |
-| `data/sessions/state/` | Worker JSONL, heartbeat, running/terminal, resume-intent, and handoff evidence; in-flight or resumable lanes can no longer be reconciled. |
-| `data/sessions/roles/` | Peripheral role JSONL and terminal evidence. |
-| `data/logs/` | Engine diagnostic history only. |
-| `data/rounds/`, `data/proxy-bundles/`, `data/directives/` | Derived round Markdown, frozen proxy evidence, and archived human directives. Some have SQLite index/source rows, so deleting only the files leaves incomplete artifacts. |
+| `.sapwood/sapwood.sqlite`, `-wal`, `-shm` | Worker/round state, events, spend, pending recovery writes, proxy audit records, and schema version. Delete the three only as one stopped-engine set. |
+| `.sapwood/sessions/state/` | Worker JSONL, heartbeat, running/terminal, resume-intent, and handoff evidence; in-flight or resumable lanes can no longer be reconciled. |
+| `.sapwood/sessions/roles/` | Peripheral role JSONL and terminal evidence. |
+| `.sapwood/logs/` | Engine diagnostic history only. |
+| `.sapwood/rounds/`, `.sapwood/proxy-bundles/`, `.sapwood/directives/` | Derived round Markdown, frozen proxy evidence, and archived human directives. Some have SQLite index/source rows, so deleting only the files leaves incomplete artifacts. |
 
-Do not delete `data/EMERGENCY_STOP`, `data/KILL_SWITCH`, or `data/PAUSE` as part of a blanket reset without deciding to lift those operator controls. Do not delete a retained worker worktree: it may contain WIP preserved for inspection (`engine/src/roles/worker.ts`).
+Do not delete `.sapwood/EMERGENCY_STOP`, `.sapwood/KILL_SWITCH`, or `.sapwood/PAUSE` as part of a blanket reset without deciding to lift those operator controls. Do not delete a retained worker worktree: it may contain WIP preserved for inspection (`engine/src/roles/worker.ts`).

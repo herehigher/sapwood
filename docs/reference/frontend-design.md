@@ -1296,7 +1296,7 @@ served from the operator-owned dismissal JSONL. The two
                   "inputTokens": 0, "outputTokens": 0 }]
   },
   "rings": 27,                      // COUNT(events WHERE kind='merged') — the ring count
-  "logPath": "data/logs/run-….log", // the run-scoped engine log file's path (#193) — shown by
+  "logPath": ".sapwood/logs/run-….log", // the run-scoped engine log file's path (#193) — shown by
                                     // the phase inspector's "view log" entry (§6); live-only,
                                     // path only — the server never serves log content
   "config": { /* ALLOWLISTED subset of resolved config (§3 E) — the server names the
@@ -1380,7 +1380,7 @@ configuration.
 
 **`POST /api/attention/dismiss`** — body `{ "eventId": n, "kind": "..." }`, with `n` an
 integer at least one and `kind` a non-empty string of at most 100 characters; appends `{ eventId, kind, ts }` to
-`attention-dismissals.jsonl` in the data directory beside the engine
+`.sapwood/attention-dismissals.jsonl` beside the engine
 sentinels. It uses the exact same JSON/custom-header/origin defences as
 `/api/control`, is gated by the same `dashboard.controls` predicate, and is
 idempotent. `GET /api/attention/dismissals` is always registered so a

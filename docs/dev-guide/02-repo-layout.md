@@ -9,7 +9,7 @@ Risk labels below mean **CORE** (central behavior; review carefully), **NORMAL**
 | `engine/` | CORE | npm workspace containing the TypeScript engine, prompts, pricing data, tests, and compiled `dist/`. |
 | `commands/` | NORMAL | Claude Code slash-command definitions that invoke the engine CLI or manage control sentinels. |
 | `docs/` | NORMAL | Durable architecture, configuration, security, usage, and contributor knowledge. Security-policy edits require elevated review. |
-| `data/` | runtime | SQLite, logs, session streams/sentinels, round artifacts, and operator control files. Never edit runtime state by hand except the documented control/directive files. |
+| `.sapwood/` | runtime | The engine's runtime directory — see [Configuration — The `.sapwood/` runtime directory](../guide/configuration.md#the-sapwood-runtime-directory). |
 | `sapwood.config.yaml` | CORE | This repository's live configuration — the loop runs from it (no `--config`); the whole file is human-merge-only. Starter for other repos: `sapwood.config.example.yaml`. |
 | `biome.json` | NORMAL | Formatting and lint policy for TypeScript sources. |
 | `tsconfig.base.json` | NORMAL | Shared strict TypeScript/NodeNext compiler policy. |
@@ -48,9 +48,9 @@ repo root's `.nvmrc` pins the Node major for version managers.
 `commands/sapwood-run.md`, `commands/sapwood-status.md`, and `commands/sapwood-dashboard.md`
 delegate to the shared package wrapper described in
 [09 — Plugin, commands & prompts](09-plugin-commands-prompts.md#slash-commands-commands), while
-preserving the target repository as cwd. `commands/sapwood-stop.md` manages
-`data/EMERGENCY_STOP`, `data/KILL_SWITCH`, and `data/PAUSE` directly; there is no separate CLI
-`stop` subcommand.
+preserving the target repository as cwd. `commands/sapwood-stop.md` calls the `sapwood
+pause`/`stop`/`estop` CLI verbs, which resolve the `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`
+sentinel paths internally; the command file never touches `.sapwood/` directly.
 
 ## docs/ — documentation partition
 

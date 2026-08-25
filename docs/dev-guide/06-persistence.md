@@ -36,7 +36,7 @@ rollback intents, review-trigger pins), never a competing authority.
 **Exclusion boundary — the medium is decided by ownership, not by shape.**
 Whoever owns a fact determines where it lives:
 
-- **Human-controlled sentinels** → files (`data/EMERGENCY_STOP`, `data/KILL_SWITCH`, `data/PAUSE`):
+- **Human-controlled sentinels** → files (`.sapwood/EMERGENCY_STOP`, `.sapwood/KILL_SWITCH`, `.sapwood/PAUSE`):
   operable with `touch`/`rm`, readable with `ls`, and available even when the
   database is locked or corrupt.
 - **The wrapper owns session evidence** → sentinel files
@@ -66,7 +66,7 @@ them is a design smell regardless of how convenient it is.
 
 ## Engine choice & files
 
-`State` uses Node's built-in `node:sqlite`, so the engine has no SQLite npm or native-build dependency. Its default database is `data/sapwood.sqlite`; SQLite may maintain adjacent `data/sapwood.sqlite-wal` and `data/sapwood.sqlite-shm` files. Writable opens set WAL mode and run migrations; the single engine process is the serial writer (conductor, round driver, role runners, and proxy journal code all write through its one `State` handle) while status readers can proceed concurrently (`State` constructor, `engine/src/state/state.ts`).
+`State` uses Node's built-in `node:sqlite`, so the engine has no SQLite npm or native-build dependency. Its default database is `.sapwood/sapwood.sqlite`; SQLite may maintain adjacent `.sapwood/sapwood.sqlite-wal` and `.sapwood/sapwood.sqlite-shm` files. Writable opens set WAL mode and run migrations; the single engine process is the serial writer (conductor, round driver, role runners, and proxy journal code all write through its one `State` handle) while status readers can proceed concurrently (`State` constructor, `engine/src/state/state.ts`).
 
 `State(path, { readOnly: true })` opens query-only and performs no migration; the CLI status caller checks the on-disk version before interpreting rows. On a filesystem where a WAL reader cannot create coordination files, `openReadOnly()` falls back to an immutable main-file snapshot and warns that live WAL rows may be absent (`engine/src/state/state.ts`, `engine/src/cli.ts`).
 
@@ -148,7 +148,7 @@ One row per proxy call, uniquely ordered by round/phase/role/session/attempt/`se
 
 #### `forge_proxy_bundles`
 
-Content-addressed frozen evidence index: SHA-256 `hash` primary key, round/phase/role/session identity, optional `decision_ref`, `byte_size`, optional on-disk `path`, and `created_at`. `persistEvidenceBundle()` writes JSON under `data/proxy-bundles/` and indexes it; decision/audit readers retrieve by hash. Re-persisting identical content keeps the first row through conflict-ignore.
+Content-addressed frozen evidence index: SHA-256 `hash` primary key, round/phase/role/session identity, optional `decision_ref`, `byte_size`, optional on-disk `path`, and `created_at`. `persistEvidenceBundle()` writes JSON under `.sapwood/proxy-bundles/` and indexes it; decision/audit readers retrieve by hash. Re-persisting identical content keeps the first row through conflict-ignore.
 
 ## Crash-consistency rules
 

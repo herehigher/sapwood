@@ -7,6 +7,25 @@ All notable changes to sapwood are documented here. Format:
 
 ## [Unreleased]
 
+### Changed
+- Runtime directory rename — see [Configuration — The `.sapwood/` runtime
+  directory](docs/guide/configuration.md#the-sapwood-runtime-directory) for the layout.
+  **Upgrading:** stop the engine before upgrading; the new CLI reads and writes `.sapwood/`
+  only; no automatic migration. Cutover checklist (idempotent and resumable — safe to re-run
+  if interrupted):
+
+  ```
+  # engine stopped (pid gone, no sapwood.lock holder)
+  mkdir -p .sapwood/cache .sapwood/keys
+  for f in sapwood.sqlite sapwood.sqlite-wal sapwood.sqlite-shm sapwood.lock KILL_SWITCH PAUSE EMERGENCY_STOP ESCALATION \
+           DIRECTIVE.md attention-dismissals.jsonl directives rounds proxy-bundles logs sessions; do
+    [ -e "data/$f" ] && mv "data/$f" .sapwood/
+  done
+  for d in review generated; do [ -e "data/$d" ] && mv "data/$d" .sapwood/cache/; done
+  for k in data/worker-deploy-key*; do [ -e "$k" ] && mv "$k" .sapwood/keys/; done
+  # sapwood.config.yaml: worker.deployKeyPath → .sapwood/keys/worker-deploy-key[-host]
+  ```
+
 ### Added
 - Bare `sapwood` npm package, including the packaged dashboard; post-publish dashboard canary
   and catalog promotion of the thin marketplace shell.
