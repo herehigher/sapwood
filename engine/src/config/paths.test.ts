@@ -73,16 +73,13 @@ test("ensureRuntimeRoot: creates the root, writes .gitignore (*) and cache/CACHE
   }
 });
 
-// #1077 fix round 1 (P2/test quality): a byte-content comparison alone cannot distinguish "the
-// second call skipped the write" from "the second call re-wrote the identical bytes" — both
-// leave the same file content behind, so a content-only assertion would still pass against an
-// implementation that always re-writes. An INJECTED fs (RuntimeRootFsOps — real node:fs mock.
-// method() interception was tried first and found unreliable across this repo's ESM/tsx
-// toolchain: a mock.method() patch on the node:fs module object was not consistently observed
-// by paths.ts's own `import { writeFileSync } from "node:fs"` binding) proves the SKIP itself:
-// zero writeFile calls on the second, already-stamped-root invocation, plus a positive control
-// pinning that the SAME fake DOES record the two real writes on a fresh root — so a "0 calls"
-// result on the second call can't be a silent no-op/broken-fake false negative.
+// A byte-content comparison alone cannot distinguish "the second call skipped the write" from
+// "the second call re-wrote the identical bytes" — both leave the same file content behind, so
+// a content-only assertion would still pass against an implementation that always re-writes. An
+// INJECTED fs (RuntimeRootFsOps) proves the SKIP itself: zero writeFile calls on the second,
+// already-stamped-root invocation, plus a positive control pinning that the SAME fake DOES
+// record the two real writes on a fresh root — so a "0 calls" result on the second call can't
+// be a silent no-op/broken-fake false negative.
 function countingFsOps(real: RuntimeRootFsOps): RuntimeRootFsOps & { writeFileCalls: string[] } {
   const writeFileCalls: string[] = [];
   return {
@@ -144,8 +141,8 @@ test("ensureRuntimeRoot: a pre-existing DIFFERING .gitignore is preserved, not o
 // ── AC1/AC6: negative oracle — `runtimePaths()` is the ONLY place these names are spelled ─────
 //
 // Scans engine/src and dashboard/src (this repo's whole application source, both production
-// and test files) for any of three bypass shapes the pre-#1077 ~8 independent literals (and
-// #1077 fix round 1's review) demonstrated:
+// and test files) for any of three bypass shapes the pre-#1077 ~8 independent literals
+// demonstrated:
 //   - a `"data/"`-shaped string literal, any quote style including a template literal
 //     (`` `data/x` ``)
 //   - a `join(...)`/`resolve(...)` call carrying a bare `"data"` argument later in its argument
@@ -175,9 +172,9 @@ const DIR_ALLOWLIST_PREFIX = "engine/src/guard/";
 // sites exercise that SAME still-unmigrated behavior (arbitrary example values in YAML-config-
 // roundtrip and gitignore-rule fixtures); config.test.ts's three worker.deployKeyPath sites are
 // arbitrary example values for the SAME still-`data/`-rooted key (config.test.ts deliberately
-// describes today's real resolution — NOT a `keys/` location that has not been implemented —
-// review round 1's finding: a `keys/`-rooted example would misleadingly describe a relocation
-// #1080 has not done yet). None of these three files carry a marker of their own — every one is
+// describes today's real resolution — NOT a `keys/` location that has not been implemented, since
+// a `keys/`-rooted example would misleadingly describe a relocation #1080 has not done yet). None
+// of these three files carry a marker of their own — every one is
 // listed here by line number, not by a substring/marker scan, so a future edit that adds an
 // unrelated `data/` literal to any of them is NOT silently covered by a leftover marker.
 const ALLOWED_1080_SITES = new Set([
@@ -212,10 +209,14 @@ const ALLOWED_1080_SITES = new Set([
   "engine/src/loop/init.test.ts:1263",
   "engine/src/loop/init.test.ts:1290",
   "engine/src/loop/init.test.ts:1317",
+  "engine/src/loop/init.test.ts:1461",
   "engine/src/loop/init.test.ts:1468",
   "engine/src/loop/init.test.ts:1535",
+  "engine/src/loop/init.test.ts:1680",
   "engine/src/loop/init.test.ts:1746",
+  "engine/src/loop/init.test.ts:1755",
   "engine/src/loop/init.test.ts:1788",
+  "engine/src/loop/init.test.ts:1800",
   "engine/src/loop/init.test.ts:2216",
   "engine/src/loop/init.test.ts:2230",
   "engine/src/loop/init.test.ts:2239",
@@ -226,13 +227,16 @@ const ALLOWED_1080_SITES = new Set([
 
 // A bare `"data/"` (or `` `data/` ``) string literal, any quote style, optionally absolute.
 const DATA_LITERAL_RE = /["'`]\/?data\//;
-// `join(...)`/`resolve(...)` carrying a bare "data" argument — any quote style, MULTILINE (runs
+// `join(...)`/`resolve(...)` carrying a bare "data" argument in ANY position — first argument
+// (`join("data", x)`) or later (`join(cwd, "data", x)`) — any quote style, MULTILINE (runs
 // against the whole file, `[\s\S]` crosses newlines) so a call whose args wrap onto several
-// lines is still caught. Bounded to 200 chars between `(` and the "data" argument (generous for
-// a handful of short path-segment arguments, even wrapped one per line) — NOT unbounded: an
-// unbounded lazy match has no notion of the call's own closing paren, so it would "leak" past
-// unrelated code and match an entirely different, later statement's "data" occurrence.
-const CALL_DATA_RE = /\b(?:join|resolve)\(\s*[\s\S]{0,200}?,\s*["'`]data["'`]\s*[,)]/;
+// lines is still caught. The leading-argument group is optional so a first-position "data" is
+// not required to be preceded by a comma. Bounded to 200 chars between `(` and the "data"
+// argument (generous for a handful of short path-segment arguments, even wrapped one per line)
+// — NOT unbounded: an unbounded lazy match has no notion of the call's own closing paren, so it
+// would "leak" past unrelated code and match an entirely different, later statement's "data"
+// occurrence.
+const CALL_DATA_RE = /\b(?:join|resolve)\(\s*(?:[\s\S]{0,200}?,\s*)?["'`]data["'`]\s*[,)]/;
 // String concatenation off a bare "data" literal: "data" + "/x".
 const CONCAT_DATA_RE = /["'`]data["'`]\s*\+/;
 
@@ -308,10 +312,10 @@ test("AC1/AC6: no `data/` runtime-root literal remains outside runtimePaths() an
 });
 
 // ── Mutation fixtures: each bypass shape the oracle above claims to catch, proven non-vacuous ──
-// P2 (review round 1): the pre-fix oracle missed `join(cwd, \`data\`, x)`, `resolve(cwd, "data",
-// x)`, string concatenation, and multiline `join(` calls. One fixture per shape, run through the
-// SAME findDataLiteralOffenses the real scan uses — if any of these ever stops matching, the
-// oracle regressed silently the same way it did before this round.
+// One fixture per shape (`join(cwd, \`data\`, x)`, `resolve(cwd, "data", x)`, "data" as the
+// FIRST argument, string concatenation, and multiline `join(` calls), run through the SAME
+// findDataLiteralOffenses the real scan uses — if any of these ever stops matching, the oracle
+// has regressed silently.
 test("negative-oracle mutation fixture: template-literal join segment (`` `data` ``) is caught", () => {
   const offenses = findDataLiteralOffenses("fixture.ts", 'export const p = join(cwd, `data`, "sessions", "roles");\n');
   assert.ok(offenses.length > 0, "join(cwd, `data`, ...) must be flagged");
@@ -320,6 +324,11 @@ test("negative-oracle mutation fixture: template-literal join segment (`` `data`
 test('negative-oracle mutation fixture: resolve(cwd, "data", x) is caught', () => {
   const offenses = findDataLiteralOffenses("fixture.ts", 'export const p = resolve(cwd, "data", "worker-deploy-key");\n');
   assert.ok(offenses.length > 0, 'resolve(cwd, "data", ...) must be flagged');
+});
+
+test('negative-oracle mutation fixture: join("data", x) — "data" as the FIRST argument, no leading comma — is caught', () => {
+  const offenses = findDataLiteralOffenses("fixture.ts", 'export const p = join("data", "worker-deploy-key");\n');
+  assert.ok(offenses.length > 0, 'join("data", ...) must be flagged even when "data" is the first argument');
 });
 
 test('negative-oracle mutation fixture: string concatenation off a bare "data" literal is caught', () => {
@@ -335,7 +344,7 @@ test('negative-oracle mutation fixture: a multiline join(...) call with "data" w
   assert.ok(offenses.length > 0, "a multiline join(...) carrying a data argument must be flagged");
 });
 
-test('negative-oracle mutation fixture: a plain "data/x" literal (the original, pre-round-1 shape) is still caught', () => {
+test('negative-oracle mutation fixture: a plain "data/x" literal is still caught', () => {
   const offenses = findDataLiteralOffenses("fixture.ts", 'export const DEFAULT_DB_PATH = "data/sapwood.sqlite";\n');
   assert.ok(offenses.length > 0);
 });
@@ -347,6 +356,7 @@ test("negative-oracle mutation fixture: a clean .sapwood/-rooted equivalent of e
     'export const p3 = ".sapwood" + "/" + name;',
     'export const p4 = join(\n  cwd,\n  ".sapwood",\n  "sessions",\n  "roles",\n);',
     'export const DEFAULT_DB_PATH = ".sapwood/sapwood.sqlite";',
+    'export const p5 = join(".sapwood", "worker-deploy-key");',
   ].join("\n");
   assert.deepEqual(findDataLiteralOffenses("fixture.ts", clean), []);
 });
