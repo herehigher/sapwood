@@ -38,9 +38,8 @@ npm run test:focus -- src/roles/merge-driver.test.ts
 ```
 
 That expands to `node --import tsx --test --test-timeout=60000 src/roles/merge-driver.test.ts`.
-Unlike `npm test`, `test:focus` does not run `scripts/check-no-leaked-test-processes.ts`
-afterward — the sweep exists to catch processes a hung/killed full run leaves behind, and a
-focused run isn't the case it's guarding against.
+Unlike `npm test`, `test:focus` bypasses `run-tests.sh`, so it neither sets the per-run sweep
+identifier nor runs `scripts/check-no-leaked-test-processes.ts` afterward.
 
 Use `--test-name-pattern` after `--test` when a Node test name is sufficiently specific. `src/roles/worker.test.ts` exercises real local subprocess and filesystem behavior through fakes/helpers around the Claude boundary; under heavy parallel machine load, rerun that file alone to distinguish contention from a deterministic failure. There is no repository script for a separate serial mode.
 
