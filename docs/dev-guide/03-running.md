@@ -37,7 +37,7 @@ Environment variables read or propagated by the engine are deliberately narrow:
 | `SAPWOOD_GUARD_MODE` | Engine-set spawn variable carrying configured hard/soft guard mode; do not use it as a contributor override (`engine/src/guard/guard-hook.ts`). |
 | `SAPWOOD_WORKTREE_ROOT` | Engine-set absolute containment root for guarded session reads (`engine/src/guard/guard.ts`). |
 
-Human controls are three cwd-relative files, not environment variables: `data/EMERGENCY_STOP`, `data/KILL_SWITCH`, and `data/PAUSE` (`State.estopPath()`, `State.killSwitchPath()`, and `State.pausePath()` in `engine/src/state/state.ts`). Reachable via raw `touch`/`rm` or the first-class `sapwood pause`/`stop`/`estop` CLI verbs, each with a `clear` form (#731) — `estop` additionally requires `--confirm` to activate. `data/DIRECTIVE.md` is an optional round input configured by `round.directiveFile`, not a stop control.
+Human controls are three cwd-relative files, not environment variables: `data/EMERGENCY_STOP`, `data/KILL_SWITCH`, and `data/PAUSE` (`State.estopPath()`, `State.killSwitchPath()`, and `State.pausePath()` in `engine/src/state/state.ts`). Reachable via raw `touch`/`rm` or the first-class `sapwood pause`/`stop`/`estop` CLI verbs, each with a `clear` form (#731) — `estop` additionally requires `--confirm` to activate. `.sapwood/DIRECTIVE.md` is an optional round input at a fixed path (no config key), not a stop control.
 
 ## Running the loop from source
 

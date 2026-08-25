@@ -11,6 +11,7 @@ import {
   dashboardConfigSubset,
   engineAgentEmptyCiRequiredChecksError,
   loadConfig,
+  normalizeLoggingPath,
   parseConfig,
 } from "./config.js";
 import { defaultRuntimeRoot, runtimePaths } from "./paths.js";
@@ -335,6 +336,23 @@ test("#1078 AC2: logging.path SET -> still resolved against the config file's di
     const customPath = join(dir, "custom.yaml");
     writeFileSync(customPath, "board: { owner: a, repo: r, projectNumber: 1 }\nlogging: { path: logs/custom.log }\n");
     assert.equal(loadConfig(customPath).logging.path, join(dir, "logs", "custom.log"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#1078 P2 (gate② round 1, single authority): normalizeLoggingPath applied to an INJECTED bare-parseConfig result (never through loadConfig — the EngineOverrides.cfg shape cli.ts's runEngine actually injects) yields the SAME logging.path a file-loaded config with the identical content resolves to — file-loaded and injected configs can never silently disagree", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-config-logging-"));
+  try {
+    const text = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+    const configPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(configPath, text);
+
+    const fileLoaded = loadConfig(configPath);
+    const injected = normalizeLoggingPath(parseConfig(text)); // the tests-only EngineOverrides.cfg shape, never through loadConfig
+
+    assert.equal(injected.logging.path, fileLoaded.logging.path);
+    assert.equal(injected.logging.path, runtimePaths(defaultRuntimeRoot()).logFile);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

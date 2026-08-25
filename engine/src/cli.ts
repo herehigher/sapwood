@@ -15,16 +15,11 @@ import {
   dashboardConfigSubset,
   engineAgentEmptyCiRequiredChecksError,
   loadConfig,
+  type NormalizedSapwoodConfig,
+  normalizeLoggingPath,
   type SapwoodConfig,
 } from "./config/config.js";
-import {
-  defaultRuntimeRoot,
-  ensureRuntimeRoot,
-  runtimePaths,
-  SAPWOOD_ESTOP_FILENAME,
-  SAPWOOD_KILL_SWITCH_FILENAME,
-  SAPWOOD_PAUSE_FILENAME,
-} from "./config/paths.js";
+import { ensureRuntimeRoot, SAPWOOD_ESTOP_FILENAME, SAPWOOD_KILL_SWITCH_FILENAME, SAPWOOD_PAUSE_FILENAME } from "./config/paths.js";
 import { findRate, loadPricingTable, type PricingTable } from "./config/pricing.js";
 import {
   associateLanePr,
@@ -2655,12 +2650,13 @@ export interface EngineOverrides {
   claudeVersionProbe?: (claudeBin: string) => Promise<ClaudeVersionProbeResult>;
 }
 
-function createRunLogger(cfg: SapwoodConfig, override?: EngineLogger): { logger: EngineLogger; path: string } {
-  // #1078: loadConfig already fills an unset logging.path with runtimePaths(defaultRuntimeRoot())
-  // .logFile before a real run ever reaches here — this fallback only matters for a hand-built
-  // cfg (parseConfig, never loadConfig) a test passes directly, same defensive belt as any other
-  // optional-with-a-runtime-default field.
-  const path = resolve(cfg.logging.path ?? runtimePaths(defaultRuntimeRoot()).logFile);
+// #1078 P2 (gate② round 1): `cfg` is `NormalizedSapwoodConfig` — `logging.path` is guaranteed
+// populated by the time ANY caller reaches this function (runEngine normalizes both the
+// file-loaded and the EngineOverrides.cfg-injected path with the SAME config.ts function before
+// either driver is invoked), so this is the only place `logging.path` is ever resolved — no
+// second, independent unset-defaulting fallback here.
+function createRunLogger(cfg: NormalizedSapwoodConfig, override?: EngineLogger): { logger: EngineLogger; path: string } {
+  const path = resolve(cfg.logging.path);
   return {
     path,
     logger:
@@ -2817,7 +2813,7 @@ function appendRunEnded(state: Pick<State, "appendEvent">, payload: Record<strin
  *  (runRoundsEngine below) is the default. */
 async function runTickEngine(
   argv: string[],
-  cfg: SapwoodConfig,
+  cfg: NormalizedSapwoodConfig,
   overrides: EngineOverrides,
   lockTakeover?: LockTakeoverRecord,
 ): Promise<number> {
@@ -3093,7 +3089,7 @@ async function runTickEngine(
  *  wires the real collaborators runRounds needs, it adds no safety logic of its own. */
 async function runRoundsEngine(
   argv: string[],
-  cfg: SapwoodConfig,
+  cfg: NormalizedSapwoodConfig,
   overrides: EngineOverrides,
   lockTakeover?: LockTakeoverRecord,
 ): Promise<number> {
@@ -3375,7 +3371,13 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
   // the round orchestrator (round.ts) actually reads it for dispatch scoping.
   // EngineOverrides.cfg is a tests-only injection seam and keeps its established precedence.
   // Production passes no override, so the CLI path is handed to loadConfig verbatim.
-  const cfg = applyMilestoneOverride(argv, overrides.cfg ?? loadConfig(validatedRun.configPath));
+  // #1078 P2 (gate② round 1): normalizeLoggingPath here — AFTER applyMilestoneOverride, so it
+  // runs on the FINAL cfg regardless of source — is what lets createRunLogger (inside either
+  // driver below) require `logging.path: string` with no fallback of its own: an injected
+  // EngineOverrides.cfg (built by a test's bare parseConfig, never through loadConfig) gets the
+  // SAME unset-defaulting rule loadConfig itself already applied to the file-loaded path, so the
+  // two can never silently disagree on where the log lands.
+  const cfg = normalizeLoggingPath(applyMilestoneOverride(argv, overrides.cfg ?? loadConfig(validatedRun.configPath)));
   // #784: fail closed BEFORE any other startup work — a config only `loadConfig`/`parseConfig`
   // warn about (reviewer.mode: engine-agent + empty ci.requiredChecks) would otherwise queue
   // every PR forever with no trusted CI evidence ever confirming it. See

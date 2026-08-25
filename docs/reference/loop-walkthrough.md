@@ -36,11 +36,11 @@ dispatch**):
    ≤ `maxDraftCycles`, then `needs-human`). Every phase: KILL_SWITCH checked
    first; marker written after; phase cursor advanced after that. All roles
    are zero-grant sessions — structured output in, engine executes writes.
-   `aligning` is also the round's steering entry point (#126): if
-   `round.directiveFile` (default `data/DIRECTIVE.md`) exists, its content is
+   `aligning` is also the round's steering entry point (#126): if the fixed
+   `.sapwood/DIRECTIVE.md` (not a config key) exists, its content is
    substituted into the aligning and architecting prompts as
    `{{round.directive}}` — a human's why/what for this round, not a code
-   change — then archived to `data/directives/round-<id>.md` so it applies
+   change — then archived to `.sapwood/directives/round-<id>.md` so it applies
    exactly once. Not tied to pause/resume: drop the file any time before this
    phase runs.
 5. **`executing`.** ONE dispatch-enabled tick (the batch, ≤

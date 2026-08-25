@@ -57,9 +57,23 @@ test("#1078 AC4: pause/stop/estop/park clear/status/events all resolve the SAME 
     const park = runCli(["node", "sapwood", "park", "clear"]);
     assert.doesNotMatch(park.stderr, /no state DB/, "park clear found the SAME db pause/stop/estop just used");
 
-    // events (read-only, no positional given) reads the SAME root too.
+    // events (read-only, no positional given) reads the SAME root too — proven with a
+    // DISTINCTIVE event inserted into `dbPath` and asserted present in the output, not just a
+    // bare exit-0 (events returns 0 even against a MISSING db, so exit code alone would pass
+    // even if the positional/root were silently ignored).
+    const marker = new State(dbPath);
+    marker.appendEvent("run-started", { configHash: "cli-root-consistency-marker" });
+    marker.close();
     const events = runCli(["node", "sapwood", "events", "--json"]);
     assert.equal(events.code, 0, events.stderr);
+    const eventsDto = JSON.parse(events.stdout) as { dbPath: string; events: { kind: string; payload: unknown }[] };
+    assert.equal(eventsDto.dbPath, DEFAULT_DB_PATH, "events reports the SAME (relative) db path every other command resolved");
+    assert.ok(
+      eventsDto.events.some(
+        (e) => e.kind === "run-started" && (e.payload as { configHash?: string }).configHash === "cli-root-consistency-marker",
+      ),
+      "the marker event written directly into dbPath was read back through events — proving the SAME root, not just a matching exit code",
+    );
   });
 });
 
@@ -71,8 +85,22 @@ test("#1078 AC4: status/events STILL accept a positional db-path override — re
     assert.equal(status.code, 0, status.stderr);
     assert.equal((JSON.parse(status.stdout) as { dbPath: string }).dbPath, elsewhere);
 
+    // Same probative shape as the same-root test above: a distinctive event written into
+    // `elsewhere` (never into the default root) must come back — proving the positional
+    // actually redirected the read, not merely that the command exited 0.
+    const marker = new State(elsewhere);
+    marker.appendEvent("run-started", { configHash: "cli-root-consistency-elsewhere-marker" });
+    marker.close();
     const events = runCli(["node", "sapwood", "events", elsewhere, "--json"]);
     assert.equal(events.code, 0, events.stderr);
+    const eventsDto = JSON.parse(events.stdout) as { dbPath: string; events: { kind: string; payload: unknown }[] };
+    assert.equal(eventsDto.dbPath, elsewhere, "events named the intended (positional) path, not the default root");
+    assert.ok(
+      eventsDto.events.some(
+        (e) => e.kind === "run-started" && (e.payload as { configHash?: string }).configHash === "cli-root-consistency-elsewhere-marker",
+      ),
+      "the marker event written into `elsewhere` was read back — proving the positional actually redirected the read",
+    );
   });
 });
 

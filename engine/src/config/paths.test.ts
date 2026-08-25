@@ -179,21 +179,20 @@ const FILE_ALLOWLIST = new Set(["engine/src/config/paths.ts", "engine/src/config
 // of these three files carry a marker of their own — every one is
 // listed here by line number, not by a substring/marker scan, so a future edit that adds an
 // unrelated `data/` literal to any of them is NOT silently covered by a leftover marker.
-// #1078: every line number below re-verified against the CURRENT file contents after this leg's
-// rebase onto #1086's own fix round 2 (init.ts gained a doc comment before ensureDeployKey plus
-// #1086's own changes; init.test.ts gained #1078's three new AC3 tests AND #1086's own new
-// fixtures; config.test.ts's deployKeyPath resolver test was rewritten) — none of the UNDERLYING
-// sites moved semantically, only their line numbers shifted.
 const ALLOWED_1080_SITES = new Set([
   "engine/src/loop/init.ts:484",
   "engine/src/loop/init.ts:841",
   "engine/src/loop/init.ts:1036",
   "engine/src/loop/init.ts:1180",
   "engine/src/config/config.test.ts:1182",
+  "engine/src/config/config.test.ts:1200",
   "engine/src/config/config.test.ts:1202",
   "engine/src/config/config.test.ts:1205",
   "engine/src/config/config.test.ts:1209",
+  "engine/src/config/config.test.ts:1220",
+  "engine/src/config/config.test.ts:1223",
   "engine/src/config/config.test.ts:1235",
+  "engine/src/config/config.test.ts:1253",
   "engine/src/loop/init.test.ts:919",
   "engine/src/loop/init.test.ts:928",
   "engine/src/loop/init.test.ts:940",
