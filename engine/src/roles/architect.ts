@@ -90,6 +90,11 @@ export interface ArchitectDeps {
    *  either heading simply absent, degrades to an explicit placeholder (see loadGoalExcerpt)
    *  rather than failing the round. */
   planMdPath?: string;
+  /** #1078: override for resolveRoundDirective's directive-file path — same seam as planMdPath
+   *  above, tests inject a fixed tmp-dir string. A real caller omits this and gets
+   *  runtimePaths(defaultRuntimeRoot()).directiveMd (round.directiveFile is retired — no config
+   *  key names this path any more). */
+  directivePath?: string;
   /** The round's aligned-goals text from the (not yet shipped, #89) PO/goal-alignment
    *  peripheral. Default: an explicit "not available yet" placeholder — #89 hasn't landed, so
    *  round.ts's `aligning` phase is still noopPeripheralStub and has nothing real to hand off.
@@ -664,6 +669,7 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       const directive = resolveRoundDirective(deps.state, deps.cfg, roundId, {
         consume: !deps.cfg.roles.po.enabled,
         ...(deps.log !== undefined ? { log: deps.log } : {}),
+        ...(deps.directivePath !== undefined ? { directivePath: deps.directivePath } : {}),
       });
       // The candidate pool for this phase is the same "still awaiting gate⓪" set plan_review
       // consumes next in the sequence (aligning -> architecting -> plan_review -> executing):

@@ -172,21 +172,28 @@ const FILE_ALLOWLIST = new Set(["engine/src/config/paths.ts", "engine/src/config
 // (init's deploy-key move) is the one place responsible for closing these. loop/init.ts's 4
 // sites are marked `// #1080` in the source for a human skimming the file; loop/init.test.ts's
 // sites exercise that SAME still-unmigrated behavior (arbitrary example values in YAML-config-
-// roundtrip and gitignore-rule fixtures); config.test.ts's three worker.deployKeyPath sites are
+// roundtrip and gitignore-rule fixtures); config.test.ts's four worker.deployKeyPath sites are
 // arbitrary example values for the SAME still-`data/`-rooted key (config.test.ts deliberately
 // describes today's real resolution — NOT a `keys/` location that has not been implemented, since
 // a `keys/`-rooted example would misleadingly describe a relocation #1080 has not done yet). None
 // of these three files carry a marker of their own — every one is
 // listed here by line number, not by a substring/marker scan, so a future edit that adds an
 // unrelated `data/` literal to any of them is NOT silently covered by a leftover marker.
+// #1078: every line number below re-verified against the CURRENT file contents after this leg's
+// rebase onto #1086's own fix round 2 (init.ts gained a doc comment before ensureDeployKey plus
+// #1086's own changes; init.test.ts gained #1078's three new AC3 tests AND #1086's own new
+// fixtures; config.test.ts's deployKeyPath resolver test was rewritten) — none of the UNDERLYING
+// sites moved semantically, only their line numbers shifted.
 const ALLOWED_1080_SITES = new Set([
   "engine/src/loop/init.ts:484",
   "engine/src/loop/init.ts:841",
   "engine/src/loop/init.ts:1036",
-  "engine/src/loop/init.ts:1173",
-  "engine/src/config/config.test.ts:1170",
+  "engine/src/loop/init.ts:1180",
   "engine/src/config/config.test.ts:1182",
+  "engine/src/config/config.test.ts:1202",
+  "engine/src/config/config.test.ts:1205",
   "engine/src/config/config.test.ts:1209",
+  "engine/src/config/config.test.ts:1235",
   "engine/src/loop/init.test.ts:919",
   "engine/src/loop/init.test.ts:928",
   "engine/src/loop/init.test.ts:940",
@@ -213,18 +220,34 @@ const ALLOWED_1080_SITES = new Set([
   "engine/src/loop/init.test.ts:1318",
   "engine/src/loop/init.test.ts:1462",
   "engine/src/loop/init.test.ts:1469",
+  "engine/src/loop/init.test.ts:1478",
+  "engine/src/loop/init.test.ts:1500",
+  "engine/src/loop/init.test.ts:1530",
   "engine/src/loop/init.test.ts:1536",
+  "engine/src/loop/init.test.ts:1559",
+  "engine/src/loop/init.test.ts:1642",
   "engine/src/loop/init.test.ts:1681",
   "engine/src/loop/init.test.ts:1747",
   "engine/src/loop/init.test.ts:1756",
+  "engine/src/loop/init.test.ts:1787",
   "engine/src/loop/init.test.ts:1789",
   "engine/src/loop/init.test.ts:1801",
+  "engine/src/loop/init.test.ts:1853",
+  "engine/src/loop/init.test.ts:1862",
+  "engine/src/loop/init.test.ts:1895",
+  "engine/src/loop/init.test.ts:1907",
   "engine/src/loop/init.test.ts:2217",
   "engine/src/loop/init.test.ts:2231",
   "engine/src/loop/init.test.ts:2240",
   "engine/src/loop/init.test.ts:2243",
   "engine/src/loop/init.test.ts:2257",
   "engine/src/loop/init.test.ts:2259",
+  "engine/src/loop/init.test.ts:2323",
+  "engine/src/loop/init.test.ts:2337",
+  "engine/src/loop/init.test.ts:2346",
+  "engine/src/loop/init.test.ts:2349",
+  "engine/src/loop/init.test.ts:2363",
+  "engine/src/loop/init.test.ts:2365",
 ]);
 
 // A bare `"data/"` (or `` `data/` ``) string literal, any quote style, optionally absolute.

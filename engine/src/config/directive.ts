@@ -1,12 +1,14 @@
 // directive.ts (#126): round directive file — human steering injected at round open. A plain
-// data file (default .sapwood/DIRECTIVE.md) an operator drops beside the engine's own runtime root to
-// hand a round WHY/WHAT direction (locked decision 5's boundary: humans decide why/what, agents
-// own execution) — read once per round, injected into both the aligning (po.md) and architecting
-// (architect.md) prompts as `{{round.directive}}`, then archived so it can never silently
-// re-apply to a LATER round. Zero new permissions: a local file read + rename, entirely inside
-// the data dir this engine already owns (dirname(cfg.round.directiveFile)); no forge write, no
-// new role capability. Not tied to pause/resume — a directive dropped mid-run is picked up the
-// next time a round opens, exactly like any other round-open read.
+// data file (.sapwood/DIRECTIVE.md, runtimePaths(defaultRuntimeRoot()).directiveMd — #1078: no
+// config key at all, cwd-relative like every other runtime path, never config-file-relative) an
+// operator drops beside the engine's own runtime root to hand a round WHY/WHAT direction (locked
+// decision 5's boundary: humans decide why/what, agents own execution) — read once per round,
+// injected into both the aligning (po.md) and architecting (architect.md) prompts as
+// `{{round.directive}}`, then archived so it can never silently re-apply to a LATER round. Zero
+// new permissions: a local file read + rename, entirely inside the runtime root this engine
+// already owns; no forge write, no new role capability. Not tied to pause/resume — a directive
+// dropped mid-run is picked up the next time a round opens, exactly like any other round-open
+// read.
 //
 // CONSUME-ONCE IS EVENT-SOURCED (crash-rerun designed up front, per this repo's recurring review
 // theme — #123's id-cursor pattern, reused here): the `directive-applied` event this module
@@ -57,6 +59,7 @@ import { dirname, join } from "node:path";
 import { capDigest } from "../retro/retro-digest.js";
 import type { State } from "../state/state.js";
 import type { SapwoodConfig } from "./config.js";
+import { defaultRuntimeRoot, runtimePaths } from "./paths.js";
 
 /** Injected verbatim as `{{round.directive}}` when no directive file exists and this round has
  *  no prior `directive-applied` event either — an explicit statement, never a silent empty
@@ -105,7 +108,16 @@ export function resolveRoundDirective(
   state: State,
   cfg: SapwoodConfig,
   roundId: number,
-  opts: { consume: boolean; log?: (message: string) => void },
+  opts: {
+    consume: boolean;
+    log?: (message: string) => void;
+    /** #1078: override for the directive file's path — tests inject a fixed tmp-dir string,
+     *  same "planMdPath"-style seam ArchitectDeps/AlignDeps already use for goal.file. A real
+     *  caller omits this and gets runtimePaths(defaultRuntimeRoot()).directiveMd: cwd-relative,
+     *  never config-resolved (round.directiveFile is retired — no config key names this path
+     *  at all any more). */
+    directivePath?: string;
+  },
 ): string {
   const round = state.getRound(roundId);
   const startEventId = round?.start_event_id ?? 0;
@@ -115,7 +127,7 @@ export function resolveRoundDirective(
     .filter(isDirectiveAppliedPayload)
     .filter((p) => p.round_id === roundId);
 
-  const directivePath = cfg.round.directiveFile;
+  const directivePath = opts.directivePath ?? runtimePaths(defaultRuntimeRoot()).directiveMd;
   let payload: DirectiveAppliedPayload;
   if (priorApplications.length > 0) {
     payload = priorApplications[0]!;

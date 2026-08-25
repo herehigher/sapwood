@@ -1061,15 +1061,19 @@ async function armAuthFailsStaleOrMismatch(
   }
   actions.push(`deploy key: SSH auth preflight OK for ${keyPath}`);
 
+  // #1078: relative(cwd, keyPath), NOT relative(dirname(configFilePath), keyPath) — a
+  // deployKeyPath written config-file-relative would silently point at the wrong file the
+  // moment the config file isn't at the repo root (config.ts's loadConfig resolver reads this
+  // same string back cwd-relative, per that fix's own doc).
   if (configFilePath === null) {
     actions.push("deploy key: WARN — no config file found to write worker.deployKeyPath/worker.deployKeyId into; set them by hand.");
   } else if (configFilePath.endsWith(".json")) {
     actions.push(
       `deploy key: worker.deployKeyPath/worker.deployKeyId NOT written — ${configFilePath} is JSON, not YAML; add ` +
-        `"worker": { "deployKeyPath": "${relative(dirname(configFilePath), keyPath)}", "deployKeyId": ${newId} } by hand.`,
+        `"worker": { "deployKeyPath": "${relative(cwd, keyPath)}", "deployKeyId": ${newId} } by hand.`,
     );
   } else {
-    actions.push(...writeDeployKeyConfigIntoYaml(configFilePath, relative(dirname(configFilePath), keyPath), newId));
+    actions.push(...writeDeployKeyConfigIntoYaml(configFilePath, relative(cwd, keyPath), newId));
   }
 
   actions.push(...(await checkDefaultBranchProtectionAction(run, repo)));
@@ -1156,7 +1160,10 @@ async function reconcileDeployKey(
  *  assume ownership from a title alone). Every failure degrades to an L0 guidance-carrying WARN
  *  (never a thrown error) — `init()` itself never fails because L1 provisioning didn't
  *  complete. */
-async function ensureDeployKey(
+// Exported (#1078) so tests can drive its fresh-provisioning writer with an explicit
+// configFilePath independent of cwd — proving the deployKeyPath it writes stays cwd-relative
+// even when the config file itself sits somewhere else (init.test.ts's own "subdirectory" tests).
+export async function ensureDeployKey(
   cfg: SapwoodConfig,
   run: GhRunner,
   repo: string,
@@ -1208,15 +1215,17 @@ async function ensureDeployKey(
   }
   actions.push(`deploy key: SSH auth preflight OK for ${keyPath}`);
 
+  // #1078: relative(cwd, keyPath) — same rule and same reason as armAuthFailsStaleOrMismatch's
+  // own writer above.
   if (configFilePath === null) {
     actions.push("deploy key: WARN — no config file found to write worker.deployKeyPath/worker.deployKeyId into; set them by hand.");
   } else if (configFilePath.endsWith(".json")) {
     actions.push(
       `deploy key: worker.deployKeyPath/worker.deployKeyId NOT written — ${configFilePath} is JSON, not YAML; add ` +
-        `"worker": { "deployKeyPath": "${relative(dirname(configFilePath), keyPath)}", "deployKeyId": ${newId} } by hand.`,
+        `"worker": { "deployKeyPath": "${relative(cwd, keyPath)}", "deployKeyId": ${newId} } by hand.`,
     );
   } else {
-    actions.push(...writeDeployKeyConfigIntoYaml(configFilePath, relative(dirname(configFilePath), keyPath), newId));
+    actions.push(...writeDeployKeyConfigIntoYaml(configFilePath, relative(cwd, keyPath), newId));
   }
 
   actions.push(...(await checkDefaultBranchProtectionAction(run, repo)));
