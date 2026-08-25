@@ -309,7 +309,7 @@ precisely why this is a prominence marker on a retained record, not an exclusion
 
 **[DR #1009](https://github.com/herehigher/sapwood/issues/1009) (owner-confirmed 2026-08-19),
 re-adjudicating [#304](https://github.com/herehigher/sapwood/issues/304) (c) and amending
-[Decision #11](PLAN.md#locked-decisions); further amended 2026-08-20 (owner ruling, deferral
+[Decision #11](PLAN.md#constraints-locked-decisions); further amended 2026-08-20 (owner ruling, deferral
 record [#1038](https://github.com/herehigher/sapwood/issues/1038)):** every `claude` role
 session sapwood spawns has run `--permission-mode auto` since the first `worker.ts`. #1011
 implements the operator-choice half of that DR — `host.permissionMode`, below — as a config key.
@@ -1624,7 +1624,7 @@ is now corrected at its source (`config.ts`'s `RoleSession` schema comment).
 **This channel stays
 open in production.** Sealing it — running with no ambient `CLAUDE.md` at all — would
 move the trust boundary to the *content* side, contradicting the locked boundary
-this page already states above and in [PLAN.md](PLAN.md#security--trust-model-trusted-first-designed-toward-public):
+this page already states above and in [PLAN.md](PLAN.md#security--trust-posture):
 the boundary is what a session can **do** (the zero-write, zero-`Bash` tool allowlist,
 now `Read`/`Grep`/`Glob` guard-confined to the worktree; the credential-stripped spawn env),
 never what it can **read**. Repo
@@ -2438,7 +2438,7 @@ prior round's `plan:approved` is re-checked — a lightweight, zero-forge-write-
 session — every time that issue re-enters a pool, before its approval is trusted for
 dispatch again; a session that can't confirm or fails escalates `needs-human` the same
 way an initial review does. The label itself is never removed by that check either way.
-See [`docs/PLAN.md`](PLAN.md#v02-north-star-the-round-orchestrator) (the "gate⓪ is scoped
+See [`docs/PLAN.md`](PLAN.md#round-orchestrator) (the "gate⓪ is scoped
 to the round pool..." locked decision) for the full detail.
 
 ## The AC-authority dispatch snapshot

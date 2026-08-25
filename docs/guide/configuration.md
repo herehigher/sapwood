@@ -84,7 +84,7 @@ Identifies the repo and ProjectV2 board the loop drives.
 | `tickIntervalSec` | `60` | How often the engine calls `tick()` — the inter-tick sleep and the liveness watchdog window. |
 | `rapidRestart.maxBirths` | `5` | The crash-loop detector — at startup the engine counts its own recent process births (`run-started` events, one per boot; wait-loop iterations can never inflate it) inside `rapidRestart.windowSec`. Reaching `maxBirths` (the current start counts) parks autonomous dispatch with an escalation — the existing park paradigm, visible in `sapwood status` and `data/ESCALATION` — until a later start observes the window drained (see [troubleshooting.md](troubleshooting.md)). Normal restarts never trip it. Births are counted in a closed window ending at the detector's own clock, so future-dated `run-started` rows (a DB restored from a fast-clock machine, or a backward host-clock step) never count — they can neither false-trip the detector nor defeat a manual park clear. |
 | `rapidRestart.windowSec` | `600` | The birth-counting window for `rapidRestart.maxBirths`. |
-| `driver` | `rounds` | Which engine `sapwood run` drives. `rounds` — the round orchestrator: peripheral roles (aligning/architecting/plan_review/harvesting/retro) wrapped around the same tick engine, one round at a time (see [`PLAN.md`'s round-orchestrator section](../PLAN.md#v02-north-star-the-round-orchestrator)). `tick` — the bare M4 loop driver, no peripherals; `--once`/`--until-idle` only apply in this mode (under `rounds` they are a startup **error** — exit 1 before any dispatch — never silently ignored). Every safety behavior (KILL_SWITCH, cost ceilings, drain-before-kill, graceful stop still running harvest) holds under both. |
+| `driver` | `rounds` | Which engine `sapwood run` drives. `rounds` — the round orchestrator: peripheral roles (aligning/architecting/plan_review/harvesting/retro) wrapped around the same tick engine, one round at a time (see [`PLAN.md`'s round-orchestrator section](../PLAN.md#round-orchestrator)). `tick` — the bare M4 loop driver, no peripherals; `--once`/`--until-idle` only apply in this mode (under `rounds` they are a startup **error** — exit 1 before any dispatch — never silently ignored). Every safety behavior (KILL_SWITCH, cost ceilings, drain-before-kill, graceful stop still running harvest) holds under both. |
 
 ## `liveness`
 
@@ -140,7 +140,7 @@ Concurrency and dispatch shape.
 
 Per-worker execution.
 
-**Minimum Claude Code CLI version: 2.1.209** (see [docs/PLAN.md's Architecture chapter](../PLAN.md#architecture-v1), "Claude CLI coupling isolated in `worker.ts`").
+**Minimum Claude Code CLI version: 2.1.209** (see [docs/PLAN.md's Architecture chapter](../PLAN.md#architecture), "Claude CLI coupling isolated in `worker.ts`").
 `2.1.209` is the ONLY version this repo has evidence for — the exact CLI the engine's
 worker/probe argv (`--no-session-persistence`, `--strict-mcp-config`, `--tools`,
 `--max-budget-usd`, `--system-prompt`) was verified against (`engine/src/roles/worker.ts`'s
