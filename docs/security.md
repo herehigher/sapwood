@@ -26,7 +26,7 @@ enforced structurally, not by asking the model nicely:
 
 | Separation | Invariant | Enforced by | Test |
 | --- | --- | --- | --- |
-| No self-merge/approve via Bash | Every GitHub merge/approve/ready/release/label/project/issue-governance/lifecycle command is blocked before it runs, including behind exec-prefixes; opaque constructs (`eval`, `sh -c`, an interpreter's `-e`/`-c`, process substitution) are blocked outright, fail-closed, rather than inspected. | `guard.ts::guardDecision` (`scanGhOverreach`, `checkOpaque`) | `guard.test.ts` |
+| No self-merge/approve via Bash | Every GitHub merge/approve/ready/release/label/project/issue-governance/lifecycle command — and the mutating `gh api`/GraphQL equivalents — is blocked before it runs, including behind exec-prefixes; opaque constructs (`eval`, `sh -c`, an interpreter's `-e`/`-c`, process substitution) are blocked outright, fail-closed, rather than inspected. | `guard.ts::guardDecision` (`scanGhOverreach`, `checkOpaque`) | `guard.test.ts` |
 | Merge is never a worker action | Only the conductor's merge driver calls the merge API — the worker's own session path never does, even if the guard were bypassed. | `merge-driver.ts::driveOne` (sole caller of `IForge.mergePR`) | `merge-driver.test.ts` |
 | Fail-closed on error | Malformed input or any exception while deciding denies — never a silent allow. | `guard-hook.ts::hookResponse` | `guard.test.ts` |
 
@@ -342,20 +342,21 @@ pause's dispatch restriction.
 
 **Interaction with `--until-idle`:** `driver.ts::isIdle` requires zero active workers among
 its other conditions — an active worker is a `running`, `driving`, or `fixing` lane, not just a
-live process. See `commands/sapwood-stop.md` for how PAUSE interacts with `--until-idle`'s exit
-timing.
+live process. A `driving` lane blocked on a fresh fix leg by PAUSE therefore keeps the run
+non-idle: `--until-idle` does not exit while such a lane exists, and removing `.sapwood/PAUSE`
+lets that fix leg dispatch on the next tick.
 
 ### Sentinel isolation boundary (honest statement)
 
 The engine's `.sapwood/` runtime root sits outside worker git worktrees as a
 **permission-layer boundary** — no worker launches with `--add-dir .sapwood`, so it has no
-`claude`-tool path there. Not an OS-level sandbox, so the guard adds defense-in-depth two ways:
-`checkWritePath`/`checkBashWritePath` deny the `Write`/`Edit` tools and the write-command set
-(`tee`/`dd`/`sed`/`perl`/`cp`/`install`/`mv`/`rm`/`git`/`touch`, plus redirections) under
-`.sapwood`; separately, `checkControlSentinelArg` blocks ANY command merely naming a `.sapwood`
-path as a literal argument, write or not. Both match root or descendant, via relative
-traversal too, case-insensitively — `.sapwood-notes/` does not match — and root equality also
-closes the older `rm -rf ../../.sapwood` gap.
+`claude`-tool path there. Not an OS-level sandbox, so the guard adds defense-in-depth two ways.
+`checkWritePath`/`checkBashWritePath` deny the write-class built-in tools (`Write`/`Edit`/
+`MultiEdit`/`NotebookEdit`) and the write-command set (`tee`/`dd`/`sed`/`perl`/`cp`/`install`/
+`mv`/`rm`/`git`/`touch`, plus redirections) under `.sapwood`; separately, `checkControlSentinelArg`
+blocks ANY command merely naming a `.sapwood` path as a literal argument, write or not. Both
+match root or descendant, via relative traversal too, case-insensitively — `.sapwood-notes/`
+does not match — and root equality also closes the older `rm -rf ../../.sapwood` gap.
 
 Three residual classes are accepted, not closed, by this rule:
 
@@ -371,8 +372,8 @@ Three residual classes are accepted, not closed, by this rule:
 - **(c) Opaque indirection is a lexical residual.** The Bash argv walk only sees tokens it can
   parse as a bare word or a `-`-prefixed glued flag: an environment assignment glued to the
   same command line (`TARGET=.sapwood/PAUSE node writer.js`) normalizes as one segment
-  (`TARGET=.sapwood`, not `.sapwood`) and never matches, a script that hardcodes the path
-  inside its own source is invisible to an argv scan, or any other CLI form the walk doesn't
+  (`TARGET=.sapwood`, not `.sapwood`) and never matches; a script that hardcodes the path
+  inside its own source is invisible to an argv scan; or any other CLI form the walk doesn't
   reach. No machinery is added to close this class — document the residual, don't chase it
   with more.
 
@@ -383,8 +384,9 @@ above.** These are shipped, documented CLI verbs any worker can invoke by name;
 `checkStopControlVerb` recognizes the bare `sapwood` binary, `node .../cli.js`/`cli.ts`, and
 `npx sapwood[@version]` — the discoverable forms this repo teaches — and blocks them. **Hiding
 the command word behind an arbitrary package spec instead** — `npx file:<path>/engine`, a
-scoped package, or an aliased binary — **is not fenced, an accepted residual** in the same
-class as (c): an accident fence, not a hostile jail.
+scoped package, an aliased binary, or any other unfenced form (this list is not exhaustive) —
+**is not fenced, an accepted residual** in the same class as (c): an accident fence, not a
+hostile jail.
 
 Until every gap above is closed, treat the isolation boundary as "a worker won't accidentally
 step here, and the obvious direct/indirect vectors are blocked," not "a worker provably cannot
@@ -421,9 +423,9 @@ self-declared by whoever wrote the issue.
 | --- | --- | --- |
 | Dispatch requires a reviewed plan | For any issue not labelled `verify:n/a`, dispatch requires both a verification-plan section and the `plan:approved` label; `verify:n/a` routes through the doc-gate path only when `needs-human` is absent. | `forge.ts::getReadyIssues` / `forge.test.ts` |
 | `needs-human`/`blocked` veto unconditionally | Present alongside any other label, either blocks dispatch regardless. | `forge.ts::getReadyIssues` / `forge.test.ts` |
-| A weak plan self-heals, bounded | The reviewer never approves a plan it authored; a distinct issues-only drafting session (not a worker lane; it never implements the issue) repairs it for at most `maxDraftCycles` (default 2) attempts, then escalates to `needs-human` with the full trail. | `plan-review.ts::reviewOneIssue` (`maxDraftCycles` at `:650`, escalation at `:664`) | `plan-review.test.ts` |
-| Output is validated, not trusted | Neither session holds a `Bash` grant; the engine schema-validates the output and re-checks it actually carries a verification-plan section before applying `plan:approved`, retrying once then escalating on malformed/invalid output. | `plan-review.ts::validateReviewerOutput`/`validateDrafterOutput` / `plan-review.test.ts` |
-| Approval is re-endorsed, not permanent | A prior round's `plan:approved` is re-checked via a lightweight, zero-forge-write-on-confirm session each time the issue re-enters the round pool — a session that can't confirm or fails escalates `needs-human`, but the label itself is never removed either way. | `plan-review.ts::confirmOneIssue` / `plan-review.test.ts` |
+| A weak plan self-heals, bounded | The reviewer never approves a plan it authored; a distinct issues-only drafting session (not a worker lane; it never implements the issue) repairs it for at most `roles.verificationPlanReviewer.maxDraftCycles` (default 2) attempts, then escalates to `needs-human` with the full trail. | `plan-review.ts::reviewOneIssue` / `plan-review.test.ts` |
+| Output is validated, not trusted | Neither the reviewer nor the drafter session holds a `Bash` grant; the engine schema-validates the output and re-checks the issue body actually carries a verification-plan section before applying `plan:approved`, retrying once then escalating on malformed/invalid output. | `plan-review.ts::validateReviewerOutput`/`validateDrafterOutput` / `plan-review.test.ts` |
+| Approval is re-endorsed, not permanent | A prior round's `plan:approved` is re-checked via a lightweight, zero-forge-write-on-confirm session each time the issue re-enters the round pool, before its approval is trusted for dispatch again — a session that can't confirm or fails escalates `needs-human`, but the label itself is never removed either way. | `plan-review.ts::confirmOneIssue` / `plan-review.test.ts` |
 
 Every attempt is externalized as issue edits/comments, so a human can inspect or intervene at
 any point. Implementation dispatch still requires `plan:approved` (or adjudicated

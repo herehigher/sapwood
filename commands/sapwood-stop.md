@@ -40,7 +40,9 @@ file only ever picks WHICH verb to run, never touches a file directly.
 
 Note for `sapwood run --until-idle`: a paused engine dispatches nothing, so once its
 in-flight lanes finish it counts as idle and the run EXITS ("finish the round, then
-stop"). Clearing the pause afterwards resumes nothing by itself — start a new
+stop") — except a `driving` lane blocked only on a fresh fix leg by PAUSE stays
+`driving` (not idle), so `--until-idle` keeps running until PAUSE lifts and that fix
+leg dispatches. Clearing the pause afterwards resumes nothing by itself — start a new
 `sapwood run`. Under `forever` mode the engine keeps ticking and `--resume` takes
 effect on the next tick as described below.
 
