@@ -21,63 +21,27 @@ the source it governs, `engine/src/state/event-kinds/index.ts`.
 
 ## producer ≠ reviewer ≠ merger
 
-The worker that writes code can never approve its own review or merge its own PR. This
-is enforced structurally, not by asking the model nicely:
+The worker that writes code can never approve its own review or merge its own PR. This is
+enforced structurally, not by asking the model nicely:
 
-- **The fail-closed guard hook (`guard.ts`)** is a PreToolUse hook wired into every
-  worker's headless `claude -p` session. It's a pure, zero-dependency, deterministic
-  function: given a tool name and its input, it decides allow/block. For `Bash`, it
-  tokenizes the command (shlex-equivalent splitting, recursing into `$()`/backtick
-  substitutions), strips exec-prefixes (`env`, `npx`, leading assignments, etc.), and
-  blocks any GitHub-overreach command a producer must never run: `gh pr merge`,
-  `gh pr review --approve`, `gh pr ready`, `gh release`, `gh label`, `gh project`,
-  governance-changing `gh issue edit` flags, `gh issue close`/`reopen`/`transfer`/`delete`,
-  and the mutating `gh api`/GraphQL equivalents. REST path tokens are decoded strictly
-  before matching and malformed path escapes fail closed; the mixed command scan decodes
-  valid percent pairs best-effort while preserving stray `%` in API field values. Plain
-  issue title/body edits remain allowed. Issue/PR comment API calls, including values
-  containing stray `%`, remain allowed when the scanned command contains no protected
-  REST path. Residual allow surface: assignees, `--title`/`--body` (`-b`/`-F`), and native
-  `--add-blocked-by`/`--remove-blocked-by`/`--add-blocking`/`--remove-blocking`
-  relations remain allowed because no sapwood gate reads those relations (dispatch
-  ordering uses `blocked-by:#N` labels, already covered by `--add-label`/`--remove-label`).
-  The issue lifecycle itself (close/reopen/transfer/delete) is
-  engine/human-owned: the worker's `gh issue close|reopen|transfer|delete` is blocked at
-  the same high-level-CLI-verb layer as the `edit` governance flags, symmetric with the
-  REST/GraphQL mutations already blocked underneath it (`gh api -X PATCH
-  repos/*/issues/<n>` state changes match `ISSUE_GOVERNANCE_PATH_RE`; GitHub has no REST
-  transfer/delete endpoint, so those reach the guard only as `gh api graphql` mutations,
-  already caught by the graphql-mutation check). `gh issue comment`/`view`/`list`/`status`/
-  `create` remain allowed — comment is the worker's refuse/hand-back channel. A
-  no-PR escalation does not depend on a human happening to read that comment: the engine
-  itself re-surfaces the worker's own final-message text (already parsed, never a new
-  capability) as a `reason` field on the escalation event and its own `needs-human` comment.
-  The worker's write path is unchanged — this is a READ-side addition, not a new grant.
-  Opaque constructs a worker could hide anything inside —
-  `eval`, `sh -c`, an interpreter's `-e`/`-c`, process substitution — are blocked
-  outright, fail-closed, rather than inspected.
-- **The merge is always executed by the conductor**, never the worker. Only
-  `merge-driver.ts`'s `driveOne` calls the merge API; `tick()` (the path a worker's own
-  session runs inside) never does. This holds even if the guard hook were somehow
-  bypassed — it's a structural separation, not just an argv check.
-- **Fail-closed on error.** The hook denies on malformed JSON, a non-object payload, a
-  malformed `tool_input` for a guarded tool, or any exception thrown while deciding. A
-  safety hook that can be disabled by feeding it garbage isn't one.
+| Separation | Invariant | Enforced by | Test |
+| --- | --- | --- | --- |
+| No self-merge/approve via Bash | Every GitHub merge/approve/release/governance command is blocked before it runs, including through exec-prefixes and opaque shell constructs. | `guard.ts::guardDecision` (`scanGhOverreach`) | `guard.test.ts` |
+| Merge is never a worker action | Only the conductor's merge driver calls the merge API — the worker's own session path never does, even if the guard were bypassed. | `merge-driver.ts::driveOne` (sole caller of `IForge.mergePR`) | `merge-driver.test.ts` |
+| Fail-closed on error | Malformed input or any exception while deciding denies — never a silent allow. | `guard-hook.ts::hookResponse` | `guard.test.ts` |
 
-**Single-identity limitation for engine-agent review.** The engine-agent review session has no
-GitHub credentials or forge access at all. The limitation is that the engine posts the audit
-comment and performs the merge under one token identity; there is no separate reviewer account
-whose GitHub approval proves account-level independence. For this reviewer kind,
-producer≠reviewer is enforced at the process/session boundary — a different-model, read-only,
-closed review session produces structured judgment, while deterministic engine code alone writes
-GitHub state and merges — not at the GitHub-account boundary. This is a bounded limitation, not an
-identity claim. The compensating control is the receipted, non-authoritative audit-comment trail:
-it records the reviewed head and diff, run id, the decisive attempt's actual reviewer identity
-(provider + model, never fabricated), each executed attempt's spend (provider-reported, a pinned-
-price estimate, or explicitly unknown — never silently read as $0), prompt hash, and
-materialized-tree manifest hash before any engine-agent-derived merge/FIXABLE outcome is consumed.
-It makes the separation and evidence inspectable, but does not turn the shared account into two
-independent principals.
+**Residual allow surface:** assignees, `--title`/`--body` edits, and the native
+`--add/remove-blocked-by`/`--add/remove-blocking` relations stay allowed — no sapwood gate
+reads those relations. Issue/PR comments also stay allowed, as the worker's refuse/hand-back
+channel.
+
+**Single-identity limitation for engine-agent review.** The engine-agent reviewer has no
+GitHub credentials — the engine posts the audit comment and merges under one token identity,
+with no separate account proving independence. Instead, producer≠reviewer is enforced at the
+process/session boundary: a different-model, read-only, closed session judges; deterministic
+engine code alone writes GitHub state. The audit trail — reviewed head + diff, run id, reviewer
+identity, spend (never read as $0), prompt hash, tree-manifest hash — is recorded before any
+merge/FIXABLE outcome: inspectable, not two principals.
 
 ### Guard modes: hard vs. soft
 
@@ -104,34 +68,27 @@ flags. **No `capabilities.*` config surface will ever be built**; PLAN.md's lock
 table (Decision #11) records the accepted rationale. Scope is **producer legs only** — the
 reviewer/peripheral sealing floor below is untouched and stays non-negotiable.
 
-A live probe (worker's exact dispatch argv: `--permission-mode auto`,
-`WORKER_ALLOWED_TOOLS`/`WORKER_DISALLOWED_TOOLS` verbatim) confirmed the premise this
-decision rests on: an ambient, user-scope MCP server tool not on the worker's allowlist was
-still callable, and the inherited MCP surface included write/exec-class tools (filesystem
+A live probe found an ambient, user-scope MCP server tool outside the worker's allowlist still
+callable, and the inherited MCP surface included write/exec-class tools (filesystem
 write/edit/move, Drive file creation, the full Playwright set, `codex`) — none of which the
-guard hook's Bash/file-tool matcher mediates. Inherited MCP tools arrive **deferred, not in
-the session's init inventory**, so a prompt or scanner that reads the init tool list and
-concludes "no MCP tools available" is wrong; `--allowedTools` does not gate an inherited MCP
-tool either (consistent with the Agent/Task-spawning finding below).
+guard hook's Bash/file-tool matcher mediates. Inherited MCP tools arrive **deferred, not in the
+session's init inventory**, so a prompt or scanner reading the init tool list cannot conclude no
+MCP tools are available; `--allowedTools` does not gate an inherited MCP tool either.
 
-**Capability/context decision rule.** Within the trusted-repos threat model, input-side
-prompt-injection hardening neither drives nor vetoes capability or context choices: prompt scope
-is governed by noise, size, and determinism, while capability is decided by whether its effects
-are enforceable at the action boundary. This is why the zero-`gh` peripheral design (below) was
-decided by enforceability rather than by input-trust concerns, and the same rule governs
-engine-injected context and retrieval design. Revisit input-side hardening when untrusted-repo
-support is actually scheduled, as its own milestone-level threat-model decision rather than a
-standing constraint on trusted-repo capabilities.
+**Capability/context decision rule.** Within the trusted-repos threat model, capability is
+decided by whether its effects are enforceable at the action boundary, not vetoed by
+input-side prompt-injection hardening (a separate axis governed by noise/size/determinism).
+This is why the zero-`gh` peripheral design and this section's host-delegated rule were both
+decided by enforceability, not input trust; untrusted-repo support revisits input-side
+hardening as its own milestone decision, not a standing constraint here.
 
-**Peripheral vs. producer split.** "Enforceable at the action boundary" cuts differently for the
-two session classes this page distinguishes. A peripheral session's action boundary is the CLI's
-own tool grant (no `Bash`, no write tool, the zero-`gh` design) — genuinely enforceable, so
-capability was withheld there. A producer (worker) leg's action boundary is different in kind:
-the guard hook mediates Bash/file-tool calls but cannot mediate `mcp__*` calls at all (see "What
-stays engine-owned" below), so in-engine capability *management* for the inherited MCP surface
-was never actually enforceable — host-delegated capability management (this section) is that same
-rule applied honestly to that surface, choosing the real enforcement points (the guard's
-write-path denial, branch protection) over a config knob that could not have been enforced.
+**Peripheral vs. producer split.** A peripheral session's action boundary is the CLI's own tool
+grant (no `Bash`, no write tool) — genuinely enforceable, so capability is withheld there. A
+producer leg's boundary differs in kind: the guard mediates Bash/file-tool calls but not
+`mcp__*` calls at all (see "What stays engine-owned" below), so in-engine capability management
+for the inherited MCP surface was never enforceable — this section applies that rule honestly,
+choosing real enforcement points (write-path denial, branch protection) over an unenforceable
+config knob.
 
 ### What stays engine-owned (the governance core)
 
@@ -160,30 +117,18 @@ in-engine *tool-permission* management for producer legs is abandoned. Five mech
   denial (below) only covers *known* forge-authority and filesystem/write/exec-class server
   names; an unrecognized server added to the operator's host environment is not caught by
   this mechanism. Branch protection (next bullet) is the backstop for exactly this gap.
-- **Branch protection is the mandatory platform backstop.** Because producer legs inherit the
-  full host tool surface, sapwood does not claim the engine alone prevents an inherited tool
-  from writing to the repository outside the reviewed PR path; a protected default branch
-  (no direct pushes, required reviews/checks) is documented as mandatory, not optional,
-  precisely because the in-engine capability boundary was deliberately not built for producer
-  legs. **This backstop's presence is now detected, not just documented.** Once per
-  engine start, `engine/src/loop/branch-protection-warning.ts` reads the target repo's default
-  branch protection state (classic branch-protection endpoint, then — only on a 404 — whether
-  an active ruleset covers the branch) and logs one warning naming the branch and both operator
-  exits when the branch is POSITIVELY VERIFIED unprotected. This is warn-only observation, the
-  same stance as the [managed-settings exception](security/role-sessions.md#managed-settings-allowmanagedpermissionrulesonly-exception)
-  below: no startup refusal, no label, no gate, and an inconclusive read never fires the
-  warning — it never enforces the backstop it names.
-- **(b′) server-granularity MCP deny vs. `allowManagedPermissionRulesOnly`.** The
-  server-granularity deny for producer legs (known forge-authority/github-class and
-  known write/exec/filesystem-class MCP servers appended to `WORKER_DISALLOWED_TOOLS`)
-  lands
-  in `--disallowedTools`. As [documented above](security/role-sessions.md#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry),
-  a target repo whose managed settings set `allowManagedPermissionRulesOnly: true` causes the
-  CLI to discard every CLI-argument permission rule — including this server deny, alongside
-  the rest of sapwood's `--disallowedTools` containment. The owner ruling is disclose +
-  detect-and-WARN — one startup warning naming both operator
-  exits, no refusal; see the [managed-settings exception section](security/role-sessions.md#managed-settings-allowmanagedpermissionrulesonly-exception)
-  below. The interaction stays named here, never silently accepted.
+- **Branch protection is the mandatory platform backstop.** Producer legs inherit the full host
+  tool surface, so sapwood does not claim the engine alone prevents an inherited tool writing
+  outside the reviewed PR path — a protected default branch (no direct pushes, required
+  reviews/checks) is mandatory. Presence is detected, not just documented:
+  `branch-protection-warning.ts::createBranchProtectionDetector` warns naming both operator
+  exits **only when positively verified unprotected**; an inconclusive read never fires it, and
+  the warning never enforces the backstop it names.
+- **(b′) server-granularity MCP deny vs. `allowManagedPermissionRulesOnly`.** The producer-leg
+  server-granularity MCP deny lands in `--disallowedTools`; a target repo whose managed
+  settings set `allowManagedPermissionRulesOnly: true` causes the CLI to discard every
+  CLI-argument permission rule, including this deny. The ruling is disclose + detect-and-WARN,
+  not silent acceptance — see the [managed-settings exception](security/role-sessions.md#managed-settings-allowmanagedpermissionrulesonly-exception).
 
 ### Doctrine lines
 
@@ -225,14 +170,12 @@ in-engine *tool-permission* management for producer legs is abandoned. Five mech
   degrade is `produce-PR-and-stop`, where a human merges.
 
 **Rewording principle.** Because producer legs inherit the host environment, no prompt,
-source comment, or doc may assert tool-inventory completeness — "no tool of yours", "no way
-other than", "there is no such tool", "structural" (in the sense of *the model structurally
-cannot reach X*) — about a producer leg's own session. State the engine-enforced structural
-fact instead: all forge writes are applied by deterministic engine code from validated
-structured output, never by the session itself. (A closed, sealed gate② review session, per
-the seal above, is the one place "read-only" can still be asserted truthfully — its `--strict-
-mcp-config`/`--setting-sources ""` seal is the mechanism, not a description of the producer
-leg's session.)
+comment, or doc may assert tool-inventory completeness about a producer leg's session — banned
+phrases: "no tool of yours", "no way other than", "there is no such tool", "structural" (meaning
+*cannot reach X*). State the engine-enforced fact instead: forge writes are applied by
+deterministic engine code from validated structured output, never the session itself. One
+exception: a sealed gate② session's `--strict-mcp-config`/`--setting-sources ""` seal makes
+"read-only" truthfully assertable there.
 
 
 ## Dashboard: loopback bind, not an auth boundary
@@ -255,15 +198,13 @@ serves a local, read-only view of the engine's own ledger. Its posture:
   **Never reverse-proxy this port to a public host.** Anyone who can reach it sees
   operator-grade data — full lane state, cost figures, and the raw event feed below —
   with no login screen standing in the way.
-- **The raw event feed is verbatim by contract, not scrubbed.** `/api/events` serves
-  ledger events as written, which by design can include `egress-suspect` command
-  snippets and raw error text (see the egress-scanning discussion above) — the forensic
-  value of that feed depends on it being unredacted. This is distinct from the *served
-  config* surface, which is already allowlisted (`CONFIG_ALLOWLIST`,
-  `engine/src/state/read-model.ts`) so a config key added later doesn't silently start
-  serving on the wire. There is no public export of a live run's raw feed; the only
-  public-facing surface is the curated recorded-run demo fixture served under `?demo`,
-  which is a separate, hand-vetted artifact rather than a redaction of live data.
+- **The raw event feed is verbatim by contract, not scrubbed.** `/api/events` serves ledger
+  events as written — by design including `egress-suspect` snippets and raw error text (see
+  [egress](security/egress.md)) — since forensic value depends on it staying unredacted. The
+  *served config* surface differs: already allowlisted (`CONFIG_ALLOWLIST`, `read-model.ts`),
+  so a new key can't silently start serving. No public export of a live feed exists; the only
+  public surface is the curated recorded-run demo fixture under `?demo`, hand-vetted, not a
+  redaction of live data.
 
 
 ## Human-merge-only paths
@@ -303,28 +244,18 @@ and review is not something the conductor should be configured to auto-merge.
 
 ### The protected live config and shipped starter are separate
 
-The path-based denial protects this repository's root `sapwood.config.yaml`: it is the
-configuration the autonomous loop on this repository actually runs from (`sapwood run` from
-the repo root, no `--config` — see [configuration.md "Two config files"](guide/configuration.md#two-config-files)),
-so its PR history is the audit trail of the governing values, and changing it remains
-human-merge-only through the guard.
-`sapwood init` instead ships `sapwood.config.example.yaml` as the starter template
-(`engine/src/loop/init.ts`'s `sampleConfig()`/`ensureConfig()`). That template belongs
-to the default `escalation.instructionPaths` surface, so edits to it route to human merge
-review, **and** it is also guard-protected in its own right: `guard.ts`'s
-`protectedPathLabel` matches `sapwood.config.example.(ya?ml|json)`, case-insensitively, as a
-sibling rule to the root config's, denying the same recognized write vectors as the root
-config — the `Write`/`Edit` tools, Bash redirection, and the write-command set (`touch`,
-`rm`, `mv`, `cp`, `install`, `git rm`/`mv`/`restore`/`checkout`, `sed -i`, `perl -i`, `tee`,
-`dd`) when the template path appears as their argument — so a worker can no longer weaken the
-`merge.mode: produce-pr-and-stop` pin every future `sapwood init` inherits from this file
-through any of those routes. This does **not** extend to the literal-argument scan
-(`checkControlSentinelArg`) that catches an arbitrary command merely naming a path under the
-`.sapwood/` runtime root — that scanner is deliberately scoped to `.sapwood/` only (a
-marginal-complexity ruling), so a script that takes the template's path as its own CLI
-argument (e.g. `node writer.js sapwood.config.example.yaml`) or hardcodes the path internally
-is outside the guard's coverage — the same residual class the "Sentinel isolation boundary"
-section below documents for the runtime root.
+The path-based denial protects this repo's root `sapwood.config.yaml` — the config the
+autonomous loop actually runs from (`sapwood run`, no `--config`; see [configuration.md "Two
+config files"](guide/configuration.md#two-config-files)) — so its PR history is the audit trail
+of the governing values, and changing it stays human-merge-only through the guard.
+
+`sapwood init`'s starter template (`sapwood.config.example.yaml`, `init.ts::sampleConfig`) sits
+on the default `escalation.instructionPaths` surface and is separately guard-protected
+(`guard.ts::protectedPathLabel`), denying the same write vectors — so a worker cannot weaken
+its default `merge.mode: produce-pr-and-stop` pin. Not covered: `checkControlSentinelArg`'s
+literal-argument scan (`.sapwood/`-only), so a script taking either config path as its own CLI
+argument, or hardcoding it, is outside the guard — the residual "Sentinel isolation boundary"
+documents below.
 
 The consequence for the protected root config: **a worker cannot land a change to its
 comments — even a purely editorial one carrying no security meaning at all.** The guard
@@ -333,37 +264,30 @@ human-merge-only`) without inspecting whether the edit touches `guard.mode` or a
 comment, which is the correct fail-closed behaviour: an intent-aware exception is exactly
 the seam a worker could talk its way through.
 
-This is a deliberate trade, not a defect — but it means any issue whose acceptance
-criteria require the protected root YAML to change has a **human-applied step that no worker can
-discharge**. A human-merge-only path is changed only by a **direct edit in the PR whose diff a
-human reviews and merges** — never by an artifact a worker produces for a human to apply. The
-guard binds engine-spawned sessions' tool calls, never a human's editor or a human-directed
-session, which is why the direct edit is available at all where a worker's write is denied. So an
-issue drafted against such a path carves the protected-path work into a `## Human-owned remainder
-(protected paths — not dispatched)` section, its dispatchable rest landing normally; when the
-protected edit is a prerequisite the whole issue depends on, nothing is left to dispatch and the
-issue belongs to a human directly. Until the human PR lands, the pending protected change lives
-on the open issue's remainder section — the process-truth home for it — not as any committed
-artifact in the tree.
+A deliberate trade: an issue needing the protected root YAML changed has a **human-applied step
+no worker can discharge**. A human-merge-only path changes only via a **direct PR edit a human
+reviews and merges** — never an artifact a worker hands off, since the guard binds only
+engine-spawned sessions, not a human's editor. Such an issue carves the work into a `##
+Human-owned remainder (protected paths — not dispatched)` section (or belongs to a human
+directly, if the edit is a prerequisite for everything else); until landed, the change lives on
+the issue's remainder section, not the tree.
 
-**Resolved at issue-authoring time, not just caught at gate⓪.**
-`verification-plan-reviewer.md`/`verification-plan-drafter.md` catch an acceptance criterion that
-still asks for a direct edit to one of these paths — but that used to be the *only* check,
-so an issue drafted with such a criterion could reliably cost a gate⓪ bounce and a repair round-trip
-before it could dispatch. `po.md` (both `align` and `triage` modes) and
-`po-decompose.md` now carry the identical check at the point an issue or `ready` child is first
-drafted, resolving it into a carved-out human-owned remainder/section immediately rather than
-leaving it for the reviewer to find. The gate⓪ check stays in place as the backstop for whatever
-this upstream pass misses — this narrows how often it fires, it does not replace it.
+**Resolved at issue-authoring time, not just caught at gate⓪.** `po.md` (`align` and
+`triage` modes) and `po-decompose.md` now carry the same protected-path check
+`verification-plan-reviewer.md`/`verification-plan-drafter.md` apply, at the point an issue or
+`ready` child is first drafted — resolving it into a carved-out remainder section immediately
+instead of costing a gate⓪ bounce and repair round-trip. The gate⓪ check stays as the backstop
+for whatever this upstream pass misses; it narrows how often that backstop fires, it does not
+replace it.
 
 ### The `sapwood:human-merge-only` label
 
 The same phrase now also names a **label**, deliberately — one fact, one term. Where the
 list above is the *static* set of paths a human must merge, `sapwood:human-merge-only` is
 the *runtime verdict* that a particular PR must be merged by a human. Today the
-instruction-path escalation above is its only writer: a PR that edits the reviewer
-instruction graph is not broken and nothing is stuck, but its merge decision is not the
-loop's to take.
+[instruction-path escalation](security/instruction-path-escalation.md) rule is its only
+writer: a PR that edits the reviewer instruction graph is not broken and nothing is stuck, but
+its merge decision is not the loop's to take.
 
 Its contract:
 
@@ -383,151 +307,81 @@ Its contract:
   can never be gate-reclaimed, so nothing can re-escalate it or re-apply `needs-human`.
 
 There is deliberately **no** static human-merge-only *path scan* on PRs. Three layers already
-keep an engine PR off those paths (gate⓪ AC screening, the `guard.ts` write-path block
-above, and the instruction-path escalation above); a fourth scanner would be redundant machinery. The label carries the
-**verdict**, not a new detection.
+keep an engine PR off those paths (gate⓪ AC screening, the `guard.ts` write-path block above,
+and [instruction-path escalation](security/instruction-path-escalation.md)); a fourth scanner
+would be redundant machinery. The label carries the **verdict**, not a new detection.
 
 ### The review-doctrine file is trusted prompt input
 
 The review-doctrine file (`doctrine.file`, default `docs/REVIEW-DOCTRINE.md`) is
 user-editable repo prose and is **not** guard-protected — yet its content is injected
-verbatim into the gate② review-trigger comment that the review bot reads, so it can
-influence the gate verdict (it could, in principle, instruct the reviewer to wave
-things through). It sits inside this page's trusted-repo assumption: doctrine content
-is trusted exactly like the rest of the repo's prose, and changes to it deserve the
-same review scrutiny as review-gate configuration (`reviewer.*`, `merge.*`). It is
-deliberately not sanitized — it's prose written *for* LLM readers, and gate② stays
-semantic, not a rules engine.
+verbatim into the gate② review-trigger comment the review bot reads, so it can influence the
+gate verdict. It sits inside this page's trusted-repo assumption: doctrine content is trusted
+like the rest of the repo's prose, and changes to it deserve the same review scrutiny as
+`reviewer.*`/`merge.*` config. It is deliberately not sanitized — prose written *for* LLM
+readers, with gate② staying semantic, not a rules engine.
 
 ## Human controls (three tiers)
 
 sapwood has three independent file-sentinel controls, all living next to the engine's
 state DB (`.sapwood/`), without requiring a config edit:
 
-- **Emergency stop** (`.sapwood/EMERGENCY_STOP`) — the strictest tier. It takes precedence over
-  the kill switch every tick and hard-kills running/fixing lane process groups without a drain
-  window. In-flight WIP is lost; killed lanes escalate to `needs-human` with their evidence
-  preserved. Use `/sapwood-stop --emergency` to set it and `--clear-emergency` only after human
-  review.
-- **Kill switch** (`.sapwood/KILL_SWITCH`) — the drain-first tier. Freezes *all* new dispatch and
-  merges. Running workers are asked to hand off gracefully within
-  `cost.drainWindowSec`; past that window the conductor escalates to a hard
-  process-tree kill. Everything else freezes too: no dispatch, no drive/merge, no
-  rollback retry, no reclaim-and-requeue of crashed lanes. Set/lift it with
-  `/sapwood-stop` (no argument to set, `--lift` to remove) or by touching/removing the
-  file directly.
-- **Pause** (`.sapwood/PAUSE`) — the gentle tier. Freezes new dispatch: no new lane is claimed,
-  **and** a driving lane's fix-leg admission gate reads this same sentinel, so a fresh fix leg
-  is held back too — see the [fix-loop admission gate](security/role-sessions.md#fix-loop-fixing-lane-state) above. A
-  worker or fix leg **already running** keeps running to its own completion, and the ordinary
-  gate scans for every `driving` lane — the review trigger, CI/merge polling, the merge itself —
-  keep executing exactly as normal, so a lane whose verdict is already `MERGE`/`WAIT_REVIEW`
-  still merges or keeps polling and eventually leaves `driving`. What does NOT proceed: a
-  `driving` lane whose next action is a *fresh* fix leg stays `driving`, blocked rather than
-  finished, for as long as PAUSE stands — it resumes the instant the sentinel is lifted, never
-  stuck permanently. No drain, nothing killed either way. Use this to stop taking on new issues
-  and new rework while letting already-running work and already-mergeable PRs land (e.g. before
-  a maintenance window). Set/lift with `/sapwood-stop --pause` / `--resume`.
+| Tier | Sentinel | Effect | Set / lift |
+| --- | --- | --- | --- |
+| Emergency stop | `.sapwood/EMERGENCY_STOP` | Strictest; takes precedence over the kill switch every tick; hard-kills running/fixing lane process groups with no drain window — in-flight WIP is lost, and killed lanes escalate to `needs-human` with their evidence preserved. | `/sapwood-stop --emergency`; `--clear-emergency` only after human review |
+| Kill switch | `.sapwood/KILL_SWITCH` | Freezes all new dispatch, merges, rollback retries, and reclaim of crashed lanes; running workers get `cost.drainWindowSec` to hand off, then a hard process-tree kill. | `/sapwood-stop` (set) / `--lift`, or touch/remove the file |
+| Pause | `.sapwood/PAUSE` | Freezes new dispatch and a fresh fix leg's admission; an already-running worker or fix leg finishes normally, and a `driving` lane already at MERGE/WAIT_REVIEW still resolves and leaves `driving`. A lane blocked only on a fresh fix leg stays `driving` until PAUSE lifts. | `/sapwood-stop --pause` / `--resume` |
 
-The precedence order is emergency stop, then kill switch, then pause: emergency stop wins over
-the kill switch, and either strict tier subsumes pause's dispatch restriction.
+**Precedence:** emergency stop overrides the kill switch, and either strict tier subsumes
+pause's dispatch restriction.
 
-**Interaction with `--until-idle`:** idleness (`driver.ts`'s `isIdle`) requires — among its
-conditions — zero active workers (`running`, `driving`, or `fixing`, not just live processes);
-the full condition set lives in `isIdle` itself. A paused engine dispatches nothing new, and a `driving` lane
-whose verdict is already `MERGE`/`WAIT_REVIEW` keeps resolving normally and eventually leaves
-`driving`; but a `driving` lane whose next action is a fresh fix leg stays `driving` — blocked,
-not finished — for as long as PAUSE stands, so **`--until-idle` does not exit on its own while
-such a lane exists**. Removing `.sapwood/PAUSE` lets that lane's fix leg dispatch on the next tick,
-after which the run can idle out normally; lifting it doesn't resume anything by itself beyond
-that — a fully drained/idle run still needs a new `sapwood run`. Under the daemon (`forever`)
-mode, the engine keeps ticking regardless, and `--resume` takes effect on the very next tick.
+**Interaction with `--until-idle`:** idleness (`driver.ts::isIdle`) requires zero active
+workers among its other conditions. A `driving` lane blocked on a fresh fix leg by PAUSE stays
+`driving` — blocked, not finished — so `--until-idle` does not exit on its own while such a lane
+exists; removing `.sapwood/PAUSE` lets that fix leg dispatch on the next tick. Under the daemon
+(`forever`) mode the engine keeps ticking regardless, and `--resume` takes effect on the very
+next tick.
 
 ### Sentinel isolation boundary (honest statement)
 
-The engine's `.sapwood/` runtime root (the state DB) sits outside worker git worktrees as a
-**permission-layer boundary** — the worker process is not launched with `--add-dir .sapwood`,
-so it has no `claude`-tool path into that directory. This is **not an OS-level sandbox**,
-so the guard (`engine/src/guard/guard.ts`) adds defense-in-depth on top of that boundary.
+The engine's `.sapwood/` runtime root sits outside worker git worktrees as a
+**permission-layer boundary** — no worker launches with `--add-dir .sapwood`, so it has no
+`claude`-tool path there. Not an OS-level sandbox, so the guard
+(`guard.ts::checkControlSentinelArg`, `protectedPathLabel`) adds defense-in-depth: any write
+vector is denied whenever its normalized target contains the exact segment `.sapwood` — root or
+descendant, via relative traversal too, case-insensitive — while `.sapwood-notes/` (a sibling
+merely starting with it) does not match; root equality also closes the older `rm -rf
+../../.sapwood` gap.
 
-The guard's write-deny rule (`protectedPathLabel`, `checkControlSentinelArg`) no longer
-enumerates individual filenames — it targets the fixed `.sapwood/` runtime root as a whole
-(#1079), so one segment-equality rule covers the three control sentinels together with
-everything else the runtime directory holds, instead of naming each path separately (see
-[configuration.md "The `.sapwood/` runtime directory"](guide/configuration.md#the-sapwood-runtime-directory)
-for the layout itself, not restated here). A
-write-class built-in tool (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`) or a Bash write vector
-(`touch`/`rm`/`mv`/`sed -i`/`perl -i`/`tee`/`dd`/`cp`/`install`/redirect-to-path, or
-`git rm`/`mv`/`restore`/`checkout`) is denied whenever its lexically normalized target contains an
-exact path segment `.sapwood` — the root itself (`rm -rf .sapwood`) or any descendant
-(`.sapwood/PAUSE`, `.sapwood/cache/x`) — including via relative traversal
-(`../../.sapwood/KILL_SWITCH`) and glued to a flag (`--target=.sapwood/PAUSE`), matched
-case-insensitively (macOS/APFS default is case-insensitive, so `.SAPWOOD/pause` still hits
-the real directory). A sibling name that merely starts with the segment
-(`.sapwood-notes/`) or carries it inside a filename (`notes/about.sapwood.md`) does not
-match — segment equality, not substring. Root equality also closes the old "directory
-deleted without ever naming a sentinel" gap: `rm -rf ../../.sapwood` now matches directly,
-since the root itself is a hit, not just a file inside it.
+Three residual classes are accepted, not closed, by this rule:
 
-Honest scope, stated plainly, not claimed as exhaustive — three residual classes, not one
-mechanism this rule closes completely:
+- **(a) Guarded built-in tool family only.** The guard's PreToolUse matcher covers only
+  `Bash`/`Write`/`Edit`/`MultiEdit`/`NotebookEdit`/`Read`/`Grep`/`Glob`/`NotebookRead` — no
+  `mcp__` pattern at all (see [Worker denylist vs. peripheral allowlist](security/role-sessions.md#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry)).
+  A write/exec-class MCP server an operator's config registers can write anywhere on disk,
+  `.sapwood/` included, without the guard ever being asked.
+- **(b) Symlink aliasing is a lexical residual.** The guard judges the path segments a
+  Bash/file-tool argument spells out after traversal-collapse; it never `realpath`s or
+  `lstat`s. A symlink whose own name carries no `.sapwood` segment but resolves onto the
+  runtime root — or the reverse — is judged on the argument's text, not the resolved target.
+- **(c) Opaque indirection is a lexical residual.** The Bash argv walk only sees tokens it can
+  parse as a bare word or a `-`-prefixed glued flag: an environment assignment glued to the
+  same command line (`TARGET=.sapwood/PAUSE node writer.js`) normalizes as one segment
+  (`TARGET=.sapwood`, not `.sapwood`) and never matches, and a script that hardcodes the path
+  inside its own source is invisible to an argv scan. No machinery is added to close this
+  class — document the residual, don't chase it with more.
 
-- **(a) Guarded built-in tool family only.** Inherited MCP write tools never reach the guard
-  hook — its PreToolUse matcher names only `Bash`/`Write`/`Edit`/`MultiEdit`/`NotebookEdit`/
-  `Read`/`Grep`/`Glob`/`NotebookRead`, no `mcp__` pattern at all (see
-  [Worker denylist vs. peripheral allowlist](security/role-sessions.md#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry)
-  for the full account). A write/exec-class MCP server an operator's config registers can
-  write anywhere on disk, `.sapwood/` included, without the guard ever being asked.
-- **(b) Symlink aliasing is a lexical residual — the same class this rule already carried,
-  not widened or closed by moving from an enumerated regex to a root rule.** The guard judges
-  the path segments a Bash/file-tool argument spells out after `normalizePath`'s traversal
-  collapse; it does not `realpath`/`lstat` anything (no filesystem canonicalisation is
-  added). A symlink whose own name carries no `.sapwood` segment but resolves onto
-  something under the runtime root — or the reverse — is judged on the argument's text, not
-  the filesystem's resolved target.
-- **(c) Opaque indirection is a lexical residual too — the same class the previous sentinel
-  regex already had, not widened.** The Bash argv walk (`checkControlSentinelArg`) only sees
-  tokens on the command line it can parse as a bare word or a `-`-prefixed glued flag; a path
-  reaching the filesystem some other way is invisible to it: an environment assignment glued
-  to the SAME command line (`TARGET=.sapwood/PAUSE node writer.js` — the token
-  `TARGET=.sapwood/PAUSE` normalizes as one segment, `TARGET=.sapwood`, not `.sapwood`, so it
-  never matches, and the assignment isn't a `-`-prefixed flag either); a script that hardcodes
-  the path *inside its own source* rather than taking it as a CLI argument (`node
-  some-script.js`, no path argument — the guard judges the Bash command line, not a script's
-  file contents); or any other CLI form the walk doesn't reach. No machinery is added here to
-  close this class — the same "document the residual, don't chase it with more machinery"
-  stance this file's other HONEST SCOPE notes already take.
+**`sapwood pause`/`stop`/`estop` are their own, separately fenced class — not the residuals
+above.** These are shipped, documented CLI verbs any worker can invoke by name;
+`checkStopControlVerb` recognizes the bare `sapwood` binary, `node .../cli.js`/`cli.ts`, and
+`npx sapwood[@version]` — the discoverable forms this repo teaches — and blocks them. **Hiding
+the command word behind an arbitrary package spec instead** — `npx file:<path>/engine`, a
+scoped package, or an aliased binary — **is not fenced, an accepted residual** in the same
+class as (c): an accident fence, not a hostile jail.
 
-**`sapwood pause`/`stop`/`estop` are NOT an instance of the residual class above —
-they are their own, distinct class the guard fences separately.** The bullets above are
-obscure hand-rolled forms a worker would have to construct deliberately. `sapwood pause`,
-`sapwood stop`, and `sapwood estop --confirm` are the opposite: a shipped, operator-
-documented CLI verb (docs/guide/getting-started.md, docs/guide/supervision.md,
-commands/sapwood-stop.md all tell an operator to run it) that any worker with ordinary
-Bash access can invoke by name. They resolve the sentinel path internally
-(`dirname(dbPath)` + the fixed filename) rather than taking it as a CLI argument, so no
-`.sapwood/PAUSE`/`.sapwood/KILL_SWITCH`/`.sapwood/EMERGENCY_STOP` token ever appears on the
-Bash command line for `checkControlSentinelArg` to match — including `sapwood estop clear`,
-which lifts an already-fired EMERGENCY_STOP with no sentinel path in sight. `guard.ts` is
-human-merge-only, so this fence was authored as a human-merge-only edit — extending
-`checkControlSentinelArg`'s Bash-argument accident fence to recognize the three
-stop-control verbs, the same route as the default-branch-push deny rule. **This fence
-is in place.**
-
-**The fence covers the *discoverable* stop-control invocation forms** — the
-bare `sapwood` binary, `node .../cli.js`/`cli.ts` (path-prefixed or direct-executed), and
-`npx sapwood[@version]` (npm's own documented "run a specific/latest version" syntax) —
-the shapes this repo's own operator docs and `--help` text teach. An invocation that hides
-the command word behind an arbitrary package spec instead — `npx file:<path>/engine`, a
-scoped package such as `npx @<scope>/engine`, or an aliased binary — is **not** fenced and
-is an **accepted residual**, in the SAME class as the hardcoded-path-inside-a-script
-residual documented above: an accident fence recognizes the invocations an operator
-would actually reach for, not every way a determined adversary could construct one. This
-list is not exhaustive.
-
-Until every gap above is closed, treat the isolation boundary as "a worker won't
-accidentally step here, and the obvious direct/indirect vectors are blocked," not "a
-worker provably cannot reach here by any means."
+Until every gap above is closed, treat the isolation boundary as "a worker won't accidentally
+step here, and the obvious direct/indirect vectors are blocked," not "a worker provably cannot
+reach here by any means."
 
 
 ## The `origin:agent` label convention
@@ -556,53 +410,19 @@ Decision #8's `Ready` gate requires more than a verification plan merely *existi
 plan must also pass agent quality review before dispatch, and `verify:n/a` is not simply
 self-declared by whoever wrote the issue.
 
-`getReadyIssues` (`engine/src/forge/forge.ts`) now requires, for any issue not labelled
-`verify:n/a`, **both** a verification-plan section in the body **and** the
-`plan:approved` label — plan presence alone no longer dispatches. `verify:n/a` still
-routes through the doc-gate path, but only when `needs-human` is absent: the
-verification-plan-reviewer peripheral may *propose* `verify:n/a` for genuinely unverifiable work, but
-it always pairs that proposal with `needs-human` in the same action, so it's a human —
-never the agent — who actually opens the doc-gate path, by removing `needs-human`
-themselves. `needs-human` and `blocked` block dispatch unconditionally, regardless of
-any other label present.
+| Rule | Enforcement | Test |
+| --- | --- | --- |
+| Dispatch requires a reviewed plan | `getReadyIssues` requires, for any issue not labelled `verify:n/a`, both a verification-plan section and the `plan:approved` label — plan presence alone no longer dispatches. `verify:n/a` still routes through the doc-gate path, but only when `needs-human` is absent. | `forge.ts::getReadyIssues` / `forge.test.ts` |
+| `needs-human`/`blocked` veto unconditionally | Present alongside any other label, either blocks dispatch regardless. | `forge.ts::getReadyIssues` / `forge.test.ts` |
+| A weak plan self-heals, bounded | The reviewer never approves a plan it authored; a distinct, issues-only drafting session (never a full worker lane; it never implements the issue) repairs it instead, for at most `roles.verificationPlanReviewer.maxDraftCycles` draft→re-review attempts (default 2), then escalates to `needs-human` with the full attempt trail. | `plan-review.ts::confirmOneIssue` / `plan-review.test.ts` |
+| Output is validated, not trusted | Neither reviewer nor drafter session holds a `Bash` grant; the engine schema-validates each session's structured output and re-checks that an approve/drafted body actually carries a verification-plan section before applying `plan:approved`. Malformed or content-invalid output is retried once, then escalated. | `plan-review.ts::validateReviewerOutput`/`validateDrafterOutput` / `plan-review.test.ts` |
+| Approval is re-endorsed, not permanent | A prior round's `plan:approved` is re-checked via a lightweight, zero-forge-write-on-confirm session every time the issue re-enters the round pool, before its approval is trusted again; a session that can't confirm or fails escalates `needs-human`. The label itself is never removed either way. | `plan-review.ts::confirmOneIssue` / `plan-review.test.ts` |
 
-**A plan below standard self-heals rather than stalls**: when the
-reviewer finds the plan missing or inadequate beyond its minor-correction latitude, it
-does not park the issue for a human — its structured decision names precisely what's
-missing, the engine posts that as a comment (the brief), and the loop dispatches a
-**scoped plan-drafting session**: issues-only writes, a session distinct from the
-reviewer (plan-author ≠ plan-approver — the reviewer never approves a plan it
-authored), never a full worker lane, and it never implements the issue itself. The
-draft then comes back through a fresh plan-review. The cycle is bounded — at most
-`roles.verificationPlanReviewer.maxDraftCycles` draft→re-review attempts per issue (default 2) —
-after which the loop applies `needs-human` with the full attempt trail preserved
-(Decision #9's degrade-to-human). Every attempt is externalized as issue edits/
-comments, so a human can inspect or intervene at any point. The Ready-gate enforcement
-above is unchanged by any of this: implementation dispatch still requires
-`plan:approved` (or adjudicated `verify:n/a`) — only the repair path became more
-autonomous.
-
-The verification-plan-reviewer/verification-plan-drafter sessions are wired and pure computation:
-neither holds a `Bash` tool grant, so neither ever runs `gh` itself. Each session's
-final message ends in a structured, sentinel-delimited output block; the engine
-(`plan-review.ts`) parses it, validates it against a zod schema, re-checks the one
-content invariant worth cheaply verifying — an "approve"/drafted body must actually
-carry a verification-plan section, since schema-valid is not the same as truthful —
-and only then applies `plan:approved` (or any body correction) itself via `IForge`.
-Malformed, schema-invalid, or content-invalid output is treated as a failed attempt:
-retried once, then escalated to `needs-human` with the full attempt trail, exactly like
-an outright session crash. The shipped default prompt lives at
-`engine/prompts/verification-plan-reviewer.md` (`roles.verificationPlanReviewer.promptFile` overrides it — same
-pattern as `worker.promptFile`).
-
-**`plan:approved` is re-endorsed, not permanent.** The verification-plan-reviewer's candidate
-sweep above is now scoped to the round pool rather than the whole Ready lane, and a
-prior round's `plan:approved` is re-checked — a lightweight, zero-forge-write-on-confirm
-session — every time that issue re-enters a pool, before its approval is trusted for
-dispatch again; a session that can't confirm or fails escalates `needs-human` the same
-way an initial review does. The label itself is never removed by that check either way.
-See [`docs/PLAN.md`](PLAN.md#round-orchestrator) (the "gate⓪ is scoped
-to the round pool..." locked decision) for the full detail.
+Every attempt is externalized as issue edits/comments, so a human can inspect or intervene at
+any point. Implementation dispatch still requires `plan:approved` (or adjudicated
+`verify:n/a`) regardless — only the repair path became more autonomous. See
+[`docs/PLAN.md`](PLAN.md#round-orchestrator) (the "gate⓪ is scoped to the round pool..."
+locked decision) for the full detail.
 
 
 ## Mechanism reference
@@ -633,4 +453,4 @@ page is the mechanism reference for its topic.
   orchestrator's self-feed design.
 - [`design/279-engine-review-agent.md`](design/279-engine-review-agent.md) — the full
   engine-agent reviewer design (materialization, review session mode, the drive/audit
-  flow) the "Review session mode" section above distills.
+  flow) [Review session mode](security/review-session-mode.md) distills.
