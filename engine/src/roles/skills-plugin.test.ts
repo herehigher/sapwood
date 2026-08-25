@@ -365,38 +365,45 @@ test("renderSkillsPlugin: against this repo's real docs/security.md, every skill
   }
 });
 
-// #1094 PR-0 (R8 finding D): guard.ts's write-path classifier and this doc's "Human-merge-only
-// paths" marker block are two independent homes for the same list, with no oracle tying them
-// together — each representative path below is driven through the REAL classifier (not a
-// hand-copied label) and its returned label's identifying substring is required to appear in
-// the REAL marker-delimited prose, so a family the classifier protects but the prose never
-// mentions fails here instead of silently drifting. `.sapwood/**` is deliberately excluded: it
-// is gitignored runtime state, never a path a PR could touch, and is already documented as its
-// own residual under "Human controls" — a different concern than this human-merge-only list.
-test("guard.ts's write-path classifier and docs/security.md's human-merge-only-paths marker block agree on every protected-path family", () => {
+// guard.ts's write-path classifier and this doc's "Human-merge-only paths" marker block are two
+// independent homes for the same list, with no oracle tying them together. Every exact protected
+// path below is driven through the REAL classifier (never a hand-copied label) and must be backed
+// by an EXACT backticked mention in the REAL marker prose — a bare substring is not enough,
+// since a path segment can appear inside unrelated prose in the same block (e.g. bare "guard.ts"
+// also occurs inside "`engine/src/guard/guard.ts`" in the config bullet's explanation; the exact
+// backtick-delimited span "`guard.ts`" does not). `.sapwood/**` is deliberately excluded: it is
+// gitignored runtime state, never a path a PR could touch, and is documented separately under
+// "Human controls" — a different concern from this human-merge-only source-path list.
+test("guard.ts's write-path classifier and docs/security.md's human-merge-only-paths marker block agree on every protected path", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const realSecurityMdPath = join(here, "..", "..", "..", "docs", "security.md");
   const securityMd = readFileSync(realSecurityMdPath, "utf8");
   const markerProse = extractMarkedSection(securityMd, "human-merge-only-paths");
 
-  const cases: [path: string, token: string][] = [
-    ["engine/src/guard/guard.ts", "guard.ts"],
-    ["engine/src/guard/guard-hook.ts", "guard hook wiring"],
-    ["engine/src/roles/reviewer.ts", "reviewer.ts"],
-    ["engine/src/roles/merge-driver.ts", "merge-driver.ts"],
-    ["sapwood.config.yaml", "sapwood.config.yaml"],
-    ["sapwood.config.example.yaml", "sapwood.config.example.yaml"],
-    [".claude/settings.json", ".claude/settings"],
-    [".github/workflows/ci.yml", ".github/workflows"],
-    ["engine/dist/roles/reviewer.js", "engine/dist"],
+  const cases: [path: string, exactToken: string][] = [
+    ["engine/src/guard/guard.ts", "`guard.ts`"],
+    ["engine/src/guard/guard-hook.ts", "`guard-hook.ts`"],
+    ["engine/src/roles/reviewer.ts", "`reviewer.ts`"],
+    ["engine/src/roles/merge-driver.ts", "`merge-driver.ts`"],
+    ["engine/dist/guard/guard.js", "`engine/dist/guard/guard.js`"],
+    ["engine/dist/guard/guard-hook.js", "`engine/dist/guard/guard-hook.js`"],
+    ["engine/dist/roles/reviewer.js", "`engine/dist/roles/reviewer.js`"],
+    ["engine/dist/roles/merge-driver.js", "`engine/dist/roles/merge-driver.js`"],
+    ["sapwood.config.yaml", "`sapwood.config.yaml`"],
+    ["sapwood.config.json", "`sapwood.config.json`"],
+    ["sapwood.config.example.yaml", "`sapwood.config.example.yaml`"],
+    ["sapwood.config.example.json", "`sapwood.config.example.json`"],
+    [".claude/settings.json", "`.claude/settings*.json`"],
+    [".claude/settings.local.json", "`.claude/settings*.json`"],
+    [".github/workflows/ci.yml", "`.github/workflows/**`"],
   ];
-  for (const [path, token] of cases) {
+  for (const [path, exactToken] of cases) {
     const decision = guardDecision("Write", { file_path: path }, "/repo");
     assert.equal(decision.allow, false, `precondition: guard.ts must classify ${path} as human-merge-only`);
     assert.match(decision.reason, /is human-merge-only$/, `precondition: ${path}'s reason must be a write-path block`);
     assert.ok(
-      markerProse.includes(token),
-      `guard.ts blocks ${path} (${decision.reason}) but "${token}" is missing from the human-merge-only-paths marker prose — the list may only widen, per CLAUDE.md`,
+      markerProse.includes(exactToken),
+      `guard.ts blocks ${path} (${decision.reason}) but the exact token ${exactToken} is missing from the human-merge-only-paths marker prose — the list may only widen, per CLAUDE.md`,
     );
   }
 });

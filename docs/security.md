@@ -2028,7 +2028,7 @@ Some files are structurally off-limits to an autonomous worker because changing 
 would let a worker weaken the very mechanism that constrains it. Any change to these is
 **human-merge-only**, regardless of what merge mode is configured:
 
-- `guard.ts` / the guard hook wiring
+- `guard.ts` / `guard-hook.ts` (the guard hook wiring)
 - `reviewer.ts` / `merge-driver.ts`
 - `engine/dist/guard/guard.js`, `engine/dist/guard/guard-hook.js`, `engine/dist/roles/reviewer.js`,
   `engine/dist/roles/merge-driver.js` — the compiled artifacts each PreToolUse invocation and the
