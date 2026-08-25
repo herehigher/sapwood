@@ -69,7 +69,7 @@ a benign hit, while the opposite error would downgrade a real one.
 
 Classification reads the full observed text, not the 200-character evidence snippet, so a public
 URL truncated out of the recorded evidence cannot be tagged loopback (`worker.test.ts`:
-"scanEgressSuspects (#387): classification reads the FULL text, not the 200-char snippet … a
+"scanEgressSuspects (#387): classification reads the FULL text, not the 200-char snippet — a
 public URL truncated out of the evidence can never leave the hit tagged loopback").
 
 Loopback is not "safe" in general — a local port can be a proxy onward — which is why this is a
@@ -108,7 +108,7 @@ process itself performs, and not every inherited schema's semantics.
 
 Gate②'s review-session mode also refuses a caller-supplied `allowedTools` outright (thrown, not
 silently accepted). A gate whose conclusions could drift run to run over a live web result is not
-an inspectable gate — recorded as a deliberate reproducibility property.
+an inspectable gate — this is recorded as a deliberate reproducibility property.
 
 **The exception, stated exactly (`reviewer.agent.runner: codex-exec`).** An operator can select a
 locally spawned `codex exec` process as the engine-agent review session's runner — **off by
@@ -143,10 +143,15 @@ denial, so the adjudicated claim for this runner is stated here rather than inhe
   session.
 - **Recorded blind spot 3 — the inherited environment.** The session's environment is the
   engine's own, minus a denylist: `codexSessionEnv`'s per-key predicate `isStrippedEnvKey`
-  strips well-known credential families and a generic secret-shaped-name sweep, keeping only an
-  explicit provider-transport keep-set (`codex-exec.test.ts`: "isStrippedEnvKey: the well-known
-  credential FAMILIES … are dropped"; "the keep-set WINS over the sweep").
-- **That list cannot be exhaustive.** The rest of the environment is inherited, and dumping it
+  strips well-known credential families and a generic secret-shaped-name sweep, with an explicit
+  provider-transport keep-set (`CODEX_ENV_KEEP`) that wins over the sweep — every unmatched key
+  is inherited (`codex-exec.test.ts`: "isStrippedEnvKey: the well-known credential FAMILIES an
+  operator's shell carries are dropped — a prompt-injected session dumping `env` is the cheapest
+  exfiltration path there is").
+- **The keep-set is an exception, not an allowlist.** `codex-exec.test.ts`: "isStrippedEnvKey:
+  the keep-set WINS over the sweep — every supported auth mode survives, or every review breaks
+  with no way to catch it short of a paid run."
+- **The denylist cannot be exhaustive.** The rest of the environment is inherited, and dumping it
   costs a steered session one `env` (an allowlist was considered and rejected — see [Design
   derivations](../design/security-egress-derivations-2026-08.md)). An operator who runs the
   engine from a shell carrying secrets should assume a steered review session can read them.
