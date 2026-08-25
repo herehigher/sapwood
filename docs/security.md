@@ -2192,9 +2192,11 @@ state DB (`data/`), without requiring a config edit:
 The precedence order is emergency stop, then kill switch, then pause: emergency stop wins over
 the kill switch, and either strict tier subsumes pause's dispatch restriction.
 
-**Interaction with `--until-idle`:** idleness (`driver.ts`'s `isIdle`) is
-`state.activeWorkers().length === 0` — running **and** `driving` **and** `fixing` lanes all
-count, not just live processes. A paused engine dispatches nothing new, and a `driving` lane
+**Interaction with `--until-idle`:** idleness (`driver.ts`'s `isIdle`) requires zero active
+workers (`running`, `driving`, or `fixing` — not just live processes) **and** that this tick
+dispatched nothing new **and** that no fix-leg soft-budget handoff was just reclaimed and is
+waiting for the next tick's RESUME, all three at once — which leaves the paused-`driving`-lane
+conclusion below unaffected either way. A paused engine dispatches nothing new, and a `driving` lane
 whose verdict is already `MERGE`/`WAIT_REVIEW` keeps resolving normally and eventually leaves
 `driving`; but a `driving` lane whose next action is a fresh fix leg stays `driving` — blocked,
 not finished — for as long as PAUSE stands, so **`--until-idle` does not exit on its own while
