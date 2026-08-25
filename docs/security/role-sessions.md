@@ -101,8 +101,11 @@ sees it. The ruling is **disclose + detect-and-WARN**, not refusal; the warning 
 
 **Boundaries**
 
-The `Agent`/`Task` deny is scoped to `claude`; `codex-exec` differs (a read-only sandbox). Worker
-spawn decision + cost: [the design
+This deny is a name-list of the ONE known spawn channel over a CLI-defined, version-drifting tool
+surface, never a claim the session's capability set is closed — a future CLI version could rename,
+add, or remove a spawn-shaped tool. The cited tests prove only that `Agent`/`Task` are listed as
+denied, not that no other spawn-shaped tool exists. It is scoped to the `claude` executor;
+`codex-exec` differs (a read-only sandbox). Worker spawn decision + cost: [the design
 record](../design/security-issues-only-derivations-2026-08.md#origin-issues-only-role-sessions--the-workers-spawn-capability-decision-and-its-cost-measurement) —
 accepted, unbounded blind spot.
 
@@ -118,7 +121,7 @@ record](../design/security-issues-only-derivations-2026-08.md#origin-the-forge-m
 | Invariant | Enforcement | Test |
 | --- | --- | --- |
 | `resume()`'s proxy attachment mirrors `dispatch()`'s byte-for-byte (mint-before-argv, `--allowedTools`, `--mcp-config`, `credentialFree` policy, teardown); on `credentialFree` mint failure, resume never deletes the jsonl/`.handoff` sentinel, preserving resumability. | `worker.ts` (`WorkerSupervisor.resume`) | `worker.test.ts` |
-| `workerCredentialFreeEnv` severs `gh`/git's on-disk credential lookup: fresh `GH_CONFIG_DIR`, nulled `GIT_CONFIG_GLOBAL`/`SYSTEM`, `GIT_TERMINAL_PROMPT=0`, dropped `SSH_AUTH_SOCK`, drops `Bash(gh *)` (`Bash(git *)` stays). | `worker.ts::workerCredentialFreeEnv` | `worker.test.ts` |
+| `workerCredentialFreeEnv()` severs `gh`'s and git's on-disk credential lookup and narrows `--allowedTools` to drop `Bash(gh *)`. | `worker.ts::workerCredentialFreeEnv` | `worker.test.ts` |
 | `--strict-mcp-config` makes the MCP config exclusive under `credentialFree`, so ambient host MCP servers never load — closing a gap worse than the disk-read residual below (network vs local-disk). | `worker.ts` (`dispatch()`/`resume()`) | `worker.test.ts` |
 | A `credentialFree` mint failure REFUSES dispatch outright; an ordinary mint failure is non-fatal (lane dispatches unattached). Either way: a durable `proxy-mint-failed` event. | `worker.ts` | `worker.test.ts` |
 
@@ -126,8 +129,10 @@ record](../design/security-issues-only-derivations-2026-08.md#origin-the-forge-m
 
 - **HONEST SCOPE — this is NOT full isolation.** `workerCredentialFreeEnv` and the MCP seal do not
   confine a fix leg's `Bash(node *)`/`Bash(npm *)` disk reads — the lane runs with the operator's
-  REAL `$HOME`. A live PoC (`steal.mjs`) confirmed this; the PoC and the two rejected mitigations
-  are in [the design
+  REAL `$HOME`. A live PoC (`steal.mjs`) confirmed this by reading `~/.config/gh/hosts.yml` and
+  successfully authenticating to GitHub with the credential found there, bypassing every env var
+  `workerCredentialFreeEnv` touches; the PoC narrative and the two rejected mitigations are in [the
+  design
   record](../design/security-issues-only-derivations-2026-08.md#origin-honest-scope--this-is-not-full-isolation--the-stealmjs-proof-of-concept-and-rejected-mitigations).
 - The upgrade path for a boundary that's actually closed is OS-level sandboxing (the
   operator-configured Bash-sandbox recipe — see [Execution
@@ -195,16 +200,16 @@ for the fuller argument.
 
 | Invariant | Enforcement | Test |
 | --- | --- | --- |
-| A `driving` lane (holding a PR awaiting gate①/gate②) transitions to `fixing` (a live fix-leg worker process reworking that PR) and back to `driving` on a terminal outcome; `fixing` occupies dispatch capacity exactly like `running`/`driving`. | `state.ts::activeWorkers`; `conductor.ts::startFixLeg` | `conductor.test.ts`: "startFixLeg: transitions driving -> fixing, bumps fix_rounds, resumes the SAME lane (never a fresh dispatch — squash-branch-reuse hazard)" |
+| A `driving` lane transitions to `fixing` via `resume()`; `fixing` occupies dispatch capacity exactly like `running`/`driving`. | `conductor.ts::startFixLeg` | `conductor.test.ts`: "startFixLeg: transitions driving -> fixing, bumps fix_rounds, resumes the SAME lane (never a fresh dispatch — squash-branch-reuse hazard)" |
 | `fix_rounds` (rework rounds) and `resume_attempts` (budget-exhaustion handoffs) are independent counters — starting a fix leg never touches `resume_attempts`. | `state.ts` schema v18→v19 (`workers.fix_rounds`); `conductor.ts::startFixLeg` | `conductor.test.ts`: "startFixLeg: fix_rounds is independent of resume_attempts" |
-| The `fixing → driving` edge clears the review-trigger pin (`review_triggered_head`/`_at` reset to `null`), forcing a fresh review on the fix leg's new head. | `conductor.ts` (`fixingPinClear`) | `conductor.test.ts` (transitions covered by `fixingPinClear`) |
-| A `fixing` lane is a live worker process under the SAME heartbeat/timeout/soft-budget supervision as `running`, but is invisible to the DRIVE loop — the structural reason the review-silence escalation cannot arm while a lane is fixing. | `state.ts::drivingWorkers` / `fixingWorkers` | `state.test.ts`: "fixingWorkers returns only state=fixing rows, disjoint from drivingWorkers"; `conductor.test.ts`: "#170 review-silence escalation is provably NOT armed during `fixing`" |
-| With the `FIXABLE` gate wired in, ordinary review findings route to `fixing` instead of producing a `failed`+PR row — the only remaining producer of that shape is the `fix_rounds` cap escalation. | `state.ts::gatedFailedWorkers` (narrowed semantics) | `conductor.test.ts` (`gatedFailedWorkers()` assertions around the fix-rounds-cap escalation) |
-| An unresolved review thread at the same (finding digest, span) as an already-resolved, non-outdated thread is an adjudicated re-raise, excluded from the blocking count — keyed on (finding, span), never a thread id or a bare span alone. | `reviewer.ts::adjudicatedDuplicateThreads` | `reviewer.test.ts` (`adjudicatedDuplicateThreads` fixtures) |
-| Same-tick fix-loop precedence is verdict-rerun → convergence-stalled → cap: a byte-identical rerun wins outright; a stalled lane escalates before another fix round; `lanes.prFixCap` backstops a lane still genuinely converging. | `conductor.ts` (verdict-rerun breaker); `review/convergence.ts` (progress classifier) | `conductor.test.ts`: "verdict-rerun breaker — a SECOND fixable for the SAME engine-agent verdictRunId dispatches NO fix leg" |
-| A driving lane's fix leg is exempt from `cost.roundBudgetUsd` (which gates NEW dispatch only) but stays bounded by `lanes.prFixCap`, `worker.budgetUsdSoft`, and the hard `cost.dailyBudgetUsd`, deliberately NOT exempted. | `conductor.ts` (fix-leg admission path) | `conductor.test.ts`: "#375: fixable + round budget exceeded -> the fix leg is EXEMPT from cost.roundBudgetUsd" |
-| A fix leg's admission gate reads the genuine `.sapwood/PAUSE` sentinel only (`humanPauseOnly`), never the wider `forceDispatchPause`/round-stop OR'd flag DISPATCH/RESUME use — a round-level stop never blocks a fix leg alone, a human PAUSE still does (see [Human controls](../security.md#human-controls-three-tiers)). | `conductor.ts::fixLegAdmissionBlockReason` | `conductor.test.ts`: "forceDispatchPause ALONE ... does NOT block a FIXUP dispatch"; "a GENUINE human PAUSE sentinel ... still blocks a FIXUP dispatch" |
-| Under the `KILL_SWITCH` bounded drain, a `driving` lane that is daily-budget-blocked, fix-rounds-capped, or CI-pending past its ceiling is terminal-for-drain past `cost.drainWindowSec`; a lane that never needed a fix leg (MERGE-/WAIT-gated) is left alone. | `conductor.ts::drivingLaneTerminalForDrain` | `conductor.test.ts`: "a driving lane mid-fix-loop ... blocked ONLY by the daily-budget ceiling is TERMINAL-for-drain too"; "a driving lane that never needed a fix leg ... is left alone" |
+| The `fixing → driving` edge (on any terminal outcome) clears the review-trigger pin, forcing a fresh review on the fix leg's new head. | `conductor.ts::reclaimTerminalLane` | `conductor.test.ts`: "tick FIXING RECLAIM + DRIVE, same tick: once a fixing lane lands back in driving with a cleared pin, the SAME tick's DRIVE loop re-triggers a fresh review on the new head" |
+| A `fixing` lane is a live worker process under the SAME supervision as `running`, but invisible to the DRIVE loop — why the review-silence escalation cannot arm while a lane is fixing. | `state.ts::drivingWorkers` / `fixingWorkers` | `state.test.ts`: "fixingWorkers returns only state=fixing rows, disjoint from drivingWorkers"; `conductor.test.ts`: "#170 review-silence escalation is provably NOT armed during `fixing`" |
+| With `prFixCap > 0`, ordinary findings route to `fixing` instead of a `failed`+PR row (fix_rounds cap escalation is the only other producer); at `prFixCap: 0` they fold directly to HUMAN instead. | `merge-driver.ts::deriveGate`; `conductor.ts::driveDecision`; `state.ts::gatedFailedWorkers` (doc) | `merge-driver.test.ts`: "prFixCap: 0 -> unresolved findings (HANDLE_THREADS) still needs-human, byte-for-byte the pre-#246 path"; `conductor.test.ts` (fixable+under-cap dispatch fixtures) |
+| An unresolved thread matching an already-resolved, non-outdated thread's (finding, span) key is an adjudicated re-raise, excluded from the blocking count. | `reviewer.ts::adjudicatedDuplicateThreads` | `reviewer.test.ts` (`adjudicatedDuplicateThreads` fixtures) |
+| Same-tick fix-loop precedence is verdict-rerun → convergence-stalled → cap: a rerun wins outright; a stalled lane escalates before another fix round. | `conductor.ts` (verdict-rerun breaker); `review/convergence.ts` (progress classifier) | `conductor.test.ts`: "verdict-rerun breaker — a SECOND fixable for the SAME engine-agent verdictRunId dispatches NO fix leg" |
+| A driving lane's fix leg is exempt from `cost.roundBudgetUsd` (NEW dispatch only) but stays bounded by `lanes.prFixCap`/`worker.budgetUsdSoft`/the hard `cost.dailyBudgetUsd`. | `conductor.ts` (fix-leg admission path) | `conductor.test.ts`: "#375: fixable + round budget exceeded -> the fix leg is EXEMPT from cost.roundBudgetUsd" |
+| A fix leg's admission gate reads the genuine `.sapwood/PAUSE` sentinel only, never the wider `forceDispatchPause` flag — a round-level stop never blocks a fix leg alone. | `conductor.ts::fixLegAdmissionBlockReason` | `conductor.test.ts`: "forceDispatchPause ALONE ... does NOT block a FIXUP dispatch"; "a GENUINE human PAUSE sentinel ... still blocks a FIXUP dispatch" |
+| Under `KILL_SWITCH`, a budget-blocked/capped/CI-wedged `driving` lane is terminal-for-drain past `cost.drainWindowSec` when `prFixCap > 0`; at `prFixCap: 0`, EVERY driving lane is terminal-for-drain unconditionally. | `conductor.ts::drivingLaneTerminalForDrain` | `conductor.test.ts`: "a driving lane mid-fix-loop ... blocked ONLY by the daily-budget ceiling is TERMINAL-for-drain too"; "a driving lane that never needed a fix leg ... is left alone" (both `prFixCap > 0` fixtures) |
 
 **Boundaries**
 
@@ -219,3 +224,6 @@ for the fuller argument.
 - The `roundBudgetUsd` exemption is uniform across every round/run-level stop reason: once any
   stop condition fires, new DISPATCH freezes, but a fix leg on an already-open PR is never "new
   dispatch" either way.
+- At `prFixCap: 0`, `drivingLaneTerminalForDrain`'s own `fixRounds >= prFixCap` branch (`0 >= 0`)
+  makes every driving lane terminal-for-drain unconditionally — a direct consequence of the
+  function as written, not yet pinned by a named test at that specific input.

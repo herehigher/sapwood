@@ -3,8 +3,8 @@
 > **Process record.** Internal design/research artifact from sapwood's own development
 > history — not end-user documentation. Read current docs/code for shipped state:
 > [`../security/role-sessions.md`](../security/role-sessions.md) is the mechanism reference this
-> record was split out of (#1094 PR-2, compressing "Worker denylist vs. peripheral allowlist" and
-> "Issues-only role sessions"). This document preserves the rationale, measurements, and rejected
+> record was split out of, compressing "Worker denylist vs. peripheral allowlist" and
+> "Issues-only role sessions". This document preserves the rationale, measurements, and rejected
 > alternatives behind decisions the current page states only as accepted blind spots and
 > enforcement boundaries.
 
@@ -92,13 +92,14 @@ that confirmed the residual, and the two mitigations considered and rejected, ve
 
 ---
 
-A live proof-of-concept (`node steal.mjs`, a script invoked through exactly that grant) read
-`~/.config/gh/hosts.yml` directly and reached GitHub with the credential found there, bypassing
-every env var `workerCredentialFreeEnv` touches entirely — filesystem access is orthogonal to
-environment-variable redirection AND to the MCP seal, and no amount of either closes it. Two
-mitigations this repo deliberately does NOT attempt: **HOME isolation** (redirecting `$HOME` would
-break the `claude` CLI's own config/auth, which the lane also needs merely to run) and **stripping
-`Bash(node *)`/`Bash(npm *)`** (a fix leg's whole job requires running tests).
+A live proof-of-concept (`node steal.mjs`, a script invoked through
+exactly that grant) read `~/.config/gh/hosts.yml` directly and reached GitHub with the credential
+found there, bypassing every env var `workerCredentialFreeEnv` touches entirely — filesystem
+access is orthogonal to environment-variable redirection AND to the MCP seal, and no amount of
+either closes it. Two mitigations this repo deliberately does NOT attempt: **HOME isolation**
+(redirecting `$HOME` would break the `claude` CLI's own config/auth, which the lane also needs
+merely to run) and **stripping `Bash(node *)`/`Bash(npm *)`** (a fix leg's whole job requires
+running tests).
 
 ---
 
@@ -135,6 +136,6 @@ Routing review findings (`HANDLE_THREADS`) straight to `needs-human` (`merge-dri
 `deriveGate`) would ask a human to *resolve* a review, inverting the autonomy principle
 (humans adjudicate reviews, they never resolve them). Instead, the producing worker gets its own
 lane state to address findings itself, *before* human escalation, without ever handing it a new
-dispatch or forge credentials.
+dispatch or forge credentials:
 
 ---
