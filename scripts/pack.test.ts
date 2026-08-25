@@ -241,7 +241,9 @@ test("packed engine tarball is fresh, map-free, and runnable from a clean checko
         command: binPath,
         args: ["dashboard", "--port", String(port)],
         cwd: canaryDir,
-        env: npmEnv,
+        // BROWSER=none (Vite/CRA convention): this canary runs the real compiled bin, which
+        // reaches the real opener — without it, every test run pops an unwanted browser tab.
+        env: { ...npmEnv, BROWSER: "none" },
         timeoutMs: 30_000,
       });
       assert.match(canary.output, /serving at http:\/\/127\.0\.0\.1:/);

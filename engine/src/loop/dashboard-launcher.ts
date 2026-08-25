@@ -46,8 +46,13 @@ const pExecFile = promisify(execFile);
 /** Real browser-open: an argv array through execFile, never a shell (SECURITY — same discipline
  *  as forge/gh.ts's own `gh` calls) — a URL is never at risk of shell interpretation. A missing
  *  opener binary (the expected headless/CI/Docker shape) rejects; caught and reported honestly,
- *  never thrown up to crash the CLI (AC2). */
-export async function openBrowserReal(url: string): Promise<BrowserOpenResult> {
+ *  never thrown up to crash the CLI (AC2). `BROWSER=none` (the Vite/CRA convention) short-circuits
+ *  before execFile — it lets a headless caller, or a black-box test spawning the compiled bin,
+ *  opt out of the real opener without a dedicated CLI flag. Takes `env` as a parameter (default
+ *  `process.env`), matching `openerArgv`'s own `platform` param style, so a test can exercise this
+ *  without mutating global state. */
+export async function openBrowserReal(url: string, env: NodeJS.ProcessEnv = process.env): Promise<BrowserOpenResult> {
+  if (env.BROWSER === "none") return { opened: false, reason: "BROWSER=none is set" };
   const { cmd, args } = openerArgv(url);
   try {
     await pExecFile(cmd, args);

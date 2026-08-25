@@ -23,6 +23,7 @@ import {
   type BrowserOpenResult,
   type DashboardServerHandle,
   dashboardAssetPaths,
+  openBrowserReal,
   openerArgv,
   startDashboardServer,
 } from "./dashboard-launcher.js";
@@ -235,10 +236,15 @@ test("resolveDashboardPort: a malformed env value is a hard error, never a silen
   assert.match("error" in r ? r.error : "", /SAPWOOD_DASHBOARD_PORT must be an integer between 1 and 65535/);
 });
 
-// ── openerArgv (pure — no real execFile) ────────────────────────────────────────────────────
+// ── openerArgv / openBrowserReal short-circuit (pure — no real execFile) ───────────────────────
 
 test("openerArgv: darwin uses `open`", () => {
   assert.deepEqual(openerArgv("http://127.0.0.1:4517", "darwin"), { cmd: "open", args: ["http://127.0.0.1:4517"] });
+});
+
+test("openBrowserReal: BROWSER=none short-circuits before execFile, resolving instantly", async () => {
+  const result = await openBrowserReal("http://127.0.0.1:4517", { BROWSER: "none" });
+  assert.deepEqual(result, { opened: false, reason: "BROWSER=none is set" });
 });
 
 test("openerArgv: win32 uses `cmd /c start` with an empty title arg (so the URL is never read as the window title)", () => {

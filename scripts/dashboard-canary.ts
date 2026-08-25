@@ -123,7 +123,9 @@ async function main(argv: string[]): Promise<void> {
       command: "npx",
       args: ["--yes", `sapwood@${version}`, "dashboard", "--port", String(port)],
       cwd,
-      env: { ...process.env, npm_config_cache: cache },
+      // BROWSER=none (Vite/CRA convention): this probe runs the real published bin, which
+      // reaches the real opener — without it, every release-runbook run pops a browser tab.
+      env: { ...process.env, npm_config_cache: cache, BROWSER: "none" },
     });
     process.stdout.write(`dashboard canary: OK ${result.origin}\n`);
   } finally {
