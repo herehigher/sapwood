@@ -25,7 +25,7 @@
 // must not silently pass). A missing marker with ZERO comments is the one pass-through case
 // (AC8's reverse test: behavior-identical to today — no new writes, labels, or outcome changes;
 // the checkpoints that consume this module's result DO add comment/actor reads, see
-// docs/security.md).
+// docs/security/adjudication.md#the-comment-adjudication-cursor).
 //
 // #703 v2 (POSITION SEMANTICS, supersedes the pre-v2 engine-comment rejection): a cursor pointing
 // at an ENGINE comment is now a VALID position, exactly like one pointing at a non-engine
