@@ -24,28 +24,40 @@ const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 // Word-boundary aware, not a bare substring match: `(?<![A-Za-z0-9_])data/` excludes only a
 // literal `data` immediately preceded by an identifier character (e.g. "metadata/body"), never
 // a real path mention (which is always preceded by whitespace, punctuation, or a backtick).
-// Fenced code blocks (``` ... ```) are excluded from the scan: a migration script's `mv
-// "data/$f" .sapwood/` necessarily names the OLD path as the FROM side of a rename — that is
-// the shipped cutover checklist working as intended, not a stale description of the current
-// layout. Inline code spans (single backticks) and ordinary prose both stay in scope.
+// Fenced code blocks stay IN scope — a stale `touch data/KILL_SWITCH` example is exactly the
+// kind of regression this oracle exists to catch. The one necessary exception is the CHANGELOG
+// cutover checklist below, which names the OLD path as the deliberate FROM side of a migration.
 const DATA_LITERAL_RE = /(?<![A-Za-z0-9_])data\//;
 
 function isFenceDelimiter(line: string): boolean {
   return /^\s*```/.test(line);
 }
 
-/** Every `data/` offense line, with fenced-code-block content skipped. */
+// The ONLY fence exempted from the scan: matched by its own first content line, not by file or
+// line number, so the exemption can't silently widen to swallow an unrelated block. This is the
+// literal FROM side of the shipped cutover checklist (CHANGELOG.md) — the whole point of that
+// block is to show the pre-rename path being moved away from, so it cannot itself be "fixed".
+const CHANGELOG_CUTOVER_MARKER = "# engine stopped (pid gone, no sapwood.lock holder)";
+
+/** Every `data/` offense line. Fenced code blocks are scanned like any other text, except the
+ *  single fence whose first line is CHANGELOG_CUTOVER_MARKER (matched by content). */
 function findOffenses(relPath: string, content: string): string[] {
   const offenders: string[] = [];
-  let inFence = false;
   const lines = content.split("\n");
+  let inFence = false;
+  let fenceExempt = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     if (isFenceDelimiter(line)) {
+      if (!inFence) {
+        fenceExempt = lines[i + 1]?.trim() === CHANGELOG_CUTOVER_MARKER;
+      } else {
+        fenceExempt = false;
+      }
       inFence = !inFence;
       continue;
     }
-    if (inFence) continue;
+    if (inFence && fenceExempt) continue;
     if (DATA_LITERAL_RE.test(line)) offenders.push(`${relPath}:${i + 1}`);
   }
   return offenders;
@@ -117,9 +129,15 @@ test("reverse test: 'metadata/body' is NOT flagged (word-boundary, not bare subs
   assert.deepEqual(findOffenses("fixture.md", content), []);
 });
 
-test("reverse test: a `data/` literal fenced inside a shell block (a migration's FROM side) is NOT flagged, the same literal outside a fence IS", () => {
-  const fenced = ["```", 'mv "data/sapwood.sqlite" .sapwood/', "```"].join("\n");
-  assert.deepEqual(findOffenses("fixture.md", fenced), []);
+test("positive fixture: a fenced `data/` literal outside the CHANGELOG cutover block IS flagged", () => {
+  const content = ["```bash", "touch data/KILL_SWITCH", "```"].join("\n");
+  assert.deepEqual(findOffenses("fixture.md", content), ["fixture.md:2"]);
+});
+
+test("reverse test: the CHANGELOG cutover checklist block (marker present) is NOT flagged, the same literal outside that block IS", () => {
+  const checklist = ["some prose", "```", CHANGELOG_CUTOVER_MARKER, 'mv "data/sapwood.sqlite" .sapwood/', "```"].join("\n");
+  assert.deepEqual(findOffenses("fixture.md", checklist), []);
+
   const prose = 'Move it with `mv "data/sapwood.sqlite" .sapwood/`.\n';
   assert.equal(findOffenses("fixture.md", prose).length, 1);
 });
@@ -170,25 +188,37 @@ function parseConfigurationTree(content: string): Set<string> {
   return paths;
 }
 
+/** The actual set-comparison oracle: which `runtimePaths()` entries the documented tree omits,
+ *  and which documented entries have no matching `runtimePaths()` field. Factored out so the
+ *  reverse test below exercises this comparison directly, not just the tree parser. */
+function compareRuntimePaths(documented: Set<string>, known: Set<string>): { missingFromDoc: string[]; extraInDoc: string[] } {
+  return {
+    missingFromDoc: [...known].filter((p) => !documented.has(p)),
+    extraInDoc: [...documented].filter((p) => !known.has(p)),
+  };
+}
+
 test("configuration.md's runtime-directory tree matches runtimePaths() exactly, both directions", () => {
   const known = knownRuntimeRelativePaths();
   assert.ok(known.size > 10, "sanity: runtimePaths() should name well over 10 sub-paths");
   const content = readFileSync(join(REPO_ROOT, "docs", "guide", "configuration.md"), "utf8");
   const documented = parseConfigurationTree(content);
 
-  const missingFromDoc = [...known].filter((p) => !documented.has(p));
-  const extraInDoc = [...documented].filter((p) => !known.has(p));
+  const { missingFromDoc, extraInDoc } = compareRuntimePaths(documented, known);
   assert.deepEqual(missingFromDoc, [], "runtimePaths() entries missing from the documented tree");
   assert.deepEqual(extraInDoc, [], "documented tree entries with no matching runtimePaths() field");
 });
 
-test("reverse test: the tree parser actually detects a mismatch (both directions), proven against synthetic trees", () => {
-  const heading = HEADING;
-  const missingOne = `${heading}\n\n\`\`\`\n.sapwood/\nKILL_SWITCH\n\`\`\`\n`;
-  const documentedMissing = parseConfigurationTree(missingOne);
-  assert.ok(!documentedMissing.has("PAUSE"), "sanity: synthetic tree omits PAUSE");
+test("reverse test: the set-comparison oracle catches both a missing and an extra path", () => {
+  const known = knownRuntimeRelativePaths();
+  const knownArr = [...known];
+  const omitted = knownArr[0];
+  assert.ok(omitted, "sanity: runtimePaths() names at least one path");
+  const treeLines = [".sapwood/", ...knownArr.slice(1), "bogus-entry"];
+  const content = `${HEADING}\n\n\`\`\`\n${treeLines.join("\n")}\n\`\`\`\n`;
 
-  const extraOne = `${heading}\n\n\`\`\`\n.sapwood/\nKILL_SWITCH\nbogus-entry\n\`\`\`\n`;
-  const documentedExtra = parseConfigurationTree(extraOne);
-  assert.ok(documentedExtra.has("bogus-entry"), "sanity: synthetic tree carries an unknown entry");
+  const documented = parseConfigurationTree(content);
+  const { missingFromDoc, extraInDoc } = compareRuntimePaths(documented, known);
+  assert.deepEqual(missingFromDoc, [omitted], "the omitted runtimePaths() entry must be reported missing");
+  assert.deepEqual(extraInDoc, ["bogus-entry"], "the synthetic unknown entry must be reported extra");
 });
