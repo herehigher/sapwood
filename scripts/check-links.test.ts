@@ -29,9 +29,36 @@ test("slugify: keeps letters, combining marks, and decimal digits from other scr
   assert.equal(slugify("日本語 heading"), "日本語-heading");
 });
 
+test("slugify: keeps a combining mark from a decomposed sequence, not just a precomposed letter", () => {
+  // The "café" case above uses the precomposed 'é' (a single Ll code point), which would still
+  // pass even if \p{M} were deleted from KEEP_CATEGORY_RE — it never exercises the mark branch.
+  // This uses the *decomposed* NFD form instead: a plain 'e' followed by U+0301 COMBINING ACUTE
+  // ACCENT (category Mn) as two separate code points. Verified against the deleted Python's
+  // `unicodedata.category` behavior (category[0] == 'M'): the combining mark survives unchanged.
+  const decomposed = "Café";
+  assert.equal(slugify(decomposed), decomposed.toLowerCase());
+});
+
 test("headingSlugs: duplicate headings get GitHub's -1, -2, ... suffixes", () => {
   const content = "# Foo\n\nsome text\n\n## Foo\n\nmore text\n\n### Foo\n";
   assert.deepEqual(headingSlugs(content), new Set(["foo", "foo-1", "foo-2"]));
+});
+
+test("headingSlugs: a later heading's own literal text can collide with a would-be suffix (Foo, Foo-1, Foo)", () => {
+  // The third "Foo" wants "foo-1" next, but the second heading's own text already claimed that
+  // slug literally — so the third has to skip to "foo-2", not reuse "foo-1". Verified against
+  // the deleted Python's headings_of: same collision-skipping behavior.
+  const content = "# Foo\n\n## Foo-1\n\n### Foo\n";
+  assert.deepEqual(headingSlugs(content), new Set(["foo", "foo-1", "foo-2"]));
+});
+
+test("headingSlugs: a duplicate's assigned suffix can itself collide with a later heading's literal text (Foo, Foo, Foo-1)", () => {
+  // The second "Foo" is assigned "foo-1" (the first free suffix). The third heading's own text,
+  // "Foo-1", slugifies to "foo-1" too — already taken — so its suffix loop appends to ITS OWN
+  // base ("foo-1"), landing on "foo-1-1", not on the next available "foo-2". Verified against
+  // the deleted Python's headings_of: same behavior.
+  const content = "# Foo\n\n## Foo\n\n### Foo-1\n";
+  assert.deepEqual(headingSlugs(content), new Set(["foo", "foo-1", "foo-1-1"]));
 });
 
 test("headingSlugs: only lines that begin with 1-6 '#'s followed by whitespace count as headings", () => {
