@@ -8,11 +8,11 @@ The engine-agent reviewer runs a static review session against an already-**mate
 tree — `review/materializer.ts`'s private-clone checkout of the exact reviewed commit, with no
 `.git` at all (D1: static-only, no producer-code execution).
 
-That materialized cwd is **producer-controlled content** — the PR head under review. The
-ambient-context boundary ("what a session can *read* is not the boundary" — see [Ambient repo
-context: record, don't
-seal](ambient-repo-context.md#ambient-repo-context-record-dont-seal)) therefore needs one closure
-specific to review sessions.
+That materialized cwd is **producer-controlled content** — the PR head under review.
+[Ambient repo context: record, don't
+seal](ambient-repo-context.md#ambient-repo-context-record-dont-seal) locks the trust boundary to
+what a session can **do**, never what it can **read**. Review sessions need one further closure
+specific to this producer-controlled case.
 
 A materialized tree can carry its own `.mcp.json` or `.claude/settings.json`. Neither the
 `--disallowedTools Bash` grant nor the PreToolUse guard hook mediates MCP-server-process launches
@@ -22,20 +22,23 @@ hardcoded (not caller-overridable) for every review session:
 
 | Invariant | Enforcement point | Test |
 | --- | --- | --- |
-| `--strict-mcp-config` + an explicit empty `--mcp-config` load zero MCP servers from any source, regardless of what the materialized tree's own `.mcp.json` declares. | `worker.ts::claudeArgs`; `peripheral.ts::RoleRunner.run` (hardcodes both for `reviewCwd`) | `peripheral.test.ts:2799`; `review-session.test.ts:235` |
+| `--strict-mcp-config` + the explicit empty `--mcp-config '{"mcpServers":{}}'` (`EMPTY_MCP_CONFIG_JSON`) load zero MCP servers from any source, regardless of what the materialized tree's own `.mcp.json` declares. | `worker.ts::claudeArgs`, `::EMPTY_MCP_CONFIG_JSON`; `peripheral.ts::RoleRunner.run` (hardcodes both for `reviewCwd`) | `peripheral.test.ts:2799`; `review-session.test.ts:235` |
 | `--setting-sources ""` loads ZERO file settings sources — not user, project, or local; only the inline guard `--settings` applies. | `worker.ts::claudeArgs`; `peripheral.ts::RoleRunner.run` (hardcodes `settingSources: ""`) | `peripheral.test.ts:2839`; `review-session.test.ts:278` |
-| The guard hook rides in on inline `--settings` (`guardSettings()`'s JSON, never a file) — a separate mechanism `--setting-sources` doesn't touch; its containment root (`SAPWOOD_WORKTREE_ROOT`) is the materialized tree. | `worker.ts::guardSettings`; `peripheral.ts::RoleRunner.run`; `guard.ts::checkReadContainment` | `review-session.test.ts`: "LIVE containment: guard-hook.ts ... BLOCKS a Read outside the materialized tree" |
+| The guard hook rides in on inline `--settings` (never a file) — a mechanism `--setting-sources` doesn't touch; its containment root is the materialized tree. | `worker.ts::guardSettings`; `peripheral.ts::RoleRunner.run`; `guard.ts::checkReadContainment` | `review-session.test.ts`: "LIVE containment: guard-hook.ts ... BLOCKS a Read outside the materialized tree" |
 | Guard mode is forced `hard` for every review session (`SAPWOOD_GUARD_MODE=hard`), regardless of the configured `guard.mode`. | `peripheral.ts::RoleRunner.run` | `peripheral.test.ts:2847`; `review-session.test.ts`: "LIVE containment ... under a configured soft guard.mode, a review session still blocks" |
-| The tool profile is `Read`/`Grep`/`Glob` only — `Write`/`Edit`/`MultiEdit`/`NotebookEdit`/`Bash`/`Agent`/`Task` all denied, so a review session structurally never writes — and the no-forge-proxy rule is hardcoded for `reviewCwd`; a caller-supplied `allowedTools`/`disallowedTools`/`proxy` throws, never silently overridden. | `peripheral.ts::RoleRunner.run` | `peripheral.test.ts:1040,2761,2971` |
-| A missing materialized directory at spawn time is a setup failure mapping to `session-unavailable`, never a silent degraded run. | `peripheral.ts::RoleRunner.run` | `peripheral.test.ts:2945` |
-| The materialized tree comes from a private, origin-verified clone that discards and re-clones on any local-config drift; hooks and dangerous git config keys are disabled/rejected. | `review/materializer.ts::createPrivateClone` | `materializer.test.ts`: "fails closed on core.hooksPath"; "config-clean is re-asserted on every reuse" |
+| `ROLE_ALLOWED_TOOLS`/`ROLE_DISALLOWED_TOOLS` are hardcoded for `reviewCwd` — no write-capable tool, no `Bash`, no subagent spawn, no forge proxy; a caller override throws, never silently accepted. | `peripheral.ts::ROLE_ALLOWED_TOOLS`/`ROLE_DISALLOWED_TOOLS`; `peripheral.ts::RoleRunner.run` | `peripheral.test.ts:1040,2730,2761,2971` |
+| Every review-session setup failure — a missing materialized directory, a caller-supplied tool/proxy override — maps to `session-unavailable`, never a silent degraded run. | `peripheral.ts::RoleRunner.run` | `peripheral.test.ts:2945` |
+| The private clone lives outside every worker worktree and is origin-verified; any drift discards it and re-clones. | `review/materializer.ts::assertOutsideWorktreeMounts`, `::createPrivateClone` | `materializer.test.ts`: "rejects a cloneDir nested inside worktreeRoot BEFORE ever touching git" (L290); "config-clean is re-asserted on every reuse" (L758) |
+| Local config must match a section ALLOWLIST (`core`/`remote`/`branch`; remote only `url`/`fetch`) plus a dangerous-`core.*` denylist — fails closed on anything unrecognized; git ignores global/system config. | `review/materializer.ts::assertLocalConfigClean`, `::gitIsolationEnv` | `materializer.test.ts`: L580 (`core.hooksPath`), L327 (`filter.*`), L618 (`remote.origin.uploadpack`), L202/235 (isolation env) |
 | Checkout disables replacement objects, writes symlinks as plain text, and yields a `.git`-free tree with a post-checkout OID verification and a hashed manifest. | `review/materializer.ts::materialize` | `materializer.test.ts`: "--no-replace-objects is load-bearing"; "a tracked symlink materializes as a plain regular text file ... manifest recorded" |
 | The session's structured output is data, not instructions — a strict schema accepts only complete per-AC judgments/findings, and deterministic code alone derives the verdict. | `review/agent-output.ts::validateAgentReviewOutput`, `::deriveApprovalResult` | `agent-output.test.ts`: "extra top-level key (e.g. overall) -> null" |
-| Every finding's prose is escaped and blockquoted before it reaches the PR comment, so it cannot match an external verdict parser; audit comments are never read back as gate② approvals. | `review/audit.ts::buildAuditComment` | `audit.test.ts`: "hostile finding bodies cannot inject approval-parseable lines into the audit comment" |
+| Every finding's id is escaped (`escapeCell`) and its body blockquoted (`> ` prefix) before posting, so it cannot match the hosted reviewer's clean-verdict or reviewed-head parsers. Audit comments are explicitly non-authoritative, never read back as gate② approvals. | `review/audit.ts::buildAuditComment`, `::renderFindingsList`, `::escapeCell` | `audit.test.ts`: "hostile finding bodies cannot inject approval-parseable lines" |
 
-**Residuals.** Excluding `user` settings (not just `project`/`local`) closes a specific gap: a
-worker leg's `Bash(node *)`/`Bash(npm *)` grant runs with the operator's REAL `$HOME` and, absent
-an operator-configured Bash sandbox, is not filesystem-confined from it.
+**Residuals.** A worker leg's `Bash(node *)`/`Bash(npm *)` grant runs with the operator's REAL
+`$HOME` and, absent an operator-configured Bash sandbox, is not filesystem-confined from it — so a
+producer could in principle have influenced `~/.claude/settings.json` in an earlier round.
+Excluding `user` settings (not just `project`/`local`) removes that inheritance path for review
+sessions only; the broader worker-HOME residual stays open.
 
 See [Execution profiles](execution-profiles.md#execution-profiles-host-permission-mode--bash-sandbox)
 for the operator recipe that closes the named-path subset of that gap, and
@@ -64,12 +67,12 @@ eval where ambient repo/user state must NOT leak into the comparison. For that c
 `claude -p` against a **clean, throwaway directory** with explicit, full prompt injection instead
 of ambient discovery:
 
-- **`--bare` is MANDATORY, not optional.** Without it, `~/.claude` and the current-directory
-  config still load underneath whatever flags you pass (`--settings` is *additive*, not a
-  replacement; `--mcp-config` can retain ambient MCP servers rather than fully overriding them) —
-  hand-picking flags without `--bare` does not achieve isolation. `--bare` skips hooks, LSP, plugin
-  sync, attribution, auto-memory, background prefetches, keychain reads, and `CLAUDE.md`
-  auto-discovery in one flag, and sets `CLAUDE_CODE_SIMPLE=1`.
+- **`--bare` is MANDATORY, not optional.** Per Claude Code's own docs, `--bare` is the *only* mode
+  where the flags you pass become the SOLE inputs — without it, `~/.claude` and the
+  current-directory config still load underneath whatever you pass (`--settings` is *additive*,
+  not a replacement; `--mcp-config` can retain ambient MCP servers rather than fully overriding
+  them). `--bare` skips hooks, LSP, plugin sync, attribution, auto-memory, background prefetches,
+  keychain reads, and `CLAUDE.md` auto-discovery in one flag, and sets `CLAUDE_CODE_SIMPLE=1`.
 - a fresh, empty working directory (no repo `CLAUDE.md`, no prior session state);
 - `--system-prompt` / `--system-prompt-file` and `--append-system-prompt[-file]` to supply exactly
   the context the eval wants the model to have, explicitly (`--bare`'s own doc names these as the
