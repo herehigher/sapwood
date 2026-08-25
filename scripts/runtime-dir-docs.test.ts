@@ -33,14 +33,17 @@ function isFenceDelimiter(line: string): boolean {
   return /^\s*```/.test(line);
 }
 
-// The ONLY fence exempted from the scan: matched by its own first content line, not by file or
-// line number, so the exemption can't silently widen to swallow an unrelated block. This is the
-// literal FROM side of the shipped cutover checklist (CHANGELOG.md) — the whole point of that
-// block is to show the pre-rename path being moved away from, so it cannot itself be "fixed".
+// The ONLY fence exempted from the scan: it must BOTH live in CHANGELOG.md AND open with this
+// exact first content line. Content alone is not enough — the marker is plain text, so any other
+// doc could copy it verbatim and smuggle a real stale example past the oracle; requiring the file
+// too means the exemption can only ever cover the one shipped cutover checklist, not a lookalike
+// elsewhere. This is the literal FROM side of that checklist — the whole point of the block is to
+// show the pre-rename path being moved away from, so it cannot itself be "fixed".
+const CHANGELOG_CUTOVER_FILE = "CHANGELOG.md";
 const CHANGELOG_CUTOVER_MARKER = "# engine stopped (pid gone, no sapwood.lock holder)";
 
 /** Every `data/` offense line. Fenced code blocks are scanned like any other text, except the
- *  single fence whose first line is CHANGELOG_CUTOVER_MARKER (matched by content). */
+ *  single fence in CHANGELOG_CUTOVER_FILE whose first line is CHANGELOG_CUTOVER_MARKER. */
 function findOffenses(relPath: string, content: string): string[] {
   const offenders: string[] = [];
   const lines = content.split("\n");
@@ -50,7 +53,7 @@ function findOffenses(relPath: string, content: string): string[] {
     const line = lines[i]!;
     if (isFenceDelimiter(line)) {
       if (!inFence) {
-        fenceExempt = lines[i + 1]?.trim() === CHANGELOG_CUTOVER_MARKER;
+        fenceExempt = relPath === CHANGELOG_CUTOVER_FILE && lines[i + 1]?.trim() === CHANGELOG_CUTOVER_MARKER;
       } else {
         fenceExempt = false;
       }
@@ -63,18 +66,30 @@ function findOffenses(relPath: string, content: string): string[] {
   return offenders;
 }
 
-/** docs/**\/*.md plus the repo-root README.md and CHANGELOG.md — every doc a stale runtime-path
- *  reference could hide in. No directory-level exclusion for docs/design/ or docs/research/:
- *  neither carries a README declaring itself a dated archive, so both are scanned like any
- *  other doc (the one stale reference found under docs/design/ was fixed directly). */
-function listMarkdownFiles(): string[] {
-  const out: string[] = [join(REPO_ROOT, "README.md"), join(REPO_ROOT, "CHANGELOG.md")];
-  const docsRoot = join(REPO_ROOT, "docs");
-  for (const entry of readdirSync(docsRoot, { recursive: true, withFileTypes: true })) {
+function listMdFilesUnder(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { recursive: true, withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
     const parent = (entry as unknown as { parentPath?: string; path?: string }).parentPath ?? (entry as unknown as { path: string }).path;
     out.push(join(parent, entry.name));
   }
+  return out;
+}
+
+/** docs/**\/*.md, .claude-plugin/**\/*.md, plus the repo-root README.md and CHANGELOG.md — every
+ *  doc a stale runtime-path reference could hide in. `.claude-plugin/` ships WITH the plugin (it
+ *  is what a target repo's Claude session reads, per docs/dev-guide/09-plugin-commands-prompts.md)
+ *  so it is a live user-facing carrier, not internal-only. `commands/*.md` is deliberately NOT
+ *  added here — it already has its own dedicated negative oracle in scripts/plugin-wrapper.test.ts
+ *  ("commands/*.md never spells a data/ or .sapwood/ runtime-root path literal"); duplicating that
+ *  scan here would just be two oracles asserting the same fact. No directory-level exclusion for
+ *  docs/design/ or docs/research/: neither carries a README declaring itself a dated archive, so
+ *  both are scanned like any other doc (the one stale reference found under docs/design/ was
+ *  fixed directly). */
+function listMarkdownFiles(): string[] {
+  const out: string[] = [join(REPO_ROOT, "README.md"), join(REPO_ROOT, "CHANGELOG.md")];
+  out.push(...listMdFilesUnder(join(REPO_ROOT, "docs")));
+  out.push(...listMdFilesUnder(join(REPO_ROOT, ".claude-plugin")));
   return out;
 }
 
@@ -134,12 +149,17 @@ test("positive fixture: a fenced `data/` literal outside the CHANGELOG cutover b
   assert.deepEqual(findOffenses("fixture.md", content), ["fixture.md:2"]);
 });
 
-test("reverse test: the CHANGELOG cutover checklist block (marker present) is NOT flagged, the same literal outside that block IS", () => {
+test("reverse test: the CHANGELOG cutover checklist block (right file, marker present) is NOT flagged, the same literal outside that block IS", () => {
   const checklist = ["some prose", "```", CHANGELOG_CUTOVER_MARKER, 'mv "data/sapwood.sqlite" .sapwood/', "```"].join("\n");
-  assert.deepEqual(findOffenses("fixture.md", checklist), []);
+  assert.deepEqual(findOffenses(CHANGELOG_CUTOVER_FILE, checklist), []);
 
   const prose = 'Move it with `mv "data/sapwood.sqlite" .sapwood/`.\n';
-  assert.equal(findOffenses("fixture.md", prose).length, 1);
+  assert.equal(findOffenses(CHANGELOG_CUTOVER_FILE, prose).length, 1);
+});
+
+test("positive fixture: the same marker-bearing fenced block in a DIFFERENT file IS flagged — the exemption requires CHANGELOG.md, not just the marker text", () => {
+  const lookalike = ["some prose", "```", CHANGELOG_CUTOVER_MARKER, 'mv "data/sapwood.sqlite" .sapwood/', "```"].join("\n");
+  assert.deepEqual(findOffenses("fixture.md", lookalike), ["fixture.md:4"]);
 });
 
 // ── Oracle B: configuration.md's tree cannot silently drift from runtimePaths() ─────────────

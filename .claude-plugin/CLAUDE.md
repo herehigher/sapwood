@@ -24,7 +24,7 @@ them itself or leaves the merge for a human.
   preview what would dispatch + a cost estimate, no worker spawned, no state written.
 - **`/sapwood-status [db-path]`** — read engine state (active lanes, PRs awaiting
   review, spend vs. the daily ceiling, e-stop/kill switch/pause state) directly from
-  `data/sapwood.sqlite`. Works with no engine session currently running.
+  `.sapwood/sapwood.sqlite`. Works with no engine session currently running.
 - **`/sapwood-stop [--emergency|--clear-emergency|--pause|--resume|--lift]`** — three
   human-control tiers. `--emergency` sets the strictest, no-drain stop; clear it with
   `--clear-emergency` only after human review. No argument sets the drain-first kill
