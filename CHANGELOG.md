@@ -8,11 +8,11 @@ All notable changes to sapwood are documented here. Format:
 ## [Unreleased]
 
 ### Changed
-- Runtime directory renamed `data/` → `.sapwood/` (fixed name, engine-exclusive, self-ignoring
-  via its own `.gitignore`) — see [Configuration — The `.sapwood/` runtime
-  directory](docs/guide/configuration.md#the-sapwood-runtime-directory). **Upgrading:** stop the
-  engine before upgrading; the new CLI reads and writes `.sapwood/` only; no automatic migration.
-  Cutover checklist (idempotent and resumable — safe to re-run if interrupted):
+- Runtime directory rename — see [Configuration — The `.sapwood/` runtime
+  directory](docs/guide/configuration.md#the-sapwood-runtime-directory) for the layout.
+  **Upgrading:** stop the engine before upgrading; the new CLI reads and writes `.sapwood/`
+  only; no automatic migration. Cutover checklist (idempotent and resumable — safe to re-run
+  if interrupted):
 
   ```
   # engine stopped (pid gone, no sapwood.lock holder)
@@ -23,8 +23,7 @@ All notable changes to sapwood are documented here. Format:
   done
   for d in review generated; do [ -e "data/$d" ] && mv "data/$d" .sapwood/cache/; done
   for k in data/worker-deploy-key*; do [ -e "$k" ] && mv "$k" .sapwood/keys/; done
-  # sapwood.config.yaml: worker.deployKeyPath is no longer written by `init` by default —
-  # remove the line, or point it at .sapwood/keys/worker-deploy-key[-host]
+  # sapwood.config.yaml: worker.deployKeyPath → .sapwood/keys/worker-deploy-key[-host]
   ```
 
 ### Added
