@@ -87,7 +87,7 @@ against: the worker that writes code never approves or merges it, enforced
 structurally by the fail-closed guard hook (`guard.ts`), not by a prompt — production,
 gate②'s fresh non-author review, and the Conductor's merge stay in separate hands no
 matter how the round loop (see "Architecture" below) is shaped. Every path listed in
-[`docs/security.md`'s "Human-merge-only paths"](security.md#human-merge-only-paths) is
+["Human-merge-only paths"](security.md#human-merge-only-paths) is
 human-merge-only; that list is authoritative and is not paraphrased here.
 
 | # | Decision | Choice |
@@ -102,7 +102,7 @@ human-merge-only; that list is authoritative and is not paraphrased here.
 | 8 | Dispatch readiness | **An issue is not `Ready` until it carries a verification plan** — acceptance criteria + how to prove them (tests to write/run, commands, observable outcomes). Authored by the issue author/triage *before* the producer starts (keeps producer≠author). Enforced at the `Ready` gate (`getReadyIssues` refuses issues without one) **and** re-checked by the reviewer at gate② (the PR must satisfy the stated plan). Inherently-unverifiable issues (docs/knowledge, chore) are labelled `verify:n/a` and use the round-close doc gate / a lighter definition-of-done instead, so the gate never blocks legitimate work. A **verification-plan-reviewer peripheral (gate⓪)** additionally reviews each plan's quality/feasibility post-`Ready`, pre-dispatch, in a session distinct from both the plan's author and the producer — presence alone is not the bar; `getReadyIssues` requires the plan **and** its `plan:approved` label (fail-closed). `verify:n/a` is never self-declared: gate⓪ can only *propose* it, always paired with `needs-human`, and a human finalizes the adjudication by removing `needs-human` (→ doc-gate path). |
 | 9 | Edge-case handling | **Rare edge cases degrade to `needs-human`, never to more machinery.** Automation covers the common path only; when a low-probability edge would require new hardening/persistence/recovery code, the correct handling is: preserve the evidence, label `needs-human`, stop. First application: the drain path never runs git in worker worktrees (sentinel-only handoff + dirty-worktree retention). |
 | 10 | Engine-agent reviewer | **Engine-composed, static, different-Claude-model gate② session:** no producer-code execution/Bash; an engine-private, config-isolated checkout; runs serially after trusted CI and reruns only when needed; checkbox ACs receive engine IDs; configured and actual reviewer models must differ from the producer's; materializes the exact head from a private clone; includes instruction context but changes to configured instruction paths escalate to human review. The dispatch-time full-body/AC snapshot is authoritative session input; code-verifiable confirmation requires app-slug-bound `ci.requiredChecks`; `engine-agent` is primary-only (never a fallback) and has no fallback model. |
-| 11 | Host-delegated capability management | sapwood delegates tool-permission/capability management to the host for producer (worker) legs, rather than managing capabilities in-engine. Producer legs officially **inherit the operator's host Claude Code environment** — settings sources, MCP servers, skills — as documented behavior. **No `capabilities.*` config surface will ever be built.** Scope is **producer legs only**: the reviewer/peripheral sealing floor (gate② seal, Decision #10) is untouched. Rationale: permission control is where complexity bugs live; config-surface complexity hurts UX; this is an LLM-core product and cutting tools cuts the model's hands; favor empowerment under the trusted-repos-first threat model (Decision #3). The engine keeps a small governance core instead — enumerated in [`docs/security.md`](security.md). Two host EXECUTION-PROFILE keys sit alongside this decision without reopening it: `host.permissionMode: dontAsk\|auto\|bypassPermissions` (default `auto`) and `bashSandbox: host-managed\|required` (default `host-managed`) — a profile key configures HOW a session's already-granted tools reach the host, never WHICH tools a producer leg is offered. **Floor = governance core** (engine-configured; `required` is checked at CLI-init time only via `failIfUnavailable`; `bypassPermissions` triggers one guidance WARN, never an engine refusal); **allowances = host** (`allowedDomains`/`allowRead`/`allowWrite` stay in the operator's Claude settings; `required`+L1 additionally floors `excludedCommands` at the four git-remote-mutation verbs — push/fetch/pull/ls-remote; no domain/path allowance surface is added to sapwood YAML). Full mechanics, the seven-layer table, and the deployment-tier ladder: [`docs/security.md`'s "Execution profiles"](security.md#execution-profiles-host-permission-mode--bash-sandbox). **The `bashSandbox` axis is deferred pre-release** — no such config key ships and the engine injects no sandbox settings; the probed floor survives as the operator recipe in that same section; `host.permissionMode` stands exactly as specified. |
+| 11 | Host-delegated capability management | sapwood delegates tool-permission/capability management to the host for producer (worker) legs, rather than managing capabilities in-engine. Producer legs officially **inherit the operator's host Claude Code environment** — settings sources, MCP servers, skills — as documented behavior. **No `capabilities.*` config surface will ever be built.** Scope is **producer legs only**: the reviewer/peripheral sealing floor (gate② seal, Decision #10) is untouched. Rationale: permission control is where complexity bugs live; config-surface complexity hurts UX; this is an LLM-core product and cutting tools cuts the model's hands; favor empowerment under the trusted-repos-first threat model (Decision #3). The engine keeps a small governance core instead — enumerated in [`docs/security.md`](security.md). Two host EXECUTION-PROFILE keys sit alongside this decision without reopening it: `host.permissionMode: dontAsk\|auto\|bypassPermissions` (default `auto`) and `bashSandbox: host-managed\|required` (default `host-managed`) — a profile key configures HOW a session's already-granted tools reach the host, never WHICH tools a producer leg is offered. **Floor = governance core** (engine-configured; `required` is checked at CLI-init time only via `failIfUnavailable`; `bypassPermissions` triggers one guidance WARN, never an engine refusal); **allowances = host** (`allowedDomains`/`allowRead`/`allowWrite` stay in the operator's Claude settings; `required`+L1 additionally floors `excludedCommands` at the four git-remote-mutation verbs — push/fetch/pull/ls-remote; no domain/path allowance surface is added to sapwood YAML). Full mechanics, the seven-layer table, and the deployment-tier ladder: ["Execution profiles"](security.md#execution-profiles-host-permission-mode--bash-sandbox). **The `bashSandbox` axis is deferred pre-release** — no such config key ships and the engine injects no sandbox settings; the probed floor survives as the operator recipe in that same section; `host.permissionMode` stands exactly as specified. |
 | 12 | Producer PR-opening ownership | **engine-open-PR is the ordinary path** for worker lanes — a worker's job ends at pushing its branch; the engine performs the forge-API PR-open from deterministic code, at reclaim (`forge.ts::associateLanePr` — branch known, no open PR on it, branch confirmed pushed via `probePushedBranch`, session over → the engine calls `forge.openPR` with an engine-authored body carrying the `sapwood:pr-owner` marker). The worker prompt does not instruct `gh pr create`; a worker that opens its own PR anyway (possible at credential tier L0, where the `gh` grant remains; structurally impossible at L1 — see docs/security.md's worker credential tiers) has it adopted via the marker, never duplicated. Motivated by the producer≠merger consequence of the L1 credential tier: a worker holding only a git-transport deploy key, no API credential at all, structurally cannot open a PR, making engine-open the only channel rather than an option. No engine git invocation targets a worker worktree on this path: `associateLanePr`'s forge calls are pure API writes. |
 
 ## Architecture
@@ -156,7 +156,7 @@ owns.
   workers to hand off gracefully first; a hard process-tree kill (`worker.ts` kills the whole
   detached process group, never a plain PID kill that leaves orphans running) is the bounded
   `cost.drainWindowSec` last resort, never the first response. Full three-tier model (PAUSE /
-  KILL_SWITCH / EMERGENCY_STOP): [`docs/security.md`'s "Human controls (three tiers)"](security.md#human-controls-three-tiers).
+  KILL_SWITCH / EMERGENCY_STOP): ["Human controls (three tiers)"](security.md#human-controls-three-tiers).
 - **Claude CLI coupling isolated in `worker.ts`**: every `claude -p` flag, the `stream-json` cost
   parsing, and `CLAUDE_BIN` discovery live in one module. A pinned minimum Claude Code CLI
   version is enforced/reported (`worker.ts`'s `MIN_CLAUDE_CLI_VERSION`,
@@ -185,7 +185,7 @@ pass — `driving → fixing → driving` — before human escalation, instead o
 `needs-human` before paying another round. Full mechanism, the precedence between a stalled
 review and a byte-identical rerun, the adjudicated-re-raise finding filter, and the
 `cost.roundBudgetUsd` fix-leg exemption: see
-[`docs/security.md`'s "Fix-loop `fixing` lane state"](security.md#fix-loop-fixing-lane-state).
+["Fix-loop `fixing` lane state"](security.md#fix-loop-fixing-lane-state).
 
 **The three-tier escalation model.** Humans intervene to *review*, never to *resolve reviews* —
 three labels, each encoding exactly one fact:
@@ -212,8 +212,8 @@ counting off the same, unchanged trigger pin, so a hold outlasting `reviewer.esc
 can fire the escalation on the very first post-removal tick (a single, tick-scale-imprecise
 evaluation, never a repeated burst). Full mechanism (the `human-merge-only`/`planless` labels
 that round out the ESCALATE tier, the gated-reentry handshake): see
-[`docs/security.md`'s "Human controls (three tiers)"](security.md#human-controls-three-tiers) and
-[`docs/security.md`'s "Human-merge-only paths"](security.md#human-merge-only-paths).
+["Human controls (three tiers)"](security.md#human-controls-three-tiers) and
+["Human-merge-only paths"](security.md#human-merge-only-paths).
 
 ### Security & trust posture
 
@@ -234,7 +234,7 @@ review, and the Conductor's merge in separate hands. Issues-only peripheral sess
 shared read-only, worktree-confined, no-shell grant with no forge credential of their own; the
 engine alone executes forge writes from schema-validated structured output. Full mechanism
 (`checkReadContainment`, the allow/deny matrix): see
-[`docs/security.md`'s "Issues-only role sessions"](security.md#issues-only-role-sessions-read-only-worktree-confined-no-shell).
+["Issues-only role sessions"](security.md#issues-only-role-sessions-read-only-worktree-confined-no-shell).
 
 **The guardrail/shackle criterion.** A mediation design for role-session information access must
 never deny a request AND still demand a definitive judgment from the same session — that
@@ -243,7 +243,7 @@ it. The alternative is a guardrail: explicit denial paired with a first-class
 abstention/escalation path, so a session that cannot get evidence can say so instead of guessing.
 This is why sapwood ships an engine-hosted, read-only forge MCP proxy — built to widen what a
 session may ask for without ever forcing a verdict once it has asked. Full contract: see
-[`docs/security.md`'s forge MCP proxy section](security.md#the-forge-mcp-proxys-role-x-tool-matrix)
+[the forge MCP proxy section](security.md#the-forge-mcp-proxys-role-x-tool-matrix)
 and [`docs/configuration.md`](guide/configuration.md#proxy).
 
 **Ambient repo context — record, don't seal.** Every session — worker or peripheral — runs
@@ -255,17 +255,16 @@ sealing it was considered and rejected. The obligation is honesty and diagnosabi
 isolation: every such session attempt assembles a **context manifest** recording every source it
 absorbed. Full model and the isolation recipe (production never seals; only a throwaway benchmark
 run does — `--bare` also disables hooks, and the guard hook is the actual safety boundary): see
-[`docs/security.md`'s "Ambient repo context: record, don't seal"](security.md#ambient-repo-context-record-dont-seal).
+["Ambient repo context: record, don't seal"](security.md#ambient-repo-context-record-dont-seal).
 
 **Validation depth ∝ decision weight.** Judgment enters the engine only through a role session's
 validated structured output; the engine validates *format* and *permission*, never *decision
 quality*, so the deeper the write a field drives, the deeper its validation must be — the
 standing safety baseline every future "bring judgment in" change updates, checked by gate②. Full
 principle and the write-inventory table: see
-[`docs/reference/role-paradigm.md`'s "Validation depth ∝ decision weight"
-section](reference/role-paradigm.md#validation-depth--decision-weight-the-structured-output-write-inventory).
+[role-paradigm.md's "Validation depth ∝ decision weight" section](reference/role-paradigm.md#validation-depth--decision-weight-the-structured-output-write-inventory).
 
-## Round orchestrator
+### Round orchestrator
 
 v0.2 introduces a **round orchestrator**: a layer *above* the tick engine that adds peripheral
 roles (goal alignment, architecture review, gate⓪ plan review, harvest, retrospective) around the
@@ -365,7 +364,7 @@ finalizes the adjudication by removing `needs-human`. Enforcement is fail-closed
 prompt: `getReadyIssues` requires the plan present **and** `plan:approved`; `needs-human`/`blocked`
 never dispatch. Full self-heal mechanics (the plan-drafting session, the
 `maxDraftCycles`-bounded cycle): see
-[`docs/security.md`'s "The `plan:approved` label and gate⓪"](security.md#the-planapproved-label-and-gate).
+["The `plan:approved` label and gate⓪"](security.md#the-planapproved-label-and-gate).
 
 **gate⓪ is scoped to the round pool, with a freshness re-confirm at every pool entry.** The
 verification-plan-reviewer's candidate set is the round pool itself, not the whole Ready lane: an
@@ -439,8 +438,28 @@ above for the detailed design, the repository's
   expensive tail (each platform needs a guard-hook equivalent, security-reviewed,
   human-merge-only). If ever scheduled: sequence lightweight-first (roles before workers),
   and let no platform difference leak past the adapter layer into the conductor.
-- **Verification:** the acceptance set (`npm run build && npm run typecheck && npm run test
-  && npm run lint`) is the gate; the mechanisms this doc describes are pinned by the test
-  suite, not restated here as a separate checklist. No test in this suite currently pins an
-  end-to-end live-dogfood run against a real `claude`/`gh`; that remains a manual,
-  pre-release check, not an automated one.
+- **Onboarding / DX (v1).** Onboarding is a shipped, tested surface, not a plan item — see
+  [`docs/getting-started.md`](guide/getting-started.md) for the full walkthrough (`sapwood init`'s auth
+  preflight and idempotent provisioning, the `--dry-run` trust ramp, the L0–L3 autonomy ladder, and
+  the minimum doc set) and [`docs/configuration.md`](guide/configuration.md) for every config key it
+  writes or reads.
+
+## Verification (how we'll prove v1)
+
+The acceptance set (`npm run build && npm run typecheck && npm run test && npm run lint`) is the
+gate; the mechanisms this doc describes are pinned by the test suite, not restated here as a
+separate checklist: guard bypass matrix + differential fuzzing —
+[`guard.test.ts`](../engine/src/guard/guard.test.ts) /
+[`guard.fuzz.test.ts`](../engine/src/guard/guard.fuzz.test.ts); scheduling-core parity, including
+the kill-switch drain and terminal-for-drain behavior above —
+[`conductor.test.ts`](../engine/src/loop/conductor.test.ts); merge-gate parity —
+[`merge-driver.test.ts`](../engine/src/roles/merge-driver.test.ts); the soft-budget graceful
+handoff and `--resume` continuation —
+[`worker.test.ts`](../engine/src/roles/worker.test.ts) (`requestHandoff`/`.handoff`/`resume`
+cases); the `Ready` verification-plan gate —
+[`forge.test.ts`](../engine/src/forge/forge.test.ts) (`getReadyIssues`); `sapwood init`'s auth
+preflight — [`init.test.ts`](../engine/src/loop/init.test.ts). Session-death recovery (a stale
+heartbeat reclaiming a lane after a conductor restart) is exercised by `conductor.test.ts`'s own
+reclaim cases, not a separate drill. No test in this suite currently pins an end-to-end
+live-dogfood run against a real `claude`/`gh`; that remains a manual, pre-release check, not an
+automated one — stated here rather than implied covered.
