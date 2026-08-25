@@ -64,11 +64,21 @@ at `sapwood run` startup: `deploy-key-startup-check.ts::detectDeployKeyStartupTi
 immediately after `WorkerSupervisor` construction, strictly before any dispatch. `L0` logs one
 disclosure line and returns — legal, unblocked. `L1` is FAIL-CLOSED: no local anchor, an
 unreadable key file, a still-running lane from before this restart whose own persisted
-`credential_tier` doesn't match `L1` (a legacy marker with none recorded counts as a mismatch,
-never a silent pass), the anchor's remote id no longer listed or not confirmed `readOnly: false`,
-or a failed SSH preflight each throw before any dispatch or board/label mutation (state creation,
-the `run-started` event, and stateful startup detectors are unaffected) — never a silent run at
-L0. This is a reversal of the retired config-anchored design's WARN-only startup posture.
+`credential_tier` doesn't match `L1` (a legacy marker with none recorded, an unparseable marker,
+or a running-lane state directory that can't even be listed all count as a mismatch, never a
+silent pass), the anchor's remote id no longer listed or not confirmed `readOnly: false`, or a
+failed SSH preflight each throw before any dispatch or board/label mutation (state creation, the
+`run-started` event, and stateful startup detectors are unaffected) — never a silent run at L0.
+This is a reversal of the retired config-anchored design's WARN-only startup posture.
+
+A running-tier mismatch's refusal names each offending lane's own name, `session_id`, `pid`, and
+recorded tier, then gives exactly two remedies that don't require this engine to act on the other
+process itself: wait for it to exit (then delete the stale `.running.json` once the process is
+actually gone), or `kill <pid>` first if you cannot wait — no process sweep and no pid-liveness
+check exist in this gate (a recovery mechanism must not become a new problem source), so a marker
+whose process has already died still refuses the same as a live one. `sapwood estop` is
+deliberately not offered here: it only writes a sentinel for a RUNNING engine to notice, and the
+engine that owned these lanes is by definition gone by the time this restart reaches the refusal.
 
 **The local (key file, id sidecar) pair is the anchor — a remote key's title is never
 authoritative for "mine".** A `sapwood-worker`-titled key on the repo may validly belong to a
@@ -104,7 +114,7 @@ repo's own `.gitignore`; a deliberate `git add -f` can still stage it.
 | Default/unset `worker.credentialTier` is `L0`, byte-identical to today — the SSH preflight is never even invoked. | `worker.ts::resolveDeployKeyPath` | `worker.test.ts:8447`: "dispatch: worker.credentialTier L0 (default) -> byte-identical to today (reverse test)" |
 | `sapwood init` never writes `worker.credentialTier` or any deploy-key fact into `sapwood.config.yaml` — the config file is byte-identical before and after any reconcile outcome. | `init.ts::ensureDeployKey`/`reconcileDeployKey` | `init.test.ts:1201`: "sapwood.config.yaml is byte-identical before and after a RECONCILE-FAILURE run" |
 | `sapwood run` startup fails closed for `L1` with no working, remotely-confirmed anchor — before any dispatch or board/label mutation. | `deploy-key-startup-check.ts::detectDeployKeyStartupTier`, called from `cli.ts` right after `WorkerSupervisor` construction | `deploy-key-startup-check.test.ts`: arm 2 (:80, missing anchor), arm 3 (:109, unreadable key), arm 5 (:280, preflight fails) |
-| A still-running lane from before this restart whose own persisted `credential_tier` doesn't match `L1` (including a legacy marker with none recorded) blocks startup, naming the lane. | `detectDeployKeyStartupTier`'s running-marker scan, `worker.ts::listRunningCredentialTiers` | `deploy-key-startup-check.test.ts:138,168` |
+| A still-running lane from before this restart whose own persisted `credential_tier` doesn't match `L1` (including a legacy marker with none recorded, an unparseable marker, or an unlistable state directory) blocks startup, naming each lane/session/pid/tier and the two remedies (wait it out, or `kill <pid>`) — never `sapwood estop`. | `detectDeployKeyStartupTier`'s running-marker scan, `worker.ts::listRunningCredentialTiers` | `deploy-key-startup-check.test.ts`: "arm running-tier-mismatch" (lane/session/pid/remedies, legacy marker, dead pid, scan failure) |
 | Startup's remote check requires an explicit `readOnly: false`; a missing/non-boolean field is never read as confirmed write access. | `detectDeployKeyStartupTier` | `deploy-key-startup-check.test.ts:248` (arm 4c) |
 | The startup check seeds the SAME memoized preflight a later dispatch/resume/fix reuses — anchor-seeded, never a second independent resolution. | `worker.ts::checkDeployKeyPreflight`, `deployKeyProbe` | `worker.test.ts:8591` |
 | Every dispatch/resume/fix spawn re-resolves the anchor from disk and re-checks readability (`accessSync`) on every call, and refuses if the anchor's identity changed since this supervisor's memoized preflight bound to one. | `worker.ts::resolveDeployKeyPath` | `worker.test.ts:8749` (unreadable key); `worker.test.ts:8781` ("the deploy-key anchor changing between two dispatches on the SAME supervisor is REJECTED") |

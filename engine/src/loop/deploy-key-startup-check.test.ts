@@ -15,11 +15,11 @@ import { detectDeployKeyStartupTier } from "./deploy-key-startup-check.js";
 
 function fakeSupervisor(
   result: LlmPingResult | undefined,
-  runningMarkers: Array<{ name: string; tier: unknown }> = [],
+  runningMarkers: Array<{ name: string; tier: unknown; session_id?: unknown; pid?: unknown }> = [],
 ): {
   calls: number;
   checkDeployKeyPreflight: (anchor: { keyPath: string; keyId: number }) => Promise<LlmPingResult | undefined>;
-  listRunningCredentialTiers: () => Array<{ name: string; tier: unknown }>;
+  listRunningCredentialTiers: () => Array<{ name: string; tier: unknown; session_id: unknown; pid: unknown }>;
 } {
   const s = {
     calls: 0,
@@ -27,7 +27,7 @@ function fakeSupervisor(
       s.calls++;
       return result;
     },
-    listRunningCredentialTiers: () => runningMarkers,
+    listRunningCredentialTiers: () => runningMarkers.map((m) => ({ name: m.name, tier: m.tier, session_id: m.session_id, pid: m.pid })),
   };
   return s;
 }
@@ -135,14 +135,14 @@ test("arm 3: credentialTier L1, anchor found but key file unreadable -> THROWS, 
   }
 });
 
-test("arm running-tier-mismatch: credentialTier L1, a still-running lane's marker does not carry a matching tier -> THROWS naming the lane, no probe consumed", async () => {
+test("arm running-tier-mismatch: credentialTier L1, a still-running lane's marker does not carry a matching tier -> THROWS listing lane/session/pid/tier and the two remedies, never estop", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-deploy-key-startup-"));
   try {
     const keyPath = join(dir, "worker-deploy-key");
     writeFileSync(keyPath, "not-a-real-key");
     const logs: string[] = [];
     const events: Array<[string, unknown]> = [];
-    const supervisor = fakeSupervisor({ ok: true }, [{ name: "lane-stale-l0", tier: "L0" }]);
+    const supervisor = fakeSupervisor({ ok: true }, [{ name: "lane-stale-l0", tier: "L0", session_id: "sess-1234", pid: 5678 }]);
     await assert.rejects(
       () =>
         detectDeployKeyStartupTier(
@@ -152,11 +152,22 @@ test("arm running-tier-mismatch: credentialTier L1, a still-running lane's marke
           (line) => logs.push(line),
           { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }), run: fakeRun([{ id: 1, readOnly: false }]) },
         ),
-      /sapwood estop/,
+      /lane-stale-l0/,
     );
     assert.equal(supervisor.calls, 0, "a running-tier mismatch must never reach the shared preflight");
     assert.equal(logs.length, 1);
+    // #1105 round 3 (P2/P3): lane, session id, pid, and recorded tier must all be visible so the
+    // operator can act on THIS lane without guessing which process the refusal means.
     assert.match(logs[0]!, /lane-stale-l0/);
+    assert.match(logs[0]!, /sess-1234/);
+    assert.match(logs[0]!, /5678/);
+    assert.match(logs[0]!, /tier L0/);
+    // Exactly two remedies, neither of which requires this engine to touch the other process.
+    assert.match(logs[0]!, /wait for those processes to exit/i);
+    assert.match(logs[0]!, /kill <pid>/);
+    // #1105 round 3 (P2): `sapwood estop` cannot act on a lane once the prior engine that owned
+    // it is dead — it must never be offered as a remedy here.
+    assert.doesNotMatch(logs[0]!, /estop/i);
     assert.match(logs[0]!, /Refusing to start before any dispatch/);
     assert.equal(events.length, 1);
     assert.deepEqual(events[0], ["deploy-key-tier-detected", { tier: "L1", arm: "running-tier-mismatch" }]);
@@ -165,12 +176,40 @@ test("arm running-tier-mismatch: credentialTier L1, a still-running lane's marke
   }
 });
 
-test("arm running-tier-mismatch: a marker with NO credential_tier recorded at all (pre-#1105) counts as a mismatch, never as a silent pass", async () => {
+test("arm running-tier-mismatch: a marker with NO credential_tier recorded at all (pre-#1105) counts as a mismatch, never as a silent pass; absent session/pid render as 'unknown'", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-deploy-key-startup-"));
   try {
     const keyPath = join(dir, "worker-deploy-key");
     writeFileSync(keyPath, "not-a-real-key");
+    const logs: string[] = [];
     const supervisor = fakeSupervisor({ ok: true }, [{ name: "lane-legacy", tier: undefined }]);
+    await assert.rejects(
+      () =>
+        detectDeployKeyStartupTier(
+          supervisor,
+          { worker: { credentialTier: "L1" }, board: { owner: "o", repo: "r" } },
+          { appendEvent: () => {} },
+          (line) => logs.push(line),
+          { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }), run: fakeRun([{ id: 1, readOnly: false }]) },
+        ),
+      /lane-legacy/,
+    );
+    assert.match(logs[0]!, /session unknown/);
+    assert.match(logs[0]!, /pid unknown/);
+    assert.match(logs[0]!, /tier unknown/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("arm running-tier-mismatch: a mismatched marker with a dead pid still refuses — no liveness probe ever excuses it (no process sweep, no pid check by design)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-deploy-key-startup-"));
+  try {
+    const keyPath = join(dir, "worker-deploy-key");
+    writeFileSync(keyPath, "not-a-real-key");
+    // A pid guaranteed not to exist on macOS/Linux: both cap real pids well under 2**22.
+    const deadPid = 2 ** 22;
+    const supervisor = fakeSupervisor({ ok: true }, [{ name: "lane-dead", tier: "L0", pid: deadPid }]);
     await assert.rejects(
       () =>
         detectDeployKeyStartupTier(
@@ -180,8 +219,47 @@ test("arm running-tier-mismatch: a marker with NO credential_tier recorded at al
           () => {},
           { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }), run: fakeRun([{ id: 1, readOnly: false }]) },
         ),
-      /lane-legacy/,
+      /lane-dead/,
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("arm running-tier-mismatch: the running-lane scan itself failing (unreadable state dir) refuses too, not just an individual bad marker", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-deploy-key-startup-"));
+  try {
+    const keyPath = join(dir, "worker-deploy-key");
+    writeFileSync(keyPath, "not-a-real-key");
+    const logs: string[] = [];
+    const events: Array<[string, unknown]> = [];
+    const supervisor = {
+      calls: 0,
+      checkDeployKeyPreflight: async () => {
+        supervisor.calls++;
+        return { ok: true };
+      },
+      listRunningCredentialTiers: (): Array<{ name: string; tier: unknown; session_id: unknown; pid: unknown }> => {
+        throw new Error("ENOENT: no such file or directory, scandir '/nonexistent'");
+      },
+    };
+    await assert.rejects(
+      () =>
+        detectDeployKeyStartupTier(
+          supervisor,
+          { worker: { credentialTier: "L1" }, board: { owner: "o", repo: "r" } },
+          { appendEvent: (kind, payload) => events.push([kind, payload]) },
+          (line) => logs.push(line),
+          { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }), run: fakeRun([{ id: 1, readOnly: false }]) },
+        ),
+      /could not be scanned/,
+    );
+    assert.equal(supervisor.calls, 0, "a scan failure must never reach the shared preflight");
+    assert.equal(logs.length, 1);
+    assert.match(logs[0]!, /could not be scanned/);
+    assert.match(logs[0]!, /ENOENT/);
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0], ["deploy-key-tier-detected", { tier: "L1", arm: "running-tier-mismatch" }]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -334,7 +412,7 @@ test("arm 6: credentialTier L1, anchor found, reconciled remotely, preflight OK 
   }
 });
 
-test("arm 6b: credentialTier L1, every running marker already carries a matching L1 tier -> starts normally, past the mismatch gate", async () => {
+test("arm 6b: credentialTier L1, every running marker already carries a matching L1 tier -> starts normally, past the mismatch gate — AND the scan was actually invoked", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-deploy-key-startup-"));
   try {
     const keyPath = join(dir, "worker-deploy-key");
@@ -343,6 +421,15 @@ test("arm 6b: credentialTier L1, every running marker already carries a matching
       { name: "lane-a", tier: "L1" },
       { name: "lane-b", tier: "L1" },
     ]);
+    // #1105 round 3 (P3): spy on the injected lister so this test fails if the scan is ever
+    // removed from the L1 path — an all-L1 fixture that never invokes it would otherwise "pass"
+    // for the wrong reason (nothing to mismatch against) rather than because the gate ran.
+    let scanCalls = 0;
+    const originalList = supervisor.listRunningCredentialTiers;
+    supervisor.listRunningCredentialTiers = () => {
+      scanCalls++;
+      return originalList();
+    };
     const result = await detectDeployKeyStartupTier(
       supervisor,
       { worker: { credentialTier: "L1" }, board: { owner: "o", repo: "r" } },
@@ -351,6 +438,7 @@ test("arm 6b: credentialTier L1, every running marker already carries a matching
       { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }), run: fakeRun([{ id: 1, readOnly: false }]) },
     );
     assert.deepEqual(result, { tier: "L1", arm: "active" });
+    assert.equal(scanCalls, 1, "the L1 running-marker scan must actually be invoked, not merely trusted to pass");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -40,9 +40,12 @@ export interface DeployKeyStartupResult {
  *  without constructing a real supervisor. */
 export interface DeployKeyPreflightSupervisor {
   checkDeployKeyPreflight(anchor: { keyPath: string; keyId: number }): Promise<LlmPingResult | undefined>;
-  /** #1105: every still-running lane's own `credential_tier` provenance — see
-   *  WorkerSupervisor.listRunningCredentialTiers' own doc for what it scans. */
-  listRunningCredentialTiers(): Array<{ name: string; tier: unknown }>;
+  /** #1105 (round 3, P2/P3): every still-running lane's own `credential_tier` provenance, plus
+   *  its `session_id`/`pid` for the refusal message below — see
+   *  WorkerSupervisor.listRunningCredentialTiers' own doc for what it scans and its fail-closed
+   *  contract (throws on a directory-listing failure; reports, rather than excludes, an
+   *  unparseable marker). */
+  listRunningCredentialTiers(): Array<{ name: string; tier: unknown; session_id: unknown; pid: unknown }>;
 }
 
 /** Run once per engine start (cli.ts, immediately after `WorkerSupervisor` construction — see
@@ -118,15 +121,46 @@ export async function detectDeployKeyStartupTier(
   // every restart passes through before any dispatch, rather than threaded into every adoption
   // path individually. A marker with no `credential_tier` recorded at all (pre-#1105) counts as
   // a mismatch — it was never confirmed L1, so it must never be silently trusted as one.
-  const runningMarkers = supervisor.listRunningCredentialTiers();
+  //
+  // #1105 (round 3, P2): a scan that can't even list the running-lane state directory is refused
+  // the same way as a mismatch — "couldn't see what's running" must never read as "nothing is
+  // running" and let startup proceed.
+  let runningMarkers: Array<{ name: string; tier: unknown; session_id: unknown; pid: unknown }>;
+  try {
+    runningMarkers = supervisor.listRunningCredentialTiers();
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    const message =
+      `worker.credentialTier is "L1" but the running-lane state directory could not be scanned (${detail}) — ` +
+      "adopting any lane still on disk from before this restart without checking its credential tier is unsafe. " +
+      `Refusing to start before any dispatch — see <${DOC_LINKS.security}>'s worker credential tiers.`;
+    log(`[sapwood:startup] ${message}`);
+    record({ tier: "L1", arm: "running-tier-mismatch" });
+    throw new Error(message);
+  }
   const mismatched = runningMarkers.filter((m) => m.tier !== "L1");
   if (mismatched.length > 0) {
-    const names = mismatched.map((m) => m.name).join(", ");
+    // #1105 (round 3, P2): no process sweep and no liveness probe here — a recovery mechanism
+    // must not become a new problem source (the operator can wait or kill directly). The message
+    // gives the operator everything on disk per lane (session id, pid, recorded tier) and exactly
+    // two remedies that don't require THIS engine to touch the other process. `sapwood estop` is
+    // deliberately NOT one of the remedies: it only writes a sentinel for a RUNNING engine to
+    // notice, and the engine that owned these lanes is by definition not around to notice it —
+    // this refusal fires on THIS restart, after that prior engine is already gone.
+    const rows = mismatched
+      .map((m) => {
+        const session = typeof m.session_id === "string" && m.session_id ? m.session_id : "unknown";
+        const pid = typeof m.pid === "number" ? String(m.pid) : "unknown";
+        const tier = typeof m.tier === "string" && m.tier ? m.tier : "unknown";
+        return `${m.name} (session ${session}, pid ${pid}, tier ${tier})`;
+      })
+      .join("; ");
     const message =
       `worker.credentialTier is "L1" but ${mismatched.length} lane(s) already running from before this restart ` +
-      `do not carry a matching credential tier (${names}) — adopting them would keep a process this run's L1 ` +
-      `startup gate never validated alive. Let them finish, or run "sapwood estop" to stop them, then restart. ` +
-      `Refusing to start before any dispatch — see <${DOC_LINKS.security}>'s worker credential tiers.`;
+      `do not carry a matching credential tier: ${rows}. Adopting them would keep a process this run's L1 ` +
+      "startup gate never validated alive. Wait for those processes to exit, then delete the stale " +
+      '.running.json if the process is already gone; or run "kill <pid>" first if you cannot wait. Refusing ' +
+      `to start before any dispatch — see <${DOC_LINKS.security}>'s worker credential tiers.`;
     log(`[sapwood:startup] ${message}`);
     record({ tier: "L1", arm: "running-tier-mismatch" });
     throw new Error(message);

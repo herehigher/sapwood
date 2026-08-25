@@ -2865,31 +2865,40 @@ export class WorkerSupervisor implements Supervisor {
     return this.deployKeyProbe.probe;
   }
 
-  /** #1105: the marker reader deploy-key-startup-check.ts's restart-adoption gate consumes —
-   *  reuses `readJson` (this file's one generic try/catch JSON parser, the same one every
-   *  running.json read in this class already goes through) plus the same directory-listing
+  /** #1105 (round 3, P2): the marker reader deploy-key-startup-check.ts's restart-adoption gate
+   *  consumes — reuses `readJson` (this file's one generic try/catch JSON parser, the same one
+   *  every running.json read in this class already goes through) plus the same directory-listing
    *  idiom `otherLaneOnBranch` above already establishes, rather than a second implementation of
    *  either. Scoped to `*.running.json` only (a lane still in flight, per SENTINEL_FILE's own
    *  extension set) — a terminal sentinel's process has already exited, so its tier provenance
-   *  is moot to a startup adoption-safety check. Never throws: an unreadable state dir or an
-   *  individual unparseable marker is just excluded, the same fail-open-on-read-error stance
-   *  `otherLaneOnBranch` already takes for this exact directory. `tier` is `unknown`, not the
-   *  narrowed `"L0" | "L1"` union — deliberately: the caller decides what counts as a mismatch,
-   *  this method only reports what's on disk (including a legacy marker with the field absent
-   *  entirely). */
-  listRunningCredentialTiers(): Array<{ name: string; tier: unknown }> {
-    let entries: string[];
-    try {
-      entries = readdirSync(this.dir);
-    } catch {
-      return [];
-    }
-    const out: Array<{ name: string; tier: unknown }> = [];
+   *  is moot to a startup adoption-safety check.
+   *
+   *  FAIL CLOSED on both axes the startup gate depends on, unlike `otherLaneOnBranch`'s
+   *  fail-open stance on this same directory (that method's caller degrades to a WARN either
+   *  way; this one's caller refuses startup, so "couldn't tell" must never read as "nothing is
+   *  running"): a directory-listing failure THROWS instead of returning `[]`, and an unparseable
+   *  marker is still REPORTED (with `tier: undefined`, via `readJson`'s own null-on-parse-failure
+   *  return) rather than silently excluded — the caller's mismatch check (`tier !== "L1"`) then
+   *  refuses on it exactly like a legacy marker with the field absent.
+   *
+   *  `tier`/`session_id`/`pid` are all `unknown`, not narrowed — deliberately: the caller decides
+   *  what counts as a mismatch and how to render an absent field; this method only reports what's
+   *  on disk verbatim, including a legacy marker missing some or all of these fields entirely.
+   *  `pid` is the marker's own `wrapper_pid` (the CONFIRMED spawn's field, see `resume`'s doc
+   *  above) — this method performs no liveness check on it, and neither does its caller; a dead
+   *  PID's marker still refuses, the caller's remedy text just can't `kill` it. */
+  listRunningCredentialTiers(): Array<{ name: string; tier: unknown; session_id: unknown; pid: unknown }> {
+    const entries = readdirSync(this.dir);
+    const out: Array<{ name: string; tier: unknown; session_id: unknown; pid: unknown }> = [];
     for (const entry of entries) {
       if (!entry.endsWith(".running.json")) continue;
       const running = this.readJson(join(this.dir, entry));
-      if (!running) continue;
-      out.push({ name: entry.slice(0, -".running.json".length), tier: running.credential_tier });
+      out.push({
+        name: entry.slice(0, -".running.json".length),
+        tier: running?.credential_tier,
+        session_id: running?.session_id,
+        pid: running?.wrapper_pid,
+      });
     }
     return out;
   }
