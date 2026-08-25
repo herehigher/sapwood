@@ -799,25 +799,38 @@ const PROTECTED_SUFFIXES = [
   "/engine/src/roles/merge-driver.ts",
 ];
 
-// Out-of-band control sentinels (#81, fable gate② follow-up to #80): data/KILL_SWITCH,
-// data/PAUSE, and data/EMERGENCY_STOP live in the engine's OWN data dir (state.ts
-// killSwitchPath()/pausePath()/estopPath()) — outside worker worktrees (no --add-dir data)
-// as a permission-layer boundary, not an OS sandbox (docs/security.md's isolation-boundary
-// note). A worker has zero legitimate reason to touch any of the three: forging PAUSE
-// starves competing dispatch, deleting KILL_SWITCH defeats the hard-stop escape hatch, and
-// deleting EMERGENCY_STOP defeats the operator's immediate-stop control — the strictest of
-// the three tiers (#724), and this rule originally missed it (#779, found at gate② on PR
-// #774; #732). Matched on the normalized absolute path, so relative traversal
-// (`../../data/EMERGENCY_STOP`) resolves to the same block as the direct path. Matched
-// case-insensitively (#84 gate② P2-1): macOS/APFS is case-insensitive by default, so
-// `touch data/pause` creates the file existsSync(pausePath()) finds and `rm data/kill_switch`
-// deletes the real sentinel — the $-anchor keeps near-misses (data/paused, data/EMERGENCY_STOPPED)
-// unaffected.
-const CONTROL_SENTINEL_RE = /\/data\/(KILL_SWITCH|PAUSE|EMERGENCY_STOP)$/i;
+// ── .sapwood/** runtime-root write-deny (#1079, replaces the three-name CONTROL_SENTINEL_RE) ──
+// #81/#779 (fable gate② follow-up to #80, #724): a worker forging PAUSE starves competing
+// dispatch, deleting KILL_SWITCH defeats the hard-stop escape hatch, and deleting
+// EMERGENCY_STOP defeats the operator's immediate-stop control — the three control sentinels
+// used to be the ONLY named boundary here, leaving every other runtime-owned path (sqlite,
+// sessions, the review clone, generated/role-skills/**, #656) unprotected by construction,
+// since nothing named them either. `.sapwood/` is the fixed engine runtime root; a worker has
+// zero legitimate reason to write ANYWHERE under it, so one segment-equality rule replaces the
+// enumeration — root equality (`rm -rf .sapwood`) now also closes the old "directory deleted
+// without ever naming a sentinel" residual, since the root itself matches, not just a file
+// inside it.
+//
+// SAPWOOD_ROOT_SEGMENT is spelled locally, not imported from #1077's `runtimePaths()` module:
+// guard-hook.ts is a standalone binary spawned as a Claude CLI PreToolUse hook and must stay
+// free of engine-config imports.
+const SAPWOOD_ROOT_SEGMENT = ".sapwood";
+
+/** True when `abs` (a normalized absolute path) contains `.sapwood` as an EXACT path segment —
+ *  the root itself or any descendant. Segment equality, not substring: a sibling name
+ *  (`.sapwood-notes/`, `docs/.sapwoodx`) or the string appearing inside a filename
+ *  (`notes/about.sapwood.md`) does not match. Case-insensitive, the same stance the sentinel
+ *  regex already took (macOS/APFS is case-insensitive by default; over-blocking a path nobody
+ *  legitimately uses is the fail-closed direction — owner ruling 2026-08-25). No filesystem
+ *  canonicalisation (no realpath/lstat) — lexical only, same as every other rule in this file;
+ *  symlink aliasing stays a documented residual (docs/security.md), not one this closes. */
+function isUnderSapwoodRoot(abs: string): boolean {
+  return abs.split("/").some((seg) => seg.toLowerCase() === SAPWOOD_ROOT_SEGMENT);
+}
 
 /** If `abs` (a normalized absolute path) is a boundary file, return a short label; else null. */
 function protectedPathLabel(abs: string): string | null {
-  if (CONTROL_SENTINEL_RE.test(abs)) return "data/KILL_SWITCH, data/PAUSE, or data/EMERGENCY_STOP (control sentinel)";
+  if (isUnderSapwoodRoot(abs)) return ".sapwood/** (sapwood runtime root)";
   if (/\/\.claude\/settings(\.local)?\.json$/.test(abs)) return ".claude/settings.json (hook wiring)";
   if (/\/\.github\/workflows(\/|$)/.test(abs)) return ".github/workflows/** (CI integrity)";
   // The engine config carries guard.mode + reviewer/security settings — a worker editing it to
@@ -927,28 +940,27 @@ function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null
 }
 
 /**
- * #81: a control sentinel path (data/KILL_SWITCH, data/PAUSE, data/EMERGENCY_STOP — #779
- * extended this to all three) appearing as a literal argument to ANY command — not just the
- * recognized WRITE_CMDS verbs. Unlike guard.ts / workflows (legitimately read by cat/cp-source),
- * a worker has no legitimate reason to reference any of the three at all, so mere appearance is
- * enough. This closes the `node some-script.js ../../data/EMERGENCY_STOP`-style indirection
- * where the script's own write is opaque to the guard but the path argument on the Bash command
- * line is not. (A script that hardcodes the path internally, with no CLI argument, remains an
- * open residual — see docs/security.md's isolation-boundary note.)
+ * #1079 (was #81's CONTROL_SENTINEL_RE-specific check): a `.sapwood/**` path appearing as a
+ * literal argument to ANY command — not just the recognized WRITE_CMDS verbs. A worker has no
+ * legitimate reason to reference the runtime root at all, so mere appearance is enough. This
+ * closes the `node some-script.js ../../.sapwood/PAUSE`-style indirection where the script's own
+ * write is opaque to the guard but the path argument on the Bash command line is not. (A script
+ * that hardcodes the path internally, with no CLI argument, remains an open residual — see
+ * docs/security.md's isolation-boundary note.) One caveat this scan inherits from being
+ * cwd-relative: a session whose OWN cwd already sits under `.sapwood/` (e.g. a materialized
+ * review tree) would see every bare relative token match here, command word included — this
+ * function's scope is the worker's own worktree-relative Bash usage, not a session dispatched
+ * with its cwd already inside the protected root.
  */
 function checkControlSentinelArg(tokens: string[], cwd: string): string | null {
   for (const t of tokens) {
     if (!t) continue;
-    // A flag can glue the path to its value (`--target=../../data/PAUSE`) — judge the
-    // substring after the first `=` for `-`-prefixed tokens (#84 gate② P2-2).
+    // A flag can glue the path to its value (`--target=../../.sapwood/PAUSE`) — judge the
+    // substring after the first `=` for `-`-prefixed tokens (#84 gate② P2-2, carried forward).
     const candidate = t.startsWith("-") ? (t.includes("=") ? t.slice(t.indexOf("=") + 1) : null) : t;
     if (!candidate) continue;
     const abs = normalizePath(candidate, cwd);
-    if (CONTROL_SENTINEL_RE.test(abs)) {
-      // Reuse protectedPathLabel's own sentinel label (guard② P2-5 on #809: this used to be a
-      // hardcoded two-name string that went stale the moment #779 added EMERGENCY_STOP to
-      // CONTROL_SENTINEL_RE without a matching update here) — one label string, not two that can
-      // drift apart, and it now names all three tiers per Decision.reason's category+hit contract.
+    if (isUnderSapwoodRoot(abs)) {
       return `BLOCK [write-path] ${protectedPathLabel(abs)} referenced as a command argument`;
     }
   }
@@ -977,7 +989,7 @@ function checkStopControlVerb(tokens: string[]): string | null {
     if (STOP_CONTROL_VERBS.has(verb)) {
       return (
         `BLOCK [stop-control] sapwood ${verb} is a control-sentinel CLI verb (same boundary as ` +
-        `data/PAUSE, data/KILL_SWITCH, data/EMERGENCY_STOP) — human-merge-only, see ${DOC_LINKS.security}`
+        `.sapwood/**) — human-merge-only, see ${DOC_LINKS.security}`
       );
     }
   }

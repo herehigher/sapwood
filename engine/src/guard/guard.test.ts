@@ -209,43 +209,38 @@ const BLOCK: [string, string, string][] = [
   ["gh api -X PATCH repos/o/r/issues/352 -f state=open", CWD, "labels/milestone/state"],
   ['gh api graphql -f query=\'mutation { transferIssue(input: {issueId: "1", newOwner: "o2"}) { issue { id } } }\'', CWD, "graphql"],
   ["gh api graphql -f query='mutation { deleteIssue(input: {issueId: \"1\"}) { clientMutationId } }'", CWD, "graphql"],
-  // #81: defense-in-depth for the KILL_SWITCH / PAUSE control sentinels (fable gate② follow-up
-  // to #80) — direct Bash vectors (touch/rm/redirect) plus relative-path traversal.
-  ["touch data/KILL_SWITCH", CWD, "write-path"],
-  ["touch data/PAUSE", CWD, "write-path"],
-  ["touch ../../data/PAUSE", CWD, "write-path"],
-  ["rm data/KILL_SWITCH", CWD, "write-path"],
-  ["rm -f data/PAUSE", CWD, "write-path"],
-  ["rm ../../data/KILL_SWITCH", CWD, "write-path"],
-  ["echo x > data/PAUSE", CWD, "write-path"],
-  ["echo x >> data/KILL_SWITCH", CWD, "write-path"],
-  ["cat foo > ../../data/KILL_SWITCH", CWD, "write-path"],
-  ["mv data/PAUSE /tmp/x", CWD, "write-path"],
-  ["git rm data/KILL_SWITCH", CWD, "write-path"],
-  // node <script.js> indirection where the sentinel target is a literal CLI arg (detectable
-  // by path matching, even though the script's own write is opaque to the guard).
-  ["node kill.js ../../data/KILL_SWITCH", CWD, "write-path"],
-  ["node scripts/unpause.js data/PAUSE", CWD, "write-path"],
-  // #84 gate② P2-1: macOS/APFS is case-insensitive — `touch data/pause` creates a file that
-  // existsSync(pausePath()) finds, so lowercase/mixed-case variants must block too.
-  ["touch data/pause", CWD, "write-path"],
-  ["rm data/kill_switch", CWD, "write-path"],
-  ["touch ../../data/Pause", CWD, "write-path"],
-  ["echo x > data/Kill_Switch", CWD, "write-path"],
-  // #84 gate② P2-2: sentinel path glued to a flag (`--target=...`) must not slip past the
-  // literal-arg matcher's `-`-prefix skip.
-  ["node kill.js --target=../../data/PAUSE", CWD, "write-path"],
-  ["node unpause.js --file=data/kill_switch", CWD, "write-path"],
-  // #779: EMERGENCY_STOP is the strictest of the three sentinels (#724) and was missing from
-  // this rule's first pass — same Bash-vector coverage as KILL_SWITCH/PAUSE above.
-  ["touch data/EMERGENCY_STOP", CWD, "write-path"],
-  ["rm data/EMERGENCY_STOP", CWD, "write-path"],
-  ["rm -f ../../data/EMERGENCY_STOP", CWD, "write-path"],
-  ["echo x > data/EMERGENCY_STOP", CWD, "write-path"],
-  ["node kill.js ../../data/EMERGENCY_STOP", CWD, "write-path"],
-  ["node kill.js --target=data/EMERGENCY_STOP", CWD, "write-path"],
-  ["touch data/emergency_stop", CWD, "write-path"],
-  ["rm ../../data/Emergency_Stop", CWD, "write-path"],
+  // #1079: `.sapwood/**` runtime-root write-deny (replaces the three-name CONTROL_SENTINEL_RE).
+  // Root equality, descendants (including the three sentinel names — #81/#779/#84's original
+  // regression coverage carried forward under the new root), traversal, and flag-glued forms.
+  ["rm -rf .sapwood", CWD, "write-path"],
+  ["touch .sapwood/PAUSE", CWD, "write-path"],
+  ["touch .sapwood/KILL_SWITCH", CWD, "write-path"],
+  ["touch .sapwood/EMERGENCY_STOP", CWD, "write-path"],
+  ["touch .sapwood/cache/x", CWD, "write-path"],
+  ["rm .sapwood/KILL_SWITCH", CWD, "write-path"],
+  ["rm -f .sapwood/PAUSE", CWD, "write-path"],
+  ["rm ../../.sapwood/KILL_SWITCH", CWD, "write-path"],
+  ["echo x > .sapwood/PAUSE", CWD, "write-path"],
+  ["echo x >> .sapwood/KILL_SWITCH", CWD, "write-path"],
+  ["cat foo > ../../.sapwood/KILL_SWITCH", CWD, "write-path"],
+  ["mv .sapwood/PAUSE /tmp/x", CWD, "write-path"],
+  ["git rm .sapwood/KILL_SWITCH", CWD, "write-path"],
+  // node <script.js> indirection where the target is a literal CLI arg (detectable by path
+  // matching, even though the script's own write is opaque to the guard).
+  ["node kill.js ../../.sapwood/KILL_SWITCH", CWD, "write-path"],
+  ["node scripts/unpause.js .sapwood/PAUSE", CWD, "write-path"],
+  // #84 gate② P2-1 (carried forward): macOS/APFS is case-insensitive — `touch .sapwood/pause`
+  // creates a file the real sentinel resolver finds, so lowercase/mixed-case variants block too.
+  ["touch .SAPWOOD/pause", CWD, "write-path"],
+  ["rm .sapwood/kill_switch", CWD, "write-path"],
+  ["touch ../../.Sapwood/Pause", CWD, "write-path"],
+  ["echo x > .sapwood/Kill_Switch", CWD, "write-path"],
+  // #84 gate② P2-2 (carried forward): path glued to a flag (`--target=...`) must not slip past
+  // the literal-arg matcher's `-`-prefix skip.
+  ["node kill.js --target=../../.sapwood/PAUSE", CWD, "write-path"],
+  ["node unpause.js --file=.sapwood/kill_switch", CWD, "write-path"],
+  // absolute path under the repo.
+  ["rm /repo/.sapwood/EMERGENCY_STOP", CWD, "write-path"],
 ];
 
 for (const [command, cwd, kw] of BLOCK) {
@@ -256,17 +251,15 @@ for (const [command, cwd, kw] of BLOCK) {
   });
 }
 
-// gate② P2-5 on #809: checkControlSentinelArg's reason string used to be a hardcoded
-// "data/KILL_SWITCH / data/PAUSE" that went stale the moment #779 extended CONTROL_SENTINEL_RE
-// to EMERGENCY_STOP — asserting only the "write-path" keyword (the BLOCK loop above) would not
-// have caught that staleness. Pin the actual reason TEXT for a literal-arg EMERGENCY_STOP hit.
-test("BLOCK reason text: node kill.js ../../data/EMERGENCY_STOP names all three sentinel tiers, not a stale two-name string", () => {
-  const d = bash("node kill.js ../../data/EMERGENCY_STOP");
+// #1079: the reason text now names the runtime ROOT, not an enumerated sentinel list — the
+// #809 gate② P2-5 staleness class (a hardcoded per-name string drifting from the actual match
+// set) is structurally impossible now: there is one label for the whole tree, not one per name
+// to go stale when a new path joins it. Pin the actual reason TEXT for a literal-arg hit.
+test("BLOCK reason text: node kill.js ../../.sapwood/EMERGENCY_STOP names the .sapwood runtime root, not a specific sentinel", () => {
+  const d = bash("node kill.js ../../.sapwood/EMERGENCY_STOP");
   assert.equal(d.allow, false);
-  assert.ok(d.reason.includes("EMERGENCY_STOP"), `reason must name EMERGENCY_STOP: ${d.reason}`);
-  assert.ok(d.reason.includes("KILL_SWITCH"), `reason must still name KILL_SWITCH: ${d.reason}`);
-  assert.ok(d.reason.includes("PAUSE"), `reason must still name PAUSE: ${d.reason}`);
-  assert.ok(d.reason.includes("control sentinel"), `reason must name the category: ${d.reason}`);
+  assert.ok(d.reason.includes(".sapwood"), `reason must name the .sapwood root: ${d.reason}`);
+  assert.ok(d.reason.includes("runtime root"), `reason must name the category: ${d.reason}`);
 });
 
 // ── #731: sapwood pause/stop/estop CLI verbs — same control-sentinel boundary as the section
@@ -450,19 +443,15 @@ const ALLOW: string[] = [
   'gh api repos/o/r/issues -f "title=progress%zzdone"',
   "gh api repos/o/r/issues/352",
   "gh api -X PATCH repos/o/r/issues/abc -f body=updated",
-  // #81 guardrails: benign touch/paths that merely resemble the sentinels must still pass
+  // #1079 reverse tests: benign paths that merely resemble `.sapwood` must still pass —
+  // sibling names (segment must be EXACT, not a prefix) and the string inside a filename.
   "touch /tmp/scratch.txt",
-  "touch data/README.md",
+  "touch .sapwood-notes/x",
   "node scripts/build.js",
-  "cat data/README.md",
-  // #84 gate② guardrails: /i near-misses ($-anchored, so suffix-extended names pass) and
-  // benign flag-glued paths must still pass
-  "touch data/paused",
-  "touch data/pause-notes.md",
+  "cat docs/.sapwoodx",
+  "touch notes/about.sapwood.md",
+  // benign flag-glued paths must still pass (the flag-glue extraction itself doesn't false-positive).
   "node build.js --out=dist/app.js",
-  // #779 reverse test: EMERGENCY_STOP near-miss ($-anchored) must still pass.
-  "touch data/EMERGENCY_STOPPED",
-  "touch data/EMERGENCY_STOP.md",
   // #781 reverse test: sapwood.config.example near-misses must still pass.
   "touch sapwood.config.example2.yaml",
   "touch sapwood.config.example-notes.md",
@@ -650,6 +639,22 @@ test("Read ALLOW: the worktree root itself", () => {
   assert.equal(d.allow, true, d.reason);
 });
 
+// #1079: read containment is untouched by the .sapwood/** write-deny rule — a reviewer
+// session's own worktreeRoot sits UNDER .sapwood (the materialized review tree), and
+// checkReadContainment never consults protectedPathLabel/isUnderSapwoodRoot, so Read/Grep
+// stay allowed there exactly as for any other worktreeRoot.
+const REVIEW_TREE_ROOT = "/repo/.sapwood/cache/review/trees/abc123";
+
+test("Read ALLOW (#1079): reviewer session reading inside its own .sapwood-rooted materialized tree", () => {
+  const d = guardDecision("Read", { file_path: `${REVIEW_TREE_ROOT}/src/app.ts` }, REVIEW_TREE_ROOT, REVIEW_TREE_ROOT);
+  assert.equal(d.allow, true, d.reason);
+});
+
+test("Grep ALLOW (#1079): reviewer session grepping inside its own .sapwood-rooted materialized tree", () => {
+  const d = guardDecision("Grep", { path: REVIEW_TREE_ROOT }, REVIEW_TREE_ROOT, REVIEW_TREE_ROOT);
+  assert.equal(d.allow, true, d.reason);
+});
+
 test("Read BLOCK: an absolute host path outside the worktree root (Phase-0's /etc/hosts case)", () => {
   const d = guardDecision("Read", { file_path: "/etc/hosts" }, WORKTREE_ROOT, WORKTREE_ROOT);
   assert.equal(d.allow, false);
@@ -753,7 +758,7 @@ test("NotebookEdit reads notebook_path, not file_path — the field pick is load
   // Claude Code's NotebookEdit schema carries notebook_path; file_path on a NotebookEdit input is
   // not a real tool shape. Pin that the guard consults the real field, so a future refactor can't
   // silently fall back to file_path and read every NotebookEdit as path-less.
-  const d = guardDecision("NotebookEdit", { notebook_path: "data/KILL_SWITCH", file_path: "src/ok.ts" }, CWD);
+  const d = guardDecision("NotebookEdit", { notebook_path: ".sapwood/PAUSE", file_path: "src/ok.ts" }, CWD);
   assert.equal(d.allow, false);
   assert.ok(d.reason.toLowerCase().includes("write-path"));
 });
@@ -817,25 +822,27 @@ const WRITE_BLOCK: [string, string][] = [
   ["engine/src/roles/merge-driver.ts", "write-path"], // merge path source (gates + TOCTOU pin) (#13 follow-up)
   ["/repo/engine/dist/roles/merge-driver.js", "write-path"], // running merge-path artifact
   ["engine/dist/roles/reviewer.js", "write-path"], // running gate② artifact
-  // #81: control sentinels (data/KILL_SWITCH, data/PAUSE) — direct file-tool writes, plus
-  // relative-path traversal reaching the same absolute target.
-  ["data/KILL_SWITCH", "write-path"],
-  ["data/PAUSE", "write-path"],
-  ["/repo/data/KILL_SWITCH", "write-path"],
-  ["/repo/data/PAUSE", "write-path"],
-  ["../../data/PAUSE", "write-path"],
-  ["../../data/KILL_SWITCH", "write-path"],
-  // #84 gate② P2-1: case-insensitive FS (macOS/APFS) — lowercase names hit the same file.
-  ["data/pause", "write-path"],
-  ["data/kill_switch", "write-path"],
-  ["/repo/data/Pause", "write-path"],
-  // #779: EMERGENCY_STOP — same direct-write, traversal, and case-variant coverage as
-  // KILL_SWITCH/PAUSE above (the strictest of the three sentinel tiers, #724).
-  ["data/EMERGENCY_STOP", "write-path"],
-  ["/repo/data/EMERGENCY_STOP", "write-path"],
-  ["../../data/EMERGENCY_STOP", "write-path"],
-  ["data/emergency_stop", "write-path"],
-  ["/repo/data/Emergency_Stop", "write-path"],
+  // #1079: `.sapwood/**` runtime root — root equality, descendants (including the three
+  // sentinel names — #81/#779/#84's original regression coverage carried forward under the
+  // new root), traversal, and case variants.
+  [".sapwood", "write-path"],
+  [".sapwood/KILL_SWITCH", "write-path"],
+  [".sapwood/PAUSE", "write-path"],
+  [".sapwood/cache/x", "write-path"],
+  ["/repo/.sapwood/KILL_SWITCH", "write-path"],
+  ["/repo/.sapwood/PAUSE", "write-path"],
+  ["../../.sapwood/PAUSE", "write-path"],
+  ["../../.sapwood/KILL_SWITCH", "write-path"],
+  // #84 gate② P2-1 (carried forward): case-insensitive FS (macOS/APFS) — lowercase/mixed-case
+  // segment names hit the same real directory.
+  [".sapwood/pause", "write-path"],
+  [".sapwood/kill_switch", "write-path"],
+  ["/repo/.SAPWOOD/Pause", "write-path"],
+  [".sapwood/EMERGENCY_STOP", "write-path"],
+  ["/repo/.sapwood/EMERGENCY_STOP", "write-path"],
+  ["../../.sapwood/EMERGENCY_STOP", "write-path"],
+  [".sapwood/emergency_stop", "write-path"],
+  ["/repo/.Sapwood/Emergency_Stop", "write-path"],
   // #781: the init-starter template — same rule shape as sapwood.config.* above, but a
   // separate match target (the root config and the shipped example are different files).
   ["sapwood.config.example.yaml", "write-path"],
@@ -862,8 +869,11 @@ for (const file_path of [
   "/repo/engine/src/forge.ts",
   ".github/ISSUE_TEMPLATE.md",
   "data/README.md",
-  // #779 reverse: near-miss sentinel name stays allowed ($-anchor).
-  "data/EMERGENCY_STOPPED",
+  // #1079 reverse: sibling names (segment must be EXACT) and the string inside a filename
+  // segment stay allowed — a substring match would over-block these.
+  ".sapwood-notes/x",
+  "docs/.sapwoodx",
+  "notes/about.sapwood.md",
   // #781 reverse: near-miss template name stays allowed ($-anchor).
   "sapwood.config.example2.yaml",
 ]) {
