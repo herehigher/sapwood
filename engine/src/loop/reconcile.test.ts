@@ -885,8 +885,8 @@ test("#447: a per-lane forge failure leaves that lane exactly as it was and neve
 
 test("role debris sweep removes confirmed-dead role debris only", () => {
   const root = mkdtempSync(join(tmpdir(), "sapwood-role-sweep-"));
-  const roles = join(root, "data", "sessions", "roles");
-  const workerState = join(root, "data", "sessions", "state");
+  const roles = join(root, ".sapwood", "sessions", "roles");
+  const workerState = join(root, ".sapwood", "sessions", "state");
   const worktrees = join(root, ".claude", "worktrees");
   mkdirSync(roles, { recursive: true });
   mkdirSync(workerState, { recursive: true });
@@ -922,6 +922,28 @@ test("role debris sweep removes confirmed-dead role debris only", () => {
     assert.equal(existsSync(join(worktrees, "lane-171")), true);
     assert.deepEqual(events, [{ session: "role-dead-aaaa", removed: ["worktree", "sentinel"] }]);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// #1077: no `stateDir` override injected — proves the runtimePaths()-derived default itself
+// finds the sentinel, not merely that an explicit override is respected (the fixture above).
+test("role debris sweep: default stateDir resolves under <cwd>/.sapwood/sessions/roles when no override is injected", () => {
+  const root = mkdtempSync(join(tmpdir(), "sapwood-role-sweep-defaultdir-"));
+  const previousCwd = process.cwd();
+  try {
+    process.chdir(root);
+    const roles = join(root, ".sapwood", "sessions", "roles");
+    mkdirSync(roles, { recursive: true });
+    writeFileSync(join(roles, "role-dead-zzzz.running.json"), JSON.stringify({ wrapper_pid: 999 }));
+    const swept = sweepStaleRoleSessions(
+      { appendEvent: () => {} },
+      { pidStatus: () => "dead", worktreeRoot: join(root, ".claude", "worktrees") },
+    );
+    assert.deepEqual(swept, ["role-dead-zzzz"]);
+    assert.equal(existsSync(join(roles, "role-dead-zzzz.running.json")), false);
+  } finally {
+    process.chdir(previousCwd);
     rmSync(root, { recursive: true, force: true });
   }
 });

@@ -41,6 +41,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import { defaultRuntimeRoot, runtimePaths } from "../config/paths.js";
 
 const pexecFile = promisify(execFile);
 
@@ -127,14 +128,14 @@ export function assertOutsideWorktreeMounts(cloneDir: string, worktreeRoot: stri
   }
 }
 
-/** Default engine-private clone location: `data/` is the SAME convention `stateDir` uses
- *  (`worker.ts`'s `WorkerSupervisor.dir` default `<cwd>/data/sessions/state`) -- workers have no
- *  mount under `data/` at all (existing structural guarantee this repo already relies on), which
- *  is a stronger property than mere path disjointness from `worktreeRoot`. `assertOutsideWorktreeMounts`
- *  is still run against whatever directory is actually passed in -- this default is a safe
- *  starting point, not a substitute for the assertion. */
+/** Default engine-private clone location: `.sapwood/` is the SAME runtime root `stateDir` uses
+ *  (`worker.ts`'s `WorkerSupervisor.dir` default `<cwd>/.sapwood/sessions/state`) -- workers have
+ *  no mount under `.sapwood/` at all (existing structural guarantee this repo already relies
+ *  on), which is a stronger property than mere path disjointness from `worktreeRoot`.
+ *  `assertOutsideWorktreeMounts` is still run against whatever directory is actually passed in
+ *  -- this default is a safe starting point, not a substitute for the assertion. */
 export function defaultPrivateCloneDir(cwd: string = process.cwd()): string {
-  return join(cwd, "data", "review", "clone.git");
+  return runtimePaths(defaultRuntimeRoot(cwd)).cacheReviewCloneGit;
 }
 
 /** Mirrors `WorkerSupervisor`'s own `worktreeRoot` default exactly (worker.ts) -- the convention

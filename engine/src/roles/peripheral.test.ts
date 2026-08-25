@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -81,6 +81,27 @@ test("RoleRunner: default guard hook resolves the compiled hook in the guard dir
     const guardHookPath = (runner as unknown as { guardHookPath: string }).guardHookPath;
     assert.equal(guardHookPath, fileURLToPath(new URL("../guard/guard-hook.js", import.meta.url)));
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #1077: no `stateDir` override injected — proves the runtimePaths()-derived default itself,
+// not merely that an explicit override is respected (every other fixture in this file injects
+// one).
+test("RoleRunner: default stateDir resolves under <cwd>/.sapwood/sessions/roles when no override is injected", () => {
+  // realpathSync: macOS's tmpdir() is a symlink (/tmp -> /private/tmp) — process.chdir()+
+  // process.cwd() (what the production default actually reads) resolves it, so comparing
+  // against the raw mkdtempSync path would spuriously fail on the "/var/.." vs "/private/var/.."
+  // string difference alone, not a real defect.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sapwood-role-defaultdir-")));
+  const previousCwd = process.cwd();
+  try {
+    process.chdir(dir);
+    const runner = new RoleRunner({ now: realClock, cfg, worktreeRoot: join(dir, "worktrees"), claudeBin: "claude" });
+    const stateDir = (runner as unknown as { dir: string }).dir;
+    assert.equal(stateDir, join(dir, ".sapwood", "sessions", "roles"));
+  } finally {
+    process.chdir(previousCwd);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -2609,13 +2630,13 @@ test("run (#639): RoleRunnerDeps.defaultSkillsPluginDir applies to a peripheral-
       dir,
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
-    const runner = mkRunner(dir, bin, { defaultSkillsPluginDir: "/data/generated/role-skills/deadbeef" });
+    const runner = mkRunner(dir, bin, { defaultSkillsPluginDir: "/plugin-dir/role-skills/deadbeef" });
     const result = await runner.run({ roleId: "architect", prompt: "p", model: "sonnet", effort: "medium", fallbackModel: "sonnet" });
     assert.equal(result.outcome, "done");
     const seen = readFileSync(join(dir, "args.seen"), "utf8").split("\n");
     const i = seen.indexOf("--plugin-dir");
     assert.ok(i !== -1, "--plugin-dir must reach argv when RoleRunnerDeps.defaultSkillsPluginDir is set");
-    assert.equal(seen[i + 1], "/data/generated/role-skills/deadbeef");
+    assert.equal(seen[i + 1], "/plugin-dir/role-skills/deadbeef");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -2646,7 +2667,7 @@ test("run (#639): reviewCwd NEVER attaches a skills plugin dir — structurally 
       dir,
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen")}"\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
-    const runner = mkRunner(dir, bin, { defaultSkillsPluginDir: "/data/generated/role-skills/deadbeef" });
+    const runner = mkRunner(dir, bin, { defaultSkillsPluginDir: "/plugin-dir/role-skills/deadbeef" });
     const result = await runner.run({
       roleId: "engine-reviewer",
       prompt: "review this diff",

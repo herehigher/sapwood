@@ -8,7 +8,7 @@ import type { IForge, PRTopLevelComment } from "../forge/forge.js";
 import { MergeDriver } from "../roles/merge-driver.js";
 import { State } from "../state/state.js";
 import { buildAcSnapshot } from "./ac-snapshot.js";
-import { makeProductionEngineAgent, sweepReviewTrees } from "./production.js";
+import { defaultReviewCodexStateDir, defaultReviewTreeRoot, makeProductionEngineAgent, sweepReviewTrees } from "./production.js";
 
 /** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
  *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
@@ -20,6 +20,14 @@ const realClock = (): Date => new Date();
 function oid(n: number): string {
   return n.toString(16).padStart(40, "0");
 }
+
+// #1077: injected-root check — the runtimePaths()-derived defaults land under the given cwd,
+// in the cache tier (never beside the durable state root).
+test("defaultReviewTreeRoot/defaultReviewCodexStateDir: resolve under an injected cwd's .sapwood/", () => {
+  const cwd = "/repo";
+  assert.equal(defaultReviewTreeRoot(cwd), join(cwd, ".sapwood", "cache", "review", "trees"));
+  assert.equal(defaultReviewCodexStateDir(cwd), join(cwd, ".sapwood", "sessions", "review-codex"));
+});
 
 // ── #489: the decisive engine-agent verdict is announced in the durable event stream ─────────
 // One harness, both outcomes: the ONLY difference between an approved and a rejected run here is

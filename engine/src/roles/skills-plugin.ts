@@ -26,6 +26,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { defaultRuntimeRoot, runtimePaths } from "../config/paths.js";
 import { type ResolvedLabelsForSkill, renderLabelsSkillBody } from "../forge/labels.js";
 
 export interface SkillsPluginSpec {
@@ -247,7 +248,7 @@ export function resolveSkillsPluginDir(
   if (!cfg.roles.skills.enabled) return undefined;
   return renderSkillsPlugin({
     securityMdPath: join(cwd, "docs", "security.md"),
-    outRoot: join(cwd, "data", "generated", "role-skills"),
+    outRoot: runtimePaths(defaultRuntimeRoot(cwd)).cacheGeneratedRoleSkillsDir,
     labelsCfg: { labels: cfg.labels, escalation: cfg.escalation },
   }).dir;
 }

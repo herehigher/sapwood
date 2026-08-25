@@ -118,6 +118,30 @@ test("WorkerSupervisor: default guard hook resolves the compiled hook in the gua
   }
 });
 
+// #1077: no `stateDir` override injected — proves the runtimePaths()-derived default itself,
+// not merely that an explicit override is respected (every other fixture in this file injects
+// one).
+test("WorkerSupervisor: default stateDir resolves under <cwd>/.sapwood/sessions/state when no override is injected", () => {
+  // realpathSync: macOS's tmpdir() is a symlink (/tmp -> /private/tmp) — process.chdir()+
+  // process.cwd() (what the production default actually reads) resolves it, so comparing
+  // against the raw mkdtempSync path would spuriously fail on the "/var/.." vs "/private/var/.."
+  // string difference alone, not a real defect.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sapwood-worker-defaultdir-")));
+  const previousCwd = process.cwd();
+  let supervisor: WorkerSupervisor | undefined;
+  try {
+    process.chdir(dir);
+    supervisor = new WorkerSupervisor({ now: realClock, cfg, claudeBin: "claude" });
+    const stateDir = (supervisor as unknown as { dir: string }).dir;
+    assert.equal(stateDir, join(dir, ".sapwood", "sessions", "state"));
+  } finally {
+    process.chdir(previousCwd);
+    killAnyRunningLanes(supervisor);
+    supervisor?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("parseCostUsd: takes the last result line's total_cost_usd", () => {
   const jsonl = [
     `{"type":"system","subtype":"init"}`,
@@ -1223,11 +1247,11 @@ test("claudeArgs (#639): pluginDir only when given -> --plugin-dir <path>; omitt
     worktree: "w",
     name: "w",
     sessionId: "s",
-    pluginDir: "/data/generated/role-skills/abc123",
+    pluginDir: "/plugin-dir/role-skills/abc123",
   });
   const i = withPluginDir.indexOf("--plugin-dir");
   assert.ok(i !== -1);
-  assert.equal(withPluginDir[i + 1], "/data/generated/role-skills/abc123");
+  assert.equal(withPluginDir[i + 1], "/plugin-dir/role-skills/abc123");
 });
 
 test("claudeArgs (#285): worktree is OPTIONAL — omitted entirely -> no --worktree flag at all (review session mode spawns against an already-materialized cwd instead, via spawnClaudeSession's own cwd opt)", () => {
@@ -4386,8 +4410,8 @@ test("#935 AC2: a resumed lane's pre-handoff usage split across THREE lines for 
 // #935 AC1/AC2 (the three estimator mechanisms — tiered pricing, dedup-by-message-id, chars/4
 // output fallback) stay covered by synthetic unit fixtures below. AC3 (the real-transcript band
 // check against actual dogfood usage) is not a repo-carried test: real captured transcripts are
-// dev-time artefacts of one dogfood run, not framework fixtures, so they live in the deploy's
-// `data/fixtures/estimator/` and the replay runs as an operator script —
+// dev-time artefacts of one dogfood run, not framework fixtures, so they live in that deploy's
+// own scratch storage under fixtures/estimator/ and the replay runs as an operator script —
 // `engine/scripts/estimator-replay.ts` (see docs/supervision.md, "Est-vs-real cost method").
 
 test("#155: a DETACHED lane (no in-memory handle) carries no live telemetry — never invents a second baseline", async () => {
@@ -7895,14 +7919,14 @@ test("dispatch (#639): WorkerDeps.skillsPluginDir set -> --plugin-dir <dir> reac
       renderPrompt: () => "p",
       heartbeatMs: 50,
       guardHookPath: hook,
-      skillsPluginDir: "/data/generated/role-skills/deadbeef",
+      skillsPluginDir: "/plugin-dir/role-skills/deadbeef",
     });
     await s.dispatch({ number: 1, title: "t", labels: [] });
     await waitForFile(join(dir, "args.seen"), "skills-plugin dispatch argv was not published");
     const args = readFileSync(join(dir, "args.seen"), "utf8").trim().split("\n");
     const i = args.indexOf("--plugin-dir");
     assert.ok(i !== -1, "--plugin-dir must reach argv when WorkerDeps.skillsPluginDir is set");
-    assert.equal(args[i + 1], "/data/generated/role-skills/deadbeef");
+    assert.equal(args[i + 1], "/plugin-dir/role-skills/deadbeef");
   } finally {
     killAnyRunningLanes(s);
     s?.dispose();
@@ -9164,7 +9188,7 @@ test("resume (#639): WorkerDeps.skillsPluginDir set -> --plugin-dir <dir> reache
     const { s: sLane, name } = await mkHandoffLane(
       dir,
       `  printf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\n  mv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\n  ${RESULT_LINE}`,
-      { skillsPluginDir: "/data/generated/role-skills/deadbeef" },
+      { skillsPluginDir: "/plugin-dir/role-skills/deadbeef" },
     );
     s = sLane;
     await s.resume({ number: 9, title: "t", labels: [] }, name);
@@ -9172,7 +9196,7 @@ test("resume (#639): WorkerDeps.skillsPluginDir set -> --plugin-dir <dir> reache
     const args = readFileSync(join(dir, "args.seen"), "utf8").trim().split("\n");
     const i = args.indexOf("--plugin-dir");
     assert.ok(i !== -1, "--plugin-dir must reach the resumed leg's argv too");
-    assert.equal(args[i + 1], "/data/generated/role-skills/deadbeef");
+    assert.equal(args[i + 1], "/plugin-dir/role-skills/deadbeef");
   } finally {
     killAnyRunningLanes(s);
     s?.dispose();
@@ -9206,7 +9230,7 @@ test("resume (#639 gate② round 1): WorkerDeps.skillsPluginDir set -> --plugin-
       renderPrompt: () => "issue-rendered-prompt",
       heartbeatMs: 50,
       guardHookPath: hook,
-      skillsPluginDir: "/data/generated/role-skills/deadbeef",
+      skillsPluginDir: "/plugin-dir/role-skills/deadbeef",
     });
     // Same driving-lane precondition as the A1 fix-leg-entry test: a fresh dispatch completes
     // DONE quickly (no --resume in the fake stub's first invocation), leaving a done sentinel
@@ -9226,7 +9250,7 @@ test("resume (#639 gate② round 1): WorkerDeps.skillsPluginDir set -> --plugin-
     const args = readFileSync(join(dir, "fix-args.seen"), "utf8").trim().split("\n");
     const i = args.indexOf("--plugin-dir");
     assert.ok(i !== -1, "--plugin-dir must reach a genuine FIX-ENTRY resumed leg's argv too");
-    assert.equal(args[i + 1], "/data/generated/role-skills/deadbeef");
+    assert.equal(args[i + 1], "/plugin-dir/role-skills/deadbeef");
 
     for (let i2 = 0; i2 < 400 && !existsSync(join(dir, `${name}.done.json`)); i2++) await sleep(20);
   } finally {

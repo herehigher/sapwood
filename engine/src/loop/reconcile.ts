@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { defaultRuntimeRoot, runtimePaths } from "../config/paths.js";
 import { type BoardPlacement, findLaneOwnedPr, hasPrOwnerMarker, type IForge, type OpenPrBody, referencedIssue } from "../forge/forge.js";
 import { labelsIncludeAny } from "../forge/labels.js";
 import type { EscalationCarrier, State, WorkerRow } from "../state/state.js";
@@ -636,7 +637,7 @@ function processStatus(pid: number): "alive" | "dead" | "unreadable" {
 /** Sweep only role-* running sentinels. Unknown/unreadable pids are retained, and the distinct
  *  worker sentinel directory plus the role- prefix keep worker lanes/worktrees out of scope. */
 export function sweepStaleRoleSessions(state: Pick<State, "appendEvent">, options: RoleSweepOptions = {}): string[] {
-  const stateDir = options.stateDir ?? join(process.cwd(), "data", "sessions", "roles");
+  const stateDir = options.stateDir ?? runtimePaths(defaultRuntimeRoot()).sessionsRolesDir;
   const worktreeRoot = options.worktreeRoot ?? join(process.cwd(), ".claude", "worktrees");
   const status = options.pidStatus ?? processStatus;
   if (!existsSync(stateDir)) return [];
