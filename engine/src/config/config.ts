@@ -1650,17 +1650,17 @@ export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "doctrine" | "
   notify: { mentions: string[] };
 };
 
-/** #1078 P2 (gate② round 1): a `SapwoodConfig` whose `logging.path` is GUARANTEED populated —
- *  the shape the engine boundary (cli.ts's runEngine) hands to the log driver, so createRunLogger
- *  needs no fallback of its own (a SECOND unset-defaulting authority, independent of
- *  normalizeLoggingPath below, is exactly the "silently disagree" risk this type closes off). */
+/** #1078: a `SapwoodConfig` whose `logging.path` is GUARANTEED populated — the shape the engine
+ *  boundary (cli.ts's runEngine) hands to the log driver, so createRunLogger needs no fallback
+ *  of its own (a SECOND unset-defaulting authority, independent of normalizeLoggingPath below,
+ *  is exactly the "silently disagree" risk this type closes off). */
 export type NormalizedSapwoodConfig = SapwoodConfig & { logging: SapwoodConfig["logging"] & { path: string } };
 
-/** #1078 P2 (gate② round 1, single authority): the ONE place logging.path's "unset -> the
- *  runtime root's own log location" default is applied. `loadConfig` below calls this for the
- *  file-loaded path; cli.ts's `runEngine` calls it again on `EngineOverrides.cfg` (the
- *  tests-only injection seam that bypasses `loadConfig` entirely) — same function, so a
- *  file-loaded config and an injected one can never silently disagree on the rule. Mutates
+/** #1078: the ONE place logging.path's "unset -> the runtime root's own log location" default is
+ *  applied — one normalization authority, so a file-loaded config and an injected one can never
+ *  silently disagree. `loadConfig` below calls this for the file-loaded path; cli.ts's
+ *  `runEngine` calls it again on `EngineOverrides.cfg` (the tests-only injection seam that
+ *  bypasses `loadConfig` entirely) — same function, applied both times. Mutates
  *  `cfg.logging.path` in place when unset (matches `loadConfig`'s own convention for every
  *  other path field) and returns the same object, now typed as guaranteed-populated; a value
  *  that's already set (by either a real config file or a test) passes through untouched. */
@@ -2139,7 +2139,7 @@ export function loadConfig(path?: string): SapwoodConfig {
   // and stays config-file-relative so `sapwood validate repo/sapwood.config.yaml` judges the
   // same file the engine would resolve inside `repo/`.
   if (cfg.logging.path === undefined) {
-    normalizeLoggingPath(cfg); // #1078 P2: single authority, shared with cli.ts's EngineOverrides.cfg path
+    normalizeLoggingPath(cfg); // #1078: one normalization authority, shared with cli.ts's EngineOverrides.cfg path
   } else if (!isAbsolute(cfg.logging.path)) {
     cfg.logging.path = resolve(dirname(file), cfg.logging.path);
   }

@@ -2650,11 +2650,11 @@ export interface EngineOverrides {
   claudeVersionProbe?: (claudeBin: string) => Promise<ClaudeVersionProbeResult>;
 }
 
-// #1078 P2 (gate② round 1): `cfg` is `NormalizedSapwoodConfig` — `logging.path` is guaranteed
-// populated by the time ANY caller reaches this function (runEngine normalizes both the
-// file-loaded and the EngineOverrides.cfg-injected path with the SAME config.ts function before
-// either driver is invoked), so this is the only place `logging.path` is ever resolved — no
-// second, independent unset-defaulting fallback here.
+// #1078: `cfg` is `NormalizedSapwoodConfig` — `logging.path` is guaranteed populated by the time
+// ANY caller reaches this function (runEngine normalizes both the file-loaded and the
+// EngineOverrides.cfg-injected path with the SAME config.ts function before either driver is
+// invoked), so this is the only place `logging.path` is ever resolved — no second, independent
+// unset-defaulting fallback here.
 function createRunLogger(cfg: NormalizedSapwoodConfig, override?: EngineLogger): { logger: EngineLogger; path: string } {
   const path = resolve(cfg.logging.path);
   return {
@@ -3371,7 +3371,7 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
   // the round orchestrator (round.ts) actually reads it for dispatch scoping.
   // EngineOverrides.cfg is a tests-only injection seam and keeps its established precedence.
   // Production passes no override, so the CLI path is handed to loadConfig verbatim.
-  // #1078 P2 (gate② round 1): normalizeLoggingPath here — AFTER applyMilestoneOverride, so it
+  // #1078: normalizeLoggingPath here — AFTER applyMilestoneOverride, so it
   // runs on the FINAL cfg regardless of source — is what lets createRunLogger (inside either
   // driver below) require `logging.path: string` with no fallback of its own: an injected
   // EngineOverrides.cfg (built by a test's bare parseConfig, never through loadConfig) gets the

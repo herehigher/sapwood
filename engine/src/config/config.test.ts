@@ -341,7 +341,7 @@ test("#1078 AC2: logging.path SET -> still resolved against the config file's di
   }
 });
 
-test("#1078 P2 (gate② round 1, single authority): normalizeLoggingPath applied to an INJECTED bare-parseConfig result (never through loadConfig — the EngineOverrides.cfg shape cli.ts's runEngine actually injects) yields the SAME logging.path a file-loaded config with the identical content resolves to — file-loaded and injected configs can never silently disagree", () => {
+test("#1078 (single normalization authority): normalizeLoggingPath applied to an INJECTED bare-parseConfig result (never through loadConfig — the EngineOverrides.cfg shape cli.ts's runEngine actually injects) yields the SAME logging.path a file-loaded config with the identical content resolves to — file-loaded and injected configs can never silently disagree", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-config-logging-"));
   try {
     const text = "board: { owner: a, repo: r, projectNumber: 1 }\n";
