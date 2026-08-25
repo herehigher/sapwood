@@ -2615,8 +2615,9 @@ review or dispatch spends against it. It is a deterministic, trust-independent s
 LLM in the loop, keyed on one body marker: `<!-- sapwood:comments-adjudicated-through: <comment-id> -->`,
 meaning "a maintainer has adjudicated every comment at or before this one." Pure marker parsing and
 pending-comment computation live in `comment-cursor.ts`; the impure fetch/escalate half lives in
-`comment-cursor-gate.ts`; both are wired into three engine-side checkpoints — gate⓪, dispatch, and
-drive — that run before a worker is ever dispatched, and never touch the worker's own prompt.
+`comment-cursor-gate.ts`; both are wired into engine-side checkpoints at gate⓪, dispatch, drive,
+and fix-leg spawn — all running before a worker is ever dispatched, none touching the worker's
+own prompt.
 
 | Invariant | Enforcement point | Test |
 | --- | --- | --- |
@@ -2632,7 +2633,7 @@ drive — that run before a worker is ever dispatched, and never touch the worke
 | A marker counts only as the entire trimmed line outside a fence; any attempt-shaped payload between the colon and `-->` is validated, never silently read as absent. | `comment-cursor.ts::scanStandaloneMarkerLines` | `comment-cursor.test.ts`: "#703 v2 gate② P2-1: a BLANK-value marker attempt … fails closed as malformed" |
 | A comment is exempt only when it carries `ENGINE_COMMENT_MARKER` AND its author matches the authenticated actor; an unresolvable actor exempts none. | `comment-cursor-gate.ts::fetchCommentStream` | `plan-review.test.ts`: "unresolvable actor (getAuthenticatedActor -> null) exempts NO comment, ever" |
 | Any id-less comment anywhere in the fetched stream fails the whole check closed, naming its stream position, never a substituted placeholder id. | `comment-cursor.ts::computeCommentCursor` | `comment-cursor.test.ts`: "a comment with a null id anywhere in the stream fails closed: comment-id-missing" |
-| Three checkpoints — gate⓪, dispatch, and drive — each re-check cursor freshness against the exact body a decision was computed from before it takes effect. | `plan-review.ts::checkGate0CommentCursor`; `conductor.ts`'s dispatch loop; `conductor.ts::checkAcAuthorityFreshness` | `conductor.test.ts`: "tick dispatch (#652): a non-engine comment already present when the cursor is missing blocks dispatch" |
+| Cursor freshness is re-checked at gate⓪ (pre-spend, pre-apply, pre-drafter-write, post-confirm), at dispatch, and at drive plus fix-leg spawn, always against the exact body a decision was computed from. | `plan-review.ts::checkGate0CommentCursor` (gate⓪); `conductor.ts` dispatch loop (dispatch); `conductor.ts::checkAcAuthorityFreshness` (drive, fix-leg spawn) | `plan-review.test.ts`: "a DIRECT body edit landing DURING the confirm session discards a 'confirm' outcome too"; `conductor.test.ts`: "tick dispatch (#652): a non-engine comment already present … blocks dispatch"; "comment-cursor-stale(checkpoint: fix-leg-spawn), no fix leg spawned" |
 | A confirmed stale/invalid cursor applies needs-human plus one deduplicated pointer comment naming the marker line to paste; dedup/post failures are reported, never thrown. | `comment-cursor-gate.ts::escalateCommentCursorStale` | `comment-cursor-gate.test.ts`: "escalateCommentCursorStale: the SAME cursor/pending set never produces a second comment" |
 
 **Boundaries**
@@ -2647,13 +2648,9 @@ drive — that run before a worker is ever dispatched, and never touch the worke
   comparison is a multiset, never positional.
 - A comment/body fetch failure performs no issue write; it propagates through each checkpoint's
   own existing retry/environment-failure path, never becoming a human adjudication.
-- The validator relaxation (row 1, cursor may target an engine comment) shipped in the SAME change
-  as role-marker immutability (row 2) — never the relaxation alone.
 - When a round dispatches nothing and also produced `comment-cursor-stale` events, the round log
   names the held-back issue(s) — a read of already-appended events, no write of any kind, including
   on the read's own failure path (`round.test.ts:667`).
-- Both `gate0-post-confirm` and the `fix-leg-spawn` recheck (added by #995) are real, independently
-  tested cursor rechecks, not bare call sites — see the claims-diff (C23) for their own tests.
 
 **Rollout is a one-time backfill, not a migration.** No new CLI, no migration state, no schema
 change; existing commented issues just need a maintainer to record-ruling → rewrite-body →
