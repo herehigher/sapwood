@@ -300,10 +300,10 @@ const architecturePlaceholder = (path: string): string =>
  *  input-manifest row (below, at this stub's dispatch site) report which section(s) were present
  *  without re-parsing the rendered excerpt.
  *
- *  #251 gate② review round 3 (Codex delta-verify F2)'s ONE-READ rule still applies, now to BOTH
- *  sections: a duplicated existsSync/readFileSync check per section could disagree with the real
- *  read under concurrent file replacement (a TOCTOU window), so this single pass feeds both the
- *  prompt substitution and the architecture-chapter manifest row. `ok`/`detail` reflect the
+ *  #251's ONE-READ rule applies to BOTH sections: a duplicated existsSync/readFileSync check per
+ *  section could disagree with the real read under concurrent file replacement (a TOCTOU
+ *  window), so this single pass feeds both the prompt substitution and the architecture-chapter
+ *  manifest row. `ok`/`detail` reflect the
  *  ACTUAL read outcome (`false` + a reason only for ENOENT/an unreadable file — never for a
  *  missing heading in an otherwise-successfully-read file, which is a content-shape issue, not a
  *  read failure). A missing/unreadable file collapses to ONE placeholder covering the whole
@@ -351,10 +351,7 @@ function loadGoalExcerptWithStatus(path: string): {
  *  either heading missing all degrade to an explicit placeholder (never a throw, never a silent
  *  substitution of the raw file) — architecture review is advisory, so a docs read failure must
  *  not abort the round; the placeholder makes the degradation visible to anyone reading the
- *  architect's rendered prompt/transcript. #1089: renamed from loadArchitectureChapter — its
- *  name said architecture-only, but the payload it returns now carries both sections (this
- *  codebase's own rule: no architecture-only-named function may do that); every call site/test
- *  updated alongside the rename. */
+ *  architect's rendered prompt/transcript. */
 export function loadGoalExcerpt(path: string): string {
   return loadGoalExcerptWithStatus(path).excerpt;
 }
@@ -692,11 +689,11 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       // #128: deps.planMdPath is a TEST override only now — a real caller omits it and gets
       // cfg.goal.file (config-file-relative resolved, default DEFAULT_GOAL_FILE).
       const architecturePath = deps.planMdPath ?? deps.cfg.goal.file;
-      // #251 gate② review round 3 (F2), extended by #1089 to both sections: ONE read
-      // (loadGoalExcerptWithStatus, above), consumed by both the prompt substitution and the
-      // architecture-chapter manifest row below — a round-2 draft duplicated existsSync/
-      // readFileSync in two places, which could disagree under concurrent file replacement
-      // (TOCTOU); a single read can't disagree with itself.
+      // #251, extended by #1089 to both sections: ONE read (loadGoalExcerptWithStatus, above),
+      // consumed by both the prompt substitution and the architecture-chapter manifest row below
+      // — a duplicated existsSync/readFileSync check per section could disagree with the real
+      // read under concurrent file replacement (TOCTOU); a single read can't disagree with
+      // itself.
       const {
         excerpt: goalExcerpt,
         ok: goalExcerptOk,

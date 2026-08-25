@@ -30,7 +30,9 @@
      architect peripheral every round, alongside Constraints above (contradiction checks). The
      architect reads EXACTLY these two sections from this file — Constraints and Architecture,
      nothing else — each degrading to its own explicit "no ... section/chapter available"
-     placeholder when missing or empty; advisory only, a missing section never blocks a round. -->
+     placeholder when the heading is missing; advisory only, a missing section never blocks a
+     round. (An empty section under a present heading is not a missing one — it renders as its
+     bare heading, itself visible in the excerpt.) -->
 
 ## Current milestone
 

@@ -13,7 +13,7 @@
 // validates it (including the candidate-set check), and performs every forge write itself.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -443,12 +443,14 @@ test("createArchitectStub #251: a missing/unreadable PLAN.md yields architecture
   state.close();
 });
 
-test("createArchitectStub #251/#1089: an unreadable PLAN.md (readFileSync throws on an existing, unreadable file — not the ENOENT branch) yields architecture-chapter ok:false, rendered:0, omitted:2", async () => {
+test("createArchitectStub #251/#1089: an unreadable PLAN.md (existsSync true, readFileSync throws EISDIR — not the ENOENT branch) yields architecture-chapter ok:false, rendered:0, omitted:2 — a directory-as-path is root-proof, unlike chmod 0", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-architect-unreadable-"));
   try {
+    // A directory at the goal-file path: existsSync is true (it's a real filesystem entry) but
+    // readFileSync throws EISDIR — the catch branch, deterministically, regardless of the
+    // process's own uid (unlike chmod 0, which a root/CI process can still read straight through).
     const unreadablePath = join(dir, "PLAN.md");
-    writeFileSync(unreadablePath, "# Goal\n\n## Constraints\nlocked\n\n## Architecture\nshape\n");
-    chmodSync(unreadablePath, 0o000);
+    mkdirSync(unreadablePath);
     const forge = new FakeForge();
     forge.planReviewCandidates = [{ number: 10, title: "a", labels: [] }];
     const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
@@ -457,11 +459,6 @@ test("createArchitectStub #251/#1089: an unreadable PLAN.md (readFileSync throws
     await createArchitectStub(deps).run({ roundId: 25, phase: "architecting", marker: null });
     const rows = state.inputManifestRows(25);
     const architectureRow = rows.find((r) => r.channel === "architecture-chapter");
-    // A root/CI process can sometimes still read a chmod 0 file — skip rather than false-fail.
-    if (architectureRow?.ok === true) {
-      state.close();
-      return;
-    }
     assert.equal(architectureRow?.ok, false, "existsSync(true) + readFileSync(throws) -> the catch branch, not ENOENT");
     assert.equal(architectureRow?.version, null);
     assert.equal(architectureRow?.total, 2);
@@ -470,7 +467,6 @@ test("createArchitectStub #251/#1089: an unreadable PLAN.md (readFileSync throws
     assert.ok(architectureRow?.detail?.includes(unreadablePath));
     state.close();
   } finally {
-    chmodSync(join(dir, "PLAN.md"), 0o644);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -1211,6 +1207,11 @@ test("extractConstraintsSection: a level-3 'Constraints' heading with no level-2
   assert.equal(extractConstraintsSection(doc), null);
 });
 
+test("extractConstraintsSection: a level-3 'Constraints' heading BEFORE the real level-2 one (nested under an earlier, unrelated H2) never leaks into it — the H2 is still excerpted exactly", () => {
+  const doc = "## Goal\n### Constraints\nnested under Goal, not the real section\n## Constraints\nthe real section\n## Next\nN";
+  assert.equal(extractConstraintsSection(doc), "## Constraints\nthe real section");
+});
+
 // ── #1089: loadGoalExcerpt — the two-section (Constraints + Architecture) excerpt ────────────
 
 test("loadGoalExcerpt: a real docs/PLAN.md resolves to a non-empty Constraints section (with a locked-decisions table row) AND a non-empty Architecture chapter, Constraints first — a future PLAN.md heading move fails this, not silently shrinks the architect's payload", () => {
@@ -1221,7 +1222,17 @@ test("loadGoalExcerpt: a real docs/PLAN.md resolves to a non-empty Constraints s
   const architecture = extractArchitectureChapter(readFileSync(planPath, "utf8"));
   assert.ok(constraints, "docs/PLAN.md must carry a level-2 ## Constraints section");
   assert.match(constraints!, /^\|.*\|$/m, "the locked-decisions table — at least one markdown table row");
+  const constraintsLines = constraints!.split("\n");
+  assert.ok(
+    constraintsLines.length > 1 && constraintsLines.slice(1).some((l) => l.trim() !== ""),
+    "the Constraints section has body content beyond its heading line — a heading-only match would silently pass an empty section",
+  );
   assert.ok(architecture, "docs/PLAN.md must carry an ## Architecture chapter");
+  const architectureLines = architecture!.split("\n");
+  assert.ok(
+    architectureLines.length > 1 && architectureLines.slice(1).some((l) => l.trim() !== ""),
+    "the Architecture chapter has body content beyond its heading line — a heading-only match would silently pass an empty chapter",
+  );
   const excerpt = loadGoalExcerpt(planPath);
   assert.ok(excerpt.startsWith("## Constraints"), "Constraints renders first");
   assert.ok(excerpt.includes(constraints!));

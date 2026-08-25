@@ -39,3 +39,8 @@ test("extractMarkdownSections: level=2 with only an H3 of the matching text (no 
   const doc = "## Architecture\nchapter body\n### Constraints\nnested, not a real Constraints section\nmore chapter body\n## Next\nN";
   assert.deepEqual(extractMarkdownSections(doc, /Constraints\b/, 2), []);
 });
+
+test("extractMarkdownSections: level=2 with an H3 of the matching text BEFORE the real H2 (nested under an earlier, unrelated H2) still returns exactly the H2 section — the H3 never leaks into it", () => {
+  const doc = "## Goal\n### Constraints\nnested under Goal, not the real section\n## Constraints\nthe real section\n## Next\nN";
+  assert.deepEqual(extractMarkdownSections(doc, /Constraints\b/, 2), ["## Constraints\nthe real section"]);
+});
