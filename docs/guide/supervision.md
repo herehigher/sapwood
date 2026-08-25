@@ -709,10 +709,11 @@ engine already does is the authoritative number.
 
 The estimator itself (`parseAssistantUsageDeltas` + `estimateUsd`) carries synthetic unit
 coverage in-repo; validating it against a real captured run transcript is an operator step,
-not a repo test — real transcripts are one issue's dev-time artefacts and live in the deploy's
-own `data/fixtures/estimator/`, never this repo. Run `npx tsx scripts/estimator-replay.ts <dir>`
-from `engine/` against such a directory; it prints each file's estimate/real/signed error and
-exits non-zero if any file lands outside the adjudicated [-12%, +5%] band.
+not a repo test — real transcripts are one issue's dev-time artefacts and live in operator
+scratch outside `.sapwood/` (the engine never reads them), never this repo. Run `npx tsx
+scripts/estimator-replay.ts <dir>` from `engine/` against such a directory; it prints each
+file's estimate/real/signed error and exits non-zero if any file lands outside the
+adjudicated [-12%, +5%] band.
 
 ## UX harness: simulated-user supervision
 
@@ -787,14 +788,14 @@ One ledger per supervised session, one-way to the PM supervisor. Per finding:
 A session that finds nothing records an explicit clean pass — "no findings" is a valid, complete
 ledger, not an omission.
 
-Ledgers are archived at `data/review/ux/` (one file per session), each pinned with the dashboard
+Ledgers are archived in operator scratch (one file per session), each pinned with the dashboard
 commit SHA and the fixture/replay id (e.g. the demo fixture's round id, or a recorded round's own
 id) the walk was run against — so a finding is reproducible against the exact panel state it
 describes, not a moving target.
 
-That path lives under the deploy checkout's own `data/` directory — separate from the engine's
-`.sapwood/` runtime root, gitignored repo-wide by design — the ledger is an operator-side
-artifact, never a tracked file a PR tree could contain. A reviewer
+That scratch area lives outside the engine's `.sapwood/` runtime root — the engine never reads
+it — gitignored repo-wide by design; the ledger is an operator-side artifact, never a tracked
+file a PR tree could contain. A reviewer
 cannot confirm a walk by inspecting the tree; the reviewable evidence for any given session is the
 operator's witness record folded into the relevant issue **body** (actor, steps, timestamp,
 findings summary, artifact path) — a PR or issue comment is an operator inbox/audit item, never
@@ -827,11 +828,14 @@ recipe below is that same mechanism, not new machinery:
 # to inherit from the operator's own logged-in browser.
 DASHBOARD_ORIGIN="http://localhost:4517"
 MCP_CONFIG='{"mcpServers":{"browser":{"command":"npx","args":["@playwright/mcp@latest","--isolated","--allowed-origins","'"$DASHBOARD_ORIGIN"'","--blocked-origins","https://github.com;https://api.github.com;https://*.github.com"]}}}'
+# Wherever the operator keeps this walk's ledgers — anywhere OUTSIDE .sapwood/, since the
+# engine never reads operator scratch.
+LEDGER_DIR="/absolute/path/to/operator-scratch/review/ux"
 
 claude \
   --strict-mcp-config --mcp-config "$MCP_CONFIG" \
   --setting-sources "" \
-  --allowedTools "Read,Edit(data/review/ux/**),mcp__browser__*" \
+  --allowedTools "Read,Edit($LEDGER_DIR/**),mcp__browser__*" \
   --disallowedTools "Bash,mcp__forge__*,mcp__github__*" \
   --append-system-prompt "$(cat docs/testing/ux-simulated-user.md)"
 ```
@@ -856,8 +860,8 @@ claude \
   MCP server's own origin-enforcement behaving as documented, not sapwood's PreToolUse guard hook
   — a bug in that enforcement is a channel this doesn't defend against. It is a real, configured
   control, though, not merely an unenforced instruction.
-- `--allowedTools "Read,Edit(data/review/ux/**),mcp__browser__*"` grants exactly: reading any
-  file (to consult its own report contract), writing only under `data/review/ux/` (to file its
+- `--allowedTools "Read,Edit($LEDGER_DIR/**),mcp__browser__*"` grants exactly: reading any
+  file (to consult its own report contract), writing only under `$LEDGER_DIR` (to file its
   ledger, nothing else), and the browser-automation tools to walk the journeys.
 - `--disallowedTools "Bash,mcp__forge__*,mcp__github__*"` is a third, belt-and-suspenders veto —
   in case a future edit to `$MCP_CONFIG` ever names a forge-authority or exec-capable server, this

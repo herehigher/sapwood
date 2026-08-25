@@ -9,7 +9,7 @@ Risk labels below mean **CORE** (central behavior; review carefully), **NORMAL**
 | `engine/` | CORE | npm workspace containing the TypeScript engine, prompts, pricing data, tests, and compiled `dist/`. |
 | `commands/` | NORMAL | Claude Code slash-command definitions that invoke the engine CLI or manage control sentinels. |
 | `docs/` | NORMAL | Durable architecture, configuration, security, usage, and contributor knowledge. Security-policy edits require elevated review. |
-| `.sapwood/` | runtime | SQLite, logs, session streams/sentinels, round artifacts, and operator control files — see [Configuration — The `.sapwood/` runtime directory](../guide/configuration.md#the-sapwood-runtime-directory). Never edit runtime state by hand except the documented control/directive files. |
+| `.sapwood/` | runtime | The engine's runtime directory — see [Configuration — The `.sapwood/` runtime directory](../guide/configuration.md#the-sapwood-runtime-directory). |
 | `sapwood.config.yaml` | CORE | This repository's live configuration — the loop runs from it (no `--config`); the whole file is human-merge-only. Starter for other repos: `sapwood.config.example.yaml`. |
 | `biome.json` | NORMAL | Formatting and lint policy for TypeScript sources. |
 | `tsconfig.base.json` | NORMAL | Shared strict TypeScript/NodeNext compiler policy. |

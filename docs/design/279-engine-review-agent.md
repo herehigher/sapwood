@@ -227,7 +227,7 @@ to the agent in the diff and is prompt-directed review focus, not engine-proven.
   spawn, same transaction as the claim] the engine extracts the checkbox AC set and
   persists an **AC manifest** {FULL issue body hash, [(id, text)]} in state. IDs are
   ordinal+hash WITHIN the snapshot — later reorders/edits cannot shift them.
-- State is writable only by the engine (workers have no data/ mount — existing
+- State is writable only by the engine (workers have no runtime-root mount — existing
   structural guarantee); the manifest is an integrity PIN authored by the engine, not
   an approval artifact, so the state-not-verdict-bearing doctrine is intact.
 - At review time the engine refetches the issue body: **ANY body drift (full-body

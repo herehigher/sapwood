@@ -1380,7 +1380,7 @@ configuration.
 
 **`POST /api/attention/dismiss`** — body `{ "eventId": n, "kind": "..." }`, with `n` an
 integer at least one and `kind` a non-empty string of at most 100 characters; appends `{ eventId, kind, ts }` to
-`attention-dismissals.jsonl` in the data directory beside the engine
+`.sapwood/attention-dismissals.jsonl` beside the engine
 sentinels. It uses the exact same JSON/custom-header/origin defences as
 `/api/control`, is gated by the same `dashboard.controls` predicate, and is
 idempotent. `GET /api/attention/dismissals` is always registered so a
