@@ -1,11 +1,15 @@
 # AGENTS.md
 
-Repo-level guidance for automated agents working in this repository.
+Tool-neutral entry point for automated agents working in this repository.
 
-This file is the **durable** contract: it holds standing rules that apply to every pull
-request. Anything specific to one PR — what that change is supposed to do and how to prove
-it — is stated in the review-request comment on the PR itself. Both channels apply, and
-neither restates the other.
+**Repository contract.** Before changing or reviewing this repository, read
+[`CLAUDE.md`](CLAUDE.md), even if your tool does not load it automatically. It states the
+repository-wide non-negotiables and routes each subject to its authoritative source. It is
+linked here rather than duplicated, following the repository's one-home-per-fact rule.
+
+**Review tasks.** When reviewing a pull request, also use that PR's review-request comment:
+it states what the change is intended to do and how to verify it. The standing review
+guidelines below and that per-PR context both apply.
 
 ## Review guidelines
 
