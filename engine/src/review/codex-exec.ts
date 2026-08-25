@@ -13,7 +13,7 @@
 // builder, where a reviewer can see the whole profile at once.
 //
 // CONTAINMENT PROFILE (R2, honest recording) — verified against the installed CLI's own
-// `codex exec --help` (codex-cli 0.145.0) at implementation time; only flags that exist are pinned:
+// `codex exec --help` (codex-cli 0.149.0) at implementation time; only flags that exist are pinned:
 //   --sandbox read-only     the strongest sandbox the CLI offers for a session that must not write
 //   --ignore-user-config    `$CODEX_HOME/config.toml` is not loaded (config-source isolation)
 //   --ignore-rules          no user/project execpolicy `.rules` file is loaded
@@ -27,8 +27,9 @@
 //   -c project_doc_max_bytes=0   disables codex-cli's project-instruction discovery — the reviewed
 //                                tree's root `AGENTS.md`/`AGENTS.override.md`, which
 //                                `--ignore-user-config`/`--ignore-rules` don't cover (those seal
-//                                config.toml and exec-policy `.rules`, not project docs); keeps
-//                                session instructions to the engine prompt and doctrine only
+//                                config.toml and exec-policy `.rules`, not project docs); the
+//                                reviewed tree then supplies no standing project instructions — the
+//                                review task and doctrine remain engine-supplied
 //   -c tools.web_search=false   no model-invoked web egress
 //   -o <file>               the final message is captured to a FILE, never scraped out of the
 //                           terminal stream (this repo's Codex ops notes: truncated/interleaved

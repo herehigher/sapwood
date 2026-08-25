@@ -581,8 +581,8 @@ quietly inherited:
   `-c project_doc_max_bytes=0`, disabling codex-cli's own project-instruction discovery — without
   it, the reviewed tree's root `AGENTS.md`/`AGENTS.override.md` would load as standing
   instructions even under `--ignore-user-config`/`--ignore-rules` (those seal config.toml and
-  exec-policy `.rules`, not project docs). With the budget at zero, the only instructions the
-  session reads are the engine-composed prompt and the doctrine file.
+  exec-policy `.rules`, not project docs). With the budget at zero, the reviewed tree supplies no
+  standing project instructions; the review task and doctrine remain engine-supplied.
 - **Recorded blind spot 1 — execution.** `--sandbox read-only` blocks *writes*, not *execution*: a
   shell-capable agent under it can still run producer-controlled code from the materialized tree.
   This is NOT equivalent to the Claude runner's Read/Grep/Glob-only, no-`Bash` profile.
