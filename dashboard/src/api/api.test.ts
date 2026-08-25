@@ -42,7 +42,7 @@ test("§8 GET /api/loop/state is fetched and returned verbatim", async () => {
     round: { id: 12, phase: "executing" },
     spend: { todayUsd: 12.4, dailyBudgetUsd: 100, runUsd: 13.3, runBudgetUsd: 100, byModel: [] },
     rings: 27,
-    logPath: "data/logs/run-1.log",
+    logPath: ".sapwood/logs/run-1.log",
     config: {},
   };
   const calls = stubFetch(snapshot);

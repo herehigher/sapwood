@@ -398,7 +398,7 @@ test("foldOpenAttention: a later `run-started` clears an open emergency-stop row
 
 test("foldOpenAttention: `worktree-released` clears the worktree-retained entry sharing its worktreePath, keyed by path not issue", () => {
   const open = foldOpenAttention([
-    event(1, "worktree-retained", { worker: "w1", issue: 5, worktreePath: "/data/worktrees/w1-issue5" }),
+    event(1, "worktree-retained", { worker: "w1", issue: 5, worktreePath: "/worktrees/w1-issue5" }),
     // A DIFFERENT dispatch for the SAME issue number reusing the lane slot must NOT clear the
     // still-retained folder — §3's own reason keying by worktreePath exists to prevent this.
     event(2, "dispatched", { issue: 5 }),
@@ -406,7 +406,7 @@ test("foldOpenAttention: `worktree-released` clears the worktree-retained entry 
   assert.equal(Object.keys(open).length, 1, "an unrelated dispatch on the same issue must not clear a retained worktree");
 
   const released = foldOpenAttention(
-    [event(3, "worktree-released", { worker: "w1", issue: 5, worktreePath: "/data/worktrees/w1-issue5" })],
+    [event(3, "worktree-released", { worker: "w1", issue: 5, worktreePath: "/worktrees/w1-issue5" })],
     open,
   );
   assert.deepEqual(released, {});
