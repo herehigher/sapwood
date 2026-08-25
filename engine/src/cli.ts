@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 // `sapwood` CLI. M0.5 shipped `init`; `run` (the M4 loop driver, #46) and `validate` (#49)
 // landed next; `status` + `run --dry-run` (#15) land here. The plugin's slash commands
 // (/sapwood-run, /sapwood-status, /sapwood-stop) are thin wrappers that shell out to this CLI
@@ -1578,9 +1578,9 @@ export function runPark(argv: string[]): { stdout: string; stderr: string; code:
 // already-active tier, or clearing an already-inactive one, is a normal exit-0 no-op, same as a
 // second `touch`/`rm -f` on the same path.
 
-// #1077 fix round 1 (P2, single authority): filenames derived from paths.ts rather than
-// restated — runtimePaths() builds its own killSwitch/estop/pause fields from these same
-// constants, so this table and the real sentinel paths can never drift apart.
+// Filenames derived from paths.ts rather than restated — runtimePaths() builds its own
+// killSwitch/estop/pause fields from these same constants, so this table and the real sentinel
+// paths can never drift apart.
 const SENTINEL_FILENAME = {
   pause: SAPWOOD_PAUSE_FILENAME,
   stop: SAPWOOD_KILL_SWITCH_FILENAME,
@@ -1803,10 +1803,10 @@ function runSentinelCommand(argv: string[], spec: SentinelSpec): { stdout: strin
   if (existsSync(sentinelPath)) {
     return { stdout: `sapwood ${spec.tier}: ${sentinelPath} already ACTIVE — no change.\n`, stderr: "", code: 0 };
   }
-  // #1077 fix round 1 (P2): this is the one mutator that can create a fresh runtime root with
-  // no State ever constructed (a bare `sapwood pause` against a repo that has never run
-  // `sapwood run`) — ensureRuntimeRoot, not a bare mkdirSync, so that root self-declares
-  // (.gitignore + cache/CACHEDIR.TAG) exactly like every other write-capable entry point.
+  // This is the one mutator that can create a fresh runtime root with no State ever constructed
+  // (a bare `sapwood pause` against a repo that has never run `sapwood run`) — ensureRuntimeRoot,
+  // not a bare mkdirSync, so that root self-declares (.gitignore + cache/CACHEDIR.TAG) exactly
+  // like every other write-capable entry point.
   ensureRuntimeRoot(dirname(sentinelPath));
   writeFileSync(sentinelPath, "");
   return {
@@ -3371,30 +3371,30 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
   buildRenderPrompt(cfg);
   buildRenderFixPrompt(cfg);
   // #382 (F9): single-instance lock on the data dir, acquired BEFORE State exists — a refused
-  // second engine must perform ZERO writes against the holder's data dir, and constructing a
-  // State opens + migrates the shared SQLite DB (a NEWER binary would upgrade the live
-  // holder's schema on its way to exit 1 — codex finding 3). The lock path is therefore
-  // derived without a State: from the injected test state's own data dir when present
-  // (in-memory -> null -> no-op acquire, the killSwitchPath convention), else from the same
-  // DEFAULT_DB_PATH the State default constructor uses.
+  // second engine must perform ZERO writes against the holder's directory: no DB write (a NEWER
+  // binary constructing a State would open + migrate the shared SQLite DB, upgrading the live
+  // holder's schema on its way to exit 1 — codex finding 3), and no root-marker write either
+  // (.gitignore/cache/CACHEDIR.TAG). That is why root stamping (ensureRuntimeRoot) happens ONLY
+  // after this process has actually won the lock, below — never before the acquire attempt. The
+  // lock path is derived without a State: from the injected test state's own data dir when
+  // present (in-memory -> null -> no-op acquire, the killSwitchPath convention), else from the
+  // same DEFAULT_DB_PATH the State default constructor uses.
   //
-  // #1077 fix round 1 (P2): ensureRuntimeRoot (never a bare mkdirSync) — this is the single
-  // earliest write-capable chokepoint in the whole `sapwood run` startup sequence, so this ONE
-  // call is also what stamps .gitignore/cache/CACHEDIR.TAG before the log driver's own mkdir
-  // (createRunLogger, inside runTickEngine/runRoundsEngine below) and an enabled skills-plugin
-  // render (resolveSkillsPluginDir, same two functions) ever run — both happen strictly after
-  // this point in the call sequence, before either driver constructs its own State. Still
-  // "an empty/idempotently-marked dir write-conflicts with nobody": a refused second engine
-  // writes only the SAME .gitignore/CACHEDIR.TAG bytes a live holder already wrote (or would
-  // write identically itself), never touches the shared SQLite DB, and the "zero DB writes on
-  // refusal" guarantee (codex finding 3, tested below) is unaffected.
+  // The lock file itself still needs its parent directory to exist before acquireInstanceLock's
+  // atomic create can run (writeFileExclusive/linkSync take no `recursive` option) — so a bare,
+  // idempotent mkdir (a no-op against an already-existing dir, i.e. the live-holder case) is the
+  // only filesystem touch allowed ahead of the acquire attempt. It is deliberately NOT
+  // ensureRuntimeRoot: that call also stamps .gitignore/CACHEDIR.TAG, which a refused engine must
+  // never write.
   let lockPath: string | null;
+  let dataDirToStamp: string | null = null;
   if (overrides.state !== undefined) {
     lockPath = overrides.state.instanceLockPath();
   } else {
     const dataDir = dirname(DEFAULT_DB_PATH);
-    ensureRuntimeRoot(dataDir);
+    mkdirSync(dataDir, { recursive: true });
     lockPath = join(dataDir, INSTANCE_LOCK_FILENAME);
+    dataDirToStamp = dataDir;
   }
   const lock = acquireInstanceLock(lockPath, {
     now: systemClock,
@@ -3403,6 +3403,13 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
   if (!lock.acquired) {
     process.stderr.write(`sapwood run: ${lock.message}\n`);
     return 1;
+  }
+  // Only the successful lock owner stamps/repairs the root — before the log driver's own mkdir
+  // (createRunLogger, inside runTickEngine/runRoundsEngine below) or an enabled skills-plugin
+  // render (resolveSkillsPluginDir, same two functions) ever run, and before either driver
+  // constructs its own State.
+  if (dataDirToStamp !== null) {
+    ensureRuntimeRoot(dataDirToStamp);
   }
   try {
     let lockTakeover: LockTakeoverRecord | undefined;
