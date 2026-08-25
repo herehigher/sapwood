@@ -1195,9 +1195,9 @@ test("worker.deployKeyPath: unset by default, overridable, follows the #74 promp
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.worker.deployKeyPath, undefined);
   const over = parseConfig(
-    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key, deployKeyId: 1 }",
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: keys/worker-deploy-key, deployKeyId: 1 }",
   );
-  assert.equal(over.worker.deployKeyPath, "data/worker-deploy-key");
+  assert.equal(over.worker.deployKeyPath, "keys/worker-deploy-key");
 });
 
 test("#1078 AC3 (resolver): worker.deployKeyPath is CWD-relative, NOT resolved against the config file's directory — proven by putting the config file in a SUBDIRECTORY of cwd", () => {
@@ -1213,14 +1213,14 @@ test("#1078 AC3 (resolver): worker.deployKeyPath is CWD-relative, NOT resolved a
     const cfgPath = join(subdir, "sapwood.config.yaml");
     writeFileSync(
       cfgPath,
-      "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key, deployKeyId: 1 }",
+      "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: keys/worker-deploy-key, deployKeyId: 1 }",
     );
     process.chdir(root);
     const cfg = loadConfig(cfgPath);
-    assert.equal(cfg.worker.deployKeyPath, join(root, "data", "worker-deploy-key"));
+    assert.equal(cfg.worker.deployKeyPath, join(root, "keys", "worker-deploy-key"));
     assert.notEqual(
       cfg.worker.deployKeyPath,
-      join(subdir, "data", "worker-deploy-key"),
+      join(subdir, "keys", "worker-deploy-key"),
       "must not resolve against the config file's OWN directory (the pre-#1078 promptFile-style rule)",
     );
   } finally {
@@ -1247,10 +1247,10 @@ test("worker.deployKeyId: unset by default, overridable to a positive integer, n
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
   assert.equal(cfg.worker.deployKeyId, undefined);
   const over = parseConfig(
-    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key, deployKeyId: 159210179 }",
+    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: keys/worker-deploy-key, deployKeyId: 159210179 }",
   );
   assert.equal(over.worker.deployKeyId, 159210179);
-  assert.equal(over.worker.deployKeyPath, "data/worker-deploy-key");
+  assert.equal(over.worker.deployKeyPath, "keys/worker-deploy-key");
 });
 
 test("worker.deployKeyId: rejects zero/negative/non-integer values — a GitHub deploy-key id is always a positive integer", () => {
@@ -1265,7 +1265,7 @@ test("worker.deployKeyId: rejects zero/negative/non-integer values — a GitHub 
 // reconcile against a meaningless half-anchor.
 test("worker.deployKeyPath/deployKeyId (R3-6): rejects a config with ONLY deployKeyPath set, naming deployKeyId as the missing half", () => {
   assert.throws(
-    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key }"),
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: keys/worker-deploy-key }"),
     (e: Error) => /deployKeyId/.test(e.message) && /sapwood init/.test(e.message),
   );
 });
@@ -1280,7 +1280,7 @@ test("worker.deployKeyPath/deployKeyId (R3-6): rejects a config with ONLY deploy
 test("worker.deployKeyPath/deployKeyId (R3-6): BOTH set, or BOTH unset, parse cleanly — only a lone half is rejected", () => {
   assert.doesNotThrow(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }"));
   assert.doesNotThrow(() =>
-    parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key, deployKeyId: 42 }"),
+    parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: keys/worker-deploy-key, deployKeyId: 42 }"),
   );
 });
 

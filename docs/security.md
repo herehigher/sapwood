@@ -760,7 +760,7 @@ happens to be registered" plus "a local key that happens to authenticate" indepe
 hand-edited or foreign id sharing a different but also-registered key could otherwise fake); and
 the SSH preflight (`ssh -T git@github.com`, matched against GitHub's own documented success shape
 — exit 1, stderr containing "successfully authenticated") must pass. All four green → a positive
-confirmation and L1 stays active. Any ONE of them failing (a wiped data dir, a second machine, a
+confirmation and L1 stays active. Any ONE of them failing (a wiped local key file, a second machine, a
 remotely rotated/foreign key, a rotated preflight) routes to a **WARN + operator choice**,
 offered only when `sapwood init` is running interactively (a real TTY):
 **(a)** leave every remote key untouched, clear the stale local anchor, generate a FRESH keypair
@@ -785,18 +785,10 @@ honest instruction: the next run either reconciles cleanly (choice (a) already h
 re-diagnoses the SAME state truthfully. Any other sapwood-titled key still on the repo is named in the WARN for
 HUMAN cleanup.
 
-**The private key does not end up staged by an ordinary `git add -A`.** After provisioning (and
-on every path that can leave a private key on disk), `sapwood init` ensures its `.gitignore`
-ends with the exact rooted rule `/data/worker-deploy-key*` as its LAST effective line (appending
-it, with an explanatory comment, if it isn't already there — creating `.gitignore` if it doesn't
-exist yet). gitignore semantics are last-match-wins, so an earlier, unrelated rule (even a
-negation) can never override a rule sitting at the very end of the file — this is deliberately
-NOT a full gitignore evaluator, just the simplest mechanism that is correct for this one pattern.
-The pattern covers the base key location and every per-host/numeric-
-suffixed sibling arm (a) can mint, plus each key's `.pub` counterpart. The guarantee is
-best-effort (a WARN, never a reason to fail init, if `.gitignore` itself can't be written): init
-appends a last-position ignore rule so an ordinary `git add -A` will not stage the worker deploy
-key(s); a deliberate `git add -f` still can.
+**The private key does not end up staged by an ordinary `git add -A`.** The key lives under the
+self-ignoring `.sapwood/` runtime root (its own `.gitignore` already excludes everything under
+it), so `sapwood init` no longer needs to append a rule to the repo's own `.gitignore` to keep it
+out of a sweep; a deliberate `git add -f` can still stage it.
 
 **Startup visibility, not a gate.** `sapwood init` provisions and preflights the key, but
 a RUNNING engine used to discover key problems only lazily, at the first dispatch's own memoized
@@ -898,7 +890,7 @@ line, never a bare "something's wrong"):**
    either way — init itself never fails over this.
 2. **Reconcile fails — auth-fails/stale/mismatch.** Any of "local key file exists" / "recorded
    id still listed" / "local `.pub` content matches that entry's own registered key" / "SSH
-   preflight green" failing (rotated key, wiped data dir, second machine, a foreign key sharing
+   preflight green" failing (rotated key, wiped local key file, second machine, a foreign key sharing
    the `sapwood-worker` title, a hand-edited id pointing at an unrelated but also-registered key)
    → a WARN naming the specific reason(s), any other sapwood-titled key already on the repo (for
    HUMAN cleanup), and — on an interactive `sapwood init` — the (a)/(b) choice above; a
@@ -925,9 +917,6 @@ line, never a bare "something's wrong"):**
    naming the underlying error and the same advice ("if this repo's plan cannot expose
    protection, treat the default branch as unprotected and add a rule by hand") without CLAIMING
    the API confirmed anything.
-5. **`.gitignore` could not be updated to cover the private key.** A best-effort WARN naming the
-   exact rule that needs to be added by hand as the LAST line of `.gitignore` — fires only when
-   the automated append itself fails (an unwritable `.gitignore`), never blocks provisioning.
 
 ## Worker denylist vs. peripheral allowlist: deliberate asymmetry
 

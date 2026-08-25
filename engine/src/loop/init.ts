@@ -7,7 +7,7 @@
 // The guard PreToolUse hook is built (guard.ts / guard-hook.ts) and wired live per session by
 // worker.ts at dispatch time, not by init — init only reports that, and that guard.ts/hook
 // wiring/security config are human-merge-only per CLAUDE.md.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -19,6 +19,11 @@ import {
   parseConfig,
   type SapwoodConfig,
 } from "../config/config.js";
+// #1080: the deploy key moves under the shared runtime-root layout (`.sapwood/keys/`) instead of
+// init's own pre-#1080 bare `data` directory — the same root `ensureRuntimeRoot` (#1077) already
+// creates for every other state-touching command, so init's own root creation and its key
+// placement can never drift onto two different notions of "the runtime root".
+import { defaultRuntimeRoot, ensureRuntimeRoot, runtimePaths } from "../config/paths.js";
 import type { OwnerKind } from "../forge/forge.js";
 import { type GhRunner, gh, ghText } from "../forge/gh.js";
 import { createMissingLabels, describeLabelDrift, type LabelSpec, normalizeLabel, taxonomyLabels } from "../forge/labels.js";
@@ -382,6 +387,98 @@ function resolveActiveConfigPath(cwd: string, justWritten: string | null): strin
 // string `sapwood init` itself would produce for the same failure shape.
 export const DEPLOY_KEY_TITLE = "sapwood-worker";
 
+// #1080: the ONE place `cwd` is turned into "where the deploy key(s) live" — keeps every
+// key-path construction below (base path, per-host candidates, numeric-suffixed siblings)
+// agreeing with `runtimePaths()` by construction.
+function deployKeysDir(cwd: string): string {
+  return runtimePaths(defaultRuntimeRoot(cwd)).keysDir;
+}
+
+// #1080: injectable fs seam for enforceDeployKeyPermissions below — the same DI pattern
+// paths.ts's own RuntimeRootFsOps uses (a spy substituted for the real node:fs calls). This is
+// the only way to deterministically exercise a chmod/lstat FAILURE in a test: real permission
+// tricks (chmod a directory unwritable, run as non-root, ...) behave differently per OS/CI
+// runner and would make the test flaky or unrunnable rather than a reliable regression pin.
+export interface DeployKeyPermissionsFsOps {
+  mkdir: (dir: string) => void;
+  lstat: (path: string) => import("node:fs").Stats;
+  chmod: (path: string, mode: number) => void;
+}
+
+export const realDeployKeyPermissionsFsOps: DeployKeyPermissionsFsOps = {
+  mkdir: (dir) => mkdirSync(dir, { recursive: true }),
+  lstat: (path) => lstatSync(path),
+  chmod: (path, mode) => chmodSync(path, mode),
+};
+
+// #1080: repairs the key's directory (0700) and, when a private key file is present, its own
+// mode (0600) — called on every path that can leave a key on disk (fresh generation, reuse,
+// reconcile), since neither a bare `mkdir`'s own `mode` option nor ssh-keygen's own default is
+// trusted to land on the exact mode regardless of the caller's umask. Uses `lstat` (never
+// dereferenced) to confirm each entry is what it claims to be BEFORE chmodding it: `chmod`
+// follows symlinks the same as a bare shell `chmod` (not `chmod -h`), so chmodding whatever a
+// mere existence check reports present could reach through a symlink and mutate an unrelated
+// file's permissions, or strip the executable bit off a directory standing in for the key file.
+// Every failure — a collision (wrong entry type) or a genuine I/O error from any of the three
+// calls (mkdir/lstat/chmod) — is reported back to the caller as `{ ok: false, reason }` instead
+// of throwing, so a caller that must never let this abort the whole run (reconcile) can degrade
+// to a WARN rather than crash `init()` outright.
+function enforceDeployKeyPermissions(
+  keyPath: string,
+  fs: DeployKeyPermissionsFsOps = realDeployKeyPermissionsFsOps,
+): { ok: true } | { ok: false; reason: string } {
+  const dir = dirname(keyPath);
+  try {
+    fs.mkdir(dir);
+  } catch (e) {
+    return { ok: false, reason: `could not create ${dir}: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  let dirStat: import("node:fs").Stats;
+  try {
+    dirStat = fs.lstat(dir);
+  } catch (e) {
+    return { ok: false, reason: `could not stat ${dir}: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  if (!dirStat.isDirectory()) {
+    return { ok: false, reason: `${dir} exists but is not a real directory (a symlink or other type) — refusing to chmod it` };
+  }
+  try {
+    fs.chmod(dir, 0o700);
+  } catch (e) {
+    return { ok: false, reason: `could not chmod ${dir} to 0700: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  let keyStat: import("node:fs").Stats | undefined;
+  try {
+    keyStat = fs.lstat(keyPath);
+  } catch (e) {
+    // ENOENT alone means "nothing at keyPath yet" — every OTHER lstat failure (EACCES, ELOOP,
+    // ...) is a reported failure, never silently read as absence: treating an unreadable path as
+    // absent would send the caller on to attempt ssh-keygen against a path this process cannot
+    // even stat, rather than surfacing the real problem.
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { ok: true };
+    return { ok: false, reason: `could not stat ${keyPath}: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  if (!keyStat.isFile()) {
+    return { ok: false, reason: `${keyPath} exists but is not a regular file (a directory or symlink) — refusing to chmod it` };
+  }
+  try {
+    fs.chmod(keyPath, 0o600);
+  } catch (e) {
+    return { ok: false, reason: `could not chmod ${keyPath} to 0600: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  return { ok: true };
+}
+
+// #1080: the fresh/reuse/arm(a) provisioning call sites already run inside a try/catch that
+// degrades ANY failure to the same guidance-carrying WARN (deployKeyProvisioningFailedAction) —
+// this just turns a permission-repair collision into a thrown Error so it takes that identical
+// path, rather than requiring each call site to check the result inline.
+function enforceDeployKeyPermissionsOrThrow(keyPath: string, fs: DeployKeyPermissionsFsOps = realDeployKeyPermissionsFsOps): void {
+  const result = enforceDeployKeyPermissions(keyPath, fs);
+  if (!result.ok) throw new Error(result.reason);
+}
+
 export interface DeployKeyListEntry {
   id: number;
   title: string;
@@ -460,8 +557,10 @@ const MAX_ARM_A_SLOT_ATTEMPTS = 1000;
  *  never reuse whatever happens to already be sitting at the per-host path (a previous
  *  interrupted run) or register under a per-host title already claimed on the repo (foreign —
  *  same never-touch rule as any other unrecognized remote key). Walks `<hostComponent>`,
- *  `<hostComponent>-2`, `<hostComponent>-3`, ... and returns the first suffix where BOTH the
- *  local key path is free AND the title isn't among `knownRemoteTitles`; path and title always
+ *  `<hostComponent>-2`, `<hostComponent>-3`, ... and returns the first suffix where the local key
+ *  path AND its `.pub` counterpart are BOTH free AND the title isn't among `knownRemoteTitles`
+ *  (#1080: EITHER half existing is a collision — ssh-keygen would silently overwrite whichever
+ *  half is missing, so a slot is only "free" when neither half is there); path and title always
  *  share the same suffix. `knownRemoteTitles` should be as fresh as practical (see its caller)
  *  since an interactive prompt can leave an arbitrary gap between the last remote read and this
  *  call.
@@ -481,9 +580,9 @@ export function pickFreshArmAKeySlot(
 ): { path: string; title: string } {
   for (let n = 1; n <= MAX_ARM_A_SLOT_ATTEMPTS; n++) {
     const candidateHost = n === 1 ? hostComponent : `${hostComponent}-${n}`;
-    const path = join(cwd, "data", `worker-deploy-key-${candidateHost}`); // #1080: moves under runtimePaths() once the gitignore rule below (and its tests) move with it
+    const path = join(deployKeysDir(cwd), `worker-deploy-key-${candidateHost}`);
     const title = `${DEPLOY_KEY_TITLE}-${candidateHost}`;
-    if (!existsSync(path) && !knownRemoteTitles.has(title)) return { path, title };
+    if (!existsSync(path) && !existsSync(`${path}.pub`) && !knownRemoteTitles.has(title)) return { path, title };
   }
   throw new Error(
     `could not find a free per-machine deploy-key slot for "${hostComponent}" after ${MAX_ARM_A_SLOT_ATTEMPTS} numeric-suffixed attempts — every candidate path/title is already taken`,
@@ -838,60 +937,9 @@ function clearDeployKeyConfig(configFilePath: string): string[] {
   return configFilePath.endsWith(".json") ? clearDeployKeyConfigFromJson(configFilePath) : clearDeployKeyConfigFromYaml(configFilePath);
 }
 
-const GITIGNORE_DEPLOY_KEY_RULE = "/data/worker-deploy-key*"; // #1080: moves with the key itself
-const GITIGNORE_DEPLOY_KEY_COMMENT = `# sapwood: worker deploy key(s) — kept out of \`git add -A\` (see ${DOC_LINKS.security})`;
-
-/** #606 gate② round 1 (P1-6), round 2 (R3-7): keeps the private key out of an ordinary
- *  `git add -A` sweep. gitignore semantics are LAST-MATCH-WINS (a later negation can
- *  re-include a path an earlier rule excluded), so an unordered "is SOME line in the file
- *  covering this path" check is bypassable — this deliberately does NOT implement a full
- *  gitignore evaluator. Instead: ensure the exact rooted rule in GITIGNORE_DEPLOY_KEY_RULE (a
- *  single pattern covering every key this file ever provisions — the base path and every
- *  per-host/numeric-suffixed sibling arm (a) can mint, plus each key's `.pub` counterpart) is
- *  the file's LAST effective non-blank line; append it (with its own comment) at EOF if it
- *  isn't already there EXACTLY. Appending at EOF always wins over anything earlier in the file,
- *  including a negation — the simple mechanism this repo's doctrine prefers over a bespoke
- *  evaluator. Idempotent: a repeat run whose last line already IS the exact rule is a true
- *  no-op. Best-effort: a failure here is a WARN, never a reason to fail init.
- *
- *  Round 3 fix (item 1): the equality check against the last non-blank line is RAW byte
- *  equality, never `.trim()`ed — gitignore treats leading whitespace on a pattern line as part
- *  of the pattern itself (not decorative indentation the way YAML/most config formats treat
- *  it), so a line reading `  /data/worker-deploy-key*` (leading spaces) is a DIFFERENT,
- *  non-matching pattern to git and does NOT actually ignore the key — trimming before comparing
- *  would have falsely treated that as "already covered" and left the key unignored. */
-function ensureGitignoreCoversDeployKeyAction(cwd: string): string[] {
-  const gitignorePath = join(cwd, ".gitignore");
-  try {
-    const existing = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
-    const lines = existing.split("\n");
-    let lastNonBlankIdx = -1;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      // `.trim()` here is ONLY to detect whether the line is blank (decides which line is
-      // "last"), never used for the equality check below.
-      if (lines[i]!.trim().length > 0) {
-        lastNonBlankIdx = i;
-        break;
-      }
-    }
-    if (lastNonBlankIdx !== -1 && lines[lastNonBlankIdx] === GITIGNORE_DEPLOY_KEY_RULE) {
-      return [];
-    }
-    const needsLeadingNewline = existing.length > 0 && !existing.endsWith("\n");
-    const addition = `${GITIGNORE_DEPLOY_KEY_COMMENT}\n${GITIGNORE_DEPLOY_KEY_RULE}\n`;
-    writeFileSync(gitignorePath, `${existing}${needsLeadingNewline ? "\n" : ""}${addition}`);
-    return [
-      `deploy key: appended "${GITIGNORE_DEPLOY_KEY_RULE}" as the last rule in ${gitignorePath}, so an ordinary ` +
-        `"git add -A" will not stage the worker deploy key(s) (a deliberate "git add -f" still can)`,
-    ];
-  } catch (e) {
-    return [
-      `deploy key: WARN — could not update ${gitignorePath} to ignore the worker deploy key(s) (${
-        e instanceof Error ? e.message : String(e)
-      }). Add "${GITIGNORE_DEPLOY_KEY_RULE}" as the LAST line of .gitignore by hand.`,
-    ];
-  }
-}
+// The key lives under the runtime root's own self-ignoring `.gitignore` (`*`, written by
+// `ensureRuntimeRoot`), so no rule ever needs appending to the repo's own `.gitignore` here;
+// this file also never removes an existing rule from a user's `.gitignore`.
 
 /** #606 gate② round 1 (P2-7), round 2 (R3-5): distinguishes protected / confirmed-unprotected /
  *  cannot-verify, checking BOTH the legacy branch-protection endpoint and (when that legacy
@@ -978,6 +1026,7 @@ async function armAuthFailsStaleOrMismatch(
   staleForeignKeys: DeployKeyListEntry[],
   reasons: string[],
   deps: Pick<InitDeps, "sshKeygen" | "probeSshAuth" | "isInteractive" | "promptOperator" | "hostname">,
+  permissionsFs: DeployKeyPermissionsFsOps = realDeployKeyPermissionsFsOps,
 ): Promise<string[]> {
   const actions: string[] = [];
   if (configFilePath !== null) {
@@ -1033,7 +1082,7 @@ async function armAuthFailsStaleOrMismatch(
   // degrades exactly like any other provisioning failure. `fallbackKeyPath`/`fallbackTitle` (the
   // UN-suffixed base candidate) name the WARN's manual steps when slot-picking itself is what
   // failed, since `keyPath`/`title` never get assigned in that case.
-  const fallbackKeyPath = join(cwd, "data", `worker-deploy-key-${hostComponent}`); // #1080
+  const fallbackKeyPath = join(deployKeysDir(cwd), `worker-deploy-key-${hostComponent}`);
   const fallbackTitle = `${DEPLOY_KEY_TITLE}-${hostComponent}`;
   let keyPath: string;
   let title: string;
@@ -1044,9 +1093,9 @@ async function armAuthFailsStaleOrMismatch(
       `deploy key: operator chose (a) — registering a NEW per-machine deploy key titled "${title}"; every ` +
         `existing remote key is left untouched.`,
     );
-    mkdirSync(dirname(keyPath), { recursive: true });
+    enforceDeployKeyPermissionsOrThrow(keyPath, permissionsFs); // dir ready (0700) before ssh-keygen writes into it
     await deps.sshKeygen(keyPath);
-    actions.push(...ensureGitignoreCoversDeployKeyAction(cwd));
+    enforceDeployKeyPermissionsOrThrow(keyPath, permissionsFs); // repair the freshly-written private key's mode too
     newId = await addDeployKeyCapturingNewId(run, repo, keyPath, title);
   } catch (e) {
     actions.push(deployKeyProvisioningFailedAction(repo, fallbackKeyPath, fallbackTitle, e));
@@ -1083,8 +1132,10 @@ async function armAuthFailsStaleOrMismatch(
 /** #606 gate② round 1 (OWNER RULING), round 2 (R3-1): both `worker.deployKeyPath` AND
  *  `worker.deployKeyId` configured — RECONCILE (never skip, unlike the superseded version, which
  *  returned immediately once `deployKeyPath` was set and so could never actually detect or
- *  recover from a stale/rotated/mismatched key — P1-5). FOUR checks, ALL must be green: the
- *  local key file exists; the recorded id is present in `gh repo deploy-key list`; that
+ *  recover from a stale/rotated/mismatched key). FIVE checks, ALL must be green: the
+ *  local key file exists; its directory/file permissions are repairable to 0700/0600 (#1080 —
+ *  a directory or symlink standing in for either is a preserved collision, not a repair target);
+ *  the recorded id is present in `gh repo deploy-key list`; that
  *  id-matched remote entry's OWN public key content matches the local `.pub` file (R3-1 — proves
  *  the (path, id) pair is genuinely the SAME key that was recorded together, not merely "an id
  *  that happens to be registered" plus "a local key that happens to authenticate" independently,
@@ -1100,8 +1151,15 @@ async function reconcileDeployKey(
   deployKeyPath: string,
   deployKeyId: number,
   deps: Pick<InitDeps, "sshKeygen" | "probeSshAuth" | "isInteractive" | "promptOperator" | "hostname">,
+  permissionsFs: DeployKeyPermissionsFsOps = realDeployKeyPermissionsFsOps,
 ): Promise<string[]> {
   const localFileOk = existsSync(deployKeyPath);
+  // A repair failure here (the configured path is a directory/symlink, an unwritable mount, or
+  // any other chmod/lstat error) is a reported degradation, never silently swallowed into a
+  // green "reconciled" verdict below — folded into the same green-condition check the other
+  // four signals already go through. enforceDeployKeyPermissions itself never throws (every
+  // failure comes back as `{ ok: false, reason }`), so this call needs no try/catch of its own.
+  const permissionRepair = localFileOk ? enforceDeployKeyPermissions(deployKeyPath, permissionsFs) : { ok: true as const };
   let listedKeys: DeployKeyListEntry[] = [];
   let matchedEntry: DeployKeyListEntry | undefined;
   try {
@@ -1127,7 +1185,7 @@ async function reconcileDeployKey(
 
   const probe = localFileOk ? await deps.probeSshAuth(deployKeyPath) : { ok: false, detail: "local key file missing" };
 
-  if (localFileOk && idListed && keyContentMatches && probe.ok) {
+  if (localFileOk && permissionRepair.ok && idListed && keyContentMatches && probe.ok) {
     const actions = [
       `deploy key: reconciled — ${deployKeyPath} (id ${deployKeyId}) is registered on ${repo} and the SSH auth ` +
         `preflight is green — L1 active`,
@@ -1138,6 +1196,7 @@ async function reconcileDeployKey(
 
   const reasons: string[] = [];
   if (!localFileOk) reasons.push(`local key file missing at ${deployKeyPath}`);
+  if (!permissionRepair.ok) reasons.push(`could not repair key permissions: ${permissionRepair.reason}`);
   if (!idListed) reasons.push(`recorded id ${deployKeyId} not found on ${repo}'s registered deploy keys`);
   if (idListed && localFileOk && !keyContentMatches) {
     reasons.push(
@@ -1147,7 +1206,7 @@ async function reconcileDeployKey(
   }
   if (localFileOk && !probe.ok) reasons.push(`SSH auth preflight failed${probe.detail ? `: ${probe.detail}` : ""}`);
   const staleForeign = listedKeys.filter((k) => isSapwoodWorkerTitle(k.title));
-  return armAuthFailsStaleOrMismatch(run, repo, cwd, configFilePath, staleForeign, reasons, deps);
+  return armAuthFailsStaleOrMismatch(run, repo, cwd, configFilePath, staleForeign, reasons, deps, permissionsFs);
 }
 
 /** #606 gate② round 1 (OWNER RULING) orchestrator: (deployKeyPath, deployKeyId) BOTH configured
@@ -1170,14 +1229,18 @@ export async function ensureDeployKey(
   cwd: string,
   configFilePath: string | null,
   deps: Pick<InitDeps, "sshKeygen" | "probeSshAuth" | "isInteractive" | "promptOperator" | "hostname">,
+  // #1080: injectable ONLY so tests can deterministically simulate a chmod/lstat failure — see
+  // DeployKeyPermissionsFsOps's own doc. Production never passes this; it's not part of
+  // InitDeps because init() itself has no reason to ever override it.
+  permissionsFs: DeployKeyPermissionsFsOps = realDeployKeyPermissionsFsOps,
 ): Promise<string[]> {
   const { deployKeyPath, deployKeyId } = cfg.worker;
 
   if (deployKeyPath !== undefined && deployKeyId !== undefined) {
-    return reconcileDeployKey(run, repo, cwd, configFilePath, deployKeyPath, deployKeyId, deps);
+    return reconcileDeployKey(run, repo, cwd, configFilePath, deployKeyPath, deployKeyId, deps, permissionsFs);
   }
 
-  const keyPath = join(cwd, "data", "worker-deploy-key"); // #1080
+  const keyPath = join(deployKeysDir(cwd), "worker-deploy-key");
   let existingKeys: DeployKeyListEntry[];
   try {
     existingKeys = parseDeployKeys(await run(["repo", "deploy-key", "list", "-R", repo, "--json", "id,title"]));
@@ -1189,18 +1252,30 @@ export async function ensureDeployKey(
     // A sapwood-titled key exists remotely, but THIS machine has no recorded (path, id) anchor
     // for it — per the owner ruling, a title is never authoritative for "mine": it may validly
     // belong to a different machine/operator. Never assume ownership, never touch it.
-    return armAuthFailsStaleOrMismatch(run, repo, cwd, configFilePath, priorSapwoodKeys, [], deps);
+    return armAuthFailsStaleOrMismatch(run, repo, cwd, configFilePath, priorSapwoodKeys, [], deps, permissionsFs);
   }
 
   // Fresh provisioning: nothing configured locally, nothing sapwood-titled remotely.
   const actions: string[] = [];
   let newId: number;
   try {
-    if (!existsSync(keyPath)) {
-      mkdirSync(dirname(keyPath), { recursive: true });
+    const privateExists = existsSync(keyPath);
+    const pubExists = existsSync(`${keyPath}.pub`);
+    if (privateExists !== pubExists) {
+      // Exactly one half present — an interrupted previous run, or a stray file left by hand.
+      // ssh-keygen would silently overwrite whichever half is missing; refuse instead, same as
+      // any other provisioning failure below (WARN, degrade to L0, never touch what's there).
+      throw new Error(
+        pubExists
+          ? `${keyPath}.pub exists but its private half does not — refusing to run ssh-keygen, which would overwrite it`
+          : `${keyPath} exists but its public half (.pub) does not — refusing to register it without a matching .pub`,
+      );
+    }
+    if (!privateExists) {
+      enforceDeployKeyPermissionsOrThrow(keyPath, permissionsFs); // dir ready (0700) before ssh-keygen writes into it
       await deps.sshKeygen(keyPath);
     }
-    actions.push(...ensureGitignoreCoversDeployKeyAction(cwd));
+    enforceDeployKeyPermissionsOrThrow(keyPath, permissionsFs); // repair mode whether just generated or reused
     newId = await addDeployKeyCapturingNewId(run, repo, keyPath, DEPLOY_KEY_TITLE);
   } catch (e) {
     actions.push(deployKeyProvisioningFailedAction(repo, keyPath, DEPLOY_KEY_TITLE, e));
@@ -1345,6 +1420,23 @@ export async function init(cfg: SapwoodConfig, deps: Partial<InitDeps> = {}): Pr
   ConfigSchema.parse({ ...cfg, doctrine: doctrineSchemaFields });
   const repo = `${cfg.board.owner}/${cfg.board.repo}`;
   const actions: string[] = [];
+
+  // The runtime root must exist before the deploy key can be provisioned under its `keys/`
+  // subdirectory below — created via the SAME `ensureRuntimeRoot` every other state-touching
+  // command uses, so init's root and the engine's own root can never drift apart. No tree-level
+  // "foreign directory" heuristic: init is idempotent by contract (a second run must report zero
+  // create actions) and never creates the DB itself, so a heuristic trying to detect "this isn't
+  // sapwood's own directory" would refuse init's own second run. The ONLY refusal is `.sapwood`
+  // already existing as something other than a directory — checked here (not left to
+  // `ensureRuntimeRoot`'s own `mkdir`) so the message names `sapwood init` itself rather than an
+  // unqualified filesystem error. Every other collision (an existing directory carrying unrelated
+  // content) is handled per owned file, same as init's other scaffolded files below.
+  const runtimeRoot = defaultRuntimeRoot(cwd);
+  if (existsSync(runtimeRoot) && !statSync(runtimeRoot).isDirectory()) {
+    throw new InitError(`${runtimeRoot} already exists and is not a directory — remove or rename it, then re-run "sapwood init".`);
+  }
+  ensureRuntimeRoot(runtimeRoot, (message) => actions.push(message));
+  actions.push(`runtime root: ${runtimeRoot}`);
 
   await preflight(getAuthStatus);
 

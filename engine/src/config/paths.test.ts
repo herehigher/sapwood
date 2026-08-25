@@ -156,10 +156,6 @@ test("ensureRuntimeRoot: a pre-existing DIFFERING .gitignore is preserved, not o
 // The allowlist is a small, fully explicit `file:line` set — no substring/marker skip and no
 // file-level exclusion beyond the file named below, with its own reason:
 //   - this file and paths.ts itself (the one place the names ARE spelled)
-//   - the exact `file:line` sites in loop/init.ts, loop/init.test.ts, and config/config.test.ts
-//     where the deploy-key literal is still `data/`-rooted — #1080's move, not this leg's;
-//     listed one line at a time (never "any line containing #1080") so the allowlist can never
-//     silently widen
 // engine/src/guard/** carries no directory-level allowlist entry: guard.ts's `.sapwood/`
 // write-deny rule (#1079) matches this factory's real paths directly, so no `data/` literal
 // remains anywhere under engine/src/guard/** — a future one there is a real offense, not
@@ -168,69 +164,10 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", ".."
 const SCAN_ROOTS = [join(REPO_ROOT, "engine", "src"), join(REPO_ROOT, "dashboard", "src")];
 const FILE_ALLOWLIST = new Set(["engine/src/config/paths.ts", "engine/src/config/paths.test.ts"]);
 
-// The exact, hand-verified `file:line` sites this leg deliberately leaves data/-rooted — #1080
-// (init's deploy-key move) is the one place responsible for closing these. loop/init.ts's 4
-// sites are marked `// #1080` in the source for a human skimming the file; loop/init.test.ts's
-// sites exercise that SAME still-unmigrated behavior (arbitrary example values in YAML-config-
-// roundtrip and gitignore-rule fixtures); config.test.ts's four worker.deployKeyPath sites are
-// arbitrary example values for the SAME still-`data/`-rooted key (config.test.ts deliberately
-// describes today's real resolution — NOT a `keys/` location that has not been implemented, since
-// a `keys/`-rooted example would misleadingly describe a relocation #1080 has not done yet). None
-// of these three files carry a marker of their own — every one is
-// listed here by line number, not by a substring/marker scan, so a future edit that adds an
-// unrelated `data/` literal to any of them is NOT silently covered by a leftover marker.
-const ALLOWED_1080_SITES = new Set([
-  "engine/src/loop/init.ts:484",
-  "engine/src/loop/init.ts:841",
-  "engine/src/loop/init.ts:1036",
-  "engine/src/loop/init.ts:1180",
-  "engine/src/config/config.test.ts:1200",
-  "engine/src/config/config.test.ts:1220",
-  "engine/src/config/config.test.ts:1223",
-  "engine/src/config/config.test.ts:1253",
-  "engine/src/loop/init.test.ts:920",
-  "engine/src/loop/init.test.ts:929",
-  "engine/src/loop/init.test.ts:941",
-  "engine/src/loop/init.test.ts:955",
-  "engine/src/loop/init.test.ts:959",
-  "engine/src/loop/init.test.ts:973",
-  "engine/src/loop/init.test.ts:978",
-  "engine/src/loop/init.test.ts:991",
-  "engine/src/loop/init.test.ts:1060",
-  "engine/src/loop/init.test.ts:1071",
-  "engine/src/loop/init.test.ts:1130",
-  "engine/src/loop/init.test.ts:1141",
-  "engine/src/loop/init.test.ts:1200",
-  "engine/src/loop/init.test.ts:1210",
-  "engine/src/loop/init.test.ts:1211",
-  "engine/src/loop/init.test.ts:1213",
-  "engine/src/loop/init.test.ts:1224",
-  "engine/src/loop/init.test.ts:1234",
-  "engine/src/loop/init.test.ts:1235",
-  "engine/src/loop/init.test.ts:1236",
-  "engine/src/loop/init.test.ts:1238",
-  "engine/src/loop/init.test.ts:1265",
-  "engine/src/loop/init.test.ts:1292",
-  "engine/src/loop/init.test.ts:1319",
-  "engine/src/loop/init.test.ts:1463",
-  "engine/src/loop/init.test.ts:1470",
-  "engine/src/loop/init.test.ts:1479",
-  "engine/src/loop/init.test.ts:1501",
-  "engine/src/loop/init.test.ts:1531",
-  "engine/src/loop/init.test.ts:1560",
-  "engine/src/loop/init.test.ts:1643",
-  "engine/src/loop/init.test.ts:1788",
-  "engine/src/loop/init.test.ts:1854",
-  "engine/src/loop/init.test.ts:1863",
-  "engine/src/loop/init.test.ts:1896",
-  "engine/src/loop/init.test.ts:1908",
-  "engine/src/loop/init.test.ts:2324",
-  "engine/src/loop/init.test.ts:2338",
-  "engine/src/loop/init.test.ts:2347",
-  "engine/src/loop/init.test.ts:2350",
-  "engine/src/loop/init.test.ts:2364",
-  "engine/src/loop/init.test.ts:2366",
-]);
+// Stays EMPTY, not deleted — removing the mechanism entirely would let a future `data/` literal
+// silently reintroduce a bypass with no oracle catching it; an empty Set still runs the full
+// scan below with zero exemptions.
+const ALLOWED_1080_SITES = new Set<string>([]);
 
 // A bare `"data/"` (or `` `data/` ``) string literal, any quote style, optionally absolute.
 const DATA_LITERAL_RE = /["'`]\/?data\//;

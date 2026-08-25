@@ -57,7 +57,8 @@ export interface RuntimePaths {
   readonly directivesDir: string;
   readonly logsDir: string;
   readonly logFile: string;
-  /** #1080 moves the deploy key file here; this leg only reserves the name. */
+  /** #1080: the worker deploy key(s) live here — `worker-deploy-key[-<host>]` + `.pub`,
+   *  0600/dir 0700 — instead of the pre-#1080 `data/` location. */
   readonly keysDir: string;
 
   // ── cache: safe to delete whenever no engine runs ──
@@ -183,9 +184,11 @@ function writeIfAbsentOrIdentical(path: string, content: string, log: (message: 
  *  not even idempotent marker writes — so `runEngine` does a bare, idempotent `mkdir` of the
  *  lock file's parent directory (required for the lock's own atomic create, a no-op against an
  *  already-existing dir) ahead of the acquire attempt, and calls this function to stamp the root
- *  only AFTER it has actually won the lock. `sapwood init` never calls this either — it writes
- *  config/goal/doctrine/issue-template files elsewhere in the repo, never under the runtime root
- *  (the deploy key stays under the pre-#1077 `data/` location until #1080 moves it here).
+ *  only AFTER it has actually won the lock. `sapwood init` (#1080) also calls this — first, before
+ *  any of its other config/goal/doctrine/issue-template writes elsewhere in the repo — since the
+ *  worker deploy key it provisions now lives under this root's `keys/` subdirectory; the ONLY
+ *  refusal is `root` already existing as something other than a directory (init.ts checks this
+ *  itself before calling in, so the refusal message can name `sapwood init` specifically).
  *
  *  `fs` defaults to the real node:fs calls; tests inject a spy (RuntimeRootFsOps) instead of
  *  monkey-patching node:fs's own exports, since dependency injection (the same LockFsOps pattern

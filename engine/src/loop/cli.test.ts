@@ -2135,6 +2135,30 @@ test("runStatus: exported directly (not just via runCli) for the same result", (
   assert.match(r.stdout, /no state DB/);
 });
 
+// #1080 AC5: `sapwood status` prints the resolved runtime root once, on both the no-DB early
+// return (an operator's first question when nothing else has ever run is often "where is
+// sapwood even looking") and the ordinary populated report.
+test("runStatus (#1080 AC5): prints the resolved runtime root — no state DB yet", () => {
+  const dbPath = "/tmp/does-not-exist-sapwood-status.sqlite";
+  const r = runStatus(["node", "sapwood", "status", dbPath]);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, new RegExp(`runtime dir: ${dirname(dbPath)}`));
+});
+
+test("runStatus (#1080 AC5): prints the resolved runtime root — an existing, populated DB", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-status-runtime-dir-"));
+  const dbPath = join(dir, "sapwood.sqlite");
+  const seed = new State(dbPath);
+  seed.close();
+  try {
+    const r = runStatus(["node", "sapwood", "status", dbPath]);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, new RegExp(`runtime dir: ${dir}\\n?$`), `expected a "runtime dir: ${dir}" line, got:\n${r.stdout}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("status: truly read-only — DB file bytes, user_version, and journal_mode all unchanged (Codex PR #70 P2)", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-status-"));
   const dbPath = join(dir, "sapwood.sqlite");
