@@ -5,10 +5,11 @@
 //
 // Uses Node's built-in node:sqlite (unflagged since Node 22.13 — see engines floor).
 // ponytail: zero native dep; if the API bites, swap to better-sqlite3 — same call shape.
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
+import { ensureRuntimeRoot, type RuntimePaths, runtimePaths, SAPWOOD_DIR } from "../config/paths.js";
 import { capDigest } from "../retro/retro-digest.js";
 import type { AcceptanceCriterion, AcSnapshot } from "../review/ac-snapshot.js";
 import { type EventKind, type KindGlossary, kindsTagged } from "./event-kinds/index.js";
@@ -1782,7 +1783,7 @@ export interface ForgeProxyBundleRow {
  *  cli.ts can derive the data-dir lock path WITHOUT constructing a State — lock arbitration must
  *  precede the DB open/migration a State construction performs, or a refused second engine
  *  (possibly a newer binary) would migrate the live holder's database on its way to exit 1. */
-export const DEFAULT_DB_PATH = "data/sapwood.sqlite";
+export const DEFAULT_DB_PATH = `${SAPWOOD_DIR}/sapwood.sqlite`;
 
 /** #382: the single-instance lockfile's basename, shared by State.instanceLockPath() below and
  *  cli.ts's pre-State lock-path derivation so the two can never drift. */
@@ -1809,6 +1810,10 @@ export class State {
   // in-memory handles tests use — there is no directory to watch, so the kill switch is
   // always inactive there (tests inject their own via a real tmp-dir State instead).
   private readonly dataDir: string | null;
+  // The named sibling-path set for dataDir (runtimePaths' whole point: one derivation, not a
+  // join() repeated at every sentinel/lock/round/proxy-bundle getter below). null exactly when
+  // dataDir is null (in-memory State) — same convention throughout this class.
+  private readonly paths: RuntimePaths | null;
   // #642: true iff this readOnly handle took openReadOnly's immutable-fallback branch (a
   // read-only filesystem, so live WAL frames are not visible). Always false for a write-mode
   // handle. Surfaced via isImmutableSnapshot() so a caller can report the degraded-snapshot
@@ -1841,10 +1846,11 @@ export class State {
    *  engine's uncommitted-to-main WAL frames won't be visible (a possibly-stale snapshot is
    *  the honest best a read-only FS allows). Write methods throw at the SQLite layer. */
   constructor(path = DEFAULT_DB_PATH, opts: { readOnly?: boolean; busyTimeoutMs?: number } = {}) {
-    // SQLite won't create missing parent dirs, and data/ is gitignored (absent on a
+    // SQLite won't create missing parent dirs, and .sapwood/ is gitignored (absent on a
     // fresh checkout). Create it first. (Codex P2, PR #22.) Skip for special handles.
     const isMemory = path === ":memory:" || path.startsWith("file::memory:");
     this.dataDir = isMemory ? null : dirname(path);
+    this.paths = this.dataDir ? runtimePaths(this.dataDir) : null;
     if (opts.readOnly) {
       this.readBusyTimeoutMs = opts.busyTimeoutMs ?? DEFAULT_READONLY_BUSY_TIMEOUT_MS;
       const opened = openReadOnly(path, isMemory, this.readBusyTimeoutMs);
@@ -1855,7 +1861,10 @@ export class State {
     this.immutableFallback = false;
     this.readBusyTimeoutMs = DEFAULT_READONLY_BUSY_TIMEOUT_MS;
     if (this.dataDir) {
-      mkdirSync(this.dataDir, { recursive: true });
+      // #1077: also stamps the root's .gitignore + cache/CACHEDIR.TAG (idempotent) — this
+      // write-mode constructor is the one place every write-capable engine entry point already
+      // passes through before touching the runtime tree.
+      ensureRuntimeRoot(this.dataDir);
     }
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL");
@@ -3285,7 +3294,7 @@ export class State {
    *  Flippable by a human (`touch`/`rm`) without touching config. null dir (in-memory State,
    *  tests) -> never active. */
   killSwitchPath(): string | null {
-    return this.dataDir ? join(this.dataDir, "KILL_SWITCH") : null;
+    return this.paths ? this.paths.killSwitch : null;
   }
 
   isKillSwitchActive(): boolean {
@@ -3299,7 +3308,7 @@ export class State {
    *  EMERGENCY_STOP means immediate hard kill with no drain window at all — see conductor.ts's
    *  tick() gate, which checks this BEFORE killSwitchPath so both present -> E-STOP wins. */
   estopPath(): string | null {
-    return this.dataDir ? join(this.dataDir, "EMERGENCY_STOP") : null;
+    return this.paths ? this.paths.estop : null;
   }
 
   isEstopActive(): boolean {
@@ -3315,7 +3324,7 @@ export class State {
    *  see conductor.tick()'s DISPATCH-only skip, which is the only place this is consulted.
    *  null dir (in-memory State, tests) -> never active, same as killSwitchPath. */
   pausePath(): string | null {
-    return this.dataDir ? join(this.dataDir, "PAUSE") : null;
+    return this.paths ? this.paths.pause : null;
   }
 
   isPauseActive(): boolean {
@@ -3329,7 +3338,7 @@ export class State {
    *  cli.ts run path is its one consumer). null dir (in-memory State, tests) -> no lock, same
    *  convention as killSwitchPath/pausePath — no shared data dir means nothing to double-drive. */
   instanceLockPath(): string | null {
-    return this.dataDir ? join(this.dataDir, INSTANCE_LOCK_FILENAME) : null;
+    return this.paths ? this.paths.lock : null;
   }
 
   // ── Environment-failure park (#168) ─────────────────────────────────────────────────────
@@ -3549,7 +3558,7 @@ export class State {
    *  window (forge itself unreachable) where a forge-side notification isn't possible. null dir
    *  (in-memory State, tests) -> no path, same convention as killSwitchPath/pausePath. */
   escalationMarkerPath(): string | null {
-    return this.dataDir ? join(this.dataDir, "ESCALATION") : null;
+    return this.paths ? this.paths.escalation : null;
   }
 
   /** Write the local escalation fallback marker (#168's channel-ladder local branch,
@@ -4580,7 +4589,7 @@ export class State {
   /** Where the derived markdown VIEW of a round's artifact lives on disk — null for an
    *  in-memory State (tests), same convention as killSwitchPath/pausePath above. */
   roundArtifactMdPath(roundId: number): string | null {
-    return this.dataDir ? join(this.dataDir, "rounds", `round-${roundId}.md`) : null;
+    return this.paths ? join(this.paths.roundsDir, `round-${roundId}.md`) : null;
   }
 
   // ── Input manifest (#231) ───────────────────────────────────────────────────────────────
@@ -4970,7 +4979,7 @@ export class State {
   /** Where frozen evidence bundle JSON files live on disk — null for an in-memory State (tests),
    *  same convention as roundArtifactMdPath. */
   forgeProxyBundleDir(): string | null {
-    return this.dataDir ? join(this.dataDir, "proxy-bundles") : null;
+    return this.paths ? this.paths.proxyBundlesDir : null;
   }
 
   /** Index one frozen evidence bundle. Idempotent on hash (ON CONFLICT DO NOTHING): the same
