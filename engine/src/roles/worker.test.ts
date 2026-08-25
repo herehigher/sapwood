@@ -3176,7 +3176,7 @@ test('dispatch (#1011): host.permissionMode "dontAsk" -> --permission-mode dontA
     const settings = JSON.parse(argv[settingsIdx + 1]!);
     // AC2: guardSettings() output stays byte-identical to pre-#1011 — no sandbox key, ever,
     // regardless of host.permissionMode (the engine injects no sandbox settings; see
-    // docs/security.md's "Execution profiles" section for the operator recipe).
+    // docs/security/execution-profiles.md's "Execution profiles" section for the operator recipe).
     assert.equal("sandbox" in settings, false);
   } finally {
     killAnyRunningLanes(s);
@@ -8737,7 +8737,7 @@ test("WORKER_DISALLOWED_TOOLS: known forge-authority + write/exec-class MCP serv
   }
 });
 
-// #552 decision (docs/security.md, "the code-producing worker deliberately retains spawn
+// #552 decision (docs/security/role-sessions.md, "the code-producing worker deliberately retains spawn
 // capability"): unlike #534's peripheral-role/gate②-reviewer deny (ROLE_DISALLOWED_TOOLS names
 // Agent/Task explicitly, peripheral.test.ts), the coding worker's OWN deny list stays a gh-verb
 // pattern list only — no name-list entry for either subagent-spawn tool. Pins the DECISION, not
@@ -8747,7 +8747,7 @@ test("WORKER_DISALLOWED_TOOLS: Agent/Task are NOT denied — the coding worker k
   for (const spawnTool of ["Agent", "Task"]) {
     assert.ok(
       !WORKER_DISALLOWED_TOOLS.split(",").includes(spawnTool),
-      `${spawnTool} must stay unlisted — #552 decided to keep worker subagent spawn, accepting the soft-budget blind spot as documented in docs/security.md`,
+      `${spawnTool} must stay unlisted — #552 decided to keep worker subagent spawn, accepting the soft-budget blind spot as documented in docs/security/role-sessions.md`,
     );
   }
 });

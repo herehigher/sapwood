@@ -27,6 +27,11 @@ const DOC_PATHS = {
   configuration: "docs/guide/configuration.md",
   troubleshooting: "docs/guide/troubleshooting.md",
   security: "docs/security.md",
+  // #1094 PR-S: docs/security.md split into the core model + per-mechanism pages under
+  // docs/security/ — these DOC_LINKS entries now point at their new page, not the core file.
+  securityExecutionProfiles: "docs/security/execution-profiles.md",
+  securityRoleSessions: "docs/security/role-sessions.md",
+  securityAdjudication: "docs/security/adjudication.md",
   supervision: "docs/guide/supervision.md",
   reviewDoctrine: "docs/REVIEW-DOCTRINE.md",
   plan: "docs/PLAN.md",
@@ -49,6 +54,7 @@ export const DOC_LINKS = {
   reviewDoctrine: docUrl("reviewDoctrine"),
   plan: docUrl("plan"),
   securityAcceptedBlindSpots: docUrl("security", "accepted-blind-spots"),
-  securityManagedSettingsException: docUrl("security", "managed-settings-allowmanagedpermissionrulesonly-exception"),
-  securityExecutionProfiles: docUrl("security", "execution-profiles-host-permission-mode--bash-sandbox"),
+  securityManagedSettingsException: docUrl("securityRoleSessions", "managed-settings-allowmanagedpermissionrulesonly-exception"),
+  securityExecutionProfiles: docUrl("securityExecutionProfiles", "execution-profiles-host-permission-mode--bash-sandbox"),
+  securityAcAuthorityDispatchSnapshot: docUrl("securityAdjudication", "the-ac-authority-dispatch-snapshot"),
 } as const;

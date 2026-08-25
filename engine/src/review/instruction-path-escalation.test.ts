@@ -380,6 +380,30 @@ test("#539/#639/#640: each newly-covered mechanism-carrier default path escalate
   }
 });
 
+test("#1094 PR-S: a path under docs/security/ escalates via the docs/security/** default glob", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  const path = "docs/security/execution-profiles.md";
+  const labels: string[] = [];
+  let comments = 0;
+  const forge = {
+    getPRChangedFiles: async () => ({ files: [{ filename: path }], complete: true }),
+    addPRLabel: async (_pr: number, label: string) => {
+      labels.push(label);
+    },
+    addPRComment: async () => {
+      comments++;
+    },
+  } satisfies Pick<IForge, "getPRChangedFiles" | "addPRLabel" | "addPRComment">;
+
+  assert.deepEqual(await escalateInstructionPathChanges({ forge, pr: 7, labels: [], cfg }), {
+    kind: "escalated",
+    matchedPaths: [path],
+    reason: "instruction-path-change",
+  });
+  assert.deepEqual(labels, [cfg.labels.humanMergeOnly]);
+  assert.equal(comments, 1);
+});
+
 test("#539: a control path (unrelated source file) unaffected by the new mechanism-carrier defaults", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
   const forge = {

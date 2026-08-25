@@ -10,7 +10,7 @@ separate implementation issue, filed with its own AC/verification.
 
 Traced the actual outcome→escalation path, not the intended one.
 
-**A coding worker legitimately holds real forge credentials** (`docs/security.md`: "Code-producing
+**A coding worker legitimately holds real forge credentials** (`docs/security/role-sessions.md`: "Code-producing
 worker lanes are unaffected: they legitimately hold the token, mediated by the guard hook") and
 `gh issue comment`/`create`/`view`/`list`/`status` are explicitly allowed through `guard.ts` —
 `docs/security.md` names this outright: *"comment is the worker's refuse/hand-back channel."* So a

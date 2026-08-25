@@ -360,7 +360,7 @@ autonomous dispatch (the same park machinery as an environment failure — visib
 without dispatching.
 
 Recovery: stop whatever is restarting the engine (usually a supervisor without its own
-restart limit — configure one; see [security.md](../security.md)'s supervisor
+restart limit — configure one; see [security.md](../security/cost-ceilings.md#cost-ceilings-vs-the-soft-worker-budget)'s supervisor
 prerequisite), fix the crash's cause, and start the engine once the window has drained
 — a start that counts fewer than `maxBirths` births clears the park automatically
 (`park-resumed`, `via: restart-window-clear`). No state surgery is needed;

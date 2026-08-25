@@ -932,7 +932,7 @@ test("tick dispatch: the snapshotted body survives a live mid-flight edit — la
   // #301 review round 3 (P3): this proves State.getAcSnapshot() itself is immutable across a
   // live edit — never re-derived from a live read. It does NOT prove what any review SESSION's
   // input is (that wiring is #286/E4a's job — see ac-snapshot.ts's module header and
-  // docs/security.md for the accurate scope statement).
+  // docs/security/adjudication.md for the accurate scope statement).
   assert.equal(
     st.getAcSnapshot(7)?.body,
     originalBody,

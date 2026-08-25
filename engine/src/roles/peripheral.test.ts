@@ -1424,7 +1424,7 @@ test("run: a per-role allowedTools override reaches the argv (#91 — retro's wi
 // ── #1011 AC2/AC3: host.permissionMode reaches every peripheral role session too — the SAME
 // configured value worker.ts's dispatch()/resume() pass, review sessions included (reviewMode
 // changes the TOOL profile, never the permission mode). The engine injects no sandbox settings
-// into any session (docs/security.md's "Execution profiles" section carries the operator
+// into any session (docs/security/execution-profiles.md's "Execution profiles" section carries the operator
 // recipe), so `--settings` never carries a `sandbox` key regardless of role or config. ────────
 
 test("run (#1011): retro (Bash-bearing allowedTools) -> --permission-mode reflects the configured host.permissionMode; --settings never carries a sandbox key", async () => {
@@ -2836,7 +2836,7 @@ test('run (#285, Codex sol-high PR #300 review, P1): reviewCwd closes the MCP + 
     assert.equal(
       at("--setting-sources"),
       "",
-      "ZERO file settings sources load — not user, project, or local; only the inline guard --settings applies (the operator's ~/.claude/settings.json is producer-influenceable per security.md's worker-real-HOME boundary, so a review session must not load it either)",
+      "ZERO file settings sources load — not user, project, or local; only the inline guard --settings applies (the operator's ~/.claude/settings.json is producer-influenceable per docs/security/review-session-mode.md's worker-real-HOME boundary, so a review session must not load it either)",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });

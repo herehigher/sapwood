@@ -21,6 +21,11 @@ These three stay at the `docs/` root — not a stylistic choice: engine config
 runtime output (`engine/src/util/doc-links.ts`) cite them by a path baked
 into shipped code, so moving them would break a live wire, not just a link.
 
+## [`security/`](security/) — mechanism reference
+
+Per-mechanism detail for the security model above — one page per topic, linked from
+`security.md`'s "Mechanism reference" table.
+
 ## [`guide/`](guide/) — for operators
 
 Install, configure, run, and troubleshoot a sapwood deployment.

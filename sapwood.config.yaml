@@ -71,6 +71,7 @@ escalation:
     - engine/src/config/config.ts
     - sapwood.config.example.yaml
     - docs/security.md
+    - docs/security/**
     - engine/src/roles/skills-plugin.ts
     - engine/src/forge/labels.ts
 doctrine:

@@ -2296,7 +2296,7 @@ async function runRoundsCore(deps: RoundDeps): Promise<RoundsResult> {
             );
           }
         } catch (e) {
-          // #703 v2 gate② (P2-3): LOG only, never a ledger write — docs/security.md's own "no
+          // #703 v2 gate② (P2-3): LOG only, never a ledger write — docs/security/adjudication.md's own "no
           // write of any kind" claim for this diagnostic path must hold even on its OWN failure
           // path, not just its success path. `tickErrors` is an in-memory counter (this
           // function's own local variable, reset every process start), never appended as a

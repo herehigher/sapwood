@@ -208,7 +208,7 @@ lint/DSL, since spotting a violation requires reading design intent, not matchin
   (`OWNER`, etc.) authenticates the poster, never the claim — it is not attestation; folding
   the record into the issue **body** IS the attestation. Post the record into the body; if a
   comment also carried it, advance the [comment adjudication
-  cursor](security.md#the-comment-adjudication-cursor) past it in that SAME body edit — the
+  cursor](security/adjudication.md#the-comment-adjudication-cursor) past it in that SAME body edit — the
   cursor adjudicates comments, so a body-only path has nothing to advance past. Never
   comment-only, for the same reasons the bullet above already gives
   (`checkAcDriftBeforeDrive`, `needs-human`, rebaseline).

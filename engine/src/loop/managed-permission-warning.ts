@@ -2,7 +2,7 @@
 // the codex re-review finding on PR #553 (#534) — a target's managed settings can set
 // `allowManagedPermissionRulesOnly: true`, which voids EVERY CLI-argument permission rule this
 // engine passes (`--disallowedTools`/`--allowedTools`: the blanket Bash deny, the Write/Edit/
-// MultiEdit deny, the Agent/Task spawn deny — see docs/security.md's own exception paragraph).
+// MultiEdit deny, the Agent/Task spawn deny — see docs/security/role-sessions.md's own exception paragraph).
 // Ruling: no startup refusal, no needs-human escalation — just one engine-log warning per start,
 // naming both operator exits. Fail-open (no warning, no error) when managed settings are
 // absent/unreadable, which is the normal, unmanaged host — zero behavior change there.

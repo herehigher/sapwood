@@ -20,7 +20,7 @@
 //      BLOCK fail-closed (a worker could hide anything inside them).
 //   4. gh-overreach semantic check.
 //   5. (#679) raw git-transport `git push` reaching the default branch — same producer≠merger
-//      boundary as step 4, active only when defaultBranch is set (see docs/security.md).
+//      boundary as step 4, active only when defaultBranch is set (see docs/security/credential-tiers.md).
 // For Write/Edit tools: deny writes to the guard's boundary files.
 // For Read/Grep/Glob/NotebookRead (#235 PR-A): confine the resolved target path to the session's
 // worktree, when the engine told us what that worktree is (worktreeRoot param — see below).
@@ -528,7 +528,7 @@ function scanGhOverreach(tokens: string[]): string | null {
 // Blocks `git push` whose destination reaches `defaultBranch`, at the git-transport layer
 // (Category C above only covers the `gh` layer). Active only when `defaultBranch` is non-empty
 // (SAPWOOD_DEFAULT_BRANCH, engine-set at spawn, never worker-writable). Not a replacement for
-// GitHub branch protection — that's the backstop of record (DR #616), see docs/security.md.
+// GitHub branch protection — that's the backstop of record (DR #616), see docs/security/credential-tiers.md.
 const GIT_GLOBAL_VALUE_FLAGS = new Set(["-C", "--git-dir", "--work-tree", "--namespace", "-c", "--exec-path"]);
 
 /** Skip `git`'s own global flags (e.g. `git -C dir push ...`) so the subcommand check below
@@ -1043,7 +1043,7 @@ function checkBashWritePath(tokens: string[], cwd: string): string | null {
 // Read, so the guard never even saw the call, and `/etc/hosts` / `../`-traversal reads to
 // arbitrary host files both succeeded (permission_denials: []). Real FS isolation would
 // need `--bare`, which disables hooks entirely — ruled out for production dispatch
-// (docs/security.md "Benchmark isolation recipe"). So containment has to be this guard's
+// (docs/security/review-session-mode.md "Benchmark isolation recipe"). So containment has to be this guard's
 // job, the same way Write/Edit boundary-file protection already is.
 //
 // Read/Grep/Glob/NotebookRead all resolve to a single filesystem target: Read's `file_path`

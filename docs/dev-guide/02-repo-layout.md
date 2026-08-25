@@ -62,6 +62,7 @@ sentinel paths internally; the command file never touches `.sapwood/` directly.
 | `docs/guide/getting-started.md` | Operators installing and starting sapwood. |
 | `docs/guide/configuration.md` | Operators configuring all supported keys. |
 | `docs/security.md` | Operators and reviewers evaluating trust boundaries and controls. |
+| `docs/security/` | Per-mechanism security reference pages linked from `docs/security.md`'s "Mechanism reference" table. |
 | `docs/reference/role-paradigm.md` | Designers and implementers of autonomous roles. |
 | `docs/PLAN.md` | Architecture, durable decisions, and planned capabilities. |
 | `docs/reference/loop-walkthrough.md` | Behavioral reference for round, tick, state, and UI truth. |

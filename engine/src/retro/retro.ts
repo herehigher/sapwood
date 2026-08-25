@@ -75,7 +75,7 @@ import { buildRetroDigest, gatherRetroPRLifecycle, PR_TOUCHED_EVENT_KINDS } from
  *  worker leg does. The `peripheral.ts:244`-class caveat applies: an attached forge proxy is
  *  retro's only ENGINE-GRANTED forge reach, but an inherited ambient MCP server is a separate,
  *  unsealed channel this allow/deny list (and the guard hook's Bash/file-tool matcher) does not
- *  cover — see docs/security.md's worker-egress blind-spot section.
+ *  cover — see docs/security/egress.md's worker-egress blind-spot section.
  *
  *  #235 PR-B: `Grep`/`Glob` added alongside the `Read` this role already carried — the same
  *  "explicit ALLOW for ALL peripheral roles" ruling peripheral.ts's ROLE_ALLOWED_TOOLS doc

@@ -647,11 +647,11 @@ for (const command of [
 // the alias-injection check to recognize `p` as `push` here would require modeling git's own
 // config resolution, not scanning one more token spelling — the same class of boundary
 // checkControlSentinelArg's "hardcoded path in a script" residual already accepts. GitHub branch
-// protection (DR #616) is the backstop of record for this class; see docs/security.md's #679
+// protection (DR #616) is the backstop of record for this class; see docs/security/credential-tiers.md's #679
 // section, "argv-visible forms only" paragraph. Pinned here, deliberately, as a KNOWN ALLOW —
 // not a silent gap: a future reader (or a future gate②) should see this was a decided boundary,
 // not an oversight.
-test("KNOWN RESIDUAL (#679 gate② round 2, PM-ruled accepted — see docs/security.md): a PRE-PERSISTED git-config alias is not detected by an argv scan — the guard sees only 'git p ...', never the earlier 'git config alias.p push' that made 'p' mean 'push'", () => {
+test("KNOWN RESIDUAL (#679 gate② round 2, PM-ruled accepted — see docs/security/credential-tiers.md): a PRE-PERSISTED git-config alias is not detected by an argv scan — the guard sees only 'git p ...', never the earlier 'git config alias.p push' that made 'p' mean 'push'", () => {
   const d = bashDefaultBranch("git config alias.p push && git p origin HEAD:main");
   assert.equal(d.allow, true, "documented residual — accepted by PM ruling, not a regression");
 });

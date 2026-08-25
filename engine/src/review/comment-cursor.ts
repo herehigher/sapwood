@@ -7,7 +7,7 @@
 // its comment thread before the engine spent on gate⓪ review or dispatch. This module is that
 // check, expressed as a pure function of (body, comment stream) — no forge/state I/O of its own,
 // same pure/impure split as ac-snapshot.ts (the sibling "existing body drift" mechanism this
-// extends: see docs/security.md's "AC-authority dispatch snapshot" section).
+// extends: see docs/security/adjudication.md's "AC-authority dispatch snapshot" section).
 //
 // MARKER: `<!-- sapwood:comments-adjudicated-through: <comment-id> -->` in the issue body.
 // Semantics: "a maintainer has adjudicated every comment at or before this one" (adjudicated =
@@ -25,7 +25,7 @@
 // must not silently pass). A missing marker with ZERO comments is the one pass-through case
 // (AC8's reverse test: behavior-identical to today — no new writes, labels, or outcome changes;
 // the checkpoints that consume this module's result DO add comment/actor reads, see
-// docs/security.md).
+// docs/security/adjudication.md#the-comment-adjudication-cursor).
 //
 // #703 v2 (POSITION SEMANTICS, supersedes the pre-v2 engine-comment rejection): a cursor pointing
 // at an ENGINE comment is now a VALID position, exactly like one pointing at a non-engine
@@ -41,7 +41,7 @@
 // only when it is the ENTIRE trimmed line, and never inside a fenced (``` / ~~~) code block. A
 // quoted/inline-code example (e.g. an issue body that shows the marker syntax to a maintainer,
 // or a review comment quoting a PAST marker) must never parse as authoritative — see
-// `findStandaloneMarkerValues` below and docs/security.md's "standalone-line" convention.
+// `findStandaloneMarkerValues` below and docs/security/adjudication.md's "standalone-line" convention.
 import { createHash } from "node:crypto";
 
 /** A marker candidate is recognized only when, after trimming, it is the ENTIRE line — prose or

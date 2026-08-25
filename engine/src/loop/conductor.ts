@@ -174,7 +174,7 @@ export type DrainReason = CeilingReason | "stop-signal" | "emergency-stop";
 // wall clock is a per-process attention alarm, not a security boundary. The crash-loop case the
 // gap heuristic defended against is now handled by the rapid-restart detector
 // (loop/rapid-restart.ts) + the #382 single-instance lock, with the supervisor's own
-// circuit-breaker as a documented PREREQUISITE (docs/security.md).
+// circuit-breaker as a documented PREREQUISITE (docs/security/cost-ceilings.md).
 
 /** Pure ceiling check — daily USD cap + wall-clock cap ONLY. #69: the kill switch is no
  *  longer one of these reasons; it's checked once, at the very top of tick(), before this

@@ -258,7 +258,7 @@ export function resolveSkillsPluginDir(
  *  something inferred from call-site plumbing. A review-mode session (materialized, closed-MCP,
  *  gate② read-only tree) is the ONE exclusion — mirrors RoleRunner.run()'s existing
  *  `reviewMode ? {} : {worktree: name}` pattern for the same reason: a review session's tool
- *  profile and execution surface are hardcoded and closed by design (docs/security.md's "Review
+ *  profile and execution surface are hardcoded and closed by design (docs/security/review-session-mode.md's "Review
  *  session mode" section), and a skill is one more thing for a session to invoke — out of scope
  *  for a session that must do nothing but read and judge. */
 export type SkillsSessionKind = "worker-dispatch" | "worker-resume" | "worker-fix-entry" | "peripheral-role" | "review";

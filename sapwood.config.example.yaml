@@ -88,7 +88,7 @@ worker:
 
 # host: the --permission-mode requested for every claude session the engine spawns (worker legs
   #       and every peripheral role session alike). See docs/guide/configuration.md's "host" section /
-  #       docs/security.md's "Execution profiles" section for full semantics.
+  #       docs/security/execution-profiles.md's "Execution profiles" section for full semantics.
 # host:
 #   permissionMode: auto # default: auto — unchanged classifier-reviewed behavior; "dontAsk"
     #                      # only runs an explicitly allowed/read-only/guard-approved action;
@@ -375,7 +375,8 @@ merge:
 #   instructionPaths: [CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md, .claude/rules/**, AGENTS.md,
 #                      engine/prompts/**, engine/src/forge/forge.ts, engine/src/proxy/**,
 #                      engine/src/review/instruction-path-escalation.ts,
-#                      engine/src/config/config.ts, sapwood.config.example.yaml, docs/security.md, engine/src/roles/skills-plugin.ts,
+#                      engine/src/config/config.ts, sapwood.config.example.yaml, docs/security.md,
+#                      docs/security/**, engine/src/roles/skills-plugin.ts,
 #                      engine/src/forge/labels.ts]
 
 # notify:
