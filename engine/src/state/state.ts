@@ -365,8 +365,13 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
   // not gate" contract as round_artifacts. `ok=0` + `detail` covers a failed read (goal file
   // unreadable, backlog read failed); `total/rendered/omitted/truncated` cover a bounded
   // digest's pack (align.ts's packDigestRecords) — null/0 for a channel with no meaningful count
-  // (e.g. a single-file read). `version` is a short content hash (align.ts's contentVersion) so
-  // two successful attempts can still be told apart.
+  // (e.g. a single-file read), though NOT every multi-count channel is a digest: #1089's
+  // architect.ts `architecture-chapter` channel counts a goal file's two FIXED sections
+  // (Constraints, Architecture) the same way — total=2, rendered = sections actually found,
+  // omitted = 2 - rendered — and `detail` on that channel doubles as an `ok=1` content-shape
+  // note (which section, if any, was missing) rather than only a failure reason. `version` is a
+  // short content hash (align.ts's contentVersion) so two successful attempts can still be told
+  // apart.
   //
   // #231 gate② (Codex sol high F5): `CHECK (attempt > 0)` and a UNIQUE index on the full
   // dimension key make a caller bug (a zero/negative attempt, or two rows for the exact same
@@ -1439,7 +1444,10 @@ export interface InputManifestRow {
    *  failed read, or a channel with no content of its own). */
   version?: string | null;
   /** Bounded-digest pack counts (align.ts's packDigestRecords) — null for a channel that isn't
-   *  a multi-record digest (e.g. a single-file read uses total=1/rendered=1|0/omitted=0|1). */
+   *  a multi-record digest (e.g. a single-file read uses total=1/rendered=1|0/omitted=0|1). Not
+   *  every multi-count channel is a digest pack, though: architect.ts's `architecture-chapter`
+   *  channel counts the goal file's TWO fixed sections (Constraints, Architecture) — total=2,
+   *  rendered = how many were actually found (0 on a failed read), omitted = 2 - rendered. */
   total?: number | null;
   rendered?: number | null;
   omitted?: number | null;
@@ -1452,7 +1460,10 @@ export interface InputManifestRow {
    *  exactly the fabricated-success-claim this three-state shape replaces (a caller that doesn't
    *  know must not claim it does). */
   truncated?: boolean | null;
-  /** Free-text detail — a failure reason on `ok: false`, otherwise unset. */
+  /** Free-text detail — a failure reason on `ok: false`. Also usable on `ok: true` for a
+   *  content-shape note that isn't itself a failure (e.g. architect.ts's `architecture-chapter`
+   *  channel names which of its two fixed sections wasn't found when the read succeeded but a
+   *  heading was missing); otherwise unset. */
   detail?: string | null;
 }
 
