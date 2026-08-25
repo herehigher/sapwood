@@ -264,54 +264,21 @@ code-producing worker deliberately retains spawn capability** — `WORKER_DISALL
 (`worker.ts::WORKER_DISALLOWED_TOOLS`) does not deny `Agent`/`Task` — so "role sessions cannot
 spawn subagents" names a peripheral-role-and-gate②-reviewer boundary, never a sapwood-wide one.
 
-**The worker's decision, and why it differs from the peripheral-role deny above, honestly stated.**
-That earlier deny
-cost nothing — a peripheral role's observed spawn was pure circumvention of its own deliberate
-lack of a shell, zero legitimate benefit. Subagent use is a mainline coding capability for the
-worker (parallel sub-reads on a large refactor), so denying it has a real cost, and the
-separation-of-duties boundary holds regardless of the answer: the guard hook rides in via
-`--settings` and its PreToolUse fires on a child's tool calls too, so `WORKER_DISALLOWED_TOOLS`'
-merge/approve/ready/label/project denies are inherited by anything a worker spawns. This was
-never a producer≠merger hole; it is a soft-budget accounting question, decided as follows:
-**keep spawn enabled, and accept the soft-budget overshoot it opens as a documented, unbounded
-blind spot** — no new poll-tightening or child-cost-accounting machinery, per this repo's
-marginal-complexity rule (`docs/PLAN.md`), because a live measurement (below) shows the overshoot
-is small relative to a worker leg's own budget, not because the blind spot is bounded by any code
-in this engine.
-
-The concrete mechanism: `checkSoftBudget()`/`liveTelemetry()` (`worker.ts`) re-derive the running
-spend estimate by re-parsing **one file**, `lane.jsonlPath` — the parent session's own
-stream-json transcript. Claude Code's CLI writes a spawned subagent's entire turn history
-(its own `assistant`/`user`/`tool_use` lines, token usage included) to a **separate** file —
-observed on disk as `<parent-session-dir>/subagents/agent-<id>.jsonl` — that neither
-`checkSoftBudget` nor `liveTelemetry` ever reads. The parent's own jsonl gains exactly one small
-`assistant` entry for the turn where it issues the `Agent`/`Task` tool call, and one more once the
-tool result returns; every token the child itself spent in between is structurally invisible to
-the live estimator for the child's entire lifetime — not a one-poll delay, a complete gap bounded
-only by how long the child runs.
-
-**Live measurement:** one real subagent call (`Explore`
-agent type, a research task comparable to ordinary worker sub-reads) spent 30 input + 1,268
-output + 125,616 cache-creation + 384,230 cache-read tokens over ~37.5 wall-clock seconds
-(15 of its own `assistant` turns) — roughly **$0.61** at this repo's shipped `sonnet` rate
-(`engine/pricing.yaml`). The parent's own jsonl recorded the dispatching tool_use at T+0 and the
-next line — the tool_result, once the child fully finished — 43 seconds later: zero new assistant
-lines from the parent in between, the entire 37.5s child run included.
-Against the dogfooded `opus`/`high` worker-leg soft budget of $8–20 (`docs/guide/configuration.md`),
-one subagent call is roughly 3–8% of the whole per-leg budget — small enough that
-accepting it unbounded, rather than building accounting for it, is the marginal-complexity call.
-
-**Stated honestly, not overclaimed:** this measurement covers ONE sequential subagent call. A
-worker that fans out several/many children concurrently (the CLI has no cap sapwood imposes) can
-accumulate a correspondingly larger invisible total — nothing in this engine bounds that other
-than the worker's own prompted behavior, which today does not direct large fan-outs. The existing
-`egress-suspect` event (`worker.ts`) already logs every `Agent`/`Task` tool_use a worker
-leg makes, but for network-egress containment, not cost — it is not a cost-accounting signal and
-this decision does not lean on it as one. If a future dogfood round measures a worker leg whose
-subagent fan-out meaningfully erodes the soft budget's purpose (frequent late handoffs, or spend
-well past `budgetUsdSoft` before the next graceful SIGTERM), that is the trigger to revisit this
-as a bounding problem (tighter `heartbeatMs`, or summing `subagents/*.jsonl` into
-`liveTelemetry()`) — not a reason to have built that machinery pre-emptively today.
+**The worker keeps spawn capability; the resulting soft-budget overshoot is accepted, not bounded.**
+Subagent use is a mainline coding capability for the worker (parallel sub-reads on a large
+refactor); the separation-of-duties boundary holds regardless of the answer, since the guard
+hook's PreToolUse fires on a spawned child's tool calls too, so `WORKER_DISALLOWED_TOOLS`'
+merge/approve/ready/label/project denies are inherited by anything a worker spawns. What a worker
+spawns is a soft-budget accounting gap, not a producer≠merger hole: `checkSoftBudget()`/
+`liveTelemetry()` (`worker.ts`) estimate running spend by re-parsing only the parent session's own
+`lane.jsonlPath`, never the separate `subagents/agent-<id>.jsonl` file Claude Code's CLI writes
+for a spawned child's own turn history — so a child's spend is structurally invisible to the live
+estimator for its entire lifetime, not a one-poll delay. This is an accepted, **unbounded** blind
+spot (no poll-tightening or child-cost-accounting machinery), a marginal-complexity call
+(`docs/PLAN.md`) grounded in a live measurement showing one sequential subagent call costs roughly
+3–8% of a worker leg's own soft budget — see [the design record](../design/security-issues-only-derivations-2026-08.md#origin-issues-only-role-sessions--the-workers-spawn-capability-decision-and-its-cost-measurement)
+for the measurement and the full argument, including why a worker fanning out several/many
+children concurrently is not covered by that measurement.
 
 Every `RoleRunner` session is additionally spawned without forge credentials:
 `peripheralSessionEnv()` in `peripheral.ts` strips inherited `GH_*`,
@@ -390,21 +357,20 @@ tool from this proxy** (deny-by-default, regression-tested, scoped to the proxy'
 `mcp__forge__*` namespace only — it says nothing about an ambient host MCP server a session may
 separately inherit under host-delegated capability management, see the worker-egress blind-spot section):
 
-| Role | Tools granted |
-| --- | --- |
-| `po-pool` / `po-align` / `po-triage` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
-| `harvest` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
-| `architect` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
-| `verification-plan-reviewer` / `verification-plan-drafter` / `verification-plan-reviewer-confirm` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
-| `retro` | `issue_details`, `issue_comments`, `issue_relations`, `search_issues` |
-| `worker` (the fix-loop leg's PR-review evidence channel) | `pr_details`, `pr_reviews`, `pr_review_threads`, `pr_checks`, `pr_audit_comments`, `pr_failed_checks` |
-| *(any other role id)* | none — deny-by-default |
+Nine issues-only peripheral roles (`po-pool`/`po-align`/`po-triage`, `harvest`, `architect`,
+`verification-plan-reviewer`/`verification-plan-drafter`/`verification-plan-reviewer-confirm`,
+`retro`) each get the same four read-only issue tools; `worker` (the fix-loop leg's PR-review
+evidence channel) gets the PR-facing tool set instead; any other role id gets none. The exact
+tool names, the deny-by-default fallback, and the frozen-matrix invariant live in
+`proxy/access.ts`'s `PROXY_ROLE_TOOL_MATRIX` / `allowedToolsForRole`, regression-tested in
+`access.test.ts` ("every issue-oriented peripheral role gets exactly ISSUE_TOOLS", "the fix-loop
+worker leg gets exactly PR_TOOLS", "deny-by-default — an unrecognized role gets NO tool", "every
+entry is a subset of the fixed tool algebra, and the matrix is frozen").
 
-**This ten-role grant is deliberate, not an oversight to narrow.** Every one of these tools is
-read-only and costs nothing when a session never calls it, and a measured zero-call count is not
-evidence that a grant is unneeded: zero calls means the role's TASK never asked for a
-lookup, not that the capability itself has no use — the lever for changing that is the task step
-a prompt gives the role, not the grant it holds.
+**This ten-role grant is deliberate, not an oversight to narrow**: a measured zero-call count on
+any one role is not evidence the grant is unneeded — see [the design
+record](../design/security-issues-only-derivations-2026-08.md#origin-the-forge-mcp-proxys-role-x-tool-matrix--the-ten-role-grant-is-deliberate)
+for the argument.
 
 **`WorkerSupervisor.resume()` also attaches a proxy.** A fix leg is a *resumed* leg (same worker
 row/worktree/branch/session — see
@@ -465,14 +431,14 @@ boundary section below).** `workerCredentialFreeEnv` closes `gh`'s and git's OWN
 paths, and the MCP seal above closes the ambient-MCP gap — together they do NOT structurally
 confine what arbitrary code run under this lane's `Bash(node *)`/`Bash(npm *)` grant can read off
 disk — a fix leg genuinely needs those grants to run its own test suite, and it still executes with
-the operator's REAL `$HOME`. A live proof-of-concept (`node steal.mjs`, a script invoked through
-exactly that grant) read `~/.config/gh/hosts.yml` directly and reached GitHub with the credential
-found there, bypassing every env var `workerCredentialFreeEnv` touches entirely — filesystem
-access is orthogonal to environment-variable redirection AND to the MCP seal, and no amount of
-either closes it. Two mitigations this repo deliberately does NOT attempt: **HOME isolation**
-(redirecting `$HOME` would break the `claude` CLI's own config/auth, which the lane also needs
-merely to run) and **stripping `Bash(node *)`/`Bash(npm *)`** (a fix leg's whole job requires
-running tests). The upgrade path for a boundary that's actually closed is **OS-level sandboxing**
+the operator's REAL `$HOME`. A live proof-of-concept (`steal.mjs`) confirmed this residual is real,
+not theoretical — reaching GitHub with a credential read directly off disk, bypassing every env var
+`workerCredentialFreeEnv` touches: filesystem access is orthogonal to environment-variable
+redirection AND to the MCP seal, and no amount of either closes it. Two mitigations this repo
+deliberately does NOT attempt (HOME isolation; stripping `Bash(node *)`/`Bash(npm *)`) are
+recorded, with the PoC itself, in [the design
+record](../design/security-issues-only-derivations-2026-08.md#origin-honest-scope--this-is-not-full-isolation--the-stealmjs-proof-of-concept-and-rejected-mitigations).
+The upgrade path for a boundary that's actually closed is **OS-level sandboxing**
 (container/chroot/Landlock-style filesystem confinement, available as the operator-configured
 Bash-sandbox recipe — see [Execution
 profiles](execution-profiles.md#execution-profiles-host-permission-mode--bash-sandbox) below) or running fix legs
@@ -502,17 +468,11 @@ paragraph), a producer leg in round N can in principle write `~/.claude/settings
 (permission grants, hooks, or an `apiKeyHelper`), and every LATER worker leg — any lane, any round
 — inherits whatever that write left behind.
 
-**Startup detection and disclosure is what ships (arm 2).** Two other arms were considered and rejected for this specific vector:
-
-- **Arm (1), pinning `--setting-sources` on worker legs** — ruled out. A prior measurement already
-  found that `--setting-sources ""` also stops the repo's own `CLAUDE.md` from loading, which
-  collides with the locked ruling below ("ambient repo context: record, don't seal"). A partial
-  source list (e.g. `"project,local"`) is unproven and carries a named `apiKeyHelper`-breakage
-  risk on hosts whose Claude auth lives in user settings — config-gating that would add a new
-  config key and a host-compatibility matrix for a vector the L1 direction (worker =
-  transport-only deploy key) is independently shrinking.
-- **Arm (3), documentation alone** — insufficient on its own: the vector is producer-influenceable
-  across rounds, which warrants observability, not prose alone.
+**Startup detection and disclosure is what ships (arm 2).** Two other arms — pinning
+`--setting-sources` on worker legs, and documentation alone — were considered and rejected for
+this specific vector; see [the design
+record](../design/security-issues-only-derivations-2026-08.md#origin-worker-leg-user-settings-persistence-vector--arms-considered-and-rejected)
+for why.
 
 **What shipped:** `engine/src/loop/user-settings-watch.ts`'s `createUserSettingsWatch` —
 constructed once at engine startup (both drivers, `cli.ts`), it snapshots/hashes the operator's
@@ -595,94 +555,37 @@ route in.
 
 ### Fix-loop `fixing` lane state
 
-Routing review findings (`HANDLE_THREADS`) straight to `needs-human` (`merge-driver.ts`'s
-`deriveGate`) would ask a human to *resolve* a review, inverting the autonomy principle
-(humans adjudicate reviews, they never resolve them). Instead, the producing worker gets its own
-lane state to address findings itself, *before* human escalation, without ever handing it a new
-dispatch or forge credentials:
+The producing worker gets its own lane state to address review findings itself, before human
+escalation, without ever handing it a new dispatch or forge credentials — routing findings
+straight to `needs-human` would ask a human to *resolve* a review rather than adjudicate it; see
+[the design
+record](../design/security-issues-only-derivations-2026-08.md#origin-fix-loop-fixing-lane-state--why-a-new-lane-state-instead-of-needs-human)
+for the fuller argument.
 
-- **New `WorkerState`: `fixing`.** `driving` (holds a PR awaiting gate①/gate②) → `fixing` (a
-  LIVE fix-leg worker process reworking that same PR) → back to `driving` once the fix leg
-  reaches a terminal outcome. `state.ts`'s `activeWorkers()` counts `running + driving + fixing`
-  — a fixing lane occupies capacity exactly like the other two. The actual gate decision that
-  triggers `driving → fixing` (deriving `FIXABLE` from a live review verdict) is a separate
-  mechanism; this lane state provides the machinery and the seam (`conductor.ts`'s `startFixLeg`)
-  that decision calls once made.
-- **Fix leg = `resume()`, never a new `dispatch()`.** `startFixLeg` reuses the resume
-  machinery outright — same worker row, same worktree/branch/session lineage — specifically to
-  avoid the squash-branch-reuse hazard a fresh dispatch against this lane's (possibly-stale,
-  possibly-ahead) head would create. The fix leg's prompt (`worker.fixPromptFile`, engine-shipped
-  default `prompts/fix.md` — same config pattern as `worker.promptFile`) instructs the
-  worker to pull its own PR's review findings and CI-failure evidence via the PR-facing proxy
-  tools (`pr_review_threads`/`pr_reviews`/`pr_checks`/`pr_details`/`pr_failed_checks`) — never via
-  findings or CI-log text relayed through the prompt itself (no prompt-injection transport;
-  `pr_failed_checks`' response is framed as untrusted CI/log data, same stance as every other
-  externally-influenceable proxy read).
-- **`fix_rounds`** is a new per-PR counter (`workers.fix_rounds`, schema v18→v19), counting
-  rework rounds — deliberately independent of `resume_attempts` (the continuation-leg
-  counter): one axis is "how many times did this PR need fixing", the other is "how many budget-
-  exhaustion handoffs did one leg need" — they never share a counter, and a lane can spend both
-  independently.
-- **The `fixing` → `driving` edge clears the review-trigger pin** (`review_triggered_head`/`at`
-  reset to `null`), reusing `MergeDriver.driveOne`'s own re-trigger machinery to force a fresh
-  review on the fix leg's new head — the same shape as the engine's existing gated-PR reentry.
-- **Supervision**: a `fixing` lane is a live worker process, so the SAME heartbeat/timeout/soft-
-  budget supervision and crash-safety machinery (`reclaimTerminalLane`, dirty-worktree retention,
-  the kill-switch drain) applies to it as to a `running` lane. It is NOT scanned by the DRIVE
-  loop (`state.drivingWorkers()` excludes `fixing` rows by construction), which is also why
-  the review-silence escalation structurally cannot arm while a lane is fixing — that clock
-  only ever fires from inside the DRIVE loop.
-- **Narrowed `gatedFailedWorkers()` semantics**: with the `FIXABLE` gate wired in, ordinary
-  review findings no longer produce a `failed`+PR row at all (they route to `fixing` instead) —
-  the only remaining producer of that shape is the `fix_rounds` cap escalation. Findings no
-  longer masquerade as `failed`.
-- **Adjudicated findings do not re-consume fix rounds.** Gate② tracks each review thread's span
-  (`path`/`line`/`originalLine`), GitHub's own `isOutdated` staleness field, and a
-  whitespace-normalized digest of the originating comment identifying which finding the thread is
-  about, all from the same paged read that already produces the blocking-thread count. An
-  unresolved thread carrying the same finding at the same span as an already-resolved thread
-  whose code has not moved since is an *adjudicated re-raise* and is excluded from the blocking
-  count — keyed on (finding, span), never a thread id (a re-raise always arrives as a brand-new
-  thread) and never a span alone (two unrelated findings can share a line). A resolved thread
-  whose code changed after resolution still reads as outdated and blocks again; an unresolved
-  thread with no prior adjudication on its span still blocks; a standing `CHANGES_REQUESTED`
-  still blocks; a review submitted against a non-current head is excluded from both halves of the
-  gate. Both exclusions are named in the `FIXABLE` outcome's own reason — a filter that silently
-  shrank gate② input would be exactly the invisible weakening this mechanism exists to avoid.
-- **Precedence when more than one fix-loop signal fires on the same tick: verdict-rerun →
-  convergence-stalled → cap.** A byte-identical rerun (its own fix leg already ran and pushed
-  nothing) wins outright regardless of measured progress; a stalled lane
-  (`review/convergence.ts`'s progress classifier) escalates to `needs-human` before paying
-  another fix round; `lanes.prFixCap` remains the cost backstop for a lane still genuinely
-  converging.
-- **A driving lane's fix leg is exempt from `cost.roundBudgetUsd` outright.** An already-open PR
-  has no completion path other than merge or fix — there is no "abandon the PR" outcome — so
-  gating a fix leg on round spend could wedge a round forever once spend crossed the cap while a
-  PR still needed rework. `cost.roundBudgetUsd` gates *new* dispatch only; a fix leg remains
-  bounded by the three other, pre-existing limits: `lanes.prFixCap` (attempts, above),
-  `worker.budgetUsdSoft` (the leg's own per-worker graceful-handoff ceiling), and
-  `cost.dailyBudgetUsd` (the hard daily ceiling — deliberately NOT exempted, since it is the
-  actual safety boundary against runaway spend, not a per-round pacing device). The exemption is
-  uniform across every round/run-level stop reason, not just the spend cap: once
-  `roundBudgetUsd`/`roundDispatchCap`/a round milestone/a `stop.*` condition fires, further
-  dispatch waves freeze via the same "no new dispatch this round" signal (never a human pause),
-  and a fix leg on an already-open PR is never "new dispatch" either way — new DISPATCH itself
-  stays fully frozen regardless. **A fix leg's admission gate reads the genuine `.sapwood/PAUSE`
-  sentinel only, never `forceDispatchPause`.** DISPATCH and RESUME's own admission checks OR the
-  two together into one wider flag (`conductor.ts`'s `paused`), but the fix-leg admission gate
-  (`fixLegAdmissionBlockReason`) deliberately reads the narrower `humanPauseOnly` —
-  `state.isPauseActive()` alone. So a round/run-level stop condition firing never blocks a fix
-  leg on its own, while a human-set `.sapwood/PAUSE` still does, exactly like it blocks new lane
-  dispatch — see [Human controls](../security.md#human-controls-three-tiers) below.
-- **Terminal-for-drain under the `KILL_SWITCH` bounded drain.** A `driving` lane has no live
-  process for the drain to hand off or kill, so left alone it could sit untouched for as long as
-  the switch stayed active. Three cases: a `driving` lane that is daily-budget-blocked or
-  fix-rounds-capped is escalated to `needs-human` past the same bounded `cost.drainWindowSec`,
-  exactly like a hard-killed running/fixing lane, so the engine always exits within the drain
-  window; a `driving` lane that has never needed a fix leg (MERGE-/WAIT-gated) is left alone —
-  it isn't stuck for a budget reason, and resumes the instant the breach/switch clears; and a
-  lane whose CI-pending pin is already past `ci.pendingEscalateAfterSec` is terminal-for-drain
-  too, in BOTH drain arms — the kill-switch heuristic's own input and the ceiling path's observed
-  set — because gate① being permanently stuck is exactly "can never make forward progress," and
-  it is invisible in `fix_rounds` (such a lane has spent none). A pin that is merely fresh stays
-  a healthy WAIT.
+| Invariant | Enforcement | Test |
+| --- | --- | --- |
+| A `driving` lane (holding a PR awaiting gate①/gate②) transitions to `fixing` (a live fix-leg worker process reworking that PR) and back to `driving` on a terminal outcome; `fixing` occupies dispatch capacity exactly like `running`/`driving`. | `state.ts::activeWorkers`; `conductor.ts::startFixLeg` | `conductor.test.ts`: "startFixLeg: transitions driving -> fixing, bumps fix_rounds, resumes the SAME lane (never a fresh dispatch — squash-branch-reuse hazard)" |
+| `fix_rounds` (rework rounds) and `resume_attempts` (budget-exhaustion handoffs) are independent counters — starting a fix leg never touches `resume_attempts`. | `state.ts` schema v18→v19 (`workers.fix_rounds`); `conductor.ts::startFixLeg` | `conductor.test.ts`: "startFixLeg: fix_rounds is independent of resume_attempts" |
+| The `fixing → driving` edge clears the review-trigger pin (`review_triggered_head`/`_at` reset to `null`), forcing a fresh review on the fix leg's new head. | `conductor.ts` (`fixingPinClear`) | `conductor.test.ts` (transitions covered by `fixingPinClear`) |
+| A `fixing` lane is a live worker process under the SAME heartbeat/timeout/soft-budget supervision as `running`, but is invisible to the DRIVE loop — the structural reason the review-silence escalation cannot arm while a lane is fixing. | `state.ts::drivingWorkers` / `fixingWorkers` | `state.test.ts`: "fixingWorkers returns only state=fixing rows, disjoint from drivingWorkers"; `conductor.test.ts`: "#170 review-silence escalation is provably NOT armed during `fixing`" |
+| With the `FIXABLE` gate wired in, ordinary review findings route to `fixing` instead of producing a `failed`+PR row — the only remaining producer of that shape is the `fix_rounds` cap escalation. | `state.ts::gatedFailedWorkers` (narrowed semantics) | `conductor.test.ts` (`gatedFailedWorkers()` assertions around the fix-rounds-cap escalation) |
+| An unresolved review thread at the same (finding digest, span) as an already-resolved, non-outdated thread is an adjudicated re-raise, excluded from the blocking count — keyed on (finding, span), never a thread id or a bare span alone. | `reviewer.ts::adjudicatedDuplicateThreads` | `reviewer.test.ts` (`adjudicatedDuplicateThreads` fixtures) |
+| Same-tick fix-loop precedence is verdict-rerun → convergence-stalled → cap: a byte-identical rerun wins outright; a stalled lane escalates before another fix round; `lanes.prFixCap` backstops a lane still genuinely converging. | `conductor.ts` (verdict-rerun breaker); `review/convergence.ts` (progress classifier) | `conductor.test.ts`: "verdict-rerun breaker — a SECOND fixable for the SAME engine-agent verdictRunId dispatches NO fix leg" |
+| A driving lane's fix leg is exempt from `cost.roundBudgetUsd` (which gates NEW dispatch only) but stays bounded by `lanes.prFixCap`, `worker.budgetUsdSoft`, and the hard `cost.dailyBudgetUsd`, deliberately NOT exempted. | `conductor.ts` (fix-leg admission path) | `conductor.test.ts`: "#375: fixable + round budget exceeded -> the fix leg is EXEMPT from cost.roundBudgetUsd" |
+| A fix leg's admission gate reads the genuine `.sapwood/PAUSE` sentinel only (`humanPauseOnly`), never the wider `forceDispatchPause`/round-stop OR'd flag DISPATCH/RESUME use — a round-level stop never blocks a fix leg alone, a human PAUSE still does (see [Human controls](../security.md#human-controls-three-tiers)). | `conductor.ts::fixLegAdmissionBlockReason` | `conductor.test.ts`: "forceDispatchPause ALONE ... does NOT block a FIXUP dispatch"; "a GENUINE human PAUSE sentinel ... still blocks a FIXUP dispatch" |
+| Under the `KILL_SWITCH` bounded drain, a `driving` lane that is daily-budget-blocked, fix-rounds-capped, or CI-pending past its ceiling is terminal-for-drain past `cost.drainWindowSec`; a lane that never needed a fix leg (MERGE-/WAIT-gated) is left alone. | `conductor.ts::drivingLaneTerminalForDrain` | `conductor.test.ts`: "a driving lane mid-fix-loop ... blocked ONLY by the daily-budget ceiling is TERMINAL-for-drain too"; "a driving lane that never needed a fix leg ... is left alone" |
+
+**Boundaries**
+
+- The fix leg's prompt (`worker.fixPromptFile`, default `prompts/fix.md`) instructs the worker to
+  pull its own PR's review findings and CI-failure evidence via the PR-facing proxy tools
+  (`pr_review_threads`/`pr_reviews`/`pr_checks`/`pr_details`/`pr_failed_checks`), never via findings
+  or CI-log text relayed through the prompt itself — no prompt-injection transport;
+  `pr_failed_checks`' response is framed as untrusted CI/log data.
+- A resolved thread whose code changed after resolution still reads as outdated and blocks again;
+  an unresolved thread with no prior adjudication on its span still blocks; a standing
+  `CHANGES_REQUESTED` still blocks; a review against a non-current head is excluded from both
+  halves of the gate. Both exclusions are named in the `FIXABLE` outcome's own reason.
+- The `roundBudgetUsd` exemption is uniform across every round/run-level stop reason: once any
+  stop condition fires, new DISPATCH freezes, but a fix leg on an already-open PR is never "new
+  dispatch" either way.
