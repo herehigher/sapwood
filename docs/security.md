@@ -2616,24 +2616,25 @@ LLM in the loop, keyed on one body marker: `<!-- sapwood:comments-adjudicated-th
 meaning "a maintainer has adjudicated every comment at or before this one." Pure marker parsing and
 pending-comment computation live in `comment-cursor.ts`; the impure fetch/escalate half lives in
 `comment-cursor-gate.ts`; both are wired into engine-side checkpoints at gate⓪, dispatch, drive,
-and fix-leg spawn — all running before a worker is ever dispatched, none touching the worker's
-own prompt.
+and fix-leg spawn, each running before the effect it protects (gate⓪ before the plan verdict is
+applied, dispatch before the leg spawns, drive before a verdict-driven action, fix-leg spawn
+before a FIXUP leg spawns) — none touching the worker's own prompt.
 
 | Invariant | Enforcement point | Test |
 | --- | --- | --- |
-| A cursor targets a comment by stream position, never by numeric id; a missing, duplicate, non-numeric, or dangling-target marker fails closed. | `comment-cursor.ts::computeCommentCursor` | `comment-cursor.test.ts`: "malformed marker (non-numeric, not '0'): fails closed" |
+| A cursor targets a comment by stream position, never by numeric id; a missing marker fails closed only when non-engine comments exist, while a duplicate, non-numeric, or dangling-target marker always fails closed. | `comment-cursor.ts::computeCommentCursor` | `comment-cursor.test.ts`: "malformed marker (non-numeric, not '0'): fails closed" |
 | No role may create, move, or delete the cursor marker: any role-emitted marker is stripped, and the current body's marker (if any) is reattached byte-for-byte. | `comment-cursor.ts::applyRoleBodyRewrite` | `comment-cursor.test.ts`: "applyRoleBodyRewrite (#703a): … carries the ORIGINAL marker byte-for-byte" |
-| An operator-owned fence (`<!-- sapwood:operator-owned -->` … `/sapwood:operator-owned -->`) is recognized standalone-line/fence-aware and extracted byte-for-byte, CRLF included. | `comment-cursor.ts::extractOperatorOwnedFences` | `comment-cursor.test.ts`: "extractOperatorOwnedFences: preserves CRLF bytes internal to a fence" |
+| An operator-owned fence (`<!-- sapwood:operator-owned -->` … `<!-- /sapwood:operator-owned -->`) is recognized standalone-line/fence-aware and extracted byte-for-byte, CRLF included. | `comment-cursor.ts::extractOperatorOwnedFences` | `comment-cursor.test.ts`: "extractOperatorOwnedFences: preserves CRLF bytes internal to a fence" |
 | A role write that alters, removes, or rewords a single byte inside a current-body operator-owned fence refuses the ENTIRE write, never a partial repair. | `comment-cursor.ts::applyRoleBodyRewrite` (`missingOperatorFences`) | `comment-cursor.test.ts`: "#827: a role-proposed body that alters a byte inside an operator-owned fence is rejected" |
 | An unclosed current fence refuses the whole write outright; a fence-only CRLF/LF edit still counts as a byte change; a role-forged fence tag is stripped, its content kept. | `comment-cursor.ts::applyRoleBodyRewrite` (`operatorFenceScanResult`, `stripUnpreservedOperatorFenceTags`) | `comment-cursor.test.ts`: "applyRoleBodyRewrite (P1a, mutation-kill target): a malformed opener in the CURRENT body refuses the ENTIRE write outright" |
 | The operator-owned fence's open tag is excluded by name from the generic marked-mode scan, so its presence never poisons AC/verification extraction into a false "planless" read. | `forge.ts::associateMarkedSections` | `forge.test.ts`: "#827: an operator-owned fence coexisting with a LEGACY (unanchored) verification plan does not poison extraction" |
-| PO-triage body normalization happens exactly once, against a fresh live-body read taken immediately before the write — never pre-persisted into the write-ahead journal. | `align.ts::updateIssueBodyIfUnchanged` | `align.test.ts`: "#703 v2, gate② P1-1 … never writes the journaled marker" |
+| PO-triage body normalization happens exactly once, against a fresh live-body read taken immediately before the write — the write-ahead journal itself stores the raw, un-normalized body. | `align.ts::updateIssueBodyIfUnchanged` (normalizes at write time); `align.ts::persistTriageDecision` (journals the raw body) | `align.test.ts`: "#703 v2, gate② P1-1 … never writes the journaled marker" |
 | When the current body's own marker state is already invalid (duplicate/malformed), the role write is refused entirely — never repaired. | `comment-cursor.ts::checkMarkerWritePrecondition` | `comment-cursor.test.ts`: "checkMarkerWritePrecondition: more than one marker line refuses — reason 'duplicate-marker'" |
-| The final pre-write check is a synchronous string compare with no I/O between the read and the write, so nothing async can land in the gap. | `comment-cursor-gate.ts::checkBodyDrift`, called from `plan-review.ts`'s write sites | `comment-cursor-gate.test.ts`: "checkBodyDrift: a marker-only advance … STILL counts as drift" |
-| A marker counts only as the entire trimmed line outside a fence; any attempt-shaped payload between the colon and `-->` is validated, never silently read as absent. | `comment-cursor.ts::scanStandaloneMarkerLines` | `comment-cursor.test.ts`: "#703 v2 gate② P2-1: a BLANK-value marker attempt … fails closed as malformed" |
-| A comment is exempt only when it carries `ENGINE_COMMENT_MARKER` AND its author matches the authenticated actor; an unresolvable actor exempts none. | `comment-cursor-gate.ts::fetchCommentStream` | `plan-review.test.ts`: "unresolvable actor (getAuthenticatedActor -> null) exempts NO comment, ever" |
+| The final pre-write check is a synchronous string compare with no I/O between the read and the write, so nothing async can land in the gap. | `comment-cursor-gate.ts::checkBodyDrift`, called from `plan-review.ts`'s write sites | `plan-review.test.ts`: "the reviewer approve-with-revision's FINAL getIssueBody and updateIssueBody are ADJACENT in the forge call trace" |
+| A marker counts only as the entire trimmed line outside a fence; any attempt-shaped payload between the colon and `-->` is validated, never silently read as absent. | `comment-cursor.ts::scanStandaloneMarkerLines` (recognizes the attempt); `computeCommentCursor` + `checkMarkerWritePrecondition` (validate it, fail closed) | `comment-cursor.test.ts`: "#703 v2 gate② P2-1: a BLANK-value marker attempt … fails closed as malformed" |
+| A comment is exempt only when it carries `ENGINE_COMMENT_MARKER` AND its author matches the authenticated actor; an unresolvable actor exempts none. | `comment-cursor-gate.ts::fetchCommentStream` | `comment-cursor-gate.test.ts`: "unresolvable actor (getAuthenticatedActor -> null) exempts NO comment, ever" |
 | Any id-less comment anywhere in the fetched stream fails the whole check closed, naming its stream position, never a substituted placeholder id. | `comment-cursor.ts::computeCommentCursor` | `comment-cursor.test.ts`: "a comment with a null id anywhere in the stream fails closed: comment-id-missing" |
-| Cursor freshness is re-checked at gate⓪ (pre-spend, pre-apply, pre-drafter-write, post-confirm), at dispatch, and at drive plus fix-leg spawn, always against the exact body a decision was computed from. | `plan-review.ts::checkGate0CommentCursor` (gate⓪); `conductor.ts` dispatch loop (dispatch); `conductor.ts::checkAcAuthorityFreshness` (drive, fix-leg spawn) | `plan-review.test.ts`: "a DIRECT body edit landing DURING the confirm session discards a 'confirm' outcome too"; `conductor.test.ts`: "tick dispatch (#652): a non-engine comment already present … blocks dispatch"; "comment-cursor-stale(checkpoint: fix-leg-spawn), no fix leg spawned" |
+| Cursor freshness is re-checked, always against the exact body a decision was computed from: at gate⓪ (pre-spend, pre-apply, pre-drafter-write, post-confirm) before the plan verdict is applied, at dispatch before the leg spawns, at drive before a verdict-driven action, and at fix-leg spawn before a FIXUP leg spawns. | `plan-review.ts::checkGate0CommentCursor` (gate⓪); `conductor.ts` dispatch loop (dispatch); `conductor.ts::checkAcAuthorityFreshness` (drive, fix-leg spawn) | `plan-review.test.ts`: "a DIRECT body edit landing DURING the confirm session discards a 'confirm' outcome too"; `conductor.test.ts`: "tick dispatch (#652): a non-engine comment already present … blocks dispatch"; "comment-cursor-stale(checkpoint: fix-leg-spawn), no fix leg spawned" |
 | A confirmed stale/invalid cursor applies needs-human plus one deduplicated pointer comment naming the marker line to paste; dedup/post failures are reported, never thrown. | `comment-cursor-gate.ts::escalateCommentCursorStale` | `comment-cursor-gate.test.ts`: "escalateCommentCursorStale: the SAME cursor/pending set never produces a second comment" |
 
 **Boundaries**
@@ -2664,7 +2665,8 @@ adjudicated, not that every comment's current text was seen.
 ### Residual notes for this doc package
 
 - **The worker prompt surface is unchanged.** Workers are dispatched with the issue body only
-  (`{{issue.body}}`, `worker.ts`); nothing here touches what a dispatched worker session is shown.
+  (`{{issue.body}}`, `worker.ts`); nothing in this doc package touches what a dispatched worker
+  session is shown.
 - **"No issue-comment tools" is a proxy-grant claim, not a Bash claim.** The cursor closes the
   engine's own forge-proxy comment-reading tools (`PROXY_ROLE_TOOL_MATRIX`). An **L0** worker still
   holds `Bash(gh *)` (see [Worker credential tiers](#worker-credential-tiers)) and could read
@@ -2673,8 +2675,9 @@ adjudicated, not that every comment's current text was seen.
 - **The public/private threat-model split.** In a public repo, comment entries from an author
   outside GitHub `OWNER`/`MEMBER`/`COLLABORATOR`, the authenticated engine actor, or the reviewer-bot
   allowlist are dropped at five forge reads (issue/PR comments, reviews, review threads, tails);
-  missing author provenance fails the whole read. Editing an already-cursored comment remains the
-  separate "v1 residual" case above.
+  missing author provenance fails the whole read. Nothing else in the engine filters comment
+  provenance. The filter records only an aggregate withheld count and does not write to GitHub.
+  Editing an already-cursored comment remains the separate "v1 residual" case above.
 - **`docs/security.md` itself, and the prompt files, both ride the instruction-path escalation.**
   `engine/prompts/**` and `docs/security.md` are both entries in `escalation.instructionPaths`
   (see [Instruction-path changes escalate to human review](#instruction-path-changes-escalate-to-human-review)),
