@@ -60,7 +60,10 @@ human-vetted" is stronger than what the second family's mechanism actually deliv
   one-shot `claude -p` asking for that fact: the default run answered with the marker, the
   identical run with `--setting-sources ""` answered `UNKNOWN`. Same machine, same operator
   settings, one flag changed — so the difference is the flag, not a local settings deny wearing
-  platform clothes.
+  platform clothes. For the `codex-exec` runner the equivalent seal is `-c project_doc_max_bytes=0`
+  (see [The exception, stated exactly](egress.md#peripheral-network-egress-websearchwebfetch-detected-not-pinned)), which disables the CLI's own project-instruction
+  discovery so the reviewed tree's `AGENTS.md`/`AGENTS.override.md` cannot load as standing
+  instructions there either.
 - **The reviewer's own carriers** — the doctrine file (`doctrine.file`, default
   `docs/REVIEW-DOCTRINE.md`, substituted verbatim into the reviewer prompt) and the reviewer prompt
   itself (shipped as `engine/prompts/**`, repointable via `reviewer.agent.promptFile`). These are
