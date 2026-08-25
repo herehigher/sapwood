@@ -2178,20 +2178,30 @@ state DB (`data/`), without requiring a config edit:
   file directly.
 - **Pause** (`data/PAUSE`) — the gentle tier. Freezes new dispatch: no new lane is claimed,
   **and** a driving lane's fix-leg admission gate reads this same sentinel, so a fresh fix leg
-  is held back too — see the [fix-loop admission gate](#fix-loop-fixing-lane-state) above.
-  Everything already in flight — running/fixing workers, PRs already moving through the
-  review/merge gate — proceeds exactly as normal to completion. No drain, nothing killed. Use
-  this to stop taking on new issues while letting the current round finish (e.g. before a
-  maintenance window). Set/lift with `/sapwood-stop --pause` / `--resume`.
+  is held back too — see the [fix-loop admission gate](#fix-loop-fixing-lane-state) above. A
+  worker or fix leg **already running** keeps running to its own completion, and the ordinary
+  gate scans for every `driving` lane — the review trigger, CI/merge polling, the merge itself —
+  keep executing exactly as normal, so a lane whose verdict is already `MERGE`/`WAIT_REVIEW`
+  still merges or keeps polling and eventually leaves `driving`. What does NOT proceed: a
+  `driving` lane whose next action is a *fresh* fix leg stays `driving`, blocked rather than
+  finished, for as long as PAUSE stands — it resumes the instant the sentinel is lifted, never
+  stuck permanently. No drain, nothing killed either way. Use this to stop taking on new issues
+  and new rework while letting already-running work and already-mergeable PRs land (e.g. before
+  a maintenance window). Set/lift with `/sapwood-stop --pause` / `--resume`.
 
 The precedence order is emergency stop, then kill switch, then pause: emergency stop wins over
 the kill switch, and either strict tier subsumes pause's dispatch restriction.
 
-**Interaction with `--until-idle`:** a paused engine dispatches nothing, so once its
-in-flight lanes finish it counts as idle and the run exits on its own — "finish the
-round, then stop." Removing `data/PAUSE` afterward doesn't resume anything by itself;
-start a new `sapwood run`. Under the daemon (`forever`) mode, the engine keeps ticking
-and `--resume` takes effect on the very next tick.
+**Interaction with `--until-idle`:** idleness (`driver.ts`'s `isIdle`) is
+`state.activeWorkers().length === 0` — running **and** `driving` **and** `fixing` lanes all
+count, not just live processes. A paused engine dispatches nothing new, and a `driving` lane
+whose verdict is already `MERGE`/`WAIT_REVIEW` keeps resolving normally and eventually leaves
+`driving`; but a `driving` lane whose next action is a fresh fix leg stays `driving` — blocked,
+not finished — for as long as PAUSE stands, so **`--until-idle` does not exit on its own while
+such a lane exists**. Removing `data/PAUSE` lets that lane's fix leg dispatch on the next tick,
+after which the run can idle out normally; lifting it doesn't resume anything by itself beyond
+that — a fully drained/idle run still needs a new `sapwood run`. Under the daemon (`forever`)
+mode, the engine keeps ticking regardless, and `--resume` takes effect on the very next tick.
 
 ### Sentinel isolation boundary (honest statement)
 
