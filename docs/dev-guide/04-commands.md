@@ -14,7 +14,7 @@ The suite uses colocated `node:test` files loaded through `tsx`. The source carr
 | `engine/` | `npm run lint` | `biome ci src`. |
 | `engine/` | `npm run typecheck` | `tsc -p tsconfig.typecheck.json`. |
 | `engine/` | `npm run build` | `tsc`. |
-| repository root | `python3 scripts/check-links.py` | Pre-publish dead-link check (#340) across README + docs entry pages: file existence, GitHub-style heading anchors, and private-repo-safe checks for `github.com/herehigher/sapwood/issues\|pull` links via `gh api`. Stdlib-only. Re-run this before any docs-affecting cutover (e.g. #329) to refresh the recorded result. |
+| repository root | `node scripts/check-links.ts` | Pre-publish dead-link check across README + docs entry pages: file existence, GitHub-style heading anchors, and private-repo-safe checks for `github.com/herehigher/sapwood/issues\|pull` links via `gh api`. Node built-ins only. Re-run this before any docs-affecting cutover to refresh the recorded result. |
 
 `engine/tsconfig.json` is the BUILD config and excludes `src/**/*.test.ts` (and
 `src/**/*.test-support.ts`) so `tsc` does not emit test files into `dist/`.

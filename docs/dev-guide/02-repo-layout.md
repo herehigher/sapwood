@@ -14,7 +14,7 @@ Risk labels below mean **CORE** (central behavior; review carefully), **NORMAL**
 | `biome.json` | NORMAL | Formatting and lint policy for TypeScript sources. |
 | `tsconfig.base.json` | NORMAL | Shared strict TypeScript/NodeNext compiler policy. |
 | `package.json` | NORMAL | Private npm workspace root and root quality scripts. |
-| `scripts/` | NORMAL | Repo-level maintenance scripts with no engine dependency (e.g. `check-links.py`, #340) — distinct from `engine/scripts/`, which is scoped to the engine npm workspace. |
+| `scripts/` | NORMAL | Repo-level maintenance scripts with no engine dependency (e.g. `check-links.ts`) — distinct from `engine/scripts/`, which is scoped to the engine npm workspace. |
 | `.claude-plugin/` | NORMAL | Claude Code plugin manifest and plugin-facing instructions. Guard hooks are currently wired per session in `worker.ts` and `peripheral.ts`, not registered here. |
 | `.github/` | HANDS-OFF for workflows | Issue templates and CI workflow; workflow writes are guard-protected. |
 
