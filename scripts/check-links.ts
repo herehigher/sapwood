@@ -20,7 +20,7 @@
 //   - Every relative Markdown link (`[text](path)` or `[text](path#anchor)`) resolves to a
 //     file that exists.
 //   - Every `#anchor` (same-file or cross-file) resolves to a real heading in the target
-//     file, using GitHub's own heading-slug algorithm (see `slugify` below).
+//     file, using GitHub's own heading-slug algorithm (see engine/src/util/markdown-slug.ts).
 //   - Every `https://github.com/herehigher/sapwood/issues/N` or `/pull/N` link is checked
 //     with `gh api` rather than a raw HTTP request: this repo is currently **private**, so an
 //     unauthenticated HTTP probe 404s on every such URL regardless of whether the issue/PR
@@ -37,50 +37,11 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { headingSlugs } from "../engine/src/util/markdown-slug.ts";
 
 const REPO = "herehigher/sapwood";
 
 const LINK_RE = /\[([^\]]*)\]\(([^)]+)\)/g;
-
-// Reproduces GitHub's heading-slug algorithm (github-slugger behavior). Strip inline
-// code/emphasis markers, lowercase, then drop every character that is not a Unicode
-// letter/mark/decimal-digit/hyphen/space — deliberately `\p{L}\p{M}\p{Nd}`, NOT `\w` and NOT
-// `\p{N}`: JS `\w` keeps only ASCII, and `\p{N}` also keeps Unicode category No/Nl (circled
-// digits like the gate marks used in this repo's own headings, e.g. `⓪`/`②`) that GitHub's
-// slugger strips. Each remaining literal space maps to its own hyphen — runs are NOT
-// collapsed, so "table — reading" (em dash between two spaces, the dash itself dropped above)
-// yields "table--reading", matching GitHub exactly.
-const KEEP_CATEGORY_RE = /[\p{L}\p{M}\p{Nd}]/u;
-
-export function slugify(text: string): string {
-  const stripped = text.replace(/[`*_]/g, "").toLowerCase();
-  let kept = "";
-  for (const ch of stripped) {
-    if (ch === " " || ch === "-" || KEEP_CATEGORY_RE.test(ch)) kept += ch;
-  }
-  return kept.trim().replaceAll(" ", "-");
-}
-
-// Every heading in a Markdown file's slugs, with GitHub-style duplicate-slug suffixing
-// (-1, -2, ...): the second `## Foo` on a page gets `foo-1`, the third `foo-2`, and so on.
-// Takes content directly (rather than a path) so it is exercisable without touching the
-// filesystem; `headingsOf` below is the path-reading wrapper the checker itself uses.
-export function headingSlugs(content: string): Set<string> {
-  const slugs = new Set<string>();
-  for (const line of content.replaceAll("\r\n", "\n").split("\n")) {
-    const m = /^(#{1,6})\s+(.*)$/.exec(line);
-    if (!m) continue;
-    const base = slugify(m[2] ?? "");
-    let slug = base;
-    let i = 1;
-    while (slugs.has(slug)) {
-      slug = `${base}-${i}`;
-      i++;
-    }
-    slugs.add(slug);
-  }
-  return slugs;
-}
 
 function headingsOf(path: string): Set<string> {
   try {

@@ -1,9 +1,9 @@
-// check-links.test.ts: covers the GitHub heading-slug port (see check-links.ts's module
+// check-links.test.ts: covers the GitHub heading-slug port (see markdown-slug.ts's module
 // comment for the algorithm and its two traps) — the piece a naive `\w`/`\p{N}`-based port
 // gets wrong.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { headingSlugs, slugify } from "./check-links.ts";
+import { headingSlugs, slugify } from "../engine/src/util/markdown-slug.ts";
 
 test("slugify: drops a circled digit (category No), unlike \\w or \\p{N}", () => {
   // '⓪' and '②' are Unicode category No (other number) — GitHub's own slugger drops them,
