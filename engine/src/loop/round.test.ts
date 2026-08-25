@@ -664,7 +664,7 @@ test("runRounds (#703 v2, ruling item 5): an idle round with NO comment-cursor-s
   deps.state.close();
 });
 
-test("runRounds (#703 v2 gate② P2-3): a READ failure in the empty-pool surfacing path is READ-ONLY even on ITS OWN failure — logged only, ZERO new events appended (docs/security.md's 'no write of any kind' claim must hold on the failure path too, not just the success path)", async () => {
+test("runRounds (#703 v2 gate② P2-3): a READ failure in the empty-pool surfacing path is READ-ONLY even on ITS OWN failure — logged only, ZERO new events appended (docs/security/adjudication.md's 'no write of any kind' claim must hold on the failure path too, not just the success path)", async () => {
   const { sleep } = mkSleepSpy();
   const logLines: string[] = [];
   const deps = baseDeps({ sleep, log: (msg) => logLines.push(msg) });

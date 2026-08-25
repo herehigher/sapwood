@@ -647,7 +647,7 @@ for (const command of [
 // the alias-injection check to recognize `p` as `push` here would require modeling git's own
 // config resolution, not scanning one more token spelling — the same class of boundary
 // checkControlSentinelArg's "hardcoded path in a script" residual already accepts. GitHub branch
-// protection (DR #616) is the backstop of record for this class; see docs/security.md's #679
+// protection (DR #616) is the backstop of record for this class; see docs/security/credential-tiers.md's #679
 // section, "argv-visible forms only" paragraph. Pinned here, deliberately, as a KNOWN ALLOW —
 // not a silent gap: a future reader (or a future gate②) should see this was a decided boundary,
 // not an oversight.

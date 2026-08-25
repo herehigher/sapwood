@@ -8747,7 +8747,7 @@ test("WORKER_DISALLOWED_TOOLS: Agent/Task are NOT denied — the coding worker k
   for (const spawnTool of ["Agent", "Task"]) {
     assert.ok(
       !WORKER_DISALLOWED_TOOLS.split(",").includes(spawnTool),
-      `${spawnTool} must stay unlisted — #552 decided to keep worker subagent spawn, accepting the soft-budget blind spot as documented in docs/security.md`,
+      `${spawnTool} must stay unlisted — #552 decided to keep worker subagent spawn, accepting the soft-budget blind spot as documented in docs/security/role-sessions.md`,
     );
   }
 });

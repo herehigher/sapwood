@@ -532,17 +532,18 @@ own issue with that evidence as the Why.
 #### Role-session skill injection — an accident fence, not a jail
 
 `engine/src/roles/skills-plugin.ts` renders two v1 reference skills (`human-merge-only-paths`,
-`ac-evidence-tiers`) verbatim from this file's own marker-delimited sections (see the
-`<!-- sapwood:skill:*:start/end -->` comments above and around the "Doctrine lines" AC-evidence
-tiers) into an immutable, content-hash-named plugin directory under
+`ac-evidence-tiers`) verbatim from [`docs/security.md`](../security.md)'s own marker-delimited sections (see
+the `<!-- sapwood:skill:*:start/end -->` comments around [Human-merge-only
+paths](../security.md#human-merge-only-paths) and [Doctrine lines](../security.md#doctrine-lines) in the core
+file) into an immutable, content-hash-named plugin directory under
 `.sapwood/cache/generated/role-skills/<hash>/`, attached to a session via `claude --plugin-dir`. This
-CONTENT-side-only: the render path's only input is this engine-shipped file — never anything
+CONTENT-side-only: the render path's only input is [`docs/security.md`](../security.md) — never anything
 issue-body- or PR-derived — and a published hash directory is never overwritten (the "accident
 fence, not a jail" doctrine: the goal is to stop a mistake, not to withstand an adversary who
 already has code-execution authority in the same repo).
 
 **A third skill, `sapwood-labels`, lives on the same plugin dir.** Unlike the two above, its
-content is NOT extracted from this file's markers — it is rendered from `engine/src/forge/
+content is NOT extracted from [`docs/security.md`](../security.md)'s markers — it is rendered from `engine/src/forge/
 labels.ts`'s `LABEL_SEMANTICS` registry (writer/remover/gates/distinguish-from per label) against
 THIS repo's fully-resolved `cfg.labels`/`cfg.escalation.holdLabels`/`cfg.escalation.humanLabels`,
 so a `labels.prefix` remap always shows the RESOLVED names a session actually sees on real

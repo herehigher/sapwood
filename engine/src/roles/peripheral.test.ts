@@ -2836,7 +2836,7 @@ test('run (#285, Codex sol-high PR #300 review, P1): reviewCwd closes the MCP + 
     assert.equal(
       at("--setting-sources"),
       "",
-      "ZERO file settings sources load — not user, project, or local; only the inline guard --settings applies (the operator's ~/.claude/settings.json is producer-influenceable per security.md's worker-real-HOME boundary, so a review session must not load it either)",
+      "ZERO file settings sources load — not user, project, or local; only the inline guard --settings applies (the operator's ~/.claude/settings.json is producer-influenceable per docs/security/review-session-mode.md's worker-real-HOME boundary, so a review session must not load it either)",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });

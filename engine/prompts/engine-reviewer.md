@@ -195,7 +195,7 @@ says. Tightening any of them in prose here is a no-op; the check is the source o
   tool grant (`Read`/`Grep`/`Glob`, no `Bash`, no forge access) is hardcoded in `RoleRunner.run()`'s
   review mode and a caller cannot widen it; the codex-exec runner's read-only sandbox blocks writes
   but not shell execution or host-wide file reads — a disclosed gap
-  (`engine-review-containment-gap`, docs/security.md), never claimed as an engine-enforced fence.
+  (`engine-review-containment-gap`, docs/security/egress.md#peripheral-network-egress-websearchwebfetch-detected-not-pinned), never claimed as an engine-enforced fence.
 
 **Agent-JUDGED — everything the engine cannot check.** Nothing below is checked by the engine, by
 construction: these are judgment calls no schema can verify, so no engine check will catch a bad

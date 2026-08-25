@@ -291,7 +291,7 @@ export interface RoleSessionOpts {
    *     ANY source, project/user/ambient included) AND `--setting-sources ""` (Codex sol-high PR
    *     #300 review, SECOND round, P1: NO file-based settings source loads at all — not
    *     `project`/`local` (the materialized tree's own layers) and, tightened from an earlier
-   *     `"user"`-only version of this fix, not `user` either — this repo's own security.md
+   *     `"user"`-only version of this fix, not `user` either — this repo's own docs/security/review-session-mode.md
    *     documents that a worker leg's `Bash(node *)`/`Bash(npm *)` grant runs with the operator's
    *     REAL, unconfined `$HOME`, so a producer could in principle have influenced the operator's
    *     real `~/.claude/settings.json` in an earlier round; loading it here would have reopened
@@ -770,12 +770,12 @@ export class RoleRunner {
         // #410 amendment (owner ruling 2026-07-28): this triple is DELIBERATELY review-mode-only
         // — an earlier version of this PR pinned it for EVERY peripheral session, but a live
         // measurement found `--setting-sources ""` also stops loading the repo's own CLAUDE.md,
-        // colliding with the locked #236 ruling (docs/security.md "Ambient repo context: record,
+        // colliding with the locked #236 ruling (docs/security/ambient-repo-context.md "Ambient repo context: record,
         // don't seal" — peripheral sessions absorbing the target repo's CLAUDE.md is a
         // deliberately OPEN channel, never sealed). The #410 decision record's own reserved
         // fallback — lightweight startup detection + warning (cli.ts's
         // checkWebAccessSettingsDenial) — replaces the pinning for non-review sessions instead;
-        // see docs/security.md's peripheral-egress section for the full rationale.
+        // see docs/security/egress.md's peripheral-egress section for the full rationale.
         ...(reviewMode
           ? { mcpConfig: EMPTY_MCP_CONFIG_JSON, strictMcpConfig: true, settingSources: "" }
           : proxyHandle

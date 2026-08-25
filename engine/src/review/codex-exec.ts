@@ -57,7 +57,7 @@
 // readable on disk. What would close it is filesystem confinement, and the owner ruling (R2)
 // deliberately does not ship one — no new outer OS/container fence (trusted-repos posture + the
 // marginal-complexity principle). Both facets are recorded at every spawn via
-// `ENGINE_REVIEW_CONTAINMENT_GAP`; docs/security.md states the exposure in full for an operator
+// `ENGINE_REVIEW_CONTAINMENT_GAP`; docs/security/egress.md states the exposure in full for an operator
 // deciding whether to enable this runner.
 //
 // BUDGET (R1): `codex exec` has no `--max-budget-usd` equivalent, so `reviewer.agent.costCapUsd`
@@ -273,7 +273,7 @@ const CODEX_ENV_KEEP: ReadonlySet<string> = new Set([
 ]);
 
 /** Well-known credential FAMILIES, by exact name or prefix. Not exhaustive and not claimed to be —
- *  see `codexSessionEnv`'s honest-limit note and docs/security.md. */
+ *  see `codexSessionEnv`'s honest-limit note and docs/security/egress.md. */
 const CODEX_ENV_STRIP_EXACT: ReadonlySet<string> = new Set([
   // forge
   "GITHUB_TOKEN",
@@ -342,7 +342,7 @@ export function isStrippedEnvKey(key: string): boolean {
  *  denylist's failure mode — an unknown-shaped secret survives — is bounded and disclosed; the
  *  allowlist's is a runner that never works. `CODEX_ENV_KEEP` is the explicit counterweight.
  *
- *  HONEST LIMITS, both disclosed in docs/security.md:
+ *  HONEST LIMITS, both disclosed in docs/security/egress.md:
  *   1. The strip covers known families and common name shapes; it CANNOT be exhaustive. The
  *      remaining environment is INHERITED, so an operator running the engine from a shell that
  *      carries secrets should assume a steered review session can read them.
@@ -619,7 +619,7 @@ export class CodexExecReviewSessionExecutor implements ReviewSessionExecutor {
     //
     // LOAD-BEARING, unlike every other event this module writes (PR #510 round-2 review, P2-a). The
     // record IS the mitigation for a gap the owner ruling deliberately leaves unfenced, and
-    // docs/security.md states the facets are emitted at EVERY spawn — a best-effort append would let
+    // docs/security/egress.md states the facets are emitted at EVERY spawn — a best-effort append would let
     // that claim silently become false and run an unrecorded session against operator-readable
     // credentials. So a failure here THROWS before anything is spawned: review-session.ts maps the
     // throw to `unavailable` and the lane degrades honestly (no session, no spend, a visible

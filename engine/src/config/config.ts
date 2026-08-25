@@ -202,7 +202,7 @@ const Cost = z
     // security boundary: the durable cross-restart bounds are cost.dailyBudgetUsd +
     // guard/gates/kill-switch; crash-loop abuse is the rapid-restart detector's job
     // (engine.rapidRestart below) plus the operator's own supervisor circuit-breaker
-    // (docs/security.md — a PREREQUISITE for unattended supervised runs). Note: a 24h life
+    // (docs/security/cost-ceilings.md#cost-ceilings-vs-the-soft-worker-budget — a PREREQUISITE for unattended supervised runs). Note: a 24h life
     // can straddle UTC midnight and therefore two dailyBudgetUsd periods (~2x worst-case
     // single-life spend; this existed at the old 4h default with smaller magnitude).
     // Independent of worker.timeoutSec (which bounds a single worker); there is still no
@@ -585,8 +585,8 @@ const Labels = z
 // runSessionWithRetry peripheral call sites (harvest, architect, plan-review's reviewer, drafter,
 // and #214's confirm session, retro, and — as of #251 — align.ts's three PO sessions: po-align,
 // po-triage, po-pool), never silently varying between retries. See
-// docs/security.md ("Ambient repo context") and
-// docs/guide/configuration.md for the channel and its rationale; docs/security.md also documents the
+// docs/security/ambient-repo-context.md ("Ambient repo context") and
+// docs/guide/configuration.md for the channel and its rationale; docs/security/review-session-mode.md also documents the
 // clean-directory `--bare`-style isolation recipe for BENCHMARK runs only (never production —
 // `--bare` disables hooks, so the guard can't ship with it).
 // Default to a lighter model/effort than worker.model/effort (which does real implementation
@@ -825,8 +825,8 @@ const Roles = z
     // human-merge-only-paths/ac-evidence-tiers sections, pulled verbatim into an immutable
     // content-hash-named plugin dir and attached via `--plugin-dir` — see skills-plugin.ts).
     // Default false: v1 ships the mechanism unattached everywhere; #639's own PR series flips
-    // this to true only after a follow-up measures the effect (docs/security.md's "Config"
-    // note). `false` -> every claudeArgs()-producing caller stays byte-identical to pre-#639
+    // this to true only after a follow-up measures the effect (docs/security/role-sessions.md's
+    // "Role-session skill injection" section). `false` -> every claudeArgs()-producing caller stays byte-identical to pre-#639
     // argv — resolveSkillsPluginDir short-circuits before ever reading docs/security.md.
     skills: z
       .object({
@@ -942,8 +942,8 @@ const ProxyConfig = z
 // sessions (architect, po-align, po-triage — peripheral.ts's ARCHITECT_ALLOWED_TOOLS/
 // PO_ALIGN_ALLOWED_TOOLS/PO_TRIAGE_ALLOWED_TOOLS named exports). Default true: the capability is
 // read-only, carries no credential into any project system, is strictly weaker than the egress
-// the worker already has unrestricted (docs/security.md's "Worker network egress: accepted blind
-// spot"), and every call is journalled through the SAME scanEgressSuspects path the worker's own
+// the worker already has unrestricted (docs/security/egress.md#worker-network-egress-bash-channel-containment-available-as-a-hardening-profile
+// "Worker network egress: accepted blind spot"), and every call is journalled through the SAME scanEgressSuspects path the worker's own
 // tripwire uses (worker.ts). `false` falls every one of those three sessions back to the base
 // ROLE_ALLOWED_TOOLS/PO_ALLOWED_TOOLS pair — no WebSearch/WebFetch reaches them at all. The
 // review family (verification-plan-reviewer/verification-plan-drafter/verification-plan-reviewer-confirm, and every gate② reviewer
@@ -974,7 +974,7 @@ const Guard = z
 // #1011 (DR #1009, Decision #11 amendment): host EXECUTION-PROFILE key — it configures HOW a
 // session's already-granted tools reach the host (execution reach), never WHICH tools a producer
 // leg is offered (host-delegated capability management, Decision #11, unchanged and unrelated —
-// no `capabilities.*` surface is reopened here). Semantics copied verbatim from docs/security.md's
+// no `capabilities.*` surface is reopened here). Semantics copied verbatim from docs/security/execution-profiles.md's
 // "Execution profiles" section — that section, not this file, is the place to read the full
 // seven-layer table and deployment-tier ladder.
 const Host = z
@@ -989,7 +989,7 @@ const Host = z
     // engine `allowedTools` config key. `bypassPermissions`: everything runs unchecked, including
     // writes to Claude Code's own protected paths — an operator call the engine does not gate;
     // configuring it triggers one guidance-carrying startup WARN (log + event) naming the
-    // outer-boundary recipe docs/security.md documents, never a refusal.
+    // outer-boundary recipe docs/security/execution-profiles.md documents, never a refusal.
     permissionMode: z.enum(["dontAsk", "auto", "bypassPermissions"]).default("auto"),
   })
   .strict();
@@ -1562,7 +1562,7 @@ const ConfigSchemaRaw = z
           // #539: the mechanism's own carriers — the matcher/escalation implementation itself and
           // the config file carrying this very schema block + defaults — join the escalation
           // surface too (escalation, not the guard deny-list: the worker may still produce a
-          // change here, a human adjudicates the merge). See docs/security.md's "Instruction-path
+          // change here, a human adjudicates the merge). See docs/security/instruction-path-escalation.md's "Instruction-path
           // changes escalate to human review" section for the self-reference this creates and its
           // one-bootstrap-PR exposure window.
           "engine/src/review/instruction-path-escalation.ts",

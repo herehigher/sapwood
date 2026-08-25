@@ -520,7 +520,7 @@ ships instead is a **supervision contract** the engine holds up its end of:
   see [troubleshooting.md](troubleshooting.md#consecutive-stalls-park) for the
   operator-clear step. These are backstops, not a substitute: configure the
   supervisor's **own** circuit-breaker too — a *prerequisite* for unattended supervised
-  runs ([security.md](../security.md)'s supervisor prerequisite).
+  runs ([security.md](../security/cost-ceilings.md#cost-ceilings-vs-the-soft-worker-budget)'s supervisor prerequisite).
 - **Stopping a supervised engine** is the supervisor's stop verb (e.g. `systemctl stop`),
   which sends SIGTERM — the in-flight round finishes, harvest included, and `run-ended`
   is written. The kill switch remains the in-band emergency freeze; note a kill-switch
@@ -533,7 +533,7 @@ Worked example — systemd (`/etc/systemd/system/sapwood.service`):
 [Unit]
 Description=sapwood engine
 After=network-online.target
-# The supervisor's OWN circuit-breaker (security.md prerequisite): stop restarting
+# The supervisor's OWN circuit-breaker (docs/security/cost-ceilings.md prerequisite): stop restarting
 # after 5 failures inside 10 minutes; `systemctl reset-failed sapwood` re-arms it.
 StartLimitIntervalSec=600
 StartLimitBurst=5

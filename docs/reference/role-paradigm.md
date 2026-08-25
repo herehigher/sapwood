@@ -83,7 +83,7 @@ mode and a caller cannot widen it, together with an empty strict MCP configurati
 file-based settings sources, worktree-confined reads, and a forced-hard guard regardless of the
 ordinary configured guard mode; the `codex-exec` runner's read-only sandbox blocks writes but not
 shell execution or host-wide file reads — a disclosed gap (`engine-review-containment-gap`,
-docs/security.md), never claimed as an engine-enforced fence.
+docs/security/egress.md), never claimed as an engine-enforced fence.
 
 The session never approves, labels, comments on, fixes, or merges a PR. Its strict output contains
 only per-AC statuses and findings; it cannot name an overall verdict or head OID. The deterministic

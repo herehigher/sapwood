@@ -16,7 +16,7 @@
 // fail-closed PreToolUse guard hook wired in via --settings (#26) — but only for the
 // Bash/Write/Edit/MultiEdit/Read/Grep/Glob/NotebookRead tool family its matcher covers. A
 // producer leg inherits the operator's host MCP surface (capability DR #616) and no `mcp__`
-// tool call reaches this hook at all; see docs/security.md's "Worker network egress: accepted
+// tool call reaches this hook at all; see docs/security/egress.md's "Worker network egress: accepted
 // blind spot" section for the residual and branch protection as the mandatory backstop.
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -301,7 +301,7 @@ function authorityHost(authority: string): string {
  *
  *  Dogfood run 2026-07-24 flagged `curl http://127.0.0.1:5173/...` dev-server smoke checks
  *  identically to real public egress (which the same run also caught — including a spoofed-UA
- *  font download). The decision recorded in docs/security.md is TAG, never exclude: a loopback
+ *  font download). The decision recorded in docs/security/egress.md is TAG, never exclude: a loopback
  *  hit is still journalled with full evidence, it just carries a marker so the prominent line in
  *  a round artifact stays the public one.
  *
@@ -1307,7 +1307,7 @@ export interface ClaudeArgsOpts {
    *
    *  Review sessions pass `""` (Codex sol-high PR #300 review, SECOND round, P1: an earlier
    *  version of this fix passed `"user"`, keeping the operator's own `~/.claude/settings.json`
-   *  in scope — but this repo's OWN security.md documents that a worker leg's `Bash(node
+   *  in scope — but this repo's OWN docs/security/review-session-mode.md documents that a worker leg's `Bash(node
    *  *)`/`Bash(npm *)` grant runs with the operator's REAL, unconfined `$HOME` (the
    *  `workerCredentialFreeEnv` "HONEST SCOPE" note's own `steal.mjs` proof-of-concept), so a
    *  producer could in principle have influenced that real `~/.claude/settings.json` in an
@@ -1321,7 +1321,7 @@ export interface ClaudeArgsOpts {
    *  stderr) — proving both that the flag is accepted with an empty value AND that it actually
    *  suppresses file-based loading, not just user-facing sources. The guard hook itself is
    *  UNAFFECTED — it rides in on `--settings` (inline JSON, a wholly separate flag from
-   *  `--setting-sources`; see `docs/security.md`'s "Benchmark isolation recipe" section, which
+   *  `--setting-sources`; see `docs/security/review-session-mode.md`'s "Benchmark isolation recipe" section, which
    *  already documents `--settings` as additive to whatever settings SOURCES load, never a
    *  replacement for them). Omitted -> no `--setting-sources` flag, unchanged behavior (today's
    *  default: user+project+local, correct for every OTHER role/worker session, whose cwd is the
@@ -2012,7 +2012,7 @@ export interface WorkerDeps {
  *  at all, through whatever residual channel remains after that; see workerCredentialFreeEnv's
  *  doc for the honest scope: this is NOT a claim that the proxy is the leg's only reach to
  *  GitHub in an absolute sense, since arbitrary code under Bash(node/npm) can still read an
- *  ambient credential store directly off disk — docs/security.md's residuals note). Same
+ *  ambient credential store directly off disk — docs/security/role-sessions.md's residuals note). Same
  *  worker-class posture retro.ts's session already uses for its own git-credential reach.
  *
  *  SEALED MCP SURFACE (#617, seam 1 of capability DR #616 — CLOSED HISTORY, not current risk):
