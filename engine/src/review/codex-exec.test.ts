@@ -458,6 +458,8 @@ test("buildCodexExecArgs (R2): the pinned containment profile, as a value — re
     "-c",
     "mcp_servers={}",
     "-c",
+    "project_doc_max_bytes=0",
+    "-c",
     "tools.web_search=false",
     "-o",
     "/t/last.txt",
