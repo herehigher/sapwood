@@ -24,6 +24,11 @@
 //                           source (including a producer-authored project-level `.codex/config.toml`
 //                           inside the reviewed tree, which `--ignore-user-config` alone would not
 //                           cover)
+//   -c project_doc_max_bytes=0   disables codex-cli's project-instruction discovery — the reviewed
+//                                tree's root `AGENTS.md`/`AGENTS.override.md`, which
+//                                `--ignore-user-config`/`--ignore-rules` don't cover (those seal
+//                                config.toml and exec-policy `.rules`, not project docs); keeps
+//                                session instructions to the engine prompt and doctrine only
 //   -c tools.web_search=false   no model-invoked web egress
 //   -o <file>               the final message is captured to a FILE, never scraped out of the
 //                           terminal stream (this repo's Codex ops notes: truncated/interleaved
@@ -504,6 +509,8 @@ export function buildCodexExecArgs(opts: { treeDir: string; model: string; effor
     `model_reasoning_effort="${opts.effort}"`,
     "-c",
     "mcp_servers={}",
+    "-c",
+    "project_doc_max_bytes=0",
     "-c",
     "tools.web_search=false",
     "-o",
