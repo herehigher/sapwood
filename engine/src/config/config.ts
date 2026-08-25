@@ -1125,9 +1125,9 @@ const Liveness = z
 
 const Logging = z
   .object({
-    // #1077 fix round 1 (P2, single authority): runtimePaths(SAPWOOD_DIR).logFile derives the
-    // exact same cwd-relative string runtimePaths() itself spells for logFile — never a second
-    // "logs/sapwood.log" literal restated here.
+    // runtimePaths(SAPWOOD_DIR).logFile derives the exact same cwd-relative string
+    // runtimePaths() itself spells for logFile — never a second "logs/sapwood.log" literal
+    // restated here.
     path: z.string().min(1).default(runtimePaths(SAPWOOD_DIR).logFile),
     teeToStderr: z.boolean().default(true),
     maxBytes: z
@@ -1267,8 +1267,8 @@ const Round = z
     // state.ts's own DEFAULT_DB_PATH uses — NOT config-file-relative like roles.*.promptFile,
     // since this file lives beside the engine's own runtime root (and gets archived to a
     // sibling `directives/` dir there), not beside a role's shipped prompt. Always has a value
-    // (never "unset"), same shape as goal.file. #1077 fix round 1 (P2, single authority):
-    // runtimePaths(SAPWOOD_DIR).directiveMd, never a second "DIRECTIVE.md" literal.
+    // (never "unset"), same shape as goal.file. runtimePaths(SAPWOOD_DIR).directiveMd derives
+    // the value — never a second "DIRECTIVE.md" literal restated here.
     directiveFile: z.string().min(1).default(runtimePaths(SAPWOOD_DIR).directiveMd),
     // Deterministic-truncation cap (never a silent drop — the cut is marked in the text itself,
     // directive.ts reuses retro-digest.ts's capDigest) on the directive text substituted into the

@@ -765,8 +765,8 @@ test("/api/loop/state: a missing database starts as an empty read-only dashboard
   }
 });
 
-// #1077 fix round 1 (P2): a first-ever dashboard visit against a repo that has never run
-// `sapwood run` is a write-capable root-acquisition chokepoint too — createDashboardServer's
+// A first-ever dashboard visit against a repo that has never run `sapwood run` is a
+// write-capable root-acquisition chokepoint too — createDashboardServer's
 // own bootstrap branch (`if (!existsSync(opts.dbPath)) { new State(opts.dbPath); ... }`)
 // constructs a write-mode State, which already stamps the root via ensureRuntimeRoot; this
 // pins that the dashboard's own entry point actually reaches it, on a genuinely fresh root

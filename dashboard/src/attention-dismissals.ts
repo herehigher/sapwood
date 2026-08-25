@@ -1,11 +1,10 @@
 import { appendFileSync, readFileSync } from "node:fs";
-// #1077 fix round 1 (P2, single authority): same cross-package import direction (dashboard ->
-// engine) as fold-open-attention.ts's own State/DEFAULT_DB_PATH import — the filename is
-// spelled once, in paths.ts, not restated here. `.js` extension (not `.ts`, unlike fold-open-
-// attention.ts's own import of state.ts): this file is pulled into dashboard's
-// tsconfig.server.json compile graph (server.ts imports it), which does not set
-// allowImportingTsExtensions — `.js`, resolving to the .ts source via standard NodeNext
-// resolution, is the one specifier form that typechecks under both dashboard tsconfigs.
+// Same cross-package import direction (dashboard -> engine) as fold-open-attention.ts's own
+// State/DEFAULT_DB_PATH import — the filename is spelled once, in paths.ts, not restated here.
+// `.js` extension (not `.ts`, unlike fold-open-attention.ts's own import of state.ts): this file
+// is pulled into dashboard's tsconfig.server.json compile graph (server.ts imports it), which
+// does not set allowImportingTsExtensions — `.js`, resolving to the .ts source via standard
+// NodeNext resolution, is the one specifier form that typechecks under both dashboard tsconfigs.
 import { SAPWOOD_ATTENTION_DISMISSALS_FILENAME } from "../../engine/src/config/paths.js";
 
 export const ATTENTION_DISMISSALS_FILE = SAPWOOD_ATTENTION_DISMISSALS_FILENAME;

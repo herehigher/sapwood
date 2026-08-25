@@ -11,11 +11,11 @@ import { join } from "node:path";
 // `.gitignore`).
 export const SAPWOOD_DIR = ".sapwood";
 
-// #1077 fix round 1 (P2, single authority): every bare filename `runtimePaths()` joins onto a
-// root, exported so the handful of callers that need the BASENAME alone (state.ts's
-// DEFAULT_DB_PATH/INSTANCE_LOCK_FILENAME, cli.ts's SENTINEL_FILENAME, dashboard's
-// ATTENTION_DISMISSALS_FILE) derive it from here instead of restating the string a second time.
-// `runtimePaths()` itself is built from these same constants below — one spelling, not two.
+// Single authority for every bare filename `runtimePaths()` joins onto a root — exported so the
+// handful of callers that need the BASENAME alone (state.ts's DEFAULT_DB_PATH/
+// INSTANCE_LOCK_FILENAME, cli.ts's SENTINEL_FILENAME, dashboard's ATTENTION_DISMISSALS_FILE)
+// derive it from here instead of restating the string a second time. `runtimePaths()` itself is
+// built from these same constants below — one spelling, not two.
 export const SAPWOOD_DB_FILENAME = "sapwood.sqlite";
 export const SAPWOOD_LOCK_FILENAME = "sapwood.lock";
 export const SAPWOOD_KILL_SWITCH_FILENAME = "KILL_SWITCH";
@@ -130,11 +130,11 @@ const CACHEDIR_TAG_CONTENT =
   "# This file is a cache directory tag created by sapwood.\n" +
   "# For information about cache directory tags, see https://bford.info/cachedir/spec.html\n";
 
-// #1077 fix round 1 (P2/test quality): an injectable fs seam, same pattern as loop/instance-
-// lock.ts's own LockFsOps — a byte-content comparison alone can prove the FINAL state is
-// correct, but not that a no-op call actually SKIPPED the write (an implementation that always
-// re-writes identical content leaves the same bytes behind, so a content-only test can't tell
-// the two apart). Defaults to the real node:fs calls; tests inject a spy instead.
+// An injectable fs seam, same pattern as loop/instance-lock.ts's own LockFsOps — a byte-content
+// comparison alone can prove the FINAL state is correct, but not that a no-op call actually
+// SKIPPED the write (an implementation that always re-writes identical content leaves the same
+// bytes behind, so a content-only test can't tell the two apart). Defaults to the real node:fs
+// calls; tests inject a spy instead.
 export interface RuntimeRootFsOps {
   exists: (path: string) => boolean;
   readFile: (path: string) => string;
@@ -171,25 +171,26 @@ function writeIfAbsentOrIdentical(path: string, content: string, log: (message: 
  *  runtime root needs: `.gitignore` (`*` — the whole tree is engine-owned, never committed) and
  *  `cache/CACHEDIR.TAG` (the standard tag, so backup/sync tooling that honors it skips the
  *  cache tier). Idempotent (safe to call on every engine start, not just the first): an
- *  existing root/markers with matching content are a no-op — so every write-capable entry point
- *  that can be the FIRST thing to touch a fresh root calls this before its own first write,
- *  never a bare mkdirSync: `State`'s write-mode constructor (dispatch, `sapwood status`'s
- *  bootstrap-if-missing, and the dashboard's own bootstrap all go through it), cli.ts's
- *  `runEngine` (before the instance lock — this single call also covers the log driver and an
- *  enabled skills-plugin render, since both run later in that same startup sequence, before any
- *  State exists), and cli.ts's `runSentinelCommand` (the `pause`/`stop`/`estop` activation
- *  path — the one mutator that can create a fresh root with no State ever constructed). The
- *  read-only `status`/`events` path deliberately never calls this (same "no filesystem
- *  mutation" contract it already has); neither does `sapwood init` (it writes config/goal/
- *  doctrine/issue-template files elsewhere in the repo, never under the runtime root — the
- *  deploy key stays under the pre-#1077 `data/` location until #1080 moves it here).
+ *  existing root/markers with matching content are a no-op.
+ *
+ *  Every write-capable entry point that can be the FIRST thing to touch a fresh root calls this
+ *  before its own first write: `State`'s write-mode constructor (dispatch, `sapwood status`'s
+ *  bootstrap-if-missing, and the dashboard's own bootstrap all go through it), and cli.ts's
+ *  `runSentinelCommand` (the `pause`/`stop`/`estop` activation path — the one mutator that can
+ *  create a fresh root with no State ever constructed). cli.ts's `runEngine` is the ONE
+ *  exception to "before its own first write": it must acquire the single-instance lock first,
+ *  and a refused (non-owning) start must perform ZERO writes against the holder's directory —
+ *  not even idempotent marker writes — so `runEngine` does a bare, idempotent `mkdir` of the
+ *  lock file's parent directory (required for the lock's own atomic create, a no-op against an
+ *  already-existing dir) ahead of the acquire attempt, and calls this function to stamp the root
+ *  only AFTER it has actually won the lock. `sapwood init` never calls this either — it writes
+ *  config/goal/doctrine/issue-template files elsewhere in the repo, never under the runtime root
+ *  (the deploy key stays under the pre-#1077 `data/` location until #1080 moves it here).
  *
  *  `fs` defaults to the real node:fs calls; tests inject a spy (RuntimeRootFsOps) instead of
- *  monkey-patching node:fs's own exports — this repo's ESM/tsx toolchain does not reliably
- *  propagate a mock.method() patch on node:fs through to a DIFFERENT module's own `import {
- *  writeFileSync } from "node:fs"` binding (verified empirically while adding this seam), so
- *  dependency injection (the same LockFsOps pattern loop/instance-lock.ts already uses) is the
- *  robust seam, not a builtin-module mock. */
+ *  monkey-patching node:fs's own exports, since dependency injection (the same LockFsOps pattern
+ *  loop/instance-lock.ts already uses) is the seam that reliably intercepts calls across this
+ *  repo's ESM/tsx toolchain. */
 export function ensureRuntimeRoot(
   root: string,
   log: (message: string) => void = console.error,

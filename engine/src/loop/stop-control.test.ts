@@ -29,12 +29,12 @@ function writeConfig(dir: string, costLine = "cost: { dailyBudgetUsd: 50 }\n"): 
   return path;
 }
 
-// #1077 fix round 1 (P2): `sapwood pause`/`stop`/`estop` are the one mutator that can create a
-// fresh runtime root with NO State ever constructed (a bare control invocation against a repo
-// that has never run `sapwood run`) — ensureRuntimeRoot must run there too, not just in
-// State's own constructor. No `withDataDir`/explicit db-path here on purpose: this drives the
-// DEFAULT, cwd-relative `.sapwood/` root the same way an operator's bare `sapwood pause` would.
-test("#1077 fix round 1 (P2): a bare `sapwood pause` against a repo with no prior .sapwood/ self-declares the root", () => {
+// `sapwood pause`/`stop`/`estop` are the one mutator that can create a fresh runtime root with
+// NO State ever constructed (a bare control invocation against a repo that has never run
+// `sapwood run`) — ensureRuntimeRoot must run there too, not just in State's own constructor.
+// No `withDataDir`/explicit db-path here on purpose: this drives the DEFAULT, cwd-relative
+// `.sapwood/` root the same way an operator's bare `sapwood pause` would.
+test("a bare `sapwood pause` against a repo with no prior .sapwood/ self-declares the root", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-stop-control-root-declare-"));
   const previousCwd = process.cwd();
   try {

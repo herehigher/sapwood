@@ -29,8 +29,8 @@ test("defaultReviewTreeRoot/defaultReviewCodexStateDir: resolve under an injecte
   assert.equal(defaultReviewCodexStateDir(cwd), join(cwd, ".sapwood", "sessions", "review-codex"));
 });
 
-// #1077 fix round 1 (P2/test quality): the test above proves the EXPORTED HELPER computes the
-// right string — it says nothing about whether makeProductionEngineAgent's own `treeRoot`
+// The test above proves the EXPORTED HELPER computes the right string — it says nothing about
+// whether makeProductionEngineAgent's own `treeRoot`
 // closure variable (production.ts:156) actually resolves through it when `reviewTreeRoot` is
 // left unset, the real production composition. Breaking that one line (e.g. hardcoding a
 // different default, or silently dropping the `?? defaultReviewTreeRoot(...)` fallback) would
