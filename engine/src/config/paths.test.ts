@@ -154,17 +154,19 @@ test("ensureRuntimeRoot: a pre-existing DIFFERING .gitignore is preserved, not o
 // per bypass shape, proving each regex is not vacuous) is the ceiling here.
 //
 // The allowlist is a small, fully explicit `file:line` set — no substring/marker skip and no
-// file-level exclusion beyond the directories/files named below, each with its own reason:
+// file-level exclusion beyond the file named below, with its own reason:
 //   - this file and paths.ts itself (the one place the names ARE spelled)
-//   - engine/src/guard/** — the guard rule's own sentinel-path assumptions are #1079's leg
 //   - the exact `file:line` sites in loop/init.ts, loop/init.test.ts, and config/config.test.ts
 //     where the deploy-key literal is still `data/`-rooted — #1080's move, not this leg's;
 //     listed one line at a time (never "any line containing #1080") so the allowlist can never
 //     silently widen
+// engine/src/guard/** carries no directory-level allowlist entry: guard.ts's `.sapwood/`
+// write-deny rule (#1079) matches this factory's real paths directly, so no `data/` literal
+// remains anywhere under engine/src/guard/** — a future one there is a real offense, not
+// silently covered by a directory-wide exemption.
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const SCAN_ROOTS = [join(REPO_ROOT, "engine", "src"), join(REPO_ROOT, "dashboard", "src")];
 const FILE_ALLOWLIST = new Set(["engine/src/config/paths.ts", "engine/src/config/paths.test.ts"]);
-const DIR_ALLOWLIST_PREFIX = "engine/src/guard/";
 
 // The exact, hand-verified `file:line` sites this leg deliberately leaves data/-rooted — #1080
 // (init's deploy-key move) is the one place responsible for closing these. loop/init.ts's 4
@@ -295,7 +297,7 @@ test("AC1/AC6: no `data/` runtime-root literal remains outside runtimePaths() an
   for (const scanRoot of SCAN_ROOTS) {
     for (const file of listSourceFiles(scanRoot)) {
       const relPath = file.slice(REPO_ROOT.length + 1);
-      if (FILE_ALLOWLIST.has(relPath) || relPath.startsWith(DIR_ALLOWLIST_PREFIX)) continue;
+      if (FILE_ALLOWLIST.has(relPath)) continue;
       const content = readFileSync(file, "utf8");
       for (const site of rawDataLiteralMatches(relPath, content)) {
         if (ALLOWED_1080_SITES.has(site)) hitAllowlistSites.add(site);
