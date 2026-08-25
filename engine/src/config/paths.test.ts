@@ -163,12 +163,10 @@ test("ensureRuntimeRoot: a pre-existing DIFFERING .gitignore is preserved, not o
 //     where the deploy-key literal is still `data/`-rooted — #1080's move, not this leg's;
 //     listed one line at a time (never "any line containing #1080") so the allowlist can never
 //     silently widen
-// engine/src/guard/** carried a directory-level allowlist entry through #1079's first pass
-// (guard.ts's rule still assumed `data/`-rooted sentinels, ahead of this leg landing under it)
-// — #1079 fix round 1 rebased onto this leg and rewrote guard.ts/guard.test.ts to the real
-// `.sapwood/` paths this factory produces, so no `data/` literal remains anywhere under
-// engine/src/guard/** and the directory entry is gone; a future `data/` literal there is a real
-// offense again, not silently covered.
+// engine/src/guard/** carries no directory-level allowlist entry: guard.ts's `.sapwood/`
+// write-deny rule (#1079) matches this factory's real paths directly, so no `data/` literal
+// remains anywhere under engine/src/guard/** — a future one there is a real offense, not
+// silently covered by a directory-wide exemption.
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const SCAN_ROOTS = [join(REPO_ROOT, "engine", "src"), join(REPO_ROOT, "dashboard", "src")];
 const FILE_ALLOWLIST = new Set(["engine/src/config/paths.ts", "engine/src/config/paths.test.ts"]);

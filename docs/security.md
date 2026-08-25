@@ -1443,7 +1443,7 @@ own issue with that evidence as the Why.
 `ac-evidence-tiers`) verbatim from this file's own marker-delimited sections (see the
 `<!-- sapwood:skill:*:start/end -->` comments above and around the "Doctrine lines" AC-evidence
 tiers) into an immutable, content-hash-named plugin directory under
-`data/generated/role-skills/<hash>/`, attached to a session via `claude --plugin-dir`. This
+`.sapwood/cache/generated/role-skills/<hash>/`, attached to a session via `claude --plugin-dir`. This
 CONTENT-side-only: the render path's only input is this engine-shipped file — never anything
 issue-body- or PR-derived — and a published hash directory is never overwritten (the "accident
 fence, not a jail" doctrine: the goal is to stop a mistake, not to withstand an adversary who
@@ -2127,8 +2127,8 @@ so the guard (`engine/src/guard/guard.ts`) adds defense-in-depth on top of that 
 The guard's write-deny rule (`protectedPathLabel`, `checkControlSentinelArg`) no longer
 enumerates individual filenames — it targets the fixed `.sapwood/` runtime root as a whole
 (#1079), so one segment-equality rule covers the three control sentinels together with
-everything else the runtime directory holds, instead of naming each path separately (the
-directory's own layout is documented in `docs/configuration.md`, not restated here). A
+everything else the runtime directory holds, instead of naming each path separately (see
+`docs/guide/configuration.md` for the runtime directory, not restated here). A
 write-class built-in tool (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`) or a Bash write vector
 (`touch`/`rm`/`mv`/`sed -i`/`perl -i`/`tee`/`dd`/`cp`/`install`/redirect-to-path, or
 `git rm`/`mv`/`restore`/`checkout`) is denied whenever its lexically normalized target contains an
