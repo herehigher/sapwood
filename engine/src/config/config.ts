@@ -1020,8 +1020,8 @@ const Engine = z
     // roles (aligning/architecting/plan_review/harvesting/retro) wrapped around the same tick
     // engine, batch-dispatch-then-drain per round. "tick" — the bare M4 loop driver (driver.ts's
     // runDriver), unchanged: no peripherals, --once/--until-idle apply. Kept reachable as an
-    // explicit escape hatch until a live dogfood run has validated the round path (PLAN.md's
-    // follow-up note); not deprecated, just no longer the default.
+    // explicit escape hatch (docs/guide/configuration.md's `driver` row); not deprecated, just no
+    // longer the default.
     driver: z.enum(["rounds", "tick"]).default("rounds"),
   })
   .strict();

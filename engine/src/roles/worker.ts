@@ -955,7 +955,7 @@ export function discoverClaudeBin(env: Record<string, string | undefined>): stri
   return b ? b : "claude";
 }
 
-/** #799 (PLAN.md:123 — "state a minimum Claude Code CLI version", never previously built): the
+/** #799 (PLAN.md's Architecture chapter — "state a minimum Claude Code CLI version", never previously built): the
  *  minimum Claude Code CLI version this engine's worker/probe argv
  *  is verified against — the ONLY version this repo has evidence for. probeLlmPing's own doc
  *  below states it: "verified working against claude CLI 2.1.209" for `--no-session-persistence`,
@@ -1152,7 +1152,7 @@ export function mkProbeLlmReachable(cfg: SapwoodConfig, claudeBin: string): () =
 // loop/, but the ACTUAL spawn lives HERE, next to probeLlmPing, on purpose: this file's own
 // `#69 grep-invariant` test (below, "the ONLY child_process importers are worker.ts...") is a
 // repo-wide structural check that no OTHER engine module shells out — the "Claude CLI coupling
-// isolated in worker.ts" property PLAN.md:129 itself names as a v1 requirement. Adding a second
+// isolated in worker.ts" property PLAN.md's Architecture chapter itself names as a v1 requirement. Adding a second
 // spawn call in loop/claude-version-startup-check.ts would either violate that invariant or force
 // widening its allowlist; keeping the spawn here and exporting only the RESULT type/function
 // keeps the isolation property intact while still letting the startup module own the arm/log/
