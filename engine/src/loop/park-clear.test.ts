@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { parseParkArgs, runPark } from "../cli.js";
 import type { EventKind } from "../state/event-kinds/index.js";
-import { INSTANCE_LOCK_FILENAME, type ParkSource, State } from "../state/state.js";
+import { DEFAULT_DB_PATH, INSTANCE_LOCK_FILENAME, type ParkSource, State } from "../state/state.js";
 import { clearParksReceiptFirst } from "./park-clear.js";
 
 const park = (s: State, source: ParkSource, reason = `${source} reason`): void => {
@@ -116,12 +116,20 @@ test("clearing an unparked source is a no-op — no receipt for an episode that 
 });
 
 // ── the CLI verb ────────────────────────────────────────────────────────────────────────────
+//
+// #1078: `park clear` is a MUTATING command — no db-path positional any more (AC4). Every test
+// below chdirs into a fresh tmp dir instead of passing an explicit db-path, exactly the DEFAULT,
+// cwd-relative `.sapwood/` root a real operator's bare `sapwood park clear` would use (same
+// pattern stop-control.test.ts's own #1077 "self-declares the root" test already established).
 
 function withDataDir(fn: (dir: string, dbPath: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-park-clear-"));
+  const previousCwd = process.cwd();
   try {
-    fn(dir, join(dir, "sapwood.sqlite"));
+    process.chdir(dir);
+    fn(dir, join(dir, ".sapwood", "sapwood.sqlite"));
   } finally {
+    process.chdir(previousCwd);
     rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -132,13 +140,13 @@ test("sapwood park clear: clears the episode, takes down the ESCALATION marker, 
     park(s, "consecutive-stalls");
     s.writeEscalationMarker({ source: "consecutive-stalls", reason: "wedged", message: "m", at: "2026-07-31T00:00:00.000Z" });
     s.close();
-    assert.equal(existsSync(join(dir, "ESCALATION")), true);
+    assert.equal(existsSync(join(dir, ".sapwood", "ESCALATION")), true);
 
-    const res = runPark(["node", "sapwood", "park", "clear", dbPath]);
+    const res = runPark(["node", "sapwood", "park", "clear"]);
     assert.equal(res.code, 0, res.stderr);
     assert.match(res.stdout, /consecutive-stalls/);
-    assert.equal(existsSync(join(dir, "ESCALATION")), false, "the answered alarm is taken down");
-    assert.equal(existsSync(join(dir, INSTANCE_LOCK_FILENAME)), false, "the verb releases the data-dir lock it acquired");
+    assert.equal(existsSync(join(dir, ".sapwood", "ESCALATION")), false, "the answered alarm is taken down");
+    assert.equal(existsSync(join(dir, ".sapwood", INSTANCE_LOCK_FILENAME)), false, "the verb releases the data-dir lock it acquired");
 
     const after = new State(dbPath);
     assert.equal(after.isParked(), false);
@@ -155,7 +163,7 @@ test("#644: sapwood park clear --reason lands the text in the receipt payload (r
     park(s, "idle-churn");
     s.close();
 
-    const res = runPark(["node", "sapwood", "park", "clear", dbPath, "--reason", "confirmed with owner in #604 thread"]);
+    const res = runPark(["node", "sapwood", "park", "clear", "--reason", "confirmed with owner in #604 thread"]);
     assert.equal(res.code, 0, res.stderr);
     assert.match(res.stdout, /confirmed with owner in #604 thread/, "the reason text is echoed in stdout");
 
@@ -174,13 +182,13 @@ test("#644 reverse test: sapwood park clear WITHOUT --reason is byte-identical t
     s.writeEscalationMarker({ source: "consecutive-stalls", reason: "wedged", message: "m", at: "2026-07-31T00:00:00.000Z" });
     s.close();
 
-    const res = runPark(["node", "sapwood", "park", "clear", dbPath]);
+    const res = runPark(["node", "sapwood", "park", "clear"]);
     assert.equal(res.code, 0, res.stderr);
     assert.equal(
       res.stdout,
       "sapwood park clear: 1 park episode(s) cleared, receipt-first\n  cleared consecutive-stalls (parked since 2026-07-31T00:00:00.000Z) — reason: consecutive-stalls reason\n",
     );
-    assert.equal(existsSync(join(dir, "ESCALATION")), false);
+    assert.equal(existsSync(join(dir, ".sapwood", "ESCALATION")), false);
 
     const after = new State(dbPath);
     const resumed = after.eventsAfterId(0, ["park-resumed"]);
@@ -192,11 +200,11 @@ test("#644 reverse test: sapwood park clear WITHOUT --reason is byte-identical t
 test("#644: sapwood park clear --reason with empty or whitespace-only text is REJECTED fail-closed", () => {
   withDataDir((_dir, dbPath) => {
     new State(dbPath).close();
-    const empty = runPark(["node", "sapwood", "park", "clear", dbPath, "--reason", ""]);
+    const empty = runPark(["node", "sapwood", "park", "clear", "--reason", ""]);
     assert.equal(empty.code, 1);
     assert.match(empty.stderr, /--reason/);
 
-    const whitespace = runPark(["node", "sapwood", "park", "clear", dbPath, "--reason", "   "]);
+    const whitespace = runPark(["node", "sapwood", "park", "clear", "--reason", "   "]);
     assert.equal(whitespace.code, 1);
     assert.match(whitespace.stderr, /--reason/);
   });
@@ -205,11 +213,11 @@ test("#644: sapwood park clear --reason with empty or whitespace-only text is RE
 test("#644: sapwood park clear --reason with a missing value fails closed, same stance as --source", () => {
   withDataDir((_dir, dbPath) => {
     new State(dbPath).close();
-    const missing = runPark(["node", "sapwood", "park", "clear", dbPath, "--reason"]);
+    const missing = runPark(["node", "sapwood", "park", "clear", "--reason"]);
     assert.equal(missing.code, 1);
     assert.match(missing.stderr, /--reason requires/);
 
-    const flagShaped = runPark(["node", "sapwood", "park", "clear", dbPath, "--reason", "--source"]);
+    const flagShaped = runPark(["node", "sapwood", "park", "clear", "--reason", "--source"]);
     assert.equal(flagShaped.code, 1);
     assert.match(flagShaped.stderr, /--reason requires/);
   });
@@ -226,6 +234,16 @@ test("#644: parseParkArgs — --reason parses to ParkArgs.reason, and the unknow
   assert.match(unknown.error ?? "", /unknown flag: --bogus/);
 });
 
+// #1078 AC4: `park clear` is a mutating command — a positional argument (the pre-#1078 db-path
+// escape hatch) is now rejected outright rather than silently reinterpreted as a DB to operate
+// on. `status`/`events` deliberately keep accepting one (they stay read-only) — see cli.test.ts.
+test("#1078 AC4: sapwood park clear REJECTS a positional argument — no more db-path override on a mutating command", () => {
+  const res = parseParkArgs(["node", "sapwood", "park", "clear", "/some/other/db.sqlite"]);
+  assert.equal(res.help, false);
+  assert.match(res.error ?? "", /unexpected argument/);
+  assert.equal(res.dbPath, DEFAULT_DB_PATH, "dbPath stays the fixed default regardless of the rejected positional");
+});
+
 test("sapwood park clear REFUSES against a data dir held by a live engine — never a silent racy clear", () => {
   withDataDir((dir, dbPath) => {
     const s = new State(dbPath);
@@ -234,11 +252,11 @@ test("sapwood park clear REFUSES against a data dir held by a live engine — ne
     // The lockfile a live engine holds. `process.pid` is this very process — indisputably alive,
     // so the refusal is decided by a fact, not by a race (instance-lock.ts's pidIsAlive).
     writeFileSync(
-      join(dir, INSTANCE_LOCK_FILENAME),
+      join(dir, ".sapwood", INSTANCE_LOCK_FILENAME),
       JSON.stringify({ pid: process.pid, token: "held", acquiredAt: "2026-07-31T00:00:00.000Z" }) + "\n",
     );
 
-    const res = runPark(["node", "sapwood", "park", "clear", dbPath]);
+    const res = runPark(["node", "sapwood", "park", "clear"]);
     assert.equal(res.code, 1);
     assert.match(res.stderr, /refusing/i);
     assert.match(res.stderr, new RegExp(String(process.pid)));
@@ -247,28 +265,36 @@ test("sapwood park clear REFUSES against a data dir held by a live engine — ne
     assert.equal(after.isParked(), true, "the park stands — the refusal changed nothing");
     assert.equal(after.eventsAfterId(0, ["park-resumed"]).length, 0, "and left no receipt behind");
     after.close();
-    assert.equal(existsSync(join(dir, INSTANCE_LOCK_FILENAME)), true, "the live holder's lock is never displaced");
+    assert.equal(existsSync(join(dir, ".sapwood", INSTANCE_LOCK_FILENAME)), true, "the live holder's lock is never displaced");
   });
 });
 
 test("sapwood park clear on an unparked engine: nothing to clear, exit 0", () => {
   withDataDir((_dir, dbPath) => {
     new State(dbPath).close();
-    const res = runPark(["node", "sapwood", "park", "clear", dbPath]);
+    const res = runPark(["node", "sapwood", "park", "clear"]);
     assert.equal(res.code, 0, res.stderr);
     assert.match(res.stdout, /no open park episode/);
   });
 });
 
-test("sapwood park clear: missing DB, unknown source, and unknown subcommand all fail closed", () => {
-  withDataDir((dir, dbPath) => {
+test("sapwood park clear: unknown source and unknown subcommand fail closed", () => {
+  withDataDir((_dir, dbPath) => {
     new State(dbPath).close();
-    assert.equal(runPark(["node", "sapwood", "park", "clear", join(dir, "nope.sqlite")]).code, 1);
-    const bad = runPark(["node", "sapwood", "park", "clear", dbPath, "--source", "bogus"]);
+    const bad = runPark(["node", "sapwood", "park", "clear", "--source", "bogus"]);
     assert.equal(bad.code, 1);
     assert.match(bad.stderr, /unknown --source/);
     assert.equal(runPark(["node", "sapwood", "park", "wat"]).code, 1);
     assert.equal(runPark(["node", "sapwood", "park", "clear", "--help"]).code, 0);
+  });
+});
+
+test("sapwood park clear: no DB at all in this cwd -> a clean 'the engine has never run here' refusal, exit 1", () => {
+  withDataDir(() => {
+    // No State ever constructed in this dir — DEFAULT_DB_PATH genuinely does not exist.
+    const res = runPark(["node", "sapwood", "park", "clear"]);
+    assert.equal(res.code, 1);
+    assert.match(res.stderr, /no state DB|never run here/);
   });
 });
 
@@ -292,7 +318,7 @@ test("the verb's clear is the SAME act the engine's startup path honors: a later
     assert.equal(s.isParked(), true);
     s.close();
 
-    assert.equal(runPark(["node", "sapwood", "park", "clear", dbPath, "--source", "consecutive-stalls"]).code, 0);
+    assert.equal(runPark(["node", "sapwood", "park", "clear", "--source", "consecutive-stalls"]).code, 0);
 
     const next = new State(dbPath);
     next.appendEvent("run-started", { configHash: "h" });
@@ -308,7 +334,7 @@ test("the verb's clear is the SAME act the engine's startup path honors: a later
       "the receipt closed the episode and reset the streak",
     );
     assert.equal(next.eventsAfterId(0, ["park-resumed"]).length, 1, "exactly one receipt — the startup path adds none of its own");
-    assert.equal(existsSync(join(dir, "ESCALATION")), false);
+    assert.equal(existsSync(join(dir, ".sapwood", "ESCALATION")), false);
     next.close();
   });
 });

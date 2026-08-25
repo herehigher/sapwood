@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { runEngine } from "../cli.js";
-import { engineAgentEmptyCiRequiredChecksError, parseConfig } from "../config/config.js";
+import { engineAgentEmptyCiRequiredChecksError, loadConfig, parseConfig } from "../config/config.js";
 import type { GhRunner } from "../forge/gh.js";
 import { State } from "../state/state.js";
 import { DOC_LINKS } from "../util/doc-links.js";
@@ -15,6 +15,7 @@ import {
   defaultDoctrineTemplatePath,
   defaultGoalTemplatePath,
   defaultIssueTemplatePath,
+  ensureDeployKey,
   InitError,
   ISSUE_TEMPLATE_NAMES,
   init,
@@ -1469,6 +1470,112 @@ test("init: FRESH PROVISIONING — nothing configured, no sapwood-titled remote 
     assert.equal(lastNonBlank, "/data/worker-deploy-key*");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #1078 AC3: worker.deployKeyPath is CWD-relative, not config-file-relative ────────────────
+// Every test below puts the config file in a SUBDIRECTORY of `root` (`root`'s own `cwd`
+// parameter) — the OLD relative(dirname(configFilePath), keyPath) rule would have written
+// "../data/worker-deploy-key..." here; the fix writes the CWD-relative "data/worker-deploy-key..."
+// instead, exactly what config.ts's loadConfig resolver reads back (its own AC3 test above).
+
+test("#1078 AC3 (init writer site 1/2 — ensureDeployKey's fresh-provisioning tail): deployKeyPath is written CWD-relative even though the config file lives in a subdirectory of cwd", async () => {
+  const root = tmpCwd();
+  try {
+    const sub = join(root, "sub");
+    mkdirSync(sub, { recursive: true });
+    const configPath = join(sub, "sapwood.config.yaml");
+    writeFileSync(configPath, "board: { owner: acme, repo: widgets, projectNumber: 7 }\n");
+    const provisioned = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }"); // no worker.* set -> fresh provisioning
+    const { run } = fakeRun({ deployKeyEntries: [] }); // nothing registered remotely either
+    const actions = await ensureDeployKey(provisioned, run, "acme/widgets", root, configPath, {
+      sshKeygen: async (path) => {
+        writeFileSync(path, "fake-private-key");
+        writeFileSync(`${path}.pub`, "ssh-ed25519 AAAA fake");
+      },
+      probeSshAuth: async () => ({ ok: true }),
+      ...nonInteractive,
+    });
+    assert.ok(actions.some((a) => /wrote worker\.deployKeyPath\/worker\.deployKeyId/.test(a)));
+    const configText = readFileSync(configPath, "utf8");
+    const expected = relative(root, join(root, "data", "worker-deploy-key"));
+    assert.match(configText, new RegExp(`deployKeyPath: ${expected.replace(/\\/g, "\\\\")}\\b`));
+    assert.ok(!configText.includes(".."), "must never resolve against the config file's OWN directory (the pre-#1078 rule)");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#1078 AC3 (init writer site 2/2 — armAuthFailsStaleOrMismatch's arm (a)): deployKeyPath is written CWD-relative even though the config file lives in a subdirectory of cwd", async () => {
+  const root = tmpCwd();
+  try {
+    const sub = join(root, "sub");
+    mkdirSync(sub, { recursive: true });
+    const configPath = join(sub, "sapwood.config.yaml");
+    writeFileSync(configPath, "board: { owner: acme, repo: widgets, projectNumber: 7 }\n");
+    const provisioned = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }"); // no local anchor
+    // A sapwood-titled key already exists remotely -> routes into armAuthFailsStaleOrMismatch.
+    const { run } = fakeRun({ deployKeyEntries: [{ id: 7, title: "sapwood-worker" }] });
+    const actions = await ensureDeployKey(provisioned, run, "acme/widgets", root, configPath, {
+      sshKeygen: async (path) => {
+        writeFileSync(path, "fake-private-key");
+        writeFileSync(`${path}.pub`, "ssh-ed25519 AAAA fake");
+      },
+      probeSshAuth: async () => ({ ok: true }),
+      isInteractive: () => true,
+      promptOperator: async () => "a", // choose (a): register a new per-machine key
+      hostname: () => "MyLaptop.local",
+    });
+    assert.ok(actions.some((a) => /operator chose \(a\)/.test(a)));
+    const configText = readFileSync(configPath, "utf8");
+    const expected = relative(root, join(root, "data", "worker-deploy-key-mylaptop-local"));
+    assert.match(configText, new RegExp(`deployKeyPath: ${expected.replace(/\\/g, "\\\\")}\\b`));
+    assert.ok(!configText.includes(".."), "must never resolve against the config file's OWN directory (the pre-#1078 rule)");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#1078 AC3 (end-to-end): loadConfig's CWD-resolved deployKeyPath is exactly the path reconcileDeployKey() receives — a config file in a subdirectory of cwd still reconciles green", async () => {
+  // realpathSync: macOS's tmpdir() is a symlink (/var -> /private/var) — process.chdir()+
+  // resolve() (what loadConfig's cwd-relative resolution actually reads) resolves it, so
+  // comparing against the raw mkdtempSync path would spuriously fail on the "/var/.." vs
+  // "/private/var/.." string difference alone, not a real defect (same pattern peripheral.test.ts/
+  // worker.test.ts already use).
+  const root = realpathSync(tmpCwd());
+  const previousCwd = process.cwd();
+  try {
+    const sub = join(root, "sub");
+    mkdirSync(sub, { recursive: true });
+    const configPath = join(sub, "sapwood.config.yaml");
+    writeFileSync(
+      configPath,
+      "board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: data/worker-deploy-key, deployKeyId: 42 }\n",
+    );
+    process.chdir(root);
+    const cfg = loadConfig(configPath);
+    process.chdir(previousCwd);
+    // Proves the resolution itself is cwd-relative (config.ts's own AC3 resolver test covers this
+    // in isolation too) — this is the value reconcileDeployKey below will actually be handed.
+    assert.equal(cfg.worker.deployKeyPath, join(root, "data", "worker-deploy-key"));
+
+    writeFakeKeyPair(cfg.worker.deployKeyPath!);
+    const { run, calls } = fakeRun({
+      deployKeyEntries: [{ id: 42, title: "sapwood-worker", key: FAKE_PUB_KEY }],
+    });
+    const actions = await ensureDeployKey(cfg, run, "acme/widgets", root, configPath, {
+      ...nonInteractive,
+      sshKeygen: failSshKeygen,
+      probeSshAuth: async () => ({ ok: true }),
+    });
+    assert.ok(!calls.some((c) => c[0] === "repo" && c[1] === "deploy-key" && c[2] === "add"), "a green reconcile never re-provisions");
+    assert.ok(
+      actions.some((a) => /reconciled/.test(a) && /L1 active/.test(a)),
+      `expected a green reconcile action, got: ${actions.join(" | ")}`,
+    );
+  } finally {
+    process.chdir(previousCwd);
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

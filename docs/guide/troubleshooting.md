@@ -55,7 +55,7 @@ capacity. A `Ready` board status alone is not enough.
   — a marker-only comment does not
   produce either escalation.
 
-The run narrative defaults to `data/logs/sapwood.log` and is also teed to stderr; use
+The run narrative defaults to `.sapwood/logs/sapwood.log` (`logging.path` is optional; a SET value resolves against the config file's directory instead) and is also teed to stderr; use
 `sapwood status` for active lanes and `sapwood events --issue ISSUE` for durable escalation
 facts. Today, an in-memory dispatch result can name capacity reasons such as `cap`, `no-lane`,
 or `over-budget`, but the normal CLI does **not** persist a per-candidate skip reason for an
@@ -514,7 +514,7 @@ disagree.
 
 ## Where to look after an unattended run
 
-The run log (`logging.path`, default `data/logs/sapwood.log`) is the disposable human/LLM
+The run log (`logging.path`, unset -> `.sapwood/logs/sapwood.log`) is the disposable human/LLM
 narrative: startup, tick and round lifecycle summaries, degradations, and park notices. Merges
 announce themselves here too — one `[sapwood:drive] lane <lane> pr #<n> MERGED (<headOid>)` line
 per merged PR, so the engine's most consequential act is visible to a live `tail -f`

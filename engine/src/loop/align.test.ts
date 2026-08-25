@@ -2808,13 +2808,13 @@ test("createAligningStub #126: no directive file -> both the align session AND e
   forge.planTriageCandidates = [{ number: 9, title: "planless idea", labels: [] }];
   const dir = mkdtempSync(join(tmpdir(), "sapwood-directive-"));
   try {
-    const cfg = mkCfg({ round: { directiveFile: join(dir, "DIRECTIVE.md") } });
+    const cfg = mkCfg();
     const runner = new ScriptedRunner([
       doneResult("po-align-1", alignResultText([])),
       doneResult("po-triage-1", triageResultText(9, PLAN_BODY)),
     ]);
     const state = new State(":memory:");
-    const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+    const deps: AlignDeps = { now: realClock, forge, state, cfg, runner, directivePath: join(dir, "DIRECTIVE.md") };
     const stub = createAligningStub(deps);
     await stub.run({ roundId: 1, phase: "aligning", marker: null });
     assert.equal(runner.calls.length, 2);
@@ -2835,13 +2835,13 @@ test("createAligningStub #126: a directive file is substituted into BOTH the ali
   try {
     const directiveFile = join(dir, "DIRECTIVE.md");
     writeFileSync(directiveFile, "Prioritize the payments module this round.", "utf8");
-    const cfg = mkCfg({ round: { directiveFile } });
+    const cfg = mkCfg();
     const runner = new ScriptedRunner([
       doneResult("po-align-1", alignResultText([])),
       doneResult("po-triage-1", triageResultText(9, PLAN_BODY)),
     ]);
     const state = new State(":memory:");
-    const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+    const deps: AlignDeps = { now: realClock, forge, state, cfg, runner, directivePath: directiveFile };
     const stub = createAligningStub(deps);
     await stub.run({ roundId: 4, phase: "aligning", marker: null });
     assert.equal(runner.calls.length, 2);
@@ -2868,11 +2868,11 @@ test("createAligningStub #126: crash-rerun — a resumed call for the SAME round
   try {
     const directiveFile = join(dir, "DIRECTIVE.md");
     writeFileSync(directiveFile, "original steering", "utf8");
-    const cfg = mkCfg({ round: { directiveFile } });
+    const cfg = mkCfg();
     const state = new State(":memory:");
 
     const runner1 = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
-    const deps1: AlignDeps = { now: realClock, forge, state, cfg, runner: runner1 };
+    const deps1: AlignDeps = { now: realClock, forge, state, cfg, runner: runner1, directivePath: directiveFile };
     await createAligningStub(deps1).run({ roundId: 2, phase: "aligning", marker: null });
     assert.ok(runner1.calls[0]!.prompt.includes("original steering"));
 
@@ -2882,7 +2882,7 @@ test("createAligningStub #126: crash-rerun — a resumed call for the SAME round
     writeFileSync(directiveFile, "a later, different directive", "utf8");
     forge.planTriageCandidates = [{ number: 9, title: "planless idea", labels: [] }];
     const runner2 = new ScriptedRunner([doneResult("po-triage-2", triageResultText(9, PLAN_BODY))]);
-    const deps2: AlignDeps = { now: realClock, forge, state, cfg, runner: runner2 };
+    const deps2: AlignDeps = { now: realClock, forge, state, cfg, runner: runner2, directivePath: directiveFile };
     await createAligningStub(deps2).run({ roundId: 2, phase: "aligning", marker: null });
     assert.equal(runner2.calls.length, 1, "the persisted proposal set skips po-align; triage still runs");
     assert.equal(runner2.calls[0]!.roleId, "po-triage");

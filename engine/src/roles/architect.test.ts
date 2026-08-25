@@ -908,10 +908,18 @@ test("createArchitectStub #126: no directive file -> the rendered prompt carries
   forge.planReviewCandidates = [{ number: 7, title: "t", labels: [] }];
   const dir = mkdtempSync(join(tmpdir(), "sapwood-architect-directive-"));
   try {
-    const cfg = mkCfg({ round: { directiveFile: join(dir, "DIRECTIVE.md") } });
+    const cfg = mkCfg();
     const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
     const state = new State(":memory:");
-    const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+    const deps: ArchitectDeps = {
+      now: realClock,
+      forge,
+      state,
+      cfg,
+      runner,
+      planMdPath: "/nonexistent/PLAN.md",
+      directivePath: join(dir, "DIRECTIVE.md"),
+    };
     await createArchitectStub(deps).run({ roundId: 3, phase: "architecting", marker: null });
     assert.ok(runner.calls[0]!.prompt.includes("No round directive was provided for this round."));
     assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 0);
@@ -928,10 +936,18 @@ test("createArchitectStub #126: with the PO role DISABLED (#127, aligning never 
   try {
     const directiveFile = join(dir, "DIRECTIVE.md");
     writeFileSync(directiveFile, "Weigh the payments-module candidates first.", "utf8");
-    const cfg = mkCfg({ round: { directiveFile }, roles: { po: { enabled: false } } });
+    const cfg = mkCfg({ roles: { po: { enabled: false } } });
     const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
     const state = new State(":memory:");
-    const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+    const deps: ArchitectDeps = {
+      now: realClock,
+      forge,
+      state,
+      cfg,
+      runner,
+      planMdPath: "/nonexistent/PLAN.md",
+      directivePath: directiveFile,
+    };
     await createArchitectStub(deps).run({ roundId: 6, phase: "architecting", marker: null });
     assert.ok(runner.calls[0]!.prompt.includes("Weigh the payments-module candidates first."));
     const events = state.eventsAfterId(0, ["directive-applied"]);
@@ -955,10 +971,18 @@ test("createArchitectStub #126 gate② I2: with the PO role ENABLED, a directive
     // Dropped BETWEEN aligning and architecting: no directive-applied event exists (aligning
     // ran with no file present), but the file is now at the live path.
     writeFileSync(directiveFile, "dropped between aligning and architecting", "utf8");
-    const cfg = mkCfg({ round: { directiveFile } }); // po enabled (default)
+    const cfg = mkCfg(); // po enabled (default)
     const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
     const state = new State(":memory:");
-    const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+    const deps: ArchitectDeps = {
+      now: realClock,
+      forge,
+      state,
+      cfg,
+      runner,
+      planMdPath: "/nonexistent/PLAN.md",
+      directivePath: directiveFile,
+    };
     await createArchitectStub(deps).run({ roundId: 6, phase: "architecting", marker: null });
     assert.ok(runner.calls[0]!.prompt.includes("No round directive was provided for this round."));
     assert.ok(!runner.calls[0]!.prompt.includes("dropped between aligning and architecting"), "never a half-round apply");
@@ -976,7 +1000,7 @@ test("createArchitectStub #126: when aligning already consumed this round's dire
   const dir = mkdtempSync(join(tmpdir(), "sapwood-architect-directive-"));
   try {
     const directiveFile = join(dir, "DIRECTIVE.md");
-    const cfg = mkCfg({ round: { directiveFile } });
+    const cfg = mkCfg();
     const state = new State(":memory:");
     // Simulate aligning's own consumption of this round's directive (align.ts calls the SAME
     // resolveRoundDirective — this test only needs the resulting durable event + archived file,
@@ -985,7 +1009,15 @@ test("createArchitectStub #126: when aligning already consumed this round's dire
     state.appendEvent("directive-applied", payload);
 
     const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
-    const deps: ArchitectDeps = { now: realClock, forge, state, cfg, runner, planMdPath: "/nonexistent/PLAN.md" };
+    const deps: ArchitectDeps = {
+      now: realClock,
+      forge,
+      state,
+      cfg,
+      runner,
+      planMdPath: "/nonexistent/PLAN.md",
+      directivePath: directiveFile,
+    };
     await createArchitectStub(deps).run({ roundId: 10, phase: "architecting", marker: null });
     assert.ok(runner.calls[0]!.prompt.includes("steer toward payments"));
     assert.equal(state.eventsAfterId(0, ["directive-applied"]).length, 1, "no duplicate event");

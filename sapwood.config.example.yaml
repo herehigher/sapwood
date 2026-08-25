@@ -40,7 +40,8 @@ board:
   #                          # closed between them parks the engine for a human
 
 # logging:
-#   path: data/logs/sapwood.log # default shown — resolves against this config file's directory
+#   path: logs/run.log # optional; default .sapwood/logs/sapwood.log (cwd-relative, unset) — a
+  #                     # SET value resolves against this config file's directory instead
 #   teeToStderr: true # default: true — also write each log record to stderr
 #   maxBytes: 10485760 # default: 10485760 (10 MiB) — rotate to <path>.1 before the next append
   #                     # crosses this size
@@ -74,9 +75,11 @@ worker:
   #                                   # only for fix-leg resumes
   # pricingFile: pricing/my-rates.yaml # default: unset — engine's shipped pricing.yaml rate
   #                                     # table; your file REPLACES it entirely, no merging
-  # deployKeyPath: data/worker-deploy-key # default: unset (L0, full credentialed env) — set
-  #                                        # TOGETHER with deployKeyId to activate the L1 scoped
-  #                                        # SSH deploy key; `sapwood init` provisions both
+  # deployKeyPath: .sapwood/keys/worker-deploy-key # default: unset (L0, full credentialed env) —
+  #                                        # set TOGETHER with deployKeyId to activate the L1
+  #                                        # scoped SSH deploy key; `sapwood init` provisions
+  #                                        # both. Resolves against CWD, not this config file's
+  #                                        # directory (unlike promptFile/pricingFile above).
   # deployKeyId: 12345678 # default: unset — the deploy key's GitHub-assigned numeric id
 
 # guard:
@@ -127,9 +130,6 @@ cost:
 #   idleChurn:
 #     consecutiveIdenticalRoundsThreshold: 5 # default: 5 — this many consecutive idle,
     #                                         # state-identical rounds parks the engine
-#   directiveFile: data/DIRECTIVE.md # default shown — human why/what steering read at round
-  #                                   # open; resolved relative to the process cwd, not this
-  #                                   # config file's directory
 #   directiveMaxChars: 20000 # default: 20000 — deterministic-truncation cap on the directive
   #                           # text substituted into prompts
 #   poolFactor: 1.5 # default: 1.5 — round-pool selection multiplier over lanes.roundDispatchCap,

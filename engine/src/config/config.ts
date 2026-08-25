@@ -18,7 +18,7 @@ import {
 } from "../forge/labels.js";
 import { DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
 import { DOC_LINKS } from "../util/doc-links.js";
-import { runtimePaths, SAPWOOD_DIR } from "./paths.js";
+import { defaultRuntimeRoot, runtimePaths } from "./paths.js";
 
 export const DEFAULT_EGRESS_SUSPECT_COMMANDS = [
   "curl",
@@ -150,9 +150,12 @@ const Worker = z
     pricingFile: z.string().optional(),
     // #606 (#351 final ruling): the L1 scoped-worker-identity per-repo SSH deploy key —
     // `sapwood init` provisions it (ssh-keygen + `gh repo deploy-key add --allow-write`) and
-    // writes this key back into the config file. Same #74 promptFile shape: a relative path
-    // resolves against the CONFIG FILE's directory (see loadConfig). Unset (default) -> L0,
-    // today's behavior unchanged (a worker leg inherits the operator's full credentialed env).
+    // writes this key back into the config file. #1078: UNLIKE promptFile/pricingFile above, a
+    // relative path here resolves against CWD (see loadConfig) — the key file lives beside the
+    // engine's own runtime root, not beside a role's shipped prompt, so it follows that same
+    // cwd-relative convention instead of promptFile's config-file-relative one. Unset (default)
+    // -> L0, today's behavior unchanged (a worker leg inherits the operator's full credentialed
+    // env).
     // Set -> worker.ts probes SSH auth once per engine life; success activates L1 (git-transport-
     // only env, `Bash(gh *)` dropped from the leg's tool grant) on every dispatch/resume/fix leg;
     // failure WARNs with a re-provision instruction and dispatch stays at L0 (never wedges). A
@@ -1125,10 +1128,12 @@ const Liveness = z
 
 const Logging = z
   .object({
-    // runtimePaths(SAPWOOD_DIR).logFile derives the exact same cwd-relative string
-    // runtimePaths() itself spells for logFile — never a second "logs/sapwood.log" literal
-    // restated here.
-    path: z.string().min(1).default(runtimePaths(SAPWOOD_DIR).logFile),
+    // #1078: no schema default — unset means "use the runtime root's own log location"
+    // (runtimePaths(defaultRuntimeRoot()).logFile, cwd-relative), which loadConfig below fills
+    // in AFTER parse, not here. A SET value is an operator-authored file reference (same class
+    // as promptFile/goal.file/doctrine.file) and stays config-file-relative, exactly like those
+    // — see loadConfig's own resolution step for the two rules side by side.
+    path: z.string().min(1).optional(),
     teeToStderr: z.boolean().default(true),
     maxBytes: z
       .number()
@@ -1261,15 +1266,11 @@ const Round = z
     emptySpin: EmptySpin.default({}),
     // #470: the idle-churn breaker's own threshold — see IdleChurn's doc above.
     idleChurn: IdleChurn.default({}),
-    // #126: round directive file — human steering (why/what) injected into the aligning +
-    // architecting prompts at round open (directive.ts's resolveRoundDirective). Resolved like
-    // other runtime-root paths in this repo — relative to the process cwd, the same convention
-    // state.ts's own DEFAULT_DB_PATH uses — NOT config-file-relative like roles.*.promptFile,
-    // since this file lives beside the engine's own runtime root (and gets archived to a
-    // sibling `directives/` dir there), not beside a role's shipped prompt. Always has a value
-    // (never "unset"), same shape as goal.file. runtimePaths(SAPWOOD_DIR).directiveMd derives
-    // the value — never a second "DIRECTIVE.md" literal restated here.
-    directiveFile: z.string().min(1).default(runtimePaths(SAPWOOD_DIR).directiveMd),
+    // #1078: round.directiveFile retired — the directive file has no config key at all now,
+    // same as the runtime root itself: directive.ts's resolveRoundDirective reads it from
+    // runtimePaths(defaultRuntimeRoot()).directiveMd (cwd-relative, DIRECTIVE.md), never a
+    // config-resolved path. An old config setting this key now fails the standard unknown-key
+    // error, same as any other retired/misspelled key (pre-v1: no deprecation shim).
     // Deterministic-truncation cap (never a silent drop — the cut is marked in the text itself,
     // directive.ts reuses retro-digest.ts's capDigest) on the directive text substituted into the
     // prompts. Same user-tunable-in-config, marked-cut contract as roles.harvest.artifactMaxChars
@@ -1648,6 +1649,27 @@ export type SapwoodConfig = Omit<z.infer<typeof ConfigSchemaRaw>, "doctrine" | "
   escalation: { humanLabels: string[]; holdLabels: string[]; instructionPaths: string[] };
   notify: { mentions: string[] };
 };
+
+/** #1078: a `SapwoodConfig` whose `logging.path` is GUARANTEED populated — the shape the engine
+ *  boundary (cli.ts's runEngine) hands to the log driver, so createRunLogger needs no fallback
+ *  of its own (a SECOND unset-defaulting authority, independent of normalizeLoggingPath below,
+ *  is exactly the "silently disagree" risk this type closes off). */
+export type NormalizedSapwoodConfig = SapwoodConfig & { logging: SapwoodConfig["logging"] & { path: string } };
+
+/** #1078: the ONE place logging.path's "unset -> the runtime root's own log location" default is
+ *  applied — one normalization authority, so a file-loaded config and an injected one can never
+ *  silently disagree. `loadConfig` below calls this for the file-loaded path; cli.ts's
+ *  `runEngine` calls it again on `EngineOverrides.cfg` (the tests-only injection seam that
+ *  bypasses `loadConfig` entirely) — same function, applied both times. Mutates
+ *  `cfg.logging.path` in place when unset (matches `loadConfig`'s own convention for every
+ *  other path field) and returns the same object, now typed as guaranteed-populated; a value
+ *  that's already set (by either a real config file or a test) passes through untouched. */
+export function normalizeLoggingPath(cfg: SapwoodConfig): NormalizedSapwoodConfig {
+  if (cfg.logging.path === undefined) {
+    cfg.logging.path = runtimePaths(defaultRuntimeRoot()).logFile;
+  }
+  return cfg as NormalizedSapwoodConfig;
+}
 
 /** Resolve the configured namespace before deriving omitted workflow and escalation labels.
  * Explicit per-label values and an explicit humanLabels array pass through verbatim. */
@@ -2108,9 +2130,17 @@ export function loadConfig(path?: string): SapwoodConfig {
     throw new Error(`no config found; looked for ${DEFAULT_CONFIG_PATHS.join(", ")}`);
   }
   const cfg = parseConfig(readFileSync(file, "utf8"));
-  // Run logs are repo/config scoped just like prompt files. Unlike promptFile, logging.path is
-  // defaulted, so the default is resolved too whenever a config file is loaded.
-  if (!isAbsolute(cfg.logging.path)) {
+  // #1078: two different rules for two different kinds of path. Unset logging.path has no
+  // operator-authored value to resolve — it falls back to the runtime root's own log location
+  // (runtimePaths(defaultRuntimeRoot()).logFile), cwd-relative like every other runtime path in
+  // this repo (state.ts's DEFAULT_DB_PATH, the sentinel files, directive.ts's DIRECTIVE.md), NOT
+  // relative to wherever this config file happens to live. A SET value, by contrast, IS an
+  // operator-authored file reference — same class as promptFile/goal.file/doctrine.file below —
+  // and stays config-file-relative so `sapwood validate repo/sapwood.config.yaml` judges the
+  // same file the engine would resolve inside `repo/`.
+  if (cfg.logging.path === undefined) {
+    normalizeLoggingPath(cfg); // #1078: one normalization authority, shared with cli.ts's EngineOverrides.cfg path
+  } else if (!isAbsolute(cfg.logging.path)) {
     cfg.logging.path = resolve(dirname(file), cfg.logging.path);
   }
   // A relative worker.promptFile means "relative to the config file" (#74), not to whatever
@@ -2127,9 +2157,15 @@ export function loadConfig(path?: string): SapwoodConfig {
   if (cfg.worker.pricingFile !== undefined && !isAbsolute(cfg.worker.pricingFile)) {
     cfg.worker.pricingFile = resolve(dirname(file), cfg.worker.pricingFile);
   }
-  // Same rule for worker.deployKeyPath (#606).
+  // #1078 (was #606's config-file-relative rule): worker.deployKeyPath is CWD-relative, not
+  // config-file-relative — unlike promptFile/pricingFile/logging.path above, the key file lives
+  // beside the engine's own runtime root (init.ts's writers emit the matching relative(cwd,
+  // keyPath) string), so a config file that isn't at the repo root must still resolve to the
+  // SAME absolute key path the engine itself would use. `resolve()` with a single argument
+  // already resolves against process.cwd() — the same convention every other runtime-root path
+  // in this repo uses.
   if (cfg.worker.deployKeyPath !== undefined && !isAbsolute(cfg.worker.deployKeyPath)) {
-    cfg.worker.deployKeyPath = resolve(dirname(file), cfg.worker.deployKeyPath);
+    cfg.worker.deployKeyPath = resolve(cfg.worker.deployKeyPath);
   }
   // #88/#87: same relative-to-config-file resolution for the verification-plan-reviewer prompt.
   if (cfg.roles.verificationPlanReviewer.promptFile !== undefined && !isAbsolute(cfg.roles.verificationPlanReviewer.promptFile)) {

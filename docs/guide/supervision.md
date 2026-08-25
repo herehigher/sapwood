@@ -244,9 +244,10 @@ not just the launch line above:
   invoking process's cwd — pass it explicitly, same as the deploy-dir rule above.**
   `status`/`events`/`park clear` all fall back to this cwd-relative default when no
   positional `db-path` is given, and `--config` does **not** change that resolution
-  (`docs/guide/configuration.md`'s loader-resolution note: logging/prompt/goal/doctrine paths
-  go config-file-relative, but the DB, `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, and worktree
-  roots stay cwd-relative regardless). A detached poller's cwd is arbitrary — polling
+  (`docs/guide/configuration.md`'s loader-resolution note: prompt/goal/doctrine paths, and a
+  SET `logging.path`, go config-file-relative; an UNSET `logging.path`, the DB,
+  `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, and worktree roots stay cwd-relative
+  regardless). A detached poller's cwd is arbitrary — polling
   from anywhere but the deployment checkout silently prints `sapwood events: no state DB
   at data/sapwood.sqlite — engine has never run` and **exits 0**, indistinguishable from
   "nothing new yet" unless you're reading the message itself. Pass the DB positionally,

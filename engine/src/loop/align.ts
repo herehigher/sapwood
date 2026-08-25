@@ -1671,6 +1671,11 @@ export interface AlignDeps {
    *  project's north-star goal file, so they honor the SAME resolved config value rather than
    *  each hardcoding their own default. */
   planMdPath?: string;
+  /** #1078: override for resolveRoundDirective's directive-file path — same seam as planMdPath
+   *  above, tests inject a fixed tmp-dir string. A real caller omits this and gets
+   *  runtimePaths(defaultRuntimeRoot()).directiveMd (round.directiveFile is retired — no config
+   *  key names this path any more). */
+  directivePath?: string;
 }
 
 /** #621: is there anything THIS round's align-CREATION (decompose) session would actually be
@@ -1731,6 +1736,7 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
       const directive = resolveRoundDirective(deps.state, deps.cfg, roundId, {
         consume: true,
         ...(deps.log !== undefined ? { log: deps.log } : {}),
+        ...(deps.directivePath !== undefined ? { directivePath: deps.directivePath } : {}),
       });
 
       let priorProgress: ReturnType<typeof proposalProgress>;

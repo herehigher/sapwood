@@ -15,6 +15,8 @@ import {
   dashboardConfigSubset,
   engineAgentEmptyCiRequiredChecksError,
   loadConfig,
+  type NormalizedSapwoodConfig,
+  normalizeLoggingPath,
   type SapwoodConfig,
 } from "./config/config.js";
 import { ensureRuntimeRoot, SAPWOOD_ESTOP_FILENAME, SAPWOOD_KILL_SWITCH_FILENAME, SAPWOOD_PAUSE_FILENAME } from "./config/paths.js";
@@ -223,10 +225,11 @@ reachable as an explicit escape hatch.
 
 Flags:
   --config PATH  Load config from this path instead of probing the defaults. Selects
-                 config-file-relative logging.path, promptFile, goal.file, and doctrine.file
-                 keys (so its default log sits beside that config). The DB
-                 (.sapwood/sapwood.sqlite), EMERGENCY_STOP/KILL_SWITCH/PAUSE, sessions, and
-                 worktree roots remain relative to the current working directory.
+                 config-file-relative promptFile, goal.file, doctrine.file, and (only when
+                 SET) logging.path keys. An UNSET logging.path, and worker.deployKeyPath
+                 whenever it's relative, resolve against the current working directory
+                 instead — the same convention the DB (.sapwood/sapwood.sqlite),
+                 EMERGENCY_STOP/KILL_SWITCH/PAUSE, sessions, and worktree roots already use.
   --once         Tick driver only (engine.driver: tick): run exactly one tick, then exit
                  (exit 1 if the tick attempt failed). No equivalent under the round
                  orchestrator, which has no notion of a single tick — passing it under
@@ -1387,7 +1390,7 @@ export function runEvents(argv: string[]): { stdout: string; stderr: string; cod
 // ── #475: `sapwood park clear` — the engine-owned, receipt-first operator clear ─────────────
 
 const PARK_USAGE = `\
-usage: sapwood park clear [db-path] [--source SOURCE] [--reason "<text>"]
+usage: sapwood park clear [--source SOURCE] [--reason "<text>"]
 
 Clear a park episode the way the engine itself would: append the \`park-resumed\`
 receipt (\`via: operator-clear\`) FIRST, then delete the park_state row, then take down
@@ -1399,7 +1402,8 @@ under a running engine is exactly the race this verb exists to remove. Stop the 
 clear, start it again.
 
 Without --source, every open episode is cleared. Sources: ${PARK_SOURCES.join(", ")}.
-Defaults to ${DEFAULT_DB_PATH} (the same path \`sapwood run\` writes to).
+Always operates on ${DEFAULT_DB_PATH} (the same path \`sapwood run\` writes to) — no db-path
+override (#1078: a mutating command must never be aimable outside the fixed runtime root).
 
 Flags:
   --source SOURCE  Clear only this park source
@@ -1414,7 +1418,11 @@ Flags:
 `;
 
 /** Parsed \`sapwood park clear\` args — same flat shape and fail-closed flag handling as
- *  parseStatusArgs (help/error checked in order by the caller). Pure: no I/O. */
+ *  parseStatusArgs (help/error checked in order by the caller). Pure: no I/O.
+ *  #1078: `dbPath` is always DEFAULT_DB_PATH — `park clear` is a MUTATING command, so it never
+ *  accepts a positional db-path override (unlike `status`/`events`, which stay read-only and
+ *  keep theirs); a stray positional is rejected as an unexpected argument, never silently
+ *  reinterpreted as the DB to operate on. */
 export interface ParkArgs {
   help: boolean;
   error?: string | undefined;
@@ -1479,7 +1487,12 @@ export function parseParkArgs(argv: string[]): ParkArgs {
     }
     positionals.push(a);
   }
-  return { help: false, dbPath: positionals[0] ?? DEFAULT_DB_PATH, source, reason };
+  // #1078: `park clear` is mutating — no db-path positional (see ParkArgs' own doc). ANY
+  // leftover positional is a hard error now, never silently read as an operator-supplied path.
+  if (positionals.length > 0) {
+    return { help: false, error: `unexpected argument(s): ${positionals.join(" ")}`, dbPath: DEFAULT_DB_PATH };
+  }
+  return { help: false, dbPath: DEFAULT_DB_PATH, source, reason };
 }
 
 /** `sapwood park clear`: the operator clear, performed inside the engine's own protocol instead
@@ -1558,21 +1571,24 @@ export function runPark(argv: string[]): { stdout: string; stderr: string; code:
 // killSwitchPath/estopPath already define and conductor.ts's tick() already reads. THIN WRAPPERS
 // ONLY (#731's own "架构优先/大道至简" instruction): every function below does nothing but
 // create/remove one of those three files — the engine's tick-top detection is untouched, zero
-// bytes of loop/state-machine code changed by this feature. Mirrors `sapwood park clear`'s own
-// [db-path] positional + --config resolution shape: --config is validated the SAME way status/
-// events do (#710 — authoritative once given, hard error on a bad path, never a silent
+// bytes of loop/state-machine code changed by this feature. --config is validated the SAME way
+// status/events do (#710 — authoritative once given, hard error on a bad path, never a silent
 // fallback), but per run's own --config doc ("The DB ... EMERGENCY_STOP/KILL_SWITCH/PAUSE ...
 // remain relative to the current working directory"), --config never changes WHICH sentinel file
-// gets touched — only the optional [db-path] positional does that (same escape hatch status/park
-// clear already give an operator or a test; the DB path's dirname is the sentinel's directory,
-// exactly state.ts's own `dataDir = dirname(path)`).
+// gets touched — that is always dirname(DEFAULT_DB_PATH), the fixed .sapwood root resolved from
+// cwd (state.ts's own `dataDir = dirname(path)` convention).
 //
-// Verb shape: `sapwood <tier> [db-path] [--config PATH]` activates; `sapwood <tier> clear
-// [db-path] [--config PATH]` clears — `clear` is recognized ONLY as the very first token (same
-// precedent as `park clear`'s own `args[0] !== "clear"` check), so it can never be confused with
-// a db-path positional. `estop` additionally requires `--confirm` to activate (owner ruling
-// 2026-08-07, #731: "the confirmation is REQUIRED and not up for removal at review") — `clear`
-// does not need it, since lifting an already-fired estop is not itself a destructive act.
+// #1078: these three (like `park clear`) are MUTATING commands, so — unlike `status`/`events`,
+// which stay read-only and keep theirs — none of them accept a db-path positional any more: a
+// mutable command that could be aimed at dirname(<arbitrary db>) would create control files
+// outside the fixed runtime root and outside the guard's root rule. Tests that used to reach a
+// non-default data dir via that positional inject through `State`/deps instead.
+//
+// Verb shape: `sapwood <tier> [--config PATH]` activates; `sapwood <tier> clear [--config PATH]`
+// clears — `clear` is recognized ONLY as the very first token (same precedent as `park clear`'s
+// own `args[0] !== "clear"` check). `estop` additionally requires `--confirm` to activate (owner
+// ruling 2026-08-07, #731: "the confirmation is REQUIRED and not up for removal at review") —
+// `clear` does not need it, since lifting an already-fired estop is not itself a destructive act.
 //
 // Idempotent both ways (AC: "re-activation idempotency, documented and tested") — activating an
 // already-active tier, or clearing an already-inactive one, is a normal exit-0 no-op, same as a
@@ -1588,10 +1604,12 @@ const SENTINEL_FILENAME = {
 } as const;
 type SentinelTier = keyof typeof SENTINEL_FILENAME;
 
-/** Parsed `sapwood pause|stop|estop [clear] [db-path] [--config PATH] [--confirm]` args. Pure
- *  (no I/O), same flat help/error shape every other subcommand parser here uses. `confirm` is
- *  only ever set to true when `allowConfirm` (estop only) — on pause/stop, `--confirm` falls
- *  through to the unknown-flag check below, never silently accepted. */
+/** Parsed `sapwood pause|stop|estop [clear] [--config PATH] [--confirm]` args. Pure (no I/O),
+ *  same flat help/error shape every other subcommand parser here uses. `confirm` is only ever
+ *  set to true when `allowConfirm` (estop only) — on pause/stop, `--confirm` falls through to
+ *  the unknown-flag check below, never silently accepted. #1078: `dbPath` is always
+ *  DEFAULT_DB_PATH — these three are MUTATING commands, so (unlike `status`/`events`) they never
+ *  accept a db-path positional; a stray positional is rejected as an unexpected argument. */
 interface SentinelArgs {
   help: boolean;
   error?: string | undefined;
@@ -1638,10 +1656,12 @@ function parseSentinelArgs(argv: string[], allowConfirm: boolean): SentinelArgs 
     }
     positionals.push(a);
   }
-  if (positionals.length > 1) {
-    return { help: false, error: `unexpected argument(s): ${positionals.slice(1).join(" ")}`, mode, dbPath: DEFAULT_DB_PATH, confirm };
+  // #1078: mutating command — no db-path positional (see SentinelArgs' own doc). ANY leftover
+  // positional is a hard error now, never silently read as an operator-supplied path.
+  if (positionals.length > 0) {
+    return { help: false, error: `unexpected argument(s): ${positionals.join(" ")}`, mode, dbPath: DEFAULT_DB_PATH, confirm };
   }
-  return { help: false, mode, dbPath: positionals[0] ?? DEFAULT_DB_PATH, configPath, confirm };
+  return { help: false, mode, dbPath: DEFAULT_DB_PATH, configPath, confirm };
 }
 
 /** One tier's fixed copy: help text, the activation confirmation requirement, and the honest
@@ -1665,7 +1685,7 @@ const SENTINEL_SPECS: Record<SentinelTier, SentinelSpec> = {
     tier: "pause",
     requireConfirm: false,
     usage: `\
-usage: sapwood pause [clear] [db-path] [--config PATH]
+usage: sapwood pause [clear] [--config PATH]
 
 The gentle stop tier: creates/removes the .sapwood/PAUSE file sentinel — a thin wrapper,
 identical in effect to \`touch .sapwood/PAUSE\` / \`rm -f .sapwood/PAUSE\`. Freezes NEW lane dispatch
@@ -1680,8 +1700,9 @@ Flags:
   --config PATH  Load config from this path instead of probing the defaults — same
                  resolution semantics as \`status --config\`: authoritative once given, a
                  missing/invalid path is a hard error, never a silent fallback. Never changes
-                 WHICH file gets touched (that is always [db-path]'s directory) — config is
-                 read only to enrich this command's own messages.
+                 WHICH file gets touched (that is always dirname(${DEFAULT_DB_PATH}) — #1078: a
+                 mutating command, no db-path override) — config is read only to enrich this
+                 command's own messages.
   --help, -h     Print this help and exit
 `,
     activationLine: () =>
@@ -1692,7 +1713,7 @@ Flags:
     tier: "stop",
     requireConfirm: false,
     usage: `\
-usage: sapwood stop [clear] [db-path] [--config PATH]
+usage: sapwood stop [clear] [--config PATH]
 
 The drain-first stop tier: creates/removes the .sapwood/KILL_SWITCH file sentinel — a thin
 wrapper, identical in effect to \`touch .sapwood/KILL_SWITCH\` / \`rm -f .sapwood/KILL_SWITCH\`. Freezes
@@ -1708,8 +1729,9 @@ Flags:
   --config PATH  Load config from this path instead of probing the defaults — same
                  resolution semantics as \`status --config\`: authoritative once given, a
                  missing/invalid path is a hard error, never a silent fallback. Never changes
-                 WHICH file gets touched (that is always [db-path]'s directory); when it
-                 resolves, cfg.cost.drainWindowSec is echoed in the activation message.
+                 WHICH file gets touched (that is always dirname(${DEFAULT_DB_PATH}) — #1078: a
+                 mutating command, no db-path override); when it resolves,
+                 cfg.cost.drainWindowSec is echoed in the activation message.
   --help, -h     Print this help and exit
 `,
     activationLine: (cfg) => {
@@ -1728,7 +1750,7 @@ Flags:
     tier: "estop",
     requireConfirm: true,
     usage: `\
-usage: sapwood estop --confirm [clear] [db-path] [--config PATH]
+usage: sapwood estop --confirm [clear] [--config PATH]
 
 The strictest stop tier: creates/removes the .sapwood/EMERGENCY_STOP file sentinel — a
 thin wrapper, identical in effect to \`touch .sapwood/EMERGENCY_STOP\` / \`rm -f .sapwood/EMERGENCY_STOP\`.
@@ -1749,7 +1771,8 @@ Flags:
                  sentinel written.
   --config PATH  Load config from this path instead of probing the defaults — same
                  resolution semantics as \`status --config\`. Never changes WHICH file gets
-                 touched (that is always [db-path]'s directory).
+                 touched (that is always dirname(${DEFAULT_DB_PATH}) — #1078: a mutating
+                 command, no db-path override).
   --help, -h     Print this help and exit
 `,
     activationLine: () =>
@@ -1776,8 +1799,8 @@ function runSentinelCommand(argv: string[], spec: SentinelSpec): { stdout: strin
   }
   const filename = SENTINEL_FILENAME[spec.tier];
   // Same dataDir convention state.ts's own pausePath/killSwitchPath/estopPath use:
-  // dirname(dbPath) — cwd-relative by default (DEFAULT_DB_PATH's own dirname is SAPWOOD_DIR), never
-  // config-file-relative (see this section's header comment).
+  // dirname(dbPath) — #1078: dbPath is always DEFAULT_DB_PATH now (no positional override on a
+  // mutating command), so this is always cwd-relative, never config-file-relative.
   const sentinelPath = join(dirname(dbPath), filename);
 
   if (mode === "clear") {
@@ -2627,7 +2650,12 @@ export interface EngineOverrides {
   claudeVersionProbe?: (claudeBin: string) => Promise<ClaudeVersionProbeResult>;
 }
 
-function createRunLogger(cfg: SapwoodConfig, override?: EngineLogger): { logger: EngineLogger; path: string } {
+// #1078: `cfg` is `NormalizedSapwoodConfig` — `logging.path` is guaranteed populated by the time
+// ANY caller reaches this function (runEngine normalizes both the file-loaded and the
+// EngineOverrides.cfg-injected path with the SAME config.ts function before either driver is
+// invoked), so this is the only place `logging.path` is ever resolved — no second, independent
+// unset-defaulting fallback here.
+function createRunLogger(cfg: NormalizedSapwoodConfig, override?: EngineLogger): { logger: EngineLogger; path: string } {
   const path = resolve(cfg.logging.path);
   return {
     path,
@@ -2785,7 +2813,7 @@ function appendRunEnded(state: Pick<State, "appendEvent">, payload: Record<strin
  *  (runRoundsEngine below) is the default. */
 async function runTickEngine(
   argv: string[],
-  cfg: SapwoodConfig,
+  cfg: NormalizedSapwoodConfig,
   overrides: EngineOverrides,
   lockTakeover?: LockTakeoverRecord,
 ): Promise<number> {
@@ -3061,7 +3089,7 @@ async function runTickEngine(
  *  wires the real collaborators runRounds needs, it adds no safety logic of its own. */
 async function runRoundsEngine(
   argv: string[],
-  cfg: SapwoodConfig,
+  cfg: NormalizedSapwoodConfig,
   overrides: EngineOverrides,
   lockTakeover?: LockTakeoverRecord,
 ): Promise<number> {
@@ -3343,7 +3371,13 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
   // the round orchestrator (round.ts) actually reads it for dispatch scoping.
   // EngineOverrides.cfg is a tests-only injection seam and keeps its established precedence.
   // Production passes no override, so the CLI path is handed to loadConfig verbatim.
-  const cfg = applyMilestoneOverride(argv, overrides.cfg ?? loadConfig(validatedRun.configPath));
+  // #1078: normalizeLoggingPath here — AFTER applyMilestoneOverride, so it
+  // runs on the FINAL cfg regardless of source — is what lets createRunLogger (inside either
+  // driver below) require `logging.path: string` with no fallback of its own: an injected
+  // EngineOverrides.cfg (built by a test's bare parseConfig, never through loadConfig) gets the
+  // SAME unset-defaulting rule loadConfig itself already applied to the file-loaded path, so the
+  // two can never silently disagree on where the log lands.
+  const cfg = normalizeLoggingPath(applyMilestoneOverride(argv, overrides.cfg ?? loadConfig(validatedRun.configPath)));
   // #784: fail closed BEFORE any other startup work — a config only `loadConfig`/`parseConfig`
   // warn about (reviewer.mode: engine-agent + empty ci.requiredChecks) would otherwise queue
   // every PR forever with no trusted CI evidence ever confirming it. See

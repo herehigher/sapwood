@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,8 +11,10 @@ import {
   dashboardConfigSubset,
   engineAgentEmptyCiRequiredChecksError,
   loadConfig,
+  normalizeLoggingPath,
   parseConfig,
 } from "./config.js";
+import { defaultRuntimeRoot, runtimePaths } from "./paths.js";
 
 test("applies defaults when only required board fields given", () => {
   const cfg = parseConfig("board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n");
@@ -303,9 +305,11 @@ test("host: strict unknown-key rejection (a typo'd host key is not silently drop
   );
 });
 
-test("logging: defaults, overrides, and strict unknown-key rejection", () => {
+test("#1078: logging.path has NO schema default any more — bare parseConfig (no loadConfig) leaves it unset; overrides and strict unknown-key rejection unchanged", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.deepEqual(cfg.logging, { path: ".sapwood/logs/sapwood.log", teeToStderr: true, maxBytes: 10 * 1024 * 1024 });
+  assert.equal(cfg.logging.path, undefined);
+  assert.equal(cfg.logging.teeToStderr, true);
+  assert.equal(cfg.logging.maxBytes, 10 * 1024 * 1024);
   const over = parseConfig(
     "board: { owner: a, repo: r, projectNumber: 1 }\nlogging: { path: logs/run.log, teeToStderr: false, maxBytes: 2048 }",
   );
@@ -313,16 +317,42 @@ test("logging: defaults, overrides, and strict unknown-key rejection", () => {
   assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nlogging: { maxByte: 10 }"), /maxByte|[Uu]nrecognized/);
 });
 
-test("logging.path: loadConfig resolves both default and explicit relative paths against the config directory", () => {
+// #1078 AC2 (two tests: this one + the "explicit relative path" case just below).
+test("#1078 AC2: logging.path UNSET -> loadConfig fills runtimePaths(defaultRuntimeRoot()).logFile — cwd-relative, NOT resolved against the config file's directory (the config file lives in an unrelated tmp dir)", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-config-logging-"));
   try {
     const defaultPath = join(dir, "default.yaml");
     writeFileSync(defaultPath, "board: { owner: a, repo: r, projectNumber: 1 }\n");
-    assert.equal(loadConfig(defaultPath).logging.path, join(dir, ".sapwood", "logs", "sapwood.log"));
+    assert.equal(loadConfig(defaultPath).logging.path, runtimePaths(defaultRuntimeRoot()).logFile);
+    assert.notEqual(loadConfig(defaultPath).logging.path, join(dir, ".sapwood", "logs", "sapwood.log"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
+test("#1078 AC2: logging.path SET -> still resolved against the config file's directory, exactly like promptFile — an operator-authored file reference, unlike the unset case above", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-config-logging-"));
+  try {
     const customPath = join(dir, "custom.yaml");
     writeFileSync(customPath, "board: { owner: a, repo: r, projectNumber: 1 }\nlogging: { path: logs/custom.log }\n");
     assert.equal(loadConfig(customPath).logging.path, join(dir, "logs", "custom.log"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#1078 (single normalization authority): normalizeLoggingPath applied to an INJECTED bare-parseConfig result (never through loadConfig — the EngineOverrides.cfg shape cli.ts's runEngine actually injects) yields the SAME logging.path a file-loaded config with the identical content resolves to — file-loaded and injected configs can never silently disagree", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-config-logging-"));
+  try {
+    const text = "board: { owner: a, repo: r, projectNumber: 1 }\n";
+    const configPath = join(dir, "sapwood.config.yaml");
+    writeFileSync(configPath, text);
+
+    const fileLoaded = loadConfig(configPath);
+    const injected = normalizeLoggingPath(parseConfig(text)); // the tests-only EngineOverrides.cfg shape, never through loadConfig
+
+    assert.equal(injected.logging.path, fileLoaded.logging.path);
+    assert.equal(injected.logging.path, runtimePaths(defaultRuntimeRoot()).logFile);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1170,18 +1200,32 @@ test("worker.deployKeyPath: unset by default, overridable, follows the #74 promp
   assert.equal(over.worker.deployKeyPath, "data/worker-deploy-key");
 });
 
-test("worker.deployKeyPath: a RELATIVE path resolves against the CONFIG FILE's directory, exactly like promptFile (#74)", () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
+test("#1078 AC3 (resolver): worker.deployKeyPath is CWD-relative, NOT resolved against the config file's directory — proven by putting the config file in a SUBDIRECTORY of cwd", () => {
+  // realpathSync: macOS's tmpdir() is a symlink (/var -> /private/var) — process.chdir()+
+  // resolve() (what loadConfig's cwd-relative resolution actually reads) resolves it, so
+  // comparing against the raw mkdtempSync path would spuriously fail on the "/var/.." vs
+  // "/private/var/.." string difference alone, not a real defect.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "sapwood-cfg-")));
+  const previousCwd = process.cwd();
   try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
+    const subdir = join(root, "subdir");
+    mkdirSync(subdir, { recursive: true });
+    const cfgPath = join(subdir, "sapwood.config.yaml");
     writeFileSync(
       cfgPath,
       "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: data/worker-deploy-key, deployKeyId: 1 }",
     );
+    process.chdir(root);
     const cfg = loadConfig(cfgPath);
-    assert.equal(cfg.worker.deployKeyPath, join(dir, "data", "worker-deploy-key"));
+    assert.equal(cfg.worker.deployKeyPath, join(root, "data", "worker-deploy-key"));
+    assert.notEqual(
+      cfg.worker.deployKeyPath,
+      join(subdir, "data", "worker-deploy-key"),
+      "must not resolve against the config file's OWN directory (the pre-#1078 promptFile-style rule)",
+    );
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    process.chdir(previousCwd);
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -1678,20 +1722,13 @@ test("round: a typo'd key is rejected, not silently dropped (.strict())", () => 
   assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { milestne: M4 }"), /milestne|[Uu]nrecognized/);
 });
 
-// ── #126: round.directiveFile / round.directiveMaxChars — round directive file ──────────────
+// ── #1078 AC1: round.directiveFile retired — no schema key at all any more ──────────────────
 
-test("round.directiveFile: defaults to .sapwood/DIRECTIVE.md", () => {
-  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.equal(cfg.round.directiveFile, ".sapwood/DIRECTIVE.md");
-});
-
-test("round.directiveFile: overridable, and NOT resolved relative to the config file (unlike roles.*.promptFile) — same cwd-relative convention as the engine's own .sapwood/sapwood.sqlite default", () => {
-  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { directiveFile: custom/STEER.md }");
-  assert.equal(cfg.round.directiveFile, "custom/STEER.md");
-});
-
-test("round.directiveFile: an empty string is rejected (always has a value, same shape as goal.file)", () => {
-  assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { directiveFile: '' }"), /directiveFile/);
+test("#1078 AC1: round.directiveFile is a retired key — parsing a config that sets it fails with the standard unknown-key error, same as any other misspelled/removed key (pre-v1: no deprecation shim)", () => {
+  assert.throws(
+    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { directiveFile: custom/STEER.md }"),
+    /directiveFile|[Uu]nrecognized/,
+  );
 });
 
 test("round.directiveMaxChars: defaults to 20000, a positive int", () => {
