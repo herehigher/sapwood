@@ -39,7 +39,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
 import { loadDoctrine } from "../config/doctrine.js";
-import { defaultRuntimeRoot, runtimePaths } from "../config/paths.js";
+import { defaultRuntimeRoot, ensureRuntimeRoot, runtimePaths } from "../config/paths.js";
 import { estimateUsd, loadPricingTable, type PricingTable } from "../config/pricing.js";
 import type { Issue, LanePrOutcome } from "../forge/forge.js";
 import type { LaneProbe, ReclaimResult, ResumeIntentState, Supervisor, WorktreeSettleOutcome } from "../loop/conductor.js";
@@ -2709,7 +2709,16 @@ export class WorkerSupervisor implements Supervisor {
   private defaultBranchProbe?: Promise<string>;
 
   constructor(private readonly deps: WorkerDeps) {
-    this.dir = deps.stateDir ?? runtimePaths(defaultRuntimeRoot()).sessionsStateDir;
+    if (deps.stateDir !== undefined) {
+      this.dir = deps.stateDir;
+    } else {
+      // This runner lives inside the lock-owning engine process (never the entry point that
+      // arbitrates the instance lock itself), so stamping here is safe: ensureRuntimeRoot is
+      // idempotent, and a default-root writer must never leave an unstamped root behind.
+      const root = defaultRuntimeRoot();
+      ensureRuntimeRoot(root);
+      this.dir = runtimePaths(root).sessionsStateDir;
+    }
     this.worktreeRoot = deps.worktreeRoot ?? join(process.cwd(), ".claude", "worktrees");
     this.bin = deps.claudeBin ?? discoverClaudeBin(process.env);
     this.hbMs = deps.heartbeatMs ?? 30_000;

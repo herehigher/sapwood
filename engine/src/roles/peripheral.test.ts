@@ -87,8 +87,9 @@ test("RoleRunner: default guard hook resolves the compiled hook in the guard dir
 
 // #1077: no `stateDir` override injected — proves the runtimePaths()-derived default itself,
 // not merely that an explicit override is respected (every other fixture in this file injects
-// one).
-test("RoleRunner: default stateDir resolves under <cwd>/.sapwood/sessions/roles when no override is injected", () => {
+// one). Also proves the constructor routes its directory creation through ensureRuntimeRoot
+// (not a bare mkdirSync): a default-root writer must never leave the root unstamped.
+test("RoleRunner: default stateDir resolves under <cwd>/.sapwood/sessions/roles when no override is injected, and the root self-declares", () => {
   // realpathSync: macOS's tmpdir() is a symlink (/tmp -> /private/tmp) — process.chdir()+
   // process.cwd() (what the production default actually reads) resolves it, so comparing
   // against the raw mkdtempSync path would spuriously fail on the "/var/.." vs "/private/var/.."
@@ -100,6 +101,8 @@ test("RoleRunner: default stateDir resolves under <cwd>/.sapwood/sessions/roles 
     const runner = new RoleRunner({ now: realClock, cfg, worktreeRoot: join(dir, "worktrees"), claudeBin: "claude" });
     const stateDir = (runner as unknown as { dir: string }).dir;
     assert.equal(stateDir, join(dir, ".sapwood", "sessions", "roles"));
+    assert.equal(existsSync(join(dir, ".sapwood", ".gitignore")), true, "the default root self-declares (.gitignore)");
+    assert.equal(existsSync(join(dir, ".sapwood", "cache", "CACHEDIR.TAG")), true, "the default root self-declares (cache tier)");
   } finally {
     process.chdir(previousCwd);
     rmSync(dir, { recursive: true, force: true });

@@ -22,7 +22,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, r
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
-import { defaultRuntimeRoot, runtimePaths } from "../config/paths.js";
+import { defaultRuntimeRoot, ensureRuntimeRoot, runtimePaths } from "../config/paths.js";
 import { classifyEnvFailure, type EnvFailurePatterns, type EnvFailureSource } from "../loop/env-failure.js";
 import { allowedToolsForRole } from "../proxy/access.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
@@ -566,7 +566,16 @@ export class RoleRunner {
   private readonly killGraceMs: number;
 
   constructor(private readonly deps: RoleRunnerDeps) {
-    this.dir = deps.stateDir ?? runtimePaths(defaultRuntimeRoot()).sessionsRolesDir;
+    if (deps.stateDir !== undefined) {
+      this.dir = deps.stateDir;
+    } else {
+      // This runner lives inside the lock-owning engine process (never the entry point that
+      // arbitrates the instance lock itself), so stamping here is safe: ensureRuntimeRoot is
+      // idempotent, and a default-root writer must never leave an unstamped root behind.
+      const root = defaultRuntimeRoot();
+      ensureRuntimeRoot(root);
+      this.dir = runtimePaths(root).sessionsRolesDir;
+    }
     this.worktreeRoot = deps.worktreeRoot ?? join(process.cwd(), ".claude", "worktrees");
     this.bin = deps.claudeBin ?? discoverClaudeBin(process.env);
     this.hbMs = deps.heartbeatMs ?? 30_000;
