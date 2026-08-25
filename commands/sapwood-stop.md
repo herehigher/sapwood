@@ -1,13 +1,14 @@
 ---
 description: Emergency-stop, trip/lift the kill switch, or pause/resume dispatch — three human-control tiers
 argument-hint: "[--emergency | --clear-emergency | --lift | --pause | --resume]"
-allowed-tools: Bash(mkdir:*), Bash(touch:*), Bash(rm:*), Bash(echo:*)
+allowed-tools: Bash(sh:*)
 ---
 
-sapwood has three tiers of human control, all plain file sentinels next to the engine's
-state DB (`engine/src/state/state.ts`) — no config edit needed for any of them:
+sapwood has three tiers of human control, each a first-class `sapwood` CLI verb backed by a
+plain file sentinel next to the engine's state DB (`engine/src/state/state.ts`) — no config
+edit needed for any of them:
 
-- **emergency stop** (`data/EMERGENCY_STOP`, `estopPath`) — the strictest tier. It is checked
+- **emergency stop** (`sapwood estop`, `estopPath`) — the strictest tier. It is checked
   before the kill switch every tick and wins when both sentinels are present. In the normal path,
   it hard-kills every running/fixing lane's process group on that same tick: there is no drain
   window, in-flight WIP is lost, and killed lanes escalate to `needs-human` with their evidence
@@ -17,69 +18,69 @@ state DB (`engine/src/state/state.ts`) — no config edit needed for any of them
   `needs-human` labels/comments — may still touch the forge, and is best-effort; none of it gates
   process termination anymore. Use it only for credential exposure, destructive calls, or a cost
   blowout faster than the drain window.
-- **kill switch** (`data/KILL_SWITCH`, `killSwitchPath`) — the drain-first tier. Freezes ALL new
+- **kill switch** (`sapwood stop`, `killSwitchPath`) — the drain-first tier. Freezes ALL new
   dispatch and merges; running workers are asked to hand off gracefully within
   `cfg.cost.drainWindowSec`, then the conductor escalates to a hard kill. Use this to stop
   the engine unless the emergency-stop conditions above apply.
-- **pause** (`data/PAUSE`, `pausePath`) — the gentle tier. Freezes new lane dispatch
+- **pause** (`sapwood pause`, `pausePath`) — the gentle tier. Freezes new lane dispatch
   ONLY: no new work is claimed or launched. Everything already in flight keeps going exactly
   as normal — running workers finish their work, and PRs already open keep moving through the
   review/merge gate. No drain, no freeze, nothing killed. Use this to stop taking on new
   issues while letting the current round finish cleanly (e.g. before a maintenance window, or
   to hold the queue while triaging).
 
-The precedence order is emergency stop, then kill switch, then pause. If both
-`data/EMERGENCY_STOP` and `data/KILL_SWITCH` are present, emergency stop wins; either strict tier
-already subsumes pause's dispatch restriction.
+The precedence order is emergency stop, then kill switch, then pause: if both are active,
+emergency stop wins; either strict tier already subsumes pause's dispatch restriction.
 
-The same three tiers are also reachable as first-class `sapwood` CLI verbs — outside a
-Claude Code session, or for scripting/an agent supervisor: `sapwood pause` / `sapwood pause
-clear`, `sapwood stop` / `sapwood stop clear`, and `sapwood estop --confirm` / `sapwood estop
-clear` (activating `estop` refuses without `--confirm` — no TTY prompt, agent-friendly; see
-`sapwood estop --help`). This slash command still shells the raw `touch`/`rm` below rather than
-the CLI verbs — both act on the exact same three sentinel files, so either path is equally valid;
-this file documents the flag-per-tier shape, not the CLI-verb shape shown above.
+This command shells the same CLI verbs any outside-Claude-Code caller uses — scripting, an
+agent supervisor, or a human at a terminal (`sapwood pause --help` / `sapwood stop --help` /
+`sapwood estop --help` document the full semantics). Every sentinel path (which file gets
+touched, wherever the engine's runtime root actually is) is resolved by the CLI itself; this
+file only ever picks WHICH verb to run, never touches a file directly.
 
 Note for `sapwood run --until-idle`: a paused engine dispatches nothing, so once its
 in-flight lanes finish it counts as idle and the run EXITS ("finish the round, then
-stop"). Removing `data/PAUSE` afterwards resumes nothing by itself — start a new
+stop"). Clearing the pause afterwards resumes nothing by itself — start a new
 `sapwood run`. Under `forever` mode the engine keeps ticking and `--resume` takes
 effect on the next tick as described below.
 
-If the argument is `--emergency`, set the emergency-stop sentinel:
+If the argument is `--emergency`, activate the emergency-stop tier (requires `--confirm`,
+non-interactively — no TTY prompt, agent-friendly):
 
 ```bash
-mkdir -p data && touch data/EMERGENCY_STOP && echo "EMERGENCY STOP SET (data/EMERGENCY_STOP) — in the normal path, running/fixing lane process groups hard-kill this tick via a forge-free synchronous durable-PID signal; no drain window and in-flight WIP is lost. Clear with /sapwood-stop --clear-emergency only after human review."
+sh "$CLAUDE_PLUGIN_ROOT/bin/sapwood-plugin.sh" estop --confirm
 ```
 
-If the argument is `--clear-emergency`, clear the emergency-stop sentinel:
+If the argument is `--clear-emergency`, clear the emergency-stop tier (does NOT require
+`--confirm` — lifting an already-fired estop is not itself a destructive act):
 
 ```bash
-rm -f data/EMERGENCY_STOP && echo "emergency stop cleared (data/EMERGENCY_STOP removed) — the kill switch or pause, if still present, continues to apply."
+sh "$CLAUDE_PLUGIN_ROOT/bin/sapwood-plugin.sh" estop clear
 ```
 
-If the argument is `--lift`, clear the kill-switch sentinel:
+If the argument is `--lift`, clear the kill-switch tier:
 
 ```bash
-rm -f data/KILL_SWITCH && echo "kill switch lifted (data/KILL_SWITCH removed) — EMERGENCY_STOP or PAUSE, if still present, continues to apply."
+sh "$CLAUDE_PLUGIN_ROOT/bin/sapwood-plugin.sh" stop clear
 ```
 
-If the argument is `--pause`, pause new dispatch by creating the PAUSE sentinel:
+If the argument is `--pause`, activate the pause tier:
 
 ```bash
-mkdir -p data && touch data/PAUSE && echo "paused (data/PAUSE) — no new lane dispatch; in-flight workers and PR review/merge proceed normally. Run /sapwood-stop --resume to remove PAUSE; dispatch can resume only if no EMERGENCY_STOP or KILL_SWITCH remains."
+sh "$CLAUDE_PLUGIN_ROOT/bin/sapwood-plugin.sh" pause
 ```
 
-If the argument is `--resume`, lift the pause by removing the PAUSE sentinel:
+If the argument is `--resume`, clear the pause tier:
 
 ```bash
-rm -f data/PAUSE && echo "pause lifted (data/PAUSE removed) — EMERGENCY_STOP or KILL_SWITCH, if still present, continues to apply."
+sh "$CLAUDE_PLUGIN_ROOT/bin/sapwood-plugin.sh" pause clear
 ```
 
-Otherwise (no argument, or any other argument), set the drain-first kill switch:
+Otherwise (no argument, or any other argument), activate the drain-first kill-switch tier:
 
 ```bash
-mkdir -p data && touch data/KILL_SWITCH && echo "kill switch SET (data/KILL_SWITCH) — new dispatch/merges frozen; running workers drain within cfg.cost.drainWindowSec, then a hard stop. Run /sapwood-stop --lift to remove it; EMERGENCY_STOP or PAUSE, if present, still applies."
+sh "$CLAUDE_PLUGIN_ROOT/bin/sapwood-plugin.sh" stop
 ```
 
-Report the resulting message back to the user verbatim.
+Report the CLI's own output back to the user verbatim, unedited — same convention as
+`/sapwood-run`/`/sapwood-status`/`/sapwood-dashboard`.

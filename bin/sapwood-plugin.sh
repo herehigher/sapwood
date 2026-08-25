@@ -8,7 +8,7 @@
 #      npm package pinned to this exact plugin's own version, so the commands invoked never
 #      silently drift from what `/plugin install` fetched.
 # cwd is deliberately left untouched in both branches: the target repo's sapwood.config.yaml and
-# data/ must resolve from wherever the operator ran the slash command, not from this script's
+# .sapwood/ must resolve from wherever the operator ran the slash command, not from this script's
 # location.
 set -eu
 

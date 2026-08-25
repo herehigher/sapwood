@@ -4,7 +4,7 @@
 // choose the right branch and pass the right argv through."
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -22,6 +22,42 @@ test("plugin CLI command docs invoke the shared wrapper with their matching verb
   ]) {
     const command = readFileSync(join(REPO_ROOT, "commands", file!), "utf8");
     assert.ok(command.includes(`sh "$CLAUDE_PLUGIN_ROOT/bin/sapwood-plugin.sh" ${verb} $ARGUMENTS`));
+  }
+});
+
+// #1077 fix round 1 (P1): sapwood-stop.md used to touch the sentinel files directly
+// (mkdir/touch/rm against a hardcoded `data/` path) — a relocation-blind shortcut that would
+// silently stop working the moment the engine's runtime root moved. It now shells the SAME
+// `sapwood pause|stop|estop` CLI verbs (+ their `clear` forms) every other caller uses, so the
+// sentinel path is resolved in exactly one place (cli.ts) regardless of where the runtime root
+// lives. One dispatch line per `--flag` branch the command doc itself documents.
+test("sapwood-stop.md dispatches every control-tier branch through the shared wrapper's pause/stop/estop verbs, never a direct file touch", () => {
+  const command = readFileSync(join(REPO_ROOT, "commands", "sapwood-stop.md"), "utf8");
+  for (const verbLine of [
+    'sh "$CLAUDE_PLUGIN_ROOT/bin/sapwood-plugin.sh" estop --confirm',
+    'sh "$CLAUDE_PLUGIN_ROOT/bin/sapwood-plugin.sh" estop clear',
+    'sh "$CLAUDE_PLUGIN_ROOT/bin/sapwood-plugin.sh" stop clear',
+    'sh "$CLAUDE_PLUGIN_ROOT/bin/sapwood-plugin.sh" pause',
+    'sh "$CLAUDE_PLUGIN_ROOT/bin/sapwood-plugin.sh" pause clear',
+    'sh "$CLAUDE_PLUGIN_ROOT/bin/sapwood-plugin.sh" stop',
+  ]) {
+    assert.ok(command.includes(verbLine), `missing dispatch line: ${verbLine}`);
+  }
+  for (const directTouch of ["mkdir -p data", "touch data/", "rm -f data/", "mkdir -p .sapwood", "touch .sapwood/", "rm -f .sapwood/"]) {
+    assert.ok(!command.includes(directTouch), `sapwood-stop.md must never touch a sentinel file directly: found "${directTouch}"`);
+  }
+});
+
+// #1077 fix round 1 (P2): a command doc that names a literal `data/`/`.sapwood/` path bakes the
+// engine's runtime-root name into shipped copy a THIRD time (paths.ts spells it, the CLI's own
+// --help text describes it, and now this file would too) — exactly the kind of independent
+// literal #1077 exists to collapse. Every command doc must describe control-tier/DB-path
+// behavior by naming the CLI verb or flag, never by spelling out where the CLI resolves it.
+test("commands/*.md never spells a data/ or .sapwood/ runtime-root path literal", () => {
+  for (const file of readdirSync(join(REPO_ROOT, "commands")).filter((f) => f.endsWith(".md"))) {
+    const command = readFileSync(join(REPO_ROOT, "commands", file), "utf8");
+    assert.doesNotMatch(command, /data\//, `${file} names a literal data/ path`);
+    assert.doesNotMatch(command, /\.sapwood\//, `${file} names a literal .sapwood/ path`);
   }
 });
 
