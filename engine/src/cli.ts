@@ -942,8 +942,12 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
     return { stdout: "", stderr: formatConfigLoadError("status", configResult.error), code: 1 };
   }
   const { cfg, provenance: configProvenance } = configResult;
+  // #1080: the resolved runtime root, once — an operator's first question when nothing else on
+  // this snapshot orients them (no active lanes, no DB yet) is often "where is sapwood even
+  // looking", so this prints even on the no-DB early return below, not only the populated report.
+  const runtimeDirLine = `runtime dir: ${dirname(resolve(dbPath))}`;
   if (!existsSync(dbPath)) {
-    return { stdout: `sapwood status: no state DB at ${dbPath} — engine has never run\n`, stderr: "", code: 0 };
+    return { stdout: `sapwood status: no state DB at ${dbPath} — engine has never run\n${runtimeDirLine}\n`, stderr: "", code: 0 };
   }
   let state: State;
   try {
@@ -1014,7 +1018,7 @@ export function runStatus(argv: string[]): { stdout: string; stderr: string; cod
         baseCiRed: baseRedPin(state),
         laneAnchors,
       };
-      return { stdout: formatStatus(snapshot), stderr: "", code: 0 };
+      return { stdout: `${formatStatus(snapshot)}${runtimeDirLine}\n`, stderr: "", code: 0 };
     });
   } catch (e) {
     if (e instanceof SqliteBusyError) return busyResult("status", e, json);

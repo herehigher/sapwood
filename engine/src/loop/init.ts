@@ -7,7 +7,7 @@
 // The guard PreToolUse hook is built (guard.ts / guard-hook.ts) and wired live per session by
 // worker.ts at dispatch time, not by init — init only reports that, and that guard.ts/hook
 // wiring/security config are human-merge-only per CLAUDE.md.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -19,6 +19,11 @@ import {
   parseConfig,
   type SapwoodConfig,
 } from "../config/config.js";
+// #1080: the deploy key moves under the shared runtime-root layout (`.sapwood/keys/`) instead of
+// init's own pre-#1080 bare `data` directory — the same root `ensureRuntimeRoot` (#1077) already
+// creates for every other state-touching command, so init's own root creation and its key
+// placement can never drift onto two different notions of "the runtime root".
+import { defaultRuntimeRoot, ensureRuntimeRoot, runtimePaths } from "../config/paths.js";
 import type { OwnerKind } from "../forge/forge.js";
 import { type GhRunner, gh, ghText } from "../forge/gh.js";
 import { createMissingLabels, describeLabelDrift, type LabelSpec, normalizeLabel, taxonomyLabels } from "../forge/labels.js";
@@ -382,6 +387,25 @@ function resolveActiveConfigPath(cwd: string, justWritten: string | null): strin
 // string `sapwood init` itself would produce for the same failure shape.
 export const DEPLOY_KEY_TITLE = "sapwood-worker";
 
+// #1080: the ONE place `cwd` is turned into "where the deploy key(s) live" — every key-path
+// construction below (the base path, arm (a)'s per-host candidates, and pickFreshArmAKeySlot's
+// numeric-suffixed siblings) calls this instead of re-deriving `runtimePaths(defaultRuntimeRoot(cwd))`
+// itself, so a future change to the runtime-root layout can't move two of the three sites and miss
+// the third.
+function deployKeysDir(cwd: string): string {
+  return runtimePaths(defaultRuntimeRoot(cwd)).keysDir;
+}
+
+// #1080: creates `dir` (recursive — the runtime root itself already exists via ensureRuntimeRoot,
+// but its `keys/` child does not until the first key is provisioned) and pins its mode to 0700
+// explicitly — `mkdirSync`'s own `mode` option is still subject to the process umask, which a
+// bare `{ recursive: true, mode: 0o700 }` would silently under- or over-permission depending on
+// the caller's environment; an explicit `chmodSync` after creation is not.
+function ensureDeployKeysDir(dir: string): void {
+  mkdirSync(dir, { recursive: true });
+  chmodSync(dir, 0o700);
+}
+
 export interface DeployKeyListEntry {
   id: number;
   title: string;
@@ -481,7 +505,7 @@ export function pickFreshArmAKeySlot(
 ): { path: string; title: string } {
   for (let n = 1; n <= MAX_ARM_A_SLOT_ATTEMPTS; n++) {
     const candidateHost = n === 1 ? hostComponent : `${hostComponent}-${n}`;
-    const path = join(cwd, "data", `worker-deploy-key-${candidateHost}`); // #1080: moves under runtimePaths() once the gitignore rule below (and its tests) move with it
+    const path = join(deployKeysDir(cwd), `worker-deploy-key-${candidateHost}`);
     const title = `${DEPLOY_KEY_TITLE}-${candidateHost}`;
     if (!existsSync(path) && !knownRemoteTitles.has(title)) return { path, title };
   }
@@ -838,60 +862,11 @@ function clearDeployKeyConfig(configFilePath: string): string[] {
   return configFilePath.endsWith(".json") ? clearDeployKeyConfigFromJson(configFilePath) : clearDeployKeyConfigFromYaml(configFilePath);
 }
 
-const GITIGNORE_DEPLOY_KEY_RULE = "/data/worker-deploy-key*"; // #1080: moves with the key itself
-const GITIGNORE_DEPLOY_KEY_COMMENT = `# sapwood: worker deploy key(s) — kept out of \`git add -A\` (see ${DOC_LINKS.security})`;
-
-/** #606 gate② round 1 (P1-6), round 2 (R3-7): keeps the private key out of an ordinary
- *  `git add -A` sweep. gitignore semantics are LAST-MATCH-WINS (a later negation can
- *  re-include a path an earlier rule excluded), so an unordered "is SOME line in the file
- *  covering this path" check is bypassable — this deliberately does NOT implement a full
- *  gitignore evaluator. Instead: ensure the exact rooted rule in GITIGNORE_DEPLOY_KEY_RULE (a
- *  single pattern covering every key this file ever provisions — the base path and every
- *  per-host/numeric-suffixed sibling arm (a) can mint, plus each key's `.pub` counterpart) is
- *  the file's LAST effective non-blank line; append it (with its own comment) at EOF if it
- *  isn't already there EXACTLY. Appending at EOF always wins over anything earlier in the file,
- *  including a negation — the simple mechanism this repo's doctrine prefers over a bespoke
- *  evaluator. Idempotent: a repeat run whose last line already IS the exact rule is a true
- *  no-op. Best-effort: a failure here is a WARN, never a reason to fail init.
- *
- *  Round 3 fix (item 1): the equality check against the last non-blank line is RAW byte
- *  equality, never `.trim()`ed — gitignore treats leading whitespace on a pattern line as part
- *  of the pattern itself (not decorative indentation the way YAML/most config formats treat
- *  it), so a line reading `  /data/worker-deploy-key*` (leading spaces) is a DIFFERENT,
- *  non-matching pattern to git and does NOT actually ignore the key — trimming before comparing
- *  would have falsely treated that as "already covered" and left the key unignored. */
-function ensureGitignoreCoversDeployKeyAction(cwd: string): string[] {
-  const gitignorePath = join(cwd, ".gitignore");
-  try {
-    const existing = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
-    const lines = existing.split("\n");
-    let lastNonBlankIdx = -1;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      // `.trim()` here is ONLY to detect whether the line is blank (decides which line is
-      // "last"), never used for the equality check below.
-      if (lines[i]!.trim().length > 0) {
-        lastNonBlankIdx = i;
-        break;
-      }
-    }
-    if (lastNonBlankIdx !== -1 && lines[lastNonBlankIdx] === GITIGNORE_DEPLOY_KEY_RULE) {
-      return [];
-    }
-    const needsLeadingNewline = existing.length > 0 && !existing.endsWith("\n");
-    const addition = `${GITIGNORE_DEPLOY_KEY_COMMENT}\n${GITIGNORE_DEPLOY_KEY_RULE}\n`;
-    writeFileSync(gitignorePath, `${existing}${needsLeadingNewline ? "\n" : ""}${addition}`);
-    return [
-      `deploy key: appended "${GITIGNORE_DEPLOY_KEY_RULE}" as the last rule in ${gitignorePath}, so an ordinary ` +
-        `"git add -A" will not stage the worker deploy key(s) (a deliberate "git add -f" still can)`,
-    ];
-  } catch (e) {
-    return [
-      `deploy key: WARN — could not update ${gitignorePath} to ignore the worker deploy key(s) (${
-        e instanceof Error ? e.message : String(e)
-      }). Add "${GITIGNORE_DEPLOY_KEY_RULE}" as the LAST line of .gitignore by hand.`,
-    ];
-  }
-}
+// #1080: the pre-#1080 `.gitignore`-append guarantee (GITIGNORE_DEPLOY_KEY_RULE and its ensure
+// routine) is retired — the key now lives under the runtime root's `keys/` subdirectory, and
+// that root's own `.gitignore` (`*`, written by `ensureRuntimeRoot`, #1077) already excludes
+// everything under it. This file never removes an existing rule from a user's `.gitignore`; it
+// simply stops adding a new one, since it no longer needs to.
 
 /** #606 gate② round 1 (P2-7), round 2 (R3-5): distinguishes protected / confirmed-unprotected /
  *  cannot-verify, checking BOTH the legacy branch-protection endpoint and (when that legacy
@@ -1033,7 +1008,7 @@ async function armAuthFailsStaleOrMismatch(
   // degrades exactly like any other provisioning failure. `fallbackKeyPath`/`fallbackTitle` (the
   // UN-suffixed base candidate) name the WARN's manual steps when slot-picking itself is what
   // failed, since `keyPath`/`title` never get assigned in that case.
-  const fallbackKeyPath = join(cwd, "data", `worker-deploy-key-${hostComponent}`); // #1080
+  const fallbackKeyPath = join(deployKeysDir(cwd), `worker-deploy-key-${hostComponent}`);
   const fallbackTitle = `${DEPLOY_KEY_TITLE}-${hostComponent}`;
   let keyPath: string;
   let title: string;
@@ -1044,9 +1019,8 @@ async function armAuthFailsStaleOrMismatch(
       `deploy key: operator chose (a) — registering a NEW per-machine deploy key titled "${title}"; every ` +
         `existing remote key is left untouched.`,
     );
-    mkdirSync(dirname(keyPath), { recursive: true });
+    ensureDeployKeysDir(dirname(keyPath));
     await deps.sshKeygen(keyPath);
-    actions.push(...ensureGitignoreCoversDeployKeyAction(cwd));
     newId = await addDeployKeyCapturingNewId(run, repo, keyPath, title);
   } catch (e) {
     actions.push(deployKeyProvisioningFailedAction(repo, fallbackKeyPath, fallbackTitle, e));
@@ -1177,7 +1151,7 @@ export async function ensureDeployKey(
     return reconcileDeployKey(run, repo, cwd, configFilePath, deployKeyPath, deployKeyId, deps);
   }
 
-  const keyPath = join(cwd, "data", "worker-deploy-key"); // #1080
+  const keyPath = join(deployKeysDir(cwd), "worker-deploy-key");
   let existingKeys: DeployKeyListEntry[];
   try {
     existingKeys = parseDeployKeys(await run(["repo", "deploy-key", "list", "-R", repo, "--json", "id,title"]));
@@ -1197,10 +1171,9 @@ export async function ensureDeployKey(
   let newId: number;
   try {
     if (!existsSync(keyPath)) {
-      mkdirSync(dirname(keyPath), { recursive: true });
+      ensureDeployKeysDir(dirname(keyPath));
       await deps.sshKeygen(keyPath);
     }
-    actions.push(...ensureGitignoreCoversDeployKeyAction(cwd));
     newId = await addDeployKeyCapturingNewId(run, repo, keyPath, DEPLOY_KEY_TITLE);
   } catch (e) {
     actions.push(deployKeyProvisioningFailedAction(repo, keyPath, DEPLOY_KEY_TITLE, e));
@@ -1345,6 +1318,25 @@ export async function init(cfg: SapwoodConfig, deps: Partial<InitDeps> = {}): Pr
   ConfigSchema.parse({ ...cfg, doctrine: doctrineSchemaFields });
   const repo = `${cfg.board.owner}/${cfg.board.repo}`;
   const actions: string[] = [];
+
+  // #1080: the runtime root must exist before the deploy key can be provisioned under its
+  // `keys/` subdirectory below — created via the SAME `ensureRuntimeRoot` (#1077) every other
+  // state-touching command uses, so init's root and the engine's own root can never drift apart.
+  // Design review (2026-08-25) rejected any "foreign tree" heuristic here: init is idempotent by
+  // contract (a second run must report zero create actions) and never creates the DB itself, so
+  // a heuristic trying to detect "this isn't sapwood's own directory" would refuse init's own
+  // second run. The ONLY refusal is `.sapwood` already existing as something other than a
+  // directory — a case `ensureRuntimeRoot`'s own recursive `mkdir` cannot recover from — checked
+  // here (not left to that `mkdir`'s raw ENOENT/EEXIST) so the refusal names `sapwood init`
+  // itself rather than an unqualified filesystem error. Every other collision (an existing
+  // directory carrying unrelated content) is handled per owned file, same as init's other
+  // scaffolded files (config/goal/doctrine/issue templates below) — never a tree-level check.
+  const runtimeRoot = defaultRuntimeRoot(cwd);
+  if (existsSync(runtimeRoot) && !statSync(runtimeRoot).isDirectory()) {
+    throw new InitError(`${runtimeRoot} already exists and is not a directory — remove or rename it, then re-run "sapwood init".`);
+  }
+  ensureRuntimeRoot(runtimeRoot, (message) => actions.push(message));
+  actions.push(`runtime root: ${runtimeRoot}`);
 
   await preflight(getAuthStatus);
 
