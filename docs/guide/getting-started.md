@@ -175,30 +175,37 @@ sapwood init
    sapwood only needs labels + board lanes, milestones are your organizational choice).
 5. **Ensures the ProjectV2 board's `Status` field has the configured lanes**
    (`Ready` / `In Progress` / `Done` by default).
-6. **Provisions the L1 worker deploy key — the default onboarding path
-   for the worker's write capability.** `init` generates a per-repo ed25519 SSH key
-   (`ssh-keygen`), registers it as a **write** deploy key (`gh repo deploy-key add --allow-write
-   --title sapwood-worker`) under your own logged-in `gh` credential (requires repo admin), runs a
-   preflight SSH auth check, and — once green — writes BOTH `worker.deployKeyPath` and
-   `worker.deployKeyId` into your config: the local `(path, id)` pair is the anchor every later
-   `sapwood init` run RECONCILES against — never the bare key title, which may validly belong to
-   a different machine (the config schema rejects a config carrying only one half of the pair).
-   `init` writes the key under the self-ignoring `.sapwood/` runtime root, so it never needs to
-   touch your repo's own `.gitignore` to keep the private key out of an ordinary `git add -A`; a
-   deliberate `git add -f` can still stage it.
-   From then on, every worker leg — dispatch, resume, AND fix — pushes over git transport ONLY,
-   through this key, with **no forge API credential in its environment at all**: it structurally
-   cannot open a PR, approve a review, label an issue, or touch the board — the engine does all of
-   that from its own, separately-held credential (see
+6. **Provisions the L1 worker deploy key on THIS machine — a prerequisite, not an
+   activation.** `init` generates a per-repo ed25519 SSH key (`ssh-keygen`), registers it as a
+   **write** deploy key (`gh repo deploy-key add --allow-write --title sapwood-worker`) under
+   your own logged-in `gh` credential (requires repo admin), runs a preflight SSH auth check,
+   and — once green — writes the key's GitHub-assigned id into a `.id` sidecar beside the key,
+   under this machine's own `.sapwood/keys/` (mode 0600, same as the key itself): that local
+   (key file, id sidecar) pair is the anchor every later `sapwood init` run on THIS machine
+   RECONCILES against — never the bare key title, which may validly belong to a different
+   machine. **`init` never writes to `sapwood.config.yaml` for this** — the key's LOCATION is a
+   fact about one machine, never a value in the audited config. `init` writes the key and sidecar
+   under the self-ignoring `.sapwood/` runtime root, so it never needs to touch your repo's own
+   `.gitignore` to keep the private key out of an ordinary `git add -A`; a deliberate `git add -f`
+   can still stage it.
+   Provisioning the key does not by itself change worker behavior: set
+   `worker.credentialTier: L1` in `sapwood.config.yaml` (a human-reviewed, committed decision) to
+   actually require it — from then on, every worker leg — dispatch, resume, AND fix — pushes over
+   git transport ONLY, through this key, with **no forge API credential in its environment at
+   all**: it structurally cannot open a PR, approve a review, label an issue, or touch the
+   board — the engine does all of that from its own, separately-held credential (see
    [Worker credential tiers](../security/credential-tiers.md#worker-credential-tiers) for the full L0/L1
-   picture and honest residuals). If you don't have repo admin, `init` logs exactly what to do by
-   hand (or skip — the engine runs fully functional either way, at L0, today's fuller-credentialed
-   default) and moves on; it never fails `init` over this. On a LATER run, if the recorded key
-   ever stops reconciling (wiped local state, a second machine, a rotated/foreign key sharing the
-   title, a hand-edited id pointing at an unrelated key), `init` never deletes or touches any
-   existing remote key — from an interactive terminal
-   it offers to register an additional key just for this machine (titled
-   `sapwood-worker-<hostname>`); non-interactively it degrades to L0 and names the manual steps.
+   picture and honest residuals). `worker.credentialTier` defaults to `L0` (today's
+   fuller-credentialed behavior, byte-for-byte unchanged) — this repo's own config keeps it. If
+   `credentialTier` is `L1` and no working key is found at `sapwood run` startup, the run
+   **refuses to start, before any dispatch**, naming `sapwood init` as the fix — never a silent
+   fallback to L0. If you don't have repo admin, `init` logs exactly what to do by hand and moves
+   on; it never fails `init` itself over this. On a LATER run on this same machine, if the
+   recorded key ever stops reconciling (wiped local state, a rotated/foreign key sharing the
+   title, a hand-edited sidecar pointing at an unrelated key), `init` never deletes or touches any
+   existing remote key or local file over a mere WARN — from an interactive terminal it offers to
+   register an additional key just for this machine (titled `sapwood-worker-<hostname>`), writing
+   only that new key and its own sidecar; non-interactively it just names the manual steps.
 7. **Scaffolds starter goal and review-doctrine files** at their configured paths
    (`goal.file`, `doctrine.file`) if missing — never overwrites an existing file.
 8. **Scaffolds `.github/ISSUE_TEMPLATE/`** (feature / fix / docs / chore, matching the
@@ -270,8 +277,8 @@ Complete this setup before choosing L3.
   producer's inherited host tool surface; sapwood can warn when protection is absent, but
   does not enforce it.
 - Use a merger GitHub identity and credential distinct from the worker identity. Give the
-  worker the L1 deploy-key path (`worker.deployKeyPath` and `worker.deployKeyId`) rather than
-  a forge API credential, and keep the conductor's merger credential outside the worker's
+  worker the L1 deploy key (`worker.credentialTier: L1`, provisioned by `sapwood init`) rather
+  than a forge API credential, and keep the conductor's merger credential outside the worker's
   normal credential lookup paths. Actual unreadability requires the L2 [enterprise posture
   checklist](../security/credential-tiers.md#l2-enterprise-posture-checklist). Both controls
   matter: branch protection prevents a producer from bypassing review with a direct push, while

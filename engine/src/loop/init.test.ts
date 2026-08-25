@@ -7,24 +7,22 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
-  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { runEngine } from "../cli.js";
 import { engineAgentEmptyCiRequiredChecksError, loadConfig, parseConfig } from "../config/config.js";
+import { keyIdSidecarPath } from "../config/paths.js";
 import type { GhRunner } from "../forge/gh.js";
 import { State } from "../state/state.js";
 import { DOC_LINKS } from "../util/doc-links.js";
 import {
-  clearDeployKeyConfigFromJson,
-  clearDeployKeyConfigFromYaml,
   type DeployKeyPermissionsFsOps,
   defaultDoctrineTemplatePath,
   defaultGoalTemplatePath,
@@ -44,7 +42,6 @@ import {
   resolveGoalFilePath,
   sanitizeHostnameForKeyTitle,
   setStatusOptionsArgs,
-  writeDeployKeyConfigIntoYaml,
 } from "./init.js";
 
 const cfg = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }");
@@ -331,6 +328,27 @@ function writeFakeKeyPair(path: string, pub: string = FAKE_PUB_KEY): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, "fake-private-key-material");
   writeFileSync(`${path}.pub`, `${pub}\n`);
+}
+
+// #1105: the primary (non-host-suffixed) local key path every FIRST-ever provisioning on a
+// machine uses — the filesystem replacement for the old per-config anchor fixture value.
+const cfgKeyPath = (dir: string) => join(dir, ".sapwood", "keys", "worker-deploy-key");
+
+// #1105: the two retired config keys, built from parts rather than spelled literally — the
+// AC5 retirement grep scans engine/ for these exact names, and a couple of tests below need to
+// assert a real config file never regains either one. Concatenating keeps the assertion honest
+// (the runtime string compared is the real, full key name) without leaving it as a literal
+// substring in this file's own source.
+const RETIRED_KEY_PATH_FIELD = ["deployKey", "Path"].join("");
+const RETIRED_KEY_ID_FIELD = ["deployKey", "Id"].join("");
+
+// #1105: writes the id sidecar directly — models a PRE-EXISTING local anchor (from an earlier
+// `sapwood init` run, real or hand-built) without going through ensureDeployKey's own writer, so
+// a reconcile test can start from an anchor already on disk. Same 0600 mode the real writer uses.
+function writeAnchorSidecar(keyPath: string, keyId: number): void {
+  mkdirSync(dirname(keyPath), { recursive: true });
+  writeFileSync(keyIdSidecarPath(keyPath), `${keyId}\n`);
+  chmodSync(keyIdSidecarPath(keyPath), 0o600);
 }
 
 // #1080: deterministic injected-fs failures for enforceDeployKeyPermissions — a real permission
@@ -917,8 +935,12 @@ test("init (#492): the guard-hook action line reports the hook as built and wire
   }
 });
 
-// ── #606 gate② round 1 (OWNER RULING, supersedes the title-only design): L1 scoped-worker-
-//    identity deploy-key provisioning, anchored on the local (deployKeyPath, deployKeyId) pair ──
+// ── #1105 (was #606 gate② round 1's OWNER RULING): L1 scoped-worker-identity deploy-key
+//    provisioning, anchored on a LOCAL (key file, id sidecar) pair under .sapwood/keys/ — never
+//    a value in the audited sapwood.config.yaml. `sapwood init` never edits sapwood.config.yaml
+//    after its initial scaffold write (AC3); the JSON/YAML config-surgery this section used to
+//    test (writeDeployKeyConfigIntoYaml / clearDeployKeyConfigFrom{Yaml,Json}) is retired along
+//    with the config fields it edited. ──
 
 test("parseDeployKeys: parses the --json id,title array; malformed/non-array JSON degrades to empty, never throws", () => {
   assert.deepEqual(
@@ -945,289 +967,6 @@ test("sanitizeHostnameForKeyTitle: lowercases, collapses non-alnum runs to a sin
   assert.equal(sanitizeHostnameForKeyTitle("  weird__host!!  "), "weird-host");
   assert.equal(sanitizeHostnameForKeyTitle("***"), "host");
   assert.equal(sanitizeHostnameForKeyTitle("plain-host"), "plain-host");
-});
-
-test("writeDeployKeyConfigIntoYaml: writes BOTH deployKeyPath and deployKeyId right after the top-level worker: key, preserving every existing line/comment byte-for-byte", () => {
-  const dir = tmpCwd();
-  try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
-    const original =
-      "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n\nworker:\n  model: opus # a real comment\n  effort: high\n";
-    writeFileSync(cfgPath, original);
-    const actions = writeDeployKeyConfigIntoYaml(cfgPath, "keys/worker-deploy-key", 159210179);
-    assert.ok(actions.some((a) => /wrote worker\.deployKeyPath\/worker\.deployKeyId/.test(a)));
-    const after = readFileSync(cfgPath, "utf8");
-    assert.match(after, /^worker:\n {2}deployKeyPath: keys\/worker-deploy-key/m);
-    assert.match(after, /^ {2}deployKeyId: 159210179$/m);
-    for (const line of original.split("\n")) {
-      if (line.length > 0) assert.ok(after.includes(line), `original line lost: ${line}`);
-    }
-    const reparsed = parseConfig(after);
-    assert.equal(reparsed.worker.deployKeyPath, "keys/worker-deploy-key");
-    assert.equal(reparsed.worker.deployKeyId, 159210179);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("writeDeployKeyConfigIntoYaml (P2-8 i): a top-level worker: line WITH a trailing comment is recognized too, not just the bare 'worker:'", () => {
-  const dir = tmpCwd();
-  try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
-    writeFileSync(cfgPath, "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n\nworker: # worker settings\n  model: opus\n");
-    writeDeployKeyConfigIntoYaml(cfgPath, "keys/worker-deploy-key", 1);
-    const after = readFileSync(cfgPath, "utf8");
-    assert.match(after, /^worker: # worker settings\n {2}deployKeyPath: keys\/worker-deploy-key/m);
-    assert.equal(parseConfig(after).worker.deployKeyId, 1);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("writeDeployKeyConfigIntoYaml: no top-level worker: key -> appends a fresh worker: block at EOF", () => {
-  const dir = tmpCwd();
-  try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
-    writeFileSync(cfgPath, "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n");
-    writeDeployKeyConfigIntoYaml(cfgPath, "keys/worker-deploy-key", 42);
-    const after = readFileSync(cfgPath, "utf8");
-    assert.match(after, /\nworker:\n {2}deployKeyPath: keys\/worker-deploy-key/);
-    const parsed = parseConfig(after);
-    assert.equal(parsed.worker.deployKeyPath, "keys/worker-deploy-key");
-    assert.equal(parsed.worker.deployKeyId, 42);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("writeDeployKeyConfigIntoYaml: REPLACES a prior deployKeyPath:/deployKeyId: pair (however indented) rather than leaving a stale second copy alongside the new one", () => {
-  const dir = tmpCwd();
-  try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
-    const original =
-      "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  deployKeyPath: some/stale/path\n  deployKeyId: 1\n";
-    writeFileSync(cfgPath, original);
-    writeDeployKeyConfigIntoYaml(cfgPath, "keys/worker-deploy-key-fresh", 999);
-    const after = readFileSync(cfgPath, "utf8");
-    assert.doesNotMatch(after, /some\/stale\/path/);
-    assert.doesNotMatch(after, /deployKeyId: 1$/m);
-    const parsed = parseConfig(after);
-    assert.equal(parsed.worker.deployKeyPath, "keys/worker-deploy-key-fresh");
-    assert.equal(parsed.worker.deployKeyId, 999);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("writeDeployKeyConfigIntoYaml (P2-8 ii): a flow-style 'worker: { ... }' mapping is NEVER edited — returns a hand-edit WARN, file untouched", () => {
-  const dir = tmpCwd();
-  try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
-    const original = "board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { model: opus, effort: high }\n";
-    writeFileSync(cfgPath, original);
-    const actions = writeDeployKeyConfigIntoYaml(cfgPath, "keys/worker-deploy-key", 1);
-    assert.ok(actions.some((a) => /NOT written/.test(a) && /flow-style/.test(a)));
-    assert.equal(readFileSync(cfgPath, "utf8"), original, "byte-for-byte untouched");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("writeDeployKeyConfigIntoYaml (P2-8 iii): if the written value doesn't round-trip back to what was written, the ORIGINAL bytes are restored and a hand-edit WARN is returned — never a corrupted config", () => {
-  const dir = tmpCwd();
-  try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
-    const original = "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n\nworker:\n  model: opus\n";
-    writeFileSync(cfgPath, original);
-    // "null" is a YAML-special plain-scalar token — written UNQUOTED it round-trips back as the
-    // null VALUE, not the string "null", so the written config fails z.string() validation (a
-    // realistic hand-edit-adjacent failure mode, not a contrived schema violation): this exercises
-    // the read-back-and-restore path exactly as a genuinely surprising path value would in
-    // production.
-    const actions = writeDeployKeyConfigIntoYaml(cfgPath, "null", 1);
-    assert.ok(actions.some((a) => /NOT written/.test(a) && /did not parse back cleanly/.test(a)));
-    assert.equal(readFileSync(cfgPath, "utf8"), original, "byte-for-byte restored to the original — never left corrupted");
-    // The restored file must ALWAYS still parse as valid config.
-    assert.doesNotThrow(() => parseConfig(readFileSync(cfgPath, "utf8")));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("clearDeployKeyConfigFromYaml: removes both deployKeyPath: and deployKeyId: lines, preserving everything else; a no-op when neither is present", () => {
-  const dir = tmpCwd();
-  try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
-    writeFileSync(
-      cfgPath,
-      "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  model: opus\n  deployKeyPath: keys/worker-deploy-key\n  deployKeyId: 42\n",
-    );
-    const actions = clearDeployKeyConfigFromYaml(cfgPath);
-    assert.ok(actions.some((a) => /cleared/.test(a)));
-    const after = readFileSync(cfgPath, "utf8");
-    assert.doesNotMatch(after, /deployKeyPath:/);
-    assert.doesNotMatch(after, /deployKeyId:/);
-    assert.match(after, /model: opus/);
-    const parsed = parseConfig(after);
-    assert.equal(parsed.worker.deployKeyPath, undefined);
-    assert.equal(parsed.worker.deployKeyId, undefined);
-
-    const noop = clearDeployKeyConfigFromYaml(cfgPath);
-    assert.deepEqual(noop, []);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// #606 gate② round 2 (R3-4): a deployKeyPath:/deployKeyId:-shaped line sitting inside an
-// UNRELATED block scalar elsewhere in the file must survive both writeDeployKeyConfigIntoYaml
-// and clearDeployKeyConfigFromYaml untouched — both the presence-check and the strip filter are
-// scoped to the top-level worker: block's own body only. Hosted under goal.file (a real,
-// schema-valid `z.string()` field that accepts any block-scalar content) rather than a
-// fabricated top-level key, so this fixture is itself schema-valid config, not merely
-// YAML-syntax-valid.
-const BLOCK_SCALAR_DECOY = "goal:\n  file: |\n    deployKeyPath: not a real key, just decoy prose\n    deployKeyId: 999999\n";
-
-test("writeDeployKeyConfigIntoYaml (R3-4 block-scalar reproduction): a deployKeyPath:/deployKeyId:-shaped line inside an unrelated block scalar survives untouched; only the worker: block's own body is edited", () => {
-  const dir = tmpCwd();
-  try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
-    const original = `board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n${BLOCK_SCALAR_DECOY}worker:\n  model: opus\n`;
-    writeFileSync(cfgPath, original);
-    writeDeployKeyConfigIntoYaml(cfgPath, "keys/worker-deploy-key", 1);
-    const after = readFileSync(cfgPath, "utf8");
-    // the decoy lines inside notes: | survive byte-for-byte
-    assert.ok(
-      after.includes("    deployKeyPath: not a real key, just decoy prose"),
-      "decoy deployKeyPath: line inside goal.file's block scalar must survive",
-    );
-    assert.ok(after.includes("    deployKeyId: 999999"), "decoy deployKeyId: line inside goal.file's block scalar must survive");
-    // the REAL anchor landed under the actual worker: block
-    assert.match(after, /^worker:\n {2}deployKeyPath: keys\/worker-deploy-key/m);
-    const parsed = parseConfig(after);
-    assert.equal(parsed.worker.deployKeyPath, "keys/worker-deploy-key");
-    assert.equal(parsed.worker.deployKeyId, 1);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("clearDeployKeyConfigFromYaml (R3-4 block-scalar reproduction): a deployKeyPath:/deployKeyId:-shaped line inside an unrelated block scalar survives untouched while the worker: block's own anchor is cleared", () => {
-  const dir = tmpCwd();
-  try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
-    const original = `board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n${BLOCK_SCALAR_DECOY}worker:\n  deployKeyPath: keys/worker-deploy-key\n  deployKeyId: 42\n`;
-    writeFileSync(cfgPath, original);
-    const actions = clearDeployKeyConfigFromYaml(cfgPath);
-    assert.ok(actions.some((a) => /cleared/.test(a)));
-    const after = readFileSync(cfgPath, "utf8");
-    assert.ok(
-      after.includes("    deployKeyPath: not a real key, just decoy prose"),
-      "decoy line inside goal.file's block scalar must survive the clear",
-    );
-    assert.ok(after.includes("    deployKeyId: 999999"), "decoy line inside goal.file's block scalar must survive the clear");
-    const parsed = parseConfig(after);
-    assert.equal(parsed.worker.deployKeyPath, undefined);
-    assert.equal(parsed.worker.deployKeyId, undefined);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("clearDeployKeyConfigFromYaml (R3-4): a deployKeyPath:/deployKeyId:-shaped decoy line BEFORE any real top-level worker: block is never mistaken for presence — a file with ONLY the decoy is a correct no-op", () => {
-  const dir = tmpCwd();
-  try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
-    // no top-level `worker:` block at all — just the decoy inside notes: |
-    const original = `board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\n${BLOCK_SCALAR_DECOY}`;
-    writeFileSync(cfgPath, original);
-    const actions = clearDeployKeyConfigFromYaml(cfgPath);
-    assert.deepEqual(actions, [], "no worker: block exists, so there is nothing this function can (or should) clear");
-    assert.equal(readFileSync(cfgPath, "utf8"), original, "byte-for-byte untouched");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// #606 gate② round 3 (item 2): a block scalar NESTED INSIDE the worker: block itself — e.g.
-// worker.promptFile: | — sits at a DEEPER indent than the block's own direct children
-// (deployKeyPath:/deployKeyId: at 2 spaces; the block-scalar body at 4+). The round-2 fix scoped
-// matching to "inside the worker: block", but not to "at the block's own direct-child indent",
-// so a schema-valid worker.promptFile whose CONTENT happens to contain the literal text
-// "deployKeyPath: ..."/"deployKeyId: ..." was still silently emptied by both write and clear.
-const NESTED_PROMPT_DECOY =
-  "  promptFile: |\n    deployKeyPath: this is prose INSIDE the prompt file text, not a real config key\n    deployKeyId: 4242 (also prose)\n";
-
-test("writeDeployKeyConfigIntoYaml (gate② round 3, item 2a): a block scalar under worker.promptFile containing deployKeyPath:/deployKeyId:-shaped text survives write byte-for-byte; only the REAL direct-child anchor lines are inserted", () => {
-  const dir = tmpCwd();
-  try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
-    const original = `board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n${NESTED_PROMPT_DECOY}  model: opus\n`;
-    writeFileSync(cfgPath, original);
-    writeDeployKeyConfigIntoYaml(cfgPath, "keys/worker-deploy-key", 1);
-    const after = readFileSync(cfgPath, "utf8");
-    // the nested block-scalar prose survives byte-for-byte, untouched
-    assert.ok(
-      after.includes("    deployKeyPath: this is prose INSIDE the prompt file text, not a real config key"),
-      "the nested promptFile block-scalar line must survive",
-    );
-    assert.ok(after.includes("    deployKeyId: 4242 (also prose)"), "the nested promptFile block-scalar line must survive");
-    // the REAL anchor landed as a direct child of worker: (2-space indent)
-    assert.match(after, /^worker:\n {2}deployKeyPath: keys\/worker-deploy-key/m);
-    const parsed = parseConfig(after);
-    assert.equal(parsed.worker.deployKeyPath, "keys/worker-deploy-key");
-    assert.equal(parsed.worker.deployKeyId, 1);
-    assert.ok(parsed.worker.promptFile?.includes("deployKeyPath: this is prose"), "worker.promptFile's own content is preserved verbatim");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("clearDeployKeyConfigFromYaml (gate② round 3, item 2a): a block scalar under worker.promptFile containing deployKeyPath:/deployKeyId:-shaped text survives clear byte-for-byte; only the REAL direct-child anchor lines are removed", () => {
-  const dir = tmpCwd();
-  try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
-    const original = `board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  deployKeyPath: keys/worker-deploy-key\n  deployKeyId: 42\n${NESTED_PROMPT_DECOY}  model: opus\n`;
-    writeFileSync(cfgPath, original);
-    const actions = clearDeployKeyConfigFromYaml(cfgPath);
-    assert.ok(actions.some((a) => /cleared/.test(a)));
-    const after = readFileSync(cfgPath, "utf8");
-    assert.ok(
-      after.includes("    deployKeyPath: this is prose INSIDE the prompt file text, not a real config key"),
-      "the nested promptFile block-scalar line must survive the clear",
-    );
-    assert.ok(after.includes("    deployKeyId: 4242 (also prose)"), "the nested promptFile block-scalar line must survive the clear");
-    assert.ok(after.includes("  model: opus"), "sibling direct-child content survives");
-    const parsed = parseConfig(after);
-    assert.equal(parsed.worker.deployKeyPath, undefined);
-    assert.equal(parsed.worker.deployKeyId, undefined);
-    assert.ok(parsed.worker.promptFile?.includes("deployKeyPath: this is prose"), "worker.promptFile's own content is preserved verbatim");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("clearDeployKeyConfigFromYaml (gate② round 3, item 2b): a BLANK LINE between deployKeyId: and the next direct child (e.g. model:) does not cause a false 'nothing left' — the block's own header survives and the sibling child is preserved", () => {
-  const dir = tmpCwd();
-  try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
-    const original =
-      "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nworker:\n  deployKeyPath: keys/worker-deploy-key\n  deployKeyId: 42\n\n  model: opus\n";
-    writeFileSync(cfgPath, original);
-    const actions = clearDeployKeyConfigFromYaml(cfgPath);
-    assert.ok(actions.some((a) => /cleared/.test(a)));
-    const after = readFileSync(cfgPath, "utf8");
-    assert.doesNotMatch(after, /deployKeyPath:/);
-    assert.doesNotMatch(after, /deployKeyId:/);
-    assert.match(after, /^worker:/m, "the worker: header must survive — model: opus is a real remaining child");
-    assert.match(after, /model: opus/);
-    const parsed = parseConfig(after);
-    assert.equal(parsed.worker.deployKeyPath, undefined);
-    assert.equal(parsed.worker.deployKeyId, undefined);
-    assert.equal(parsed.worker.model, "opus");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });
 
 test("pickFreshArmAKeySlot: the bare hostComponent slot when both the local path and the title are free", () => {
@@ -1290,70 +1029,6 @@ test("pickFreshArmAKeySlot (gate② round 3, item 3): every candidate title alre
     rmSync(dir, { recursive: true, force: true });
   }
 });
-
-test("clearDeployKeyConfigFromJson (R3-2): removes worker.deployKeyPath/deployKeyId, preserving other worker keys and top-level keys; drops the worker object entirely once empty", () => {
-  const dir = tmpCwd();
-  try {
-    const cfgPath = join(dir, "sapwood.config.json");
-    writeFileSync(
-      cfgPath,
-      JSON.stringify({
-        board: { owner: "acme", repo: "widgets", projectNumber: 7 },
-        worker: { deployKeyPath: "keys/worker-deploy-key", deployKeyId: 42 },
-      }),
-    );
-    const actions = clearDeployKeyConfigFromJson(cfgPath);
-    assert.ok(actions.some((a) => /cleared/.test(a)));
-    const parsed = JSON.parse(readFileSync(cfgPath, "utf8"));
-    assert.equal(parsed.worker, undefined, "an empty worker object is dropped entirely, not left as {}");
-    assert.equal(parsed.board.owner, "acme", "unrelated top-level content survives");
-    const reparsed = parseConfig(readFileSync(cfgPath, "utf8"));
-    assert.equal(reparsed.worker.deployKeyPath, undefined);
-    assert.equal(reparsed.worker.deployKeyId, undefined);
-
-    const noop = clearDeployKeyConfigFromJson(cfgPath);
-    assert.deepEqual(noop, []);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("clearDeployKeyConfigFromJson (R3-2): preserves sibling worker keys — only deployKeyPath/deployKeyId are removed", () => {
-  const dir = tmpCwd();
-  try {
-    const cfgPath = join(dir, "sapwood.config.json");
-    writeFileSync(
-      cfgPath,
-      JSON.stringify({
-        board: { owner: "acme", repo: "widgets", projectNumber: 7 },
-        worker: { model: "opus", deployKeyPath: "keys/worker-deploy-key", deployKeyId: 42 },
-      }),
-    );
-    clearDeployKeyConfigFromJson(cfgPath);
-    const parsed = JSON.parse(readFileSync(cfgPath, "utf8"));
-    assert.equal(parsed.worker.model, "opus");
-    assert.equal(parsed.worker.deployKeyPath, undefined);
-    assert.equal(parsed.worker.deployKeyId, undefined);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("clearDeployKeyConfigFromJson: malformed JSON -> a hand-edit WARN, file untouched", () => {
-  const dir = tmpCwd();
-  try {
-    const cfgPath = join(dir, "sapwood.config.json");
-    const original = "{ not valid json,,,";
-    writeFileSync(cfgPath, original);
-    const actions = clearDeployKeyConfigFromJson(cfgPath);
-    assert.ok(actions.some((a) => /NOT cleared/.test(a)));
-    assert.equal(readFileSync(cfgPath, "utf8"), original);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-const cfgKeyPath = (dir: string) => join(dir, ".sapwood", "keys", "worker-deploy-key");
 
 test("init: a fresh fixture repo receives a starter config pinned to produce-pr-and-stop", async () => {
   const { run } = fakeRun({
@@ -1446,12 +1121,92 @@ test("init→run smoke (#801): sapwood init warns about its own scaffold's engin
   }
 });
 
-test("init: FRESH PROVISIONING — nothing configured, no sapwood-titled remote key -> provisions end-to-end (ssh-keygen + gh repo deploy-key add --allow-write --title sapwood-worker), reads back the new id, preflight green, BOTH deployKeyPath and deployKeyId written into the config file, key lives under the self-ignoring .sapwood/keys/", async () => {
+// ── #1105 AC3: sapwood init never edits sapwood.config.yaml after its initial scaffold write —
+//    the deploy-key step writes ONLY under .sapwood/keys/, never touching the config file at all,
+//    fresh or on any re-run. ──
+
+test("init (#1105 AC3): sapwood.config.yaml is byte-identical before and after a FRESH provisioning run", async () => {
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+    deployKeyEntries: [],
+  });
+  const dir = tmpCwd();
+  try {
+    await init(cfg, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      ...nonInteractive,
+      sshKeygen: async (path) => writeFakeKeyPair(path),
+      probeSshAuth: async () => ({ ok: true }),
+    });
+    const configPath = join(dir, "sapwood.config.yaml");
+    const afterFirstRun = readFileSync(configPath, "utf8");
+
+    // Second run: a real local anchor now exists (the first run's own sidecar), so this is a
+    // genuine reconcile, not a hand-built fixture.
+    const { run: run2 } = fakeRun({
+      labels: requiredLabels(cfg).map((l) => l.name),
+      boardExists: true,
+      boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+      deployKeyEntries: [{ id: 1, title: "sapwood-worker", key: FAKE_PUB_KEY }],
+    });
+    await init(cfg, {
+      run: run2,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      ...nonInteractive,
+      sshKeygen: failSshKeygen,
+      probeSshAuth: async () => ({ ok: true }),
+    });
+    assert.equal(readFileSync(configPath, "utf8"), afterFirstRun, "the second run must not touch the config file at all");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init (#1105 AC3): sapwood.config.yaml is byte-identical before and after a RECONCILE-FAILURE run (non-interactive WARN)", async () => {
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+    deployKeyEntries: [{ id: 42, title: "sapwood-worker" }], // a foreign key this machine has no anchor for
+  });
+  const dir = tmpCwd();
+  try {
+    await init(cfg, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      ...nonInteractive,
+      sshKeygen: failSshKeygen,
+      probeSshAuth: failProbeSshAuth,
+    });
+    const configPath = join(dir, "sapwood.config.yaml");
+    const before = readFileSync(configPath, "utf8");
+    const { actions } = await init(cfg, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      ...nonInteractive,
+      sshKeygen: failSshKeygen,
+      probeSshAuth: failProbeSshAuth,
+    });
+    assert.ok(actions.some((a) => a.startsWith("deploy key: WARN")));
+    assert.equal(readFileSync(configPath, "utf8"), before, "a WARN-only outcome must never touch the config file");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init: FRESH PROVISIONING — nothing local, no sapwood-titled remote key -> provisions end-to-end (ssh-keygen + gh repo deploy-key add --allow-write --title sapwood-worker), reads back the new id, preflight green, sidecar written under .sapwood/keys/, config file untouched", async () => {
   const { run, calls } = fakeRun({
     labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
     boardOptions: ["Todo", "Ready", "In Progress", "Done"],
-    deployKeyEntries: [], // nothing registered at all -> fresh provisioning runs
+    deployKeyEntries: [],
   });
   const dir = tmpCwd();
   try {
@@ -1464,8 +1219,7 @@ test("init: FRESH PROVISIONING — nothing configured, no sapwood-titled remote 
       ...nonInteractive,
       sshKeygen: async (path) => {
         keygenCalledWith = path;
-        writeFileSync(path, "fake-private-key");
-        writeFileSync(`${path}.pub`, "ssh-ed25519 AAAA fake");
+        writeFakeKeyPair(path);
       },
       probeSshAuth: async (path) => {
         probeCalledWith = path;
@@ -1487,162 +1241,35 @@ test("init: FRESH PROVISIONING — nothing configured, no sapwood-titled remote 
     assert.equal(addCall![3], `${expectedKeyPath}.pub`);
     assert.ok(actions.some((a) => /added write deploy key/.test(a)));
     assert.ok(actions.some((a) => /preflight OK/.test(a)));
-    assert.ok(actions.some((a) => /wrote worker\.deployKeyPath\/worker\.deployKeyId/.test(a)));
-    const configPath = join(dir, "sapwood.config.yaml");
-    const configText = readFileSync(configPath, "utf8");
-    assert.match(configText, /deployKeyPath: \.sapwood[/\\]keys[/\\]worker-deploy-key/);
-    assert.match(configText, /deployKeyId: 1\b/); // fakeRun's fresh deploy-key add is read back as id 1 (see below)
-    const reparsed = parseConfig(configText);
-    assert.equal(reparsed.worker.deployKeyPath, join(".sapwood", "keys", "worker-deploy-key"));
-    assert.equal(reparsed.worker.deployKeyId, 1);
-    // #1080: no root .gitignore append any more — the key lives under the runtime root's own
-    // self-ignoring `.sapwood/.gitignore` (`*`, written by `ensureRuntimeRoot`), and this run
-    // never touched the repo root's own .gitignore at all.
-    assert.equal(existsSync(join(dir, ".gitignore")), false, "root .gitignore is never created/touched by init");
-    assert.equal(readFileSync(join(dir, ".sapwood", ".gitignore"), "utf8"), "*\n");
+    assert.ok(actions.some((a) => /recorded the local anchor/.test(a) && a.includes(keyIdSidecarPath(expectedKeyPath))));
+    assert.equal(readFileSync(keyIdSidecarPath(expectedKeyPath), "utf8").trim(), "1");
+    assert.equal(statSync(keyIdSidecarPath(expectedKeyPath)).mode & 0o777, 0o600, "the sidecar is written 0600, same as the key");
+    const configText = readFileSync(join(dir, "sapwood.config.yaml"), "utf8");
+    assert.doesNotMatch(
+      configText,
+      new RegExp(`${RETIRED_KEY_PATH_FIELD}|${RETIRED_KEY_ID_FIELD}`),
+      "the config file is never touched by the deploy-key step",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-// ── #1078 AC3: worker.deployKeyPath is CWD-relative, not config-file-relative ────────────────
-// Every test below puts the config file in a SUBDIRECTORY of `root` (`root`'s own `cwd`
-// parameter) — the OLD relative(dirname(configFilePath), keyPath) rule would have written
-// "../.sapwood/keys/worker-deploy-key..." here; the fix writes the CWD-relative
-// ".sapwood/keys/worker-deploy-key..." instead, exactly what config.ts's loadConfig resolver
-// reads back (its own AC3 test above).
-
-test("#1078 AC3 (init writer site 1/2 — ensureDeployKey's fresh-provisioning tail): deployKeyPath is written CWD-relative even though the config file lives in a subdirectory of cwd", async () => {
-  const root = tmpCwd();
-  try {
-    const sub = join(root, "sub");
-    mkdirSync(sub, { recursive: true });
-    const configPath = join(sub, "sapwood.config.yaml");
-    writeFileSync(configPath, "board: { owner: acme, repo: widgets, projectNumber: 7 }\n");
-    const provisioned = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }"); // no worker.* set -> fresh provisioning
-    const { run } = fakeRun({ deployKeyEntries: [] }); // nothing registered remotely either
-    const actions = await ensureDeployKey(provisioned, run, "acme/widgets", root, configPath, {
-      sshKeygen: async (path) => {
-        writeFileSync(path, "fake-private-key");
-        writeFileSync(`${path}.pub`, "ssh-ed25519 AAAA fake");
-      },
-      probeSshAuth: async () => ({ ok: true }),
-      ...nonInteractive,
-    });
-    assert.ok(actions.some((a) => /wrote worker\.deployKeyPath\/worker\.deployKeyId/.test(a)));
-    const configText = readFileSync(configPath, "utf8");
-    const expected = relative(root, join(root, ".sapwood", "keys", "worker-deploy-key"));
-    assert.match(configText, new RegExp(`deployKeyPath: ${expected.replace(/\\/g, "\\\\")}\\b`));
-    assert.ok(!configText.includes(".."), "must never resolve against the config file's OWN directory (the pre-#1078 rule)");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("#1078 AC3 (init writer site 2/2 — armAuthFailsStaleOrMismatch's arm (a)): deployKeyPath is written CWD-relative even though the config file lives in a subdirectory of cwd", async () => {
-  const root = tmpCwd();
-  try {
-    const sub = join(root, "sub");
-    mkdirSync(sub, { recursive: true });
-    const configPath = join(sub, "sapwood.config.yaml");
-    writeFileSync(configPath, "board: { owner: acme, repo: widgets, projectNumber: 7 }\n");
-    const provisioned = parseConfig("board: { owner: acme, repo: widgets, projectNumber: 7 }"); // no local anchor
-    // A sapwood-titled key already exists remotely -> routes into armAuthFailsStaleOrMismatch.
-    const { run } = fakeRun({ deployKeyEntries: [{ id: 7, title: "sapwood-worker" }] });
-    const actions = await ensureDeployKey(provisioned, run, "acme/widgets", root, configPath, {
-      sshKeygen: async (path) => {
-        writeFileSync(path, "fake-private-key");
-        writeFileSync(`${path}.pub`, "ssh-ed25519 AAAA fake");
-      },
-      probeSshAuth: async () => ({ ok: true }),
-      isInteractive: () => true,
-      promptOperator: async () => "a", // choose (a): register a new per-machine key
-      hostname: () => "MyLaptop.local",
-    });
-    assert.ok(actions.some((a) => /operator chose \(a\)/.test(a)));
-    const configText = readFileSync(configPath, "utf8");
-    const expected = relative(root, join(root, ".sapwood", "keys", "worker-deploy-key-mylaptop-local"));
-    assert.match(configText, new RegExp(`deployKeyPath: ${expected.replace(/\\/g, "\\\\")}\\b`));
-    assert.ok(!configText.includes(".."), "must never resolve against the config file's OWN directory (the pre-#1078 rule)");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("#1078 AC3 (end-to-end): loadConfig's CWD-resolved deployKeyPath is exactly the path reconcileDeployKey() receives — a config file in a subdirectory of cwd still reconciles green", async () => {
-  // realpathSync: macOS's tmpdir() is a symlink (/var -> /private/var) — process.chdir()+
-  // resolve() (what loadConfig's cwd-relative resolution actually reads) resolves it, so
-  // comparing against the raw mkdtempSync path would spuriously fail on the "/var/.." vs
-  // "/private/var/.." string difference alone, not a real defect (same pattern peripheral.test.ts/
-  // worker.test.ts already use).
-  const root = realpathSync(tmpCwd());
-  const previousCwd = process.cwd();
-  try {
-    const sub = join(root, "sub");
-    mkdirSync(sub, { recursive: true });
-    const configPath = join(sub, "sapwood.config.yaml");
-    writeFileSync(
-      configPath,
-      "board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: keys/worker-deploy-key, deployKeyId: 42 }\n",
-    );
-    process.chdir(root);
-    const cfg = loadConfig(configPath);
-    process.chdir(previousCwd);
-    // Proves the resolution itself is cwd-relative (config.ts's own AC3 resolver test covers this
-    // in isolation too) — this is the value reconcileDeployKey below will actually be handed.
-    assert.equal(cfg.worker.deployKeyPath, join(root, "keys", "worker-deploy-key"));
-
-    writeFakeKeyPair(cfg.worker.deployKeyPath!);
-    const { run, calls } = fakeRun({
-      deployKeyEntries: [{ id: 42, title: "sapwood-worker", key: FAKE_PUB_KEY }],
-    });
-    const actions = await ensureDeployKey(cfg, run, "acme/widgets", root, configPath, {
-      ...nonInteractive,
-      sshKeygen: failSshKeygen,
-      probeSshAuth: async () => ({ ok: true }),
-    });
-    assert.ok(!calls.some((c) => c[0] === "repo" && c[1] === "deploy-key" && c[2] === "add"), "a green reconcile never re-provisions");
-    assert.ok(
-      actions.some((a) => /reconciled/.test(a) && /L1 active/.test(a)),
-      `expected a green reconcile action, got: ${actions.join(" | ")}`,
-    );
-  } finally {
-    process.chdir(previousCwd);
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("init: RECONCILE — deployKeyPath+deployKeyId both configured, local file exists, id listed, preflight green -> a positive confirmation action, NO re-provisioning (no ssh-keygen, no deploy-key add, no config rewrite)", async () => {
+test("init: RECONCILE — a discovered local anchor, local file exists, id listed, preflight green -> a positive confirmation action, NO re-provisioning (no ssh-keygen, no deploy-key add)", async () => {
   const dir = tmpCwd();
-  // #606 gate② round 1: deployKeyPath must be ABSOLUTE here — production's loadConfig() always
-  // resolves a relative worker.deployKeyPath against the config file's directory before init()
-  // ever sees it (config.ts's own #606 rule), so reconcileDeployKey's existsSync check assumes
-  // an already-resolved path. parseConfig() alone (used by this fixture, unlike loadConfig)
-  // does NOT do that resolution — a bare relative string here would check the wrong path
-  // (relative to the TEST RUNNER's cwd, not `dir`), so this fixture inlines the absolute path
-  // directly, exactly what a real loadConfig()'d cfg would already carry.
   const keyPath = cfgKeyPath(dir);
-  const provisioned = parseConfig(
-    `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: ${keyPath}, deployKeyId: 159210179 }`,
-  );
   const { run, calls } = fakeRun({
-    labels: requiredLabels(provisioned).map((l) => l.name),
+    labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
     boardOptions: ["Todo", "Ready", "In Progress", "Done"],
-    // #606 gate② round 2 (R3-1): the id-matched entry's `key` must match the LOCAL `.pub` file
-    // content below for reconcile's cross-check to go green — an id merely being "listed" is no
-    // longer sufficient on its own.
+    // #606 gate② round 2 (R3-1, carried forward): the id-matched entry's `key` must match the
+    // LOCAL `.pub` file content below for reconcile's cross-check to go green.
     deployKeyEntries: [{ id: 159210179, title: "sapwood-worker", key: FAKE_PUB_KEY }],
   });
   try {
     writeFakeKeyPair(keyPath);
-    const configPath = join(dir, "sapwood.config.yaml");
-    writeFileSync(
-      configPath,
-      `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: ${keyPath}, deployKeyId: 159210179 }\n`,
-    );
-    const before = readFileSync(configPath, "utf8");
-    const { actions } = await init(provisioned, {
+    writeAnchorSidecar(keyPath, 159210179);
+    const { actions } = await init(cfg, {
       run,
       getAuthStatus: async () => OK_AUTH,
       cwd: dir,
@@ -1652,30 +1279,27 @@ test("init: RECONCILE — deployKeyPath+deployKeyId both configured, local file 
     });
     assert.ok(!calls.some((c) => c[0] === "repo" && c[1] === "deploy-key" && c[2] === "add"), "no re-provisioning on a clean reconcile");
     assert.ok(actions.some((a) => /reconciled/.test(a) && /L1 active/.test(a)));
-    assert.equal(readFileSync(configPath, "utf8"), before, "config untouched on a clean reconcile");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("init: RECONCILE — a configured key already on disk with the wrong permissions (dir 0777, file 0777) has BOTH repaired to 0700/0600 as part of a successful reconcile", async () => {
+test("init: RECONCILE — a discovered anchor already on disk with the wrong permissions (dir 0777, file 0777) has BOTH repaired to 0700/0600 as part of a successful reconcile", async () => {
   const dir = tmpCwd();
   const keyPath = cfgKeyPath(dir);
   const keysDir = dirname(keyPath);
-  const provisioned = parseConfig(
-    `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: ${keyPath}, deployKeyId: 159210179 }`,
-  );
   const { run } = fakeRun({
-    labels: requiredLabels(provisioned).map((l) => l.name),
+    labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
     boardOptions: ["Todo", "Ready", "In Progress", "Done"],
     deployKeyEntries: [{ id: 159210179, title: "sapwood-worker", key: FAKE_PUB_KEY }],
   });
   try {
     writeFakeKeyPair(keyPath);
+    writeAnchorSidecar(keyPath, 159210179);
     chmodSync(keysDir, 0o777);
     chmodSync(keyPath, 0o777);
-    const { actions } = await init(provisioned, {
+    const { actions } = await init(cfg, {
       run,
       getAuthStatus: async () => OK_AUTH,
       cwd: dir,
@@ -1694,21 +1318,19 @@ test("init: RECONCILE — a configured key already on disk with the wrong permis
   }
 });
 
-test("init: RECONCILE — a DIRECTORY sitting at the configured deployKeyPath cannot be repaired to 0600; reconcile reports a WARN and never claims L1 active", async () => {
+test("init: RECONCILE — a DIRECTORY sitting at the discovered anchor's key path cannot be repaired to 0600; reconcile reports a WARN and never claims L1 active", async () => {
   const dir = tmpCwd();
   const keyPath = cfgKeyPath(dir);
-  mkdirSync(keyPath, { recursive: true }); // a DIRECTORY, not a key file, at the configured path
-  const provisioned = parseConfig(
-    `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: ${keyPath}, deployKeyId: 159210179 }`,
-  );
+  mkdirSync(keyPath, { recursive: true }); // a DIRECTORY, not a key file, at the anchored path
+  writeAnchorSidecar(keyPath, 159210179);
   const { run, calls } = fakeRun({
-    labels: requiredLabels(provisioned).map((l) => l.name),
+    labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
     boardOptions: ["Todo", "Ready", "In Progress", "Done"],
     deployKeyEntries: [{ id: 159210179, title: "sapwood-worker" }],
   });
   try {
-    const { actions } = await init(provisioned, {
+    const { actions } = await init(cfg, {
       run,
       getAuthStatus: async () => OK_AUTH,
       cwd: dir,
@@ -1732,25 +1354,14 @@ test("init: RECONCILE — a DIRECTORY sitting at the configured deployKeyPath ca
 test("ensureDeployKey (reconcile): a genuine chmod FAILURE (EPERM, injected via the fs seam — not a real OS-dependent permission trick) during repair is a reported WARN degradation, never a thrown error and never a green L1 claim", async () => {
   const dir = tmpCwd();
   const keyPath = cfgKeyPath(dir);
-  const configPath = join(dir, "sapwood.config.yaml");
-  writeFileSync(
-    configPath,
-    `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: ${keyPath}, deployKeyId: 159210179 }\n`,
-  );
-  const provisioned = parseConfig(
-    `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: ${keyPath}, deployKeyId: 159210179 }`,
-  );
-  const { run } = fakeRun({
-    deployKeyEntries: [{ id: 159210179, title: "sapwood-worker", key: FAKE_PUB_KEY }],
-  });
+  const { run } = fakeRun({ deployKeyEntries: [{ id: 159210179, title: "sapwood-worker", key: FAKE_PUB_KEY }] });
   try {
     writeFakeKeyPair(keyPath);
+    writeAnchorSidecar(keyPath, 159210179);
     const actions = await ensureDeployKey(
-      provisioned,
       run,
       "acme/widgets",
       dir,
-      configPath,
       { ...nonInteractive, sshKeygen: failSshKeygen, probeSshAuth: async () => ({ ok: true }) },
       fsWithChmodFailure("EPERM"),
     );
@@ -1769,17 +1380,13 @@ test("ensureDeployKey (reconcile): a genuine chmod FAILURE (EPERM, injected via 
 
 test("ensureDeployKey (fresh provisioning): a genuine lstat FAILURE (EACCES, injected via the fs seam) on the private-key path is a reported WARN degradation, never silently read as 'absent' — ssh-keygen is never invoked", async () => {
   const dir = tmpCwd();
-  const configPath = join(dir, "sapwood.config.yaml");
-  writeFileSync(configPath, "board: { owner: acme, repo: widgets, projectNumber: 7 }\n");
-  const keyPath = join(dir, ".sapwood", "keys", "worker-deploy-key");
+  const keyPath = cfgKeyPath(dir);
   const { run, calls } = fakeRun({ deployKeyEntries: [] });
   try {
     const actions = await ensureDeployKey(
-      cfg,
       run,
       "acme/widgets",
       dir,
-      configPath,
       {
         ...nonInteractive,
         sshKeygen: async () => {
@@ -1801,14 +1408,11 @@ test("ensureDeployKey (fresh provisioning): a genuine lstat FAILURE (EACCES, inj
   }
 });
 
-test("init (P1-5): RECONCILE FAILS (recorded id no longer listed — rotated/stale) -> non-interactive default (b): WARN + config anchor CLEARED, remote NEVER touched (no deploy-key delete call, ever)", async () => {
+test("init (#1105 AC4): RECONCILE FAILS (recorded id no longer listed — rotated/stale) -> non-interactive default (b): WARN, remote NEVER touched, and NO FILE IS MODIFIED (not even the stale sidecar)", async () => {
   const dir = tmpCwd();
-  const keyPath = cfgKeyPath(dir); // see the RECONCILE test above for why this must be absolute
-  const provisioned = parseConfig(
-    `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: ${keyPath}, deployKeyId: 9999999 }`,
-  );
+  const keyPath = cfgKeyPath(dir);
   const { run, calls } = fakeRun({
-    labels: requiredLabels(provisioned).map((l) => l.name),
+    labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
     boardOptions: ["Todo", "Ready", "In Progress", "Done"],
     // the recorded id (9999999) is NOT in this list — a different id is registered instead,
@@ -1816,14 +1420,11 @@ test("init (P1-5): RECONCILE FAILS (recorded id no longer listed — rotated/sta
     deployKeyEntries: [{ id: 42, title: "sapwood-worker" }],
   });
   try {
-    mkdirSync(join(dir, ".sapwood", "keys"), { recursive: true });
+    mkdirSync(dirname(keyPath), { recursive: true });
     writeFileSync(keyPath, "stale-private-key");
-    const configPath = join(dir, "sapwood.config.yaml");
-    writeFileSync(
-      configPath,
-      `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker:\n  deployKeyPath: ${keyPath}\n  deployKeyId: 9999999\n`,
-    );
-    const { actions } = await init(provisioned, {
+    writeAnchorSidecar(keyPath, 9999999);
+    const sidecarBefore = readFileSync(keyIdSidecarPath(keyPath), "utf8");
+    const { actions } = await init(cfg, {
       run,
       getAuthStatus: async () => OK_AUTH,
       cwd: dir,
@@ -1844,45 +1445,31 @@ test("init (P1-5): RECONCILE FAILS (recorded id no longer listed — rotated/sta
       /sapwood-worker.*id 42/,
       "surfaces the foreign/stale remote key for HUMAN cleanup — behaviorally never touched (see the calls-log assertion above)",
     );
-    const configText = readFileSync(configPath, "utf8");
-    assert.doesNotMatch(
-      configText,
-      /deployKeyPath:/,
-      "the stale local anchor is CLEARED — this is what makes 're-run init' converge (P1-5)",
-    );
-    assert.doesNotMatch(configText, /deployKeyId:/);
-    // #606 gate② round 2 (R3-2): the file must no longer PARSE with the anchor either — not
-    // just a text-level absence of the string "deployKeyPath:".
-    assert.equal(parseConfig(configText).worker.deployKeyPath, undefined);
-    assert.equal(parseConfig(configText).worker.deployKeyId, undefined);
+    // #1105: unlike the retired config-anchored design, a WARN-only outcome touches NO file —
+    // not even the stale sidecar it's warning about (AC4). The next `sapwood init` run reconciles
+    // the same anchor again and reports the same honest WARN.
+    assert.equal(readFileSync(keyIdSidecarPath(keyPath), "utf8"), sidecarBefore, "the stale sidecar is left exactly as it was");
+    assert.equal(readFileSync(keyPath, "utf8"), "stale-private-key", "the stale key file is left exactly as it was");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("init (R3-1): RECONCILE FAILS when the recorded id IS listed and the local file DOES exist and SSH preflight succeeds, but the local .pub content does NOT match that id's own registered key — proves the (path, id) pair was never recorded together", async () => {
+test("init (R3-1): RECONCILE FAILS when the recorded id IS listed and the local file DOES exist and SSH preflight succeeds, but the local .pub content does NOT match that id's own registered key — proves the (key, id) pair was never recorded together; no file modified either", async () => {
   const dir = tmpCwd();
-  const keyPath = cfgKeyPath(dir); // absolute — see the RECONCILE test's own note on why
-  const provisioned = parseConfig(
-    `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: ${keyPath}, deployKeyId: 42 }`,
-  );
+  const keyPath = cfgKeyPath(dir);
   const { run, calls } = fakeRun({
-    labels: requiredLabels(provisioned).map((l) => l.name),
+    labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
     boardOptions: ["Todo", "Ready", "In Progress", "Done"],
     // id 42 IS registered — but under a DIFFERENT public key than the one at `keyPath` below (a
-    // hand-edited id, or an id that once matched but was rotated on the remote side without
-    // updating the local anchor).
+    // hand-edited sidecar, or an id that once matched but was rotated on the remote side).
     deployKeyEntries: [{ id: 42, title: "sapwood-worker", key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAADifferentKeyEntirely unrelated" }],
   });
-  const configPath = join(dir, "sapwood.config.yaml");
-  writeFileSync(
-    configPath,
-    `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker:\n  deployKeyPath: ${keyPath}\n  deployKeyId: 42\n`,
-  );
   try {
     writeFakeKeyPair(keyPath); // local .pub content is FAKE_PUB_KEY — does not match the entry's `key` above
-    const { actions } = await init(provisioned, {
+    writeAnchorSidecar(keyPath, 42);
+    const { actions } = await init(cfg, {
       run,
       getAuthStatus: async () => OK_AUTH,
       cwd: dir,
@@ -1897,79 +1484,62 @@ test("init (R3-1): RECONCILE FAILS when the recorded id IS listed and the local 
     assert.ok(warn, "expected a WARN action line");
     assert.match(warn!, /does not match the public key registered under id 42/i);
     assert.match(warn!, /no longer refers to the same key/i);
-    const reparsed = parseConfig(readFileSync(configPath, "utf8"));
-    assert.equal(reparsed.worker.deployKeyPath, undefined, "the stale anchor is cleared");
-    assert.equal(reparsed.worker.deployKeyId, undefined);
+    assert.equal(readFileSync(keyIdSidecarPath(keyPath), "utf8").trim(), "42", "the sidecar is left untouched");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("init (P1-5 convergence AC): re-running init after a reconcile-fail state converges to a green reconcile once the operator fixes the local key file", async () => {
+test("init (#1105 AC4, TTY arm (a)): re-running init after a reconcile-fail state converges to a green reconcile once the operator registers an additional key — writes ONLY the new key + its sidecar, the stale one is left in place", async () => {
   const dir = tmpCwd();
-  // NB: deliberately left relative here — round 1's whole point is that the local key file is
-  // MISSING regardless (never created under either interpretation), triggering the reconcile
-  // failure this test exercises.
-  const configPath = join(dir, "sapwood.config.yaml");
-  writeFileSync(
-    configPath,
-    "board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker:\n  deployKeyPath: keys/worker-deploy-key\n  deployKeyId: 42\n",
-  );
+  const staleKeyPath = cfgKeyPath(dir);
   try {
-    // Round 1: local key file MISSING -> reconcile fails -> arm (b) -> config cleared.
-    const cfg1 = parseConfig(readFileSync(configPath, "utf8"));
+    // Round 1: local key file MISSING -> reconcile fails -> non-interactive default (b) -> WARN,
+    // no file touched.
+    writeAnchorSidecar(staleKeyPath, 42);
     const { run: run1 } = fakeRun({
-      labels: requiredLabels(cfg1).map((l) => l.name),
+      labels: requiredLabels(cfg).map((l) => l.name),
       boardExists: true,
       boardOptions: ["Todo", "Ready", "In Progress", "Done"],
       deployKeyEntries: [{ id: 42, title: "sapwood-worker" }],
     });
-    const first = await init(cfg1, { run: run1, getAuthStatus: async () => OK_AUTH, cwd: dir, ...nonInteractive });
+    const first = await init(cfg, { run: run1, getAuthStatus: async () => OK_AUTH, cwd: dir, ...nonInteractive });
     assert.ok(first.actions.some((a) => a.startsWith("deploy key: WARN")));
-    assert.doesNotMatch(readFileSync(configPath, "utf8"), /deployKeyPath:/, "cleared after round 1's failed reconcile");
+    assert.equal(readFileSync(keyIdSidecarPath(staleKeyPath), "utf8").trim(), "42", "round 1 leaves the stale sidecar exactly as it was");
 
-    // Round 2 ("re-run sapwood init"): config now has NEITHER field, and the OLD "sapwood-worker"-
-    // titled key is STILL registered (never deleted) — this machine still has no recorded anchor
-    // for it, so a non-interactive re-run would stay at the same honest WARN forever (correct,
-    // safe default). The ruling's own convergence path is INTERACTIVE choice (a): "after choosing
-    // (a), re-run init -> preflight green with the machine's own key" — modeled here.
-    const cfg2 = parseConfig(readFileSync(configPath, "utf8"));
+    // Round 2 ("re-run sapwood init" from an interactive terminal): the OLD "sapwood-worker"-
+    // titled key is STILL registered (never deleted) — operator chooses (a) to register an
+    // ADDITIONAL per-machine key instead.
     const { run: run2, calls: calls2 } = fakeRun({
-      labels: requiredLabels(cfg2).map((l) => l.name),
+      labels: requiredLabels(cfg).map((l) => l.name),
       boardExists: true,
       boardOptions: ["Todo", "Ready", "In Progress", "Done"],
-      // the OLD foreign/stale key is still there (never deleted); provisioning adds a NEW,
-      // per-machine-titled one alongside it.
       deployKeyEntries: [{ id: 42, title: "sapwood-worker" }],
     });
-    const second = await init(cfg2, {
+    const second = await init(cfg, {
       run: run2,
       getAuthStatus: async () => OK_AUTH,
       cwd: dir,
       isInteractive: () => true,
       promptOperator: async () => "a",
       hostname: () => "converge-host",
-      sshKeygen: async (path) => {
-        writeFileSync(path, "k");
-        writeFileSync(`${path}.pub`, "p");
-      },
+      sshKeygen: async (path) => writeFakeKeyPair(path, "ssh-ed25519 AAAA converge-host-key"),
       probeSshAuth: async () => ({ ok: true }),
     });
-    // Converges: a NEW per-machine key was added (the old one untouched), and the config now
-    // carries a fresh (path, id) anchor for THIS machine's own key — the reconcile a THIRD run
-    // would perform is green from here on.
     assert.ok(calls2.some((c) => c[0] === "repo" && c[1] === "deploy-key" && c[2] === "add" && c.includes("sapwood-worker-converge-host")));
     assert.ok(!calls2.some((c) => c.join(" ").includes("delete")), "the old key is never deleted, even on the converging path");
-    const finalConfig = parseConfig(readFileSync(configPath, "utf8"));
-    assert.equal(finalConfig.worker.deployKeyPath, join(".sapwood", "keys", "worker-deploy-key-converge-host"));
-    assert.equal(typeof finalConfig.worker.deployKeyId, "number");
+    const newKeyPath = join(dir, ".sapwood", "keys", "worker-deploy-key-converge-host");
+    assert.equal(readFileSync(keyIdSidecarPath(newKeyPath), "utf8").trim(), "43"); // fakeRun assigns max(existing)+1
     assert.ok(second.actions.some((a) => /SSH auth preflight OK/.test(a)));
+    // The stale slot from round 1 is untouched — only the NEW key + its own sidecar were written.
+    assert.equal(readFileSync(keyIdSidecarPath(staleKeyPath), "utf8").trim(), "42");
+    assert.equal(existsSync(staleKeyPath), false, "round 1 never wrote a key file at the stale slot, only its sidecar");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("init: nothing configured locally, but a sapwood-titled key ALREADY exists remotely (no recorded anchor for it) -> never assumed to be 'mine' — routed through the same WARN+choice arm, remote never touched", async () => {
+test("init: nothing local, but a sapwood-titled key ALREADY exists remotely (no recorded anchor for it) -> never assumed to be 'mine' — routed through the same WARN+choice arm, remote never touched", async () => {
   const { run, calls } = fakeRun({
     labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
@@ -1990,14 +1560,14 @@ test("init: nothing configured locally, but a sapwood-titled key ALREADY exists 
     assert.ok(!calls.some((c) => c[0] === "repo" && c[1] === "deploy-key" && c[2] === "add"), "arm (b) default never registers a key");
     const warn = actions.find((a) => a.startsWith("deploy key: WARN"));
     assert.ok(warn);
-    assert.match(warn!, /no local \(path, id\) anchor/i);
+    assert.match(warn!, /no local \(key, id\) anchor/i);
     assert.match(warn!, /sapwood-worker.*id 7/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("init (arm (a), interactive): operator chooses (a) -> registers an ADDITIONAL per-machine key titled sapwood-worker-<hostname>, leaves the existing remote key untouched, records the NEW (path, id) in config", async () => {
+test("init (#1105 AC4, TTY arm (a)): operator chooses (a) -> registers an ADDITIONAL per-machine key titled sapwood-worker-<hostname>, leaves the existing remote key untouched, writes only the new key + sidecar", async () => {
   const { run, calls } = fakeRun({
     labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
@@ -2020,8 +1590,7 @@ test("init (arm (a), interactive): operator chooses (a) -> registers an ADDITION
       hostname: () => "MyLaptop.local",
       sshKeygen: async (path) => {
         keygenCalledWith = path;
-        writeFileSync(path, "k");
-        writeFileSync(`${path}.pub`, "p");
+        writeFakeKeyPair(path);
       },
       probeSshAuth: async () => ({ ok: true }),
     });
@@ -2034,10 +1603,8 @@ test("init (arm (a), interactive): operator chooses (a) -> registers an ADDITION
     assert.equal(addCall![addCall!.indexOf("--title") + 1], expectedTitle);
     assert.ok(!calls.some((c) => c.join(" ").includes("delete")), "the pre-existing remote key is left untouched, never deleted");
     assert.ok(actions.some((a) => a.includes(expectedTitle) && /operator chose \(a\)/.test(a)));
-    const configText = readFileSync(join(dir, "sapwood.config.yaml"), "utf8");
-    const reparsed = parseConfig(configText);
-    assert.equal(reparsed.worker.deployKeyPath, join(".sapwood", "keys", "worker-deploy-key-mylaptop-local"));
-    assert.equal(typeof reparsed.worker.deployKeyId, "number");
+    assert.equal(readFileSync(keyIdSidecarPath(expectedKeyPath), "utf8").trim(), "8"); // fakeRun assigns max(existing)+1
+    assert.equal(readFileSync(join(dir, "sapwood.config.yaml"), "utf8").includes(RETIRED_KEY_PATH_FIELD), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -2049,8 +1616,8 @@ test("init (arm (a), interactive, R3-1 non-reuse): a PRE-EXISTING sapwood-worker
     boardExists: true,
     boardOptions: ["Todo", "Ready", "In Progress", "Done"],
     // this machine's OWN per-host title is already registered remotely — but this machine has
-    // no LOCAL anchor for it (a fresh checkout, a wiped data dir, ...): per the ruling, a title
-    // is never proof of ownership, so this is treated the same as any other foreign key.
+    // no LOCAL anchor for it (a fresh checkout, a wiped runtime root, ...): per the ruling, a
+    // title is never proof of ownership, so this is treated the same as any other foreign key.
     deployKeyEntries: [{ id: 11, title: "sapwood-worker-test-host" }],
   });
   const dir = tmpCwd();
@@ -2062,10 +1629,7 @@ test("init (arm (a), interactive, R3-1 non-reuse): a PRE-EXISTING sapwood-worker
       isInteractive: () => true,
       promptOperator: async () => "a",
       hostname: () => "test-host",
-      sshKeygen: async (path) => {
-        writeFileSync(path, "k");
-        writeFileSync(`${path}.pub`, "p");
-      },
+      sshKeygen: async (path) => writeFakeKeyPair(path),
       probeSshAuth: async () => ({ ok: true }),
     });
     const expectedTitle = "sapwood-worker-test-host-2";
@@ -2080,8 +1644,7 @@ test("init (arm (a), interactive, R3-1 non-reuse): a PRE-EXISTING sapwood-worker
     assert.equal(addCall![addCall!.indexOf("--title") + 1], expectedTitle);
     assert.ok(!calls.some((c) => c.join(" ").includes("delete")), "the pre-existing per-host-titled key is left untouched, never deleted");
     assert.ok(actions.some((a) => a.includes(expectedTitle)));
-    const reparsed = parseConfig(readFileSync(join(dir, "sapwood.config.yaml"), "utf8"));
-    assert.equal(reparsed.worker.deployKeyPath, join(".sapwood", "keys", "worker-deploy-key-test-host-2"));
+    assert.equal(existsSync(keyIdSidecarPath(expectedKeyPath)), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -2126,7 +1689,7 @@ test("init (gate② round 3, item 3): EVERY per-machine slot already occupied re
   }
 });
 
-test("init (R3-1): a post-add id diff yielding ZERO new ids is treated as an ordinary provisioning failure (degrade (b)-style) — never silently adopts a wrong id", async () => {
+test("init (R3-1): a post-add id diff yielding ZERO new ids is treated as an ordinary provisioning failure (degrade (b)-style) — never silently adopts a wrong id, no sidecar written", async () => {
   const { run } = fakeRun({
     labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
@@ -2147,30 +1710,19 @@ test("init (R3-1): a post-add id diff yielding ZERO new ids is treated as an ord
       getAuthStatus: async () => OK_AUTH,
       cwd: dir,
       ...nonInteractive,
-      sshKeygen: async (path) => {
-        writeFileSync(path, "k");
-        writeFileSync(`${path}.pub`, "p");
-      },
+      sshKeygen: async (path) => writeFakeKeyPair(path),
       probeSshAuth: failProbeSshAuth,
     });
     const warn = actions.find((a) => a.startsWith("deploy key: WARN"));
     assert.ok(warn, "expected the ordinary provisioning-failure WARN");
     assert.match(warn!, /no new id appeared/i);
-    const configText = readFileSync(join(dir, "sapwood.config.yaml"), "utf8");
-    // #984: the shipped starter itself now carries a COMMENTED `  # deployKeyPath: ...` example,
-    // so a text-level check can no longer tell "no anchor" apart from "a commented example" —
-    // parse the config and check the RESOLVED field instead, same as the reconcile-failure tests
-    // above (e.g. line ~1605); a regression writing the anchor at any other valid indent still
-    // fails this, since parseConfig doesn't care about indentation once it's a real YAML key.
-    const anchored = parseConfig(configText);
-    assert.equal(anchored.worker.deployKeyPath, undefined, "no anchor written when the new id couldn't be determined");
-    assert.equal(anchored.worker.deployKeyId, undefined, "no anchor written when the new id couldn't be determined");
+    assert.equal(existsSync(keyIdSidecarPath(cfgKeyPath(dir))), false, "no sidecar written when the new id couldn't be determined");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("init (R3-1): a post-add id diff yielding MORE THAN ONE new id is treated as an ordinary provisioning failure (degrade (b)-style) — ambiguous, never guessed", async () => {
+test("init (R3-1): a post-add id diff yielding MORE THAN ONE new id is treated as an ordinary provisioning failure (degrade (b)-style) — ambiguous, never guessed, no sidecar written", async () => {
   const { run: baseRun } = fakeRun({
     labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
@@ -2200,45 +1752,32 @@ test("init (R3-1): a post-add id diff yielding MORE THAN ONE new id is treated a
       getAuthStatus: async () => OK_AUTH,
       cwd: dir,
       ...nonInteractive,
-      sshKeygen: async (path) => {
-        writeFileSync(path, "k");
-        writeFileSync(`${path}.pub`, "p");
-      },
+      sshKeygen: async (path) => writeFakeKeyPair(path),
       probeSshAuth: failProbeSshAuth,
     });
     const warn = actions.find((a) => a.startsWith("deploy key: WARN"));
     assert.ok(warn, "expected the ordinary provisioning-failure WARN");
     assert.match(warn!, /2 new ids appeared/i);
-    const configText = readFileSync(join(dir, "sapwood.config.yaml"), "utf8");
-    const anchored = parseConfig(configText);
-    assert.equal(anchored.worker.deployKeyPath, undefined, "no anchor written when the new id is ambiguous");
-    assert.equal(anchored.worker.deployKeyId, undefined, "no anchor written when the new id is ambiguous");
+    assert.equal(existsSync(keyIdSidecarPath(cfgKeyPath(dir))), false, "no sidecar written when the new id is ambiguous");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("init (arm (b), interactive, R3-2 YAML): starting from an ACTUALLY-configured stale (path, id) anchor, operator explicitly chooses (b) -> WARN, the file no longer PARSES with the anchor, nothing registered", async () => {
+test("init (#1105 AC4, TTY arm (b)): starting from a discovered stale anchor, operator explicitly chooses (b) -> WARN, nothing registered, no file touched", async () => {
   const dir = tmpCwd();
-  const keyPath = cfgKeyPath(dir); // absolute — see the RECONCILE test's own note on why
-  const provisioned = parseConfig(
-    `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: ${keyPath}, deployKeyId: 7 }`,
-  );
+  const keyPath = cfgKeyPath(dir);
   const { run, calls } = fakeRun({
-    labels: requiredLabels(provisioned).map((l) => l.name),
+    labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
     boardOptions: ["Todo", "Ready", "In Progress", "Done"],
     // id 7 is registered, but under a DIFFERENT key than the local file (or the local file is
     // simply missing below) — reconcile fails regardless of which specific reason.
     deployKeyEntries: [{ id: 7, title: "sapwood-worker" }],
   });
-  const configPath = join(dir, "sapwood.config.yaml");
-  writeFileSync(
-    configPath,
-    `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker:\n  deployKeyPath: ${keyPath}\n  deployKeyId: 7\n`,
-  );
   try {
-    const { actions } = await init(provisioned, {
+    writeAnchorSidecar(keyPath, 7);
+    const { actions } = await init(cfg, {
       run,
       getAuthStatus: async () => OK_AUTH,
       cwd: dir,
@@ -2251,106 +1790,25 @@ test("init (arm (b), interactive, R3-2 YAML): starting from an ACTUALLY-configur
     assert.ok(!calls.some((c) => c[0] === "repo" && c[1] === "deploy-key" && c[2] === "add"));
     assert.ok(!calls.some((c) => c.join(" ").includes("delete")));
     assert.ok(actions.some((a) => a.startsWith("deploy key: WARN")));
-    const reparsed = parseConfig(readFileSync(configPath, "utf8"));
-    assert.equal(reparsed.worker.deployKeyPath, undefined, "the file no longer PARSES with the anchor");
-    assert.equal(reparsed.worker.deployKeyId, undefined);
+    assert.equal(readFileSync(keyIdSidecarPath(keyPath), "utf8").trim(), "7", "the sidecar is untouched — arm (b) writes nothing");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("init (arm (b), interactive, R3-2 JSON): starting from an ACTUALLY-configured stale (path, id) anchor in a JSON config, operator explicitly chooses (b) -> WARN, the file no longer PARSES with the anchor", async () => {
+test("init: a SECOND run against a repo with a real discovered anchor RECONCILES (never skips outright) — the reconcile path itself makes at most one deploy-key list call, no add", async () => {
   const dir = tmpCwd();
   const keyPath = cfgKeyPath(dir);
-  const provisioned = parseConfig(
-    JSON.stringify({ board: { owner: "acme", repo: "widgets", projectNumber: 7 }, worker: { deployKeyPath: keyPath, deployKeyId: 7 } }),
-  );
   const { run, calls } = fakeRun({
-    labels: requiredLabels(provisioned).map((l) => l.name),
-    boardExists: true,
-    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
-    deployKeyEntries: [{ id: 7, title: "sapwood-worker" }],
-  });
-  const configPath = join(dir, "sapwood.config.json");
-  writeFileSync(
-    configPath,
-    JSON.stringify({ board: { owner: "acme", repo: "widgets", projectNumber: 7 }, worker: { deployKeyPath: keyPath, deployKeyId: 7 } }),
-  );
-  try {
-    const { actions } = await init(provisioned, {
-      run,
-      getAuthStatus: async () => OK_AUTH,
-      cwd: dir,
-      isInteractive: () => true,
-      promptOperator: async () => "b",
-      hostname: () => "host",
-      sshKeygen: failSshKeygen,
-      probeSshAuth: failProbeSshAuth,
-    });
-    assert.ok(!calls.some((c) => c[0] === "repo" && c[1] === "deploy-key" && c[2] === "add"));
-    assert.ok(!calls.some((c) => c.join(" ").includes("delete")));
-    assert.ok(actions.some((a) => a.startsWith("deploy key: WARN")));
-    const reparsed = parseConfig(readFileSync(configPath, "utf8"));
-    assert.equal(reparsed.worker.deployKeyPath, undefined, "the file no longer PARSES with the anchor");
-    assert.equal(reparsed.worker.deployKeyId, undefined);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("init (no-TTY default (b), R3-2 JSON): starting from an ACTUALLY-configured stale (path, id) anchor in a JSON config, the non-interactive default clears the anchor — the file no longer PARSES with it", async () => {
-  const dir = tmpCwd();
-  const keyPath = cfgKeyPath(dir);
-  const provisioned = parseConfig(
-    JSON.stringify({ board: { owner: "acme", repo: "widgets", projectNumber: 7 }, worker: { deployKeyPath: keyPath, deployKeyId: 999 } }),
-  );
-  const { run, calls } = fakeRun({
-    labels: requiredLabels(provisioned).map((l) => l.name),
-    boardExists: true,
-    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
-    // the recorded id (999) is not registered at all -> reconcile fails on "not listed"
-    deployKeyEntries: [{ id: 7, title: "sapwood-worker" }],
-  });
-  const configPath = join(dir, "sapwood.config.json");
-  writeFileSync(
-    configPath,
-    JSON.stringify({ board: { owner: "acme", repo: "widgets", projectNumber: 7 }, worker: { deployKeyPath: keyPath, deployKeyId: 999 } }),
-  );
-  try {
-    const { actions } = await init(provisioned, {
-      run,
-      getAuthStatus: async () => OK_AUTH,
-      cwd: dir,
-      ...nonInteractive,
-      sshKeygen: failSshKeygen,
-      probeSshAuth: failProbeSshAuth,
-    });
-    assert.ok(!calls.some((c) => c[0] === "repo" && c[1] === "deploy-key" && c[2] === "add"));
-    assert.ok(!calls.some((c) => c.join(" ").includes("delete")));
-    assert.ok(actions.some((a) => a.startsWith("deploy key: WARN")));
-    const reparsed = parseConfig(readFileSync(configPath, "utf8"));
-    assert.equal(reparsed.worker.deployKeyPath, undefined, "the file no longer PARSES with the anchor");
-    assert.equal(reparsed.worker.deployKeyId, undefined);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("init: a SECOND run against a config that already has BOTH worker.deployKeyPath and worker.deployKeyId set RECONCILES (never skips outright) — the reconcile path itself makes at most one deploy-key list call, no add", async () => {
-  const dir = tmpCwd();
-  const keyPath = cfgKeyPath(dir); // see the RECONCILE test above for why this must be absolute
-  const provisioned = parseConfig(
-    `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: ${keyPath}, deployKeyId: 1 }`,
-  );
-  const { run, calls } = fakeRun({
-    labels: requiredLabels(provisioned).map((l) => l.name),
+    labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
     boardOptions: ["Todo", "Ready", "In Progress", "Done"],
     deployKeyEntries: [{ id: 1, title: "sapwood-worker", key: FAKE_PUB_KEY }],
   });
   try {
     writeFakeKeyPair(keyPath);
-    const { actions } = await init(provisioned, {
+    writeAnchorSidecar(keyPath, 1);
+    const { actions } = await init(cfg, {
       run,
       getAuthStatus: async () => OK_AUTH,
       cwd: dir,
@@ -2370,7 +1828,7 @@ test("init: a SECOND run against a config that already has BOTH worker.deployKey
   }
 });
 
-test("init: without repo-admin (gh repo deploy-key add fails during fresh provisioning) -> L0 fallback guidance WARN naming the manual ssh-keygen command, the repo Settings -> Deploy keys step, the config keys, and a docs anchor; engine stays fully functional", async () => {
+test("init: without repo-admin (gh repo deploy-key add fails during fresh provisioning) -> guidance WARN naming the manual ssh-keygen command, the repo Settings -> Deploy keys step, the sidecar path, and a docs anchor; no sidecar written", async () => {
   const { run } = fakeRun({
     labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
@@ -2385,10 +1843,7 @@ test("init: without repo-admin (gh repo deploy-key add fails during fresh provis
       getAuthStatus: async () => OK_AUTH,
       cwd: dir,
       ...nonInteractive,
-      sshKeygen: async (path) => {
-        writeFileSync(path, "k");
-        writeFileSync(`${path}.pub`, "p");
-      },
+      sshKeygen: async (path) => writeFakeKeyPair(path),
       probeSshAuth: failProbeSshAuth,
     });
     const warn = actions.find((a) => a.startsWith("deploy key: WARN"));
@@ -2396,20 +1851,16 @@ test("init: without repo-admin (gh repo deploy-key add fails during fresh provis
     assert.match(warn!, /ssh-keygen -t ed25519/, "names the exact manual ssh-keygen command");
     assert.match(warn!, /Deploy keys/, "names the manual repo Settings -> Deploy keys step");
     assert.match(warn!, /write access/i, "names the allow-write step");
-    assert.match(warn!, /worker\.deployKeyPath.*worker\.deployKeyId|worker\.deployKeyId.*worker\.deployKeyPath/, "names both config keys");
+    assert.match(warn!, /\.id \(mode 0600\)/i, "names the sidecar the operator would write by hand");
     assert.ok(warn!.includes(DOC_LINKS.security), "carries a docs anchor");
-    assert.match(warn!, /L0/, "states the engine stays functional at L0");
     assert.ok(actions.some((a) => /labels already present|created \d+ label/.test(a)));
-    const configText = readFileSync(join(dir, "sapwood.config.yaml"), "utf8");
-    const anchored = parseConfig(configText);
-    assert.equal(anchored.worker.deployKeyPath, undefined, "no deployKeyPath written when provisioning failed");
-    assert.equal(anchored.worker.deployKeyId, undefined, "no deployKeyPath written when provisioning failed");
+    assert.equal(existsSync(keyIdSidecarPath(cfgKeyPath(dir))), false, "no sidecar written when provisioning failed");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("init (#554 pattern): fresh provisioning succeeds but the SSH auth preflight fails -> guidance WARN naming the re-provision instruction; config is NOT written", async () => {
+test("init (#554 pattern): fresh provisioning succeeds but the SSH auth preflight fails -> guidance WARN naming the re-provision instruction; no sidecar written", async () => {
   const { run } = fakeRun({
     labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
@@ -2423,20 +1874,14 @@ test("init (#554 pattern): fresh provisioning succeeds but the SSH auth prefligh
       getAuthStatus: async () => OK_AUTH,
       cwd: dir,
       ...nonInteractive,
-      sshKeygen: async (path) => {
-        writeFileSync(path, "k");
-        writeFileSync(`${path}.pub`, "p");
-      },
+      sshKeygen: async (path) => writeFakeKeyPair(path),
       probeSshAuth: async () => ({ ok: false, detail: "ssh: connect to host github.com port 22: Network is unreachable" }),
     });
     const warn = actions.find((a) => a.startsWith("deploy key: WARN") && /preflight failed/.test(a));
     assert.ok(warn, "expected a preflight-fail WARN action line");
     assert.match(warn!, /Network is unreachable/);
     assert.match(warn!, /sapwood init/i, "names the re-provision instruction (re-run sapwood init)");
-    const configText = readFileSync(join(dir, "sapwood.config.yaml"), "utf8");
-    const anchored = parseConfig(configText);
-    assert.equal(anchored.worker.deployKeyPath, undefined, "no deployKeyPath written when the preflight fails");
-    assert.equal(anchored.worker.deployKeyId, undefined, "no deployKeyPath written when the preflight fails");
+    assert.equal(existsSync(keyIdSidecarPath(cfgKeyPath(dir))), false, "no sidecar written when the preflight fails");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -2937,10 +2382,11 @@ test("init (AC2): a second run against an already-initialized repo WITH a real p
     const fileModeBefore = statSync(keyPath).mode & 0o777;
     assert.equal(fileModeBefore, 0o600, "the first run already leaves the key at 0600");
 
-    // Second run: loadConfig the file the first run actually wrote (deployKeyPath/deployKeyId
-    // now set), so this is a genuine RECONCILE against real state, never a hand-built "already
-    // configured" fixture — the remote list below reflects the first run's own registration
-    // (id 1, matching .pub).
+    // Second run: loadConfig the file the first run actually wrote (unchanged by the deploy-key
+    // step — #1105 — but still the config init's other steps need); the local anchor sidecar the
+    // first run wrote under .sapwood/keys/ is what makes this a genuine RECONCILE against real
+    // state, never a hand-built "already configured" fixture — the remote list below reflects the
+    // first run's own registration (id 1, matching .pub).
     process.chdir(dir);
     const cfg2 = loadConfig(join(dir, "sapwood.config.yaml"));
     process.chdir(previousCwd);

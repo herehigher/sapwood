@@ -42,9 +42,10 @@ the opposite of the no-flag case, which stays best-effort (a missing config ther
 `cost.drainWindowSec` from whichever config resolved. Relative `promptFile`, `goal.file`,
 `doctrine.file` keys, and a SET `logging.path`, resolve from the selected config's directory, so
 an alternate config's own log lands beside it when one is explicitly given. An UNSET
-`logging.path` and `worker.deployKeyPath` (whenever relative) instead resolve from cwd — the
-same convention the DB (`.sapwood/sapwood.sqlite`), `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions,
-and worktree roots already use.
+`logging.path` instead resolves from cwd — the same convention the DB
+(`.sapwood/sapwood.sqlite`), `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, worktree roots, and
+the L1 deploy-key anchor (`.sapwood/keys/`, never operator-configured at all — see the `worker`
+key table below) already use.
 Only `board.owner`, `board.repo`, and `board.projectNumber` are
 required; every other key has a default.
 
@@ -74,6 +75,7 @@ proxy-bundles                 ← evidence bundles indexed by sqlite, one <hash>
 logs                          ← rotates to logs/sapwood.log.1
 logs/sapwood.log              ← default; `logging.path` may point elsewhere
 keys                          ← worker-deploy-key[-<host>] (+ .pub), 0600
+keys/worker-deploy-key.id     ← the primary key's id sidecar, 0600 — the local L1 anchor
 sessions/state
 sessions/roles
 sessions/review-codex
@@ -110,8 +112,9 @@ creation) — it is never committed and never needs a rule in the repo's own roo
 **Resolution base.** Every path under `.sapwood/` resolves from the repo root (cwd), never from
 a config file's location. Operator-authored file references are the exception: `promptFile`,
 `goal.file`, `doctrine.file`, and a SET `logging.path` resolve from the config file's own
-directory instead — the same convention `worker.deployKeyPath` (cwd-relative, since the key
-lives beside this runtime root) follows.
+directory instead. The L1 deploy-key anchor is never operator-authored at all — it is
+discovered under `.sapwood/keys/`, always cwd-relative like the rest of this tree, and is never
+a config key (see the `worker.credentialTier` row below).
 
 **Out of scope:** `.claude/worktrees/` is the runner's own worktree root (Claude Code's, not
 sapwood's) — a sibling concern, not part of this layout.
@@ -226,8 +229,7 @@ dispatch. Upgrade with `npm i -g @anthropic-ai/claude-code@latest`. See also
 | `egressSuspectCommands` | `[curl, wget, nc, ncat, netcat, socat, ssh, scp, sftp, rsync, ftp, telnet]` | Executable names recorded by the monitor-only worker-egress tripwire. Matching is lexical at executable position in completed Bash tool calls; each deduplicated match becomes an `egress-suspect` event and never blocks or changes the lane outcome. An override **replaces** the default array entirely (no merging); set `[]` to disable the tripwire. |
 | `promptFile` | unset | Override the worker's prompt template with your own file. A relative path resolves against **the config file's own directory**, not the CLI's cwd — so the same config behaves identically no matter where `sapwood` is invoked from. Unset uses the engine's shipped `prompts/worker.md` (TDD + two-gate method). |
 | `fixPromptFile` | unset | Override the **fix-leg** prompt — the instruction a `fixing`-state resume (same worker row/worktree/branch/session as the original leg, never a new dispatch) receives instead of the ordinary issue-rendered prompt above. Same resolution/fail-fast rules as `promptFile`. Unset uses the engine's shipped `prompts/fix.md` (fetch findings via the PR-facing proxy tools, address them, push to the same branch). |
-| `deployKeyPath` | unset | Path to the per-repo SSH **write deploy key** `sapwood init` provisions — set TOGETHER with `deployKeyId` below (they are the LOCAL anchor pair `sapwood init`'s reconcile pass checks against; a title is never authoritative for "mine"). The config schema REJECTS a config with only one of the pair set (a parse error naming the missing half and pointing at re-running `sapwood init`) — see `deployKeyId`'s own row. Both set + reconciled green activates **L1**: every worker leg — dispatch, resume, AND fix — runs with `GIT_SSH_COMMAND` pinned to this key (composed onto the credential-free base for a fix leg, never replacing its severing) and no forge API credential reachable in its env at all (`Bash(gh *)` drops out of the leg's tool grant too). Unlike `promptFile`, a relative path here resolves against cwd, not the config file's directory (the key file lives beside the engine's own runtime root). Unset (the default) is **L0** — today's full credentialed env, unchanged. A reconcile failure (missing local file, a rotated/foreign remote id, a public-key content mismatch, an SSH auth failure) never blocks dispatch: **the running engine only ever logs a guidance-carrying WARN and runs that leg at L0 — dispatch/resume/fix never write to config.** Only a SEPARATE, later `sapwood init` invocation clears the stale anchor (and, run interactively, offers to register an additional per-machine key); until that happens, every leg keeps re-hitting the same reconcile failure and the same WARN, which is the correct, safe, stable state. See [Security & trust model](../security/credential-tiers.md#worker-credential-tiers) for the full tier table, the reconcile state machine, and residuals. |
-| `deployKeyId` | unset | The GitHub-assigned numeric id of the deploy key at `deployKeyPath` above — written by `sapwood init` alongside it, and always set/cleared TOGETHER with it. This is the other half of the local `(path, id)` anchor `sapwood init`'s reconcile pass keys on (including a public-key CONTENT cross-check against that id's own registered key, not just "is this id registered somewhere"); the bare key TITLE on the repo is never treated as proof of ownership (a `sapwood-worker`-titled key may validly belong to a different machine). The config schema enforces the pair: a config with only `deployKeyPath` or only `deployKeyId` set fails to load at all (a parse error naming the missing half), rather than silently behaving as "nothing configured" or reconciling against a meaningless half-anchor. |
+| `credentialTier` | `L0` | The governing L0/L1 decision for every worker leg's credential scope — `L0` or `L1` only. `L0` (default) is today's full-credentialed behavior, byte-for-byte unchanged, and NEVER reads or probes a deploy key at all. `L1` requires a local (key file, id sidecar) anchor `sapwood init` provisions under this machine's own `.sapwood/keys/` — never a value in this file: WHERE the key lives is a fact about one machine, not a governing decision, so it is discovered fresh at startup rather than written back here. With `L1` set, every worker leg — dispatch, resume, AND fix — runs with `GIT_SSH_COMMAND` pinned to the discovered key (composed onto the credential-free base for a fix leg, never replacing its severing) and no forge API credential reachable in its env at all (`Bash(gh *)` drops out of the leg's tool grant too). **No silent downgrade to L0**: if `L1` is set and `sapwood run` finds no reconciled local anchor at startup, it refuses to start — before any dispatch — naming `sapwood init` as the fix; a preflight that later fails mid-run (past that startup gate) fails that one leg outright rather than falling back to the wider tier. See [Security & trust model](../security/credential-tiers.md#worker-credential-tiers) for the full tier table, the reconcile state machine, and residuals. |
 
 ### Calibrating `budgetUsdSoft`
 

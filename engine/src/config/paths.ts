@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 // The engine's runtime root — the ONE fixed name every runtime artifact (state, sentinels,
@@ -23,6 +23,11 @@ export const SAPWOOD_ESTOP_FILENAME = "EMERGENCY_STOP";
 export const SAPWOOD_PAUSE_FILENAME = "PAUSE";
 export const SAPWOOD_ESCALATION_FILENAME = "ESCALATION";
 export const SAPWOOD_ATTENTION_DISMISSALS_FILENAME = "attention-dismissals.jsonl";
+// #1105: the primary (non-host-suffixed) worker deploy key's basename — the ONE slot every
+// machine's first-ever `sapwood init` provisions into; init.ts's own per-host fallback
+// (pickFreshArmAKeySlot) derives its sibling names from this same string rather than a second
+// literal.
+export const DEPLOY_KEY_BASENAME = "worker-deploy-key";
 
 /** The full named layout under a runtime root, computed once so every caller (state.ts,
  *  cli.ts, the role runners, the review materializer/production wiring, skills-plugin.ts,
@@ -60,6 +65,14 @@ export interface RuntimePaths {
   /** #1080: the worker deploy key(s) live here — `worker-deploy-key[-<host>]` + `.pub`,
    *  0600/dir 0700 — instead of the pre-#1080 `data/` location. */
   readonly keysDir: string;
+  /** #1105: the primary key's id sidecar — the local half of the (key, id) anchor `sapwood
+   *  init`'s reconcile pass keys on. This ONE fixed name is the canonical slot every machine's
+   *  first-ever provisioning writes to; a per-host suffixed sibling (minted only when the
+   *  primary anchor fails to reconcile — init.ts's armAuthFailsStaleOrMismatch) is discovered
+   *  dynamically instead (findDeployKeyAnchor below), never a second RuntimePaths field, since
+   *  its own basename varies by hostname. Same 0600 mode as the key itself; gitignored with the
+   *  rest of this root — never a fact in the audited sapwood.config.yaml. */
+  readonly deployKeySidecar: string;
 
   // ── cache: safe to delete whenever no engine runs ──
   readonly cacheDir: string;
@@ -104,6 +117,7 @@ export function runtimePaths(root: string): RuntimePaths {
     logsDir: join(root, "logs"),
     logFile: join(root, "logs", "sapwood.log"),
     keysDir: join(root, "keys"),
+    deployKeySidecar: keyIdSidecarPath(join(root, "keys", DEPLOY_KEY_BASENAME)),
 
     cacheDir,
     cacheDirTag: join(cacheDir, "CACHEDIR.TAG"),
@@ -111,6 +125,49 @@ export function runtimePaths(root: string): RuntimePaths {
     cacheReviewTreesDir: join(cacheReviewDir, "trees"),
     cacheGeneratedRoleSkillsDir: join(cacheDir, "generated", "role-skills"),
   };
+}
+
+/** #1105: the local (path, id) anchor's id half — a sidecar file beside the deploy key itself,
+ *  same 0600 permission the key file gets. Not itself a fixed `runtimePaths()` field (the key's
+ *  own basename varies — the primary slot, or a per-host suffixed sibling minted when the
+ *  primary fails to reconcile) — this derives the sidecar name from whatever key path the caller
+ *  already has, the same way every `.pub` public-key sibling is named. */
+export function keyIdSidecarPath(keyPath: string): string {
+  return `${keyPath}.id`;
+}
+
+/** #1105: this machine's own local deploy-key anchor, discovered from `runtimePaths(root)
+ *  .keysDir` directly — the anchor is filesystem state now (a gitignored `<key>.id` sidecar
+ *  beside the key itself), never a fact recorded in the audited `sapwood.config.yaml`. Every
+ *  `*.id` file in the directory is a candidate: the fixed primary slot (`deployKeySidecar`
+ *  above), or a per-host suffixed sibling init.ts's armAuthFailsStaleOrMismatch mints when the
+ *  primary anchor fails to reconcile and an operator registers an additional key — that arm
+ *  never deletes the stale sidecar it's replacing (a WARN-only outcome touches no file), so more
+ *  than one can coexist. The most recently WRITTEN one wins: it is the anchor a `sapwood init`
+ *  run (or an operator by hand) most recently confirmed. Real filesystem I/O (unlike
+ *  `runtimePaths()` itself) — returns undefined when the directory has no valid sidecar at all
+ *  (a fresh machine, or `sapwood init` never ran), never throws. */
+export function findDeployKeyAnchor(root: string): { keyPath: string; keyId: number } | undefined {
+  const dir = runtimePaths(root).keysDir;
+  if (!existsSync(dir)) return undefined;
+  let best: { keyPath: string; keyId: number; mtimeMs: number } | undefined;
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".id")) continue;
+    const idPath = join(dir, name);
+    let raw: string;
+    try {
+      raw = readFileSync(idPath, "utf8").trim();
+    } catch {
+      continue; // unreadable sidecar — not a candidate, but not fatal to the scan either
+    }
+    const keyId = Number(raw);
+    if (!Number.isInteger(keyId) || keyId <= 0) continue; // a GitHub deploy-key id is always a positive integer
+    const mtimeMs = statSync(idPath).mtimeMs;
+    if (best === undefined || mtimeMs > best.mtimeMs) {
+      best = { keyPath: idPath.slice(0, -".id".length), keyId, mtimeMs };
+    }
+  }
+  return best ? { keyPath: best.keyPath, keyId: best.keyId } : undefined;
 }
 
 /** `runtimePaths(root)`'s own default root: `<cwd>/.sapwood`. Call sites with a cwd default to

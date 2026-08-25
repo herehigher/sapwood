@@ -1,8 +1,10 @@
-// deploy-key-startup-check.test.ts (#671): pins each of the four detection arms the issue names
-// (unset / file missing / preflight fail / OK), that the two degrade arms reuse init.ts's EXACT
-// guidance wording (no third variant), that exactly one durable event fires per run with the
-// right tier+arm payload, and that the shared preflight is consumed at most once (the "missing"
-// arm must never even touch it — there is nothing to probe).
+// deploy-key-startup-check.test.ts (#671, redesigned by #1105): pins each of the four detection
+// arms — L0 (disclosure only, never throws), and L1's three shapes (no anchor / unreadable key /
+// preflight fails), each of which now THROWS a guidance-carrying message and refuses startup
+// before any dispatch, plus L1 active (no throw). Also pins that exactly one durable event fires
+// per run with the right tier+arm payload, and that the shared preflight is consumed at most once
+// (the "no anchor" and "unreadable key" arms must never even touch it — there is nothing to
+// probe).
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,7 +12,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { LlmPingResult } from "../roles/worker.js";
 import { detectDeployKeyStartupTier } from "./deploy-key-startup-check.js";
-import { DEPLOY_KEY_TITLE, deployKeyPreflightFailedAction, deployKeyProvisioningFailedAction } from "./init.js";
 
 function fakeSupervisor(result: LlmPingResult | undefined): {
   calls: number;
@@ -26,57 +27,83 @@ function fakeSupervisor(result: LlmPingResult | undefined): {
   return s;
 }
 
-test("arm 1: worker.deployKeyPath unset -> L0/unset, one INFO log pointing at sapwood init, no probe consumed", async () => {
+test("arm 1: credentialTier L0 -> L0/l0, one INFO log, no probe consumed, never throws", async () => {
   const logs: string[] = [];
   const events: Array<[string, unknown]> = [];
   const supervisor = fakeSupervisor({ ok: true });
   const result = await detectDeployKeyStartupTier(
     supervisor,
-    { worker: { deployKeyPath: undefined }, board: { owner: "o", repo: "r" } },
+    { worker: { credentialTier: "L0" }, board: { owner: "o", repo: "r" } },
     { appendEvent: (kind, payload) => events.push([kind, payload]) },
     (line) => logs.push(line),
   );
-  assert.deepEqual(result, { tier: "L0", arm: "unset" });
-  assert.equal(supervisor.calls, 0, "unset arm must never touch the shared preflight");
+  assert.deepEqual(result, { tier: "L0", arm: "l0" });
+  assert.equal(supervisor.calls, 0, "L0 must never touch the shared preflight");
   assert.equal(logs.length, 1);
   assert.match(logs[0]!, /L0/);
-  assert.match(logs[0]!, /sapwood init/);
   assert.equal(events.length, 1);
-  assert.deepEqual(events[0], ["deploy-key-tier-detected", { tier: "L0", arm: "unset" }]);
+  assert.deepEqual(events[0], ["deploy-key-tier-detected", { tier: "L0", arm: "l0" }]);
 });
 
-test("arm 2: path set but key file missing -> L0/missing, WARN reuses deployKeyProvisioningFailedAction's exact wording, no probe consumed", async () => {
+test("arm 2: credentialTier L1, no local anchor -> THROWS naming sapwood init, WARN logged first, no probe consumed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-deploy-key-startup-"));
+  try {
+    const logs: string[] = [];
+    const events: Array<[string, unknown]> = [];
+    const supervisor = fakeSupervisor({ ok: true });
+    await assert.rejects(
+      () =>
+        detectDeployKeyStartupTier(
+          supervisor,
+          { worker: { credentialTier: "L1" }, board: { owner: "o", repo: "r" } },
+          { appendEvent: (kind, payload) => events.push([kind, payload]) },
+          (line) => logs.push(line),
+          { root: dir, findAnchor: () => undefined },
+        ),
+      /sapwood init/,
+    );
+    assert.equal(supervisor.calls, 0, "no-anchor arm must never touch the shared preflight — nothing to probe");
+    assert.equal(logs.length, 1);
+    assert.match(logs[0]!, /no local deploy-key anchor/);
+    assert.match(logs[0]!, /sapwood init/);
+    assert.match(logs[0]!, /Refusing to start before any dispatch/);
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0], ["deploy-key-tier-detected", { tier: "L1", arm: "missing" }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("arm 3: credentialTier L1, anchor found but key file unreadable -> THROWS, no probe consumed", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-deploy-key-startup-"));
   try {
     const keyPath = join(dir, "does-not-exist");
     const logs: string[] = [];
     const events: Array<[string, unknown]> = [];
     const supervisor = fakeSupervisor({ ok: true });
-    const result = await detectDeployKeyStartupTier(
-      supervisor,
-      { worker: { deployKeyPath: keyPath }, board: { owner: "o", repo: "r" } },
-      { appendEvent: (kind, payload) => events.push([kind, payload]) },
-      (line) => logs.push(line),
+    await assert.rejects(
+      () =>
+        detectDeployKeyStartupTier(
+          supervisor,
+          { worker: { credentialTier: "L1" }, board: { owner: "o", repo: "r" } },
+          { appendEvent: (kind, payload) => events.push([kind, payload]) },
+          (line) => logs.push(line),
+          { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }) },
+        ),
+      /sapwood init/,
     );
-    assert.deepEqual(result, { tier: "L0", arm: "missing" });
-    assert.equal(supervisor.calls, 0, "missing-file arm must never touch the shared preflight — nothing to probe");
+    assert.equal(supervisor.calls, 0, "unreadable-key arm must never touch the shared preflight");
     assert.equal(logs.length, 1);
-    // The exact guidance string init.ts's own provisioning-failed helper produces — same wording
-    // `sapwood init` itself would emit for the same failure shape, not a third variant. The
-    // errno detail in parens differs machine to machine, so compare everything up to it.
-    const expectedGuidance = deployKeyProvisioningFailedAction("o/r", keyPath, DEPLOY_KEY_TITLE, new Error("ENOENT"));
-    assert.equal(logs[0]!.split("(")[0], `[sapwood:startup] ${expectedGuidance.split("(")[0]}`);
-    assert.match(logs[0]!, /could not provision a write deploy key/);
-    assert.match(logs[0]!, /ssh-keygen -t ed25519/);
+    assert.match(logs[0]!, /could not be read/);
     assert.match(logs[0]!, /sapwood init/);
     assert.equal(events.length, 1);
-    assert.deepEqual(events[0], ["deploy-key-tier-detected", { tier: "L0", arm: "missing", keyPath }]);
+    assert.deepEqual(events[0], ["deploy-key-tier-detected", { tier: "L1", arm: "missing" }]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("arm 3: path set, file present, SSH preflight fails -> L0/preflight-failed, WARN reuses deployKeyPreflightFailedAction's exact wording", async () => {
+test("arm 4: credentialTier L1, anchor found, SSH preflight fails -> THROWS naming the detail, exactly one probe consumed", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-deploy-key-startup-"));
   try {
     const keyPath = join(dir, "worker-deploy-key");
@@ -84,25 +111,29 @@ test("arm 3: path set, file present, SSH preflight fails -> L0/preflight-failed,
     const logs: string[] = [];
     const events: Array<[string, unknown]> = [];
     const supervisor = fakeSupervisor({ ok: false, detail: "Permission denied (publickey)." });
-    const result = await detectDeployKeyStartupTier(
-      supervisor,
-      { worker: { deployKeyPath: keyPath }, board: { owner: "o", repo: "r" } },
-      { appendEvent: (kind, payload) => events.push([kind, payload]) },
-      (line) => logs.push(line),
+    await assert.rejects(
+      () =>
+        detectDeployKeyStartupTier(
+          supervisor,
+          { worker: { credentialTier: "L1" }, board: { owner: "o", repo: "r" } },
+          { appendEvent: (kind, payload) => events.push([kind, payload]) },
+          (line) => logs.push(line),
+          { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }) },
+        ),
+      /sapwood init/,
     );
-    assert.deepEqual(result, { tier: "L0", arm: "preflight-failed" });
     assert.equal(supervisor.calls, 1, "preflight-failed arm must consume exactly one shared probe");
     assert.equal(logs.length, 1);
-    const expectedGuidance = deployKeyPreflightFailedAction(keyPath, "Permission denied (publickey).");
-    assert.equal(logs[0]!, `[sapwood:startup] ${expectedGuidance}`);
+    assert.match(logs[0]!, /SSH auth preflight failed/);
+    assert.match(logs[0]!, /Permission denied \(publickey\)\./);
     assert.equal(events.length, 1);
-    assert.deepEqual(events[0], ["deploy-key-tier-detected", { tier: "L0", arm: "preflight-failed", keyPath }]);
+    assert.deepEqual(events[0], ["deploy-key-tier-detected", { tier: "L1", arm: "preflight-failed" }]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("arm 4: path set, file present, preflight OK -> L1/active, one positive log line, no guidance WARN", async () => {
+test("arm 5: credentialTier L1, anchor found, preflight OK -> L1/active, one positive log line, no throw", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-deploy-key-startup-"));
   try {
     const keyPath = join(dir, "worker-deploy-key");
@@ -112,23 +143,24 @@ test("arm 4: path set, file present, preflight OK -> L1/active, one positive log
     const supervisor = fakeSupervisor({ ok: true });
     const result = await detectDeployKeyStartupTier(
       supervisor,
-      { worker: { deployKeyPath: keyPath }, board: { owner: "o", repo: "r" } },
+      { worker: { credentialTier: "L1" }, board: { owner: "o", repo: "r" } },
       { appendEvent: (kind, payload) => events.push([kind, payload]) },
       (line) => logs.push(line),
+      { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }) },
     );
     assert.deepEqual(result, { tier: "L1", arm: "active" });
     assert.equal(supervisor.calls, 1);
     assert.equal(logs.length, 1);
     assert.match(logs[0]!, /L1 active/);
-    assert.doesNotMatch(logs[0]!, /WARN/);
+    assert.doesNotMatch(logs[0]!, /Refusing to start/);
     assert.equal(events.length, 1);
-    assert.deepEqual(events[0], ["deploy-key-tier-detected", { tier: "L1", arm: "active", keyPath }]);
+    assert.deepEqual(events[0], ["deploy-key-tier-detected", { tier: "L1", arm: "active" }]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("reverse test: every arm resolves without throwing and never blocks — the check is visibility, not a gate", async () => {
+test("reverse test: L0 never throws regardless of what the filesystem holds; L1 with a genuinely working anchor+preflight also never throws", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-deploy-key-startup-"));
   const noop = { appendEvent: () => {} };
   const silent = () => {};
@@ -137,34 +169,20 @@ test("reverse test: every arm resolves without throwing and never blocks — the
     writeFileSync(keyPath, "k");
     await assert.doesNotReject(() =>
       detectDeployKeyStartupTier(
-        fakeSupervisor({ ok: true }),
-        { worker: { deployKeyPath: undefined }, board: { owner: "o", repo: "r" } },
+        fakeSupervisor({ ok: false, detail: "irrelevant at L0" }),
+        { worker: { credentialTier: "L0" }, board: { owner: "o", repo: "r" } },
         noop,
         silent,
+        { root: dir, findAnchor: () => undefined },
       ),
     );
     await assert.doesNotReject(() =>
       detectDeployKeyStartupTier(
         fakeSupervisor({ ok: true }),
-        { worker: { deployKeyPath: join(dir, "missing") }, board: { owner: "o", repo: "r" } },
+        { worker: { credentialTier: "L1" }, board: { owner: "o", repo: "r" } },
         noop,
         silent,
-      ),
-    );
-    await assert.doesNotReject(() =>
-      detectDeployKeyStartupTier(
-        fakeSupervisor({ ok: false, detail: "x" }),
-        { worker: { deployKeyPath: keyPath }, board: { owner: "o", repo: "r" } },
-        noop,
-        silent,
-      ),
-    );
-    await assert.doesNotReject(() =>
-      detectDeployKeyStartupTier(
-        fakeSupervisor({ ok: true }),
-        { worker: { deployKeyPath: keyPath }, board: { owner: "o", repo: "r" } },
-        noop,
-        silent,
+        { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }) },
       ),
     );
   } finally {

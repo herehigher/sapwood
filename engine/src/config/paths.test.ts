@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { defaultRuntimeRoot, ensureRuntimeRoot, type RuntimeRootFsOps, realRuntimeRootFsOps, runtimePaths, SAPWOOD_DIR } from "./paths.js";
+import {
+  DEPLOY_KEY_BASENAME,
+  defaultRuntimeRoot,
+  ensureRuntimeRoot,
+  findDeployKeyAnchor,
+  keyIdSidecarPath,
+  type RuntimeRootFsOps,
+  realRuntimeRootFsOps,
+  runtimePaths,
+  SAPWOOD_DIR,
+} from "./paths.js";
 
 test("SAPWOOD_DIR is the fixed, dot-prefixed root name", () => {
   assert.equal(SAPWOOD_DIR, ".sapwood");
@@ -35,6 +45,7 @@ test("runtimePaths: every named path is under the given root, matching the §4.1
   assert.equal(paths.logsDir, join(root, "logs"));
   assert.equal(paths.logFile, join(root, "logs", "sapwood.log"));
   assert.equal(paths.keysDir, join(root, "keys"));
+  assert.equal(paths.deployKeySidecar, join(root, "keys", "worker-deploy-key.id"));
   assert.equal(paths.sessionsStateDir, join(root, "sessions", "state"));
   assert.equal(paths.sessionsRolesDir, join(root, "sessions", "roles"));
   assert.equal(paths.sessionsReviewCodexDir, join(root, "sessions", "review-codex"));
@@ -303,4 +314,89 @@ test("negative-oracle mutation fixture: a clean .sapwood/-rooted equivalent of e
     'export const p5 = join(".sapwood", "worker-deploy-key");',
   ].join("\n");
   assert.deepEqual(findDataLiteralOffenses("fixture.ts", clean), []);
+});
+
+// ── #1105: the L1 deploy-key anchor — a filesystem sidecar beside the key itself, discovered
+//    from `.sapwood/keys/` directly rather than a value in the audited sapwood.config.yaml ──
+
+test("keyIdSidecarPath: appends .id beside whatever key path is given", () => {
+  assert.equal(keyIdSidecarPath("/repo/.sapwood/keys/worker-deploy-key"), "/repo/.sapwood/keys/worker-deploy-key.id");
+  assert.equal(keyIdSidecarPath("/repo/.sapwood/keys/worker-deploy-key-myhost"), "/repo/.sapwood/keys/worker-deploy-key-myhost.id");
+});
+
+test("DEPLOY_KEY_BASENAME: the fixed primary (non-host-suffixed) key basename", () => {
+  assert.equal(DEPLOY_KEY_BASENAME, "worker-deploy-key");
+});
+
+test("findDeployKeyAnchor: undefined when the keys directory does not exist at all", () => {
+  const root = join(mkdtempSync(join(tmpdir(), "sapwood-anchor-")), ".sapwood");
+  try {
+    assert.equal(findDeployKeyAnchor(root), undefined);
+  } finally {
+    rmSync(dirname(root), { recursive: true, force: true });
+  }
+});
+
+test("findDeployKeyAnchor: undefined when the keys directory exists but has no .id sidecar", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-anchor-"));
+  const root = join(dir, ".sapwood");
+  try {
+    mkdirSync(join(root, "keys"), { recursive: true });
+    writeFileSync(join(root, "keys", "worker-deploy-key"), "not a sidecar");
+    writeFileSync(join(root, "keys", "worker-deploy-key.pub"), "ssh-ed25519 AAAA");
+    assert.equal(findDeployKeyAnchor(root), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("findDeployKeyAnchor: finds the primary sidecar and returns its co-located key path and parsed id", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-anchor-"));
+  const root = join(dir, ".sapwood");
+  try {
+    mkdirSync(join(root, "keys"), { recursive: true });
+    writeFileSync(join(root, "keys", "worker-deploy-key.id"), "12345\n");
+    assert.deepEqual(findDeployKeyAnchor(root), { keyPath: join(root, "keys", "worker-deploy-key"), keyId: 12345 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("findDeployKeyAnchor: a sidecar whose content is not a positive integer (0, negative, non-numeric) is never a candidate", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-anchor-"));
+  const root = join(dir, ".sapwood");
+  try {
+    mkdirSync(join(root, "keys"), { recursive: true });
+    writeFileSync(join(root, "keys", "worker-deploy-key.id"), "0\n");
+    assert.equal(findDeployKeyAnchor(root), undefined);
+    writeFileSync(join(root, "keys", "worker-deploy-key.id"), "-5\n");
+    assert.equal(findDeployKeyAnchor(root), undefined);
+    writeFileSync(join(root, "keys", "worker-deploy-key.id"), "not-a-number\n");
+    assert.equal(findDeployKeyAnchor(root), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #1105: mtime ordering, not real-time delay — utimesSync sets each sidecar's mtime explicitly
+// so this pins the "most recently WRITTEN wins" rule deterministically, with no dependency on
+// wall-clock timing or filesystem mtime granularity (docs/REVIEW-DOCTRINE.md's no-timing-
+// dependent-tests rule: go around the clock, never wait on it).
+test("findDeployKeyAnchor: when more than one sidecar exists (a stale primary plus a fresher per-host replacement), the most recently WRITTEN one wins", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-anchor-"));
+  const root = join(dir, ".sapwood");
+  try {
+    mkdirSync(join(root, "keys"), { recursive: true });
+    const stalePath = join(root, "keys", "worker-deploy-key.id");
+    const freshPath = join(root, "keys", "worker-deploy-key-myhost-2.id");
+    writeFileSync(stalePath, "1\n");
+    writeFileSync(freshPath, "99\n");
+    const older = new Date(Date.now() - 60_000);
+    const newer = new Date();
+    utimesSync(stalePath, older, older);
+    utimesSync(freshPath, newer, newer);
+    assert.deepEqual(findDeployKeyAnchor(root), { keyPath: join(root, "keys", "worker-deploy-key-myhost-2"), keyId: 99 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

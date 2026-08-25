@@ -226,10 +226,10 @@ reachable as an explicit escape hatch.
 Flags:
   --config PATH  Load config from this path instead of probing the defaults. Selects
                  config-file-relative promptFile, goal.file, doctrine.file, and (only when
-                 SET) logging.path keys. An UNSET logging.path, and worker.deployKeyPath
-                 whenever it's relative, resolve against the current working directory
-                 instead — the same convention the DB (.sapwood/sapwood.sqlite),
-                 EMERGENCY_STOP/KILL_SWITCH/PAUSE, sessions, and worktree roots already use.
+                 SET) logging.path keys. An UNSET logging.path resolves against the current
+                 working directory instead — the same convention the DB
+                 (.sapwood/sapwood.sqlite), EMERGENCY_STOP/KILL_SWITCH/PAUSE, sessions,
+                 worktree roots, and the L1 deploy-key anchor (.sapwood/keys/) already use.
   --once         Tick driver only (engine.driver: tick): run exactly one tick, then exit
                  (exit 1 if the tick attempt failed). No equivalent under the round
                  orchestrator, which has no notion of a single tick — passing it under

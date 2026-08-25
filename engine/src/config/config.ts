@@ -148,30 +148,23 @@ const Worker = z
     // unreadable/malformed is a fail-fast startup error (loadPricingTable, loaded once at
     // supervisor construction) — never a silent fallback to the shipped default.
     pricingFile: z.string().optional(),
-    // #606 (#351 final ruling): the L1 scoped-worker-identity per-repo SSH deploy key —
-    // `sapwood init` provisions it (ssh-keygen + `gh repo deploy-key add --allow-write`) and
-    // writes this key back into the config file. #1078: UNLIKE promptFile/pricingFile above, a
-    // relative path here resolves against CWD (see loadConfig) — the key file lives beside the
-    // engine's own runtime root, not beside a role's shipped prompt, so it follows that same
-    // cwd-relative convention instead of promptFile's config-file-relative one. Unset (default)
-    // -> L0, today's behavior unchanged (a worker leg inherits the operator's full credentialed
-    // env).
-    // Set -> worker.ts probes SSH auth once per engine life; success activates L1 (git-transport-
-    // only env, `Bash(gh *)` dropped from the leg's tool grant) on every dispatch/resume/fix leg;
-    // failure WARNs with a re-provision instruction and dispatch stays at L0 (never wedges). A
-    // set-but-missing file is a probe failure, not a startup error — unlike promptFile/pricingFile,
-    // an operator without repo-admin legitimately has no key to point at yet (see init.ts's
-    // guidance-carrying WARN for that path).
-    deployKeyPath: z.string().optional(),
-    // #606 gate② round 1 (owner ruling, supersedes the title-only design): the deploy key's
-    // GitHub-assigned numeric id, paired with deployKeyPath as the LOCAL anchor init.ts's
-    // ensureDeployKey reconciles against. The remote key TITLE is never authoritative for "is
-    // this mine" — a `sapwood-worker` title on the repo may validly belong to a different
-    // machine/operator, so idempotence and reconciliation key on this (path, id) pair instead.
-    // Written by init.ts alongside deployKeyPath; unset means no local key has ever been
-    // recorded (fresh provisioning runs). Both fields are set/cleared together — never one
-    // without the other — see init.ts's writeDeployKeyConfigIntoYaml/clearDeployKeyConfigFromYaml.
-    deployKeyId: z.number().int().positive().optional(),
+    // #1105 (was #606's config-anchored local key-path/key-id pair, retired — see
+    // docs/security/credential-tiers.md): the GOVERNING half of the L1 scoped-worker-identity
+    // deploy key — WHETHER a worker leg must run scoped, not WHERE its key lives on this
+    // machine. That locality fact is now filesystem state (`runtimePaths().keys`'s id sidecar,
+    // paths.ts's findDeployKeyAnchor), never a value in this audited file: a shared committed
+    // anchor let two operator machines on one repo thrash each other's `sapwood init` writes,
+    // and a missing key on a fresh clone silently ran the worker at the WIDER tier (L0) instead
+    // of refusing — both fixed by separating "may this repo's worker use L1" (here, human-
+    // reviewed) from "does THIS machine currently have a working key" (discovered, never
+    // written back).
+    // L0 (default): today's behavior — a worker leg inherits the operator's full credentialed
+    // env; L0 never reads or probes a deploy key at all.
+    // L1: every dispatch/resume/fix leg MUST run with the deploy key (git-transport-only env,
+    // `Bash(gh *)` dropped from the leg's tool grant) and never falls back to L0 silently — no
+    // reconciled local anchor at startup is a hard refusal before any dispatch (`sapwood run`,
+    // see deploy-key-startup-check.ts), naming `sapwood init` as the fix.
+    credentialTier: z.enum(["L0", "L1"]).default("L0"),
   })
   .strict();
 
@@ -1989,25 +1982,6 @@ export const ConfigSchema = ConfigSchemaRaw.transform(resolveLabelDefaults).supe
           "choose a different Claude model for reviewer.agent.model.",
     });
   }
-  // #606 gate② round 2 (R3-6): worker.deployKeyPath and worker.deployKeyId are the owner
-  // ruling's local (path, id) anchor PAIR — init.ts's reconcile logic reads them as a unit and
-  // treats "only one set" as meaningless (neither "fresh provisioning" nor "reconcile" has a
-  // sane interpretation of a lone half). Reject a lone half at parse time, naming which is
-  // missing and pointing at the fix ("re-run sapwood init", which always writes/clears both
-  // together) rather than letting it silently fall through to fresh-provisioning behavior with
-  // an orphaned half still sitting in the file.
-  if ((cfg.worker.deployKeyPath === undefined) !== (cfg.worker.deployKeyId === undefined)) {
-    const missing = cfg.worker.deployKeyPath === undefined ? "deployKeyPath" : "deployKeyId";
-    const present = cfg.worker.deployKeyPath === undefined ? "deployKeyId" : "deployKeyPath";
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["worker", missing],
-      message:
-        `worker.${missing} is unset but worker.${present} is set — these two form ONE local anchor ` +
-        `pair (an owner ruling) and must be BOTH set or BOTH unset. Re-run "sapwood init", which ` +
-        `always writes or clears them together, or remove worker.${present} by hand.`,
-    });
-  }
   // #286 (E4a, design #279 §4.3): mode: engine-agent with an empty/absent ci.requiredChecks is
   // legal (parse still succeeds — an operator may be mid-adoption) but WEAK: code-verifiable AC
   // can then at best be claim-based (no trusted CI execution evidence exists to confirm against),
@@ -2160,16 +2134,6 @@ export function loadConfig(path?: string): SapwoodConfig {
   // Same rule for worker.pricingFile (#33 follow-up, PR #85 review).
   if (cfg.worker.pricingFile !== undefined && !isAbsolute(cfg.worker.pricingFile)) {
     cfg.worker.pricingFile = resolve(dirname(file), cfg.worker.pricingFile);
-  }
-  // #1078 (was #606's config-file-relative rule): worker.deployKeyPath is CWD-relative, not
-  // config-file-relative — unlike promptFile/pricingFile/logging.path above, the key file lives
-  // beside the engine's own runtime root (init.ts's writers emit the matching relative(cwd,
-  // keyPath) string), so a config file that isn't at the repo root must still resolve to the
-  // SAME absolute key path the engine itself would use. `resolve()` with a single argument
-  // already resolves against process.cwd() — the same convention every other runtime-root path
-  // in this repo uses.
-  if (cfg.worker.deployKeyPath !== undefined && !isAbsolute(cfg.worker.deployKeyPath)) {
-    cfg.worker.deployKeyPath = resolve(cfg.worker.deployKeyPath);
   }
   // #88/#87: same relative-to-config-file resolution for the verification-plan-reviewer prompt.
   if (cfg.roles.verificationPlanReviewer.promptFile !== undefined && !isAbsolute(cfg.roles.verificationPlanReviewer.promptFile)) {
