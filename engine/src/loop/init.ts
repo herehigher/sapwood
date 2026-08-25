@@ -394,43 +394,79 @@ function deployKeysDir(cwd: string): string {
   return runtimePaths(defaultRuntimeRoot(cwd)).keysDir;
 }
 
+// #1080: injectable fs seam for enforceDeployKeyPermissions below — the same DI pattern
+// paths.ts's own RuntimeRootFsOps uses (a spy substituted for the real node:fs calls). This is
+// the only way to deterministically exercise a chmod/lstat FAILURE in a test: real permission
+// tricks (chmod a directory unwritable, run as non-root, ...) behave differently per OS/CI
+// runner and would make the test flaky or unrunnable rather than a reliable regression pin.
+export interface DeployKeyPermissionsFsOps {
+  mkdir: (dir: string) => void;
+  lstat: (path: string) => import("node:fs").Stats;
+  chmod: (path: string, mode: number) => void;
+}
+
+export const realDeployKeyPermissionsFsOps: DeployKeyPermissionsFsOps = {
+  mkdir: (dir) => mkdirSync(dir, { recursive: true }),
+  lstat: (path) => lstatSync(path),
+  chmod: (path, mode) => chmodSync(path, mode),
+};
+
 // #1080: repairs the key's directory (0700) and, when a private key file is present, its own
 // mode (0600) — called on every path that can leave a key on disk (fresh generation, reuse,
-// reconcile), since neither `mkdirSync`'s own `mode` option nor ssh-keygen's own default is
-// trusted to land on the exact mode regardless of the caller's umask. Uses `lstatSync` (never
+// reconcile), since neither a bare `mkdir`'s own `mode` option nor ssh-keygen's own default is
+// trusted to land on the exact mode regardless of the caller's umask. Uses `lstat` (never
 // dereferenced) to confirm each entry is what it claims to be BEFORE chmodding it: `chmod`
-// follows symlinks the same as a bare shell `chmod` (not `chmod -h`), so chmodding whatever
-// `existsSync` merely reports present could reach through a symlink and mutate an unrelated
+// follows symlinks the same as a bare shell `chmod` (not `chmod -h`), so chmodding whatever a
+// mere existence check reports present could reach through a symlink and mutate an unrelated
 // file's permissions, or strip the executable bit off a directory standing in for the key file.
-// Either collision is reported back to the caller instead, never touched.
-function enforceDeployKeyPermissions(keyPath: string): { ok: true } | { ok: false; reason: string } {
+// Every failure — a collision (wrong entry type) or a genuine I/O error from any of the three
+// calls (mkdir/lstat/chmod) — is reported back to the caller as `{ ok: false, reason }` instead
+// of throwing, so a caller that must never let this abort the whole run (reconcile) can degrade
+// to a WARN rather than crash `init()` outright.
+function enforceDeployKeyPermissions(
+  keyPath: string,
+  fs: DeployKeyPermissionsFsOps = realDeployKeyPermissionsFsOps,
+): { ok: true } | { ok: false; reason: string } {
   const dir = dirname(keyPath);
   try {
-    mkdirSync(dir, { recursive: true });
+    fs.mkdir(dir);
   } catch (e) {
     return { ok: false, reason: `could not create ${dir}: ${e instanceof Error ? e.message : String(e)}` };
   }
-  let dirStat: ReturnType<typeof lstatSync>;
+  let dirStat: import("node:fs").Stats;
   try {
-    dirStat = lstatSync(dir);
+    dirStat = fs.lstat(dir);
   } catch (e) {
     return { ok: false, reason: `could not stat ${dir}: ${e instanceof Error ? e.message : String(e)}` };
   }
   if (!dirStat.isDirectory()) {
     return { ok: false, reason: `${dir} exists but is not a real directory (a symlink or other type) — refusing to chmod it` };
   }
-  chmodSync(dir, 0o700);
-
-  let keyStat: ReturnType<typeof lstatSync> | undefined;
   try {
-    keyStat = lstatSync(keyPath);
-  } catch {
-    return { ok: true }; // nothing at keyPath yet — nothing more to repair
+    fs.chmod(dir, 0o700);
+  } catch (e) {
+    return { ok: false, reason: `could not chmod ${dir} to 0700: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  let keyStat: import("node:fs").Stats | undefined;
+  try {
+    keyStat = fs.lstat(keyPath);
+  } catch (e) {
+    // ENOENT alone means "nothing at keyPath yet" — every OTHER lstat failure (EACCES, ELOOP,
+    // ...) is a reported failure, never silently read as absence: treating an unreadable path as
+    // absent would send the caller on to attempt ssh-keygen against a path this process cannot
+    // even stat, rather than surfacing the real problem.
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { ok: true };
+    return { ok: false, reason: `could not stat ${keyPath}: ${e instanceof Error ? e.message : String(e)}` };
   }
   if (!keyStat.isFile()) {
     return { ok: false, reason: `${keyPath} exists but is not a regular file (a directory or symlink) — refusing to chmod it` };
   }
-  chmodSync(keyPath, 0o600);
+  try {
+    fs.chmod(keyPath, 0o600);
+  } catch (e) {
+    return { ok: false, reason: `could not chmod ${keyPath} to 0600: ${e instanceof Error ? e.message : String(e)}` };
+  }
   return { ok: true };
 }
 
@@ -438,8 +474,8 @@ function enforceDeployKeyPermissions(keyPath: string): { ok: true } | { ok: fals
 // degrades ANY failure to the same guidance-carrying WARN (deployKeyProvisioningFailedAction) —
 // this just turns a permission-repair collision into a thrown Error so it takes that identical
 // path, rather than requiring each call site to check the result inline.
-function enforceDeployKeyPermissionsOrThrow(keyPath: string): void {
-  const result = enforceDeployKeyPermissions(keyPath);
+function enforceDeployKeyPermissionsOrThrow(keyPath: string, fs: DeployKeyPermissionsFsOps = realDeployKeyPermissionsFsOps): void {
+  const result = enforceDeployKeyPermissions(keyPath, fs);
   if (!result.ok) throw new Error(result.reason);
 }
 
@@ -990,6 +1026,7 @@ async function armAuthFailsStaleOrMismatch(
   staleForeignKeys: DeployKeyListEntry[],
   reasons: string[],
   deps: Pick<InitDeps, "sshKeygen" | "probeSshAuth" | "isInteractive" | "promptOperator" | "hostname">,
+  permissionsFs: DeployKeyPermissionsFsOps = realDeployKeyPermissionsFsOps,
 ): Promise<string[]> {
   const actions: string[] = [];
   if (configFilePath !== null) {
@@ -1056,9 +1093,9 @@ async function armAuthFailsStaleOrMismatch(
       `deploy key: operator chose (a) — registering a NEW per-machine deploy key titled "${title}"; every ` +
         `existing remote key is left untouched.`,
     );
-    enforceDeployKeyPermissionsOrThrow(keyPath); // dir ready (0700) before ssh-keygen writes into it
+    enforceDeployKeyPermissionsOrThrow(keyPath, permissionsFs); // dir ready (0700) before ssh-keygen writes into it
     await deps.sshKeygen(keyPath);
-    enforceDeployKeyPermissionsOrThrow(keyPath); // repair the freshly-written private key's mode too
+    enforceDeployKeyPermissionsOrThrow(keyPath, permissionsFs); // repair the freshly-written private key's mode too
     newId = await addDeployKeyCapturingNewId(run, repo, keyPath, title);
   } catch (e) {
     actions.push(deployKeyProvisioningFailedAction(repo, fallbackKeyPath, fallbackTitle, e));
@@ -1114,12 +1151,15 @@ async function reconcileDeployKey(
   deployKeyPath: string,
   deployKeyId: number,
   deps: Pick<InitDeps, "sshKeygen" | "probeSshAuth" | "isInteractive" | "promptOperator" | "hostname">,
+  permissionsFs: DeployKeyPermissionsFsOps = realDeployKeyPermissionsFsOps,
 ): Promise<string[]> {
   const localFileOk = existsSync(deployKeyPath);
-  // A repair failure here (the configured path is a directory/symlink, or an unwritable mount)
-  // is a reported degradation, never silently swallowed into a green "reconciled" verdict below —
-  // folded into the same green-condition check the other four signals already go through.
-  const permissionRepair = localFileOk ? enforceDeployKeyPermissions(deployKeyPath) : { ok: true as const };
+  // A repair failure here (the configured path is a directory/symlink, an unwritable mount, or
+  // any other chmod/lstat error) is a reported degradation, never silently swallowed into a
+  // green "reconciled" verdict below — folded into the same green-condition check the other
+  // four signals already go through. enforceDeployKeyPermissions itself never throws (every
+  // failure comes back as `{ ok: false, reason }`), so this call needs no try/catch of its own.
+  const permissionRepair = localFileOk ? enforceDeployKeyPermissions(deployKeyPath, permissionsFs) : { ok: true as const };
   let listedKeys: DeployKeyListEntry[] = [];
   let matchedEntry: DeployKeyListEntry | undefined;
   try {
@@ -1166,7 +1206,7 @@ async function reconcileDeployKey(
   }
   if (localFileOk && !probe.ok) reasons.push(`SSH auth preflight failed${probe.detail ? `: ${probe.detail}` : ""}`);
   const staleForeign = listedKeys.filter((k) => isSapwoodWorkerTitle(k.title));
-  return armAuthFailsStaleOrMismatch(run, repo, cwd, configFilePath, staleForeign, reasons, deps);
+  return armAuthFailsStaleOrMismatch(run, repo, cwd, configFilePath, staleForeign, reasons, deps, permissionsFs);
 }
 
 /** #606 gate② round 1 (OWNER RULING) orchestrator: (deployKeyPath, deployKeyId) BOTH configured
@@ -1189,11 +1229,15 @@ export async function ensureDeployKey(
   cwd: string,
   configFilePath: string | null,
   deps: Pick<InitDeps, "sshKeygen" | "probeSshAuth" | "isInteractive" | "promptOperator" | "hostname">,
+  // #1080: injectable ONLY so tests can deterministically simulate a chmod/lstat failure — see
+  // DeployKeyPermissionsFsOps's own doc. Production never passes this; it's not part of
+  // InitDeps because init() itself has no reason to ever override it.
+  permissionsFs: DeployKeyPermissionsFsOps = realDeployKeyPermissionsFsOps,
 ): Promise<string[]> {
   const { deployKeyPath, deployKeyId } = cfg.worker;
 
   if (deployKeyPath !== undefined && deployKeyId !== undefined) {
-    return reconcileDeployKey(run, repo, cwd, configFilePath, deployKeyPath, deployKeyId, deps);
+    return reconcileDeployKey(run, repo, cwd, configFilePath, deployKeyPath, deployKeyId, deps, permissionsFs);
   }
 
   const keyPath = join(deployKeysDir(cwd), "worker-deploy-key");
@@ -1208,7 +1252,7 @@ export async function ensureDeployKey(
     // A sapwood-titled key exists remotely, but THIS machine has no recorded (path, id) anchor
     // for it — per the owner ruling, a title is never authoritative for "mine": it may validly
     // belong to a different machine/operator. Never assume ownership, never touch it.
-    return armAuthFailsStaleOrMismatch(run, repo, cwd, configFilePath, priorSapwoodKeys, [], deps);
+    return armAuthFailsStaleOrMismatch(run, repo, cwd, configFilePath, priorSapwoodKeys, [], deps, permissionsFs);
   }
 
   // Fresh provisioning: nothing configured locally, nothing sapwood-titled remotely.
@@ -1228,10 +1272,10 @@ export async function ensureDeployKey(
       );
     }
     if (!privateExists) {
-      enforceDeployKeyPermissionsOrThrow(keyPath); // dir ready (0700) before ssh-keygen writes into it
+      enforceDeployKeyPermissionsOrThrow(keyPath, permissionsFs); // dir ready (0700) before ssh-keygen writes into it
       await deps.sshKeygen(keyPath);
     }
-    enforceDeployKeyPermissionsOrThrow(keyPath); // repair mode whether just generated or reused
+    enforceDeployKeyPermissionsOrThrow(keyPath, permissionsFs); // repair mode whether just generated or reused
     newId = await addDeployKeyCapturingNewId(run, repo, keyPath, DEPLOY_KEY_TITLE);
   } catch (e) {
     actions.push(deployKeyProvisioningFailedAction(repo, keyPath, DEPLOY_KEY_TITLE, e));

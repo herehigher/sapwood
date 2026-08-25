@@ -25,6 +25,7 @@ import { DOC_LINKS } from "../util/doc-links.js";
 import {
   clearDeployKeyConfigFromJson,
   clearDeployKeyConfigFromYaml,
+  type DeployKeyPermissionsFsOps,
   defaultDoctrineTemplatePath,
   defaultGoalTemplatePath,
   defaultIssueTemplatePath,
@@ -37,6 +38,7 @@ import {
   parseDeployKeys,
   pickFreshArmAKeySlot,
   preflight,
+  realDeployKeyPermissionsFsOps,
   requiredLabels,
   resolveDoctrineFilePath,
   resolveGoalFilePath,
@@ -329,6 +331,28 @@ function writeFakeKeyPair(path: string, pub: string = FAKE_PUB_KEY): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, "fake-private-key-material");
   writeFileSync(`${path}.pub`, `${pub}\n`);
+}
+
+// #1080: deterministic injected-fs failures for enforceDeployKeyPermissions — a real permission
+// trick (chmod a directory unwritable, run as non-root, ...) behaves differently per OS/CI
+// runner, so these are the only reliable way to pin the WARN-degradation behavior a genuine
+// chmod/lstat error must produce.
+function fsWithChmodFailure(code: string): DeployKeyPermissionsFsOps {
+  return {
+    ...realDeployKeyPermissionsFsOps,
+    chmod: () => {
+      throw Object.assign(new Error(`${code}: simulated chmod failure`), { code });
+    },
+  };
+}
+function fsWithLstatFailureFor(targetPath: string, code: string): DeployKeyPermissionsFsOps {
+  return {
+    ...realDeployKeyPermissionsFsOps,
+    lstat: (path) => {
+      if (path === targetPath) throw Object.assign(new Error(`${code}: simulated lstat failure for ${path}`), { code });
+      return realDeployKeyPermissionsFsOps.lstat(path);
+    },
+  };
 }
 
 // #606: fast, non-shelling-out, non-networked defaults for InitDeps' new sshKeygen/probeSshAuth
@@ -1700,6 +1724,78 @@ test("init: RECONCILE — a DIRECTORY sitting at the configured deployKeyPath ca
     assert.ok(warn, "expected a WARN action line");
     assert.match(warn!, /could not repair key permissions/);
     assert.ok(!calls.some((c) => c.join(" ").includes("delete")), "the remote key is never touched over a local permission collision");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ensureDeployKey (reconcile): a genuine chmod FAILURE (EPERM, injected via the fs seam — not a real OS-dependent permission trick) during repair is a reported WARN degradation, never a thrown error and never a green L1 claim", async () => {
+  const dir = tmpCwd();
+  const keyPath = cfgKeyPath(dir);
+  const configPath = join(dir, "sapwood.config.yaml");
+  writeFileSync(
+    configPath,
+    `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: ${keyPath}, deployKeyId: 159210179 }\n`,
+  );
+  const provisioned = parseConfig(
+    `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: ${keyPath}, deployKeyId: 159210179 }`,
+  );
+  const { run } = fakeRun({
+    deployKeyEntries: [{ id: 159210179, title: "sapwood-worker", key: FAKE_PUB_KEY }],
+  });
+  try {
+    writeFakeKeyPair(keyPath);
+    const actions = await ensureDeployKey(
+      provisioned,
+      run,
+      "acme/widgets",
+      dir,
+      configPath,
+      { ...nonInteractive, sshKeygen: failSshKeygen, probeSshAuth: async () => ({ ok: true }) },
+      fsWithChmodFailure("EPERM"),
+    );
+    assert.ok(
+      !actions.some((a) => /reconciled/.test(a) && /L1 active/.test(a)),
+      "a chmod failure must never be reported as a green reconcile — it must not escape and abort init() either",
+    );
+    const warn = actions.find((a) => a.startsWith("deploy key: WARN"));
+    assert.ok(warn, "expected a WARN action line");
+    assert.match(warn!, /could not repair key permissions/);
+    assert.match(warn!, /EPERM/, "the WARN names the mode/error, not just 'something went wrong'");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ensureDeployKey (fresh provisioning): a genuine lstat FAILURE (EACCES, injected via the fs seam) on the private-key path is a reported WARN degradation, never silently read as 'absent' — ssh-keygen is never invoked", async () => {
+  const dir = tmpCwd();
+  const configPath = join(dir, "sapwood.config.yaml");
+  writeFileSync(configPath, "board: { owner: acme, repo: widgets, projectNumber: 7 }\n");
+  const keyPath = join(dir, ".sapwood", "keys", "worker-deploy-key");
+  const { run, calls } = fakeRun({ deployKeyEntries: [] });
+  try {
+    const actions = await ensureDeployKey(
+      cfg,
+      run,
+      "acme/widgets",
+      dir,
+      configPath,
+      {
+        ...nonInteractive,
+        sshKeygen: async () => {
+          throw new Error("sshKeygen must not be called — the permission repair's own lstat already failed");
+        },
+        probeSshAuth: async () => ({ ok: true }),
+      },
+      fsWithLstatFailureFor(keyPath, "EACCES"),
+    );
+    assert.ok(
+      !calls.some((c) => c[0] === "repo" && c[1] === "deploy-key" && c[2] === "add"),
+      "no add call — provisioning refused before ever reaching gh",
+    );
+    const warn = actions.find((a) => a.startsWith("deploy key: WARN"));
+    assert.ok(warn, "expected a provisioning-failure WARN action line");
+    assert.match(warn!, /EACCES/, "an unreadable path is reported honestly, never silently treated as 'nothing there yet'");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
