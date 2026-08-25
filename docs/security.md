@@ -2030,6 +2030,10 @@ would let a worker weaken the very mechanism that constrains it. Any change to t
 
 - `guard.ts` / the guard hook wiring
 - `reviewer.ts` / `merge-driver.ts`
+- `engine/dist/guard/guard.js`, `engine/dist/guard/guard-hook.js`, `engine/dist/roles/reviewer.js`,
+  `engine/dist/roles/merge-driver.js` — the compiled artifacts each PreToolUse invocation and the
+  conductor actually execute; protecting only the `.ts` sources above would leave the running
+  gate overwritable through its own build output.
 - `sapwood.config.yaml` / `sapwood.config.json` — **the whole file**, not just its
   security-relevant fields (guard mode, reviewer mode, merge mode). The guard's actual
   match (`engine/src/guard/guard.ts`) is a path pattern on `sapwood.config.(ya?ml|json)`,
