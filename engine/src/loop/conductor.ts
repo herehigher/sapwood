@@ -2321,7 +2321,7 @@ export type DrivingDrainMode =
   | { mode: "heuristic"; dailyBudgetBreached: boolean }
   | { mode: "observed"; blockedLanes: ReadonlySet<string> };
 
-/** The bounded drain (PLAN.md Security model: drain before kill, always). Shared by the #69
+/** The bounded drain (PLAN.md's Architecture chapter: drain before kill, always). Shared by the #69
  *  global kill-switch gate and the #14 cost-ceiling breach path in tick(): record the breach
  *  (first detection only — see State.recordCeilingBreach's INSERT OR IGNORE), ask every
  *  running worker to hand off gracefully (idempotent per tick), and only once

@@ -678,7 +678,7 @@ engine itself already reconciles ITS OWN per-lane estimate against the real term
 finish), when a positive terminal cost is actually available — logging the divergence
 when it is, and logging the estimate as the recorded spend (never a fabricated $0) when
 it isn't (`writeTerminalSentinel`'s own doc, `engine/src/roles/worker.ts`; see
-`docs/PLAN.md`'s Security model) — that is a per-lane mechanism, not a supervision one.
+`docs/PLAN.md`'s Architecture chapter) — that is a per-lane mechanism, not a supervision one.
 
 `spend_ledger` also carries a per-row `estimated` flag so the est-vs-real
 divergence above can be queried instead of grepped from logs — populated where the

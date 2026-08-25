@@ -1,12 +1,17 @@
-// #796: the structured-output write inventory's completeness check — the machine half of
-// docs/PLAN.md's own claim ("every future … change … updates the table below in the same PR,
-// and gate② checks that it did"). Before this test, that sentence was prose only: #212 shipped
-// `po-pool` in 2026-07-16 and #233 re-gated it behind its own switch, and neither change ever
-// touched the table (issue #796's own finding). Same doc-vs-code cross-check TECHNIQUE as
+// #796: the structured-output write inventory's completeness check — the machine half of the
+// write-inventory section's own claim ("every future … change … updates the table below in the
+// same PR, and gate② checks that it did"). Before this test, that sentence was prose only: #212
+// shipped `po-pool` in 2026-07-16 and #233 re-gated it behind its own switch, and neither change
+// ever touched the table (issue #796's own finding). Same doc-vs-code cross-check TECHNIQUE as
 // escalation-buckets.test.ts:670 (reads docs/PLAN.md, asserts it agrees with the code), extended
 // to a REGISTRY-DRIVEN inventory (write-inventory-registry.ts) rather than a single fact,
 // following probe-signals.ts/probe-signals.test.ts's "one declarative array, one inventory test"
 // shape.
+//
+// The section this test pins lives in docs/reference/role-paradigm.md (moved there from
+// docs/PLAN.md by the docs/PLAN.md goal-shape cleanup — PLAN.md now keeps only a one-paragraph
+// pointer to it); the doc-vs-code technique and the three directions below are unchanged by
+// where the section lives.
 //
 // THREE directions, checked separately so each has its own failure message naming the offending
 // id — a test checking only one or two would pass with real gaps still open (see PR #816 gate②
@@ -15,8 +20,8 @@
 // dispatch site was left in place stayed green, and moving a marker off its table row into
 // ordinary prose also stayed green; round 2 fixed both, but the table-row bound itself was still
 // only "the first `| … |`-shaped header line in the WHOLE FILE" — round 2 review found a THIRD
-// bypass: a decoy table inserted earlier in docs/PLAN.md, carrying every marker on its own rows,
-// with the real po-pool marker stripped, stayed green because the scan locked onto the decoy's
+// bypass: a decoy table inserted earlier in the doc, carrying every marker on its own rows, with
+// the real po-pool marker stripped, stayed green because the scan locked onto the decoy's
 // header, never the real one):
 //   1. registry -> table: every WRITE_INVENTORY_ROLE_SESSIONS entry's `tableRole` must appear as
 //      a `<!-- sapwood:write-inventory-role:… -->` marker on some row of THE write-inventory
@@ -42,8 +47,10 @@ import { WRITE_INVENTORY_NON_REGISTRY_ROLE_IDS, WRITE_INVENTORY_ROLE_SESSIONS } 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..", "..", "..");
 const ENGINE_SRC = join(HERE, "..");
-const PLAN_PATH = join(REPO_ROOT, "docs", "PLAN.md");
-const PLAN_CONTENT = readFileSync(PLAN_PATH, "utf8");
+// The write-inventory section (heading + table) lives in docs/reference/role-paradigm.md, not
+// docs/PLAN.md — see this file's own module doc.
+const ROLE_PARADIGM_PATH = join(REPO_ROOT, "docs", "reference", "role-paradigm.md");
+const ROLE_PARADIGM_CONTENT = readFileSync(ROLE_PARADIGM_PATH, "utf8");
 
 const MARKER_RE = /<!--\s*sapwood:write-inventory-role:([a-z0-9-]+)\s*-->/g;
 
@@ -63,7 +70,7 @@ const isTableRowShaped = (line: string): boolean => {
 /** The write-inventory table's own `| … |` rows, and ONLY those. Two-stage anchor, not a
  *  file-wide scan:
  *
- *  1. Locate `SECTION_HEADING` — required to occur EXACTLY ONCE in `planContent`. Zero or
+ *  1. Locate `SECTION_HEADING` — required to occur EXACTLY ONCE in `docContent`. Zero or
  *     multiple occurrences throws rather than guessing, per this function's whole point: a parse
  *     regression (the section renamed, or a second copy of the heading text appearing anywhere)
  *     must go RED, never silently resolve to "whichever one the code happened to find first."
@@ -75,25 +82,25 @@ const isTableRowShaped = (line: string): boolean => {
  *  Round 2's version anchored on "the first file-wide line starting with the header's prefix" —
  *  bounded to *a* table, not structurally to *the* inventory table. Round 3's own gate② review
  *  reproduced the gap directly: a decoy `| Role | Output fields |` table inserted EARLIER in
- *  docs/PLAN.md, with every marker moved onto ITS rows and po-pool's real marker removed, stayed
+ *  the doc, with every marker moved onto ITS rows and po-pool's real marker removed, stayed
  *  green — the scan locked onto the decoy's header first. Anchoring to the section HEADING first
  *  closes it: nothing before that heading (where a decoy would have to sit to predate the real
  *  table) is ever examined at all. See this file's own decoy-table regression test below, which
  *  runs sol's exact probe through THIS function (not a reimplementation). */
-function readInventoryTableRows(planContent: string): string[] {
-  const lines = planContent.split("\n");
+function readInventoryTableRows(docContent: string): string[] {
+  const lines = docContent.split("\n");
 
   const headingIdxs: number[] = [];
   for (let i = 0; i < lines.length; i++) if (lines[i] === SECTION_HEADING) headingIdxs.push(i);
   if (headingIdxs.length === 0) {
     throw new Error(
-      `docs/PLAN.md: the write-inventory section heading ${JSON.stringify(SECTION_HEADING)} was not found — ` +
+      `docs/reference/role-paradigm.md: the write-inventory section heading ${JSON.stringify(SECTION_HEADING)} was not found — ` +
         `the section was renamed or removed and this scan needs updating`,
     );
   }
   if (headingIdxs.length > 1) {
     throw new Error(
-      `docs/PLAN.md: the write-inventory section heading ${JSON.stringify(SECTION_HEADING)} appears ` +
+      `docs/reference/role-paradigm.md: the write-inventory section heading ${JSON.stringify(SECTION_HEADING)} appears ` +
         `${headingIdxs.length} times — ambiguous, refusing to guess which one bounds the real table`,
     );
   }
@@ -111,13 +118,13 @@ function readInventoryTableRows(planContent: string): string[] {
   for (let i = headingIdx + 1; i < sectionEnd; i++) if (lines[i] === TABLE_HEADER_LINE) headerIdxs.push(i);
   if (headerIdxs.length === 0) {
     throw new Error(
-      `docs/PLAN.md: no write-inventory table header row found under the ${JSON.stringify(SECTION_HEADING)} ` +
+      `docs/reference/role-paradigm.md: no write-inventory table header row found under the ${JSON.stringify(SECTION_HEADING)} ` +
         `section — table structure changed, this scan needs updating`,
     );
   }
   if (headerIdxs.length > 1) {
     throw new Error(
-      `docs/PLAN.md: ${headerIdxs.length} write-inventory table header rows found under the ` +
+      `docs/reference/role-paradigm.md: ${headerIdxs.length} write-inventory table header rows found under the ` +
         `${JSON.stringify(SECTION_HEADING)} section — ambiguous`,
     );
   }
@@ -132,14 +139,16 @@ function readInventoryTableRows(planContent: string): string[] {
     rows.push(line);
   }
   if (rows.length === 0) {
-    throw new Error("docs/PLAN.md's write-inventory table header was found but no data rows followed it — parse regressed");
+    throw new Error(
+      "docs/reference/role-paradigm.md's write-inventory table header was found but no data rows followed it — parse regressed",
+    );
   }
   return rows;
 }
 
-function readPlanTableMarkers(planContent: string): string[] {
+function readDocTableMarkers(docContent: string): string[] {
   const found: string[] = [];
-  for (const row of readInventoryTableRows(planContent)) {
+  for (const row of readInventoryTableRows(docContent)) {
     for (const m of row.matchAll(MARKER_RE)) {
       const id = m[1];
       if (id) found.push(id);
@@ -157,7 +166,7 @@ function assertRegistryCoveredByTableMarkers(tableMarkers: readonly string[]): v
   for (const tableRole of expected) {
     assert.ok(
       found.has(tableRole),
-      `write-inventory-registry.ts names "${tableRole}" as a structured-output write path, but docs/PLAN.md's ` +
+      `write-inventory-registry.ts names "${tableRole}" as a structured-output write path, but role-paradigm.md's ` +
         `write-inventory table has no "<!-- sapwood:write-inventory-role:${tableRole} -->" ROW marker for it — ` +
         `the table has silently gone incomplete`,
     );
@@ -169,34 +178,34 @@ function assertTableMarkersNameRealRoles(tableMarkers: readonly string[]): void 
   for (const tableRole of tableMarkers) {
     assert.ok(
       expected.has(tableRole),
-      `docs/PLAN.md's write-inventory table has a row marked "<!-- sapwood:write-inventory-role:${tableRole} -->", ` +
+      `role-paradigm.md's write-inventory table has a row marked "<!-- sapwood:write-inventory-role:${tableRole} -->", ` +
         `but write-inventory-registry.ts has no entry naming it as a real structured-output write path — ` +
         `the row documents a role that doesn't exist (or the registry's tableRole drifted from the doc)`,
     );
   }
 }
 
-test("#796: docs/PLAN.md's write-inventory table carries a row marker for every registry entry (registry -> table)", () => {
-  assertRegistryCoveredByTableMarkers(readPlanTableMarkers(PLAN_CONTENT));
+test("#796: role-paradigm.md's write-inventory table carries a row marker for every registry entry (registry -> table)", () => {
+  assertRegistryCoveredByTableMarkers(readDocTableMarkers(ROLE_PARADIGM_CONTENT));
 });
 
-test("#796: every docs/PLAN.md write-inventory ROW marker names a real registry role (table -> registry)", () => {
-  assertTableMarkersNameRealRoles(readPlanTableMarkers(PLAN_CONTENT));
+test("#796: every role-paradigm.md write-inventory ROW marker names a real registry role (table -> registry)", () => {
+  assertTableMarkersNameRealRoles(readDocTableMarkers(ROLE_PARADIGM_CONTENT));
 });
 
-test("#796: docs/PLAN.md's write-inventory table has exactly one row per distinct tableRole (no accidental duplicate/split row)", () => {
-  const tableRoles = readPlanTableMarkers(PLAN_CONTENT);
+test("#796: role-paradigm.md's write-inventory table has exactly one row per distinct tableRole (no accidental duplicate/split row)", () => {
+  const tableRoles = readDocTableMarkers(ROLE_PARADIGM_CONTENT);
   const counts = new Map<string, number>();
   for (const id of tableRoles) counts.set(id, (counts.get(id) ?? 0) + 1);
   for (const [id, count] of counts) {
-    assert.equal(count, 1, `"${id}" is marked on ${count} separate docs/PLAN.md table rows — expected exactly one`);
+    assert.equal(count, 1, `"${id}" is marked on ${count} separate role-paradigm.md table rows — expected exactly one`);
   }
 });
 
 // ── #796 gate② round 3 (sol-high P2 residual): regressions that run the REAL functions above ────
 // against DOCTORED real content — never a local reimplementation of the scan (round 2's own unit
 // test was faulted for exactly that: it could not have caught round 2's own bug, since it never
-// called readInventoryTableRows/readPlanTableMarkers at all).
+// called readInventoryTableRows/readDocTableMarkers at all).
 
 test("#796 round-3 regression: a decoy table inserted BEFORE the real section, carrying every marker on its OWN rows, with po-pool's real marker stripped, still fails red naming po-pool", () => {
   // sol's exact probe: an earlier decoy `| Role | Output fields |` table whose rows carry every
@@ -208,13 +217,13 @@ test("#796 round-3 regression: a decoy table inserted BEFORE the real section, c
     "\n";
 
   const poolMarker = " <!-- sapwood:write-inventory-role:po-pool -->";
-  assert.ok(PLAN_CONTENT.includes(poolMarker), "sanity: the real po-pool marker must be present before this probe strips it");
-  const realTableWithoutPoolMarker = PLAN_CONTENT.replace(poolMarker, "");
+  assert.ok(ROLE_PARADIGM_CONTENT.includes(poolMarker), "sanity: the real po-pool marker must be present before this probe strips it");
+  const realTableWithoutPoolMarker = ROLE_PARADIGM_CONTENT.replace(poolMarker, "");
 
   const doctored = decoyTable + realTableWithoutPoolMarker;
 
   assert.throws(
-    () => assertRegistryCoveredByTableMarkers(readPlanTableMarkers(doctored)),
+    () => assertRegistryCoveredByTableMarkers(readDocTableMarkers(doctored)),
     /po-pool/,
     "a decoy table earlier in the file, carrying every marker on its own rows, must NOT satisfy the real " +
       "inventory's completeness check — the section-heading anchor must ignore everything before it",
@@ -223,34 +232,36 @@ test("#796 round-3 regression: a decoy table inserted BEFORE the real section, c
 
 test("#796 round-3 regression: relocating po-pool's marker into ordinary prose after the real table still fails red, via the REAL function (not a reimplementation)", () => {
   const poolMarker = " <!-- sapwood:write-inventory-role:po-pool -->";
-  assert.ok(PLAN_CONTENT.includes(poolMarker), "sanity: the real po-pool marker must be present before this probe relocates it");
-  const withoutRowMarker = PLAN_CONTENT.replace(poolMarker, "");
+  assert.ok(ROLE_PARADIGM_CONTENT.includes(poolMarker), "sanity: the real po-pool marker must be present before this probe relocates it");
+  const withoutRowMarker = ROLE_PARADIGM_CONTENT.replace(poolMarker, "");
   const doctored = `${withoutRowMarker}\n\nSome unrelated prose mentioning${poolMarker} in passing, not on a table row.\n`;
 
   assert.throws(
-    () => assertRegistryCoveredByTableMarkers(readPlanTableMarkers(doctored)),
+    () => assertRegistryCoveredByTableMarkers(readDocTableMarkers(doctored)),
     /po-pool/,
     "a marker relocated into ordinary prose, even reusing the exact same HTML-comment text, must not count as a row marker",
   );
 });
 
 test("#796: readInventoryTableRows throws (never silently passes) if the section heading is missing", () => {
-  const doctored = PLAN_CONTENT.replace(SECTION_HEADING, "### Renamed section, heading text no longer matches");
+  const doctored = ROLE_PARADIGM_CONTENT.replace(SECTION_HEADING, "### Renamed section, heading text no longer matches");
   assert.throws(() => readInventoryTableRows(doctored), /section heading/i);
 });
 
 test("#796: readInventoryTableRows throws (never silently passes) if the section heading is ambiguous (appears more than once)", () => {
-  const doctored = `${PLAN_CONTENT}\n\n${SECTION_HEADING}\n\n(a second copy of the heading text, no real table under it)\n`;
+  const doctored = `${ROLE_PARADIGM_CONTENT}\n\n${SECTION_HEADING}\n\n(a second copy of the heading text, no real table under it)\n`;
   assert.throws(() => readInventoryTableRows(doctored), /appears 2 times|ambiguous/i);
 });
 
 test("#796: readInventoryTableRows throws (never silently passes) if no table header row is found under the section", () => {
-  const doctored = PLAN_CONTENT.replace(TABLE_HEADER_LINE, "| Renamed | Header | Text | Here |");
+  const doctored = ROLE_PARADIGM_CONTENT.replace(TABLE_HEADER_LINE, "| Renamed | Header | Text | Here |");
   assert.throws(() => readInventoryTableRows(doctored), /header row/i);
 });
 
 test("#796: docs/reference/role-paradigm.md's per-role sections cover every write-inventory tableRole", () => {
-  const roleParadigm = readFileSync(join(REPO_ROOT, "docs", "reference", "role-paradigm.md"), "utf8");
+  // ROLE_PARADIGM_CONTENT already holds this same file's content (the write-inventory table
+  // moved here too) — reused rather than re-read.
+  const roleParadigm = ROLE_PARADIGM_CONTENT;
   const expected = new Set(WRITE_INVENTORY_ROLE_SESSIONS.map((e) => e.tableRole));
   for (const tableRole of expected) {
     // Sub-sections are `### <tableRole> (...)`, e.g. `### po-pool (aligning)`, `### harvest

@@ -12,7 +12,7 @@ Run the acceptance set from the repository root: `npm run build && npm run typec
 - Treat every path listed in `docs/security.md` "Human-merge-only paths" as human-merge-only; that list is authoritative — do not paraphrase or narrow its scope.
 - Never run autonomous work unless the guard test suite passes.
 - Never push directly to `main` — branch + PR.
-- Follow Decision 8 in `docs/PLAN.md` "Locked decisions" for dispatch readiness and verification-plan rules.
+- Follow Decision 8 in `docs/PLAN.md` "Constraints (locked decisions)" for dispatch readiness and verification-plan rules.
 - Keep framework code generic: `engine/`, skills, and shipped prompts encode only generic dev-loop mechanics; put deployment-specific behavior in a target repo's own config/prompts, never in the framework core.
 - Never commit development-state artifacts (probe logs, launch scripts, run data, or `.patch` files) to this repo.
 
