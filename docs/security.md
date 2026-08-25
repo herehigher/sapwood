@@ -2608,293 +2608,49 @@ does that.
 
 ## The comment-adjudication cursor
 
-A binding owner ruling recorded as an ISSUE
-COMMENT was once invisible to the worker, which reads only the issue BODY (`{{issue.body}}`,
-`worker.ts`) and faithfully implemented the stale body — 5 P1s resulted in one PR. That body-only boundary
-is correct and stays: the body is maintainer-writable, while public comment entries outside the
-forge provenance filter are not returned. What was missing is a check that the body is CURRENT relative to its
-own comment thread before the engine spends on gate⓪ review or dispatch — adjudications parked in
-comments were a standing trap, closed here.
+Workers are dispatched with the issue BODY only (`{{issue.body}}`, `worker.ts`) — the body is
+maintainer-writable, while a public repo's comment stream is not, so that boundary stays fixed.
+The gap that boundary leaves open is a body that has gone STALE relative to its own comment
+thread: a binding owner ruling posted only as a comment is invisible to a worker, and nothing
+previously stopped gate⓪ review or dispatch from spending against a body that no longer reflects
+it. The comment-adjudication cursor closes that gap on the engine side, before any spend: a
+deterministic, trust-independent staleness gate — pure computation, no LLM in the loop — built
+around one marker in the body, `<!-- sapwood:comments-adjudicated-through: <comment-id> -->`,
+meaning "a maintainer has adjudicated every comment at or before this one" (folded into the body,
+or reviewed-and-nothing-to-fold). The marker identifies a comment by its STREAM POSITION in
+GitHub's oldest-first comment list — never by numeric id order — and may point at any existing
+comment, engine-authored included; cursor `0` denotes the position before the first comment.
+Pure marker parsing and pending-comment computation live in `comment-cursor.ts`; the impure
+fetch/escalate half lives in `comment-cursor-gate.ts`; both are wired into three engine-side
+checkpoints — gate⓪, dispatch, and drive — that run before a worker is ever dispatched and never
+touch what a dispatched worker's own prompt is shown.
 
-The mechanism is a deterministic, trust-independent staleness gate, pure code with no LLM in the
-loop: the issue body carries an adjudication-cursor marker
-`<!-- sapwood:comments-adjudicated-through: <comment-id> -->`, meaning "a maintainer has
-adjudicated every comment at or before this one" (adjudicated = folded into the body, or
-reviewed-and-nothing-to-fold). The marker identifies a concrete comment — **any** comment,
-engine-authored ones included (see below) — by **stream position** in GitHub's oldest-first
-issue-comment stream, never by numeric id ordering: pending comments are the non-engine comments
-occurring after that position in the fetched stream, regardless of whether the target itself is
-an engine or non-engine comment. Cursor `0` denotes the position before the first comment (nothing
-adjudicated yet). A malformed marker, a duplicate marker, or a cursor whose target no longer
-exists all fail closed to needs-attention; a deleted PENDING comment simply supplies no content,
-but a deleted CURSOR TARGET requires a maintainer to reset the cursor to an existing adjudicated
-comment. An issue with no marker and zero comments is the one pass-through case —
-behavior-identical to the mechanism's baseline behavior (no new writes, labels, or outcome changes for that case;
-the checkpoints themselves DO add comment/actor reads on every other case, see below).
+The table below is the mechanism: one row per invariant, the function that enforces it, and the
+test that pins it.
 
-**Position semantics, not a non-engine requirement.** Live evidence — three
-occurrences in one afternoon, including a human operator reproducing the same choice by
-following the recovery-comment wording literally — showed every marker-writing party
-converging on the SAME choice — "the newest comment id" — which an earlier, stricter validator then
-rejected outright whenever that newest comment happened to be engine-authored. The design
-diagnosis: the marker's own documented meaning IS a stream position, so rejecting an
-engine-comment target would contradict the mechanism's own model. The fix ships as ONE unit, in this
-order (relaxing the validator alone, first, would open a silent-adjudication hole — see the next
-subsection):
+| Invariant | Enforcement point | Test |
+| --- | --- | --- |
+| A cursor may target ANY existing comment — engine-authored or not — identified by stream position, never numeric id; pending is every non-engine comment strictly after that position; an absent, duplicate, or non-numeric marker value fails closed, and so does a marker whose target no longer exists in the stream (`cursor-target-not-found`) — distinct from a deleted comment that is merely PENDING, not the target, which simply supplies no content and is not a failure; a body with no marker and zero comments is the one pass-through case (behavior-identical to the mechanism's baseline — no new write/label/outcome for that case; every other case still gets the checkpoints' own comment/actor read). | `comment-cursor.ts::computeCommentCursor` | `comment-cursor.test.ts`: "#703 v2: cursor targeting an engine comment AFTER the last human comment — valid, zero pending" (L182); "malformed marker (non-numeric, not '0'): fails closed" (L74); "duplicate marker: fails closed even when both instances agree" (L171); "cursor targeting a deleted (no-longer-present) comment: fails closed" (L207); "a deleted PENDING comment (not the cursor target) simply no longer supplies content — not a failure" (L218); "no marker, zero comments: ok, cursor 0, nothing pending (AC8 reverse-test shape)" (L27) |
+| No role session may create, move, or delete the adjudication-cursor marker: any marker a role emits is unconditionally stripped from its proposed body, and the current body's own marker (if any) is reattached byte-for-byte — at every role body-write site (verification-plan-reviewer's approve-with-revision, the drafter's own write, PO-triage's redraft, a role-proposed brand-new issue body). | `comment-cursor.ts::applyRoleBodyRewrite`, called from `plan-review.ts` (reviewer + drafter write sites), `align.ts::updateIssueBodyIfUnchanged`, `issue-creation.ts` | `comment-cursor.test.ts`: "applyRoleBodyRewrite (#703a): current body has an existing marker — the applied body carries the ORIGINAL marker byte-for-byte even when the role's own output carries a DIFFERENT (engine-id) marker" (L412); `align.test.ts`: "#703 v2c: a role-proposed NEW issue body carrying a cursor marker has it stripped — and the proposal's OWN terminal marker still lands as the exact trailing suffix" (L1746) |
+| An operator-owned section fence — `<!-- sapwood:operator-owned -->` … `<!-- /sapwood:operator-owned -->` — is recognized the same standalone-line/fence-aware way as the marker, and its bytes (both tag lines, CRLF included) are extracted verbatim; a byte-identical fence that only changed position relative to the rest of the body is not a violation. | `comment-cursor.ts::extractOperatorOwnedFences` / `operatorFenceScanResult` | `comment-cursor.test.ts`: "extractOperatorOwnedFences: byte-for-byte, includes both tag lines, in document order" (L527); "extractOperatorOwnedFences: preserves CRLF bytes internal to a fence — no EOL normalization" (L571) |
+| A role-proposed body that alters, removes, or rewords a single byte inside any well-formed current-body operator-owned fence refuses the ENTIRE write (never a partial repair); every call site escalates needs-human naming the violation rather than silently restoring the operator's text. | `comment-cursor.ts::applyRoleBodyRewrite` (the `missingOperatorFences` check) + call sites `plan-review.ts` (escalates `needs-human` with `operator-fence-violated` + `plan-review-escalated` events), `align.ts::updateIssueBodyIfUnchanged` (refuses the write, appends `operator-fence-violated`), `issue-creation.ts` (an empty current body carries no fence to violate by construction) | `comment-cursor.test.ts`: "#827: a role-proposed body that alters a byte inside an operator-owned fence is rejected, naming the violation" (L465); `plan-review.test.ts`: "#827: a drafter-proposed body that REWORDS text inside the operator-owned fence is refused end-to-end — needs-human, no write lands, the event names the violation" (L446); `align.test.ts`: "#827: a po-triage redraft that alters bytes inside an operator-owned fence is REFUSED entirely — no updateIssueBody call, an operator-fence-violated event names the violation" (L1645) |
+| Same function, three edge cases: an unclosed current-body fence opener refuses the whole write outright rather than reading as "no fence exists"; the byte comparison is CRLF-sensitive, so an edit that changes only a fence's line-ending bytes still counts as a violation; a role-introduced fence tag (forged, or a bare unmatched attempt) is stripped — its line removed, its inner content left untouched — rather than ever being accepted as authoritative. | `comment-cursor.ts::applyRoleBodyRewrite` (`operatorFenceScanResult().malformed`; `splitOperatorFenceLines`'s raw-slice comparison; `stripUnpreservedOperatorFenceTags`) | `comment-cursor.test.ts`: "applyRoleBodyRewrite (P1a, mutation-kill target): a malformed opener in the CURRENT body refuses the ENTIRE write outright" (L558); "applyRoleBodyRewrite (P1b, mutation-kill target): a role edit that changes ONLY the fence's line-ending bytes (CRLF -> LF) is rejected" (L578); "applyRoleBodyRewrite (P2, mutation-kill target): a role-forged fence ... has its tag lines STRIPPED, its inner content KEPT" (L598); `align.test.ts`: "(P1a, gate② round 1 fix): the CURRENT body carries a MALFORMED (unclosed) operator-owned fence — the po-triage WRITE is REFUSED entirely" (L1676) |
+| The operator-owned fence's open tag is excluded, by name, from the generic reserved-namespace marked-mode scan that `extractAcceptanceCriteria`/`extractVerificationPlan`/`extractVerificationSection` share, so its presence never poisons an otherwise-ordinary legacy-heading AC/Verification section into a false "planless" read. | `forge.ts::associateMarkedSections` (`marker[1] !== "operator-owned"`) | `forge.test.ts`: "#827: an operator-owned fence coexisting with a LEGACY (unanchored) verification plan does not poison extraction — 'sapwood:operator-owned' is excluded from the generic reserved-namespace anchor scan" (L1434); "#827: an operator-owned fence coexisting with a real ac/verification MARKED-MODE body still extracts normally" (L1456) |
+| PO-triage body normalization happens exactly ONCE, inside the write call, against a fresh live-body read taken immediately before it — for both a fresh decision's first write and a crash-resumed (journal-replayed) decision's write, since both funnel through the same call. The write-ahead journal itself stores the role's raw, un-normalized text; "whatever marker is live at write time wins" regardless of which engine version produced the journal record. | `align.ts::updateIssueBodyIfUnchanged` | `align.test.ts`: "#703 v2, gate② P1-1 — the live finding's own shape): a journaled PRE-v2-shaped triage decision with an embedded engine-id marker, replayed after a deploy, never writes the journaled marker — the write carries the LIVE body's marker instead" (L1549) |
+| When the current body's OWN marker state is already invalid (duplicate or malformed — a human can leave it this way directly, independent of any role), the role write is refused entirely — never "repaired" by picking a value or dropping the broken marker, which would be the engine making a human-owned adjudication call on the human's behalf. | `comment-cursor.ts::checkMarkerWritePrecondition`, consumed for free by gate⓪'s pre-existing freshness checkpoint and called explicitly by `align.ts::updateIssueBodyIfUnchanged` | `comment-cursor.test.ts`: "checkMarkerWritePrecondition: a malformed marker value refuses (never repaired) — reason 'malformed-marker'" (L840); "checkMarkerWritePrecondition: more than one marker line refuses — reason 'duplicate-marker'" (L846); `align.test.ts`: "#703 v2, refusal arm): the CURRENT body already carries a DUPLICATE cursor marker — the po-triage WRITE is REFUSED entirely" (L1702) |
+| The final pre-write check on gate⓪'s two write sites is a SYNCHRONOUS string compare, with no I/O of any kind between the last read and the write (`getIssueBody` → `checkBodyDrift` → `updateIssueBody`) — closing the async gap an earlier version left open by re-running the full comment/actor fetch as its own "final" check. On drift, the write never happens. | `comment-cursor-gate.ts::checkBodyDrift`, called at `plan-review.ts`'s pre-apply and pre-drafter-write sites | `comment-cursor-gate.test.ts`: "checkBodyDrift: a marker-only advance (no other byte changed) STILL counts as drift — #703's write-time guard must not be defeated by #752's AC-authority normalization" (L145); `plan-review.test.ts`: "#652 round 1, finding 2): a LATE COMMENT arriving during the drafter session discards its output — never written via updateIssueBody" (L1616) |
+| A marker counts only when, after trimming, it is the ENTIRE line, and never inside a fenced code block — an inline/quoted example never registers. Within that anchor, ANY payload between the colon and `-->` (blank, whitespace-only, or multi-token) is recognized as a marker ATTEMPT, never silently read as "no marker at all", so a malformed attempt fails closed instead of being mistaken for absent. | `comment-cursor.ts::scanStandaloneMarkerLines` | `comment-cursor.test.ts`: "marker inside inline-code backticks on its own line: NOT recognized" (L262); "#703 v2 gate② P2-1: a BLANK-value marker attempt (nothing between the colon and -->) fails closed as malformed — never read as 'no marker'" (L87) |
+| A comment is exempt from "pending" status only when it carries the central `ENGINE_COMMENT_MARKER` AND its author matches the authenticated forge actor, resolved once per check — never either alone. An unresolvable actor exempts NO comment (the maximally fail-closed reading). | `forge.ts::ENGINE_COMMENT_MARKER`, consumed by `comment-cursor-gate.ts`'s `fetchCommentStream`/`checkCommentCursorFreshness` via `IForge.getAuthenticatedActor` | `plan-review.test.ts`: "engine-comment exemption requires BOTH the marker and an actor match — marker alone is not enough" (L24); "unresolvable actor (getAuthenticatedActor -> null) exempts NO comment, ever — even a marker-carrying one" (L58) |
+| Any comment anywhere in the fetched stream that carries no id at all fails the whole check closed, naming the STREAM POSITION of the first id-less comment — never a silently-substituted placeholder id that could collide with (or be mistaken for) a real cursor target. | `comment-cursor.ts::computeCommentCursor` | `comment-cursor.test.ts`: "a comment with a null id anywhere in the stream fails closed: comment-id-missing, carrying its stream position" (L381); "an id-less comment that IS an engine comment still fails closed — engine status never exempts the missing-id check" (L401) |
+| Three checkpoints each independently re-check comment-cursor freshness against the exact body a decision was actually computed from, closing the race between candidate selection and the work starting: gate⓪ re-checks before spending on a reviewer/confirm session (using the same read rendered into that session's prompt) and again immediately before applying any reviewer-derived write or the drafter's own write; dispatch claims the issue first, then re-reads the live body and comments inside the existing rollback-on-failure unit, so a comment landing in that window blocks the dispatch and the claim rolls back; drive rechecks immediately after its sibling AC-drift check and again immediately before a fix leg actually spawns, using the AC-snapshotted body (never a fresh re-read, since the sibling drift check already confirmed the live body matches it). A comment or body fetch failure performs NO issue write and propagates through each checkpoint's own existing retry/environment-failure path — network trouble is never turned into a human adjudication. | `plan-review.ts::checkGate0CommentCursor` (checkpoints `gate0-pre-spend`, `gate0-pre-apply`, `gate0-pre-drafter-write`, `gate0-post-confirm`); the DISPATCH loop in `conductor.ts`'s `tick` (inline, inside the claim/rollback block); `conductor.ts::checkAcAuthorityFreshness` (composes `checkAcDriftBeforeDrive` + `checkCommentCursorBeforeDrive`), invoked before `gate.driveOne` (checkpoint `drive`) and again before a fix leg spawns (checkpoint `fix-leg-spawn`) | `conductor.test.ts`: "tick dispatch (#652): a non-engine comment already present when the cursor is missing blocks dispatch — the claim rolls back, needs-human applied, no worker spawned" (L826); "tick DRIVE (#995 AC1b): a NEW comment landing DURING gate.driveOne (no body edit) is caught by the pre-spawn recheck — comment-cursor-stale(checkpoint: fix-leg-spawn), no fix leg spawned" (L1090); `plan-review.test.ts`: "#652 round 1, finding 2): a LATE COMMENT arriving during the drafter session discards its output — never written via updateIssueBody" (L1616) |
+| A confirmed stale/invalid cursor (or, at gate⓪ only, a confirmed body-drift discard, recorded with a distinct `cause` so the two are never conflated) applies the existing needs-human label and posts ONE deduplicated pointer comment naming the pending comment ids and the exact standalone marker line to paste verbatim (comment ids always rendered as backticked raw numbers, never `#N`, which would read as a GitHub cross-reference). Dedup is a live marker scan keyed on the cursor/pending-set identity; the dedup read and the pointer-comment post are themselves contained — a failure there is reported (`posted: false`, `postError`), never thrown past the label write, and every checkpoint's `comment-cursor-stale` event carries the full outcome unconditionally. Separately: when a round dispatches nothing and this round also produced one or more `comment-cursor-stale` events, the round log names the held-back issue(s) — a pure read of already-appended events, no write of any kind, including on the read's own failure path (log-and-continue only). | `comment-cursor-gate.ts::escalateCommentCursorStale` / `buildCommentCursorPointerComment`; `round.ts`'s idle-round empty-pool surfacing block (`eventsAfterId(round.start_event_id, ["comment-cursor-stale"])`) | `comment-cursor-gate.test.ts`: "escalateCommentCursorStale: the SAME cursor/pending set never produces a second comment — dedup via live marker scan" (L176); "escalateCommentCursorStale: a dedup-fetch (getIssueComments) failure is reported, never thrown" (L231); `comment-cursor.test.ts`: "buildCommentCursorPointerComment (#703d v2, strengthened per gate② P2-2): ... '#N' is absent from the ENTIRE rendered comment, for EVERY pending id" (L767); `round.test.ts:667`: "a READ failure in the empty-pool surfacing path is READ-ONLY even on ITS OWN failure — logged only, ZERO new events appended (docs/security.md's 'no write of any kind' claim must hold on the failure path too, not just the success path)" |
 
-1. **Structural role-marker immutability, first.** No role session may move, create, or delete the
-   marker — see "Role-marker immutability" below. Once this lands, no role can ever choose a
-   marker value at all, so only a HUMAN's own deliberate choice can ever place a marker anywhere,
-   engine-authored target included.
-2. **Validator relaxation, in the same change.** `computeCommentCursor` now accepts a cursor
-   pointing at ANY existing comment — engine or non-engine — as a valid position. Pending is
-   computed identically either way: the non-engine comments strictly after the target's stream
-   index. An engine-comment target sitting after the last human comment is therefore fully
-   adjudicated (zero pending); one sitting before a later human comment correctly leaves that
-   comment pending. Every other fail-closed arm (malformed marker, duplicate marker, unknown
-   target, missing comment id, missing marker with pending comments) is unchanged.
-
-**Role-marker immutability.** The marker is PO/human-owned state —
-no role session has standing to move, create, or delete it, regardless of what the role's own
-output (or any prompt/plan_review advice feeding it) claims. Enforced at EVERY point a
-role-produced body is about to become the live one, not by trusting the role's text:
-`applyRoleBodyRewrite` (`comment-cursor.ts`) unconditionally strips any marker the role emitted
-from its proposed body, then reattaches the CURRENT body's marker byte-for-byte (its exact
-original line text) if one exists — or attaches none, if the current body had none. Wired into
-every role body-write site: the verification-plan-reviewer's approve-with-revision and the
-verification-plan-drafter's drafted body (`plan-review.ts`), PO triage's redraft (`align.ts`), and
-a role-proposed BRAND-NEW issue body, which can only ever have its own attempted marker stripped
-(there being no current body to preserve a marker from) without disturbing the terminal proposal
-marker's own position-load-bearing `endsWith` trailer (`issue-creation.ts`).
-
-**Operator-owned section fence.** The adjudication-cursor marker above protects one
-metadata LINE; the operator-owned fence protects an arbitrary BLOCK of body prose — a design
-ruling, ownership note, or other PO testimony a role must never rewrite. In one incident,
-the PO wrote a design ruling into the issue body before Ready promotion, and gate⓪'s
-drafter, refining the body during plan review, REWROTE the ruling's own sentences in place (kept
-the substance, changed the wording) — laundering a defective ruling sentence forward under refined
-phrasing instead of leaving it verbatim for the audit trail. Same "operator-owned bytes a role
-rewrites must preserve verbatim" family as the marker above and other finding markers. A block
-delimited by `<!-- sapwood:operator-owned -->` … `<!-- /sapwood:operator-owned -->` (standalone
-lines, fence-aware exactly like the marker: an inline or fenced-code-quoted example never
-registers as a real boundary) must survive any role-produced body rewrite byte-for-byte, open tag
-through close tag; a role may append content before, between, or after fences freely, it just may
-never change a single byte between an open and its matching close.
-
-**Enforcement point, chosen arm: REJECT (not silent-restore).** `applyRoleBodyRewrite`
-(`comment-cursor.ts`) — the SAME function that carries the marker's own strip-and-restore logic —
-checks fence preservation FIRST, before any marker normalization: `missingOperatorFences` compares
-every operator-owned fence in the current body against the role-proposed body (multiset, byte-for-
-byte) and, if any is missing or altered, the function returns `{ ok: false, reason:
-"operator-fence-violation", detail }` instead of a rewritten body — the ENTIRE role-produced write
-is refused, not just the touched fence. This differs deliberately from the marker's own silent
-strip-and-restore: a fence can hold arbitrary multi-line prose, and silently splicing the
-operator's original text back in would both hide from the role (and from review) that its output
-was rejected, and throw away whatever legitimate, non-conflicting edits shared the same body —
-reject-the-whole-write is the honest failure mode, consistent with the marker's own write-time
-refusal arm (`checkMarkerWritePrecondition`) above. Every `applyRoleBodyRewrite` call site handles
-the refusal: `plan-review.ts`'s two write sites (reviewer approve-with-revision, drafter's drafted
-body) escalate `needs-human` and append both an `operator-fence-violated` event (naming the
-violation) and `plan-review-escalated` (tagged `origin: "operator-fence-violation"` — a healthy,
-working-as-designed catch, never counted toward `round-artifact.ts`'s empty-spin breaker, which
-counts only `origin: "session-failure"`); `align.ts`'s PO-triage `updateIssueBodyIfUnchanged`
-refuses the write (the candidate re-matches next round, same non-repairing stance as its
-`invalid-marker` arm) and appends `operator-fence-violated` naming the violation;
-`issue-creation.ts`'s brand-new-issue call site can never violate this arm — an empty current body
-carries no fence to protect by construction.
-
-Multiset comparison has no notion of position: two byte-identical fences that changed order
-relative to the rest of the body, or relative to each other, are not a violation — moving a fence
-is explicitly allowed (append/move freely, never edit the bytes between open and close).
-
-**Fence-handling edge cases:**
-
-- **A malformed current fence now fails closed, never open.** An unclosed
-  `<!-- sapwood:operator-owned -->` opener in the CURRENT body (a human left a fence open) used to
-  extract no block at all — indistinguishable from "no fence exists" — so the role write proceeded
-  silently and the operator's own testimony went unprotected. `applyRoleBodyRewrite` now checks
-  this FIRST, before the fence-preservation comparison: a malformed current fence refuses the
-  entire write outright (`ok: false, reason: "malformed-operator-fence"`), the same non-repairing,
-  fail-closed stance `checkMarkerWritePrecondition`'s `malformed-marker` arm already takes for the
-  adjudication-cursor marker. Every call site treats it exactly like an `operator-fence-violation`
-  refusal — needs-human escalation with an `operator-fence-violated` event (plan-review.ts) or a
-  logged, skipped write (align.ts's po-triage) — the malformed boundary is never silently "repaired"
-  by treating it as absent.
-- **The byte-for-byte comparison is now CRLF-sensitive.** The fence-extraction/comparison path
-  splits lines on `"\n"` only (never `/\r?\n/`) and reads a fenced block's bytes as a raw substring
-  of the original body between two line offsets — never by rejoining an array of lines with a
-  literal `"\n"`. A role that changes only a fence's line-ending bytes (CRLF to LF, or the reverse)
-  now fails the comparison like any other byte change; before this fix, both bodies were normalized
-  to LF before comparing, so an EOL-only edit inside a fence passed as "byte-for-byte identical."
-  Recognizing a fence-tag line still trims (a trailing `\r` never defeats recognition) — only the
-  COMPARISON is raw.
-- **A role-introduced fence tag is stripped, not accepted.** Nothing previously stopped a role from
-  writing its OWN `<!-- sapwood:operator-owned -->` / `<!-- /sapwood:operator-owned -->` pair (or a
-  bare, unmatched attempt) into its proposed body — which would then read as genuine operator
-  authority forever after, including at brand-new issue creation, where the current body is always
-  empty and so nothing was ever "missing" to violate. `applyRoleBodyRewrite` now strips any such
-  role-authored tag LINE that is not part of an already-verified, preserved current fence — the
-  tag line is removed, the content between a forged open/close pair is left in place untouched, the
-  same "strip the role's own attempt, never trust its shape" stance the adjudication-cursor marker
-  already takes on a role-authored marker line. This runs unconditionally, including when the
-  current body carries no fence at all — `issue-creation.ts`'s brand-new-issue call site now
-  strips any fence tags a role's proposed body invents, rather than accepting them as authoritative
-  by construction.
-
-**Interaction with AC/verification-section extraction.** The generic reserved-namespace anchor
-scan `associateMarkedSections` (`forge.ts`) — the ac/verification "marked-mode" parser
-`extractAcceptanceCriteria`/`extractVerificationPlan`/`extractVerificationSection` share — treats
-ANY standalone `<!-- sapwood:<token> -->` line as an attempt to enter marked mode, deliberately
-failing closed (`null`, planless) on any token that isn't exactly `ac` or `verification`, so a
-near-miss or future protocol token never silently falls back to legacy heading parsing. The
-operator-owned fence's open tag is carved out of that scan by name (`marker[1] !==
-"operator-owned"`): without the exception, ANY issue body carrying an operator-owned fence would
-read as planless even when a perfectly ordinary legacy-heading Verification/Acceptance-criteria
-section sits right beside it — the fence's own close tag never collides in the first place (it
-starts `<!-- /sapwood:...`, not `<!-- sapwood:...`, so the anchor regex never matches it at all).
-
-**Normalization happens exactly ONCE, at the WRITE boundary — never pre-persisted into a journal.**
-PO triage's `updateIssueBodyIfUnchanged` (`align.ts`) is the
-ONE place a triage body-write is normalized, applied against a FRESH live-body read taken
-immediately before the actual `forge.updateIssueBody` call — for BOTH a fresh decision's first
-write AND a crash-RESUMED (journal-replayed) decision's write, since both funnel through this
-single call site. The `triage-decision-accepted` write-ahead journal event therefore carries the
-RAW role-produced text verbatim (never pre-normalized) — deliberately NOT versioned (pre-v1's
-no-migration doctrine): a `triage-decision-accepted` record persisted by an earlier engine version and
-resumed after a mid-round deploy upgrade (`triageProgress` only ever replays WITHIN the same
-`round_id`, so this is a same-round crash-resume, not a cross-round replay) is normalized against
-whatever marker is live RIGHT NOW at write time, exactly like a fresh decision — "whatever marker
-is live at write time wins" holds regardless of which engine version produced the journal record.
-Idempotent by construction: re-normalizing an ALREADY-normalized live body against the same role
-text reproduces that body byte-for-byte, so a genuine crash-resume where the write already landed
-still hits the pre-existing `current === newBody` short-circuit — resume-safety is
-unaffected. If the live body has moved on since a (possibly pre-deploy) session read it, the
-pre-existing concurrent-edit hash guard refuses the write outright, exactly like an ordinary
-concurrent edit — never a blind overwrite, and never the journaled marker either.
-
-**The refusal arm.** When the CURRENT body's own marker state is already invalid — a human can
-leave a body duplicate-marked or malformed directly, independent of any role — the role write is
-REFUSED entirely, never "repaired" by silently picking a value or dropping the broken marker(s):
-that would be the engine making a human-owned adjudication call on the human's behalf. Both
-`plan-review.ts` write sites get this for free from the pre-existing gate⓪ freshness checkpoint
-(which already fails the malformed-marker/duplicate-marker arms before any write is reached);
-`align.ts`'s PO-triage site, which has no equivalent checkpoint of its own, checks
-`checkMarkerWritePrecondition` at the SAME write boundary as its normalization (inside
-`updateIssueBodyIfUnchanged`) and refuses the write (the candidate re-matches next round; the
-decision may already be write-ahead accepted, but that accepted text never
-reaches GitHub) on failure.
-
-**The write-boundary race.** `plan-review.ts`'s two write sites
-re-read the live body a SECOND time, immediately before the actual `forge.updateIssueBody` call —
-closing the gap between the moment the first body snapshot is taken and the moment the EARLIER
-gate⓪ checkpoint's own async comment/actor fetch resolves. An earlier version of this fix re-ran the full
-async `checkGate0CommentCursor` as that second check — which itself performs a comment/actor fetch
-whenever no drift is found, reopening the IDENTICAL race one level later. The FINAL check is now SYNCHRONOUS —
-a pure `checkBodyDrift` string compare, no comment/actor fetch at all — so the write site's call
-sequence is exactly `getIssueBody` → `checkBodyDrift` → `updateIssueBody`, with no I/O of any kind
-between the last read and the write. A human editing the marker (or anything else) up to and
-including that final read is caught; from that read onward there is no remaining async window to
-land an edit into. On drift, the write never happens — the same needs-human/pointer-comment
-escalation the async checkpoints use, invoked directly rather than through a second full
-`checkGate0CommentCursor` pass.
-
-**Marker recognition is standalone-line anchored — and ATTEMPT recognition is
-broader than valid-VALUE parsing.** A marker counts only when it is the
-ENTIRE trimmed line, and never when that line falls inside a fenced (` ``` `/`~~~`) code block.
-Quoting the syntax for a maintainer's benefit is always safe and never mistaken for an
-authoritative marker: wrapping the marker in single backticks (inline code), leaving prose on the
-same line, or placing it inside a fenced block all parse as ordinary text, not a cursor. Only a
-bare marker, alone on its own trimmed line and outside any fence, is honored. Within that
-standalone-line/fence-aware anchor, however, ANY payload between the colon and `-->` — including
-blank, whitespace-only, or multi-token text — is recognized as a marker ATTEMPT, not silently read
-as "no marker at all": the payload is then trimmed and validated exactly like a single-token
-value, so a malformed attempt fails closed as `malformed-marker` (refusing a role write via
-`checkMarkerWritePrecondition`/the gate⓪ checkpoint, same as any other invalid marker) instead of
-being misread as an absent marker — and a role's own malformed attempt is always stripped by
-`applyRoleBodyRewrite`, since it is now always recognized as an attempt in the first place, whether
-or not its payload would ever have validated.
-
-**Engine-comment exemption is marker AND actor, never either alone.** A comment is exempt from
-"pending" status only when it carries the central `ENGINE_COMMENT_MARKER` (`forge.ts`) AND its
-author matches the authenticated forge actor, resolved once per check
-(`IForge.getAuthenticatedActor`). An unresolvable actor exempts NO comment — the maximally
-fail-closed reading, never inferred from body content alone.
-
-**A missing comment id fails the whole check closed.** If any comment in the fetched stream
-carries no id at all (a forge-read anomaly), the cursor cannot be evaluated against an incomplete
-stream — the check fails closed with the STREAM POSITION of the first id-less comment, never a
-silently-substituted placeholder id that could accidentally collide with (or be mistaken for) a
-real cursor target.
-
-**Checkpoints cover the race between candidate selection and the work actually starting, each
-checking BOTH comment-cursor freshness and whether the live body still matches the body
-a session was actually given:**
-
-1. **Gate⓪** (`plan-review.ts`) checks freshness before spending on a verification-plan-reviewer
-   (or confirm) session — that exact read (never a second, separately-fetched one) is what gets
-   rendered into the session's prompt. It rechecks immediately before applying ANY
-   reviewer-derived body or label write, AND immediately before the drafter's own body
-   write — a pending comment OR a direct body edit landing WHILE a session ran discards that
-   cycle's decision (or the drafter's draft) without applying it, approve/verify_na/draft_request/
-   needs_human alike, never partially.
-2. **Dispatch** (`conductor.ts`'s DISPATCH loop) claims the issue first, then re-reads the live
-   body followed by comments **inside the existing rollback-on-failure unit** — the refreshed
-   body (never the pre-claim `getReadyIssues` body) is what the AC snapshot and the worker prompt
-   both use from that point on. A comment landing in the window between candidate selection and
-   the claim blocks the dispatch and the claim rolls back, exactly like a launch failure always
-   has.
-3. **Drive** (`conductor.ts`, immediately after `checkAcDriftBeforeDrive` and still before
-   `gate.driveOne`) rechecks comment freshness using the cursor embedded in the AC-snapshotted
-   body — never a fresh live body re-read, since the sibling drift check just confirmed the live
-   body still matches that snapshot. A comment arriving while the worker runs escalates exactly
-   like an ordinary AC-snapshot body drift.
-
-**Degrade is the existing needs-human machinery, no new machinery.** A confirmed stale/invalid
-cursor — or (gate⓪ only) a confirmed body-drift discard, recorded with a distinct event
-`cause` so the two are never conflated — applies the existing `needsHuman` label and posts ONE
-deduplicated engine comment listing the bounded pending comment ids and the recovery steps. **The
-recovery text is a copy-paste instruction — fixing a wording trap that once led a human
-operator to reproduce the same mistake by following the text literally:** it names the EXACT
-standalone marker line to paste verbatim — `<!-- sapwood:comments-adjudicated-through: N -->` —
-where `N` is `pending.at(-1) ?? "0"` (the newest non-engine comment currently on the issue, or `0`
-when none exist). Comment ids are rendered as backticked RAW numbers — `` `N` `` — EVERYWHERE in
-this comment, not only the accepted-marker sentence: the pending-id listing itself renders the
-same way — an earlier build once rendered that list as `#10, #20` instead, a gap the
-narrower original test (checking only the accepted-marker line) missed. Never `#N` anywhere
-(which reads as a GitHub cross-reference, not a comment id). The duplicate-marker case adds an
-explicit instruction to remove every OTHER `sapwood:comments-adjudicated-through` line and keep
-exactly the one shown. `comment-id-missing` gets its own honest text with NO suggested marker
-target at all — it is a forge-READ failure (some comment in the stream came back with no id), not
-a marker problem, so offering a target would be
-dishonest while the stream itself is incomplete; the recovery is to retry the read. A body-drift
-discard names only the label removal — there is no cursor/marker action for it. Dedup is a live
-marker scan keyed on the cursor/pending-set identity — the same comment/pending combination never
-produces a second pointer comment, a genuinely new pending comment gets its own fresh post, and
-(round 1) a cursor corrected from one still-invalid target to another (e.g. a marker re-pointed
-from a deleted comment to a DIFFERENT deleted comment) dedupes distinctly rather than being
-silently suppressed by the earlier target's key. The dedup read and the pointer-comment post are
-themselves CONTAINED: a failure there
-is reported in the outcome (`posted: false`, `postError`), never thrown past the label write —
-every checkpoint's durable `comment-cursor-stale` event is UNCONDITIONAL, carrying the full
-label/post outcome in its payload, so a dedup-fetch or post failure can no longer strand an issue
-labeled `needs-human` with neither a pointer comment nor a durable event to explain it.
-
-A comment or body fetch failure performs NO issue write at all and propagates through each
-checkpoint's own existing retry/environment-failure path (dispatch's rollback-on-failure catch,
-drive's queued-and-retried-next-tick stance, gate⓪'s ordinary thrown-error propagation) — network
-trouble must never turn a candidate into a human adjudication.
-
-**Surfacing when the runnable pool goes empty — deliberately minimal: no new hold
-state, no new label, no new event kind.** When a round dispatches nothing AND this round also
-produced one or more `comment-cursor-stale` events, `round.ts` reads those already-appended events
-back over the round's own event window and logs which issue(s) are held back — `"awaiting human on
-#N[, #M]"` (`#N` here is a genuine GitHub issue-number cross-reference, unlike the comment-id
-wording constraint above) — so standby/idle-churn reporting distinguishes "genuinely nothing to
-do" from "work exists, a human needs to act." Purely a read of existing events into a log line; no
-write of any kind — including on the read's OWN failure path (an earlier build
-appended a `tick-error` event when this diagnostic read itself failed, contradicting this exact
-"no write" claim and perturbing idle-churn's own state fingerprint, which is computed over the
-same event window; fixed to log-and-continue only, an in-memory `tickErrors` counter unaffected).
+Two rows above are not independent design choices: row 1's validator relaxation (a cursor may
+target an engine-authored comment) shipped in the SAME change as row 2's role-marker immutability,
+never the relaxation alone — relaxing the validator first would let a role silently
+self-adjudicate past real human comments by choosing an engine-comment id positioned after them.
+Rows 3–5 are likewise one function (`applyRoleBodyRewrite`) enforcing three distinct properties of
+the same operator-owned fence, not three separate mechanisms.
 
 **Rollout is a one-time backfill, not a migration.** The gate only ever blocks an issue that
 already carries comments as it approaches gate⓪/dispatch — there is no new CLI, no migration
