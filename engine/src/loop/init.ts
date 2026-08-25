@@ -100,7 +100,7 @@ export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
     { name: l.inProgress, color: "0e8a16", description: "sapwood has claimed this issue and is working on it" },
     // #397: every escalation-tier description answers the same three questions a human staring at
     // the label needs — WHO writes it / WHAT the human must do / WHAT removing it does — inside
-    // GitHub's 100-char description limit, and identical to the row in docs/configuration.md
+    // GitHub's 100-char description limit, and identical to the row in docs/guide/configuration.md
     // (init.test.ts pairs them, the same check #400 introduced for `hold`).
     { name: l.needsHuman, color: "5319e7", description: "sapwood has stopped and is waiting on a human decision; remove to resume" },
     { name: l.blocked, color: "5319e7", description: "sapwood or a human blocked this on something external; remove once it's resolved" },
@@ -132,7 +132,7 @@ export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
     // #399: the PR-side lane-state mirror. The description answers the same three questions every
     // escalation-tier description does — WHO writes it / WHAT it means / WHAT removal does — and
     // the answer to the third is "nothing you need to do": the engine removes it itself when the
-    // lane ends. Identical to the row in docs/configuration.md (the #397/#400 pairing check).
+    // lane ends. Identical to the row in docs/guide/configuration.md (the #397/#400 pairing check).
     {
       name: l.laneState,
       color: "0e8a16",
@@ -171,7 +171,7 @@ export function requiredLabels(cfg: SapwoodConfig): LabelSpec[] {
     if (haveNames.has(key)) continue;
     haveNames.add(key);
     // #400: the description carries the whole contract — purpose, carrier, what removal does, and
-    // that an issue is NOT a carrier. Kept identical in docs/configuration.md (init.test.ts pairs
+    // that an issue is NOT a carrier. Kept identical in docs/guide/configuration.md (init.test.ts pairs
     // them) and inside GitHub's 100-char label-description limit.
     holdSpecs.push({
       name,

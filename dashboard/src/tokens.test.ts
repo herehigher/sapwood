@@ -94,7 +94,7 @@ test("--bark is borders-only: it is deliberately not in the text set", () => {
 });
 
 test("#728: the #144/#145 display-header font-token deviation is adjudicated in §5, matching the shipped face", () => {
-  const doc = readFileSync(new URL("../../docs/frontend-design.md", import.meta.url), "utf8");
+  const doc = readFileSync(new URL("../../docs/reference/frontend-design.md", import.meta.url), "utf8");
   assert.match(doc, /#144/);
   assert.match(doc, /#145/);
   assert.match(doc, /Fraunces/);

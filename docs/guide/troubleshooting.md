@@ -9,16 +9,16 @@ replace it.
 
 - **Stop everything:** [Kill switch](supervision.md#stop-ritual) · [Emergency
   stop](supervision.md#stop-ritual) · [Human controls (three
-  tiers)](security.md#human-controls-three-tiers)
+  tiers)](../security.md#human-controls-three-tiers)
 - **Stop new dispatch only:** [Pause](supervision.md#stop-ritual) · [Human controls
-  (three tiers)](security.md#human-controls-three-tiers)
+  (three tiers)](../security.md#human-controls-three-tiers)
 - **A lane looks stuck:** [Stale heartbeat reclaim (and restart
   adoption)](#stale-heartbeat-reclaim-and-restart-adoption) · [Interpretation
   pointers](supervision.md#interpretation-pointers)
 - **Crashed mid-round:** [Startup residue after a crash or quota
   storm](#startup-residue-after-a-crash-or-quota-storm)
 - **I want to change direction:** Pause stops only new dispatch; an in-flight lane runs to completion unless stopped with the [Kill switch](supervision.md#stop-ritual).
-  Editing it yields body-hash `needs-human`; follow [Human controls (three tiers)](security.md#human-controls-three-tiers) and [Ready issue never dispatches](#ready-issue-never-dispatches) for re-adjudication and gated re-entry (no redirect).
+  Editing it yields body-hash `needs-human`; follow [Human controls (three tiers)](../security.md#human-controls-three-tiers) and [Ready issue never dispatches](#ready-issue-never-dispatches) for re-adjudication and gated re-entry (no redirect).
 
 ## Ready issue never dispatches
 
@@ -360,7 +360,7 @@ autonomous dispatch (the same park machinery as an environment failure — visib
 without dispatching.
 
 Recovery: stop whatever is restarting the engine (usually a supervisor without its own
-restart limit — configure one; see [security.md](security.md)'s supervisor
+restart limit — configure one; see [security.md](../security.md)'s supervisor
 prerequisite), fix the crash's cause, and start the engine once the window has drained
 — a start that counts fewer than `maxBirths` births clears the park automatically
 (`park-resumed`, `via: restart-window-clear`). No state surgery is needed;
@@ -764,6 +764,6 @@ the default branch's checks (it fails closed to "not red" rather than guessing) 
 
 ## See also
 
-- [`security.md`](security.md) — the guard, human controls, and escalation model
+- [`security.md`](../security.md) — the guard, human controls, and escalation model
   behind several of the behaviors above.
 - [`configuration.md`](configuration.md) — every config key referenced above.

@@ -289,7 +289,7 @@ const STOP_CONTROL_BLOCK: string[] = [
   "sapwood estop --config sapwood.config.yaml --confirm",
   "sapwood stop --config sapwood.config.yaml",
   // node-from-source indirection (dist and src forms — the exact invocation shape
-  // commands/sapwood-status.md and docs/getting-started.md Channel A instructions use)
+  // commands/sapwood-status.md and docs/guide/getting-started.md Channel A instructions use)
   "node engine/dist/cli.js pause",
   "node engine/dist/cli.js estop --confirm",
   "node --import tsx engine/src/cli.ts stop",

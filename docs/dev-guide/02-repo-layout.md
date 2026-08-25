@@ -59,15 +59,15 @@ preserving the target repository as cwd. `commands/sapwood-stop.md` manages
 | Document | Audience |
 | --- | --- |
 | `README.md` | Product overview, requirements, architecture, roadmap, and links. |
-| `docs/getting-started.md` | Operators installing and starting sapwood. |
-| `docs/configuration.md` | Operators configuring all supported keys. |
+| `docs/guide/getting-started.md` | Operators installing and starting sapwood. |
+| `docs/guide/configuration.md` | Operators configuring all supported keys. |
 | `docs/security.md` | Operators and reviewers evaluating trust boundaries and controls. |
-| `docs/role-paradigm.md` | Designers and implementers of autonomous roles. |
+| `docs/reference/role-paradigm.md` | Designers and implementers of autonomous roles. |
 | `docs/PLAN.md` | Architecture, durable decisions, and planned capabilities. |
-| `docs/loop-walkthrough-v0.2.md` | Behavioral reference for round, tick, state, and UI truth. |
-| `docs/frontend-design.md` | Dashboard design; implementation is not present. |
-| `docs/round-artifact.md` | Round artifact contract and interpretation. |
-| `docs/troubleshooting.md` | Operator diagnosis and recovery. |
+| `docs/reference/loop-walkthrough.md` | Behavioral reference for round, tick, state, and UI truth. |
+| `docs/reference/frontend-design.md` | Dashboard design spec (built; see [07](07-dashboard.md)). |
+| `docs/reference/round-artifact.md` | Round artifact contract and interpretation. |
+| `docs/guide/troubleshooting.md` | Operator diagnosis and recovery. |
 | `docs/dev-guide/` | Contributors changing the repository. |
 
 ## Where to find X

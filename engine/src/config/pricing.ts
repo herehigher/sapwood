@@ -19,7 +19,7 @@
 // WorkerSupervisor construction (and by `sapwood validate`), never per tick.
 //
 // #155: each model entry also carries `contextWindow` (tokens) — the dashboard's context-usage
-// gauge denominator (docs/frontend-design.md §8). Same file, same fail-closed rule as the USD
+// gauge denominator (docs/reference/frontend-design.md §8). Same file, same fail-closed rule as the USD
 // rates: a model missing it fails the whole load, exactly like one missing a rate field.
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -47,7 +47,7 @@ const Rate = z
      *  prematurely, even though a cache read costs roughly a tenth of a fresh input token. */
     cacheRead: z.number().finite().positive(),
     /** #155: the model's total context window, in tokens — the denominator for the dashboard's
-     *  context-usage % gauge (docs/frontend-design.md §8). Same hand-maintained-snapshot pattern
+     *  context-usage % gauge (docs/reference/frontend-design.md §8). Same hand-maintained-snapshot pattern
      *  as the USD rates above (this file's header), and the SAME fail-closed load rule: a model
      *  entry missing `contextWindow` fails PricingFile's `.strict()` parse exactly like one
      *  missing a rate field — loadPricingTable throws, naming the file, never a silent fallback. */

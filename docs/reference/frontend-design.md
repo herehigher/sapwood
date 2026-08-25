@@ -2,7 +2,7 @@
 
 Design specification for the v0.2 dashboard (issue #17). This document owns the
 *frontend* decisions: product scope, information architecture, visual identity,
-motion, copy, and the data contract the UI consumes. [`PLAN.md`](PLAN.md)'s v0.2
+motion, copy, and the data contract the UI consumes. [`PLAN.md`](../PLAN.md)'s v0.2
 chapter owns the *why* and the dogfood/recording plan; it references this file
 and duplicates nothing from it.
 
@@ -1348,7 +1348,7 @@ and an `eventCount` for the transport's "event n/N". Ascending:
                                  // replay's exact chapter windows (§11); they are
                                  // NOT artifact fields, the server joins them in
                "artifact": { /* the validated JSON, verbatim —
-                                docs/round-artifact.md is the contract; the UI
+                                docs/reference/round-artifact.md is the contract; the UI
                                 checks schemaVersion and says "newer schema —
                                 update the dashboard" rather than mis-render */ } }] }
 ```
@@ -1441,7 +1441,7 @@ through a pathname→method route table. There is no CLI entry point yet — unt
 
 Security posture (loopback-only, no auth boundary, raw event feed) is
 documented in [`docs/security.md` "Dashboard: loopback bind, not an auth
-boundary"](security.md#dashboard-loopback-bind-not-an-auth-boundary) — that
+boundary"](../security.md#dashboard-loopback-bind-not-an-auth-boundary) — that
 page, not this one, is the canonical statement of the boundary.
 
 Wire details the frontend can rely on:
@@ -1700,7 +1700,7 @@ the overlay is the named boundary.
    lane slot recycled at the same path can be retained, and resolve, again.
 5. **`dashboard.controls` config key** (#210, round-2 amendment) —
    **LANDED** — boolean, default `true`, in the strict config schema
-  (`docs/configuration.md`); gates the §3 Operations verbs, the §8
+  (`docs/guide/configuration.md`); gates the §3 Operations verbs, the §8
   `POST /api/control` and `POST /api/attention/dismiss` routes, and their
   controls. `false` = pure-spectator dashboard. Schema
    only: the dashboard reads it, the engine does not.

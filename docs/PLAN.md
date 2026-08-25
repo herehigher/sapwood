@@ -16,6 +16,16 @@ Copilot Workspace, Claude's own `/loop`) ships. We lead with that.
 sapwood ships the generic method — the dev-loop mechanics, not application-specific
 behavior tied to any one team's workflow.
 
+## Current milestone
+
+M0–M4 are **delivered and closed** (see "Build sequencing" below for the full
+per-milestone record). **v0.2 — the round orchestrator + dashboard — is the only open
+milestone**: peripheral roles, round summaries, and the dashboard are built and
+shipping inside the npm package; the release chain (marketplace catalog, publish
+gating) is in progress. See "[v0.2 north star: the round orchestrator](#v02-north-star-the-round-orchestrator)"
+below for the detailed design, and [CHANGELOG.md](../CHANGELOG.md) "Unreleased" for a
+fine-grained view of recent work.
+
 ## Positioning & vision
 
 - **Headline:** "the autonomous coding loop with governance built in" — a
@@ -29,7 +39,8 @@ behavior tied to any one team's workflow.
   where issue authors are trusted.
 - **Long-term arc:** evolve into a **governance layer for AI-led development** —
   pluggable forge (GitLab/Gitea), pluggable reviewer, public-repo hardening
-  (untrusted-input safe), a real supervisor, and eventually a dashboard. The forge
+  (untrusted-input safe), and a real supervisor (the dashboard is already built and
+  shipping — see "Current milestone" above). The forge
   goal is deliberately scoped: v1 isolates GitHub calls, but its board, review,
   check-ownership, search, relation, and sub-issue semantics are GitHub-shaped. A
   second forge reuses the portable subset and semantically ports the rest; it is
@@ -642,7 +653,7 @@ says stop.
   suppression). See "Gate ordering" below. The shipped label description states the whole
   contract, so no reader has to consult this document to use it: *"A human is reviewing this PR —
   automation pauses; remove to resume. No effect on issues."* (identical in `loop/init.ts`'s
-  `requiredLabels` and `docs/configuration.md`, paired by a test).
+  `requiredLabels` and `docs/guide/configuration.md`, paired by a test).
 
   **Exact match, not substring (review round 1, G3).** Unlike `escalation.humanLabels` (matched
   by substring — historical, unchanged, its own accepted footgun), a hold label is a configured
@@ -800,7 +811,7 @@ only reads of `shadow` were as `enabled && !shadow`, which collapses to `enabled
 the middle state is gone — there was never anything state 2 provided that
 `enabled: false` didn't equally provide. Production ships attached by default; opting
 out is a deliberate config change, not the shipped default. The criterion drove the
-*design*; see [`configuration.md`](configuration.md#proxy) for the full two-state
+*design*; see [`configuration.md`](guide/configuration.md#proxy) for the full two-state
 contract. The same
 2026-07-17 M8 round cut two further
 mechanism issues from this posture: #213 (one batched architect session — explicit
@@ -1025,7 +1036,7 @@ principle exists to catch.
 
 For the full per-role contract behind this table (responsibility, write-scope tier,
 marker idempotency, output schema, escalation path) see
-[`docs/role-paradigm.md`](role-paradigm.md).
+[`docs/reference/role-paradigm.md`](reference/role-paradigm.md).
 
 ## Onboarding / DX (v1)
 
@@ -1222,8 +1233,8 @@ marker idempotency, output schema, escalation path) see
   SQLite table: issues merged and PRs opened (a lane's first reclaim into `driving`, the
   earliest point the engine can see a PR exists) both come straight off `TickResult`;
   milestone completion is one small `IForge.countOpenIssuesInMilestone` read per tick.
-  **Docs set delivered (#16):** `docs/getting-started.md`, `docs/configuration.md`,
-  `docs/security.md`, `docs/troubleshooting.md`, plus a plugin-facing
+  **Docs set delivered (#16):** `docs/guide/getting-started.md`, `docs/guide/configuration.md`,
+  `docs/security.md`, `docs/guide/troubleshooting.md`, plus a plugin-facing
   `.claude-plugin/CLAUDE.md` for a calling model, and the `origin:agent` label
   (provisioned by `init`, see the v0.2 chapter and `docs/security.md` for what it's
   for). Guard defense-in-depth for the `data/KILL_SWITCH` / `data/PAUSE` sentinel write
@@ -1269,7 +1280,7 @@ marker idempotency, output schema, escalation path) see
   sensitive files, the human-merge-only rule for guard/hook/reviewer/security config
   (see Security model) stays in force during this dogfood. The frontend itself —
   scope decisions, information architecture, visual identity, motion/copy specs,
-  and the API data contract — is specified in [`frontend-design.md`](frontend-design.md).
+  and the API data contract — is specified in [`frontend-design.md`](reference/frontend-design.md).
   **② Round orchestrator (#86–#91, wired #104),** cut from the locked design in the
   v0.2 chapter below: the round ledger + round-loop skeleton — two-level termination,
   rerun-not-resume (#86); the peripheral role runner — issues+docs write scope,
@@ -1312,7 +1323,7 @@ marker idempotency, output schema, escalation path) see
   `cfg.goal.file` every consumer reads (hard error if both are set and disagree; one
   deprecation line if only the old key is set). `sapwood init` scaffolds a starter
   template at the resolved path **iff it's missing** — the onboarding step for a repo
-  with no `PLAN.md` yet (see [`configuration.md`](configuration.md#goal)).
+  with no `PLAN.md` yet (see [`configuration.md`](guide/configuration.md#goal)).
 
   **M6 review-knowledge + environment resilience (2026-07-14):** `#167` shipped the
   repo-level **review doctrine** (`doctrine.file`, default `docs/REVIEW-DOCTRINE.md`,
@@ -1732,7 +1743,7 @@ to when v0.2 implementation issues are cut, not locked here.
   machinery) and trusted-repos-first; a keyword-match dup warning at the gate would fire on
   unrelated issues sharing vocabulary, and a warning humans learn to ignore costs more than
   the duplicate. Stated for users in
-  [`getting-started.md`](getting-started.md#what-the-ready-gate-does-not-check-duplicates).
+  [`getting-started.md`](guide/getting-started.md#what-the-ready-gate-does-not-check-duplicates).
   Revisit only if a real run is actually bitten.
 - **Comment-carried design guidance has no worker carrier (accepted-for-now, watch):**
   guidance left only in an issue/PR comment — an architect design note, a PO/human review
@@ -1745,6 +1756,14 @@ to when v0.2 implementation issues are cut, not locked here.
   (Decision #11), so a real fix is engine-side (fold guidance into the body, or an
   engine-computed prompt block). Same accept-and-document stance as the "Duplicate `Ready`
   issues" item above (Decision #9).
+- **Multi-provider outlook (discussed, deliberately not scheduled, 2026-07-12 review):**
+  mixing models *across platforms* per stage needs no rewrite — the seams already exist
+  (per-stage `model`/`effort` config, the narrow spawn/jsonl/sentinel contract,
+  engine-mediated writes, a reviewer tier already heterogeneous by Decision #5). Judgment
+  roles would port cheaply behind a runner-adapter seam; code-writing workers are the
+  expensive tail (each platform needs a guard-hook equivalent, security-reviewed,
+  human-merge-only). If ever scheduled: sequence lightweight-first (roles before workers),
+  and let no platform difference leak past the adapter layer into the conductor.
 
 ## Verification (how we'll prove v1)
 

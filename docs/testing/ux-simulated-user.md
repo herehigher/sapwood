@@ -25,7 +25,7 @@ given. You observe. You do not fix, suggest code changes, or judge whether the i
 
 Produce one ledger, written to your own report path, following the report contract (schema,
 severity vocabulary, archive path and SHA/fixture-id pinning) already defined in
-[`docs/supervision.md`](../supervision.md#report-contract) — that contract is the source of truth
+[`docs/guide/supervision.md`](../guide/supervision.md#report-contract) — that contract is the source of truth
 for the ledger's shape; do not re-derive or restate it here. A session that finds nothing files an
 explicit clean pass, not silence.
 

@@ -2530,7 +2530,7 @@ test("run: a role with an EMPTY PROXY_ROLE_TOOL_MATRIX grant never mints RoleRun
 // Same future-edit guard as above, LOUD half: an EXPLICIT opts.proxy for a role whose
 // PROXY_ROLE_TOOL_MATRIX grant is empty is a caller bug, not a silent override — the caller asked
 // for a proxy that role can never use, so it is refused loudly, same shape as the
-// reviewCwd+opts.proxy refusal a few hundred lines up. This keeps docs/configuration.md's "a
+// reviewCwd+opts.proxy refusal a few hundred lines up. This keeps docs/guide/configuration.md's "a
 // caller-supplied proxy opt always wins over the RoleRunner-wide default, never silently
 // overridden" literally true even for a grantless role: its explicit opts.proxy does not get
 // silently discarded, it throws. No shipped role can trigger this today (all hold grants); this

@@ -112,14 +112,14 @@ test("gate② round 3 pin: ROLES_WITH_DEFAULT_WEB_ACCESS matches peripheral.ts's
   }
 });
 
-// ── #535: write-grant membership pin — docs/role-paradigm.md's write-scope-ladder tier-1
+// ── #535: write-grant membership pin — docs/reference/role-paradigm.md's write-scope-ladder tier-1
 // membership (five peripheral roles hold no real write channel) and tier-2 (retro is the sixth
 // role, and does NOT belong at tier 1) are both hand-maintained prose derived from these same
 // exported constants. That membership drifted twice in one week (#530/#531 found tier-1 still
 // listing retro despite its real write grant; #535 found tier-2's "none of the six" claim was
 // false for the same reason) — same shape as ROLES_WITH_DEFAULT_WEB_ACCESS above, so it gets the
 // same treatment: pinned against the source of truth rather than left free-floating.
-test("#535 pin: which roles hold a real WRITE grant matches ROLE_ALLOWED_TOOLS/RETRO_ALLOWED_TOOLS — docs/role-paradigm.md's tier-1 membership needs updating when this fails", () => {
+test("#535 pin: which roles hold a real WRITE grant matches ROLE_ALLOWED_TOOLS/RETRO_ALLOWED_TOOLS — docs/reference/role-paradigm.md's tier-1 membership needs updating when this fails", () => {
   // Exact comma-delimited token membership — plain `.includes("Edit")` would also match
   // `NotebookEdit`, which every one of these lists carries as its own distinct entry.
   const tokens = (list: string): Set<string> => new Set(list.split(","));
@@ -142,7 +142,7 @@ test("#535 pin: which roles hold a real WRITE grant matches ROLE_ALLOWED_TOOLS/R
       assert.ok(
         !granted.has(tool),
         `peripheral.ts's ${name} now includes ${tool} — a peripheral role just gained a real ` +
-          `write channel. docs/role-paradigm.md's tier-1 membership needs updating.`,
+          `write channel. docs/reference/role-paradigm.md's tier-1 membership needs updating.`,
       );
     }
   }
@@ -150,7 +150,7 @@ test("#535 pin: which roles hold a real WRITE grant matches ROLE_ALLOWED_TOOLS/R
     tokens(ROLE_DISALLOWED_TOOLS).has("Bash"),
     "peripheral.ts's ROLE_DISALLOWED_TOOLS no longer denies Bash outright — the five " +
       "peripheral roles' tier-1 'no shell channel' claim depends on this. " +
-      "docs/role-paradigm.md's tier-1 membership needs updating.",
+      "docs/reference/role-paradigm.md's tier-1 membership needs updating.",
   );
 
   // retro is the sixth role and the one that does NOT belong at tier 1: a real Write/Edit/
@@ -164,12 +164,12 @@ test("#535 pin: which roles hold a real WRITE grant matches ROLE_ALLOWED_TOOLS/R
     assert.ok(
       retroGranted.has(tool),
       `retro.ts's RETRO_ALLOWED_TOOLS no longer includes ${tool} — retro would move OUT of the ` +
-        `real-write-grant category. docs/role-paradigm.md's tier-1/tier-2 membership needs updating.`,
+        `real-write-grant category. docs/reference/role-paradigm.md's tier-1/tier-2 membership needs updating.`,
     );
     assert.ok(
       !retroDenied.has(tool),
       `retro.ts's RETRO_DISALLOWED_TOOLS now denies ${tool} — retro's write grant is no longer ` +
-        `real. docs/role-paradigm.md's tier-1/tier-2 membership needs updating.`,
+        `real. docs/reference/role-paradigm.md's tier-1/tier-2 membership needs updating.`,
     );
   }
   for (const sub of RETRO_GIT_SUBCOMMANDS) {
@@ -177,16 +177,16 @@ test("#535 pin: which roles hold a real WRITE grant matches ROLE_ALLOWED_TOOLS/R
     assert.ok(
       retroGranted.has(pattern),
       `retro.ts's RETRO_ALLOWED_TOOLS is missing ${pattern} — the eight-subcommand git grant ` +
-        `docs/role-paradigm.md describes has changed. Update the doc's tier-1 membership.`,
+        `docs/reference/role-paradigm.md describes has changed. Update the doc's tier-1 membership.`,
     );
     assert.ok(
       !retroDenied.has(pattern),
       `retro.ts's RETRO_DISALLOWED_TOOLS now denies ${pattern} — retro's git grant is no longer ` +
-        `real for this subcommand. docs/role-paradigm.md's tier-1/tier-2 membership needs updating.`,
+        `real for this subcommand. docs/reference/role-paradigm.md's tier-1/tier-2 membership needs updating.`,
     );
   }
 
-  // #536 gate② round-4 F3: the two claims above are presence-only. docs/role-paradigm.md's own
+  // #536 gate② round-4 F3: the two claims above are presence-only. docs/reference/role-paradigm.md's own
   // retro row goes further — "zero `gh` entries of any kind" in RETRO_ALLOWED_TOOLS, and "exactly
   // these eight" git subcommands, not "at least these eight". Neither is pinned above: a ninth
   // `Bash(git ...)` grant, or a `Bash(gh ...)` grant re-added to the allow-list, leaves every
@@ -196,8 +196,8 @@ test("#535 pin: which roles hold a real WRITE grant matches ROLE_ALLOWED_TOOLS/R
     assert.ok(
       !tool.startsWith("Bash(gh "),
       `retro.ts's RETRO_ALLOWED_TOOLS now includes ${tool} — a \`gh\` verb reached the allow-list, ` +
-        `falsifying docs/role-paradigm.md's "zero \`gh\` entries of any kind" claim and opening a ` +
-        `path around the tier-3 openProposalPR choke point. docs/role-paradigm.md needs updating.`,
+        `falsifying docs/reference/role-paradigm.md's "zero \`gh\` entries of any kind" claim and opening a ` +
+        `path around the tier-3 openProposalPR choke point. docs/reference/role-paradigm.md needs updating.`,
     );
   }
   const retroGitGrantTokens = [...retroGranted].filter((t) => t.startsWith("Bash(git "));
@@ -205,8 +205,8 @@ test("#535 pin: which roles hold a real WRITE grant matches ROLE_ALLOWED_TOOLS/R
     retroGitGrantTokens.length,
     RETRO_GIT_SUBCOMMANDS.length,
     `retro.ts's RETRO_ALLOWED_TOOLS grants ${retroGitGrantTokens.length} \`git\` subcommand(s) ` +
-      `(${retroGitGrantTokens.join(", ")}), not the eight docs/role-paradigm.md describes as ` +
-      `"exactly these eight" — a subcommand was added or removed. docs/role-paradigm.md needs updating.`,
+      `(${retroGitGrantTokens.join(", ")}), not the eight docs/reference/role-paradigm.md describes as ` +
+      `"exactly these eight" — a subcommand was added or removed. docs/reference/role-paradigm.md needs updating.`,
   );
 });
 

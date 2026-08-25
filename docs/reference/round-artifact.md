@@ -10,7 +10,7 @@ a live GitHub query.
 **JSON is the single source of truth.** The markdown view is a deterministic *render* of
 the validated JSON object — never independently authored — and is what the harvest prompt
 consumes (`{{round.artifact}}`, capped by
-[`roles.harvest.artifactMaxChars`](configuration.md#roles)).
+[`roles.harvest.artifactMaxChars`](../guide/configuration.md#roles)).
 
 ## Where it lives
 

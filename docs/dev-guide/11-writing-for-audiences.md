@@ -16,14 +16,14 @@ agent:
   engine posts, label descriptions, and `sapwood.config.example.yaml`'s
   inline comments (`sapwood init` copies that file verbatim into the target
   repo as its own `sapwood.config.yaml` — see
-  [`docs/configuration.md`](../configuration.md)). Some of these are read by
+  [`docs/guide/configuration.md`](../guide/configuration.md)). Some of these are read by
   an agent session (prompts, commands, skills) and some by a human (posted
   comments, labels, a config file viewed on GitHub) — but all of them render
   on whatever repo installed sapwood, not on sapwood's own. That's what
   creates the hazard below, for human-read and agent-read surfaces alike.
 - **Renders in sapwood's OWN repo** — README, user-facing docs
-  (`docs/getting-started.md`, `docs/configuration.md`, `docs/security.md`,
-  `docs/supervision.md`, `docs/troubleshooting.md`, …), dev docs (this
+  (`docs/guide/getting-started.md`, `docs/guide/configuration.md`, `docs/security.md`,
+  `docs/guide/supervision.md`, `docs/guide/troubleshooting.md`, …), dev docs (this
   guide), code comments, `CHANGELOG.md`, `docs/PLAN.md`. A reference here
   can't misresolve — it's still this repo's own tracker. The reason to still
   keep the user-facing subset clean is the separate durable-knowledge/

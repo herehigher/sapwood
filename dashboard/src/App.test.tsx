@@ -2114,7 +2114,7 @@ test("#934 AC3: the feed's relative timestamps read the SAME replay-cursor clock
   );
 });
 
-// ── #934 AC5 tests live in ../../docs/frontend-design.md itself — no dashboard code asserts docs
+// ── #934 AC5 tests live in ../../docs/reference/frontend-design.md itself — no dashboard code asserts docs
 // prose; see that file's §3 D + strip paragraph.
 
 // ── #766 gate② finding [1] (header-replay-total-is-round-scoped): resolveRoundSpend ────────────

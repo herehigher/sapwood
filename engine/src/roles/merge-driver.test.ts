@@ -848,7 +848,7 @@ test("#783 wiring: an inert rollup escalates at the SHORTER 900s bound, carrying
   });
 });
 
-test("#783 wiring: a rollup pending for 20 minutes that then flips inert escalates on the FIRST inert-observing pass — the pin's age was already past the shorter bound the whole time (documented, intended: docs/configuration.md's inertEscalateAfterSec row); a later flip BACK to pending never un-escalates or double-fires, the needsHuman latch covers it", async () => {
+test("#783 wiring: a rollup pending for 20 minutes that then flips inert escalates on the FIRST inert-observing pass — the pin's age was already past the shorter bound the whole time (documented, intended: docs/guide/configuration.md's inertEscalateAfterSec row); a later flip BACK to pending never un-escalates or double-fires, the needsHuman latch covers it", async () => {
   const forge = new FakeForge();
   const reviewer = new FakeReviewer();
   const cfg = mkCfg({
@@ -875,7 +875,7 @@ test("#783 wiring: a rollup pending for 20 minutes that then flips inert escalat
   assert.equal(stillPending.ciPendingEscalation, undefined);
 
   // A check concludes SKIPPED at this same instant — the SAME pin, unmoved (pin semantics are
-  // unchanged, docs/configuration.md's own contract: stamped once, at first not-green). The very
+  // unchanged, docs/guide/configuration.md's own contract: stamped once, at first not-green). The very
   // next pass that observes the now-inert rollup escalates IMMEDIATELY: the pin (1200s old)
   // already exceeds the 900s inert bound — no fresh 15-minute clock starts.
   forge.status = { ...forge.status, ciInert: true, ciChecks: [{ name: "aux-lint", conclusion: "SKIPPED" }] };

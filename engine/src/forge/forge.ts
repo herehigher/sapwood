@@ -3300,7 +3300,7 @@ export function parsePRStatus(json: string): PRStatus {
   // gate① would wedge every repo that has not configured a required-check list, and it needs
   // per-check `name`/`appSlug` this `gh pr view --json statusCheckRollup` call does not fetch.
   // Compatibility: a repo that legitimately skips jobs on some PRs (path-filtered workflows) now
-  // stays not-green instead of merging — see docs/configuration.md `ci` for the adjustment path
+  // stays not-green instead of merging — see docs/guide/configuration.md `ci` for the adjustment path
   // (make the job always run and skip its STEPS, so it reports SUCCESS). NOT routed to `ciRed`
   // below: a skipped job is not a failure, and a mechanical CI-fix leg cannot fix one.
   const ciGreen = checks.length > 0 && checks.every((c) => (c.conclusion != null ? c.conclusion === "SUCCESS" : c.state === "SUCCESS"));

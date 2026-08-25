@@ -2,7 +2,7 @@
 // GitHub comments, startup guidance) resolves a `docs/*.md` citation to something a reader can
 // actually open. A bare repo-relative path only resolves inside a checkout of this repo — the
 // npm package's `files` field ships no `docs/` directory, and a target repo the engine is
-// installed into has no `docs/` of its own either, so a hardcoded `docs/troubleshooting.md` in
+// installed into has no `docs/` of its own either, so a hardcoded `docs/guide/troubleshooting.md` in
 // that output is a dead end for both audiences. A canonical `blob/main` URL resolves from
 // anywhere. Centralizing the base + per-file path here also means the doc reorganization that
 // follows this module (moving files under `docs/` into subfolders) is a same-file change, not a
@@ -23,11 +23,11 @@ const DOC_BASE_URL = "https://github.com/herehigher/sapwood/blob/main/";
  *  ONLY this map when a doc moves (e.g. the docs reorganization this module anticipates) — every
  *  citation below is built from it, never a hardcoded path of its own. */
 const DOC_PATHS = {
-  gettingStarted: "docs/getting-started.md",
-  configuration: "docs/configuration.md",
-  troubleshooting: "docs/troubleshooting.md",
+  gettingStarted: "docs/guide/getting-started.md",
+  configuration: "docs/guide/configuration.md",
+  troubleshooting: "docs/guide/troubleshooting.md",
   security: "docs/security.md",
-  supervision: "docs/supervision.md",
+  supervision: "docs/guide/supervision.md",
   reviewDoctrine: "docs/REVIEW-DOCTRINE.md",
   plan: "docs/PLAN.md",
 } as const;

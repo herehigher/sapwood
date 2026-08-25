@@ -25,7 +25,7 @@ itself.
   [change-risk map](docs/dev-guide/08-change-risk.md) before touching anything
   near them.
 - **Docs are part of done.** A change to durable, user-visible behavior updates
-  the relevant `docs/` page (or `docs/configuration.md` for config keys) in the
+  the relevant `docs/` page (or `docs/guide/configuration.md` for config keys) in the
   same PR. GitHub issues/PRs record process; docs record what is true now.
 
 ## Cutting a release

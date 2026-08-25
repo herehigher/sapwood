@@ -249,8 +249,8 @@ test("#796: readInventoryTableRows throws (never silently passes) if no table he
   assert.throws(() => readInventoryTableRows(doctored), /header row/i);
 });
 
-test("#796: docs/role-paradigm.md's per-role sections cover every write-inventory tableRole", () => {
-  const roleParadigm = readFileSync(join(REPO_ROOT, "docs", "role-paradigm.md"), "utf8");
+test("#796: docs/reference/role-paradigm.md's per-role sections cover every write-inventory tableRole", () => {
+  const roleParadigm = readFileSync(join(REPO_ROOT, "docs", "reference", "role-paradigm.md"), "utf8");
   const expected = new Set(WRITE_INVENTORY_ROLE_SESSIONS.map((e) => e.tableRole));
   for (const tableRole of expected) {
     // Sub-sections are `### <tableRole> (...)`, e.g. `### po-pool (aligning)`, `### harvest
@@ -270,7 +270,7 @@ test("#796: docs/role-paradigm.md's per-role sections cover every write-inventor
     });
     assert.ok(
       covered,
-      `write-inventory-registry.ts names "${tableRole}" as a structured-output write path, but docs/role-paradigm.md's ` +
+      `write-inventory-registry.ts names "${tableRole}" as a structured-output write path, but docs/reference/role-paradigm.md's ` +
         `"Per-role sections" has no heading covering it`,
     );
   }

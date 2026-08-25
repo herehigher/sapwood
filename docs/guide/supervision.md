@@ -11,8 +11,8 @@ and label named here already exists ([`status`](#supervising-a-run),
 them as a coherent supervision loop.
 
 Machine-enforced facts (the guard hook, human-merge-only paths, the kill switch vs.
-pause distinction, cost ceilings) live in [`docs/security.md`](security.md) and
-[`docs/configuration.md`](configuration.md) — this page **points at** them and never
+pause distinction, cost ceilings) live in [`docs/security.md`](../security.md) and
+[`docs/guide/configuration.md`](configuration.md) — this page **points at** them and never
 re-enumerates them. What a given event/park-source/escalation-bucket *means* lives in
 the generated `sapwood-event-glossary` skill — this page points at that too.
 
@@ -117,7 +117,7 @@ below says precisely what it does and doesn't cover). `run`'s data dir
 (`data/sapwood.sqlite`, `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, worktree roots) resolves
 **relative to the process's cwd, not to `--config`'s directory** — `run --help`
 names the DB, `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, and worktree roots
-(`docs/configuration.md`'s loader-resolution note carries the full rule) — so `cd` into
+(`docs/guide/configuration.md`'s loader-resolution note carries the full rule) — so `cd` into
 the deployment checkout FIRST, or the detached process silently
 takes root wherever the launching shell happened to be sitting. Use an absolute `node`
 here too (the lazy-load gotcha below applies to this line exactly as much as a script).
@@ -244,7 +244,7 @@ not just the launch line above:
   invoking process's cwd — pass it explicitly, same as the deploy-dir rule above.**
   `status`/`events`/`park clear` all fall back to this cwd-relative default when no
   positional `db-path` is given, and `--config` does **not** change that resolution
-  (`docs/configuration.md`'s loader-resolution note: logging/prompt/goal/doctrine paths
+  (`docs/guide/configuration.md`'s loader-resolution note: logging/prompt/goal/doctrine paths
   go config-file-relative, but the DB, `EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`, sessions, and worktree
   roots stay cwd-relative regardless). A detached poller's cwd is arbitrary — polling
   from anywhere but the deployment checkout silently prints `sapwood events: no state DB
@@ -337,7 +337,7 @@ Before dispatching a batch of work (starting a new `sapwood run`, or resuming af
 gap), work through these in order:
 
 1. **Single-instance check.** Only one `sapwood run` may hold a given data dir
-   (`data/sapwood.lock`, docs/troubleshooting.md's "Single-instance lock"). Don't guess —
+   (`data/sapwood.lock`, docs/guide/troubleshooting.md's "Single-instance lock"). Don't guess —
    either read the lock file's recorded `pid` and confirm liveness yourself
    (`ps -p <pid>`), or let `sapwood run`/`sapwood park clear` make the call: both refuse
    with the holder's pid named when a live engine already has the lock. A refusal here
@@ -376,7 +376,7 @@ Before ending a supervision session:
    a follow-up filed) or it's explicitly carried forward, never silently dropped.
 2. **Owner-ruling recovery ritual.** A ruling recorded ONLY as a comment is not evidence a
    worker will ever see — workers read the issue body only (`{{issue.body}}`, see
-   [`docs/security.md`](security.md#the-comment-adjudication-cursor)), and comments
+   [`docs/security.md`](../security.md#the-comment-adjudication-cursor)), and comments
    remain audit evidence, never the contract a worker is dispatched against; the body
    remains the worker contract. Skipping this step has a real, paid-for cost: an owner's
    ruling left only in a comment can go unseen by both a later automated pass (which then
@@ -390,7 +390,7 @@ Before ending a supervision session:
    2. **Rewrite the authoritative body** to fold the ruling in — the comment is evidence
       that a decision was made, not the decision a worker will act on.
    3. **Advance the [adjudication
-      cursor](security.md#the-comment-adjudication-cursor)**
+      cursor](../security.md#the-comment-adjudication-cursor)**
       (`<!-- sapwood:comments-adjudicated-through: <comment-id> -->`) to the ruling
       comment or later, so gate⓪ and dispatch see the body as current rather than stale.
    4. **Remove `needs-human`**, if it was applied for this reason.
@@ -594,7 +594,7 @@ GitHub, not in the state DB — `status`/`events` are deliberately DB-only (see
 for the general rule this is one instance of). Query them with `gh` directly. Label names
 below are the shipped defaults (`labels.prefix: sapwood:`); a repo running a different
 prefix or a fully custom label set needs the equivalent substitution. `blocked`/`hold`
-meaning (and how each differs from `needs-human`) lives in `docs/configuration.md`'s
+meaning (and how each differs from `needs-human`) lives in `docs/guide/configuration.md`'s
 `escalation.humanLabels`/`holdLabels` tables — read there, never re-derived here.
 
 ```bash
@@ -798,7 +798,7 @@ operator's witness record folded into the relevant issue **body** (actor, steps,
 findings summary, artifact path) — a PR or issue comment is an operator inbox/audit item, never
 gate② evidence — per the tier-C human-witnessed-probe doctrine below.
 
-**Evidence class.** Per [`docs/security.md`](security.md)'s evidence tiers, the simulated user's
+**Evidence class.** Per [`docs/security.md`](../security.md)'s evidence tiers, the simulated user's
 report is producer-side session output — **trust-origin evidence class C at best** (a
 human/PO-witnessed probe, never self-attested). It informs PM triage; it never auto-satisfies any
 acceptance criterion on its own.
@@ -831,7 +831,7 @@ claude \
   --setting-sources "" \
   --allowedTools "Read,Edit(data/review/ux/**),mcp__browser__*" \
   --disallowedTools "Bash,mcp__forge__*,mcp__github__*" \
-  --append-system-prompt "$(cat docs/prompts/ux-simulated-user.md)"
+  --append-system-prompt "$(cat docs/testing/ux-simulated-user.md)"
 ```
 
 - `--strict-mcp-config` + the explicit `--mcp-config` above discards every MCP server from every
@@ -874,18 +874,18 @@ triage and the owner why/what gate as agent-origin, the same as any other propos
 
 ## See also
 
-- [`docs/security.md`](security.md) — the trust/governance model: the guard hook,
+- [`docs/security.md`](../security.md) — the trust/governance model: the guard hook,
   human-merge-only paths (canonical list — never re-enumerated here), the kill switch vs.
   pause distinction, cost ceilings.
-- [`docs/configuration.md`](configuration.md) — every config key referenced above
+- [`docs/guide/configuration.md`](configuration.md) — every config key referenced above
   (`labels`, `escalation`, `cost`, `engine`) with its default and full semantics.
-- [`docs/troubleshooting.md`](troubleshooting.md) — the single-instance lock, park
+- [`docs/guide/troubleshooting.md`](troubleshooting.md) — the single-instance lock, park
   episodes (env-failure/rapid-restart/consecutive-stalls/idle-churn), and what to do
   when each fires — the mechanics this playbook assumes.
-- [`docs/PLAN.md`](PLAN.md) — architecture, the v1.1 real-supervisor roadmap item, and
+- [`docs/PLAN.md`](../PLAN.md) — architecture, the v1.1 real-supervisor roadmap item, and
   the open "who watches the supervisor" long-arc question.
 - `sapwood-event-glossary` skill
   (`.claude-plugin/skills/sapwood-event-glossary/SKILL.md`) — what every event
   kind/park source/escalation bucket means and how actionable it is.
-- [`docs/prompts/ux-simulated-user.md`](prompts/ux-simulated-user.md) — the session prompt for
+- [`docs/testing/ux-simulated-user.md`](../testing/ux-simulated-user.md) — the session prompt for
   the [UX harness](#ux-harness-simulated-user-supervision) above.

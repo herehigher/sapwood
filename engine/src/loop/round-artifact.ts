@@ -22,7 +22,7 @@
 // there is no cross-round bleed to guard against here).
 //
 // #17 dashboard data contract: this module's zod schema (RoundArtifactSchema) IS that contract,
-// documented in docs/round-artifact.md — any change here is a change to that contract.
+// documented in docs/reference/round-artifact.md — any change here is a change to that contract.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod";

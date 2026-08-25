@@ -89,7 +89,7 @@ import type { ReviewSessionEvidence, ReviewSessionExecutor, ReviewSessionIdentit
 
 /** #443 (R1): announced BEFORE the session starts — `reviewer.agent.costCapUsd` is advisory for
  *  this runner, because the CLI has no hard-cap mechanism to hand it to. Copy entry lives in
- *  docs/frontend-design.md §7 (every engine PR that adds a kind extends that map). */
+ *  docs/reference/frontend-design.md §7 (every engine PR that adds a kind extends that map). */
 export const ENGINE_REVIEW_BUDGET_ADVISORY = "engine-review-budget-advisory";
 
 /** #443 (R1): the session ended with NO usable token/cost telemetry — its spend is UNKNOWN, which
@@ -145,7 +145,7 @@ export const CONTAINMENT_GAP_HOST_WIDE_FILE_READS = "host-wide-filesystem-reads"
 export const CODEX_CONTAINMENT_GAPS: readonly string[] = [CONTAINMENT_GAP_MODEL_INVOKED_EXECUTION, CONTAINMENT_GAP_HOST_WIDE_FILE_READS];
 
 /** #443 (R1): the pinned per-million-token prices the `estimated` spend figure is computed from.
- *  User-tunable through `reviewer.agent.codexPricing` (docs/configuration.md) — never hardcoded at
+ *  User-tunable through `reviewer.agent.codexPricing` (docs/guide/configuration.md) — never hardcoded at
  *  a call site — because list prices differ per model and per plan. Cached input and reasoning
  *  tokens are deliberately NOT priced separately: owner ruling R1 accepts bounded estimate error in
  *  exchange for a mechanism simple enough to read in one sitting. */

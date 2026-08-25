@@ -3681,7 +3681,7 @@ test("#398: gated_escalation_carrier round-trips through upsertWorker, and a re-
   s.close();
 });
 
-// ── #142: dashboard reads (docs/frontend-design.md §8) ──────────────────────────────────────
+// ── #142: dashboard reads (docs/reference/frontend-design.md §8) ──────────────────────────────────────
 
 test("lastTickAt reads the heartbeat WITHOUT moving it (the #395 watchdog and the dashboard are spectators, never writers)", () => {
   const s = mem();
