@@ -2034,14 +2034,14 @@ would let a worker weaken the very mechanism that constrains it. Any change to t
   `engine/dist/roles/merge-driver.js` — the compiled artifacts each PreToolUse invocation and the
   conductor actually execute; protecting only the `.ts` sources above would leave the running
   gate overwritable through its own build output.
-- `sapwood.config.yaml` / `sapwood.config.json` — **the whole file**, not just its
+- `sapwood.config.yaml` / `sapwood.config.yml` / `sapwood.config.json` — **the whole file**, not just its
   security-relevant fields (guard mode, reviewer mode, merge mode). The guard's actual
   match (`engine/src/guard/guard.ts`) is a path pattern on `sapwood.config.(ya?ml|json)`,
   with no per-field carve-out: a comment-only edit, a non-security default, or reformatting
   is blocked exactly like a guard-mode change. Do not read "security-relevant config" below
   as scoping the block to a subset of the file's contents — it names *why* the file is
   protected, not *how much* of it is.
-- `sapwood.config.example.yaml` / `sapwood.config.example.json` — the `sapwood init` starter
+- `sapwood.config.example.yaml` / `sapwood.config.example.yml` / `sapwood.config.example.json` — the `sapwood init` starter
   template, guard-protected as a sibling rule to the root config above (same whole-file,
   no-per-field-carve-out treatment; `engine/src/guard/guard.ts`'s match is a path pattern on
   `sapwood.config.example.(ya?ml|json)`, case-insensitive). It carries the same

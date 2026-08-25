@@ -23,37 +23,42 @@ export function slugify(text: string): string {
   return kept.trim().replaceAll(" ", "-");
 }
 
-// A fenced code block's delimiter (CommonMark: a line whose trimmed content starts with 3+
-// backticks or 3+ tildes; closed by a later line with the SAME character and at least as many
-// repeats). Tracked so a shell comment or a `# ...` line inside a fenced sample never counts as
-// a real heading — without this, a renamed/removed real heading could hide behind a code-sample
-// line that merely looks like one, and this module would report the removed anchor as still
-// valid.
-const FENCE_RE = /^(`{3,}|~{3,})/;
+// A fenced code block's OPENING delimiter (CommonMark): at most 3 leading spaces, then 3+
+// backticks or 3+ tildes (an info string may follow — not validated here, this module only needs
+// to know a fence opened, never renders the sample). 4+ leading spaces is indented code, not a
+// fence at all — the regex's own `{0,3}` cap means a line with a 4th leading space never matches
+// at any backtrack position.
+const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})/;
 
-// Every heading in a Markdown file's slugs, with GitHub-style duplicate-slug suffixing
-// (-1, -2, ...): the second `## Foo` on a page gets `foo-1`, the third `foo-2`, and so on.
-// Takes content directly (rather than a path) so it is exercisable without touching the
-// filesystem; `headingsOf` in scripts/check-links.ts is the path-reading wrapper the checker
-// itself uses.
+// Tracked (open char + its repeat count) so a shell comment or a `# ...` line inside a fenced
+// sample never counts as a real heading — without this, a renamed/removed real heading could
+// hide behind a code-sample line that merely looks like one, and this module would report the
+// removed anchor as still valid. A fence with no matching closer runs to end-of-document (every
+// line after it, headings included, stays "inside").
 export function headingSlugs(content: string): Set<string> {
   const slugs = new Set<string>();
   let fenceChar: string | null = null;
   let fenceLen = 0;
   for (const line of content.replaceAll("\r\n", "\n").split("\n")) {
-    const fenceMatch = FENCE_RE.exec(line.trimStart());
-    if (fenceMatch) {
-      const marker = fenceMatch[1]!;
-      if (fenceChar === null) {
+    if (fenceChar === null) {
+      const open = FENCE_OPEN_RE.exec(line);
+      if (open) {
+        const marker = open[1]!;
         fenceChar = marker[0]!;
         fenceLen = marker.length;
-      } else if (marker[0] === fenceChar && marker.length >= fenceLen) {
+        continue; // a fence delimiter line is never a heading itself
+      }
+    } else {
+      // CLOSING fence: same char, at least the opening count, at most 3 leading spaces, and
+      // NOTHING but optional trailing whitespace after the run — a line like "```text" inside an
+      // open fence has trailing content after the run, so it does NOT close it (it's content).
+      const closeRe = new RegExp(`^ {0,3}[${fenceChar}]{${fenceLen},}[ \t]*$`);
+      if (closeRe.test(line)) {
         fenceChar = null;
         fenceLen = 0;
       }
-      continue; // a fence delimiter line is never a heading itself
+      continue; // every line while a fence is open is content, never a heading candidate
     }
-    if (fenceChar !== null) continue; // inside a fenced block — never a heading candidate
     const m = /^(#{1,6})\s+(.*)$/.exec(line);
     if (!m) continue;
     const base = slugify(m[2] ?? "");

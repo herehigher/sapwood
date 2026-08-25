@@ -365,20 +365,45 @@ test("renderSkillsPlugin: against this repo's real docs/security.md, every skill
   }
 });
 
+// Splits a Markdown fragment into its top-level list items: a line starting with "- " opens an
+// item; an indented continuation line (leading whitespace then non-whitespace) extends the
+// current item; anything else (a blank line, unindented prose) closes it. Used so the guard-list
+// oracle below can require a token inside the ACTUAL bulleted entry, not merely somewhere in the
+// marker body — the block's own lead-in/closing paragraphs are prose about the list, not part of
+// it, and a token landing there would prove nothing about the list itself.
+function markdownListItems(markdown: string): string[] {
+  const items: string[] = [];
+  let current: string[] | null = null;
+  for (const line of markdown.split("\n")) {
+    if (/^- /.test(line)) {
+      if (current) items.push(current.join("\n"));
+      current = [line];
+    } else if (current && /^\s+\S/.test(line)) {
+      current.push(line);
+    } else {
+      if (current) items.push(current.join("\n"));
+      current = null;
+    }
+  }
+  if (current) items.push(current.join("\n"));
+  return items;
+}
+
 // guard.ts's write-path classifier and this doc's "Human-merge-only paths" marker block are two
 // independent homes for the same list, with no oracle tying them together. Every exact protected
 // path below is driven through the REAL classifier (never a hand-copied label) and must be backed
-// by an EXACT backticked mention in the REAL marker prose — a bare substring is not enough,
-// since a path segment can appear inside unrelated prose in the same block (e.g. bare "guard.ts"
-// also occurs inside "`engine/src/guard/guard.ts`" in the config bullet's explanation; the exact
-// backtick-delimited span "`guard.ts`" does not). `.sapwood/**` is deliberately excluded: it is
-// gitignored runtime state, never a path a PR could touch, and is documented separately under
-// "Human controls" — a different concern from this human-merge-only source-path list.
+// by an EXACT backticked mention inside one of the REAL marker's own list items — neither a bare
+// substring nor a match anywhere in the block's surrounding prose is enough, since a path segment
+// can appear inside unrelated text (e.g. bare "guard.ts" also occurs inside
+// "`engine/src/guard/guard.ts`" in the config bullet's explanation; the exact backtick-delimited
+// span "`guard.ts`" does not). `.sapwood/**` is deliberately excluded: it is gitignored runtime
+// state, never a path a PR could touch, and is documented separately under "Human controls" — a
+// different concern from this human-merge-only source-path list.
 test("guard.ts's write-path classifier and docs/security.md's human-merge-only-paths marker block agree on every protected path", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const realSecurityMdPath = join(here, "..", "..", "..", "docs", "security.md");
   const securityMd = readFileSync(realSecurityMdPath, "utf8");
-  const markerProse = extractMarkedSection(securityMd, "human-merge-only-paths");
+  const items = markdownListItems(extractMarkedSection(securityMd, "human-merge-only-paths"));
 
   const cases: [path: string, exactToken: string][] = [
     ["engine/src/guard/guard.ts", "`guard.ts`"],
@@ -390,20 +415,23 @@ test("guard.ts's write-path classifier and docs/security.md's human-merge-only-p
     ["engine/dist/roles/reviewer.js", "`engine/dist/roles/reviewer.js`"],
     ["engine/dist/roles/merge-driver.js", "`engine/dist/roles/merge-driver.js`"],
     ["sapwood.config.yaml", "`sapwood.config.yaml`"],
+    ["sapwood.config.yml", "`sapwood.config.yml`"],
     ["sapwood.config.json", "`sapwood.config.json`"],
     ["sapwood.config.example.yaml", "`sapwood.config.example.yaml`"],
+    ["sapwood.config.example.yml", "`sapwood.config.example.yml`"],
     ["sapwood.config.example.json", "`sapwood.config.example.json`"],
     [".claude/settings.json", "`.claude/settings*.json`"],
     [".claude/settings.local.json", "`.claude/settings*.json`"],
     [".github/workflows/ci.yml", "`.github/workflows/**`"],
+    [".github/workflows", "`.github/workflows/**`"], // the directory itself — the classifier's own "$" branch
   ];
   for (const [path, exactToken] of cases) {
     const decision = guardDecision("Write", { file_path: path }, "/repo");
     assert.equal(decision.allow, false, `precondition: guard.ts must classify ${path} as human-merge-only`);
     assert.match(decision.reason, /is human-merge-only$/, `precondition: ${path}'s reason must be a write-path block`);
     assert.ok(
-      markerProse.includes(exactToken),
-      `guard.ts blocks ${path} (${decision.reason}) but the exact token ${exactToken} is missing from the human-merge-only-paths marker prose — the list may only widen, per CLAUDE.md`,
+      items.some((item) => item.includes(exactToken)),
+      `guard.ts blocks ${path} (${decision.reason}) but the exact token ${exactToken} is missing from a list item in the human-merge-only-paths marker — the list may only widen, per CLAUDE.md`,
     );
   }
 });
