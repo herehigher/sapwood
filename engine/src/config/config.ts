@@ -382,7 +382,7 @@ const Reviewer = z
     // fresh sapwood user already has the Claude CLI sapwood itself needs, but not necessarily the
     // hosted `@codex review` GitHub App the old default depended on. `engine-agent` runs locally
     // on that same CLI. Hosted Codex stays fully selectable (`mode: different-model-codex`); see
-    // docs/PLAN.md's locked-decisions table (Decision #5) for the amendment record.
+    // docs/PLAN.md's locked-decisions table (Decision #5) states the current default and rationale.
     mode: z.enum(["different-model-codex", "same-model-trusted", "human", "engine-agent"]).default("engine-agent"),
     // #156: the PR-comment text that requests a review (buildReviewTriggerComment in reviewer.ts).
     // Default matches today's hardcoded `@codex review` byte-for-byte. Lets an operator point the
@@ -399,9 +399,9 @@ const Reviewer = z
     // mode semantics (identity allowlist for bot modes; any-non-author-approval for human) —
     // reused unchanged from the mode implementations above, never forked. DEFAULT EMPTY: no
     // fallback configured means exactly today's behavior — an unavailable primary queues the PR
-    // forever. This is a deliberate no-silent-degradation default (PLAN.md security model):
-    // falling from a different-model review to same-model/human changes gate②'s trust
-    // properties, so it never happens unless an operator explicitly opts in.
+    // forever. This is a deliberate no-silent-degradation default (docs/guide/configuration.md's
+    // `reviewer.fallback` entry): falling from a different-model review to same-model/human
+    // changes gate②'s trust properties, so it never happens unless an operator explicitly opts in.
     fallback: z.array(z.enum(["different-model-codex", "same-model-trusted", "human"])).default([]),
     // How long (seconds, wall-clock since the last review trigger for the current head) the
     // primary reviewer may stay non-decisive (WAIT_REVIEW / REVIEW_UNAVAILABLE) before
@@ -995,7 +995,7 @@ const Engine = z
     // The loop's tick cadence (#46): how often the drivers call tick() — the inter-tick sleep
     // and the #395 watchdog window. (#431 deleted the wall-clock session-gap scaling this used
     // to feed; the wall clock now anchors to in-memory process start and never reads the
-    // cadence.) Conservative default: 1 minute (PLAN.md).
+    // cadence.) Conservative default: 1 minute (docs/guide/configuration.md's `tickIntervalSec` entry).
     tickIntervalSec: z.number().int().positive().default(60),
     // #431 (owner amendment 1): the rapid-restart detector — the crash-loop protection that
     // REPLACES the deleted session-gap heuristic without reviving F29. At startup the engine

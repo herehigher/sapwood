@@ -95,12 +95,15 @@ sapwood/
 │   ├── src/loop/            # conductor, driver, round orchestrator, escalation sweep
 │   ├── src/roles/           # worker, reviewer, merge-driver, architect, plan-review, peripheral
 │   ├── src/review/          # convergence / review-layering
+│   ├── src/retro/           # retrospective role + PR proposal digest
 │   ├── src/guard/           # fail-closed PreToolUse hook
 │   ├── src/config/          # sapwood.config.yaml loader (yaml→zod), doctrine
 │   ├── src/state/           # SQLite (WAL) state + structured-output validation
 │   ├── src/forge/           # IForge interface + GithubForge impl
 │   ├── src/proxy/           # read-only forge MCP proxy
 │   ├── src/util/            # shared helpers
+│   ├── src/cli.ts           # `sapwood` binary: init / run / status / stop / validate
+│   ├── src/index.ts         # package's public export surface
 │   └── prompts/             # shipped role prompts (worker.md, fix.md, po.md, po-decompose.md, …)
 ├── dashboard/                # React dashboard (event schema, lane board, event feed, replay)
 └── docs/                     # getting-started, config ref, security model, dev-guide, troubleshooting
@@ -472,7 +475,20 @@ being polled for routine approval.
 
 ## Verification (how we'll prove v1)
 
-Covered by the acceptance set (`npm run build && npm run typecheck && npm run test && npm run
-lint`) plus the live-dogfood/session-death/soft-budget/hard-ceiling drills documented in
-[`docs/dev-guide/03-running.md`](dev-guide/03-running.md) and
-[`CONTRIBUTING.md`](../CONTRIBUTING.md) — not restated here.
+The acceptance set (`npm run build && npm run typecheck && npm run test && npm run lint`) is the
+gate; the mechanisms this doc describes are pinned by the test suite, not restated here as a
+separate checklist: guard bypass matrix + differential fuzzing —
+[`guard.test.ts`](../engine/src/guard/guard.test.ts) /
+[`guard.fuzz.test.ts`](../engine/src/guard/guard.fuzz.test.ts); scheduling-core parity, including
+the kill-switch drain and terminal-for-drain behavior above —
+[`conductor.test.ts`](../engine/src/loop/conductor.test.ts); merge-gate parity —
+[`merge-driver.test.ts`](../engine/src/roles/merge-driver.test.ts); the soft-budget graceful
+handoff and `--resume` continuation —
+[`worker.test.ts`](../engine/src/roles/worker.test.ts) (`requestHandoff`/`.handoff`/`resume`
+cases); the `Ready` verification-plan gate —
+[`forge.test.ts`](../engine/src/forge/forge.test.ts) (`getReadyIssues`); `sapwood init`'s auth
+preflight — [`init.test.ts`](../engine/src/loop/init.test.ts). Session-death recovery (a stale
+heartbeat reclaiming a lane after a conductor restart) is exercised by `conductor.test.ts`'s own
+reclaim cases, not a separate drill. No test in this suite currently pins an end-to-end
+live-dogfood run against a real `claude`/`gh`; that remains a manual, pre-release check, not an
+automated one — stated here rather than implied covered.

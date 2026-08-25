@@ -3273,7 +3273,8 @@ export class WorkerSupervisor implements Supervisor {
   /**
    * #46: resume a lane the wrapper handed off (`.handoff` sentinel) via `claude --resume`,
    * reusing the ORIGINAL session id (no --fork-session) so claude continues the same
-   * conversation — the "M4 --resume" PLAN.md/#41 flagged. Fail-closed: absent a narrowly
+   * conversation — see docs/PLAN.md's Architecture chapter ("Sentinel-based completion" /
+   * the `.handoff` resumable state). Fail-closed: absent a narrowly
    * recognized interrupted-resume `.running` sentinel, throws if `name` has no `.handoff`
    * sentinel or it carries no session_id. The jsonl is APPENDED, not truncated: the pre-handoff stream stays as an audit
    * trail, and parseCostUsd/parseModelUsage take the LAST "result" line. Live verification for
@@ -3701,7 +3702,8 @@ export class WorkerSupervisor implements Supervisor {
 
   /** Operator/drain-initiated graceful handoff: SIGTERM (not SIGKILL) so the worker wraps up
    *  the current step; onExit then writes the resumable .handoff sentinel. This is the live
-   *  handoff path for M2 (the drain half of the kill-switch, PLAN.md) — AND (#33) the path
+   *  handoff path the drain half of the kill switch uses (docs/security.md's "Human controls
+   *  (three tiers)" section) — AND (#33) the path
    *  checkSoftBudget() calls automatically when the live token-ESTIMATE crosses
    *  worker.budgetUsdSoft, since stream-json carries no in-progress REAL total_cost_usd
    *  (only the terminal result message has that). Both callers share this one method, so both

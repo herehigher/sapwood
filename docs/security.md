@@ -119,7 +119,9 @@ prompt-injection hardening neither drives nor vetoes capability or context choic
 is governed by noise, size, and determinism, while capability is decided by whether its effects
 are enforceable at the action boundary. This is why the zero-`gh` peripheral design (below) was
 decided by enforceability rather than by input-trust concerns, and the same rule governs
-engine-injected context and retrieval design.
+engine-injected context and retrieval design. Revisit input-side hardening when untrusted-repo
+support is actually scheduled, as its own milestone-level threat-model decision rather than a
+standing constraint on trusted-repo capabilities.
 
 **Peripheral vs. producer split.** "Enforceable at the action boundary" cuts differently for the
 two session classes this page distinguishes. A peripheral session's action boundary is the CLI's
@@ -1589,7 +1591,25 @@ dispatch or forge credentials:
   `roundBudgetUsd`/`roundDispatchCap`/a round milestone/a `stop.*` condition fires, further
   dispatch waves freeze via the same "no new dispatch this round" signal (never a human pause),
   and a fix leg on an already-open PR is never "new dispatch" either way — new DISPATCH itself
-  stays fully frozen regardless.
+  stays fully frozen regardless. **A fix leg's admission gate reads the genuine `data/PAUSE`
+  sentinel only, never `forceDispatchPause`.** DISPATCH and RESUME's own admission checks OR the
+  two together into one wider flag (`conductor.ts`'s `paused`), but the fix-leg admission gate
+  (`fixLegAdmissionBlockReason`) deliberately reads the narrower `humanPauseOnly` —
+  `state.isPauseActive()` alone. So a round/run-level stop condition firing never blocks a fix
+  leg on its own, while a human-set `data/PAUSE` still does, exactly like it blocks new lane
+  dispatch — see [Human controls](#human-controls-three-tiers) below.
+- **Terminal-for-drain under the `KILL_SWITCH` bounded drain.** A `driving` lane has no live
+  process for the drain to hand off or kill, so left alone it could sit untouched for as long as
+  the switch stayed active. Three cases: a `driving` lane that is daily-budget-blocked or
+  fix-rounds-capped is escalated to `needs-human` past the same bounded `cost.drainWindowSec`,
+  exactly like a hard-killed running/fixing lane, so the engine always exits within the drain
+  window; a `driving` lane that has never needed a fix leg (MERGE-/WAIT-gated) is left alone —
+  it isn't stuck for a budget reason, and resumes the instant the breach/switch clears; and a
+  lane whose CI-pending pin is already past `ci.pendingEscalateAfterSec` is terminal-for-drain
+  too, in BOTH drain arms — the kill-switch heuristic's own input and the ceiling path's observed
+  set — because gate① being permanently stuck is exactly "can never make forward progress," and
+  it is invisible in `fix_rounds` (such a lane has spent none). A pin that is merely fresh stays
+  a healthy WAIT.
 
 ## Ambient repo context: record, don't seal
 
@@ -2156,11 +2176,13 @@ state DB (`data/`), without requiring a config edit:
   rollback retry, no reclaim-and-requeue of crashed lanes. Set/lift it with
   `/sapwood-stop` (no argument to set, `--lift` to remove) or by touching/removing the
   file directly.
-- **Pause** (`data/PAUSE`) — the gentle tier. Freezes *new dispatch only*. Everything
-  already in flight — running workers, PRs already moving through the review/merge
-  gate — proceeds exactly as normal. No drain, nothing killed. Use this to stop taking
-  on new issues while letting the current round finish (e.g. before a maintenance
-  window). Set/lift with `/sapwood-stop --pause` / `--resume`.
+- **Pause** (`data/PAUSE`) — the gentle tier. Freezes new dispatch: no new lane is claimed,
+  **and** a driving lane's fix-leg admission gate reads this same sentinel, so a fresh fix leg
+  is held back too — see the [fix-loop admission gate](#fix-loop-fixing-lane-state) above.
+  Everything already in flight — running/fixing workers, PRs already moving through the
+  review/merge gate — proceeds exactly as normal to completion. No drain, nothing killed. Use
+  this to stop taking on new issues while letting the current round finish (e.g. before a
+  maintenance window). Set/lift with `/sapwood-stop --pause` / `--resume`.
 
 The precedence order is emergency stop, then kill switch, then pause: emergency stop wins over
 the kill switch, and either strict tier subsumes pause's dispatch restriction.
