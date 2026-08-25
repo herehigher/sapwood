@@ -2615,10 +2615,10 @@ review or dispatch spends against it. It is a deterministic, trust-independent s
 LLM in the loop, keyed on one body marker: `<!-- sapwood:comments-adjudicated-through: <comment-id> -->`,
 meaning "a maintainer has adjudicated every comment at or before this one." Pure marker parsing and
 pending-comment computation live in `comment-cursor.ts`; the impure fetch/escalate half lives in
-`comment-cursor-gate.ts`; both are wired into engine-side checkpoints at gate⓪, dispatch, drive,
-and fix-leg spawn, each running before the effect it protects (gate⓪ before the plan verdict is
-applied, dispatch before the leg spawns, drive before a verdict-driven action, fix-leg spawn
-before a FIXUP leg spawns) — none touching the worker's own prompt.
+`comment-cursor-gate.ts`; both are wired into engine-side checkpoints at gate⓪ (four
+sub-checkpoints, each before the effect it protects), dispatch (before the leg spawns), drive
+(before a verdict-driven action), and fix-leg spawn (before a FIXUP leg spawns) — none touching
+the worker's own prompt.
 
 | Invariant | Enforcement point | Test |
 | --- | --- | --- |
@@ -2634,7 +2634,7 @@ before a FIXUP leg spawns) — none touching the worker's own prompt.
 | A marker counts only as the entire trimmed line outside a fence; any attempt-shaped payload between the colon and `-->` is validated, never silently read as absent. | `comment-cursor.ts::scanStandaloneMarkerLines` (recognizes the attempt); `computeCommentCursor` + `checkMarkerWritePrecondition` (validate it, fail closed) | `comment-cursor.test.ts`: "#703 v2 gate② P2-1: a BLANK-value marker attempt … fails closed as malformed" |
 | A comment is exempt only when it carries `ENGINE_COMMENT_MARKER` AND its author matches the authenticated actor; an unresolvable actor exempts none. | `comment-cursor-gate.ts::fetchCommentStream` | `comment-cursor-gate.test.ts`: "unresolvable actor (getAuthenticatedActor -> null) exempts NO comment, ever" |
 | Any id-less comment anywhere in the fetched stream fails the whole check closed, naming its stream position, never a substituted placeholder id. | `comment-cursor.ts::computeCommentCursor` | `comment-cursor.test.ts`: "a comment with a null id anywhere in the stream fails closed: comment-id-missing" |
-| Cursor freshness is re-checked, always against the exact body a decision was computed from: at gate⓪ (pre-spend, pre-apply, pre-drafter-write, post-confirm) before the plan verdict is applied, at dispatch before the leg spawns, at drive before a verdict-driven action, and at fix-leg spawn before a FIXUP leg spawns. | `plan-review.ts::checkGate0CommentCursor` (gate⓪); `conductor.ts` dispatch loop (dispatch); `conductor.ts::checkAcAuthorityFreshness` (drive, fix-leg spawn) | `plan-review.test.ts`: "a DIRECT body edit landing DURING the confirm session discards a 'confirm' outcome too"; `conductor.test.ts`: "tick dispatch (#652): a non-engine comment already present … blocks dispatch"; "comment-cursor-stale(checkpoint: fix-leg-spawn), no fix leg spawned" |
+| Cursor freshness is re-checked, always against the exact body a decision was computed from. At gate⓪: `pre-spend` before the verification-plan-reviewer/confirm session is spent on, `pre-apply` before any reviewer-derived body or label write, `pre-drafter-write` before the drafter's own body write, and `post-confirm` before an existing approval is implicitly preserved. At dispatch, before the leg spawns. At drive, before a verdict-driven action. At fix-leg spawn, before a FIXUP leg spawns. | `plan-review.ts::checkGate0CommentCursor` (gate⓪); `conductor.ts` dispatch loop (dispatch); `conductor.ts::checkAcAuthorityFreshness` (drive, fix-leg spawn) | `plan-review.test.ts`: "a DIRECT body edit landing DURING the confirm session discards a 'confirm' outcome too"; `conductor.test.ts`: "tick dispatch (#652): a non-engine comment already present … blocks dispatch"; "comment-cursor-stale(checkpoint: fix-leg-spawn), no fix leg spawned" |
 | A confirmed stale/invalid cursor applies needs-human plus one deduplicated pointer comment naming the marker line to paste; dedup/post failures are reported, never thrown. | `comment-cursor-gate.ts::escalateCommentCursorStale` | `comment-cursor-gate.test.ts`: "escalateCommentCursorStale: the SAME cursor/pending set never produces a second comment" |
 
 **Boundaries**
