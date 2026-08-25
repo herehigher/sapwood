@@ -481,7 +481,7 @@ export function pickFreshArmAKeySlot(
 ): { path: string; title: string } {
   for (let n = 1; n <= MAX_ARM_A_SLOT_ATTEMPTS; n++) {
     const candidateHost = n === 1 ? hostComponent : `${hostComponent}-${n}`;
-    const path = join(cwd, "data", `worker-deploy-key-${candidateHost}`);
+    const path = join(cwd, "data", `worker-deploy-key-${candidateHost}`); // #1080: moves under runtimePaths() once the gitignore rule below (and its tests) move with it
     const title = `${DEPLOY_KEY_TITLE}-${candidateHost}`;
     if (!existsSync(path) && !knownRemoteTitles.has(title)) return { path, title };
   }
@@ -838,14 +838,14 @@ function clearDeployKeyConfig(configFilePath: string): string[] {
   return configFilePath.endsWith(".json") ? clearDeployKeyConfigFromJson(configFilePath) : clearDeployKeyConfigFromYaml(configFilePath);
 }
 
-const GITIGNORE_DEPLOY_KEY_RULE = "/data/worker-deploy-key*";
+const GITIGNORE_DEPLOY_KEY_RULE = "/data/worker-deploy-key*"; // #1080: moves with the key itself
 const GITIGNORE_DEPLOY_KEY_COMMENT = `# sapwood: worker deploy key(s) — kept out of \`git add -A\` (see ${DOC_LINKS.security})`;
 
 /** #606 gate② round 1 (P1-6), round 2 (R3-7): keeps the private key out of an ordinary
  *  `git add -A` sweep. gitignore semantics are LAST-MATCH-WINS (a later negation can
  *  re-include a path an earlier rule excluded), so an unordered "is SOME line in the file
  *  covering this path" check is bypassable — this deliberately does NOT implement a full
- *  gitignore evaluator. Instead: ensure the exact rooted rule `/data/worker-deploy-key*` (a
+ *  gitignore evaluator. Instead: ensure the exact rooted rule in GITIGNORE_DEPLOY_KEY_RULE (a
  *  single pattern covering every key this file ever provisions — the base path and every
  *  per-host/numeric-suffixed sibling arm (a) can mint, plus each key's `.pub` counterpart) is
  *  the file's LAST effective non-blank line; append it (with its own comment) at EOF if it
@@ -1033,7 +1033,7 @@ async function armAuthFailsStaleOrMismatch(
   // degrades exactly like any other provisioning failure. `fallbackKeyPath`/`fallbackTitle` (the
   // UN-suffixed base candidate) name the WARN's manual steps when slot-picking itself is what
   // failed, since `keyPath`/`title` never get assigned in that case.
-  const fallbackKeyPath = join(cwd, "data", `worker-deploy-key-${hostComponent}`);
+  const fallbackKeyPath = join(cwd, "data", `worker-deploy-key-${hostComponent}`); // #1080
   const fallbackTitle = `${DEPLOY_KEY_TITLE}-${hostComponent}`;
   let keyPath: string;
   let title: string;
@@ -1170,7 +1170,7 @@ async function ensureDeployKey(
     return reconcileDeployKey(run, repo, cwd, configFilePath, deployKeyPath, deployKeyId, deps);
   }
 
-  const keyPath = join(cwd, "data", "worker-deploy-key");
+  const keyPath = join(cwd, "data", "worker-deploy-key"); // #1080
   let existingKeys: DeployKeyListEntry[];
   try {
     existingKeys = parseDeployKeys(await run(["repo", "deploy-key", "list", "-R", repo, "--json", "id,title"]));

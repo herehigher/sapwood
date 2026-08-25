@@ -1712,7 +1712,7 @@ export interface TickDeps {
    *  identity/state access belongs to conductor; classic reviewer modes never call it. */
   engineAgentDriveDeps?: (worker: WorkerRow, pr: number) => Omit<EngineAgentDriveDeps, "forge" | "cfg" | "reviewerAdapter">;
   /** #76 goal-based stop conditions: OR'd into the #75 PAUSE check below — same DISPATCH-only
-   *  skip, just driven by the driver's stop-condition wind-down instead of the data/PAUSE file
+   *  skip, just driven by the driver's stop-condition wind-down instead of the .sapwood/PAUSE file
    *  sentinel. Reclaim/drive (in-flight lanes, PR review/merge progression) are untouched either
    *  way; only new-lane dispatch is suppressed. Default false (today's behavior unchanged). */
   forceDispatchPause?: boolean;
@@ -4191,7 +4191,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   //   drain+freeze consequence. Unlike the kill switch, a paused tick does NOT return early:
   //   rollback retry, reclaim, and DRIVE (PR review/merge progression of lanes already in
   //   flight) all proceed exactly as normal below — only the DISPATCH phase (bottom of tick(),
-  //   new-lane creation) is skipped when `paused` is true. Removing data/PAUSE restores
+  //   new-lane creation) is skipped when `paused` is true. Removing .sapwood/PAUSE restores
   //   dispatch on the very next tick with no restart, since this is a fresh existsSync check
   //   every call, never cached. `deps.forceDispatchPause` ORs into the same flag — the #76 loop
   //   driver sets it once a configured stop condition (afterIssuesMerged/afterPRsOpened/
@@ -4214,7 +4214,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // checks `effectiveDispatchCap > 0` regardless of `paused` — so threading `forceDispatchPause`
   // into the fix-leg gate serves no purpose there except reintroducing the #375 wedge.
   // `humanPauseOnly` is the ONE genuine human control that should still hold a fix leg back —
-  // the out-of-band `data/PAUSE` sentinel — matching this comment's own long-standing "PAUSE
+  // the out-of-band `.sapwood/PAUSE` sentinel — matching this comment's own long-standing "PAUSE
   // only freezes DISPATCH, not existing-lane progression" intent below, which the fix-leg
   // admission gate had silently violated since #246 introduced it. RESUME's own admission gate
   // (`resumeSpendPaused`, below) and the llm-probe suppression deliberately keep using the wider
