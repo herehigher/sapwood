@@ -15,7 +15,7 @@ Closes #
 ## Docs impact
 
 - [ ] No durable user-visible behavior changed, **or** the canonical doc
-      (`docs/…` / `docs/configuration.md`) is updated in this PR
+      (`docs/…` / `docs/guide/configuration.md`) is updated in this PR
 
 ## Risk
 

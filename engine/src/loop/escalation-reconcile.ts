@@ -240,7 +240,7 @@ export function attentionProof(kind: string, payload: Record<string, unknown> | 
 }
 
 /** Events that CLEAR an issue-scoped attention item without resolving it externally — the
- *  dashboard's own fold (docs/frontend-design.md, "Attention items fold over the whole event
+ *  dashboard's own fold (docs/reference/frontend-design.md, "Attention items fold over the whole event
  *  history") clears on any later event that MOVES the issue. #295 review round 4 (Codex P2):
  *  this module folded only escalation + resolution kinds, so on an upgraded or long-running DB
  *  every historical escalation whose issue was later re-dispatched stayed "open" here forever —

@@ -4,7 +4,7 @@
 // restart. What was missing is everything on the other side of that exit: the next start never
 // read the record, so a DETERMINISTIC wedge — a bug that re-wedges at the same phase every
 // time — restarted into the same wedge forever under external supervision. This module is the
-// backstop that makes external supervision safe (docs/getting-started.md "Running under a
+// backstop that makes external supervision safe (docs/guide/getting-started.md "Running under a
 // supervisor"): restart is the right answer for a transient wedge, a human is the right answer
 // for a deterministic one, and the event log alone can tell them apart.
 //

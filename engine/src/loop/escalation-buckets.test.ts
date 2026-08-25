@@ -1,7 +1,7 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: SITE_INVENTORY pins each site's SOURCE TEXT verbatim; a `${...}` inside one of those fixtures is the scanned file's template literal, not this file's.
 // #397: the escalation action-bucket split — classifier behavior, the exhaustive write-site
 // inventory, the new labels' provisioning/config wiring, and the doc pairing that keeps the
-// shipped label text and docs/configuration.md from drifting apart again.
+// shipped label text and docs/guide/configuration.md from drifting apart again.
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
@@ -576,8 +576,8 @@ test("#397: requiredLabels provisions both new labels", () => {
   assert.ok(names.includes("sapwood:planless"));
 });
 
-test("#397 AC: every escalation-tier label description states writer / required action / removal effect, fits GitHub's 100-char cap, and is quoted VERBATIM in docs/configuration.md", () => {
-  const doc = readFileSync(join(REPO_ROOT, "docs", "configuration.md"), "utf8");
+test("#397 AC: every escalation-tier label description states writer / required action / removal effect, fits GitHub's 100-char cap, and is quoted VERBATIM in docs/guide/configuration.md", () => {
+  const doc = readFileSync(join(REPO_ROOT, "docs", "guide", "configuration.md"), "utf8");
   // #1049: user-perspective rewrite dropped the "Engine-applied:"/"Human-applied:" jargon prefix
   // (a user browsing their repo's label list has no notion of "the engine") in favor of naming
   // sapwood or "a human" directly in prose — the writer signal survives, the internal vocabulary
@@ -606,7 +606,7 @@ test("#397 AC: every escalation-tier label description states writer / required 
     assert.match(spec.description, /remove|never removes/i, `${name}: description must say what removal does`);
     assert.ok(
       doc.includes(spec.description),
-      `docs/configuration.md must quote ${name}'s shipped description verbatim: ${spec.description}`,
+      `docs/guide/configuration.md must quote ${name}'s shipped description verbatim: ${spec.description}`,
     );
   }
 });

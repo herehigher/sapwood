@@ -107,7 +107,7 @@ import {
  *  is a separate question this incident does NOT evidence either way: a spawned child retains
  *  `Read`/`Grep`/`Glob`, and that channel is contained only by the guard hook's
  *  `checkReadContainment` (`guard.ts`, #235 PR-A) — whether that hook is equally transitive to a
- *  child process has never been probed (see `docs/role-paradigm.md`'s tier-1 write-scope row for
+ *  child process has never been probed (see `docs/reference/role-paradigm.md`'s tier-1 write-scope row for
  *  the same caveat), so "not a security escalation" is scoped to the shell/write channel here,
  *  never stated of the incident as a whole. Both names' REGISTRY
  *  presence was confirmed by direct probe run WITH the deny in place: both were absent from the
@@ -665,7 +665,7 @@ export class RoleRunner {
     // no caller had to ask for that). But a caller-supplied `opts.proxy` for a grantless role is a
     // DIFFERENT thing — a caller explicitly asking for a proxy that role could never use — so it
     // is refused loudly, the same way reviewCwd+opts.proxy is refused above, rather than silently
-    // discarded (docs/configuration.md's "always wins over the RoleRunner-wide default, never
+    // discarded (docs/guide/configuration.md's "always wins over the RoleRunner-wide default, never
     // silently overridden" must stay true for both guards). As above, no shipped role can trigger
     // this today; it is here for the same future-edit case.
     if (!reviewMode && !roleGrantsProxyTools && opts.proxy !== undefined) {
@@ -1193,7 +1193,7 @@ export class RoleRunner {
    *  Three conditions, ALL required — deliberately the narrowest gate that closes the gap
    *  retro.ts's module doc named:
    *   1. the session holds a WRITE-CAPABLE grant (hasWriteCapableGrant — today only `retro`,
-   *      the one role NOT at tier 1, see docs/role-paradigm.md). Every issues-only role keeps
+   *      the one role NOT at tier 1, see docs/reference/role-paradigm.md). Every issues-only role keeps
    *      the pre-#428 unconditional delete: it structurally cannot have written anything, so a
    *      dirty check there could only ever produce false positives and leaked worktrees.
    *   2. the outcome is NOT "done". retro's normal path (edit -> commit -> push -> exit 0) must

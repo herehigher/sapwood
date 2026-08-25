@@ -1324,7 +1324,7 @@ export function defaultPoolPromptPath(): string {
  *  deployments would never tune, since the digest was naturally far smaller than the cap. With
  *  full-body candidates it is a REAL budget: this digest now has the same size profile as
  *  `architect.poolDigestMaxChars`, not the tiny title-only one this cap was originally sized for
- *  — see `docs/configuration.md`'s `po.backlogDigestMaxChars` row for the consequence when it
+ *  — see `docs/guide/configuration.md`'s `po.backlogDigestMaxChars` row for the consequence when it
  *  bites (a candidate can drop out of the round with nothing naming it; #558 tracks fixing the
  *  shared omission marker). #231: whole-record packed (packDigestRecords), the same fix as
  *  buildBacklogDigest above — a candidate near the cap's tail is rendered or counted as omitted,

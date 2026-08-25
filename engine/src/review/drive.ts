@@ -287,7 +287,7 @@ export function buildCiInertEscalationPayload(status: PRStatus): CiInertEscalati
 
 /** Pure message-composition function for the `ci-inert-escalated` comment text (#783 AC5): names
  *  the remedy (make the job always run and skip its STEPS, or move it to a dedicated push-only
- *  workflow — `docs/configuration.md`'s `ci` section spells out both), and cites PR #769 as the
+ *  workflow — `docs/guide/configuration.md`'s `ci` section spells out both), and cites PR #769 as the
  *  worked example (the hosted aux arm's job-level `if:` left a SKIPPED check wedging gate① until
  *  it moved to its own push-only workflow). `head` and `checks` are the same evidence
  *  `buildCiInertEscalationPayload` names — this function only composes the human-facing string, it

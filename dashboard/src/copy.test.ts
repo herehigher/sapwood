@@ -149,11 +149,11 @@ test("copy.ts has exactly one entry per §7 table kind — no more, no fewer", (
 });
 
 test("the §7 table's kind count is derived from the map, never hard-coded", () => {
-  // docs/frontend-design.md §7 itself bans a hard-coded count ("an earlier hard-coded '33' had
+  // docs/reference/frontend-design.md §7 itself bans a hard-coded count ("an earlier hard-coded '33' had
   // already drifted"); this asserts the doc and the map agree on today's count without either
   // side pinning a magic number in prose. Scoped to the §7 section specifically (not just any
   // backtick-first table row in the doc — §5's token table has the same two-column shape).
-  const doc = readFileSync(new URL("../../docs/frontend-design.md", import.meta.url), "utf8");
+  const doc = readFileSync(new URL("../../docs/reference/frontend-design.md", import.meta.url), "utf8");
   const lines = doc.split("\n");
   const start = lines.findIndex((l) => l.startsWith("## 7. Copy"));
   const end = lines.findIndex((l, i) => i > start && /^## \d/.test(l));

@@ -2,15 +2,15 @@
 
 A contributor-facing tour of the codebase: what the pieces are, where they
 live, how to run and test them, and which parts are dangerous to touch.
-User-facing docs live one level up ([getting-started](../getting-started.md),
-[configuration](../configuration.md), [security](../security.md)); this guide
-is for people **changing sapwood itself**. Contribution mechanics (branch/PR,
-quality gate, human-merge-only rules) are in the root
+User-facing docs live under [../guide/](../guide/) ([getting-started](../guide/getting-started.md),
+[configuration](../guide/configuration.md)) and [security](../security.md); this
+guide is for people **changing sapwood itself**. Contribution mechanics
+(branch/PR, quality gate, human-merge-only rules) are in the root
 [CONTRIBUTING.md](../../CONTRIBUTING.md).
 
-> Status tracks the engine at pre-v1. Sections marked **TODO (v0.2)** cover
-> the dashboard, which is designed ([frontend-design.md](../frontend-design.md))
-> but not yet built.
+> Status tracks the engine at pre-v1. The dashboard is designed
+> ([frontend-design.md](../reference/frontend-design.md)) and built — see
+> [07](07-dashboard.md) for what exists.
 
 ## System architecture
 
@@ -22,12 +22,13 @@ driving the **conductor's tick loop** during execution; ticks dispatch one
 headless **worker** per Ready issue into an isolated worktree under a
 fail-closed **guard** hook, and reclaim finished lanes into the **merge gate**
 (CI + independent review + a bounded fix loop). The engine's own GitHub
-traffic crosses the **forge adapter**; producer workers push their branch and
-open their PR directly with `gh` from the worktree (the guarded boundary is
-approval/merge, not GitHub access), while judgment roles get read-only forge
-evidence through a per-session **MCP proxy**. The engine's own durable records
-land in **SQLite state**; wrapper evidence and human controls stay on the
-filesystem (see [06](06-persistence.md)).
+traffic crosses the **forge adapter**; a producer worker's job ends at
+`git push` — the engine opens the PR itself once the branch is confirmed
+pushed (adopting a worker-opened one instead of duplicating it, if the
+worker's `gh` grant is still present and it opens one anyway), while judgment
+roles get read-only forge evidence through a per-session **MCP proxy**. The
+engine's own durable records land in **SQLite state**; wrapper evidence and
+human controls stay on the filesystem (see [06](06-persistence.md)).
 
 **The one invariant everything else hangs off:** producer ≠ reviewer ≠ merger.
 The worker that writes code never approves or merges it; the guard hook
@@ -36,7 +37,7 @@ enforces this fail-closed at the tool-call layer, and the engine's
 code path that ever calls merge.
 
 Vocabulary (lane, tick, round, sentinel, gate②, harvest, handoff, park) is
-defined behaviorally in [loop-walkthrough-v0.2.md](../loop-walkthrough-v0.2.md);
+defined behaviorally in [loop-walkthrough.md](../reference/loop-walkthrough.md);
 skim it if a term below reads opaque.
 
 ## Guide sections
@@ -49,7 +50,7 @@ skim it if a term below reads opaque.
 | [04 — Test & quality commands](04-commands.md) | test / lint / typecheck / build, how tests are written here, CI |
 | [05 — Core modules](05-core-modules.md) | Conductor, rounds, roles, forge, guard, proxy — where to look when changing behavior |
 | [06 — Persistence layer](06-persistence.md) | Maintainer deep dive: every table, migrations, crash-consistency rules |
-| [07 — Dashboard](07-dashboard.md) | **TODO (v0.2)** — designed, not yet built; what exists today |
+| [07 — Dashboard](07-dashboard.md) | Designed and built — what exists today, where it lives |
 | [08 — Change-risk map](08-change-risk.md) | Human-merge-only surface, high-risk seams, rules that must survive any refactor |
 | [09 — Plugin, commands & prompts](09-plugin-commands-prompts.md) | Plugin packaging, slash commands, role prompt assets |
 | [10 — Releasing](10-releasing.md) | Versioning policy, the four-manifest lockstep rule, and the `scripts/release.ts` runbook |
@@ -62,7 +63,7 @@ skim it if a term below reads opaque.
 | Get building and testing | 03 → 04 |
 | Change scheduling / lane lifecycle | 05 (conductor, rounds) → 08 |
 | Change gate or review behavior | 05 (merge gate) → 08 (most of it is human-merge-only) |
-| Add or tune an autonomous role | 05 (peripheral roles) → 09 (prompts) → [role-paradigm](../role-paradigm.md) |
+| Add or tune an autonomous role | 05 (peripheral roles) → 09 (prompts) → [role-paradigm](../reference/role-paradigm.md) |
 | Change GitHub integration | 05 (forge adapter, proxy) → 08 |
 | Touch durable state / recovery | 06 → 08 |
 | Change a slash command or prompt | 09 |

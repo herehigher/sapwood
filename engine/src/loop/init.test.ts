@@ -114,7 +114,7 @@ test("requiredLabels (#248 review round 1, G2): provisions the configured hold l
   assert.ok(customNames.includes("reviewing") && customNames.includes("do-not-merge"));
 });
 
-test("requiredLabels (#400): the hold label's description names purpose/carrier/removal/no-effect-on-issues, fits GitHub's 100-char limit, and is quoted VERBATIM in docs/configuration.md", () => {
+test("requiredLabels (#400): the hold label's description names purpose/carrier/removal/no-effect-on-issues, fits GitHub's 100-char limit, and is quoted VERBATIM in docs/guide/configuration.md", () => {
   const spec = requiredLabels(cfg).find((l) => l.name === "sapwood:hold");
   assert.ok(spec);
   assert.ok(spec.description.length <= 100, `GitHub caps label descriptions at 100 chars (got ${spec.description.length})`);
@@ -127,8 +127,8 @@ test("requiredLabels (#400): the hold label's description names purpose/carrier/
 
   // Same text in the docs — one description, one place to change it (the #397 pairing check).
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-  const doc = readFileSync(join(repoRoot, "docs", "configuration.md"), "utf8");
-  assert.ok(doc.includes(spec.description), `docs/configuration.md must quote the shipped description verbatim: ${spec.description}`);
+  const doc = readFileSync(join(repoRoot, "docs", "guide", "configuration.md"), "utf8");
+  assert.ok(doc.includes(spec.description), `docs/guide/configuration.md must quote the shipped description verbatim: ${spec.description}`);
 });
 
 test("#658 review round 2 (B): a holdLabels entry colliding with a taxonomy label name is now rejected AT CONFIG LOAD — the #248 round-1 dedup-in-requiredLabels this superseded is gone", () => {

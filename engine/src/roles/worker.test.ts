@@ -4412,7 +4412,7 @@ test("#935 AC2: a resumed lane's pre-handoff usage split across THREE lines for 
 // check against actual dogfood usage) is not a repo-carried test: real captured transcripts are
 // dev-time artefacts of one dogfood run, not framework fixtures, so they live in that deploy's
 // own scratch storage under fixtures/estimator/ and the replay runs as an operator script —
-// `engine/scripts/estimator-replay.ts` (see docs/supervision.md, "Est-vs-real cost method").
+// `engine/scripts/estimator-replay.ts` (see docs/guide/supervision.md, "Est-vs-real cost method").
 
 test("#155: a DETACHED lane (no in-memory handle) carries no live telemetry — never invents a second baseline", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));

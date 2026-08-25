@@ -213,7 +213,7 @@ export function matchBlockedByLabel(name: string, prefix: string): number | null
 // misreads. `sapwood-labels` (skills-plugin.ts) renders this registry into a pull-model skill
 // every role session can read on demand — see that module for the render/publish mechanics.
 //
-// This is a PROMOTION of the doc comments above, not a second carrier: `docs/configuration.md`'s
+// This is a PROMOTION of the doc comments above, not a second carrier: `docs/guide/configuration.md`'s
 // label table keeps the operator-facing prose (defaults, config keys); this registry is the
 // role-session-facing, compile-checked twin, transcribed once at #640 review time — after this
 // PR, THIS registry is the source of truth for label semantics, and the doc comments above should

@@ -2234,7 +2234,7 @@ async function reportRetainedWorktree(
     .catch(() => {});
 }
 
-/** #210 (docs/frontend-design.md §11 follow-up 4): the resolution signal for a retained
+/** #210 (docs/reference/frontend-design.md §11 follow-up 4): the resolution signal for a retained
  *  worktree. Nothing else marks a retained folder as dealt with — the dashboard's
  *  Needs-attention strip would carry the row forever — and the engine already owns the path, so
  *  the filesystem it manages IS the signal: once the folder is gone (the human salvaged or
@@ -4788,7 +4788,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // WorkerRow.ac_rebaseline_eligible's own doc) and it has a snapshot to re-baseline at all
       // (`w.ac_body_hash` non-null — a pre-#283 legacy lane has neither). Reaching this branch
       // already proves a human/supervisor cleared the escalation hold since whatever put this
-      // lane here (`decision` above is not SKIP) — docs/supervision.md's owner ruling that an LLM
+      // lane here (`decision` above is not SKIP) — docs/guide/supervision.md's owner ruling that an LLM
       // supervisor session's `park clear`-equivalent interventions ARE the trusted-operator
       // adjudication. Without this, the very next `checkAcDriftBeforeDrive`/
       // `checkCommentCursorBeforeDrive` call would compare the (now-current) live body against

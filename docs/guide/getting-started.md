@@ -70,13 +70,13 @@ file-sentinel commands (raw or the `sapwood pause`/`stop`/`estop` CLI verbs) abo
     flight (running workers, PRs moving through the review/merge gate) keeps going
     normally. `--resume` lifts it.
 
-  See [`security.md`](security.md#human-controls-three-tiers) for the full semantics, including
+  See [`security.md`](../security.md#human-controls-three-tiers) for the full semantics, including
   how pause interacts with `--until-idle`.
 
 ### Channel C — npm
 
 The engine publishes to npm as the bare package `sapwood` (the `@sapwood` scope is reserved
-for future split packages — see [`10-releasing.md`](dev-guide/10-releasing.md)). This is the
+for future split packages — see [`10-releasing.md`](../dev-guide/10-releasing.md)). This is the
 consumer path: no clone, build, or link step.
 
 ```
@@ -95,7 +95,7 @@ sapwood dashboard
 ```
 
 `alpha` is the pre-release dist-tag (a pre-release version never becomes `latest` — see
-[`10-releasing.md`](dev-guide/10-releasing.md)); use the shipped version or `latest` after a
+[`10-releasing.md`](../dev-guide/10-releasing.md)); use the shipped version or `latest` after a
 plain release.
 
 ### Channel A — contributor checkout
@@ -191,7 +191,7 @@ sapwood init
    through this key, with **no forge API credential in its environment at all**: it structurally
    cannot open a PR, approve a review, label an issue, or touch the board — the engine does all of
    that from its own, separately-held credential (see
-   [Worker credential tiers](security.md#worker-credential-tiers) for the full L0/L1
+   [Worker credential tiers](../security.md#worker-credential-tiers) for the full L0/L1
    picture and honest residuals). If you don't have repo admin, `init` logs exactly what to do by
    hand (or skip — the engine runs fully functional either way, at L0, today's fuller-credentialed
    default) and moves on; it never fails `init` over this. On a LATER run, if the recorded key
@@ -274,16 +274,16 @@ Complete this setup before choosing L3.
   worker the L1 deploy-key path (`worker.deployKeyPath` and `worker.deployKeyId`) rather than
   a forge API credential, and keep the conductor's merger credential outside the worker's
   normal credential lookup paths. Actual unreadability requires the L2 [enterprise posture
-  checklist](security.md#l2-enterprise-posture-checklist). Both controls
+  checklist](../security.md#l2-enterprise-posture-checklist). Both controls
   matter: branch protection prevents a producer from bypassing review with a direct push, while
   a distinct merger identity prevents it from acting as the conductor. Without both, producer ≠
   merger is not a fully load-bearing deployment guarantee.
 
 Credential isolation has deliberate limits: the L1 environment removes the normal forge
 credential path, but it is not OS-level confinement from arbitrary code or the host's
-credential store. Read Security's [Accepted blind spots](security.md#accepted-blind-spots),
-[Worker credential tiers](security.md#worker-credential-tiers), and
-[Worker-leg user-settings persistence vector — detect & disclose](security.md#worker-leg-user-settings-persistence-vector--detect--disclose)
+credential store. Read Security's [Accepted blind spots](../security.md#accepted-blind-spots),
+[Worker credential tiers](../security.md#worker-credential-tiers), and
+[Worker-leg user-settings persistence vector — detect & disclose](../security.md#worker-leg-user-settings-persistence-vector--detect--disclose)
 before relying on unattended merge.
 
 ## L0–L3 autonomy ladder
@@ -485,7 +485,7 @@ The CLI form additionally prints the tier's live semantics on activation (and, f
 verb, or clearing an already-inactive one, is a normal exit-0 no-op. `sapwood <tier>
 --help` documents each tier's exact semantics.
 
-See [`security.md`](security.md#human-controls-three-tiers) for the full semantics, including
+See [`security.md`](../security.md#human-controls-three-tiers) for the full semantics, including
 how pause interacts with `--until-idle`.
 
 ## Running under a supervisor
@@ -519,7 +519,7 @@ ships instead is a **supervision contract** the engine holds up its end of:
   see [troubleshooting.md](troubleshooting.md#consecutive-stalls-park) for the
   operator-clear step. These are backstops, not a substitute: configure the
   supervisor's **own** circuit-breaker too — a *prerequisite* for unattended supervised
-  runs ([security.md](security.md)'s supervisor prerequisite).
+  runs ([security.md](../security.md)'s supervisor prerequisite).
 - **Stopping a supervised engine** is the supervisor's stop verb (e.g. `systemctl stop`),
   which sends SIGTERM — the in-flight round finishes, harvest included, and `run-ended`
   is written. The kill switch remains the in-band emergency freeze; note a kill-switch
@@ -588,7 +588,7 @@ A plan being present isn't enough on its own either: the configured
 `getReadyIssues` will dispatch an issue without `labels.verifyNa` — it
 means the gate⓪ verification-plan-reviewer peripheral judged the acceptance criteria and verification plan
 actually executable, not just present. See
-[`security.md`](security.md#the-planapproved-label-and-gate) for the full gate. The default rounds driver
+[`security.md`](../security.md#the-planapproved-label-and-gate) for the full gate. The default rounds driver
 runs the verification-plan-reviewer peripheral each round and applies it automatically when it approves
 a plan; `sapwood init` provisions the label like `sapwood:verify:n/a` and
 `sapwood:origin:agent` above.
@@ -599,13 +599,13 @@ shape into the authoritative AC set a worker is dispatched against; a malformed 
 checkbox set blocks dispatch even with `plan:approved` applied. The engine also snapshots
 the full issue body BEFORE a worker ever spawns, and re-checks it for drift at review
 time — see
-[`security.md`](security.md#the-ac-authority-dispatch-snapshot) for the
+[`security.md`](../security.md#the-ac-authority-dispatch-snapshot) for the
 full mechanism.
 
 Any issue a human didn't personally author — including one an agent role opens on your
 behalf — should carry the configured `labels.originAgent` label (`sapwood:origin:agent` by
 default); see
-[`security.md`](security.md#the-originagent-label-convention) for why.
+[`security.md`](../security.md#the-originagent-label-convention) for why.
 
 ### The goal file is the project's spec
 
@@ -695,11 +695,11 @@ probing the defaults, matching `status --config`/`events --config`.
 The control actions (pause, stop, estop) exposed in the dashboard UI go through that
 one write route, `POST /api/control`, gated by the `dashboard.controls` config key —
 `true` by default; set it to `false` for a pure-spectator deployment where the
-dashboard can only ever read. See [`security.md`](security.md) for the dashboard's
+dashboard can only ever read. See [`security.md`](../security.md) for the dashboard's
 full trust posture.
 
 ## Next steps
 
 - [`configuration.md`](configuration.md) — every config key.
-- [`security.md`](security.md) — the trust and governance model.
+- [`security.md`](../security.md) — the trust and governance model.
 - [`troubleshooting.md`](troubleshooting.md) — common failures and what they mean.

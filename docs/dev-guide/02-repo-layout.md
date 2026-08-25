@@ -14,7 +14,7 @@ Risk labels below mean **CORE** (central behavior; review carefully), **NORMAL**
 | `biome.json` | NORMAL | Formatting and lint policy for TypeScript sources. |
 | `tsconfig.base.json` | NORMAL | Shared strict TypeScript/NodeNext compiler policy. |
 | `package.json` | NORMAL | Private npm workspace root and root quality scripts. |
-| `scripts/` | NORMAL | Repo-level maintenance scripts with no engine dependency (e.g. `check-links.py`, #340) — distinct from `engine/scripts/`, which is scoped to the engine npm workspace. |
+| `scripts/` | NORMAL | Repo-level maintenance scripts with no engine dependency (e.g. `check-links.ts`) — distinct from `engine/scripts/`, which is scoped to the engine npm workspace. |
 | `.claude-plugin/` | NORMAL | Claude Code plugin manifest and plugin-facing instructions. Guard hooks are currently wired per session in `worker.ts` and `peripheral.ts`, not registered here. |
 | `.github/` | HANDS-OFF for workflows | Issue templates and CI workflow; workflow writes are guard-protected. |
 
@@ -59,15 +59,15 @@ preserving the target repository as cwd. `commands/sapwood-stop.md` manages
 | Document | Audience |
 | --- | --- |
 | `README.md` | Product overview, requirements, architecture, roadmap, and links. |
-| `docs/getting-started.md` | Operators installing and starting sapwood. |
-| `docs/configuration.md` | Operators configuring all supported keys. |
+| `docs/guide/getting-started.md` | Operators installing and starting sapwood. |
+| `docs/guide/configuration.md` | Operators configuring all supported keys. |
 | `docs/security.md` | Operators and reviewers evaluating trust boundaries and controls. |
-| `docs/role-paradigm.md` | Designers and implementers of autonomous roles. |
+| `docs/reference/role-paradigm.md` | Designers and implementers of autonomous roles. |
 | `docs/PLAN.md` | Architecture, durable decisions, and planned capabilities. |
-| `docs/loop-walkthrough-v0.2.md` | Behavioral reference for round, tick, state, and UI truth. |
-| `docs/frontend-design.md` | Dashboard design; implementation is not present. |
-| `docs/round-artifact.md` | Round artifact contract and interpretation. |
-| `docs/troubleshooting.md` | Operator diagnosis and recovery. |
+| `docs/reference/loop-walkthrough.md` | Behavioral reference for round, tick, state, and UI truth. |
+| `docs/reference/frontend-design.md` | Dashboard design spec (built; see [07](07-dashboard.md)). |
+| `docs/reference/round-artifact.md` | Round artifact contract and interpretation. |
+| `docs/guide/troubleshooting.md` | Operator diagnosis and recovery. |
 | `docs/dev-guide/` | Contributors changing the repository. |
 
 ## Where to find X

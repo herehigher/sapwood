@@ -68,7 +68,7 @@ repo by `sapwood init`) and `issue-templates/`.
 
 Engine tests never cover the plugin packaging itself. To verify it end-to-end,
 install the local checkout as a plugin in a scratch target repository (see
-[Getting started](../getting-started.md) for the install flow), then run
+[Getting started](../guide/getting-started.md) for the install flow), then run
 `/sapwood-status` (no engine needed) and `/sapwood-run --dry-run` (no state
 written) against it. `$CLAUDE_PLUGIN_ROOT` resolution and `bin/sapwood-plugin.sh`'s
 local-dist-vs-`npx` branch above are exactly what this smoke-checks.

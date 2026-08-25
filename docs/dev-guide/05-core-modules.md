@@ -1,6 +1,6 @@
 # 05 — Core modules
 
-This is the code-level map. Follow [Security](../security.md), [Role paradigm](../role-paradigm.md), and `docs/PLAN.md` for rationale and policy rather than duplicating them here.
+This is the code-level map. Follow [Security](../security.md), [Role paradigm](../reference/role-paradigm.md), and `docs/PLAN.md` for rationale and policy rather than duplicating them here.
 
 ## Conductor & tick loop (`loop/conductor.ts`, `loop/driver.ts`)
 
@@ -40,7 +40,7 @@ Live token usage is estimated with `engine/src/config/pricing.ts`. Crossing `wor
 
 ## Peripheral roles (`roles/architect.ts`, `roles/plan-review.ts`, `roles/peripheral.ts`, `retro/`)
 
-Each role follows the five-element contract in [Role paradigm](../role-paradigm.md): mandate, context, capabilities, output contract, and escalation path. `RoleRunner` (`engine/src/roles/peripheral.ts`) launches a worktree-confined headless session with credential stripping, guard wiring, timeout, JSONL/sentinels, optional proxy, context manifest capture, and cleanup. `runSessionWithRetry()` performs the bounded retry/degrade pattern.
+Each role follows the five-element contract in [Role paradigm](../reference/role-paradigm.md): mandate, context, capabilities, output contract, and escalation path. `RoleRunner` (`engine/src/roles/peripheral.ts`) launches a worktree-confined headless session with credential stripping, guard wiring, timeout, JSONL/sentinels, optional proxy, context manifest capture, and cleanup. `runSessionWithRetry()` performs the bounded retry/degrade pattern.
 
 Plan review validates approve/draft/verification-not-applicable decisions, retries drafting, and applies comments/body/labels through engine `IForge` calls (`createPlanReviewStub`, `engine/src/roles/plan-review.ts`). The architect reviews goal/backlog/pool consistency and emits validated per-candidate verdicts (`createArchitectStub`, `engine/src/roles/architect.ts`). Alignment/triage and harvest live in `engine/src/loop/align.ts` and `engine/src/loop/harvest.ts`. Retro receives an engine-built digest, may edit/commit/push only in its ephemeral worktree, and asks the engine to open a PR from a validated scratch result (`engine/src/retro/retro.ts`).
 
@@ -74,7 +74,7 @@ The proxy is a local, per-session, read-only MCP server. `startForgeProxyServer(
 
 `loadConfig()` in `engine/src/config/config.ts` parses YAML/JSON, applies strict Zod defaults/refinements, resolves file paths, rejects unknown keys/collisions, and returns `SapwoodConfig`. All operator-adjustable policy belongs in this schema and the commented starter `sapwood.config.example.yaml`, not as source constants.
 
-`engine/src/config/doctrine.ts` loads and caps trusted review/escalation prose used in prompts; `directive.ts` ingests and archives one round directive; `pricing.ts` validates model rates/context windows for live estimates. Change a tunable by updating schema, defaults/sample, and `docs/configuration.md` together.
+`engine/src/config/doctrine.ts` loads and caps trusted review/escalation prose used in prompts; `directive.ts` ingests and archives one round directive; `pricing.ts` validates model rates/context windows for live estimates. Change a tunable by updating schema, defaults/sample, and `docs/guide/configuration.md` together.
 
 ## CLI (`cli.ts`) & plugin commands
 

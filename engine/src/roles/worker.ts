@@ -967,7 +967,7 @@ export function discoverClaudeBin(env: Record<string, string | undefined>): stri
  *  unverified number here — that fails the drift test below by construction (it can only compare
  *  this constant against the docs, never re-derive "what the CLI actually verifies").
  *
- *  Drift-tested against docs/getting-started.md's Requirements bullet and docs/configuration.md's
+ *  Drift-tested against docs/guide/getting-started.md's Requirements bullet and docs/guide/configuration.md's
  *  `worker` section (claude-version-startup-check.test.ts's AC1/AC2 test) — changing this value
  *  without updating both docs to the SAME exact string fails that test. Consumed by
  *  claude-version-startup-check.ts's once-per-engine-start WARN-only startup detector — never a
@@ -979,7 +979,7 @@ export const MIN_CLAUDE_CLI_VERSION = "2.1.209";
  *  stdout) error line, a timeout note, or a spawn error — so the recorded probe event lets an
  *  operator distinguish "provider still down" (a 429/overloaded error) from a local
  *  misconfiguration ("Error: Exceeded USD budget (0.01)" = envFailure.probeMaxBudgetUsd set
- *  too low; see docs/configuration.md). */
+ *  too low; see docs/guide/configuration.md). */
 export interface LlmPingResult {
   ok: boolean;
   detail?: string;
@@ -1059,7 +1059,7 @@ function llmPingArgv(probeModel: string, probeMaxBudgetUsd: number, permissionMo
  *  why the failure detail is surfaced: a too-low cap keeps the engine parked, a fail-safe but
  *  confusing state without the stderr line in the event. An OLDER CLI lacking these flags
  *  fails every probe with "error: unknown option ..." — same surfacing, remedy is a CLI
- *  upgrade (see docs/configuration.md).
+ *  upgrade (see docs/guide/configuration.md).
  *
  *  Never throws — any spawn error, non-zero exit, non-"pong" output, or a hang past
  *  `timeoutSec` (hard kill) resolves `{ ok: false, detail }`.
@@ -4268,7 +4268,7 @@ export class WorkerSupervisor implements Supervisor {
     // pinned-price estimator's substitute — is the same provenance the log line right below
     // already computes and then discards. Persisted here (never derived a second time) so
     // conductor.ts's terminal settlement can thread it into `spend_ledger.estimated` instead of
-    // leaving every worker/fix-leg row's `estimated` permanently NULL (docs/supervision.md's
+    // leaving every worker/fix-leg row's `estimated` permanently NULL (docs/guide/supervision.md's
     // est-vs-real bias query needs this to be real, not aspirational prose).
     const costEstimated = reportedCost <= 0;
     const cost = reportedCost > 0 ? reportedCost : estimatedLegCost;

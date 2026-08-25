@@ -31,7 +31,7 @@
 # handoff; under-estimating (a soft budget that never fires) is the dangerous direction.
 #
 # contextWindow (#155): each model's total context window, in tokens — the dashboard's
-# context-usage % gauge denominator (docs/frontend-design.md §8). Same hand-maintained-
+# context-usage % gauge denominator (docs/reference/frontend-design.md §8). Same hand-maintained-
 # snapshot pattern as the USD rates above, and the SAME fail-closed rule: a model entry
 # missing contextWindow fails the whole file's load, exactly like one missing a rate field.
 

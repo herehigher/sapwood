@@ -273,7 +273,7 @@ export const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
     backfillLegacyRoundCursors(db);
   },
   // 10 -> 11: per-probe lane telemetry (#155) — the priced-cost snapshot + context/composition
-  // trio a still-`running` lane's dashboard display needs (docs/frontend-design.md §8),
+  // trio a still-`running` lane's dashboard display needs (docs/reference/frontend-design.md §8),
   // refreshed on every RECLAIM-phase probe (conductor.ts) via State.setLiveTelemetry and
   // cleared the instant the lane leaves `running` (handoff/done/driving/failed) via
   // State.clearLiveTelemetry. This is a LIVE DISPLAY CACHE only — the settled real cost for a
@@ -1414,7 +1414,7 @@ export interface RoundListRow {
   startSpendId: number;
   eventCount: number;
   schemaVersion: number | null;
-  /** The validated artifact JSON, parsed and verbatim (docs/round-artifact.md is its contract). */
+  /** The validated artifact JSON, parsed and verbatim (docs/reference/round-artifact.md is its contract). */
   artifact: unknown;
 }
 
@@ -3847,7 +3847,7 @@ export class State {
   }
 
   /** #210: every retained worktree path whose LATEST retention has not been released yet — the
-   *  input to conductor.ts's releaseVanishedWorktrees scan (docs/frontend-design.md §11
+   *  input to conductor.ts's releaseVanishedWorktrees scan (docs/reference/frontend-design.md §11
    *  follow-up 4). Identity is the `worktreePath`, not the lane name (lane names are reused
    *  slots), and the decision is "what is the newest event for this path" rather than "was this
    *  path ever released": a slot recycled at the same path is retained again, and that fresh
@@ -4124,7 +4124,7 @@ export class State {
     return (this.db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM spend_ledger").get() as { m: number }).m;
   }
 
-  // ── #142: dashboard reads (docs/frontend-design.md §8) ─────────────────────────────────
+  // ── #142: dashboard reads (docs/reference/frontend-design.md §8) ─────────────────────────────────
   //
   // Four PURE READS the dashboard's read-only handle needs and nothing else in the engine has
   // an equivalent of. They live here rather than in dashboard/server.ts so there is exactly one

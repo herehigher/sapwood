@@ -9,7 +9,7 @@ sapwood turns a GitHub backlog into merged, reviewed code: *issues in → review
 PRs out*. It is a [Claude Code](https://claude.com/claude-code) plugin that drives
 self-directed development through a real governance layer — not a black box that
 self-merges and hopes for the best. Adopt it at the level you trust today, then step
-up or down through the [L0–L3 autonomy ladder](docs/getting-started.md#l0l3-autonomy-ladder):
+up or down through the [L0–L3 autonomy ladder](docs/guide/getting-started.md#l0l3-autonomy-ladder):
 read-only preview, one supervised issue, human-merged PRs, or governed unattended
 merge.
 
@@ -40,7 +40,7 @@ merge.
 **Deployment prerequisite.** The plugin's guard mediates the covered built-in
 Bash/file-tool family, not inherited ambient MCP tools or unknown servers. For
 unattended merge, protected branches and a distinct merger identity establish the
-load-bearing boundary described in [Trust model prerequisites](docs/getting-started.md#trust-model-prerequisites).
+load-bearing boundary described in [Trust model prerequisites](docs/guide/getting-started.md#trust-model-prerequisites).
 A fresh installation does not establish those repository settings.
 
 > Status: **early development** (pre-v1). The framework is being extracted and
@@ -56,7 +56,7 @@ heartwood: the stable core that holds the tree up.
 That is this loop. Bark — the fail-closed guard — protects the living layer from
 the outside. Sapwood is where the work grows: workers producing new code in
 parallel. Heartwood is `main` — with the [Trust model
-prerequisites](docs/getting-started.md#trust-model-prerequisites) in place, nothing
+prerequisites](docs/guide/getting-started.md#trust-model-prerequisites) in place, nothing
 becomes heartwood until it has passed the review gate and hardened. Growth at the
 edge, structure at the core, protection in between.
 
@@ -69,7 +69,7 @@ plugin enforces a governance path instead of treating review as advice.
   CI and a fresh review before the conductor can merge. The reviewer is pluggable,
   and a *produce-PR-and-stop* mode (a human clicks merge) is available when you
   want a tighter leash. The protected-branch and distinct-identity requirements
-  remain [deployment prerequisites](docs/getting-started.md#trust-model-prerequisites).
+  remain [deployment prerequisites](docs/guide/getting-started.md#trust-model-prerequisites).
 
 ## Prior art & inspiration
 
@@ -147,23 +147,12 @@ flowchart LR
 
 ## Documentation
 
-- [`docs/getting-started.md`](docs/getting-started.md) — install, `sapwood init`, the
-  L0–L3 autonomy ladder, slash commands, writing a `Ready` issue.
-- [`docs/configuration.md`](docs/configuration.md) — every config key, default, and
-  semantics.
+- [`docs/guide/getting-started.md`](docs/guide/getting-started.md) — install,
+  `sapwood init`, the L0–L3 autonomy ladder, slash commands, writing a `Ready` issue.
 - [`docs/security.md`](docs/security.md) — the trust/governance model: guard hook,
   human-merge-only paths, the e-stop/kill switch/pause control tiers, cost ceilings.
-- [`docs/role-paradigm.md`](docs/role-paradigm.md) — the five-element contract every
-  peripheral role follows (responsibility, write scope, idempotency, output
-  validation, escalation).
-- [`docs/troubleshooting.md`](docs/troubleshooting.md) — common failures and what they
-  mean.
-- [`docs/supervision.md`](docs/supervision.md) — the supervision playbook: monitoring a
-  run via `status`/`events`, batch open/close rituals, the stop ritual, and the
-  governance lines a human or LLM supervisor session operates under.
-- [`docs/dev-guide/`](docs/dev-guide/README.md) — **contributor development guide**:
-  architecture, repository layout, core modules, persistence schema, and the
-  change-risk map for anyone modifying sapwood itself.
+- See [`docs/README.md`](docs/README.md) for the full documentation map — guides,
+  configuration, the contributor dev-guide, and durable design references.
 
 ## Requirements
 
@@ -184,10 +173,12 @@ flowchart LR
 | M2 ✅ | Engine core (conductor + worker + guard wired live) — dogfooded end-to-end; **sapwood now builds sapwood** — **shipped** |
 | M3 ✅ | Review gate + opt-in autonomous-merge + cost ceiling + kill switch — the engine can now finish work under the two-gate policy — **shipped** |
 | M4 ✅ | Loop driver, commands + status CLI + dry-run, docs — **shipped** |
-| v0.2 | Round orchestrator (peripheral roles, gate⓪, round ledger) ✅ — now `sapwood run`'s default driver; Dashboard — built *by* sapwood itself, as the flagship dogfood — **in progress** |
+| v0.2 | Round orchestrator (peripheral roles, gate⓪, round ledger) ✅ — now `sapwood run`'s default driver; Dashboard — designed and **built**, shipping inside the npm package — **release chain (marketplace catalog, publish gating) in progress** |
 
 Built in TypeScript. Targets your own / your team's repos first (trusted context),
 architected toward public-repo hardening.
+
+For a fine-grained view of recent work, see [CHANGELOG.md](CHANGELOG.md) "Unreleased".
 
 ## Contributing
 

@@ -420,7 +420,7 @@ export function ciPendingAge(input: {
  *  machinery, no parallel state machine" discipline #782's `ciPendingAge` extraction already
  *  established for the pending arm itself).
  *
- *  PIN SEMANTICS UNCHANGED (docs/configuration.md's `inertEscalateAfterSec` row is the contract
+ *  PIN SEMANTICS UNCHANGED (docs/guide/configuration.md's `inertEscalateAfterSec` row is the contract
  *  this matches exactly): the durable CI-pending pin is stamped ONCE, at whichever moment gate①
  *  FIRST goes not-green — pending or inert, whichever comes first — and is NEVER re-stamped when
  *  a pending rollup later flips inert (or an inert one flips back to pending: neither transition
