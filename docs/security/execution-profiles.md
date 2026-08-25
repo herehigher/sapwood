@@ -10,7 +10,7 @@ session's tools reach the host, never WHICH tools a producer leg is offered (tha
 Decision #11, unchanged and unrelated; no `capabilities.*` surface is reopened here).
 
 **The engine injects no sandbox settings into any session it spawns, and no sandbox-selecting
-config key exists.** The floor survives as an **operator recipe** (below): paste-ready JSON for
+config key exists.** A paste-ready floor survives as an **operator recipe** (below): JSON for
 the operator's OWN Claude settings, not something sapwood configures on the operator's behalf.
 
 ### Seven layers, none redundant with another
@@ -30,7 +30,7 @@ These seven mechanisms answer different questions; landing the Bash sandbox make
 Layer 4 (the Bash-sandbox recipe) is orthogonal to layer 3 (credential identity vs. execution
 reach — independent axes; never coupled to `worker.deployKeyPath`/`worker.deployKeyId` in
 config). It applies to every Bash-bearing `claude` session the engine spawns — worker legs
-(dispatch/resume/fix) and `retro` — never to gate② (no Bash at all in a review session) or to
+(dispatch/resume/fix) and `retro` — never to gate② (D1: no Bash at all in a review session) or to
 `codex exec` (its own `--sandbox read-only`, a vendor-specific mechanism outside this recipe's
 scope).
 
@@ -48,8 +48,9 @@ environments](https://code.claude.com/docs/en/sandbox-environments) taxonomy:
 | Dedicated VM / Claude Code on the web | Full OS, or Anthropic-managed VM | Out of scope for sapwood's own engine; named for completeness, not built |
 
 For `-p --permission-mode auto` sessions, the Bash sandbox is **defense in depth**, explicitly
-"not sufficient for fully unattended runs in either mode" — the recommended unattended boundary
-is a container, VM, or the sandbox runtime, which additionally wrap MCP servers and hooks.
+"not sufficient for fully unattended runs in either mode" per Claude Code's own docs — the
+recommended unattended boundary is a container, VM, or the sandbox runtime, which additionally
+wrap MCP servers and hooks.
 **sapwood documents this outer-boundary recipe below; it does not build one** — containers are
 deployment-specific, and framework code stays generic.
 
@@ -124,8 +125,8 @@ git operation (checkout/commit/merge/rebase/add/diff/log/status) along with the 
 actually need it — an unnecessarily large unsandboxed surface for the same functional outcome.
 
 Enabling this recipe with `failIfUnavailable: true` (as shown) makes sandbox-initialization
-failure block CLI startup instead of falling back unsandboxed. Neither the engine nor this
-recipe positively attests per-leg engagement.
+failure block CLI startup instead of falling back unsandboxed, per Claude Code's own
+documentation. Neither the engine nor this recipe positively attests per-leg engagement.
 
 - **Guaranteed once active:** the `dangerouslyDisableSandbox` escape hatch is off;
   `sandbox.filesystem.denyRead` closes the `worker.ts::workerCredentialFreeEnv` `steal.mjs`
