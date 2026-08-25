@@ -26,14 +26,17 @@ enforced structurally, not by asking the model nicely:
 
 | Separation | Invariant | Enforced by | Test |
 | --- | --- | --- | --- |
-| No self-merge/approve via Bash | Every GitHub merge/approve/release/governance command is blocked before it runs, including through exec-prefixes and opaque shell constructs. | `guard.ts::guardDecision` (`scanGhOverreach`) | `guard.test.ts` |
+| No self-merge/approve via Bash | Every GitHub merge/approve/ready/release/label/project/issue-governance/lifecycle command is blocked before it runs, including behind exec-prefixes; opaque constructs (`eval`, `sh -c`, an interpreter's `-e`/`-c`, process substitution) are blocked outright, fail-closed, rather than inspected. | `guard.ts::guardDecision` (`scanGhOverreach`, `checkOpaque`) | `guard.test.ts` |
 | Merge is never a worker action | Only the conductor's merge driver calls the merge API — the worker's own session path never does, even if the guard were bypassed. | `merge-driver.ts::driveOne` (sole caller of `IForge.mergePR`) | `merge-driver.test.ts` |
 | Fail-closed on error | Malformed input or any exception while deciding denies — never a silent allow. | `guard-hook.ts::hookResponse` | `guard.test.ts` |
 
 **Residual allow surface:** assignees, `--title`/`--body` edits, and the native
 `--add/remove-blocked-by`/`--add/remove-blocking` relations stay allowed — no sapwood gate
-reads those relations. Issue/PR comments also stay allowed, as the worker's refuse/hand-back
-channel.
+reads those relations. Issue/PR comments also stay allowed when the command names no protected
+REST path (`guard.ts::checkGhApi`) — the worker's refuse/hand-back channel. A no-PR escalation
+does not depend on a human reading that comment: the engine re-surfaces the worker's own
+final-message text (already parsed, never a new capability) as the `reason` on the escalation
+event and its `needs-human` comment — a READ-side addition, not a new grant.
 
 **Single-identity limitation for engine-agent review.** The engine-agent reviewer has no
 GitHub credentials — the engine posts the audit comment and merges under one token identity,
@@ -75,12 +78,14 @@ guard hook's Bash/file-tool matcher mediates. Inherited MCP tools arrive **defer
 session's init inventory**, so a prompt or scanner reading the init tool list cannot conclude no
 MCP tools are available; `--allowedTools` does not gate an inherited MCP tool either.
 
-**Capability/context decision rule.** Within the trusted-repos threat model, capability is
-decided by whether its effects are enforceable at the action boundary, not vetoed by
-input-side prompt-injection hardening (a separate axis governed by noise/size/determinism).
-This is why the zero-`gh` peripheral design and this section's host-delegated rule were both
-decided by enforceability, not input trust; untrusted-repo support revisits input-side
-hardening as its own milestone decision, not a standing constraint here.
+**Capability/context decision rule.** Within the trusted-repos threat model, input-side
+prompt-injection hardening neither drives nor vetoes capability or context choices: prompt
+scope is governed by noise, size, and determinism; capability by whether its effects are
+enforceable at the action boundary — the same rule that governs engine-injected context and
+retrieval design. This is why the zero-`gh` peripheral design and this section's
+host-delegated rule were both decided by enforceability, not input trust; untrusted-repo
+support revisits input-side hardening as its own milestone decision, not a standing constraint
+here.
 
 **Peripheral vs. producer split.** A peripheral session's action boundary is the CLI's own tool
 grant (no `Bash`, no write tool) — genuinely enforceable, so capability is withheld there. A
@@ -200,7 +205,7 @@ serves a local, read-only view of the engine's own ledger. Its posture:
   with no login screen standing in the way.
 - **The raw event feed is verbatim by contract, not scrubbed.** `/api/events` serves ledger
   events as written — by design including `egress-suspect` snippets and raw error text (see
-  [egress](security/egress.md)) — since forensic value depends on it staying unredacted. The
+  [egress](security/egress.md#worker-network-egress-bash-channel-containment-available-as-a-hardening-profile)) — since forensic value depends on it staying unredacted. The
   *served config* surface differs: already allowlisted (`CONFIG_ALLOWLIST`, `read-model.ts`),
   so a new key can't silently start serving. No public export of a live feed exists; the only
   public surface is the curated recorded-run demo fixture under `?demo`, hand-vetted, not a
@@ -330,28 +335,27 @@ state DB (`.sapwood/`), without requiring a config edit:
 | --- | --- | --- | --- |
 | Emergency stop | `.sapwood/EMERGENCY_STOP` | Strictest; takes precedence over the kill switch every tick; hard-kills running/fixing lane process groups with no drain window — in-flight WIP is lost, and killed lanes escalate to `needs-human` with their evidence preserved. | `/sapwood-stop --emergency`; `--clear-emergency` only after human review |
 | Kill switch | `.sapwood/KILL_SWITCH` | Freezes all new dispatch, merges, rollback retries, and reclaim of crashed lanes; running workers get `cost.drainWindowSec` to hand off, then a hard process-tree kill. | `/sapwood-stop` (set) / `--lift`, or touch/remove the file |
-| Pause | `.sapwood/PAUSE` | Freezes new dispatch and a fresh fix leg's admission; an already-running worker or fix leg finishes normally, and a `driving` lane already at MERGE/WAIT_REVIEW still resolves and leaves `driving`. A lane blocked only on a fresh fix leg stays `driving` until PAUSE lifts. | `/sapwood-stop --pause` / `--resume` |
+| Pause | `.sapwood/PAUSE` | Freezes new dispatch and a fresh fix leg's admission — an already-running worker or fix leg finishes normally, a `driving` lane already at MERGE/WAIT_REVIEW still resolves, and a lane blocked only on a fresh fix leg stays `driving` until PAUSE lifts. | `/sapwood-stop --pause` / `--resume` |
 
 **Precedence:** emergency stop overrides the kill switch, and either strict tier subsumes
 pause's dispatch restriction.
 
-**Interaction with `--until-idle`:** idleness (`driver.ts::isIdle`) requires zero active
-workers among its other conditions. A `driving` lane blocked on a fresh fix leg by PAUSE stays
-`driving` — blocked, not finished — so `--until-idle` does not exit on its own while such a lane
-exists; removing `.sapwood/PAUSE` lets that fix leg dispatch on the next tick. Under the daemon
-(`forever`) mode the engine keeps ticking regardless, and `--resume` takes effect on the very
-next tick.
+**Interaction with `--until-idle`:** `driver.ts::isIdle` requires zero active workers among
+its other conditions — an active worker is a `running`, `driving`, or `fixing` lane, not just a
+live process. See `commands/sapwood-stop.md` for how PAUSE interacts with `--until-idle`'s exit
+timing.
 
 ### Sentinel isolation boundary (honest statement)
 
 The engine's `.sapwood/` runtime root sits outside worker git worktrees as a
 **permission-layer boundary** — no worker launches with `--add-dir .sapwood`, so it has no
-`claude`-tool path there. Not an OS-level sandbox, so the guard
-(`guard.ts::checkControlSentinelArg`, `protectedPathLabel`) adds defense-in-depth: any write
-vector is denied whenever its normalized target contains the exact segment `.sapwood` — root or
-descendant, via relative traversal too, case-insensitive — while `.sapwood-notes/` (a sibling
-merely starting with it) does not match; root equality also closes the older `rm -rf
-../../.sapwood` gap.
+`claude`-tool path there. Not an OS-level sandbox, so the guard adds defense-in-depth two ways:
+`checkWritePath`/`checkBashWritePath` deny the `Write`/`Edit` tools and the write-command set
+(`tee`/`dd`/`sed`/`perl`/`cp`/`install`/`mv`/`rm`/`git`/`touch`, plus redirections) under
+`.sapwood`; separately, `checkControlSentinelArg` blocks ANY command merely naming a `.sapwood`
+path as a literal argument, write or not. Both match root or descendant, via relative
+traversal too, case-insensitively — `.sapwood-notes/` does not match — and root equality also
+closes the older `rm -rf ../../.sapwood` gap.
 
 Three residual classes are accepted, not closed, by this rule:
 
@@ -367,9 +371,12 @@ Three residual classes are accepted, not closed, by this rule:
 - **(c) Opaque indirection is a lexical residual.** The Bash argv walk only sees tokens it can
   parse as a bare word or a `-`-prefixed glued flag: an environment assignment glued to the
   same command line (`TARGET=.sapwood/PAUSE node writer.js`) normalizes as one segment
-  (`TARGET=.sapwood`, not `.sapwood`) and never matches, and a script that hardcodes the path
-  inside its own source is invisible to an argv scan. No machinery is added to close this
-  class — document the residual, don't chase it with more.
+  (`TARGET=.sapwood`, not `.sapwood`) and never matches, a script that hardcodes the path
+  inside its own source is invisible to an argv scan, or any other CLI form the walk doesn't
+  reach. No machinery is added to close this class — document the residual, don't chase it
+  with more.
+
+This list is not exhaustive.
 
 **`sapwood pause`/`stop`/`estop` are their own, separately fenced class — not the residuals
 above.** These are shipped, documented CLI verbs any worker can invoke by name;
@@ -412,11 +419,11 @@ self-declared by whoever wrote the issue.
 
 | Rule | Enforcement | Test |
 | --- | --- | --- |
-| Dispatch requires a reviewed plan | `getReadyIssues` requires, for any issue not labelled `verify:n/a`, both a verification-plan section and the `plan:approved` label — plan presence alone no longer dispatches. `verify:n/a` still routes through the doc-gate path, but only when `needs-human` is absent. | `forge.ts::getReadyIssues` / `forge.test.ts` |
+| Dispatch requires a reviewed plan | For any issue not labelled `verify:n/a`, dispatch requires both a verification-plan section and the `plan:approved` label; `verify:n/a` routes through the doc-gate path only when `needs-human` is absent. | `forge.ts::getReadyIssues` / `forge.test.ts` |
 | `needs-human`/`blocked` veto unconditionally | Present alongside any other label, either blocks dispatch regardless. | `forge.ts::getReadyIssues` / `forge.test.ts` |
-| A weak plan self-heals, bounded | The reviewer never approves a plan it authored; a distinct, issues-only drafting session (never a full worker lane; it never implements the issue) repairs it instead, for at most `roles.verificationPlanReviewer.maxDraftCycles` draft→re-review attempts (default 2), then escalates to `needs-human` with the full attempt trail. | `plan-review.ts::confirmOneIssue` / `plan-review.test.ts` |
-| Output is validated, not trusted | Neither reviewer nor drafter session holds a `Bash` grant; the engine schema-validates each session's structured output and re-checks that an approve/drafted body actually carries a verification-plan section before applying `plan:approved`. Malformed or content-invalid output is retried once, then escalated. | `plan-review.ts::validateReviewerOutput`/`validateDrafterOutput` / `plan-review.test.ts` |
-| Approval is re-endorsed, not permanent | A prior round's `plan:approved` is re-checked via a lightweight, zero-forge-write-on-confirm session every time the issue re-enters the round pool, before its approval is trusted again; a session that can't confirm or fails escalates `needs-human`. The label itself is never removed either way. | `plan-review.ts::confirmOneIssue` / `plan-review.test.ts` |
+| A weak plan self-heals, bounded | The reviewer never approves a plan it authored; a distinct issues-only drafting session (not a worker lane; it never implements the issue) repairs it for at most `maxDraftCycles` (default 2) attempts, then escalates to `needs-human` with the full trail. | `plan-review.ts::reviewOneIssue` (`maxDraftCycles` at `:650`, escalation at `:664`) | `plan-review.test.ts` |
+| Output is validated, not trusted | Neither session holds a `Bash` grant; the engine schema-validates the output and re-checks it actually carries a verification-plan section before applying `plan:approved`, retrying once then escalating on malformed/invalid output. | `plan-review.ts::validateReviewerOutput`/`validateDrafterOutput` / `plan-review.test.ts` |
+| Approval is re-endorsed, not permanent | A prior round's `plan:approved` is re-checked via a lightweight, zero-forge-write-on-confirm session each time the issue re-enters the round pool — a session that can't confirm or fails escalates `needs-human`, but the label itself is never removed either way. | `plan-review.ts::confirmOneIssue` / `plan-review.test.ts` |
 
 Every attempt is externalized as issue edits/comments, so a human can inspect or intervene at
 any point. Implementation dispatch still requires `plan:approved` (or adjudicated
