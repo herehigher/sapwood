@@ -461,7 +461,7 @@ function section(title: string, lines: string[]): string {
 
 /** Deterministic markdown VIEW of an artifact — never independently authored, always derived
  *  from the same validated object the JSON row holds (module doc: JSON is the source of truth).
- *  Used both as the on-disk `data/rounds/round-<id>.md` view and as the `{{round.artifact}}`
+ *  Used both as the on-disk `.sapwood/rounds/round-<id>.md` view and as the `{{round.artifact}}`
  *  prompt-substitution text (harvest.ts). */
 export function renderRoundArtifactMarkdown(artifact: RoundArtifact): string {
   const parts: string[] = [
@@ -566,7 +566,7 @@ export function renderRoundArtifactMarkdown(artifact: RoundArtifact): string {
 /** Validate + persist the FINAL round artifact: a schema-invalid object throws (the caller —
  *  round.ts — contains this so a persistence bug never blocks the round from closing). Writes
  *  the DB row (source of truth) and, when the state has an on-disk data dir (a real run, not an
- *  in-memory test), the derived markdown view to `data/rounds/round-<id>.md` — never the other
+ *  in-memory test), the derived markdown view to `.sapwood/rounds/round-<id>.md` — never the other
  *  way around; the markdown is ALWAYS re-derived from the just-validated object, never authored
  *  independently (module doc). */
 export function persistRoundArtifact(state: State, artifact: RoundArtifact, now: string): void {

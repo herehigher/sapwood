@@ -379,7 +379,7 @@ test("#799: the claude-version startup check runs after run-started on the tick 
     // instead of silently proceeding into the exact race this poll exists to prevent. The poll
     // itself stays bounded and condition-based (never a blind sleep, docs/timing-dependent-
     // tests-ban) — only the "what happens when it's never satisfied" behavior changed.
-    const stateDir = join(dir, "data", "sessions", "state");
+    const stateDir = join(dir, ".sapwood", "sessions", "state");
     let quiesced = false;
     for (let i = 0; i < 200; i++) {
       const entries = existsSync(stateDir) ? readdirSync(stateDir) : [];
@@ -1533,8 +1533,8 @@ test("sapwood run (#382 round 2, codex finding 3): a refused start performs ZERO
   const previousCwd = process.cwd();
   try {
     process.chdir(dir);
-    mkdirSync(join(dir, "data"), { recursive: true });
-    const lockPath = join(dir, "data", "sapwood.lock");
+    mkdirSync(join(dir, ".sapwood"), { recursive: true });
+    const lockPath = join(dir, ".sapwood", "sapwood.lock");
     writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: "holder", acquiredAt: "2026-07-31T00:00:00.000Z" }));
     const { code, stderr } = await captureStderr(() =>
       runEngine(["node", "sapwood", "run", "--once"], {
@@ -1545,9 +1545,102 @@ test("sapwood run (#382 round 2, codex finding 3): a refused start performs ZERO
     );
     assert.equal(code, 1);
     assert.match(stderr, /refusing to start/);
-    assert.equal(existsSync(join(dir, "data", "sapwood.sqlite")), false, "no DB file — the holder's data dir saw zero writes");
+    assert.equal(existsSync(join(dir, ".sapwood", "sapwood.sqlite")), false, "no DB file — the holder's data dir saw zero writes");
     const holder = JSON.parse(readFileSync(lockPath, "utf8")) as { token: string };
     assert.equal(holder.token, "holder", "the live holder's lock survives");
+  } finally {
+    process.chdir(previousCwd);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Snapshot every file under `root` as {relPath -> raw bytes}, so a before/after comparison can
+// prove NOTHING changed — not just that one named file is absent, but that not a single byte
+// anywhere in the tree was touched (a content-only check on one path can't rule out an
+// unexpected write to a DIFFERENT path).
+function snapshotDir(root: string): Map<string, Buffer> {
+  const snapshot = new Map<string, Buffer>();
+  for (const entry of readdirSync(root, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const parent = (entry as unknown as { parentPath?: string; path?: string }).parentPath ?? (entry as unknown as { path: string }).path;
+    const abs = join(parent, entry.name);
+    snapshot.set(abs.slice(root.length + 1), readFileSync(abs));
+  }
+  return snapshot;
+}
+
+// The "zero writes" guarantee (#382 round 2, codex finding 3) is against the holder's WHOLE
+// directory, not just the DB: a refused engine must never even touch the idempotent root
+// markers (.gitignore/cache/CACHEDIR.TAG), since ensureRuntimeRoot only runs AFTER a successful
+// lock acquisition (cli.ts's runEngine), never before. This fixture starts from a root that has
+// a LIVE lock but NO markers yet (the state a first-ever `sapwood run` against a repo where a
+// peer engine just won the race would find) and proves the refused process leaves the directory
+// listing and every file's bytes byte-for-byte identical — a weaker "no sqlite file" check could
+// not catch a regression that stamped .gitignore/CACHEDIR.TAG ahead of the lock attempt.
+test("sapwood run: a refused start performs ZERO filesystem writes against the holder's directory — no DB, no .gitignore, no CACHEDIR.TAG, nothing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-cli-lock-zerowrite-"));
+  const previousCwd = process.cwd();
+  try {
+    process.chdir(dir);
+    mkdirSync(join(dir, ".sapwood"), { recursive: true });
+    const lockPath = join(dir, ".sapwood", "sapwood.lock");
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: "holder", acquiredAt: "2026-07-31T00:00:00.000Z" }));
+    const before = snapshotDir(dir);
+    const { code, stderr } = await captureStderr(() =>
+      runEngine(["node", "sapwood", "run", "--once"], {
+        cfg: mkCfg({ engine: { driver: "tick" } }),
+        forge: new FakeForge(),
+        logger: silentLogger,
+      }),
+    );
+    assert.equal(code, 1);
+    assert.match(stderr, /refusing to start/);
+    const after = snapshotDir(dir);
+    assert.deepEqual([...after.keys()].sort(), [...before.keys()].sort(), "no file was created or removed");
+    for (const [relPath, beforeBytes] of before) {
+      assert.ok(after.get(relPath)!.equals(beforeBytes), `${relPath} must be byte-for-byte unchanged`);
+    }
+  } finally {
+    process.chdir(previousCwd);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ensureRuntimeRoot must run before the FIRST write on every write-capable entry point, not
+// just State's own constructor — a crash/refusal/control-only invocation could otherwise leave
+// runtime files with no `.gitignore`/`cache/CACHEDIR.TAG`. This is the "fresh run" entry: NO
+// `state`/`logger` override, so the REAL FileEngineLogger (writing under the schema default
+// `.sapwood/logs/sapwood.log`) and a REAL `roles.skills.enabled: true` render (writing under
+// `.sapwood/cache/generated/role-skills`, tagged by `.sapwood/cache/CACHEDIR.TAG`) both run for
+// real, proving the single ensureRuntimeRoot call in runEngine (called immediately after winning
+// the instance lock, strictly before either) actually lands before both of them.
+test("sapwood run: a fresh run self-declares the runtime root before the log driver and an enabled skills-plugin render ever write under it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-run-root-declare-"));
+  const previousCwd = process.cwd();
+  try {
+    process.chdir(dir);
+    mkdirSync(join(dir, "docs"), { recursive: true });
+    writeFileSync(
+      join(dir, "docs", "security.md"),
+      "# Security & trust model\n\n<!-- sapwood:skill:human-merge-only-paths:start -->\nfixture\n<!-- sapwood:skill:human-merge-only-paths:end -->\n\n<!-- sapwood:skill:ac-evidence-tiers:start -->\nfixture\n<!-- sapwood:skill:ac-evidence-tiers:end -->\n",
+      "utf8",
+    );
+    const code = await runEngine(["node", "sapwood", "run", "--once"], {
+      cfg: mkCfg({ engine: { driver: "tick" }, roles: { skills: { enabled: true } } }),
+      forge: new FakeForge(),
+    });
+    assert.equal(code, 0);
+    assert.equal(readFileSync(join(dir, ".sapwood", ".gitignore"), "utf8"), "*\n", "root self-declares");
+    assert.match(
+      readFileSync(join(dir, ".sapwood", "cache", "CACHEDIR.TAG"), "utf8"),
+      /^Signature: 8a477f597d28d172789f06886806bc55\n/,
+      "cache tier self-declares",
+    );
+    assert.ok(existsSync(join(dir, ".sapwood", "logs", "sapwood.log")), "the REAL file logger wrote under the already-stamped root");
+    assert.ok(
+      readdirSync(join(dir, ".sapwood", "cache", "generated", "role-skills")).length > 0,
+      "the REAL enabled skills-plugin render wrote under the already-stamped cache tier",
+    );
   } finally {
     process.chdir(previousCwd);
     rmSync(dir, { recursive: true, force: true });

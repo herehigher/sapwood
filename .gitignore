@@ -4,12 +4,11 @@ dist-server/
 # #742: dashboard/src/demo/export-cli.ts generates this from demo/source.ts at build time
 dashboard/public/
 *.tsbuildinfo
-data/
+.sapwood/
 *.sqlite
 *.sqlite-*
 .DS_Store
 .codegraph/
-.worktrees/
 
 # python bytecode: guard.fuzz.test.ts's differential oracle is a static TS fixture since #840
 # (guard.py is no longer vendored in-repo), but scripts/regen-guard-shared-block-fixture.ts still

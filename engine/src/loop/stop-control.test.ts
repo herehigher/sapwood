@@ -1,6 +1,6 @@
 // stop-control.test.ts (#731): first-class CLI verbs (`pause`/`stop`/`estop`, each with a
-// `clear` form) over the three existing file sentinels (data/PAUSE, data/KILL_SWITCH,
-// data/EMERGENCY_STOP) that state.ts's own pausePath/killSwitchPath/estopPath already define and
+// `clear` form) over the three existing file sentinels (.sapwood/PAUSE, .sapwood/KILL_SWITCH,
+// .sapwood/EMERGENCY_STOP) that state.ts's own pausePath/killSwitchPath/estopPath already define and
 // conductor.ts's tick() already reads. THIN WRAPPERS ONLY — every assertion here proves the CLI
 // verb's effect is what a real `State` (the engine's own read path) observes via
 // isPauseActive()/isKillSwitchActive()/isEstopActive(), never a hand-rolled existsSync check
@@ -29,9 +29,28 @@ function writeConfig(dir: string, costLine = "cost: { dailyBudgetUsd: 50 }\n"): 
   return path;
 }
 
+// `sapwood pause`/`stop`/`estop` are the one mutator that can create a fresh runtime root with
+// NO State ever constructed (a bare control invocation against a repo that has never run
+// `sapwood run`) — ensureRuntimeRoot must run there too, not just in State's own constructor.
+// No `withDataDir`/explicit db-path here on purpose: this drives the DEFAULT, cwd-relative
+// `.sapwood/` root the same way an operator's bare `sapwood pause` would.
+test("a bare `sapwood pause` against a repo with no prior .sapwood/ self-declares the root", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-stop-control-root-declare-"));
+  const previousCwd = process.cwd();
+  try {
+    process.chdir(dir);
+    const res = runCli(["node", "sapwood", "pause"]);
+    assert.equal(res.code, 0, res.stderr);
+    assert.equal(existsSync(join(dir, ".sapwood", ".gitignore")), true);
+  } finally {
+    process.chdir(previousCwd);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── pause ────────────────────────────────────────────────────────────────────────────────────
 
-test("#731: sapwood pause creates data/PAUSE — state.ts's own isPauseActive() sees it (effect-identical to `touch`)", () => {
+test("#731: sapwood pause creates .sapwood/PAUSE — state.ts's own isPauseActive() sees it (effect-identical to `touch`)", () => {
   withDataDir((_dir, dbPath) => {
     const res = runCli(["node", "sapwood", "pause", dbPath]);
     assert.equal(res.code, 0, res.stderr);
@@ -42,7 +61,7 @@ test("#731: sapwood pause creates data/PAUSE — state.ts's own isPauseActive() 
   });
 });
 
-test("#731: sapwood pause clear removes data/PAUSE — state.ts's own isPauseActive() flips false (effect-identical to `rm -f`)", () => {
+test("#731: sapwood pause clear removes .sapwood/PAUSE — state.ts's own isPauseActive() flips false (effect-identical to `rm -f`)", () => {
   withDataDir((dir, dbPath) => {
     const s0 = new State(dbPath);
     s0.close();
@@ -80,7 +99,7 @@ test("#731: sapwood pause clear on an inactive PAUSE is a documented no-op, exit
 
 // ── stop (KILL_SWITCH) ──────────────────────────────────────────────────────────────────────
 
-test("#731: sapwood stop creates data/KILL_SWITCH — state.ts's own isKillSwitchActive() sees it", () => {
+test("#731: sapwood stop creates .sapwood/KILL_SWITCH — state.ts's own isKillSwitchActive() sees it", () => {
   withDataDir((_dir, dbPath) => {
     const res = runCli(["node", "sapwood", "stop", dbPath]);
     assert.equal(res.code, 0, res.stderr);
@@ -91,7 +110,7 @@ test("#731: sapwood stop creates data/KILL_SWITCH — state.ts's own isKillSwitc
   });
 });
 
-test("#731: sapwood stop clear removes data/KILL_SWITCH", () => {
+test("#731: sapwood stop clear removes .sapwood/KILL_SWITCH", () => {
   withDataDir((dir, dbPath) => {
     new State(dbPath).close();
     writeFileSync(join(dir, "KILL_SWITCH"), "");
@@ -138,7 +157,7 @@ test("#731 owner ruling: sapwood estop WITHOUT --confirm refuses to act — no s
   });
 });
 
-test("#731: sapwood estop --confirm creates data/EMERGENCY_STOP — state.ts's own isEstopActive() sees it", () => {
+test("#731: sapwood estop --confirm creates .sapwood/EMERGENCY_STOP — state.ts's own isEstopActive() sees it", () => {
   withDataDir((_dir, dbPath) => {
     const res = runCli(["node", "sapwood", "estop", dbPath, "--confirm"]);
     assert.equal(res.code, 0, res.stderr);
@@ -149,7 +168,7 @@ test("#731: sapwood estop --confirm creates data/EMERGENCY_STOP — state.ts's o
   });
 });
 
-test("#731: sapwood estop clear removes data/EMERGENCY_STOP and does NOT require --confirm", () => {
+test("#731: sapwood estop clear removes .sapwood/EMERGENCY_STOP and does NOT require --confirm", () => {
   withDataDir((dir, dbPath) => {
     new State(dbPath).close();
     writeFileSync(join(dir, "EMERGENCY_STOP"), "");

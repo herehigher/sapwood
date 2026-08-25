@@ -3,12 +3,12 @@
 // Before this, a signal only told a driver to stop calling tick() at the next tick boundary:
 // dispatch kept happening right up to that boundary and running workers were simply abandoned
 // mid-work (dogfood 2026-07-24: "SIGTERM had no observable effect — the engine kept ticking
-// until force-killed"). Sentinels (data/KILL_SWITCH, data/PAUSE) were the only channel that
+// until force-killed"). Sentinels (.sapwood/KILL_SWITCH, .sapwood/PAUSE) were the only channel that
 // actually froze dispatch and drained, but operators and service managers (systemd, launchd,
 // CI runners) speak signals first.
 //
 // The fix deliberately adds NO second stop mechanism: a requested stop is threaded into tick()
-// as TickDeps.stopRequested, which ORs into the very same top-of-tick gate `data/KILL_SWITCH`
+// as TickDeps.stopRequested, which ORs into the very same top-of-tick gate `.sapwood/KILL_SWITCH`
 // already drives (conductor.ts) — dispatch frozen, running/fixing lanes asked to hand off
 // gracefully, the bounded drain window then escalating to a hard kill, all of it the same code
 // so the two stop semantics cannot fork. The only fork is the RECORDED REASON ("stop-signal"

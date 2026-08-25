@@ -1,6 +1,6 @@
 /**
  * #933 AC5's Tier-C probe artifact — the fold script a human operator runs against a real
- * `data/sapwood.sqlite` after an engine round, to verify the needs-attention strip's own
+ * `.sapwood/sapwood.sqlite` after an engine round, to verify the needs-attention strip's own
  * contract (EMPTY STRIP = NOTHING IS WAITING ON A HUMAN, frontend-design.md §3) actually holds.
  *
  * Reuses the SAME machinery the browser runs, never a re-implementation: `state.eventsPage`
@@ -10,7 +10,7 @@
  * agreeing.
  *
  * `npm run fold-open-attention -w dashboard [-- <db-path>]` (default: the repository-root
- * `data/sapwood.sqlite` — `engine/src/state/state.ts`'s own `DEFAULT_DB_PATH`, anchored to this
+ * `.sapwood/sapwood.sqlite` — `engine/src/state/state.ts`'s own `DEFAULT_DB_PATH`, anchored to this
  * file's own location rather than the caller's cwd; see `REPO_ROOT_DEFAULT_DB_PATH`'s own doc).
  * Read-only open (`{ readOnly: true }`, the same handle `sapwood status` uses) — this script
  * never writes to the ledger it inspects.
@@ -27,11 +27,11 @@ import type { DomainEvent } from "./domain-event.ts";
 import { toDomainEvent } from "./domain-event.ts";
 import { applyDismissals, foldOpenAttention } from "./entities.ts";
 
-/** PR #937 gate② finding [1]: `DEFAULT_DB_PATH` ("data/sapwood.sqlite") is relative — correct
+/** PR #937 gate② finding [1]: `DEFAULT_DB_PATH` (".sapwood/sapwood.sqlite") is relative — correct
  *  ONLY when the current process's cwd is already the repository root. `npm run
  *  fold-open-attention -w dashboard` (this script's own documented invocation, above) runs with
  *  cwd set to `dashboard/`, so the bare constant would silently resolve to
- *  `dashboard/data/sapwood.sqlite` — a different, almost-certainly-nonexistent file, never the
+ *  `dashboard/.sapwood/sapwood.sqlite` — a different, almost-certainly-nonexistent file, never the
  *  live repository-root ledger the operator means to inspect. Anchored to THIS FILE's own
  *  location instead (`dashboard/src/` -> repo root is two levels up), so the default is correct
  *  regardless of the caller's cwd. An explicit CLI argument is deliberately NOT run through this

@@ -5,6 +5,7 @@ import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import type { SapwoodConfig } from "../config/config.js";
 import { loadDoctrine, NO_DOCTRINE } from "../config/doctrine.js";
+import { defaultRuntimeRoot, runtimePaths } from "../config/paths.js";
 import type { IForge } from "../forge/forge.js";
 import { baseRedPin } from "../loop/base-ci.js";
 import type { RoleRunner } from "../roles/peripheral.js";
@@ -130,6 +131,18 @@ export function deleteReviewTreesForHead(treeRoot: string, head: string, log: (m
   }
 }
 
+/** Default gate②-tree materialization root — exported (mirrors materializer.ts's own
+ *  `defaultPrivateCloneDir`/`defaultWorktreeRoot`) so the runtimePaths()-derived default is
+ *  directly testable without constructing the full `makeProductionEngineAgent` wiring. */
+export function defaultReviewTreeRoot(cwd: string = process.cwd()): string {
+  return runtimePaths(defaultRuntimeRoot(cwd)).cacheReviewTreesDir;
+}
+
+/** Default codex-exec review session state dir — same rationale as defaultReviewTreeRoot above. */
+export function defaultReviewCodexStateDir(cwd: string = process.cwd()): string {
+  return runtimePaths(defaultRuntimeRoot(cwd)).sessionsReviewCodexDir;
+}
+
 export function makeProductionEngineAgent(
   cfg: SapwoodConfig,
   forge: IForge,
@@ -140,7 +153,7 @@ export function makeProductionEngineAgent(
   const sourceRepoDir = options.sourceRepoDir ?? process.cwd();
   const cloneDir = options.privateCloneDir ?? defaultPrivateCloneDir(sourceRepoDir);
   const worktreeRoot = options.worktreeRoot ?? defaultWorktreeRoot(sourceRepoDir);
-  const treeRoot = options.reviewTreeRoot ?? join(sourceRepoDir, "data", "review", "trees");
+  const treeRoot = options.reviewTreeRoot ?? defaultReviewTreeRoot(sourceRepoDir);
   const artifacts = new Map<string, EngineReviewArtifact>();
   let activeWorker: string | null = null; // conductor DRIVE is single-writer serial
   const now = options.now;
@@ -154,7 +167,7 @@ export function makeProductionEngineAgent(
   const executor: ReviewSessionExecutor | undefined =
     cfg.reviewer.agent?.runner === "codex-exec"
       ? new CodexExecReviewSessionExecutor({
-          stateDir: join(sourceRepoDir, "data", "sessions", "review-codex"),
+          stateDir: defaultReviewCodexStateDir(sourceRepoDir),
           // The SAME wall-clock ceiling every other session in this engine gets — a timeout is not
           // a cost cap, and R1 changes nothing about it.
           timeoutSec: cfg.worker.timeoutSec,

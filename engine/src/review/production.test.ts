@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,7 +8,7 @@ import type { IForge, PRTopLevelComment } from "../forge/forge.js";
 import { MergeDriver } from "../roles/merge-driver.js";
 import { State } from "../state/state.js";
 import { buildAcSnapshot } from "./ac-snapshot.js";
-import { makeProductionEngineAgent, sweepReviewTrees } from "./production.js";
+import { defaultReviewCodexStateDir, defaultReviewTreeRoot, makeProductionEngineAgent, sweepReviewTrees } from "./production.js";
 
 /** #403 (F25): an EXPLICIT wall-clock injection for fixtures that seed no date and assert
  *  nothing calendar-dependent. Production's `now` seams are required, not optional, precisely so
@@ -20,6 +20,135 @@ const realClock = (): Date => new Date();
 function oid(n: number): string {
   return n.toString(16).padStart(40, "0");
 }
+
+// #1077: injected-root check — the runtimePaths()-derived defaults land under the given cwd,
+// in the cache tier (never beside the durable state root).
+test("defaultReviewTreeRoot/defaultReviewCodexStateDir: resolve under an injected cwd's .sapwood/", () => {
+  const cwd = "/repo";
+  assert.equal(defaultReviewTreeRoot(cwd), join(cwd, ".sapwood", "cache", "review", "trees"));
+  assert.equal(defaultReviewCodexStateDir(cwd), join(cwd, ".sapwood", "sessions", "review-codex"));
+});
+
+// The test above proves the EXPORTED HELPER computes the right string — it says nothing about
+// whether makeProductionEngineAgent's own `treeRoot`
+// closure variable (production.ts:156) actually resolves through it when `reviewTreeRoot` is
+// left unset, the real production composition. Breaking that one line (e.g. hardcoding a
+// different default, or silently dropping the `?? defaultReviewTreeRoot(...)` fallback) would
+// leave the helper test above green while every real review run wrote its trees somewhere else
+// entirely. Proven end-to-end: `materialize`'s own sweepReviewTrees call (production.ts:190-201)
+// runs on every decisive drive regardless of `materializeOverride`, against whatever `treeRoot`
+// actually closed over — so a stale tree seeded directly at
+// `defaultReviewTreeRoot(sourceRepoDir)` (never a string constructed independently by this
+// test) gets evicted by a REAL decisive drive only if that closure variable really is the same
+// path. `materializeOverride` still bypasses the real git clone/checkout (unrelated to this
+// wiring question, and heavy to drive for real here).
+test("makeProductionEngineAgent (real composition, no reviewTreeRoot override): a decisive drive's own tree sweep touches the DEFAULT .sapwood/cache/review/trees under the injected sourceRepoDir", async () => {
+  const cfg = ConfigSchema.parse({
+    board: { owner: "o", repo: "r", projectNumber: 1 },
+    worker: { model: "sonnet" },
+    reviewer: { mode: "engine-agent", agent: { model: "opus", treeRetentionCap: 1 } },
+    ci: { requiredChecks: [{ name: "test", app: "github-actions" }] },
+  });
+  const H = "a".repeat(40);
+  const B = "b".repeat(40);
+  const body = "## Acceptance criteria\n\n- [ ] Works correctly\n";
+  const snapshot = buildAcSnapshot(12, body, "2026-01-01T00:00:00Z");
+  assert.ok(snapshot);
+  const state = new State(":memory:");
+  const sourceRepoDir = mkdtempSync(join(tmpdir(), "sapwood-review-wiring-"));
+  try {
+    state.recordAcSnapshot(snapshot!);
+    state.upsertWorker({
+      name: "lane-12",
+      issue: 12,
+      session_id: "worker-session",
+      state: "driving",
+      started_at: "t",
+      ended_at: null,
+      pr: 7,
+    });
+    state.recordWorkerActualModel("lane-12", "sonnet");
+
+    const defaultTreeRoot = defaultReviewTreeRoot(sourceRepoDir);
+    mkdirSync(defaultTreeRoot, { recursive: true });
+    const staleDir = join(defaultTreeRoot, `${"c".repeat(40)}-stale`);
+    mkdirSync(staleDir, { recursive: true });
+    const old = new Date("2020-01-01T00:00:00Z");
+    utimesSync(staleDir, old, old);
+
+    const forge = {
+      getPRStatus: async () => ({ state: "OPEN", headOid: H, baseOid: B, ciGreen: true, mergeable: "MERGEABLE" }),
+      getPRReviewData: async () => ({
+        headOid: H,
+        author: "producer",
+        state: "OPEN" as const,
+        isDraft: false,
+        labels: [],
+        unresolvedThreads: 0,
+        reviews: [],
+        comments: [],
+        reactions: [],
+      }),
+      getPRDiff: async () =>
+        "diff --git a/src/foo.ts b/src/foo.ts\nindex 1111111..2222222 100644\n--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+      getPRChangedFiles: async () => ({ files: [], complete: true }),
+      getPRChecks: async () => ({
+        checks: [{ name: "test", status: "COMPLETED", conclusion: "SUCCESS", state: null, appSlug: "github-actions" }],
+        total: 1,
+      }),
+      getPRComments: async () => ({ comments: [], total: 0 }),
+      addPRComment: async () => {},
+      mergePR: async () => {},
+    } as unknown as IForge;
+    const resultText = `<<<SAPWOOD_RESULT>>>\n${JSON.stringify({
+      perAC: snapshot!.manifest.map((a) => ({ id: a.id, status: "confirmed" })),
+      findings: [],
+    })}\n<<<END_SAPWOOD_RESULT>>>`;
+    const runner = {
+      run: async () => ({
+        outcome: "done" as const,
+        costUsd: 0.1,
+        costKnown: true,
+        exitCode: 0,
+        name: "role-engine-reviewer-test",
+        resultText,
+        modelUsage: [{ model: "opus", inputTokens: 1, outputTokens: 1, cacheCreationTokens: 0, cacheReadTokens: 0 }],
+      }),
+    };
+
+    const production = makeProductionEngineAgent(cfg, forge, state, runner, {
+      now: () => new Date("2026-01-01T00:00:00Z"),
+      newRunId: () => "run-wiring-check",
+      sourceRepoDir,
+      materializeOverride: async (head) => ({
+        kind: "materialized",
+        treeDir: "/private/tree",
+        oid: head,
+        manifest: [{ path: "x", contentHash: "c" }],
+      }),
+    });
+    const driver = new MergeDriver({ forge, reviewer: production.reviewer, cfg, fallbackReviewers: [] });
+    await driver.driveOne(
+      7,
+      12,
+      { head: null, at: null },
+      () => {},
+      undefined,
+      false,
+      undefined,
+      production.driveDepsForLane(state.getWorker("lane-12")!, 7),
+    );
+
+    assert.equal(
+      existsSync(staleDir),
+      false,
+      "the stale tree was swept from the REAL default treeRoot — materialize's own treeRoot closure resolved under the injected sourceRepoDir, not merely what the exported helper computes in isolation",
+    );
+  } finally {
+    state.close();
+    rmSync(sourceRepoDir, { recursive: true, force: true });
+  }
+});
 
 // ── #489: the decisive engine-agent verdict is announced in the durable event stream ─────────
 // One harness, both outcomes: the ONLY difference between an approved and a rejected run here is

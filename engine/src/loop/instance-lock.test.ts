@@ -7,9 +7,31 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { runtimePaths } from "../config/paths.js";
 import { acquireInstanceLock, type LockFsOps, pidIsAlive } from "./instance-lock.js";
 
 const NOW = () => new Date("2026-07-31T00:00:00.000Z");
+
+// #1077 (AC2): instance-lock.ts takes its lockPath as a plain injected string — proving the
+// runtimePaths()-derived path itself resolves correctly, and that acquire/release round-trips
+// against it, is the whole "injected custom root" story for this module (its own temp/mutex
+// names are always derived from whatever lockPath it's given, by string concatenation — see
+// createViaTempLink/the takeover mutex path above).
+test("acquireInstanceLock: a lockPath sourced from runtimePaths(customRoot) round-trips under that root", () => {
+  const customRoot = mkdtempSync(join(tmpdir(), "sapwood-instance-lock-runtimepaths-"));
+  try {
+    const paths = runtimePaths(customRoot);
+    assert.equal(paths.lock, join(customRoot, "sapwood.lock"));
+    const result = acquireInstanceLock(paths.lock, { now: NOW, isPidAlive: () => true });
+    assert.equal(result.acquired, true);
+    assert.equal(result.lockPath, paths.lock);
+    assert.ok(existsSync(paths.lock), "lock file created under the injected root");
+    if (result.acquired) result.release();
+    assert.equal(existsSync(paths.lock), false, "release removes the lock file");
+  } finally {
+    rmSync(customRoot, { recursive: true, force: true });
+  }
+});
 
 function tmpLockPath(): { dir: string; lockPath: string } {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-instance-lock-"));

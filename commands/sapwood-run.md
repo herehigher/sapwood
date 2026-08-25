@@ -5,7 +5,7 @@ allowed-tools: Bash(sh:*)
 ---
 
 Run the sapwood engine CLI's `run` command from the current repo (the repo whose
-`sapwood.config.yaml` and `data/` this session is working in) and report its output
+`sapwood.config.yaml` and runtime state this session is working in) and report its output
 back to the user verbatim, unedited:
 
 ```bash

@@ -258,13 +258,13 @@ test("assertOutsideWorktreeMounts: rejects equal paths, clone nested inside work
 });
 
 test("assertOutsideWorktreeMounts: accepts a structurally disjoint sibling directory", () => {
-  assert.doesNotThrow(() => assertOutsideWorktreeMounts("/x/data/review/clone.git", "/x/.claude/worktrees"));
+  assert.doesNotThrow(() => assertOutsideWorktreeMounts("/x/.sapwood/cache/review/clone.git", "/x/.claude/worktrees"));
 });
 
 test("defaultPrivateCloneDir/defaultWorktreeRoot: shipped defaults are themselves structurally disjoint", () => {
   const cwd = "/repo";
   assert.doesNotThrow(() => assertOutsideWorktreeMounts(defaultPrivateCloneDir(cwd), defaultWorktreeRoot(cwd)));
-  assert.equal(defaultPrivateCloneDir(cwd), join(cwd, "data", "review", "clone.git"));
+  assert.equal(defaultPrivateCloneDir(cwd), join(cwd, ".sapwood", "cache", "review", "clone.git"));
   assert.equal(defaultWorktreeRoot(cwd), join(cwd, ".claude", "worktrees"));
 });
 

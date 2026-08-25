@@ -1,5 +1,5 @@
 // directive.ts (#126): round directive file — human steering injected at round open. A plain
-// data file (default data/DIRECTIVE.md) an operator drops beside the engine's own data dir to
+// data file (default .sapwood/DIRECTIVE.md) an operator drops beside the engine's own runtime root to
 // hand a round WHY/WHAT direction (locked decision 5's boundary: humans decide why/what, agents
 // own execution) — read once per round, injected into both the aligning (po.md) and architecting
 // (architect.md) prompts as `{{round.directive}}`, then archived so it can never silently
@@ -83,9 +83,9 @@ function isDirectiveAppliedPayload(p: unknown): p is DirectiveAppliedPayload {
 
 /** Where a consumed directive is archived to, once and for all, for `roundId` — a sibling
  *  `directives/` dir next to the configured directive file itself (the same
- *  `<data-dir>/<kind>/<name>` convention state.ts's roundArtifactMdPath uses for
- *  `data/rounds/round-N.md`), so the default `data/DIRECTIVE.md` archives to
- *  `data/directives/round-N.md`. Exported for tests. */
+ *  `<runtime-root>/<kind>/<name>` convention state.ts's roundArtifactMdPath uses for
+ *  `.sapwood/rounds/round-N.md`), so the default `.sapwood/DIRECTIVE.md` archives to
+ *  `.sapwood/directives/round-N.md`. Exported for tests. */
 export function directiveArchivePath(directiveFile: string, roundId: number): string {
   return join(dirname(directiveFile), "directives", `round-${roundId}.md`);
 }

@@ -99,7 +99,7 @@ async function runMainAtCwd(
 }
 
 function assertNoStateFiles(dir: string): void {
-  assert.equal(existsSync(join(dir, "data")), false, "no state directory");
+  assert.equal(existsSync(join(dir, ".sapwood")), false, "no state directory");
   assert.deepEqual(
     readdirSync(dir, { recursive: true }).filter((path) => String(path).endsWith(".sqlite") || String(path).includes(".sqlite-")),
     [],
@@ -299,7 +299,7 @@ test("run --help documents config-relative file keys and cwd-relative runtime pa
   assert.match(result.stdout, /--config PATH/);
   assert.match(result.stdout, /config-file-relative logging\.path, promptFile, goal\.file, and doctrine\.file/);
   assert.match(result.stdout, /default log sits beside that config/);
-  assert.match(result.stdout, /DB\s+\(data\/sapwood\.sqlite\), EMERGENCY_STOP\/KILL_SWITCH\/PAUSE, sessions, and\s+worktree roots/);
+  assert.match(result.stdout, /DB\s+\(\.sapwood\/sapwood\.sqlite\), EMERGENCY_STOP\/KILL_SWITCH\/PAUSE, sessions, and\s+worktree roots/);
   assert.match(result.stdout, /remain relative to the current working directory/);
 });
 
@@ -1519,9 +1519,9 @@ test("status: appears in top-level --help usage", () => {
   assert.match(r.stdout, /status/);
 });
 
-test("parseStatusArgs: defaults to data/sapwood.sqlite, no config override", () => {
+test("parseStatusArgs: defaults to .sapwood/sapwood.sqlite, no config override", () => {
   const parsed = parseStatusArgs(["node", "sapwood", "status"]);
-  assert.equal(parsed.dbPath, "data/sapwood.sqlite");
+  assert.equal(parsed.dbPath, ".sapwood/sapwood.sqlite");
   assert.equal(parsed.configPath, undefined);
   assert.equal(parsed.help, false);
 });
@@ -1543,14 +1543,14 @@ test("parseStatusArgs: --config with no operand is an error, never a silent defa
 });
 
 test("parseStatusArgs: --config followed by a flag is an error, never consumed as a path (Codex PR #70 P2)", () => {
-  const parsed = parseStatusArgs(["node", "sapwood", "status", "--config", "--bogus", "data/db.sqlite"]);
+  const parsed = parseStatusArgs(["node", "sapwood", "status", "--config", "--bogus", "custom/db.sqlite"]);
   assert.equal(parsed.error, "--config requires a path");
 });
 
 test("status: --config with a missing/flag operand exits 1 with the clear error via runCli", () => {
   for (const argv of [
     ["node", "sapwood", "status", "--config"],
-    ["node", "sapwood", "status", "--config", "--bogus", "data/db.sqlite"],
+    ["node", "sapwood", "status", "--config", "--bogus", "custom/db.sqlite"],
   ]) {
     const r = runCli(argv);
     assert.equal(r.code, 1, argv.join(" "));
@@ -1735,7 +1735,7 @@ test("status (#710): an EXPLICIT --config naming an INVALID config also fails cl
 
 test("formatStatus: kill-switch active and a recorded ceiling breach both render", () => {
   const snapshot: StatusSnapshot = {
-    dbPath: "data/sapwood.sqlite",
+    dbPath: ".sapwood/sapwood.sqlite",
     schemaVersion: 6,
     active: [],
     driving: [],
@@ -1766,7 +1766,7 @@ test("formatStatus: kill-switch active and a recorded ceiling breach both render
 // an aggregated engine word must update this test, which is the point (drift becomes visible).
 test("#723 audit: formatStatus never renders an aggregated engine-state word — a healthy idle snapshot's text carries no 'stalled'/'standby'/'running' anywhere", () => {
   const snapshot: StatusSnapshot = {
-    dbPath: "data/sapwood.sqlite",
+    dbPath: ".sapwood/sapwood.sqlite",
     schemaVersion: 7,
     active: [],
     driving: [],
@@ -1788,7 +1788,7 @@ test("#723 audit: formatStatus never renders an aggregated engine-state word —
 
 test("formatStatus: PAUSE active renders distinctly from kill switch, both can be reported independently", () => {
   const snapshot: StatusSnapshot = {
-    dbPath: "data/sapwood.sqlite",
+    dbPath: ".sapwood/sapwood.sqlite",
     schemaVersion: 7,
     active: [],
     driving: [],
@@ -1812,7 +1812,7 @@ test("formatStatus: PAUSE active renders distinctly from kill switch, both can b
 
 function laneAnchorsSnapshot(state: "running" | "fixing" | "driving", laneAnchors: Record<string, LaneAnchorsDTO>): StatusSnapshot {
   return {
-    dbPath: "data/sapwood.sqlite",
+    dbPath: ".sapwood/sapwood.sqlite",
     schemaVersion: SCHEMA_VERSION,
     active: [{ name: "lane-x", issue: 12, session_id: "s1", state, started_at: "2026-08-06T00:00:00.000Z", ended_at: null }],
     driving: [],
@@ -1887,7 +1887,7 @@ test("formatStatus (#705): a heartbeat renders its age in seconds", () => {
 
 test("formatStatus: parked (llm) renders source/reason/duration/no-escalation", () => {
   const snapshot: StatusSnapshot = {
-    dbPath: "data/sapwood.sqlite",
+    dbPath: ".sapwood/sapwood.sqlite",
     schemaVersion: SCHEMA_VERSION,
     active: [],
     driving: [],
@@ -1922,7 +1922,7 @@ test("formatStatus: parked (llm) renders source/reason/duration/no-escalation", 
 
 test("formatStatus: parked + escalated renders the escalation timestamp", () => {
   const snapshot: StatusSnapshot = {
-    dbPath: "data/sapwood.sqlite",
+    dbPath: ".sapwood/sapwood.sqlite",
     schemaVersion: SCHEMA_VERSION,
     active: [],
     driving: [],
@@ -1956,7 +1956,7 @@ test("formatStatus: parked + escalated renders the escalation timestamp", () => 
 
 test("formatStatus: not parked -> 'park: inactive', clears once resumed", () => {
   const snapshot: StatusSnapshot = {
-    dbPath: "data/sapwood.sqlite",
+    dbPath: ".sapwood/sapwood.sqlite",
     schemaVersion: SCHEMA_VERSION,
     active: [],
     driving: [],
@@ -1976,7 +1976,7 @@ test("formatStatus: not parked -> 'park: inactive', clears once resumed", () => 
 
 test("formatStatus renders latest reconcile orphans and omits an absent/healthy report", () => {
   const base: StatusSnapshot = {
-    dbPath: "data/sapwood.sqlite",
+    dbPath: ".sapwood/sapwood.sqlite",
     schemaVersion: SCHEMA_VERSION,
     active: [],
     driving: [],
@@ -2059,7 +2059,7 @@ test("runStatus sources orphans from the latest reconcile-completed event", () =
 
 test("formatStatus: a mixed storm renders BOTH episodes (one line per source), canary lane shown when in flight (#168 P1-1a)", () => {
   const snapshot: StatusSnapshot = {
-    dbPath: "data/sapwood.sqlite",
+    dbPath: ".sapwood/sapwood.sqlite",
     schemaVersion: SCHEMA_VERSION,
     active: [],
     driving: [],

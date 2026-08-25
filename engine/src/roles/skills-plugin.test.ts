@@ -377,13 +377,13 @@ test("resolveSkillsPluginDir: roles.skills.enabled false -> undefined, no render
   }
 });
 
-test("resolveSkillsPluginDir: roles.skills.enabled true -> renders under <cwd>/data/generated/role-skills", () => {
+test("resolveSkillsPluginDir: roles.skills.enabled true -> renders under <cwd>/.sapwood/cache/generated/role-skills", () => {
   const root = mkTmpDir();
   try {
     mkdirSync(join(root, "docs"), { recursive: true });
     writeFileSync(join(root, "docs", "security.md"), FIXTURE_SECURITY_MD, "utf8");
     const dir = resolveSkillsPluginDir({ roles: { skills: { enabled: true } }, ...LABELS_CFG }, root);
-    assert.ok(dir?.startsWith(join(root, "data", "generated", "role-skills")));
+    assert.ok(dir?.startsWith(join(root, ".sapwood", "cache", "generated", "role-skills")));
     assert.ok(existsSync(join(dir!, ".claude-plugin", "plugin.json")));
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -406,7 +406,7 @@ test("resolveSkillsPluginDir: production composition — returns the EXACT dir r
   try {
     mkdirSync(join(root, "docs"), { recursive: true });
     writeFileSync(join(root, "docs", "security.md"), FIXTURE_SECURITY_MD, "utf8");
-    const outRoot = join(root, "data", "generated", "role-skills");
+    const outRoot = join(root, ".sapwood", "cache", "generated", "role-skills");
     const securityMdPath = join(root, "docs", "security.md");
 
     const resolved = resolveSkillsPluginDir({ roles: { skills: { enabled: true } }, ...LABELS_CFG }, root);

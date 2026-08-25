@@ -6340,7 +6340,7 @@ test("tick DRIVE (#375 review round 2, P1): forceDispatchPause ALONE (no human P
   st.close();
 });
 
-test("tick DRIVE (#375 review round 2, P1): a GENUINE human PAUSE sentinel (data/PAUSE, not forceDispatchPause) still blocks a FIXUP dispatch — stays driving, queued, no fix leg spawned", async () => {
+test("tick DRIVE (#375 review round 2, P1): a GENUINE human PAUSE sentinel (.sapwood/PAUSE, not forceDispatchPause) still blocks a FIXUP dispatch — stays driving, queued, no fix leg spawned", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-pause-fixup-"));
   try {
     const st = new State(join(dir, "sapwood.sqlite"));
@@ -6349,7 +6349,7 @@ test("tick DRIVE (#375 review round 2, P1): a GENUINE human PAUSE sentinel (data
     seedDriving(st, "lane-a", 2, 55);
     const gate = new FakeMergeGate();
     gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
-    writeFileSync(join(dir, "PAUSE"), ""); // a human touches data/PAUSE — no forceDispatchPause involved
+    writeFileSync(join(dir, "PAUSE"), ""); // a human touches .sapwood/PAUSE — no forceDispatchPause involved
     const r = await tick({
       now: realClock,
       forge,
@@ -7748,7 +7748,7 @@ test("tick DRIVE (#450, gate② P3c): a lane under cap, PAUSED, never calls gath
     seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
     const gate = new FakeMergeGate();
     gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=1:ciRed=false" };
-    writeFileSync(join(dir, "PAUSE"), ""); // a human touches data/PAUSE
+    writeFileSync(join(dir, "PAUSE"), ""); // a human touches .sapwood/PAUSE
     const r = await tick({
       now: realClock,
       forge,
@@ -8920,7 +8920,7 @@ test("#75 tick: PAUSE active -> dispatch skipped entirely (no new lane, not even
     gate.outcomes[56] = { kind: "merged", pr: 56, headOid: "H" };
     // A Ready issue that would normally dispatch.
     forge.ready = [{ number: 9, title: "", labels: ["prio:1-high"] }];
-    writeFileSync(join(dir, "PAUSE"), ""); // a human touches data/PAUSE — no config touched
+    writeFileSync(join(dir, "PAUSE"), ""); // a human touches .sapwood/PAUSE — no config touched
 
     const r = await tick({ now: realClock, forge, state: st, supervisor: sup, cfg: mkCfg(), mergeGate: gate });
 
@@ -14076,7 +14076,7 @@ test("#168 P1-A: llm-parked + PAUSED -> zero llm pings (pause blocks the canary 
     supervisor: sup,
     cfg: mkCfg(),
     now: () => new Date(t0.getTime() + 31_000),
-    forceDispatchPause: true, // the same `paused` flag the data/PAUSE sentinel drives
+    forceDispatchPause: true, // the same `paused` flag the .sapwood/PAUSE sentinel drives
     probeLlmReachable: async () => {
       pings++;
       return true;

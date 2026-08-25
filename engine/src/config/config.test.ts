@@ -305,7 +305,7 @@ test("host: strict unknown-key rejection (a typo'd host key is not silently drop
 
 test("logging: defaults, overrides, and strict unknown-key rejection", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.deepEqual(cfg.logging, { path: "data/logs/sapwood.log", teeToStderr: true, maxBytes: 10 * 1024 * 1024 });
+  assert.deepEqual(cfg.logging, { path: ".sapwood/logs/sapwood.log", teeToStderr: true, maxBytes: 10 * 1024 * 1024 });
   const over = parseConfig(
     "board: { owner: a, repo: r, projectNumber: 1 }\nlogging: { path: logs/run.log, teeToStderr: false, maxBytes: 2048 }",
   );
@@ -318,7 +318,7 @@ test("logging.path: loadConfig resolves both default and explicit relative paths
   try {
     const defaultPath = join(dir, "default.yaml");
     writeFileSync(defaultPath, "board: { owner: a, repo: r, projectNumber: 1 }\n");
-    assert.equal(loadConfig(defaultPath).logging.path, join(dir, "data", "logs", "sapwood.log"));
+    assert.equal(loadConfig(defaultPath).logging.path, join(dir, ".sapwood", "logs", "sapwood.log"));
 
     const customPath = join(dir, "custom.yaml");
     writeFileSync(customPath, "board: { owner: a, repo: r, projectNumber: 1 }\nlogging: { path: logs/custom.log }\n");
@@ -1680,12 +1680,12 @@ test("round: a typo'd key is rejected, not silently dropped (.strict())", () => 
 
 // ── #126: round.directiveFile / round.directiveMaxChars — round directive file ──────────────
 
-test("round.directiveFile: defaults to data/DIRECTIVE.md", () => {
+test("round.directiveFile: defaults to .sapwood/DIRECTIVE.md", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.equal(cfg.round.directiveFile, "data/DIRECTIVE.md");
+  assert.equal(cfg.round.directiveFile, ".sapwood/DIRECTIVE.md");
 });
 
-test("round.directiveFile: overridable, and NOT resolved relative to the config file (unlike roles.*.promptFile) — same cwd-relative convention as the engine's own data/sapwood.sqlite default", () => {
+test("round.directiveFile: overridable, and NOT resolved relative to the config file (unlike roles.*.promptFile) — same cwd-relative convention as the engine's own .sapwood/sapwood.sqlite default", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nround: { directiveFile: custom/STEER.md }");
   assert.equal(cfg.round.directiveFile, "custom/STEER.md");
 });

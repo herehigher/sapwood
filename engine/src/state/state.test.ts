@@ -1013,6 +1013,43 @@ test("kill switch: a file sentinel in the engine's own data dir flips it, human-
   }
 });
 
+// #1077 (AC2 + AC4): a single consolidated check that EVERY runtimePaths()-derived getter on
+// State — not just killSwitchPath (covered individually above) — lands under an injected
+// custom root, and that this holds for an EXPLICIT db path (never the DEFAULT_DB_PATH default),
+// proving `dataDir = dirname(dbPath)` still yields a coherent sibling set exactly as before
+// runtimePaths() existed (killSwitchPath/pausePath/etc. used to join() this by hand, one call
+// site at a time).
+test("State: every sentinel/lock/round/proxy-bundle path is derived from dirname(dbPath) — a coherent sibling set beside an explicit, non-default DB path", () => {
+  const customRoot = mkdtempSync(join(tmpdir(), "sapwood-state-custom-root-"));
+  try {
+    const dbPath = join(customRoot, "sapwood.sqlite");
+    const s = new State(dbPath);
+    const round = s.startRound("2026-08-25T00:00:00.000Z");
+    const paths = [
+      s.killSwitchPath(),
+      s.estopPath(),
+      s.pausePath(),
+      s.instanceLockPath(),
+      s.escalationMarkerPath(),
+      s.roundArtifactMdPath(round.round_id),
+      s.forgeProxyBundleDir(),
+    ];
+    for (const p of paths) {
+      // biome-ignore lint/complexity/useOptionalChain: the assertion deliberately requires a non-null path.
+      assert.ok(p && p.startsWith(customRoot), `expected ${p} to be under ${customRoot}`);
+    }
+    // The sibling set is also internally consistent with each other, not just with the root.
+    assert.equal(s.killSwitchPath(), join(customRoot, "KILL_SWITCH"));
+    assert.equal(s.estopPath(), join(customRoot, "EMERGENCY_STOP"));
+    assert.equal(s.pausePath(), join(customRoot, "PAUSE"));
+    assert.equal(s.escalationMarkerPath(), join(customRoot, "ESCALATION"));
+    assert.equal(s.forgeProxyBundleDir(), join(customRoot, "proxy-bundles"));
+    s.close();
+  } finally {
+    rmSync(customRoot, { recursive: true, force: true });
+  }
+});
+
 test("emergency stop (#293): in-memory State has no data dir -> always inactive", () => {
   const s = mem();
   assert.equal(s.estopPath(), null);

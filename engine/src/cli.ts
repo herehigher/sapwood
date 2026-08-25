@@ -17,6 +17,7 @@ import {
   loadConfig,
   type SapwoodConfig,
 } from "./config/config.js";
+import { ensureRuntimeRoot, SAPWOOD_ESTOP_FILENAME, SAPWOOD_KILL_SWITCH_FILENAME, SAPWOOD_PAUSE_FILENAME } from "./config/paths.js";
 import { findRate, loadPricingTable, type PricingTable } from "./config/pricing.js";
 import {
   associateLanePr,
@@ -179,11 +180,11 @@ Commands:
     --json             Machine-readable events instead of the text listing
   park clear     Clear a park episode receipt-first (refuses under a live engine)
     --source SOURCE  Clear only this park source (default: every open episode)
-  pause [clear]  Create/remove the data/PAUSE sentinel — freeze new dispatch only, in-flight
+  pause [clear]  Create/remove the .sapwood/PAUSE sentinel — freeze new dispatch only, in-flight
                  lanes proceed normally (see --help for the full tier semantics)
-  stop [clear]   Create/remove the data/KILL_SWITCH sentinel — freeze dispatch/merges, drain
+  stop [clear]   Create/remove the .sapwood/KILL_SWITCH sentinel — freeze dispatch/merges, drain
                  in-flight workers, then hard-kill (see --help)
-  estop [clear]  Create/remove the data/EMERGENCY_STOP sentinel — immediate hard kill, no
+  estop [clear]  Create/remove the .sapwood/EMERGENCY_STOP sentinel — immediate hard kill, no
                  drain, in-flight WIP is lost. Activating REQUIRES --confirm (see --help)
   dashboard      Start the read-only dashboard server and open it in a browser (see --help)
     --port PORT    Bind this port instead of the default (see --help)
@@ -224,7 +225,7 @@ Flags:
   --config PATH  Load config from this path instead of probing the defaults. Selects
                  config-file-relative logging.path, promptFile, goal.file, and doctrine.file
                  keys (so its default log sits beside that config). The DB
-                 (data/sapwood.sqlite), EMERGENCY_STOP/KILL_SWITCH/PAUSE, sessions, and
+                 (.sapwood/sapwood.sqlite), EMERGENCY_STOP/KILL_SWITCH/PAUSE, sessions, and
                  worktree roots remain relative to the current working directory.
   --once         Tick driver only (engine.driver: tick): run exactly one tick, then exit
                  (exit 1 if the tick attempt failed). No equivalent under the round
@@ -394,7 +395,7 @@ Read the engine's SQLite state DB directly (no live engine session required) and
 a human-readable summary: active lanes/workers, PRs awaiting the review gate, spend vs
 the daily ceiling, and kill-switch state.
 
-Defaults to data/sapwood.sqlite (the same path \`sapwood run\` writes to). Also loads the
+Defaults to .sapwood/sapwood.sqlite (the same path \`sapwood run\` writes to). Also loads the
 sapwood config for lanes.max and the daily cost ceiling: WITHOUT --config, the same
 best-effort default probe order \`validate\` uses (sapwood.config.yaml/.yml/.json) — a
 missing/invalid config there still prints every DB-derived field, with the config-derived
@@ -621,7 +622,7 @@ export interface StatusArgs {
 export function parseStatusArgs(argv: string[]): StatusArgs {
   const args = argv.slice(3);
   if (args.includes("--help") || args.includes("-h")) {
-    return { help: true, dbPath: "data/sapwood.sqlite", json: false };
+    return { help: true, dbPath: DEFAULT_DB_PATH, json: false };
   }
   const positionals: string[] = [];
   let configPath: string | undefined;
@@ -639,18 +640,18 @@ export function parseStatusArgs(argv: string[]): StatusArgs {
       // exit 0 (Codex PR #70 P2). Fail closed instead.
       const next = args[i + 1];
       if (next === undefined || next.startsWith("-")) {
-        return { help: false, error: "--config requires a path", dbPath: "data/sapwood.sqlite", json: false };
+        return { help: false, error: "--config requires a path", dbPath: DEFAULT_DB_PATH, json: false };
       }
       configPath = next;
       i++;
       continue;
     }
     if (a.startsWith("-")) {
-      return { help: false, error: `unknown flag: ${a}`, dbPath: "data/sapwood.sqlite", json: false };
+      return { help: false, error: `unknown flag: ${a}`, dbPath: DEFAULT_DB_PATH, json: false };
     }
     positionals.push(a);
   }
-  return { help: false, dbPath: positionals[0] ?? "data/sapwood.sqlite", configPath, json };
+  return { help: false, dbPath: positionals[0] ?? DEFAULT_DB_PATH, configPath, json };
 }
 
 /** Everything `sapwood status` reports, gathered from the DB (+ config, best-effort) — kept
@@ -662,11 +663,11 @@ export interface StatusSnapshot {
   active: WorkerRow[]; // running + driving (occupied lanes)
   driving: WorkerRow[]; // driving lanes: PRs awaiting the review gate
   killSwitchActive: boolean;
-  /** #293: the immediate-hard-stop sentinel (data/EMERGENCY_STOP) — mirrors killSwitchActive's
+  /** #293: the immediate-hard-stop sentinel (.sapwood/EMERGENCY_STOP) — mirrors killSwitchActive's
    *  reporting. Distinct from it: e-stop skips the drain window entirely (kill-switch drains
    *  first), and takes precedence when both are set. */
   estopActive: boolean;
-  /** #75: the gentle-tier PAUSE sentinel (data/PAUSE) — true means new dispatch is skipped
+  /** #75: the gentle-tier PAUSE sentinel (.sapwood/PAUSE) — true means new dispatch is skipped
    *  this tick, but reclaim/drive (in-flight lanes, PR review/merge) proceed normally. Distinct
    *  from killSwitchActive above (which also drains + freezes); both can be true at once, in
    *  which case the kill switch's reporting/behavior is the one that actually governs the tick. */
@@ -812,7 +813,7 @@ export function formatStatus(s: StatusSnapshot): string {
 /** Fully synchronous (node:sqlite's DatabaseSync + loadConfig are both sync) — like `validate`,
  *  no async engine-wiring fallthrough needed. Never creates a DB: a missing file means "the
  *  engine has never run here", reported as such, NOT silently initialized by opening a fresh
- *  State() (which would create data/ + an empty schema as a side effect of just checking status).
+ *  State() (which would create .sapwood/ + an empty schema as a side effect of just checking status).
  *
  *  The DB is opened TRULY read-only (Codex PR #70 P2): SQLITE_OPEN_READONLY, no migrations,
  *  no journal-mode switch — status must never mutate/upgrade a DB an engine process (possibly
@@ -1043,7 +1044,7 @@ codified "monitor recipe": the same kind-filtered, id-cursor read a hand-rolled
 polling loop used to reimplement per session, now one contract shared with the dashboard's own
 \`/api/events\`.
 
-Defaults to data/sapwood.sqlite (the same path \`sapwood run\` writes to).
+Defaults to .sapwood/sapwood.sqlite (the same path \`sapwood run\` writes to).
 
 Flags:
   --config PATH      Load config from THIS path instead of probing the defaults — same
@@ -1390,7 +1391,7 @@ usage: sapwood park clear [db-path] [--source SOURCE] [--reason "<text>"]
 
 Clear a park episode the way the engine itself would: append the \`park-resumed\`
 receipt (\`via: operator-clear\`) FIRST, then delete the park_state row, then take down
-the data/ESCALATION marker — the same order the engine's startup path uses, so a kill
+the .sapwood/ESCALATION marker — the same order the engine's startup path uses, so a kill
 mid-clear can never leave dispatch un-gated with no receipt in the ledger.
 
 Refuses when a live engine holds the data dir (the single-instance lock): clearing
@@ -1553,7 +1554,7 @@ export function runPark(argv: string[]): { stdout: string; stderr: string; code:
 }
 
 // ── #731: `sapwood pause` / `stop` / `estop` — first-class CLI verbs over the three file
-// sentinels (data/PAUSE, data/KILL_SWITCH, data/EMERGENCY_STOP) state.ts's own pausePath/
+// sentinels (.sapwood/PAUSE, .sapwood/KILL_SWITCH, .sapwood/EMERGENCY_STOP) state.ts's own pausePath/
 // killSwitchPath/estopPath already define and conductor.ts's tick() already reads. THIN WRAPPERS
 // ONLY (#731's own "架构优先/大道至简" instruction): every function below does nothing but
 // create/remove one of those three files — the engine's tick-top detection is untouched, zero
@@ -1577,7 +1578,14 @@ export function runPark(argv: string[]): { stdout: string; stderr: string; code:
 // already-active tier, or clearing an already-inactive one, is a normal exit-0 no-op, same as a
 // second `touch`/`rm -f` on the same path.
 
-const SENTINEL_FILENAME = { pause: "PAUSE", stop: "KILL_SWITCH", estop: "EMERGENCY_STOP" } as const;
+// Filenames derived from paths.ts rather than restated — runtimePaths() builds its own
+// killSwitch/estop/pause fields from these same constants, so this table and the real sentinel
+// paths can never drift apart.
+const SENTINEL_FILENAME = {
+  pause: SAPWOOD_PAUSE_FILENAME,
+  stop: SAPWOOD_KILL_SWITCH_FILENAME,
+  estop: SAPWOOD_ESTOP_FILENAME,
+} as const;
 type SentinelTier = keyof typeof SENTINEL_FILENAME;
 
 /** Parsed `sapwood pause|stop|estop [clear] [db-path] [--config PATH] [--confirm]` args. Pure
@@ -1659,14 +1667,14 @@ const SENTINEL_SPECS: Record<SentinelTier, SentinelSpec> = {
     usage: `\
 usage: sapwood pause [clear] [db-path] [--config PATH]
 
-The gentle stop tier: creates/removes the data/PAUSE file sentinel — a thin wrapper,
-identical in effect to \`touch data/PAUSE\` / \`rm -f data/PAUSE\`. Freezes NEW lane dispatch
+The gentle stop tier: creates/removes the .sapwood/PAUSE file sentinel — a thin wrapper,
+identical in effect to \`touch .sapwood/PAUSE\` / \`rm -f .sapwood/PAUSE\`. Freezes NEW lane dispatch
 only, as of the engine's next tick-top gate: no in-flight lane is affected — running workers
 keep working, and PRs already open keep moving through the review/merge gate. No drain, no
 freeze, nothing killed.
 
-  sapwood pause          Create data/PAUSE (idempotent: already-active is a no-op, exit 0)
-  sapwood pause clear    Remove data/PAUSE (idempotent: already-inactive is a no-op, exit 0)
+  sapwood pause          Create .sapwood/PAUSE (idempotent: already-active is a no-op, exit 0)
+  sapwood pause clear    Remove .sapwood/PAUSE (idempotent: already-inactive is a no-op, exit 0)
 
 Flags:
   --config PATH  Load config from this path instead of probing the defaults — same
@@ -1686,15 +1694,15 @@ Flags:
     usage: `\
 usage: sapwood stop [clear] [db-path] [--config PATH]
 
-The drain-first stop tier: creates/removes the data/KILL_SWITCH file sentinel — a thin
-wrapper, identical in effect to \`touch data/KILL_SWITCH\` / \`rm -f data/KILL_SWITCH\`. Freezes
+The drain-first stop tier: creates/removes the .sapwood/KILL_SWITCH file sentinel — a thin
+wrapper, identical in effect to \`touch .sapwood/KILL_SWITCH\` / \`rm -f .sapwood/KILL_SWITCH\`. Freezes
 ALL new dispatch and merges as of the engine's next tick-top gate; running workers are asked
 to hand off gracefully within the configured drain window, then the conductor escalates to a
 hard kill. Use \`sapwood estop\` instead when the drain window itself is too slow (credential
 exposure, a destructive call, or a cost blowout).
 
-  sapwood stop          Create data/KILL_SWITCH (idempotent: already-active is a no-op, exit 0)
-  sapwood stop clear    Remove data/KILL_SWITCH (idempotent: already-inactive is a no-op, exit 0)
+  sapwood stop          Create .sapwood/KILL_SWITCH (idempotent: already-active is a no-op, exit 0)
+  sapwood stop clear    Remove .sapwood/KILL_SWITCH (idempotent: already-inactive is a no-op, exit 0)
 
 Flags:
   --config PATH  Load config from this path instead of probing the defaults — same
@@ -1722,15 +1730,15 @@ Flags:
     usage: `\
 usage: sapwood estop --confirm [clear] [db-path] [--config PATH]
 
-The strictest stop tier: creates/removes the data/EMERGENCY_STOP file sentinel — a
-thin wrapper, identical in effect to \`touch data/EMERGENCY_STOP\` / \`rm -f data/EMERGENCY_STOP\`.
+The strictest stop tier: creates/removes the .sapwood/EMERGENCY_STOP file sentinel — a
+thin wrapper, identical in effect to \`touch .sapwood/EMERGENCY_STOP\` / \`rm -f .sapwood/EMERGENCY_STOP\`.
 Checked BEFORE the kill switch every tick and wins when both are present. In the normal path
 it hard-kills every running/fixing lane's process group on that SAME tick: there is NO drain
 window, and any IN-FLIGHT WORK-IN-PROGRESS IS LOST. Use it only for credential exposure, a
 destructive call, or a cost blowout faster than \`sapwood stop\`'s drain window can contain.
 
-  sapwood estop --confirm   Create data/EMERGENCY_STOP (idempotent: already-active is a no-op)
-  sapwood estop clear       Remove data/EMERGENCY_STOP — does NOT require --confirm; lifting an
+  sapwood estop --confirm   Create .sapwood/EMERGENCY_STOP (idempotent: already-active is a no-op)
+  sapwood estop clear       Remove .sapwood/EMERGENCY_STOP — does NOT require --confirm; lifting an
                             already-fired estop is not itself a destructive act, only review of
                             the emergency and any resulting escalations is.
 
@@ -1768,7 +1776,7 @@ function runSentinelCommand(argv: string[], spec: SentinelSpec): { stdout: strin
   }
   const filename = SENTINEL_FILENAME[spec.tier];
   // Same dataDir convention state.ts's own pausePath/killSwitchPath/estopPath use:
-  // dirname(dbPath) — cwd-relative by default (DEFAULT_DB_PATH's own dirname is "data"), never
+  // dirname(dbPath) — cwd-relative by default (DEFAULT_DB_PATH's own dirname is SAPWOOD_DIR), never
   // config-file-relative (see this section's header comment).
   const sentinelPath = join(dirname(dbPath), filename);
 
@@ -1795,7 +1803,11 @@ function runSentinelCommand(argv: string[], spec: SentinelSpec): { stdout: strin
   if (existsSync(sentinelPath)) {
     return { stdout: `sapwood ${spec.tier}: ${sentinelPath} already ACTIVE — no change.\n`, stderr: "", code: 0 };
   }
-  mkdirSync(dirname(sentinelPath), { recursive: true });
+  // This is the one mutator that can create a fresh runtime root with no State ever constructed
+  // (a bare `sapwood pause` against a repo that has never run `sapwood run`) — ensureRuntimeRoot,
+  // not a bare mkdirSync, so that root self-declares (.gitignore + cache/CACHEDIR.TAG) exactly
+  // like every other write-capable entry point.
+  ensureRuntimeRoot(dirname(sentinelPath));
   writeFileSync(sentinelPath, "");
   return {
     stdout: `sapwood ${spec.tier}: ${sentinelPath} created — ${spec.activationLine(configResult.cfg)}\n`,
@@ -3359,20 +3371,30 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
   buildRenderPrompt(cfg);
   buildRenderFixPrompt(cfg);
   // #382 (F9): single-instance lock on the data dir, acquired BEFORE State exists — a refused
-  // second engine must perform ZERO writes against the holder's data dir, and constructing a
-  // State opens + migrates the shared SQLite DB (a NEWER binary would upgrade the live
-  // holder's schema on its way to exit 1 — codex finding 3). The lock path is therefore
-  // derived without a State: from the injected test state's own data dir when present
-  // (in-memory -> null -> no-op acquire, the killSwitchPath convention), else from the same
-  // DEFAULT_DB_PATH the State default constructor uses, with only the plain data DIR created
-  // up front (the lockfile needs a parent; an empty dir write-conflicts with nobody).
+  // second engine must perform ZERO writes against the holder's directory: no DB write (a NEWER
+  // binary constructing a State would open + migrate the shared SQLite DB, upgrading the live
+  // holder's schema on its way to exit 1 — codex finding 3), and no root-marker write either
+  // (.gitignore/cache/CACHEDIR.TAG). That is why root stamping (ensureRuntimeRoot) happens ONLY
+  // after this process has actually won the lock, below — never before the acquire attempt. The
+  // lock path is derived without a State: from the injected test state's own data dir when
+  // present (in-memory -> null -> no-op acquire, the killSwitchPath convention), else from the
+  // same DEFAULT_DB_PATH the State default constructor uses.
+  //
+  // The lock file itself still needs its parent directory to exist before acquireInstanceLock's
+  // atomic create can run (writeFileExclusive/linkSync take no `recursive` option) — so a bare,
+  // idempotent mkdir (a no-op against an already-existing dir, i.e. the live-holder case) is the
+  // only filesystem touch allowed ahead of the acquire attempt. It is deliberately NOT
+  // ensureRuntimeRoot: that call also stamps .gitignore/CACHEDIR.TAG, which a refused engine must
+  // never write.
   let lockPath: string | null;
+  let dataDirToStamp: string | null = null;
   if (overrides.state !== undefined) {
     lockPath = overrides.state.instanceLockPath();
   } else {
     const dataDir = dirname(DEFAULT_DB_PATH);
     mkdirSync(dataDir, { recursive: true });
     lockPath = join(dataDir, INSTANCE_LOCK_FILENAME);
+    dataDirToStamp = dataDir;
   }
   const lock = acquireInstanceLock(lockPath, {
     now: systemClock,
@@ -3381,6 +3403,13 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
   if (!lock.acquired) {
     process.stderr.write(`sapwood run: ${lock.message}\n`);
     return 1;
+  }
+  // Only the successful lock owner stamps/repairs the root — before the log driver's own mkdir
+  // (createRunLogger, inside runTickEngine/runRoundsEngine below) or an enabled skills-plugin
+  // render (resolveSkillsPluginDir, same two functions) ever run, and before either driver
+  // constructs its own State.
+  if (dataDirToStamp !== null) {
+    ensureRuntimeRoot(dataDirToStamp);
   }
   try {
     let lockTakeover: LockTakeoverRecord | undefined;

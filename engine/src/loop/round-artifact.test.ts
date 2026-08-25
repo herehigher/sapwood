@@ -611,7 +611,7 @@ test("persistRoundArtifact: an in-memory State (no on-disk data dir) skips the m
   state.close();
 });
 
-test("persistRoundArtifact: a real on-disk State writes the markdown view to data/rounds/round-<id>.md, matching renderRoundArtifactMarkdown", () => {
+test("persistRoundArtifact: a real on-disk State writes the markdown view to rounds/round-<id>.md beside the DB, matching renderRoundArtifactMarkdown", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-round-artifact-"));
   try {
     const state = new State(join(dir, "sapwood.sqlite"));

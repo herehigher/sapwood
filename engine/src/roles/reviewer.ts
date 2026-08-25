@@ -1002,7 +1002,7 @@ export function isReviewerKind(v: unknown): v is ReviewerKind {
 /** The per-lane failover marker (#54): "fallback reviewer `kind` obtained MERGE_OK on `head`".
  *  It shields the PR from the PRIMARY's unavailability or non-decisive verdicts — nothing else.
  *
- *  ADVISORY, never verdict-bearing (#54 R2, fable-review P2): `data/sapwood.sqlite` lives
+ *  ADVISORY, never verdict-bearing (#54 R2, fable-review P2): `.sapwood/sapwood.sqlite` lives
  *  OUTSIDE the guard write boundary, so this row is never trusted on its own. At every use,
  *  resolveReviewVerdict re-derives the verdict from LIVE PR data through the recorded kind's
  *  own mode implementation (identity allowlist / non-author-approval rules, and the always-

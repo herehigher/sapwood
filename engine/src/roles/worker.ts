@@ -39,6 +39,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
 import { loadDoctrine } from "../config/doctrine.js";
+import { defaultRuntimeRoot, ensureRuntimeRoot, runtimePaths } from "../config/paths.js";
 import { estimateUsd, loadPricingTable, type PricingTable } from "../config/pricing.js";
 import type { Issue, LanePrOutcome } from "../forge/forge.js";
 import type { LaneProbe, ReclaimResult, ResumeIntentState, Supervisor, WorktreeSettleOutcome } from "../loop/conductor.js";
@@ -1923,7 +1924,7 @@ export const MAX_INCONCLUSIVE_PR_PROBES = 3;
 export interface WorkerDeps {
   cfg: SapwoodConfig;
   log?: (message: string) => void;
-  /** Directory for sentinels/jsonl/heartbeat. Default <cwd>/data/sessions/state. */
+  /** Directory for sentinels/jsonl/heartbeat. Default <cwd>/.sapwood/sessions/state. */
   stateDir?: string;
   /** Parent directory holding each lane's git worktree, keyed by lane name
    *  (`<worktreeRoot>/<name>`). This is the SAME convention the `claude` CLI's `--worktree
@@ -2708,7 +2709,16 @@ export class WorkerSupervisor implements Supervisor {
   private defaultBranchProbe?: Promise<string>;
 
   constructor(private readonly deps: WorkerDeps) {
-    this.dir = deps.stateDir ?? join(process.cwd(), "data", "sessions", "state");
+    if (deps.stateDir !== undefined) {
+      this.dir = deps.stateDir;
+    } else {
+      // This runner lives inside the lock-owning engine process (never the entry point that
+      // arbitrates the instance lock itself), so stamping here is safe: ensureRuntimeRoot is
+      // idempotent, and a default-root writer must never leave an unstamped root behind.
+      const root = defaultRuntimeRoot();
+      ensureRuntimeRoot(root);
+      this.dir = runtimePaths(root).sessionsStateDir;
+    }
     this.worktreeRoot = deps.worktreeRoot ?? join(process.cwd(), ".claude", "worktrees");
     this.bin = deps.claudeBin ?? discoverClaudeBin(process.env);
     this.hbMs = deps.heartbeatMs ?? 30_000;
@@ -3008,7 +3018,7 @@ export class WorkerSupervisor implements Supervisor {
       !opts?.proxy?.credentialFree && deployKeyPath
         ? workerDeployKeyEnv(deployKeyPath, ghConfigDir, this.deps.cfg.board.owner, this.deps.cfg.board.repo)
         : undefined;
-    // NB: NO --add-dir for the engine `data/` tree — mounting it would let the worker write its
+    // NB: NO --add-dir for the engine `.sapwood/` tree — mounting it would let the worker write its
     // own .done/.failed or mutate state, defeating wrapper-signaled completion (Codex R3 P1).
     const args = claudeArgs({
       prompt,
@@ -4976,7 +4986,7 @@ export class WorkerSupervisor implements Supervisor {
     //
     // Validated against the trusted lane state the engine keeps for itself: the sentinels under
     // `stateDir`, which live outside every worktree and which no worker can write (workers are
-    // never granted `data/` via --add-dir). A branch that ANY other known lane is also sitting
+    // never granted `.sapwood/` via --add-dir). A branch that ANY other known lane is also sitting
     // on is contested and unusable as an association key — for BOTH lanes, deliberately: the
     // engine cannot tell the thief from the victim, so it refuses rather than picking.
     //
