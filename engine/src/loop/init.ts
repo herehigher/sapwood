@@ -7,7 +7,7 @@
 // The guard PreToolUse hook is built (guard.ts / guard-hook.ts) and wired live per session by
 // worker.ts at dispatch time, not by init — init only reports that, and that guard.ts/hook
 // wiring/security config are human-merge-only per CLAUDE.md.
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -394,15 +394,53 @@ function deployKeysDir(cwd: string): string {
   return runtimePaths(defaultRuntimeRoot(cwd)).keysDir;
 }
 
-// #1080: repairs the key's directory (0700) and, when the private key file itself is present,
-// the file (0600) — called on every path that can leave a key on disk (fresh generation, reuse,
+// #1080: repairs the key's directory (0700) and, when a private key file is present, its own
+// mode (0600) — called on every path that can leave a key on disk (fresh generation, reuse,
 // reconcile), since neither `mkdirSync`'s own `mode` option nor ssh-keygen's own default is
-// trusted to land on the exact mode regardless of the caller's umask.
-function enforceDeployKeyPermissions(keyPath: string): void {
+// trusted to land on the exact mode regardless of the caller's umask. Uses `lstatSync` (never
+// dereferenced) to confirm each entry is what it claims to be BEFORE chmodding it: `chmod`
+// follows symlinks the same as a bare shell `chmod` (not `chmod -h`), so chmodding whatever
+// `existsSync` merely reports present could reach through a symlink and mutate an unrelated
+// file's permissions, or strip the executable bit off a directory standing in for the key file.
+// Either collision is reported back to the caller instead, never touched.
+function enforceDeployKeyPermissions(keyPath: string): { ok: true } | { ok: false; reason: string } {
   const dir = dirname(keyPath);
-  mkdirSync(dir, { recursive: true });
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch (e) {
+    return { ok: false, reason: `could not create ${dir}: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  let dirStat: ReturnType<typeof lstatSync>;
+  try {
+    dirStat = lstatSync(dir);
+  } catch (e) {
+    return { ok: false, reason: `could not stat ${dir}: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  if (!dirStat.isDirectory()) {
+    return { ok: false, reason: `${dir} exists but is not a real directory (a symlink or other type) — refusing to chmod it` };
+  }
   chmodSync(dir, 0o700);
-  if (existsSync(keyPath)) chmodSync(keyPath, 0o600);
+
+  let keyStat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    keyStat = lstatSync(keyPath);
+  } catch {
+    return { ok: true }; // nothing at keyPath yet — nothing more to repair
+  }
+  if (!keyStat.isFile()) {
+    return { ok: false, reason: `${keyPath} exists but is not a regular file (a directory or symlink) — refusing to chmod it` };
+  }
+  chmodSync(keyPath, 0o600);
+  return { ok: true };
+}
+
+// #1080: the fresh/reuse/arm(a) provisioning call sites already run inside a try/catch that
+// degrades ANY failure to the same guidance-carrying WARN (deployKeyProvisioningFailedAction) —
+// this just turns a permission-repair collision into a thrown Error so it takes that identical
+// path, rather than requiring each call site to check the result inline.
+function enforceDeployKeyPermissionsOrThrow(keyPath: string): void {
+  const result = enforceDeployKeyPermissions(keyPath);
+  if (!result.ok) throw new Error(result.reason);
 }
 
 export interface DeployKeyListEntry {
@@ -1018,9 +1056,9 @@ async function armAuthFailsStaleOrMismatch(
       `deploy key: operator chose (a) — registering a NEW per-machine deploy key titled "${title}"; every ` +
         `existing remote key is left untouched.`,
     );
-    enforceDeployKeyPermissions(keyPath); // dir ready (0700) before ssh-keygen writes into it
+    enforceDeployKeyPermissionsOrThrow(keyPath); // dir ready (0700) before ssh-keygen writes into it
     await deps.sshKeygen(keyPath);
-    enforceDeployKeyPermissions(keyPath); // repair the freshly-written private key's mode too
+    enforceDeployKeyPermissionsOrThrow(keyPath); // repair the freshly-written private key's mode too
     newId = await addDeployKeyCapturingNewId(run, repo, keyPath, title);
   } catch (e) {
     actions.push(deployKeyProvisioningFailedAction(repo, fallbackKeyPath, fallbackTitle, e));
@@ -1057,8 +1095,10 @@ async function armAuthFailsStaleOrMismatch(
 /** #606 gate② round 1 (OWNER RULING), round 2 (R3-1): both `worker.deployKeyPath` AND
  *  `worker.deployKeyId` configured — RECONCILE (never skip, unlike the superseded version, which
  *  returned immediately once `deployKeyPath` was set and so could never actually detect or
- *  recover from a stale/rotated/mismatched key — P1-5). FOUR checks, ALL must be green: the
- *  local key file exists; the recorded id is present in `gh repo deploy-key list`; that
+ *  recover from a stale/rotated/mismatched key). FIVE checks, ALL must be green: the
+ *  local key file exists; its directory/file permissions are repairable to 0700/0600 (#1080 —
+ *  a directory or symlink standing in for either is a preserved collision, not a repair target);
+ *  the recorded id is present in `gh repo deploy-key list`; that
  *  id-matched remote entry's OWN public key content matches the local `.pub` file (R3-1 — proves
  *  the (path, id) pair is genuinely the SAME key that was recorded together, not merely "an id
  *  that happens to be registered" plus "a local key that happens to authenticate" independently,
@@ -1076,14 +1116,10 @@ async function reconcileDeployKey(
   deps: Pick<InitDeps, "sshKeygen" | "probeSshAuth" | "isInteractive" | "promptOperator" | "hostname">,
 ): Promise<string[]> {
   const localFileOk = existsSync(deployKeyPath);
-  if (localFileOk) {
-    try {
-      enforceDeployKeyPermissions(deployKeyPath);
-    } catch {
-      // Best-effort repair only — a failure here (an unwritable mount, say) must never block
-      // the reconcile checks below, which don't depend on whether the repair itself succeeded.
-    }
-  }
+  // A repair failure here (the configured path is a directory/symlink, or an unwritable mount)
+  // is a reported degradation, never silently swallowed into a green "reconciled" verdict below —
+  // folded into the same green-condition check the other four signals already go through.
+  const permissionRepair = localFileOk ? enforceDeployKeyPermissions(deployKeyPath) : { ok: true as const };
   let listedKeys: DeployKeyListEntry[] = [];
   let matchedEntry: DeployKeyListEntry | undefined;
   try {
@@ -1109,7 +1145,7 @@ async function reconcileDeployKey(
 
   const probe = localFileOk ? await deps.probeSshAuth(deployKeyPath) : { ok: false, detail: "local key file missing" };
 
-  if (localFileOk && idListed && keyContentMatches && probe.ok) {
+  if (localFileOk && permissionRepair.ok && idListed && keyContentMatches && probe.ok) {
     const actions = [
       `deploy key: reconciled — ${deployKeyPath} (id ${deployKeyId}) is registered on ${repo} and the SSH auth ` +
         `preflight is green — L1 active`,
@@ -1120,6 +1156,7 @@ async function reconcileDeployKey(
 
   const reasons: string[] = [];
   if (!localFileOk) reasons.push(`local key file missing at ${deployKeyPath}`);
+  if (!permissionRepair.ok) reasons.push(`could not repair key permissions: ${permissionRepair.reason}`);
   if (!idListed) reasons.push(`recorded id ${deployKeyId} not found on ${repo}'s registered deploy keys`);
   if (idListed && localFileOk && !keyContentMatches) {
     reasons.push(
@@ -1191,10 +1228,10 @@ export async function ensureDeployKey(
       );
     }
     if (!privateExists) {
-      enforceDeployKeyPermissions(keyPath); // dir ready (0700) before ssh-keygen writes into it
+      enforceDeployKeyPermissionsOrThrow(keyPath); // dir ready (0700) before ssh-keygen writes into it
       await deps.sshKeygen(keyPath);
     }
-    enforceDeployKeyPermissions(keyPath); // repair mode whether just generated or reused
+    enforceDeployKeyPermissionsOrThrow(keyPath); // repair mode whether just generated or reused
     newId = await addDeployKeyCapturingNewId(run, repo, keyPath, DEPLOY_KEY_TITLE);
   } catch (e) {
     actions.push(deployKeyProvisioningFailedAction(repo, keyPath, DEPLOY_KEY_TITLE, e));

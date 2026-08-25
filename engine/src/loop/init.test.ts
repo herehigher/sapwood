@@ -10,6 +10,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1633,6 +1634,77 @@ test("init: RECONCILE — deployKeyPath+deployKeyId both configured, local file 
   }
 });
 
+test("init: RECONCILE — a configured key already on disk with the wrong permissions (dir 0777, file 0777) has BOTH repaired to 0700/0600 as part of a successful reconcile", async () => {
+  const dir = tmpCwd();
+  const keyPath = cfgKeyPath(dir);
+  const keysDir = dirname(keyPath);
+  const provisioned = parseConfig(
+    `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: ${keyPath}, deployKeyId: 159210179 }`,
+  );
+  const { run } = fakeRun({
+    labels: requiredLabels(provisioned).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+    deployKeyEntries: [{ id: 159210179, title: "sapwood-worker", key: FAKE_PUB_KEY }],
+  });
+  try {
+    writeFakeKeyPair(keyPath);
+    chmodSync(keysDir, 0o777);
+    chmodSync(keyPath, 0o777);
+    const { actions } = await init(provisioned, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      ...nonInteractive,
+      sshKeygen: failSshKeygen,
+      probeSshAuth: async () => ({ ok: true }),
+    });
+    assert.equal(statSync(keysDir).mode & 0o777, 0o700, "the keys/ directory is repaired to 0700 as part of reconcile");
+    assert.equal(statSync(keyPath).mode & 0o777, 0o600, "the private key file is repaired to 0600 as part of reconcile");
+    assert.ok(
+      actions.some((a) => /reconciled/.test(a) && /L1 active/.test(a)),
+      "the repair does not block the green verdict",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init: RECONCILE — a DIRECTORY sitting at the configured deployKeyPath cannot be repaired to 0600; reconcile reports a WARN and never claims L1 active", async () => {
+  const dir = tmpCwd();
+  const keyPath = cfgKeyPath(dir);
+  mkdirSync(keyPath, { recursive: true }); // a DIRECTORY, not a key file, at the configured path
+  const provisioned = parseConfig(
+    `board: { owner: acme, repo: widgets, projectNumber: 7 }\nworker: { deployKeyPath: ${keyPath}, deployKeyId: 159210179 }`,
+  );
+  const { run, calls } = fakeRun({
+    labels: requiredLabels(provisioned).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+    deployKeyEntries: [{ id: 159210179, title: "sapwood-worker" }],
+  });
+  try {
+    const { actions } = await init(provisioned, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      ...nonInteractive,
+      sshKeygen: failSshKeygen,
+      probeSshAuth: async () => ({ ok: true }),
+    });
+    assert.ok(
+      !actions.some((a) => /reconciled/.test(a) && /L1 active/.test(a)),
+      "a permission-repair collision must never be reported as a green reconcile",
+    );
+    const warn = actions.find((a) => a.startsWith("deploy key: WARN"));
+    assert.ok(warn, "expected a WARN action line");
+    assert.match(warn!, /could not repair key permissions/);
+    assert.ok(!calls.some((c) => c.join(" ").includes("delete")), "the remote key is never touched over a local permission collision");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("init (P1-5): RECONCILE FAILS (recorded id no longer listed — rotated/stale) -> non-interactive default (b): WARN + config anchor CLEARED, remote NEVER touched (no deploy-key delete call, ever)", async () => {
   const dir = tmpCwd();
   const keyPath = cfgKeyPath(dir); // see the RECONCILE test above for why this must be absolute
@@ -2276,13 +2348,12 @@ test("init (#554 pattern): fresh provisioning succeeds but the SSH auth prefligh
 
 // #1080: the pre-#1080 ".gitignore already covers the rule"/"leading-whitespace rule not
 // treated as coverage"/"an unrelated rule elsewhere in the file doesn't count as coverage" trio
-// (P1-6/R3-7/gate② round 3 item 1) tested ensureGitignoreCoversDeployKeyAction, which is retired
-// — the key lives under the runtime root's own self-ignoring `.sapwood/.gitignore` now, and
-// init never touches the repo root's own `.gitignore` at all (see "AC1/AC4" below for the
-// replacement coverage: root .gitignore untouched, .sapwood/.gitignore already excludes
-// everything under it).
+// tested ensureGitignoreCoversDeployKeyAction, which is retired — the key lives under the
+// runtime root's own self-ignoring `.sapwood/.gitignore` now, and init never touches the repo
+// root's own `.gitignore` at all (see "AC1/AC4" below for the replacement coverage: root
+// .gitignore untouched, .sapwood/.gitignore already excludes everything under it).
 
-test("init (P2-7): L1 active + default branch UNPROTECTED (confirmed via a 404) -> WARN naming branch protection as the fix", async () => {
+test("init: L1 active + default branch UNPROTECTED (confirmed via a 404) -> WARN naming branch protection as the fix", async () => {
   const { run } = fakeRun({
     labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
@@ -2314,7 +2385,7 @@ test("init (P2-7): L1 active + default branch UNPROTECTED (confirmed via a 404) 
   }
 });
 
-test("init (P2-7): branch protection status CANNOT BE VERIFIED (403/plan-limit/anything not a parseable 404) -> a DISTINCT cannot-verify WARN, never read as confirmed-unprotected", async () => {
+test("init: branch protection status CANNOT BE VERIFIED (403/plan-limit/anything not a parseable 404) -> a DISTINCT cannot-verify WARN, never read as confirmed-unprotected", async () => {
   const { run } = fakeRun({
     labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
@@ -2480,7 +2551,7 @@ test("init: L1 active + default branch IS protected -> a positive confirmation a
   }
 });
 
-test("fakeRun (P1-1 regression pin): --jq without --json on a non-'api' gh command is REJECTED — the invalid argv can never go green again", async () => {
+test("fakeRun (regression pin): --jq without --json on a non-'api' gh command is REJECTED — the invalid argv can never go green again", async () => {
   const { run } = fakeRun({});
   await assert.rejects(() => run(["repo", "deploy-key", "list", "-R", "acme/widgets", "--jq", ".[].title"]), /--jq without --json/);
   // the api form (--jq alone, no --json) stays legal — different gh flag semantics.
@@ -2503,11 +2574,10 @@ test("init (AC1): fresh init on a temp repo — key at .sapwood/keys/worker-depl
       getAuthStatus: async () => OK_AUTH,
       cwd: dir,
       ...nonInteractive,
-      // #1080 gate② round 1 P1: this fake deliberately does NOT chmod the file itself — mode
-      // enforcement must be init's own doing (enforceDeployKeyPermissions), not something this
-      // test smuggles in via the fake. worker.test.ts's own "private key 0600" test separately
-      // pins the real ssh-keygen invocation's own mode (this file's fakes never shell out — see
-      // #69's grep-invariant doc).
+      // This fake deliberately does NOT chmod the file itself — mode enforcement must be init's
+      // own doing (enforceDeployKeyPermissions), not something this test smuggles in via the
+      // fake. worker.test.ts's own "private key 0600" test separately pins the real ssh-keygen
+      // invocation's own mode (this file's fakes never shell out — see #69's grep-invariant doc).
       sshKeygen: async (path) => {
         writeFileSync(path, "fake-private-key");
         writeFileSync(`${path}.pub`, "ssh-ed25519 AAAA fake");
@@ -2525,7 +2595,7 @@ test("init (AC1): fresh init on a temp repo — key at .sapwood/keys/worker-depl
   }
 });
 
-test("init (AC1 gate② round 1 P1): pre-existing key material at 0777 (both the keys/ directory and the private key file) is repaired to 0700/0600 on REUSE, not just fresh creation", async () => {
+test("init (AC1): pre-existing key material at 0777 (both the keys/ directory and the private key file) is repaired to 0700/0600 on REUSE, not just fresh creation", async () => {
   const { run } = fakeRun({
     labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
@@ -2560,7 +2630,7 @@ test("init (AC1 gate② round 1 P1): pre-existing key material at 0777 (both the
   }
 });
 
-test("init (fresh provisioning, gate② round 1 P1): a pre-existing .pub file with no private half at the BASE key path is a collision — ssh-keygen is never invoked, the .pub is preserved byte-for-byte, and provisioning degrades with a WARN", async () => {
+test("init (fresh provisioning): a pre-existing .pub file with no private half at the BASE key path is a collision — ssh-keygen is never invoked, the .pub is preserved byte-for-byte, and provisioning degrades with a WARN", async () => {
   const { run, calls } = fakeRun({
     labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
@@ -2596,7 +2666,95 @@ test("init (fresh provisioning, gate② round 1 P1): a pre-existing .pub file wi
   }
 });
 
-test("init (arm (a), gate② round 1 P1): a pre-existing .pub file with no private half at a per-host slot is a collision — arm (a) advances to a numeric-suffixed sibling rather than overwriting it", async () => {
+test("init (fresh provisioning): a DIRECTORY at the private-key path (with a real .pub sibling, so the XOR collision check passes and enforceDeployKeyPermissions itself is what's exercised) is a collision — its own mode is never chmodded to 0600, ssh-keygen is never invoked, and provisioning degrades with a WARN", async () => {
+  const { run, calls } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+    deployKeyEntries: [],
+  });
+  const dir = tmpCwd();
+  try {
+    const keyPath = join(dir, ".sapwood", "keys", "worker-deploy-key");
+    mkdirSync(keyPath, { recursive: true }); // a DIRECTORY sits where the private key file should be
+    writeFileSync(`${keyPath}.pub`, "sentinel-preexisting-pub-alongside-a-directory");
+    const dirModeBefore = statSync(keyPath).mode & 0o777;
+
+    const { actions } = await init(cfg, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      ...nonInteractive,
+      sshKeygen: async () => {
+        throw new Error("sshKeygen must not be called — the private-key path is a directory, this is a collision");
+      },
+      probeSshAuth: async () => ({ ok: true }),
+    });
+    assert.equal(statSync(keyPath).mode & 0o777, dirModeBefore, "the directory's own mode is never chmodded to 0600");
+    assert.equal(
+      readFileSync(`${keyPath}.pub`, "utf8"),
+      "sentinel-preexisting-pub-alongside-a-directory",
+      "the pre-existing .pub sibling is untouched",
+    );
+    assert.ok(
+      !calls.some((c) => c[0] === "repo" && c[1] === "deploy-key" && c[2] === "add"),
+      "no add call — provisioning refused before ever reaching gh",
+    );
+    const warn = actions.find((a) => a.startsWith("deploy key: WARN"));
+    assert.ok(warn, "expected a provisioning-failure WARN action line");
+    assert.match(warn!, /not a regular file/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init (fresh provisioning): a SYMLINK at the private-key path pointing at an external file (mode 0644, plus a real .pub sibling so the XOR check passes) is a collision — chmod never follows the symlink, so the external target's own mode and bytes are unchanged, and provisioning degrades with a WARN", async () => {
+  const { run, calls } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Todo", "Ready", "In Progress", "Done"],
+    deployKeyEntries: [],
+  });
+  const dir = tmpCwd();
+  try {
+    const keysDir = join(dir, ".sapwood", "keys");
+    mkdirSync(keysDir, { recursive: true });
+    const keyPath = join(keysDir, "worker-deploy-key");
+    const externalTarget = join(dir, "external-file-outside-keys.txt");
+    writeFileSync(externalTarget, "not a deploy key — an unrelated file this symlink points at");
+    chmodSync(externalTarget, 0o644);
+    symlinkSync(externalTarget, keyPath);
+    writeFileSync(`${keyPath}.pub`, "sentinel-preexisting-pub-alongside-a-symlink");
+
+    const { actions } = await init(cfg, {
+      run,
+      getAuthStatus: async () => OK_AUTH,
+      cwd: dir,
+      ...nonInteractive,
+      sshKeygen: async () => {
+        throw new Error("sshKeygen must not be called — the private-key path is a symlink, this is a collision");
+      },
+      probeSshAuth: async () => ({ ok: true }),
+    });
+    assert.equal(statSync(externalTarget).mode & 0o777, 0o644, "chmod never follows the symlink to reach the external target");
+    assert.equal(
+      readFileSync(externalTarget, "utf8"),
+      "not a deploy key — an unrelated file this symlink points at",
+      "the external target's bytes are untouched",
+    );
+    assert.ok(
+      !calls.some((c) => c[0] === "repo" && c[1] === "deploy-key" && c[2] === "add"),
+      "no add call — provisioning refused before ever reaching gh",
+    );
+    const warn = actions.find((a) => a.startsWith("deploy key: WARN"));
+    assert.ok(warn, "expected a provisioning-failure WARN action line");
+    assert.match(warn!, /not a regular file/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init (arm (a)): a pre-existing .pub file with no private half at a per-host slot is a collision — arm (a) advances to a numeric-suffixed sibling rather than overwriting it", async () => {
   const { run, calls } = fakeRun({
     labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
@@ -2643,12 +2801,13 @@ test("init (arm (a), gate② round 1 P1): a pre-existing .pub file with no priva
   }
 });
 
-test("init (AC2, gate② round 1): a second run against an already-initialized repo WITH a real provisioned key reports ZERO create actions and leaves the key's bytes and modes unchanged", async () => {
+test("init (AC2): a second run against an already-initialized repo WITH a real provisioned key reports ZERO create actions and leaves the key's bytes and modes unchanged", async () => {
   const dir = tmpCwd();
   const previousCwd = process.cwd();
   try {
-    // Round 1: genuine fresh provisioning — a fake sshKeygen writes both real halves, and this
-    // run's own action list (not a hand-built fixture) is what round 2 reconciles against.
+    // First run: genuine fresh provisioning — a fake sshKeygen writes both real halves, and
+    // this run's own action list (not a hand-built fixture) is what the second run reconciles
+    // against.
     const { run: run1 } = fakeRun({
       labels: requiredLabels(cfg).map((l) => l.name),
       boardExists: true,
@@ -2661,18 +2820,18 @@ test("init (AC2, gate② round 1): a second run against an already-initialized r
       cwd: dir,
       ...nonInteractive,
       sshKeygen: async (path) => {
-        writeFileSync(path, "round-1-private-key");
+        writeFileSync(path, "first-run-private-key");
         writeFileSync(`${path}.pub`, `${FAKE_PUB_KEY}\n`);
       },
       probeSshAuth: async () => ({ ok: true }),
     });
     assert.ok(
       first.actions.some((a) => /added write deploy key/.test(a)),
-      "round 1 actually provisions the key",
+      "the first run actually provisions the key",
     );
     assert.ok(
       first.actions.some((a) => /wrote starter config/.test(a)),
-      "round 1 actually creates the starter config",
+      "the first run actually creates the starter config",
     );
 
     const keyPath = join(dir, ".sapwood", "keys", "worker-deploy-key");
@@ -2680,11 +2839,12 @@ test("init (AC2, gate② round 1): a second run against an already-initialized r
     const pubBefore = readFileSync(`${keyPath}.pub`, "utf8");
     const dirModeBefore = statSync(dirname(keyPath)).mode & 0o777;
     const fileModeBefore = statSync(keyPath).mode & 0o777;
-    assert.equal(fileModeBefore, 0o600, "round 1 already leaves the key at 0600");
+    assert.equal(fileModeBefore, 0o600, "the first run already leaves the key at 0600");
 
-    // Round 2: loadConfig the file round 1 actually wrote (deployKeyPath/deployKeyId now set),
-    // so this is a genuine RECONCILE against real state, never a hand-built "already configured"
-    // fixture — the remote list below reflects round 1's own registration (id 1, matching .pub).
+    // Second run: loadConfig the file the first run actually wrote (deployKeyPath/deployKeyId
+    // now set), so this is a genuine RECONCILE against real state, never a hand-built "already
+    // configured" fixture — the remote list below reflects the first run's own registration
+    // (id 1, matching .pub).
     process.chdir(dir);
     const cfg2 = loadConfig(join(dir, "sapwood.config.yaml"));
     process.chdir(previousCwd);
@@ -2704,18 +2864,18 @@ test("init (AC2, gate② round 1): a second run against an already-initialized r
     });
     assert.ok(
       second.actions.some((a) => /reconciled/.test(a) && /L1 active/.test(a)),
-      "round 2 genuinely reconciles green",
+      "the second run genuinely reconciles green",
     );
     for (const verb of [/^wrote /, /^created /, /added write deploy key/, /appended/]) {
       assert.ok(
         !second.actions.some((a) => verb.test(a)),
-        `round 2 must report zero actions matching ${verb}, got: ${second.actions.join(" | ")}`,
+        `the second run must report zero actions matching ${verb}, got: ${second.actions.join(" | ")}`,
       );
     }
-    assert.equal(readFileSync(keyPath, "utf8"), privateBefore, "round 2 never rewrites the private key bytes");
-    assert.equal(readFileSync(`${keyPath}.pub`, "utf8"), pubBefore, "round 2 never rewrites the .pub bytes");
-    assert.equal(statSync(dirname(keyPath)).mode & 0o777, dirModeBefore, "round 2 leaves the keys/ dir mode unchanged");
-    assert.equal(statSync(keyPath).mode & 0o777, fileModeBefore, "round 2 leaves the private key mode unchanged");
+    assert.equal(readFileSync(keyPath, "utf8"), privateBefore, "the second run never rewrites the private key bytes");
+    assert.equal(readFileSync(`${keyPath}.pub`, "utf8"), pubBefore, "the second run never rewrites the .pub bytes");
+    assert.equal(statSync(dirname(keyPath)).mode & 0o777, dirModeBefore, "the second run leaves the keys/ dir mode unchanged");
+    assert.equal(statSync(keyPath).mode & 0o777, fileModeBefore, "the second run leaves the private key mode unchanged");
   } finally {
     process.chdir(previousCwd);
     rmSync(dir, { recursive: true, force: true });
