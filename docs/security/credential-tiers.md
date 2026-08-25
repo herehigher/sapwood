@@ -52,7 +52,7 @@ never swept by an ordinary `git add -A`.
 | `deployKeyPath` and `deployKeyId` are a schema-enforced pair — a config with only one set fails to parse, naming the missing half. | `config/config.ts` schema | `config.test.ts:1269`: "rejects a config with ONLY deployKeyPath set, naming deployKeyId as the missing half" |
 | Every `sapwood init` run with both configured RECONCILES, never skips — five ordered checks (enumerated in `reconcileDeployKey`'s own doc comment) must all be green, or it fails closed into the choice/degrade arm below. | `init.ts::reconcileDeployKey`, `init.ts::enforceDeployKeyPermissions` | `init.test.ts:1615` (all green); `init.test.ts:1686-1687` (0700/0600 repair) |
 | The local `(path, id)` pair is the anchor, never the remote key's title — a `sapwood-worker`-titled key may validly belong to a different machine. The engine never deletes or modifies a remote deploy key. | `init.ts::armAuthFailsStaleOrMismatch` | `init.test.ts:1804`: "RECONCILE FAILS ... non-interactive default (b): WARN + config anchor CLEARED, remote NEVER touched" |
-| Any reconcile failure offers, only interactively, (a) a fresh ADDITIONAL per-machine key or (b) degrade to L0 (non-interactive always (b)); either way it ATTEMPTS to clear the stale anchor, but a flow-style `worker: { ... }` mapping or a parse/verify failure leaves it uncleared with a hand-edit WARN instead. | `init.ts::armAuthFailsStaleOrMismatch`, `init.ts::clearDeployKeyConfigFromYaml` | `init.test.ts:2000` (arm a); the flow-style/failure clear path is untested through this call site — unit-tested only via the sibling writer, `init.test.ts:1022` |
+| Any reconcile failure, only interactively, offers (a) a fresh per-machine key or (b) degrade to L0 (non-interactive: always (b)); either way it ATTEMPTS to clear the stale anchor, but some config shapes or a parse/verify failure leave it uncleared with a hand-edit WARN instead. | `init.ts::armAuthFailsStaleOrMismatch`, `init.ts::clearDeployKeyConfigFromYaml` | `init.test.ts:2000` (arm a); `init.test.ts:1342` (JSON parse-failure, untouched+WARN) |
 | A running engine reports the effective tier once per start (log + `deploy-key-tier-detected` event) — disclosure only, never a gate. | `deploy-key-startup-check.ts::detectDeployKeyStartupTier` | `deploy-key-startup-check.test.ts`: "reverse test: ... never blocks" |
 | Branch protection is checked once provisioning/reconcile succeeds (legacy endpoint, then rulesets on a 404); WARN only if both report unprotected, distinct from a "cannot verify" WARN on any other read failure. | `init.ts::checkDefaultBranchProtectionAction` | `init.test.ts:2452`/`2552` (unprotected/ruleset); `init.test.ts:2484`/`2589` (cannot verify) |
 
@@ -81,11 +81,12 @@ additional per-machine key when reconciling against an already-registered key
   API-level scope boundary; no dedicated enforcement or test.
 
 - **Raw git-transport push to the default branch — narrowed, not eliminated.** The guard also
-  blocks `git push` reaching the default branch when `SAPWOOD_DEFAULT_BRANCH` is set
+  blocks `git push` reaching the default branch, active only when `SAPWOOD_DEFAULT_BRANCH` is set
   (`guard.ts::checkGitPushDefaultBranch`). Argv-visible forms only: an alias set by an earlier,
-  separately-judged command — whether in a prior call or earlier in the SAME call — is not caught
-  by an argv scan; accepted, not fixed, branch protection is the backstop of record
-  (`guard.test.ts:654`: "a PRE-PERSISTED git-config alias is not detected by an argv scan").
+  separately-judged command — whether in a prior call or earlier in the SAME call, or carried in
+  as `GIT_CONFIG_*` environment aliases — is not caught by an argv scan; accepted, not fixed,
+  branch protection is the backstop of record (`guard.test.ts:654`: "a PRE-PERSISTED git-config
+  alias is not detected by an argv scan").
 
 - **Host-credential theft: engine-unpluggable.** L1 severs the env-var credential-lookup path
   only; it cannot touch the operator's real credential store on the host, and a leg that reads a
