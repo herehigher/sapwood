@@ -581,9 +581,10 @@ test("defaultGoalTemplatePath resolves to a real, readable shipped file with the
   assert.match(text, /^# Goal/m);
   assert.match(text, /^## Non-goals/m);
   assert.match(text, /^## Constraints/m);
-  // Gate② P2 (PR #162): architect.ts's loadArchitectureChapter reads exactly this heading from
-  // the resolved goal file — without it, a repo bootstrapped by `sapwood init` hands the
-  // architect a missing chapter from day one (degrading to the advisory placeholder every round).
+  // Gate② P2 (PR #162), widened by #1089: architect.ts's loadGoalExcerpt reads exactly these two
+  // headings from the resolved goal file — without them, a repo bootstrapped by `sapwood init`
+  // hands the architect a missing section/chapter from day one (degrading to the advisory
+  // placeholder every round).
   assert.match(text, /^## Architecture/m);
   assert.match(text, /^## Current milestone/m);
 });
@@ -601,9 +602,9 @@ test("init scaffolds the goal-file template when the resolved path is missing", 
     assert.ok(existsSync(goalPath), "goal file was scaffolded");
     const scaffolded = readFileSync(goalPath, "utf8");
     assert.match(scaffolded, /^# Goal/m);
-    // Gate② P2 (PR #162): the scaffolded file must carry the ## Architecture section the
-    // architect peripheral extracts (loadArchitectureChapter) — a freshly-init'd repo should
-    // never start life with a missing chapter.
+    // Gate② P2 (PR #162), widened by #1089: the scaffolded file must carry the ## Architecture
+    // section the architect peripheral extracts (loadGoalExcerpt, alongside ## Constraints) — a
+    // freshly-init'd repo should never start life with a missing chapter.
     assert.match(scaffolded, /^## Architecture/m);
     assert.ok(actions.some((a) => /wrote starter goal file/.test(a)));
   } finally {

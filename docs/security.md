@@ -114,6 +114,25 @@ the session's init inventory**, so a prompt or scanner that reads the init tool 
 concludes "no MCP tools available" is wrong; `--allowedTools` does not gate an inherited MCP
 tool either (consistent with the Agent/Task-spawning finding below).
 
+**Capability/context decision rule.** Within the trusted-repos threat model, input-side
+prompt-injection hardening neither drives nor vetoes capability or context choices: prompt scope
+is governed by noise, size, and determinism, while capability is decided by whether its effects
+are enforceable at the action boundary. This is why the zero-`gh` peripheral design (below) was
+decided by enforceability rather than by input-trust concerns, and the same rule governs
+engine-injected context and retrieval design. Revisit input-side hardening when untrusted-repo
+support is actually scheduled, as its own milestone-level threat-model decision rather than a
+standing constraint on trusted-repo capabilities.
+
+**Peripheral vs. producer split.** "Enforceable at the action boundary" cuts differently for the
+two session classes this page distinguishes. A peripheral session's action boundary is the CLI's
+own tool grant (no `Bash`, no write tool, the zero-`gh` design) — genuinely enforceable, so
+capability was withheld there. A producer (worker) leg's action boundary is different in kind:
+the guard hook mediates Bash/file-tool calls but cannot mediate `mcp__*` calls at all (see "What
+stays engine-owned" below), so in-engine capability *management* for the inherited MCP surface
+was never actually enforceable — host-delegated capability management (this section) is that same
+rule applied honestly to that surface, choosing the real enforcement points (the guard's
+write-path denial, branch protection) over a config knob that could not have been enforced.
+
 ### What stays engine-owned (the governance core)
 
 Everything a producer leg's write path actually depends on stays engine-enforced; only
@@ -290,7 +309,7 @@ precisely why this is a prominence marker on a retained record, not an exclusion
 
 **[DR #1009](https://github.com/herehigher/sapwood/issues/1009) (owner-confirmed 2026-08-19),
 re-adjudicating [#304](https://github.com/herehigher/sapwood/issues/304) (c) and amending
-[Decision #11](PLAN.md#locked-decisions); further amended 2026-08-20 (owner ruling, deferral
+[Decision #11](PLAN.md#constraints-locked-decisions); further amended 2026-08-20 (owner ruling, deferral
 record [#1038](https://github.com/herehigher/sapwood/issues/1038)):** every `claude` role
 session sapwood spawns has run `--permission-mode auto` since the first `worker.ts`. #1011
 implements the operator-choice half of that DR — `host.permissionMode`, below — as a config key.
@@ -1543,6 +1562,56 @@ dispatch or forge credentials:
   review findings no longer produce a `failed`+PR row at all (they route to `fixing` instead) —
   the only remaining producer of that shape is the `fix_rounds` cap escalation. Findings no
   longer masquerade as `failed`.
+- **Adjudicated findings do not re-consume fix rounds.** Gate② tracks each review thread's span
+  (`path`/`line`/`originalLine`), GitHub's own `isOutdated` staleness field, and a
+  whitespace-normalized digest of the originating comment identifying which finding the thread is
+  about, all from the same paged read that already produces the blocking-thread count. An
+  unresolved thread carrying the same finding at the same span as an already-resolved thread
+  whose code has not moved since is an *adjudicated re-raise* and is excluded from the blocking
+  count — keyed on (finding, span), never a thread id (a re-raise always arrives as a brand-new
+  thread) and never a span alone (two unrelated findings can share a line). A resolved thread
+  whose code changed after resolution still reads as outdated and blocks again; an unresolved
+  thread with no prior adjudication on its span still blocks; a standing `CHANGES_REQUESTED`
+  still blocks; a review submitted against a non-current head is excluded from both halves of the
+  gate. Both exclusions are named in the `FIXABLE` outcome's own reason — a filter that silently
+  shrank gate② input would be exactly the invisible weakening this mechanism exists to avoid.
+- **Precedence when more than one fix-loop signal fires on the same tick: verdict-rerun →
+  convergence-stalled → cap.** A byte-identical rerun (its own fix leg already ran and pushed
+  nothing) wins outright regardless of measured progress; a stalled lane
+  (`review/convergence.ts`'s progress classifier) escalates to `needs-human` before paying
+  another fix round; `lanes.prFixCap` remains the cost backstop for a lane still genuinely
+  converging.
+- **A driving lane's fix leg is exempt from `cost.roundBudgetUsd` outright.** An already-open PR
+  has no completion path other than merge or fix — there is no "abandon the PR" outcome — so
+  gating a fix leg on round spend could wedge a round forever once spend crossed the cap while a
+  PR still needed rework. `cost.roundBudgetUsd` gates *new* dispatch only; a fix leg remains
+  bounded by the three other, pre-existing limits: `lanes.prFixCap` (attempts, above),
+  `worker.budgetUsdSoft` (the leg's own per-worker graceful-handoff ceiling), and
+  `cost.dailyBudgetUsd` (the hard daily ceiling — deliberately NOT exempted, since it is the
+  actual safety boundary against runaway spend, not a per-round pacing device). The exemption is
+  uniform across every round/run-level stop reason, not just the spend cap: once
+  `roundBudgetUsd`/`roundDispatchCap`/a round milestone/a `stop.*` condition fires, further
+  dispatch waves freeze via the same "no new dispatch this round" signal (never a human pause),
+  and a fix leg on an already-open PR is never "new dispatch" either way — new DISPATCH itself
+  stays fully frozen regardless. **A fix leg's admission gate reads the genuine `.sapwood/PAUSE`
+  sentinel only, never `forceDispatchPause`.** DISPATCH and RESUME's own admission checks OR the
+  two together into one wider flag (`conductor.ts`'s `paused`), but the fix-leg admission gate
+  (`fixLegAdmissionBlockReason`) deliberately reads the narrower `humanPauseOnly` —
+  `state.isPauseActive()` alone. So a round/run-level stop condition firing never blocks a fix
+  leg on its own, while a human-set `.sapwood/PAUSE` still does, exactly like it blocks new lane
+  dispatch — see [Human controls](#human-controls-three-tiers) below.
+- **Terminal-for-drain under the `KILL_SWITCH` bounded drain.** A `driving` lane has no live
+  process for the drain to hand off or kill, so left alone it could sit untouched for as long as
+  the switch stayed active. Three cases: a `driving` lane that is daily-budget-blocked or
+  fix-rounds-capped is escalated to `needs-human` past the same bounded `cost.drainWindowSec`,
+  exactly like a hard-killed running/fixing lane, so the engine always exits within the drain
+  window; a `driving` lane that has never needed a fix leg (MERGE-/WAIT-gated) is left alone —
+  it isn't stuck for a budget reason, and resumes the instant the breach/switch clears; and a
+  lane whose CI-pending pin is already past `ci.pendingEscalateAfterSec` is terminal-for-drain
+  too, in BOTH drain arms — the kill-switch heuristic's own input and the ceiling path's observed
+  set — because gate① being permanently stuck is exactly "can never make forward progress," and
+  it is invisible in `fix_rounds` (such a lane has spent none). A pin that is merely fresh stays
+  a healthy WAIT.
 
 ## Ambient repo context: record, don't seal
 
@@ -1557,7 +1626,7 @@ is now corrected at its source (`config.ts`'s `RoleSession` schema comment).
 **This channel stays
 open in production.** Sealing it — running with no ambient `CLAUDE.md` at all — would
 move the trust boundary to the *content* side, contradicting the locked boundary
-this page already states above and in [PLAN.md](PLAN.md#security--trust-model-trusted-first-designed-toward-public):
+this page already states above and in [PLAN.md](PLAN.md#security--trust-posture):
 the boundary is what a session can **do** (the zero-write, zero-`Bash` tool allowlist,
 now `Read`/`Grep`/`Glob` guard-confined to the worktree; the credential-stripped spawn env),
 never what it can **read**. Repo
@@ -1724,6 +1793,13 @@ re-verification of where it landed — the guard hook above is the actual contai
 enforcement; the manifest exists so a session's read footprint is diagnosable after
 the fact, the same "record, don't seal" stance this whole section takes for ambient
 `CLAUDE.md` absorption.
+
+**Honest framing.** This same broad, recorded read access is what makes architecture-debt
+detection possible at all — the architect role forms its drift/contradiction judgment from the
+SAME ambient repo/doc access every session already has, not from a separate, more-privileged
+audit grant. sapwood has no standing "audit role" with elevated read scope; if one is ever
+justified, it is an addition to this recorded posture, not evidence that today's posture was
+incomplete.
 
 ## Review session mode: closed MCP/settings surface, forced-hard guard
 
@@ -2102,20 +2178,32 @@ state DB (`.sapwood/`), without requiring a config edit:
   rollback retry, no reclaim-and-requeue of crashed lanes. Set/lift it with
   `/sapwood-stop` (no argument to set, `--lift` to remove) or by touching/removing the
   file directly.
-- **Pause** (`.sapwood/PAUSE`) — the gentle tier. Freezes *new dispatch only*. Everything
-  already in flight — running workers, PRs already moving through the review/merge
-  gate — proceeds exactly as normal. No drain, nothing killed. Use this to stop taking
-  on new issues while letting the current round finish (e.g. before a maintenance
-  window). Set/lift with `/sapwood-stop --pause` / `--resume`.
+- **Pause** (`.sapwood/PAUSE`) — the gentle tier. Freezes new dispatch: no new lane is claimed,
+  **and** a driving lane's fix-leg admission gate reads this same sentinel, so a fresh fix leg
+  is held back too — see the [fix-loop admission gate](#fix-loop-fixing-lane-state) above. A
+  worker or fix leg **already running** keeps running to its own completion, and the ordinary
+  gate scans for every `driving` lane — the review trigger, CI/merge polling, the merge itself —
+  keep executing exactly as normal, so a lane whose verdict is already `MERGE`/`WAIT_REVIEW`
+  still merges or keeps polling and eventually leaves `driving`. What does NOT proceed: a
+  `driving` lane whose next action is a *fresh* fix leg stays `driving`, blocked rather than
+  finished, for as long as PAUSE stands — it resumes the instant the sentinel is lifted, never
+  stuck permanently. No drain, nothing killed either way. Use this to stop taking on new issues
+  and new rework while letting already-running work and already-mergeable PRs land (e.g. before
+  a maintenance window). Set/lift with `/sapwood-stop --pause` / `--resume`.
 
 The precedence order is emergency stop, then kill switch, then pause: emergency stop wins over
 the kill switch, and either strict tier subsumes pause's dispatch restriction.
 
-**Interaction with `--until-idle`:** a paused engine dispatches nothing, so once its
-in-flight lanes finish it counts as idle and the run exits on its own — "finish the
-round, then stop." Removing `.sapwood/PAUSE` afterward doesn't resume anything by itself;
-start a new `sapwood run`. Under the daemon (`forever`) mode, the engine keeps ticking
-and `--resume` takes effect on the very next tick.
+**Interaction with `--until-idle`:** idleness (`driver.ts`'s `isIdle`) requires — among its
+conditions — zero active workers (`running`, `driving`, or `fixing`, not just live processes);
+the full condition set lives in `isIdle` itself. A paused engine dispatches nothing new, and a `driving` lane
+whose verdict is already `MERGE`/`WAIT_REVIEW` keeps resolving normally and eventually leaves
+`driving`; but a `driving` lane whose next action is a fresh fix leg stays `driving` — blocked,
+not finished — for as long as PAUSE stands, so **`--until-idle` does not exit on its own while
+such a lane exists**. Removing `.sapwood/PAUSE` lets that lane's fix leg dispatch on the next tick,
+after which the run can idle out normally; lifting it doesn't resume anything by itself beyond
+that — a fully drained/idle run still needs a new `sapwood run`. Under the daemon (`forever`)
+mode, the engine keeps ticking regardless, and `--resume` takes effect on the very next tick.
 
 ### Sentinel isolation boundary (honest statement)
 
@@ -2379,7 +2467,7 @@ prior round's `plan:approved` is re-checked — a lightweight, zero-forge-write-
 session — every time that issue re-enters a pool, before its approval is trusted for
 dispatch again; a session that can't confirm or fails escalates `needs-human` the same
 way an initial review does. The label itself is never removed by that check either way.
-See [`docs/PLAN.md`](PLAN.md#v02-north-star-the-round-orchestrator) (the "gate⓪ is scoped
+See [`docs/PLAN.md`](PLAN.md#round-orchestrator) (the "gate⓪ is scoped
 to the round pool..." locked decision) for the full detail.
 
 ## The AC-authority dispatch snapshot

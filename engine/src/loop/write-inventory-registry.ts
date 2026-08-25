@@ -1,18 +1,20 @@
-// #796: the declarative registry backing docs/PLAN.md's "structured-output write inventory"
-// table (section "Validation depth ∝ decision weight") and docs/reference/role-paradigm.md's "Per-role
-// sections". This is the SOURCE OF TRUTH read by write-inventory.test.ts's bidirectional
-// completeness check — see that file's own doc for why bidirectional (a structured-output
-// session with no table row can silently drop its stated validation-depth obligation; a table
-// row naming a role with no such write path is dead documentation asserting a guarantee about
-// nothing). Mirrors probe-signals.ts's shape: one flat array, one entry per distinct
-// structured-output session dispatch site whose validated output DIRECTLY drives (or, via a
-// seed into another such site, indirectly but ACTUALLY drives — see the
-// `verification-plan-reviewer-confirm` entry below) an `IForge` write.
+// #796: the declarative registry backing docs/reference/role-paradigm.md's "structured-output
+// write inventory" table (section "Validation depth ∝ decision weight") and that same doc's
+// "Per-role sections" (the write inventory moved from docs/PLAN.md into role-paradigm.md by the
+// docs/PLAN.md goal-shape cleanup — PLAN.md now keeps only a one-paragraph pointer to it). This
+// is the SOURCE OF TRUTH read by write-inventory.test.ts's bidirectional completeness check —
+// see that file's own doc for why bidirectional (a structured-output session with no table row
+// can silently drop its stated validation-depth obligation; a table row naming a role with no
+// such write path is dead documentation asserting a guarantee about nothing). Mirrors
+// probe-signals.ts's shape: one flat array, one entry per distinct structured-output session
+// dispatch site whose validated output DIRECTLY drives (or, via a seed into another such site,
+// indirectly but ACTUALLY drives — see the `verification-plan-reviewer-confirm` entry below) an
+// `IForge` write.
 //
 // Adding a new structured-output write path — this issue's own finding: `po-pool` shipped in
-// #212/#233 without ever landing in docs/PLAN.md's table — means adding a row HERE too. That is
-// what turns the table's own claim ("every future … change … updates the table below in the
-// same PR") into a checked fact instead of a prose promise gate② had no mechanism to enforce.
+// #212/#233 without ever landing in the table — means adding a row HERE too. That is what turns
+// the table's own claim ("every future … change … updates the table below in the same PR") into
+// a checked fact instead of a prose promise gate② had no mechanism to enforce.
 //
 // #796 gate② (sol-high round 1): a hand-maintained registry checked only against the DOCS is
 // still only half-structural — nothing forced a NEW production dispatch site to be registered
@@ -35,7 +37,7 @@ export interface WriteInventoryRoleEntry {
    *  (the string `runSessionWithRetry`/`RoleRunner.run` receives — grep for `roleId: "…"` at
    *  the `callSite` below to confirm it hasn't drifted). */
   roleId: string;
-  /** The canonical identifier the matching docs/PLAN.md table row's
+  /** The canonical identifier the matching role-paradigm.md write-inventory table row's
    *  `<!-- sapwood:write-inventory-role:ID -->` marker must carry. Several `roleId`s may share
    *  one `tableRole` when they are documented as a single row — e.g. `po-align`/`po-triage`
    *  under "PO / aligning", which is one write-inventory row for one round-phase. */
@@ -95,7 +97,7 @@ export const WRITE_INVENTORY_NON_REGISTRY_ROLE_IDS: readonly WriteInventoryAllow
       "the merge gate's engine-agent PR-review session (engine/src/review/engine-agent.ts::attempt), " +
       "dispatched through review-session.ts::runReviewSession — a DIFFERENT session mechanism from " +
       "RoleRunner.run/runSessionWithRetry, which every entry above uses, and outside the scope of " +
-      "docs/PLAN.md's write-inventory table, which documents the round-phase PERIPHERAL roles " +
+      "role-paradigm.md's write-inventory table, which documents the round-phase PERIPHERAL roles " +
       "round.ts's own SEQUENCE dispatches (aligning/architecting/plan_review/harvesting/retro), not " +
       "the separate merge-gate review mechanism. Its verdict feeds the human-merge-only merge gate " +
       "(merge-driver.ts/reviewer.ts — docs/security.md's Human-merge-only paths), which this PR is " +

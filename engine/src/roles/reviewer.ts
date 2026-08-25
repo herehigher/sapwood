@@ -161,7 +161,7 @@ export interface Reviewer {
  * `@codex review`, #156 reviewer.triggerCommand) plus the issue's verification plan, so gate②
  * re-checks the finished PR against the SAME plan the `Ready` gate required at dispatch
  * (getReadyIssues / hasVerificationPlan) — until now gate② only checked "fresh non-author
- * review + CI", not plan conformance (PLAN.md M3 deferred list). `planText` null (no extractable
+ * review + CI", not plan conformance. `planText` null (no extractable
  * Verification/Acceptance section — e.g. a verify:n/a issue, or a malformed body) still gets an
  * EXPLICIT fallback sentence, never a silently plan-less trigger.
  *
@@ -780,7 +780,8 @@ export class HumanReviewer implements Reviewer, ReviewerAdapter {
 }
 
 /** Only a NAMED trusted-reviewer login's APPROVED review on the current head counts — public-
- *  repo hardening seam (PLAN.md v1.1): an unlisted account approving is not gate②. Fail-closed:
+ *  repo hardening seam (docs/security.md's "Trust context" section — the allowlisted-reviewer
+ *  requirement toward public-repo hardening): an unlisted account approving is not gate②. Fail-closed:
  *  an empty trustedReviewers list means nobody is trusted, so this mode can NEVER produce
  *  MERGE_OK (not a config footgun that silently allows any reviewer). */
 export class SameModelTrustedReviewer implements Reviewer, ReviewerAdapter {

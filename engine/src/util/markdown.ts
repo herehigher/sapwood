@@ -4,10 +4,19 @@
  * matching sections are already contained in their matching ancestor and are emitted only once.
  * `headingPattern` is a pattern fragment interpolated after the heading hashes: do not pass
  * anchors or backreferences. Matching is forced case-insensitive, and a sticky flag is stripped.
+ *
+ * `level`, when given, restricts a MATCH to a heading with exactly that many `#`s (enforced in
+ * the same regex the match runs against, not a post-filter over the any-level result) — every
+ * heading still contributes to section boundaries regardless of level, only which ones count as
+ * a match narrows. A post-filter can't do this: the any-level result already collapses a nested
+ * match into its enclosing match (see above), so an unwanted outer heading (e.g. an H1 wrapping
+ * the real H2) would have already swallowed the one the caller actually wants. Omitted, matching
+ * stays any-level 1-6 — byte-identical to this function's pre-`level` behavior.
  */
-export function extractMarkdownSections(body: string, headingPattern: RegExp): string[] {
+export function extractMarkdownSections(body: string, headingPattern: RegExp, level?: number): string[] {
   const flags = [...new Set(`${headingPattern.flags.replace(/[gmy]/g, "")}i`)].join("");
-  const headingMatcher = new RegExp(`^(#{1,6})\\s*${headingPattern.source}[^\\n]*$`, flags);
+  const hashCount = level === undefined ? "{1,6}" : `{${level}}`;
+  const headingMatcher = new RegExp(`^(#${hashCount})\\s*${headingPattern.source}[^\\n]*$`, flags);
   const realHeadings: Array<{ start: number; level: number; matches: boolean; terminates: boolean }> = [];
   let offset = 0;
   let fence: { character: "`" | "~"; length: number } | null = null;

@@ -956,7 +956,7 @@ export function discoverClaudeBin(env: Record<string, string | undefined>): stri
   return b ? b : "claude";
 }
 
-/** #799 (PLAN.md:123 — "state a minimum Claude Code CLI version", never previously built): the
+/** #799 (PLAN.md's Architecture chapter — "state a minimum Claude Code CLI version", never previously built): the
  *  minimum Claude Code CLI version this engine's worker/probe argv
  *  is verified against — the ONLY version this repo has evidence for. probeLlmPing's own doc
  *  below states it: "verified working against claude CLI 2.1.209" for `--no-session-persistence`,
@@ -1153,7 +1153,7 @@ export function mkProbeLlmReachable(cfg: SapwoodConfig, claudeBin: string): () =
 // loop/, but the ACTUAL spawn lives HERE, next to probeLlmPing, on purpose: this file's own
 // `#69 grep-invariant` test (below, "the ONLY child_process importers are worker.ts...") is a
 // repo-wide structural check that no OTHER engine module shells out — the "Claude CLI coupling
-// isolated in worker.ts" property PLAN.md:129 itself names as a v1 requirement. Adding a second
+// isolated in worker.ts" property PLAN.md's Architecture chapter itself names as a v1 requirement. Adding a second
 // spawn call in loop/claude-version-startup-check.ts would either violate that invariant or force
 // widening its allowlist; keeping the spawn here and exporting only the RESULT type/function
 // keeps the isolation property intact while still letting the startup module own the arm/log/
@@ -3283,7 +3283,8 @@ export class WorkerSupervisor implements Supervisor {
   /**
    * #46: resume a lane the wrapper handed off (`.handoff` sentinel) via `claude --resume`,
    * reusing the ORIGINAL session id (no --fork-session) so claude continues the same
-   * conversation — the "M4 --resume" PLAN.md/#41 flagged. Fail-closed: absent a narrowly
+   * conversation — see docs/PLAN.md's Architecture chapter ("Sentinel-based completion" /
+   * the `.handoff` resumable state). Fail-closed: absent a narrowly
    * recognized interrupted-resume `.running` sentinel, throws if `name` has no `.handoff`
    * sentinel or it carries no session_id. The jsonl is APPENDED, not truncated: the pre-handoff stream stays as an audit
    * trail, and parseCostUsd/parseModelUsage take the LAST "result" line. Live verification for
@@ -3711,7 +3712,8 @@ export class WorkerSupervisor implements Supervisor {
 
   /** Operator/drain-initiated graceful handoff: SIGTERM (not SIGKILL) so the worker wraps up
    *  the current step; onExit then writes the resumable .handoff sentinel. This is the live
-   *  handoff path for M2 (the drain half of the kill-switch, PLAN.md) — AND (#33) the path
+   *  handoff path the drain half of the kill switch uses (docs/security.md's "Human controls
+   *  (three tiers)" section) — AND (#33) the path
    *  checkSoftBudget() calls automatically when the live token-ESTIMATE crosses
    *  worker.budgetUsdSoft, since stream-json carries no in-progress REAL total_cost_usd
    *  (only the terminal result message has that). Both callers share this one method, so both

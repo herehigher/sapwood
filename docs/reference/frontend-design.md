@@ -2,9 +2,9 @@
 
 Design specification for the v0.2 dashboard (issue #17). This document owns the
 *frontend* decisions: product scope, information architecture, visual identity,
-motion, copy, and the data contract the UI consumes. [`PLAN.md`](../PLAN.md)'s v0.2
-chapter owns the *why* and the dogfood/recording plan; it references this file
-and duplicates nothing from it.
+motion, copy, and the data contract the UI consumes. [`PLAN.md`](../PLAN.md) owns the
+*why* and the dogfood/recording plan; it references this file and duplicates nothing
+from it.
 
 Status: **design locked for v0.2 implementation issues; pixels may evolve, scope
 decisions and the data contract only change by amending this doc.**

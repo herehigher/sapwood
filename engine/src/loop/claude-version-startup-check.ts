@@ -1,4 +1,4 @@
-// claude-version-startup-check.ts (#799, PLAN.md:129): startup VISIBILITY for the installed
+// claude-version-startup-check.ts (#799, PLAN.md's Architecture chapter): startup VISIBILITY for the installed
 // Claude Code CLI's version against the engine's declared floor (worker.ts's own
 // MIN_CLAUDE_CLI_VERSION) — not a gate. worker.ts's probeLlmPing argv comment documents the
 // consequence of skipping this: an older CLI missing one of the flags that argv depends on fails
@@ -40,7 +40,7 @@
 // worker.ts's own "#799: the version probe" comment for why: worker.test.ts's `#69 grep-invariant`
 // enforces that no engine module besides a short named allowlist (worker.ts among them) may
 // import node:child_process at all — the "Claude CLI coupling isolated in worker.ts" property
-// PLAN.md:129 itself names as a v1 requirement. A second spawn site here would either violate
+// PLAN.md's Architecture chapter itself names as a v1 requirement. A second spawn site here would either violate
 // that invariant or force widening its allowlist for no architectural reason.
 import {
   CLAUDE_VERSION_PROBE_TIMEOUT_MS,
