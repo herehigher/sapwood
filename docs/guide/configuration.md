@@ -1192,6 +1192,85 @@ semantics here are copied verbatim from there.
 The key validates at load with a guidance message on an invalid value (`sapwood validate`
 catches it) — same `.strict()`/enum rejection style as `guard.mode`/`reviewer.mode` above.
 
+## Bash sandbox and outer-boundary recipes
+
+These are **operator recipes** — paste-ready configuration for the operator's OWN Claude
+settings (project/user/managed), never something sapwood configures on a producer's behalf. The
+engine neither requires nor prevents any of them, and never inspects or overrides what an
+operator configures here; see [`docs/security/execution-profiles.md`'s "Execution
+profiles"](../security/execution-profiles.md#execution-profiles-host-permission-mode--bash-sandbox)
+for what each layer confines and does not confine.
+
+### Bash sandbox (Claude Code's own, built-in)
+
+An operator who wants Claude Code's built-in Bash sandbox (Seatbelt on macOS, bubblewrap+socat
+on Linux/WSL2) engaged for engine-spawned sessions configures it in their OWN Claude settings.
+The probed floor below is paste-ready for that purpose:
+
+```json
+{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true,"allowUnsandboxedCommands":false,
+ "failIfUnavailable":true,"network":{"strictAllowlist":true},
+ "filesystem":{"denyRead":["~/.config/gh","~/.ssh","~/.aws","~/.claude/.credentials.json"]}}}
+```
+
+This floor carries no `allowedDomains`/`allowRead`/`allowWrite` — an operator pasting it in must
+add `allowedDomains` (`github.com` at minimum; a real deployment needs more — the forge API
+endpoints, package registries, and any other host the worker's Bash calls legitimately reach) in
+the same settings, or no sandboxed network destination is reachable at all. The array keys are
+additive across an operator's own settings sources: the effective network allowlist is
+`allowedDomains` plus every `WebFetch(domain:...)` permission rule already in effect, not
+`allowedDomains` alone.
+
+**L1 deploy-key note:** plain `ssh` cannot resolve or reach GitHub from inside the sandbox, so an
+operator running an L1 (deploy-key) deployment under this recipe additionally needs
+`excludedCommands: ["git push *","git fetch *","git pull *","git ls-remote *"]` — exactly the
+four network verbs deploy-key SSH transport needs, prefix-matched against the command after any
+leading environment assignments (so `GIT_SSH_COMMAND=… git ls-remote …` matches `git ls-remote
+*`; `git -c … ls-remote …` does not, and stays sandboxed).
+
+A broader `excludedCommands: ["git *"]` exempts every local git operation (checkout, commit,
+merge, rebase, add, diff, log, status) along with the four verbs that actually need it — an
+unnecessarily large unsandboxed surface for the same functional outcome. SSH:22 transits the
+sandbox's authenticated HTTP CONNECT proxy via a proxy-aware `ProxyCommand` (verified feasible on
+claude 2.1.235).
+
+Enabling this recipe with `failIfUnavailable: true` (as shown) makes sandbox-initialization
+failure block CLI startup instead of falling back unsandboxed, per Claude Code's own
+documentation. Neither the engine nor this recipe positively attests per-leg engagement; the
+engine's own observability records whatever `<sandbox_violations>` count a session's own
+transcript reports, independent of whether the sandbox was engaged by this recipe, some other
+operator configuration, or not at all.
+
+GPG-signed commits fail under the default filesystem confinement (`~/.gnupg` unwritable) — a
+host allowance (`filesystem.allowWrite: ["~/.gnupg"]`), not a change to the floor above, closes
+it. A local-port-binding test additionally needs `network.allowLocalBinding: true` (off by
+default, `EPERM` on `listen(127.0.0.1)` without it).
+
+Coverage is Bash subprocesses only — built-in tools (Read/Edit/Write), MCP servers, and hooks run
+unconstrained regardless of whether this recipe is active, which is why it is not sufficient for
+unattended runs on its own; see the outer-boundary recipes below for what wraps the whole process.
+
+### Outer-boundary recipes (containers, VM, sandbox runtime)
+
+sapwood documents, and does not build, this layer — deployment-specific, never framework code.
+None of the three is provisioned, launched, or verified by the engine; the same review checklist
+applies regardless of who hosts it — what's mounted writable, what credentials are reachable
+inside it, what the egress policy allows.
+
+- **`@anthropic-ai/sandbox-runtime`** (experimental) — wraps the WHOLE `claude` process (MCP
+  servers and hooks included, not just Bash) in the same Seatbelt/bubblewrap primitives the
+  built-in sandbox uses. `npx @anthropic-ai/sandbox-runtime claude`, configured via
+  `~/.srt-settings.json` or a passed `--settings` file; must explicitly allow-write the project
+  directory, `~/.claude`/`~/.claude.json`, and `/tmp`, and allow-domain `api.anthropic.com` (or
+  the configured provider) plus `claude.ai`/`platform.claude.com` for OAuth sessions.
+- **Dev container** (stable) — the upstream [example dev
+  container](https://code.claude.com/docs/en/devcontainer) with a default-deny iptables
+  firewall, copied into a target repo and adjusted for its own base image and allowlist. Because
+  the firewall blocks unapproved egress, this is the documented pairing for
+  `--dangerously-skip-permissions`-class unattended work.
+- **Custom container / dedicated VM** — an operator's own infrastructure; the same review
+  checklist applies regardless of who hosts it.
+
 ## `envFailure`
 
 Environment-failure park — detect an LLM-provider or forge outage as ONE class distinct
