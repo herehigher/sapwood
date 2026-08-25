@@ -369,8 +369,7 @@ function sampleConfig(): string {
   return "board:\n  owner: CHANGEME\n  repo: CHANGEME\n  projectNumber: 0\n";
 }
 
-// ---- #1105 (was #606 gate② round 1+2's OWNER RULING, now filesystem-anchored):
-// L1 scoped-worker-identity deploy-key provisioning, anchored on a LOCAL (key file, id sidecar)
+// ---- #1105: L1 scoped-worker-identity deploy-key provisioning, anchored on a LOCAL (key file, id sidecar)
 // pair under `.sapwood/keys/`. The engine never invokes or scripts remote deploy-key deletion — the bare
 // remote title may validly belong to a different machine/operator, so a foreign or stale key is
 // only ever surfaced in a WARN for a HUMAN to review, never touched by this file. ---------------
@@ -481,6 +480,11 @@ export interface DeployKeyListEntry {
   // to prove the (path, id) pair is genuinely the SAME key, not merely "an id that happens to be
   // registered" plus "a local key that happens to authenticate" independently.
   key?: string;
+  // #1105: whether this deploy key is registered read-only (no push access) — requested via
+  // `--json ...,readOnly` only by the startup tier check (deploy-key-startup-check.ts), which
+  // must refuse L1 for an anchor that authenticates but cannot push. Optional for the same
+  // reason `key` is: most callers here never request the field.
+  readOnly?: boolean;
 }
 
 /** #606 gate② round 1 (P1-1): `gh repo deploy-key list --json <fields>` — REQUIRES `--json`
@@ -506,7 +510,15 @@ export function parseDeployKeys(text: string): DeployKeyListEntry[] {
     const id = (entry as { id?: unknown } | null)?.id;
     const title = (entry as { title?: unknown } | null)?.title;
     const key = (entry as { key?: unknown } | null)?.key;
-    if (typeof id === "number" && typeof title === "string") out.push({ id, title, ...(typeof key === "string" ? { key } : {}) });
+    const readOnly = (entry as { readOnly?: unknown } | null)?.readOnly;
+    if (typeof id === "number" && typeof title === "string") {
+      out.push({
+        id,
+        title,
+        ...(typeof key === "string" ? { key } : {}),
+        ...(typeof readOnly === "boolean" ? { readOnly } : {}),
+      });
+    }
   }
   return out;
 }
@@ -652,15 +664,17 @@ async function addDeployKeyCapturingNewId(run: GhRunner, repo: string, keyPath: 
 // repo's own `.gitignore` here; this file also never removes an existing rule from a user's
 // `.gitignore`.
 
-/** #1105: records the local (key, id) anchor as a sidecar file beside the key itself — the
- *  filesystem replacement for the old committed-config write (writeDeployKeyConfigIntoYaml,
- *  retired). Same 0600 mode as the private key (enforceDeployKeyPermissions repairs the key
- *  itself; this repairs only the sidecar it just wrote, via the same injectable fs seam). A
- *  plain positive-integer text file, not YAML/JSON — nothing here is ever hand-edited or
- *  re-parsed as a config, so there is no format to keep stable. */
+/** #1105: records the local (key, id) anchor as a sidecar file beside the key itself. A plain
+ *  positive-integer text file, not YAML/JSON — nothing here is ever hand-edited or re-parsed as
+ *  a config, so there is no format to keep stable. Created with mode 0600 directly (no separate
+ *  ambient-mode window between write and chmod) and chmodded again afterward via the same
+ *  injectable fs seam enforceDeployKeyPermissions uses, since the create-time mode is still
+ *  subject to the process umask. Throws on any write/chmod failure — every caller wraps this in
+ *  its own try/catch, so a sidecar-persistence failure is reported as an ordinary provisioning
+ *  failure, never an escape past the WARN-and-degrade contract every other step here has. */
 function writeDeployKeyIdSidecar(keyPath: string, keyId: number, fs: DeployKeyPermissionsFsOps = realDeployKeyPermissionsFsOps): void {
   const idPath = keyIdSidecarPath(keyPath);
-  writeFileSync(idPath, `${keyId}\n`);
+  writeFileSync(idPath, `${keyId}\n`, { mode: 0o600 });
   fs.chmod(idPath, 0o600);
 }
 
@@ -720,22 +734,20 @@ async function checkDefaultBranchProtectionAction(run: GhRunner, repo: string): 
   }
 }
 
-/** #1105 (was #606's OWNER RULING, config-anchored — now filesystem-anchored): the reconcile-
- *  failure / no-local-anchor state. The engine never invokes or scripts remote deploy-key
- *  deletion or modification — the remote inventory is never authoritative for "mine"; a
- *  `sapwood-worker`-titled key may validly belong to a different machine/operator, so this
- *  machine can only ever ADD a new key of its own. Stale/foreign keys are surfaced in the WARN
- *  for a HUMAN to review, never touched here. Unlike the retired config-anchored version, this
- *  NEVER deletes or overwrites an existing local sidecar — a WARN-only outcome (choice (b), or
- *  no TTY) touches no file at all (#1105 AC4); the next `sapwood init` run simply reconciles
- *  against the same anchor again and reports the same WARN, which is honest (nothing changed)
- *  rather than a false convergence promise.
+/** #1105: the reconcile-failure / no-local-anchor state. The engine never invokes or scripts
+ *  remote deploy-key deletion or modification — the remote inventory is never authoritative for
+ *  "mine"; a `sapwood-worker`-titled key may validly belong to a different machine/operator, so
+ *  this machine can only ever ADD a new key of its own. Stale/foreign keys are surfaced in the
+ *  WARN for a HUMAN to review, never touched here. This NEVER deletes or overwrites an existing
+ *  local sidecar — a WARN-only outcome (choice (b), or no TTY) touches no file at all; the next
+ *  `sapwood init` run simply reconciles against the same anchor again and reports the same WARN,
+ *  which is honest (nothing changed) rather than a false convergence promise.
  *
  *  WARN + operator choice when `deps.isInteractive()`:
  *  (a) leave every remote key untouched; generate a FRESH keypair at a new local slot
  *      (pickFreshArmAKeySlot — never reuses a locally-existing path or a remotely-registered
- *      per-host title); register it as an ADDITIONAL deploy key; write its own sidecar
- *      (P1-1's before/after id-diff, never a title match); preflight.
+ *      per-host title); register it as an ADDITIONAL deploy key; write its own sidecar (via a
+ *      before/after id-diff, never a title match); preflight.
  *  (b) leave every remote key AND every local file untouched; proceed degraded at L0.
  *  No TTY -> default (b), the no-write, never-wedge path — the WARN still names (a)'s manual
  *  steps. */
@@ -795,11 +807,11 @@ async function armAuthFailsStaleOrMismatch(
     knownRemoteTitles = new Set(staleForeignKeys.map((k) => k.title));
   }
   const hostComponent = sanitizeHostnameForKeyTitle(deps.hostname());
-  // Round 3 fix (item 3, carried forward): pickFreshArmAKeySlot THROWS on exhaustion (no
-  // Date.now()-derived fallback) — folded into the SAME try/catch as keygen/add below so that
-  // failure degrades exactly like any other provisioning failure. `fallbackKeyPath`/
-  // `fallbackTitle` (the UN-suffixed base candidate) name the WARN's manual steps when
-  // slot-picking itself is what failed, since `keyPath`/`title` never get assigned in that case.
+  // pickFreshArmAKeySlot THROWS on exhaustion (never a synthesized fallback candidate) — folded
+  // into the SAME try/catch as keygen/add below so that failure degrades exactly like any other
+  // provisioning failure. `fallbackKeyPath`/`fallbackTitle` (the UN-suffixed base candidate) name
+  // the WARN's manual steps when slot-picking itself is what failed, since `keyPath`/`title`
+  // never get assigned in that case.
   const fallbackKeyPath = join(deployKeysDir(cwd), `${DEPLOY_KEY_BASENAME}-${hostComponent}`);
   const fallbackTitle = `${DEPLOY_KEY_TITLE}-${hostComponent}`;
   let keyPath: string;
@@ -828,26 +840,33 @@ async function armAuthFailsStaleOrMismatch(
   }
   actions.push(`deploy key: SSH auth preflight OK for ${keyPath}`);
 
-  writeDeployKeyIdSidecar(keyPath, newId, permissionsFs);
+  try {
+    writeDeployKeyIdSidecar(keyPath, newId, permissionsFs);
+  } catch (e) {
+    actions.push(deployKeyProvisioningFailedAction(repo, keyPath, title, e));
+    return actions;
+  }
   actions.push(`deploy key: recorded the local anchor at ${keyIdSidecarPath(keyPath)} — L1 active once worker.credentialTier is L1`);
 
   actions.push(...(await checkDefaultBranchProtectionAction(run, repo)));
   return actions;
 }
 
-/** #1105 (was #606's OWNER RULING, round 2 R3-1): both a local key file AND its id sidecar
+/** #1105: both a local key file AND its id sidecar
  *  discovered (findDeployKeyAnchor) -> RECONCILE (never skip — a stale/rotated/mismatched key
  *  must be actively detected, not assumed good because a path is on file). FIVE checks, ALL must
- *  be green: the local key file exists; its directory/file permissions are repairable to
- *  0700/0600 (#1080 — a directory or symlink standing in for either is a preserved collision, not
- *  a repair target); the recorded id is present in `gh repo deploy-key list`; that id-matched
- *  remote entry's OWN public key content matches the local `.pub` file (R3-1 — proves the (key,
- *  id) pair is genuinely the SAME key that was recorded together, not merely "an id that happens
- *  to be registered" plus "a local key that happens to authenticate" independently, which a
- *  hand-edited or foreign id sharing a DIFFERENT but also-registered key could otherwise fake);
- *  the SSH preflight succeeds. All green -> a positive confirmation action line (+
- *  branch-protection check). Any failure -> the auth-fails/stale/mismatch arm
- *  (armAuthFailsStaleOrMismatch). */
+ *  be green: the local key file exists; the recorded id is present in `gh repo deploy-key list`;
+ *  that id-matched remote entry's OWN public key content matches the local `.pub` file (proves
+ *  the (key, id) pair is genuinely the SAME key that was recorded together, not merely "an id
+ *  that happens to be registered" plus "a local key that happens to authenticate"
+ *  independently, which a hand-edited or foreign id sharing a DIFFERENT but also-registered key
+ *  could otherwise fake); the SSH preflight succeeds; its directory/file permissions (key AND id
+ *  sidecar) are repairable to 0700/0600 (#1080 — a directory or symlink standing in for either is
+ *  a preserved collision, not a repair target). All green -> a positive confirmation action line
+ *  (+ branch-protection check). Any failure -> the auth-fails/stale/mismatch arm
+ *  (armAuthFailsStaleOrMismatch) — permission repair is attempted ONLY once the other four
+ *  checks already agree this anchor is otherwise valid, so a stale id / content mismatch /
+ *  failed preflight reaches that WARN-only arm having touched nothing on disk. */
 async function reconcileDeployKey(
   run: GhRunner,
   repo: string,
@@ -858,12 +877,6 @@ async function reconcileDeployKey(
   permissionsFs: DeployKeyPermissionsFsOps = realDeployKeyPermissionsFsOps,
 ): Promise<string[]> {
   const localFileOk = existsSync(keyPath);
-  // A repair failure here (the anchored path is a directory/symlink, an unwritable mount, or any
-  // other chmod/lstat error) is a reported degradation, never silently swallowed into a green
-  // "reconciled" verdict below — folded into the same green-condition check the other four
-  // signals already go through. enforceDeployKeyPermissions itself never throws (every failure
-  // comes back as `{ ok: false, reason }`), so this call needs no try/catch of its own.
-  const permissionRepair = localFileOk ? enforceDeployKeyPermissions(keyPath, permissionsFs) : { ok: true as const };
   let listedKeys: DeployKeyListEntry[] = [];
   let matchedEntry: DeployKeyListEntry | undefined;
   try {
@@ -874,9 +887,9 @@ async function reconcileDeployKey(
   }
   const idListed = matchedEntry !== undefined;
 
-  // R3-1: cross-check the LOCAL public key file's content against the id-matched remote entry's
-  // own `key` field — "the id is registered" alone doesn't prove THIS local file is the key
-  // behind it.
+  // Cross-check the LOCAL public key file's content against the id-matched remote entry's own
+  // `key` field — "the id is registered" alone doesn't prove THIS local file is the key behind
+  // it.
   let keyContentMatches = false;
   if (idListed && localFileOk) {
     try {
@@ -889,6 +902,19 @@ async function reconcileDeployKey(
 
   const probe = localFileOk ? await deps.probeSshAuth(keyPath) : { ok: false, detail: "local key file missing" };
 
+  // A repair failure here (the anchored path is a directory/symlink, an unwritable mount, or any
+  // other chmod/lstat error) is a reported degradation, never silently swallowed into a green
+  // "reconciled" verdict below. enforceDeployKeyPermissions itself never throws (every failure
+  // comes back as `{ ok: false, reason }`), so this needs no try/catch of its own. Deliberately
+  // gated on the other four signals already being green: an anchor that is already headed for
+  // the WARN-only arm (stale id, content mismatch, failed preflight) must not have its
+  // permissions touched on the way there.
+  let permissionRepair: { ok: true } | { ok: false; reason: string } = { ok: true };
+  if (localFileOk && idListed && keyContentMatches && probe.ok) {
+    permissionRepair = enforceDeployKeyPermissions(keyPath, permissionsFs);
+    if (permissionRepair.ok) permissionRepair = enforceDeployKeyPermissions(keyIdSidecarPath(keyPath), permissionsFs);
+  }
+
   if (localFileOk && permissionRepair.ok && idListed && keyContentMatches && probe.ok) {
     const actions = [
       `deploy key: reconciled — ${keyPath} (id ${keyId}) is registered on ${repo} and the SSH auth preflight is ` +
@@ -900,7 +926,6 @@ async function reconcileDeployKey(
 
   const reasons: string[] = [];
   if (!localFileOk) reasons.push(`local key file missing at ${keyPath}`);
-  if (!permissionRepair.ok) reasons.push(`could not repair key permissions: ${permissionRepair.reason}`);
   if (!idListed) reasons.push(`recorded id ${keyId} not found on ${repo}'s registered deploy keys`);
   if (idListed && localFileOk && !keyContentMatches) {
     reasons.push(
@@ -909,14 +934,15 @@ async function reconcileDeployKey(
     );
   }
   if (localFileOk && !probe.ok) reasons.push(`SSH auth preflight failed${probe.detail ? `: ${probe.detail}` : ""}`);
+  if (!permissionRepair.ok) reasons.push(`could not repair key permissions: ${permissionRepair.reason}`);
   const staleForeign = listedKeys.filter((k) => isSapwoodWorkerTitle(k.title));
   return armAuthFailsStaleOrMismatch(run, repo, cwd, staleForeign, reasons, deps, permissionsFs);
 }
 
-/** #1105 (was #606's OWNER RULING) orchestrator: a local anchor discovered (findDeployKeyAnchor)
+/** #1105 orchestrator: a local anchor discovered (findDeployKeyAnchor)
  *  -> reconcile; none discovered and no sapwood-titled remote key -> fresh provisioning
  *  (ssh-keygen -> `gh repo deploy-key add --allow-write --title sapwood-worker` -> read back the
- *  new key's id via a before/after id diff, never a title match (R3-1) -> preflight -> write its
+ *  new key's id via a before/after id diff, never a title match -> preflight -> write its
  *  id sidecar -> branch-protection check); none discovered but a sapwood-titled key already
  *  exists remotely (this machine has no recorded anchor for it) -> the auth-fails/stale/mismatch
  *  arm, same as a reconcile failure (never assume ownership from a title alone). Every failure
@@ -988,7 +1014,12 @@ export async function ensureDeployKey(
   }
   actions.push(`deploy key: SSH auth preflight OK for ${keyPath}`);
 
-  writeDeployKeyIdSidecar(keyPath, newId, permissionsFs);
+  try {
+    writeDeployKeyIdSidecar(keyPath, newId, permissionsFs);
+  } catch (e) {
+    actions.push(deployKeyProvisioningFailedAction(repo, keyPath, DEPLOY_KEY_TITLE, e));
+    return actions;
+  }
   actions.push(`deploy key: recorded the local anchor at ${keyIdSidecarPath(keyPath)} — L1 active once worker.credentialTier is L1`);
 
   actions.push(...(await checkDefaultBranchProtectionAction(run, repo)));
@@ -1172,12 +1203,12 @@ export async function init(cfg: SapwoodConfig, deps: Partial<InitDeps> = {}): Pr
     );
   }
 
-  // #1105 (was #606's OWNER RULING): L1 scoped-worker-identity deploy key — provisioned AFTER
+  // #1105: L1 scoped-worker-identity deploy key — provisioned AFTER
   // the config file exists (ensureConfig above), so a fresh onboarding's repo/board facts are
   // already resolved. Every failure degrades to a guidance-carrying WARN; init() itself never
   // fails because L1 provisioning didn't complete (`worker.credentialTier` governs whether that
   // actually matters at `sapwood run` time — deploy-key-startup-check.ts, not here). This never
-  // touches sapwood.config.yaml — the anchor lands under `.sapwood/keys/` instead (AC3).
+  // touches sapwood.config.yaml — the anchor lands under `.sapwood/keys/` instead.
   actions.push(
     ...(await ensureDeployKey(run, repo, cwd, {
       sshKeygen,

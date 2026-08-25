@@ -21,9 +21,11 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  accessSync,
   closeSync,
   type Dirent,
   existsSync,
+  constants as fsConstants,
   lstatSync,
   mkdirSync,
   openSync,
@@ -2704,10 +2706,14 @@ export class WorkerSupervisor implements Supervisor {
   private readonly preSpawnCapturePollMs: number;
   // #606, #1105: memoized SSH-auth preflight for this machine's discovered deploy-key anchor —
   // probed at most once per supervisor life (mirrors detectManagedPermissionMode/
-  // detectRapidRestart's "once per engine start" stance for a degrade WARN). undefined = not yet
-  // probed; a settled Promise thereafter, so every dispatch()/resume() after the first awaits the
-  // SAME probe rather than re-shelling to `ssh` per lane.
-  private deployKeyProbe?: Promise<LlmPingResult>;
+  // detectRapidRestart's "once per engine start" stance for a degrade WARN), so every
+  // dispatch()/resume() after the first awaits the SAME probe rather than re-shelling to `ssh`
+  // per lane. Keyed on the anchor identity it was probed FOR (not just a bare Promise) — a
+  // successful probe for one (keyPath, keyId) pair must never be reused to authorize a
+  // DIFFERENT one that appears later (a rotated sidecar, a second `sapwood init` mid-run):
+  // resolveDeployKeyPath re-resolves the anchor on every call and refuses outright when it no
+  // longer matches what this memo was seeded with.
+  private deployKeyProbe?: { anchor: { keyPath: string; keyId: number }; probe: Promise<LlmPingResult> };
   // #679: memoized SAPWOOD_DEFAULT_BRANCH resolution — same "probe once per supervisor life"
   // stance as deployKeyProbe above (see resolveDefaultBranch's own doc for the rationale).
   private defaultBranchProbe?: Promise<string>;
@@ -2746,8 +2752,8 @@ export class WorkerSupervisor implements Supervisor {
     (this.deps.log ?? console.error)(message);
   }
 
-  /** #1105 (was #606 gate② round 1 P1-4's config-driven version): resolves the L1 scoped-worker-
-   *  identity deploy key's local path for THIS dispatch/resume/fix leg — called UNCONDITIONALLY
+  /** #1105: resolves the L1 scoped-worker-identity deploy key's local path for THIS
+   *  dispatch/resume/fix leg — called UNCONDITIONALLY
    *  now (both by an ordinary leg building its own workerDeployKeyEnv, and by a `credentialFree`
    *  leg deciding whether to compose deployKeyTransportOverlay onto its stricter base), since a
    *  fix leg needs to know this too.
@@ -2755,12 +2761,17 @@ export class WorkerSupervisor implements Supervisor {
    *  `worker.credentialTier: L0` (the default) returns `undefined` immediately — L0 never reads
    *  or probes the key at all, the same "zero behavior change" contract this repo's config docs
    *  promise. `L1` NEVER falls back to `undefined` (the old silent-downgrade-to-full-credentialed
-   *  shape, retired): no local anchor, or a failed SSH preflight, THROWS instead — the startup
-   *  gate (deploy-key-startup-check.ts) already refuses `sapwood run` before any dispatch when
-   *  L1 has no working anchor, so reaching either failure here means the key broke mid-run (or a
-   *  caller constructed a WorkerSupervisor directly, bypassing that gate); either way, a leg that
-   *  claims L1 must never silently run at the wider tier instead. The preflight itself runs at
-   *  most once per supervisor life (`this.deployKeyProbe`, shared with checkDeployKeyPreflight). */
+   *  shape, retired): no local anchor, an anchor that changed identity since this instance last
+   *  bound to one, an unreadable key file, or a failed SSH preflight, THROWS instead — the
+   *  startup gate (deploy-key-startup-check.ts) already refuses `sapwood run` before any dispatch
+   *  when L1 has no working anchor, so reaching any of these failures here means the key broke
+   *  (or moved) mid-run, or a caller constructed a WorkerSupervisor directly, bypassing that
+   *  gate; either way, a leg that claims L1 must never silently run at the wider tier, or under a
+   *  different key than the one this run's startup gate validated, instead. The anchor is
+   *  re-resolved from disk on EVERY call (never cached itself — only its probe result is), so a
+   *  leg always sees the current filesystem state; the SSH preflight itself still runs at most
+   *  once per (supervisor life, anchor identity) pair — `this.deployKeyProbe`, shared with
+   *  checkDeployKeyPreflight. */
   private async resolveDeployKeyPath(): Promise<string | undefined> {
     if (this.deps.cfg.worker.credentialTier !== "L1") return undefined;
     const anchor = this.deps.deployKeyAnchor ?? findDeployKeyAnchor(defaultRuntimeRoot());
@@ -2770,10 +2781,28 @@ export class WorkerSupervisor implements Supervisor {
           'run "sapwood init" to provision one.',
       );
     }
-    if (this.deployKeyProbe === undefined) {
-      this.deployKeyProbe = (this.deps.probeDeployKeySsh ?? probeDeployKeySsh)(anchor.keyPath);
+    if (
+      this.deployKeyProbe !== undefined &&
+      (this.deployKeyProbe.anchor.keyPath !== anchor.keyPath || this.deployKeyProbe.anchor.keyId !== anchor.keyId)
+    ) {
+      throw new Error(
+        `worker.credentialTier is "L1" but the deploy-key anchor changed (was ${this.deployKeyProbe.anchor.keyPath}, ` +
+          `now ${anchor.keyPath}) since this engine run started — a leg must never run under a key this run's ` +
+          'startup gate never validated. Restart "sapwood run" to pick up the new anchor.',
+      );
     }
-    const result = await this.deployKeyProbe;
+    try {
+      accessSync(anchor.keyPath, fsConstants.R_OK);
+    } catch (e) {
+      throw new Error(
+        `worker.credentialTier is "L1" but the deploy key at ${anchor.keyPath} is not currently readable ` +
+          `(${e instanceof Error ? e.message : String(e)}) — run "sapwood init" to re-provision it.`,
+      );
+    }
+    if (this.deployKeyProbe === undefined) {
+      this.deployKeyProbe = { anchor, probe: (this.deps.probeDeployKeySsh ?? probeDeployKeySsh)(anchor.keyPath) };
+    }
+    const result = await this.deployKeyProbe.probe;
     if (!result.ok) {
       throw new Error(
         `worker.credentialTier is "L1" but the SSH auth preflight failed for ${anchor.keyPath}` +
@@ -2818,15 +2847,21 @@ export class WorkerSupervisor implements Supervisor {
    *  startup check can build its own guidance message per distinct failure shape (no anchor vs.
    *  preflight failure) before deciding to refuse startup itself. Returns `undefined` when there
    *  is nothing to probe: `credentialTier` isn't `"L1"`, or L1 with no local anchor yet found
-   *  (the caller is expected to check anchor existence itself — see findDeployKeyAnchor). */
+   *  (the caller is expected to check anchor existence itself — see findDeployKeyAnchor). Called
+   *  exactly once, before any dispatch, so it is always the call that SEEDS the memo — it never
+   *  needs resolveDeployKeyPath's own anchor-changed rejection. */
   async checkDeployKeyPreflight(): Promise<LlmPingResult | undefined> {
     if (this.deps.cfg.worker.credentialTier !== "L1") return undefined;
     const anchor = this.deps.deployKeyAnchor ?? findDeployKeyAnchor(defaultRuntimeRoot());
     if (anchor === undefined) return undefined;
-    if (this.deployKeyProbe === undefined) {
-      this.deployKeyProbe = (this.deps.probeDeployKeySsh ?? probeDeployKeySsh)(anchor.keyPath);
+    if (
+      this.deployKeyProbe === undefined ||
+      this.deployKeyProbe.anchor.keyPath !== anchor.keyPath ||
+      this.deployKeyProbe.anchor.keyId !== anchor.keyId
+    ) {
+      this.deployKeyProbe = { anchor, probe: (this.deps.probeDeployKeySsh ?? probeDeployKeySsh)(anchor.keyPath) };
     }
-    return this.deployKeyProbe;
+    return this.deployKeyProbe.probe;
   }
 
   /** #244 (Codex sol-high PR #260 review, P2): durable mint-failure observability — a
@@ -3017,9 +3052,10 @@ export class WorkerSupervisor implements Supervisor {
     // UNCONDITIONALLY — a credentialFree fix leg needs to know this too, to COMPOSE the deploy
     // key's transport overlay onto its own stricter base env (see baseEnv below). No longer
     // "mutually exclusive" with credentialFree — the two postures COMPOSE.
-    // #1105: L1 with a broken anchor now THROWS (resolveDeployKeyPath's own doc) rather than
-    // silently falling back to L0 — same fresh-jsonl cleanup as the credentialFree mint-failure
-    // branch above, since this is also a refused-before-spawn dispatch.
+    // #1105: L1 with a broken anchor THROWS (resolveDeployKeyPath's own doc) — this dispatch
+    // must never proceed at the wider tier instead. Same fresh-jsonl cleanup as the
+    // credentialFree mint-failure branch above, since this is also a refused-before-spawn
+    // dispatch.
     let keyPath: string | undefined;
     try {
       keyPath = await this.resolveDeployKeyPath();
@@ -3030,6 +3066,18 @@ export class WorkerSupervisor implements Supervisor {
         /* noop */
       }
       this.removeIfExists(jsonlPath);
+      // A proxy minted above (fail-open, non-credentialFree case, or a credentialFree mint that
+      // itself succeeded) is a live listener holding a bearer token — this refused-before-spawn
+      // dispatch must not leak it, same as every other pre-spawn failure branch in this method.
+      if (proxyHandle) {
+        try {
+          await proxyHandle.stop();
+        } catch (te) {
+          this.log(
+            `[sapwood:forge-proxy] lane ${laneName}: teardown failed after deploy-key resolution error (non-fatal): ${sanitizeUpstreamError(te instanceof Error ? te.message : String(te))}`,
+          );
+        }
+      }
       throw e;
     }
     // #679: resolved unconditionally too — every dispatch gets SAPWOOD_DEFAULT_BRANCH in its
@@ -3263,6 +3311,11 @@ export class WorkerSupervisor implements Supervisor {
         // wall-clock timeout — baselining retention on that would judge pre-handoff WIP (older
         // than the new start) CLEAN and delete it. dispatched_at never moves once set.
         dispatched_at: startedIso,
+        // #1105: the tier THIS process was actually launched under — a cross-restart adoption
+        // (resume()'s own crash-matrix branch) compares this against the CURRENT config before
+        // ever trusting a live child it didn't itself spawn; a config edit between crash and
+        // restart must never let an L0-launched process keep running under an L1 claim.
+        credential_tier: this.deps.cfg.worker.credentialTier,
       });
       this.touchHeartbeat(laneName);
       lane.hb = setInterval(() => this.heartbeatTick(laneName), this.hbMs);
@@ -3388,6 +3441,20 @@ export class WorkerSupervisor implements Supervisor {
     // check is entry-mode-agnostic — it's about THIS resume() call's own durable spawn-intent
     // marker, not about which sentinel authorized the call in the first place.
     if (matchingResumeIntent && running.spawn_confirmed === true) {
+      // #1105: a confirmed spawn proves a child exists, but not WHICH env it was launched with —
+      // between the crash that stranded this marker and this restart, an operator could have
+      // flipped worker.credentialTier to L1. Adopting silently would keep an L0-launched process
+      // (full credentialed env, no scoped deploy key) running under a claimed-L1 run. Refuse the
+      // adoption instead — the caller treats a thrown resume() as a failed lane, same as every
+      // other resume() failure path.
+      const persistedTier = typeof running.credential_tier === "string" ? running.credential_tier : undefined;
+      if (this.deps.cfg.worker.credentialTier === "L1" && persistedTier !== "L1") {
+        throw new Error(
+          `resume: ${name} has a confirmed spawn but its running marker's credential tier ` +
+            `(${persistedTier ?? "none recorded"}) does not match this run's worker.credentialTier ("L1") — ` +
+            "refusing to adopt a live process this run's L1 startup gate never validated.",
+        );
+      }
       this.removeIfExists(handoffPath);
       return {
         name,
@@ -3551,6 +3618,8 @@ export class WorkerSupervisor implements Supervisor {
         jsonl_leg_offset: jsonlLegOffset,
         resume_pending_db: true,
         spawn_confirmed: false,
+        // #1105: same tier-provenance field dispatch() writes — see that call site's own doc.
+        credential_tier: this.deps.cfg.worker.credentialTier,
         // Preserve the original first-dispatch baseline (not this resume's start).
         ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
       };

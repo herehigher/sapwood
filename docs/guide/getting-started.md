@@ -198,8 +198,8 @@ sapwood init
    picture and honest residuals). `worker.credentialTier` defaults to `L0` (today's
    fuller-credentialed behavior, byte-for-byte unchanged) — this repo's own config keeps it. If
    `credentialTier` is `L1` and no working key is found at `sapwood run` startup, the run
-   **refuses to start, before any dispatch**, naming `sapwood init` as the fix — never a silent
-   fallback to L0. If you don't have repo admin, `init` logs exactly what to do by hand and moves
+   **refuses to start, before any dispatch or board/label mutation**, naming `sapwood init` as
+   the fix — never a silent fallback to L0. If you don't have repo admin, `init` logs exactly what to do by hand and moves
    on; it never fails `init` itself over this. On a LATER run on this same machine, if the
    recorded key ever stops reconciling (wiped local state, a rotated/foreign key sharing the
    title, a hand-edited sidecar pointing at an unrelated key), `init` never deletes or touches any

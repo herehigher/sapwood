@@ -154,17 +154,32 @@ export function findDeployKeyAnchor(root: string): { keyPath: string; keyId: num
   for (const name of readdirSync(dir)) {
     if (!name.endsWith(".id")) continue;
     const idPath = join(dir, name);
+    const keyPath = idPath.slice(0, -".id".length);
     let raw: string;
     try {
       raw = readFileSync(idPath, "utf8").trim();
     } catch {
       continue; // unreadable sidecar — not a candidate, but not fatal to the scan either
     }
+    // Plain decimal digits only — a GitHub deploy-key id is always a positive integer, and
+    // `Number()` alone would also accept "1e3"/"0x10"/leading-sign forms as valid ids.
+    if (!/^\d+$/.test(raw)) continue;
     const keyId = Number(raw);
-    if (!Number.isInteger(keyId) || keyId <= 0) continue; // a GitHub deploy-key id is always a positive integer
-    const mtimeMs = statSync(idPath).mtimeMs;
+    if (!Number.isInteger(keyId) || keyId <= 0) continue;
+    // A sidecar with no co-located key file (or one that is not a regular file) is not a real
+    // anchor — every filesystem call stays inside this try so a stat race or permission error
+    // is just a rejected candidate, never an uncaught throw out of a function documented as
+    // never throwing.
+    let mtimeMs: number;
+    try {
+      const keyStat = statSync(keyPath);
+      if (!keyStat.isFile()) continue;
+      mtimeMs = statSync(idPath).mtimeMs;
+    } catch {
+      continue;
+    }
     if (best === undefined || mtimeMs > best.mtimeMs) {
-      best = { keyPath: idPath.slice(0, -".id".length), keyId, mtimeMs };
+      best = { keyPath, keyId, mtimeMs };
     }
   }
   return best ? { keyPath: best.keyPath, keyId: best.keyId } : undefined;

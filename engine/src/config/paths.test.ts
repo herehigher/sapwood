@@ -355,6 +355,7 @@ test("findDeployKeyAnchor: finds the primary sidecar and returns its co-located 
   const root = join(dir, ".sapwood");
   try {
     mkdirSync(join(root, "keys"), { recursive: true });
+    writeFileSync(join(root, "keys", "worker-deploy-key"), "fake-private-key");
     writeFileSync(join(root, "keys", "worker-deploy-key.id"), "12345\n");
     assert.deepEqual(findDeployKeyAnchor(root), { keyPath: join(root, "keys", "worker-deploy-key"), keyId: 12345 });
   } finally {
@@ -362,17 +363,30 @@ test("findDeployKeyAnchor: finds the primary sidecar and returns its co-located 
   }
 });
 
-test("findDeployKeyAnchor: a sidecar whose content is not a positive integer (0, negative, non-numeric) is never a candidate", () => {
+test("findDeployKeyAnchor: a sidecar with no co-located key file, or one that is not a regular file, is never a candidate", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-anchor-"));
   const root = join(dir, ".sapwood");
   try {
     mkdirSync(join(root, "keys"), { recursive: true });
-    writeFileSync(join(root, "keys", "worker-deploy-key.id"), "0\n");
-    assert.equal(findDeployKeyAnchor(root), undefined);
-    writeFileSync(join(root, "keys", "worker-deploy-key.id"), "-5\n");
-    assert.equal(findDeployKeyAnchor(root), undefined);
-    writeFileSync(join(root, "keys", "worker-deploy-key.id"), "not-a-number\n");
-    assert.equal(findDeployKeyAnchor(root), undefined);
+    writeFileSync(join(root, "keys", "worker-deploy-key.id"), "12345\n");
+    assert.equal(findDeployKeyAnchor(root), undefined, "no co-located key file at all");
+    mkdirSync(join(root, "keys", "worker-deploy-key"));
+    assert.equal(findDeployKeyAnchor(root), undefined, "a directory standing in for the key file");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("findDeployKeyAnchor: a sidecar whose content is not a plain positive decimal integer (0, negative, non-numeric, 1e3, 0x10) is never a candidate", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-anchor-"));
+  const root = join(dir, ".sapwood");
+  try {
+    mkdirSync(join(root, "keys"), { recursive: true });
+    writeFileSync(join(root, "keys", "worker-deploy-key"), "fake-private-key");
+    for (const raw of ["0", "-5", "not-a-number", "1e3", "0x10", "+5", "5.0"]) {
+      writeFileSync(join(root, "keys", "worker-deploy-key.id"), `${raw}\n`);
+      assert.equal(findDeployKeyAnchor(root), undefined, `id text ${JSON.stringify(raw)} must be rejected`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -387,6 +401,8 @@ test("findDeployKeyAnchor: when more than one sidecar exists (a stale primary pl
   const root = join(dir, ".sapwood");
   try {
     mkdirSync(join(root, "keys"), { recursive: true });
+    writeFileSync(join(root, "keys", "worker-deploy-key"), "fake-private-key");
+    writeFileSync(join(root, "keys", "worker-deploy-key-myhost-2"), "fake-private-key");
     const stalePath = join(root, "keys", "worker-deploy-key.id");
     const freshPath = join(root, "keys", "worker-deploy-key-myhost-2.id");
     writeFileSync(stalePath, "1\n");

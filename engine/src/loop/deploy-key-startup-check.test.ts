@@ -1,9 +1,9 @@
-// deploy-key-startup-check.test.ts (#671, redesigned by #1105): pins each of the four detection
-// arms — L0 (disclosure only, never throws), and L1's three shapes (no anchor / unreadable key /
-// preflight fails), each of which now THROWS a guidance-carrying message and refuses startup
-// before any dispatch, plus L1 active (no throw). Also pins that exactly one durable event fires
-// per run with the right tier+arm payload, and that the shared preflight is consumed at most once
-// (the "no anchor" and "unreadable key" arms must never even touch it — there is nothing to
+// deploy-key-startup-check.test.ts (#671, #1105): pins each detection arm — L0 (disclosure only,
+// never throws), and L1's four failure shapes (no anchor / unreadable key / stale-or-read-only
+// remote id / preflight fails), each of which THROWS a guidance-carrying message and refuses
+// startup before any dispatch, plus L1 active (no throw). Also pins that exactly one durable
+// event fires per run with the right tier+arm payload, and that the shared preflight is consumed
+// at most once (the arms that fail before it must never even touch it — there is nothing to
 // probe).
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -25,6 +25,16 @@ function fakeSupervisor(result: LlmPingResult | undefined): {
     },
   };
   return s;
+}
+
+/** A fake `gh repo deploy-key list --json id,title,readOnly` — reconciled(keyId) is the shape
+ *  every L1-active/preflight-failed test needs so the new remote-authority check (#1105) doesn't
+ *  reach the real `gh` binary. */
+function fakeRun(entries: Array<{ id: number; readOnly?: boolean }>): (args: string[]) => Promise<string> {
+  return async () =>
+    JSON.stringify(
+      entries.map((e) => ({ id: e.id, title: "sapwood-worker", ...(e.readOnly !== undefined ? { readOnly: e.readOnly } : {}) })),
+    );
 }
 
 test("arm 1: credentialTier L0 -> L0/l0, one INFO log, no probe consumed, never throws", async () => {
@@ -103,7 +113,65 @@ test("arm 3: credentialTier L1, anchor found but key file unreadable -> THROWS, 
   }
 });
 
-test("arm 4: credentialTier L1, anchor found, SSH preflight fails -> THROWS naming the detail, exactly one probe consumed", async () => {
+test("arm 4a: credentialTier L1, anchor readable but remote id no longer listed -> THROWS stale, no probe consumed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-deploy-key-startup-"));
+  try {
+    const keyPath = join(dir, "worker-deploy-key");
+    writeFileSync(keyPath, "not-a-real-key");
+    const logs: string[] = [];
+    const events: Array<[string, unknown]> = [];
+    const supervisor = fakeSupervisor({ ok: true });
+    await assert.rejects(
+      () =>
+        detectDeployKeyStartupTier(
+          supervisor,
+          { worker: { credentialTier: "L1" }, board: { owner: "o", repo: "r" } },
+          { appendEvent: (kind, payload) => events.push([kind, payload]) },
+          (line) => logs.push(line),
+          { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }), run: fakeRun([{ id: 2 }]) },
+        ),
+      /sapwood init/,
+    );
+    assert.equal(supervisor.calls, 0, "a stale remote id must never reach the shared preflight");
+    assert.equal(logs.length, 1);
+    assert.match(logs[0]!, /no longer registered/);
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0], ["deploy-key-tier-detected", { tier: "L1", arm: "stale" }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("arm 4b: credentialTier L1, anchor's remote id is registered read-only -> THROWS stale, no probe consumed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-deploy-key-startup-"));
+  try {
+    const keyPath = join(dir, "worker-deploy-key");
+    writeFileSync(keyPath, "not-a-real-key");
+    const logs: string[] = [];
+    const events: Array<[string, unknown]> = [];
+    const supervisor = fakeSupervisor({ ok: true });
+    await assert.rejects(
+      () =>
+        detectDeployKeyStartupTier(
+          supervisor,
+          { worker: { credentialTier: "L1" }, board: { owner: "o", repo: "r" } },
+          { appendEvent: (kind, payload) => events.push([kind, payload]) },
+          (line) => logs.push(line),
+          { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }), run: fakeRun([{ id: 1, readOnly: true }]) },
+        ),
+      /sapwood init/,
+    );
+    assert.equal(supervisor.calls, 0, "a read-only remote key must never reach the shared preflight");
+    assert.equal(logs.length, 1);
+    assert.match(logs[0]!, /read-only/);
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0], ["deploy-key-tier-detected", { tier: "L1", arm: "stale" }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("arm 5: credentialTier L1, anchor found, reconciled remotely, SSH preflight fails -> THROWS naming the detail, exactly one probe consumed", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-deploy-key-startup-"));
   try {
     const keyPath = join(dir, "worker-deploy-key");
@@ -118,7 +186,7 @@ test("arm 4: credentialTier L1, anchor found, SSH preflight fails -> THROWS nami
           { worker: { credentialTier: "L1" }, board: { owner: "o", repo: "r" } },
           { appendEvent: (kind, payload) => events.push([kind, payload]) },
           (line) => logs.push(line),
-          { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }) },
+          { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }), run: fakeRun([{ id: 1, readOnly: false }]) },
         ),
       /sapwood init/,
     );
@@ -133,7 +201,7 @@ test("arm 4: credentialTier L1, anchor found, SSH preflight fails -> THROWS nami
   }
 });
 
-test("arm 5: credentialTier L1, anchor found, preflight OK -> L1/active, one positive log line, no throw", async () => {
+test("arm 6: credentialTier L1, anchor found, reconciled remotely, preflight OK -> L1/active, one positive log line, no throw", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-deploy-key-startup-"));
   try {
     const keyPath = join(dir, "worker-deploy-key");
@@ -146,7 +214,7 @@ test("arm 5: credentialTier L1, anchor found, preflight OK -> L1/active, one pos
       { worker: { credentialTier: "L1" }, board: { owner: "o", repo: "r" } },
       { appendEvent: (kind, payload) => events.push([kind, payload]) },
       (line) => logs.push(line),
-      { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }) },
+      { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }), run: fakeRun([{ id: 1, readOnly: false }]) },
     );
     assert.deepEqual(result, { tier: "L1", arm: "active" });
     assert.equal(supervisor.calls, 1);
@@ -160,7 +228,7 @@ test("arm 5: credentialTier L1, anchor found, preflight OK -> L1/active, one pos
   }
 });
 
-test("reverse test: L0 never throws regardless of what the filesystem holds; L1 with a genuinely working anchor+preflight also never throws", async () => {
+test("reverse test: L0 never throws regardless of what the filesystem holds; L1 with a genuinely working, remotely-reconciled anchor+preflight also never throws", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-deploy-key-startup-"));
   const noop = { appendEvent: () => {} };
   const silent = () => {};
@@ -182,7 +250,7 @@ test("reverse test: L0 never throws regardless of what the filesystem holds; L1 
         { worker: { credentialTier: "L1" }, board: { owner: "o", repo: "r" } },
         noop,
         silent,
-        { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }) },
+        { root: dir, findAnchor: () => ({ keyPath, keyId: 1 }), run: fakeRun([{ id: 1, readOnly: false }]) },
       ),
     );
   } finally {

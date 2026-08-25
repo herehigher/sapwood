@@ -1,11 +1,11 @@
-// deploy-key-startup-check.ts (#671, redesigned by #1105): startup enforcement for the effective
+// deploy-key-startup-check.ts (#671, #1105): startup enforcement for the effective
 // worker-credential tier — L0 disclosure only (a legal, zero-effect mode), L1 a hard FAIL-CLOSED
 // gate. Batch-9 (2026-08-05) ran an entire dogfood batch at L0 because the deploy key was absent
 // in the run environment, and the operator only found out by debugging a single leg's degrade
 // deep inside worker.ts's own lazy, per-dispatch resolution — nothing at startup said "this whole
-// batch is L0, and here's why." #1105 goes further: an operator who explicitly configured L1
-// never gets a silent downgrade at all — no reconciled local anchor is a startup refusal, before
-// any dispatch, naming `sapwood init` as the fix.
+// batch is L0, and here's why." An operator who explicitly configures L1 must never get a silent
+// downgrade at all — no reconciled local anchor is a startup refusal, before any dispatch, naming
+// `sapwood init` as the fix.
 //
 // Same placement/never-blocks-for-L0 stance as detectManagedPermissionMode/detectRapidRestart/
 // detectConsecutiveStalls (cli.ts: run once per engine start, strictly after run-started).
@@ -22,12 +22,14 @@
 import { readFileSync } from "node:fs";
 import type { SapwoodConfig } from "../config/config.js";
 import { defaultRuntimeRoot, findDeployKeyAnchor, runtimePaths } from "../config/paths.js";
+import { type GhRunner, gh } from "../forge/gh.js";
 import type { LlmPingResult } from "../roles/worker.js";
 import type { State } from "../state/state.js";
 import { DOC_LINKS } from "../util/doc-links.js";
+import { parseDeployKeys } from "./init.js";
 
-/** Which of the four shapes the issue names produced the reported tier. */
-export type DeployKeyStartupArm = "l0" | "missing" | "preflight-failed" | "active";
+/** Which of the five shapes the issue names produced the reported tier. */
+export type DeployKeyStartupArm = "l0" | "missing" | "stale" | "preflight-failed" | "active";
 
 export interface DeployKeyStartupResult {
   tier: "L0" | "L1";
@@ -43,10 +45,11 @@ export interface DeployKeyPreflightSupervisor {
 /** Run once per engine start (cli.ts, immediately after `WorkerSupervisor` construction — see
  *  this module's own doc for why), strictly BEFORE the driver loop (runDriver/runRounds) can
  *  dispatch anything. `L0` (default) is disclosure only — logs the tier and returns, never
- *  throws. `L1` fails CLOSED: no local anchor, an unreadable key file, or a failed SSH preflight
- *  each log a guidance-carrying message AND throw — the caller (runTickEngine/runRoundsEngine's
- *  own try/catch) already turns an uncaught startup error into a non-zero exit, so this is the
- *  ONE place `worker.credentialTier: L1` becomes an actual startup gate rather than a WARN. */
+ *  throws. `L1` fails CLOSED: no local anchor, an unreadable key file, a remote id that is no
+ *  longer listed or has been demoted to read-only, or a failed SSH preflight each log a
+ *  guidance-carrying message AND throw — the caller (runTickEngine/runRoundsEngine's own
+ *  try/catch) already turns an uncaught startup error into a non-zero exit, so this is the ONE
+ *  place `worker.credentialTier: L1` becomes an actual startup gate rather than a WARN. */
 export async function detectDeployKeyStartupTier(
   supervisor: DeployKeyPreflightSupervisor,
   cfg: {
@@ -59,6 +62,7 @@ export async function detectDeployKeyStartupTier(
     root?: string;
     readFile?: (path: string) => string;
     findAnchor?: (root: string) => { keyPath: string; keyId: number } | undefined;
+    run?: GhRunner;
   } = {},
 ): Promise<DeployKeyStartupResult> {
   const record = (result: DeployKeyStartupResult): DeployKeyStartupResult => {
@@ -99,6 +103,41 @@ export async function detectDeployKeyStartupTier(
       `<${DOC_LINKS.security}>'s worker credential tiers.`;
     log(`[sapwood:startup] ${message}`);
     record({ tier: "L1", arm: "missing" });
+    throw new Error(message);
+  }
+
+  // A green SSH preflight alone doesn't prove the anchor still means what it says: the same
+  // keypair authenticates whether or not GitHub still lists this id, and whether or not that id
+  // has since been demoted to read-only — SSH auth succeeding says nothing about push access.
+  // One authoritative remote read settles both: the sidecar id must still be listed AND not
+  // read-only, or L1 refuses the same as a missing/unreadable anchor.
+  const run = opts.run ?? gh;
+  const repo = `${cfg.board.owner}/${cfg.board.repo}`;
+  let remoteEntry: { id: number; readOnly?: boolean } | undefined;
+  try {
+    const listed = parseDeployKeys(await run(["repo", "deploy-key", "list", "-R", repo, "--json", "id,title,readOnly"]));
+    remoteEntry = listed.find((k) => k.id === anchor.keyId);
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    const message =
+      `worker.credentialTier is "L1" but the registered deploy keys for ${repo} could not be read (${detail}) ` +
+      `— run "sapwood init" to re-check. Refusing to start before any dispatch — see ` +
+      `<${DOC_LINKS.security}>'s worker credential tiers.`;
+    log(`[sapwood:startup] ${message}`);
+    record({ tier: "L1", arm: "stale" });
+    throw new Error(message);
+  }
+  if (remoteEntry === undefined || remoteEntry.readOnly === true) {
+    const reason =
+      remoteEntry === undefined
+        ? `id ${anchor.keyId} is no longer registered on ${repo}`
+        : `id ${anchor.keyId} on ${repo} is registered read-only (no push access)`;
+    const message =
+      `worker.credentialTier is "L1" but the local anchor is stale — ${reason} — run "sapwood init" to ` +
+      `re-provision it. Refusing to start before any dispatch — see <${DOC_LINKS.security}>'s worker credential ` +
+      "tiers.";
+    log(`[sapwood:startup] ${message}`);
+    record({ tier: "L1", arm: "stale" });
     throw new Error(message);
   }
 

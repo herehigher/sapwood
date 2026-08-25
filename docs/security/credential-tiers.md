@@ -68,7 +68,9 @@ exact fix (the same pattern this repo already uses for `allowManagedPermissionRu
 below); `sapwood init` itself never fails over this. Whether that failure actually MATTERS is
 decided separately, at `sapwood run` startup, by `worker.credentialTier` (see "Startup gate,
 not just visibility" below) — L1 configured with no working key is a hard refusal before any
-dispatch, never a silent run at L0.
+dispatch or board/label mutation (state creation, the `run-started` event, and stateful startup
+detectors are unaffected — this gate is a dispatch/mutation boundary, not a zero-writes one),
+never a silent run at L0.
 
 **The LOCAL (key file, id sidecar) pair is the anchor — a remote key's TITLE is never
 authoritative for "mine".** A `sapwood-worker`-titled key on the repo may validly belong to a
@@ -84,9 +86,13 @@ provisioning, not merely "an id that happens to be registered" plus "a local key
 authenticate" independently, which a hand-edited or foreign id sharing a different but
 also-registered key could otherwise fake); and the SSH preflight (`ssh -T git@github.com`,
 matched against GitHub's own documented success shape — exit 1, stderr containing "successfully
-authenticated") must pass. All four green → a positive confirmation and L1 stays active. Any ONE
-of them failing (a wiped local key file, a second machine, a remotely rotated/foreign key, a
-rotated preflight) routes to a **WARN + operator choice**, offered only when `sapwood init` is
+authenticated") must pass. All four green → the key's and id-sidecar's own file permissions are
+repaired to 0600 (dir 0700) as the LAST gate, only once every other signal already agrees the
+anchor is valid — a WARN-only outcome below never touches permissions on the way there — and only
+then a positive confirmation and L1 stays active. Any ONE of the four failing (a wiped local key
+file, a second machine, a remotely rotated/foreign key, a rotated preflight), or that final
+permission repair itself failing (a directory/symlink standing in for the key or sidecar),
+routes to a **WARN + operator choice**, offered only when `sapwood init` is
 running interactively (a real TTY): **(a)** leave every remote key AND every local file
 untouched, generate a FRESH keypair — never reusing a key file already sitting at the per-host
 path, or a per-host title already registered remotely under someone else's provisioning (treated
@@ -118,12 +124,18 @@ operator went digging in a single leg's logs. At engine startup (`cli.ts`, right
 `WorkerSupervisor` construction, sharing that SAME instance's memoized preflight so this costs no
 extra SSH probe) `deploy-key-startup-check.ts` checks `worker.credentialTier` first: `L0` logs
 one disclosure line and returns — a legal, fully-functional mode, never blocked. `L1` is
-fail-closed: no local anchor found, the anchored key file unreadable, or the SSH preflight
-failing each log a guidance-carrying message AND throw, refusing `sapwood run` before any
-dispatch — the same never-silent-downgrade stance `worker.ts`'s own per-leg resolution takes (a
-preflight failure mid-run, past the startup gate, fails that ONE leg loudly rather than falling
-back to the full-credentialed env). Every outcome — L0's disclosure and L1's three failure
-shapes — is also recorded as a `deploy-key-tier-detected` event.
+fail-closed: no local anchor found, the anchored key file unreadable, the anchor's id no longer
+listed on the repo OR listed but registered read-only (one authoritative `gh repo deploy-key
+list` read — SSH auth succeeding proves the key works, not that this specific id still carries
+write access), or the SSH preflight failing, each log a guidance-carrying message AND throw,
+refusing `sapwood run` before any dispatch or board/label mutation (state creation, the
+`run-started` event, and stateful startup detectors are unaffected) — the same
+never-silent-downgrade stance `worker.ts`'s own per-leg resolution takes. That per-leg resolution
+re-resolves the anchor and re-checks its readability (`accessSync`) on EVERY dispatch/resume/fix
+spawn, not just once at startup, and refuses outright if the anchor's identity has changed since
+this supervisor last bound its memoized preflight to one — a leg never runs under a key that was
+never itself probed. Every outcome — L0's disclosure and L1's four failure shapes — is also
+recorded as a `deploy-key-tier-detected` event.
 
 **Honest residuals — what L1 does NOT close:**
 
