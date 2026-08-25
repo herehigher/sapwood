@@ -19,8 +19,8 @@ autonomy-L1 and credential-L1.
 
 | Tier | What the tier guarantees | Push mechanism | PR-open mechanism | Theft blast radius |
 | --- | --- | --- | --- | --- |
-| **L0** (today's default, unset deploy-key config) | No severing — the operator's real forge/git credentials, inherited verbatim. | `git push` over the engine's own checkout transport. | Reachable (`Bash(gh *)` granted); `associateLanePr` (`forge.ts`) adopts a worker-opened PR via the `sapwood:pr-owner` marker. | The operator's full forge credential — every repo and scope it carries. |
-| **L1** (deploy key reconciled green) | No forge API credential in the env (`workerDeployKeyEnv()`/`workerCredentialFreeEnv()`, `worker.ts`; `worker.test.ts:8262`) — a fix leg composes the same overlay onto its `credentialFree` base (`conductor.ts::startFixLeg`). | `git push` over SSH via the deploy key only. | Structurally unreachable — `associateLanePr` is the only PR-open channel. | Git-transport write to this one repo only — no API write capability exists. |
+| **L0** (unset deploy-key config) | No severing — the operator's real forge/git credentials, inherited verbatim. | `git push` over the engine's own checkout transport. | Reachable (`Bash(gh *)` granted); `associateLanePr` (`forge.ts`) adopts a worker-opened PR via the `sapwood:pr-owner` marker. | The operator's full forge credential — every repo and scope it carries. |
+| **L1** (deploy key reconciled green) | No forge API credential in the env — composed by `workerDeployKeyEnv()`/`resume()` (`worker.ts`; `worker.test.ts:8262`,`9588`). | `git push` over SSH via the deploy key only. | Structurally unreachable — `associateLanePr` is the only PR-open channel. | Git-transport write to this one repo only — no API write capability exists. |
 | **L2** (enterprise guidance — not implemented) | See the [L2 enterprise posture checklist](#l2-enterprise-posture-checklist). | — | — | — |
 
 ### L2 enterprise posture checklist
@@ -40,19 +40,19 @@ on L1:
   with no access to the conductor's or host user's credential stores, keychains, SSH agents, or
   config files; keep merger credentials on the separate conductor/host account only.
 
-**Activation is opt-in, not default-on.** Unset `deployKeyPath`/`deployKeyId` (the shipped
-default) is L0, byte-for-byte unchanged; `sapwood init` provisions L1 autonomously when the
-operator has repo-admin, else degrades to a guidance WARN at L0 — never a startup or dispatch
-failure. The private key lives under the self-ignoring `.sapwood/keys/` root
-(`config/paths.ts::SAPWOOD_DIR`), never swept by an ordinary `git add -A`.
+**Activation is opt-in, not default-on.** Unset `deployKeyPath`/`deployKeyId` is L0, byte-for-byte
+unchanged; `sapwood init` provisions L1 autonomously when the operator has repo-admin, else
+degrades to a guidance WARN at L0 — never a startup or dispatch failure. The private key lives
+under the self-ignoring `.sapwood/keys/` root (`config/paths.ts::runtimePaths`'s `keysDir`),
+never swept by an ordinary `git add -A`.
 
 | Invariant | Enforcement | Test |
 | --- | --- | --- |
 | Unset `deployKeyPath` is L0, byte-identical to today — the SSH preflight is never even invoked. | `worker.ts::WorkerSupervisor.resolveDeployKeyPath` | `worker.test.ts:8437`: "dispatch: worker.deployKeyPath UNSET -> L0, byte-identical to today (reverse test)" |
 | `deployKeyPath` and `deployKeyId` are a schema-enforced pair — a config with only one set fails to parse, naming the missing half. | `config/config.ts` schema | `config.test.ts:1269`: "rejects a config with ONLY deployKeyPath set, naming deployKeyId as the missing half" |
-| Every `sapwood init` run with both configured RECONCILES, never skips, against five checks (local file present + repairable to 0700/0600, id still listed, its public-key content matches the local `.pub`, SSH preflight green) — all five green to stay L1. | `init.ts::reconcileDeployKey`, `init.ts::enforceDeployKeyPermissions` | `init.test.ts:1615` (all green); `init.test.ts:1686-1687` (0700/0600 repair) |
+| Every `sapwood init` run with both configured RECONCILES, never skips — five ordered checks (enumerated in `reconcileDeployKey`'s own doc comment) must all be green, or it fails closed into the choice/degrade arm below. | `init.ts::reconcileDeployKey`, `init.ts::enforceDeployKeyPermissions` | `init.test.ts:1615` (all green); `init.test.ts:1686-1687` (0700/0600 repair) |
 | The local `(path, id)` pair is the anchor, never the remote key's title — a `sapwood-worker`-titled key may validly belong to a different machine. The engine never deletes or modifies a remote deploy key. | `init.ts::armAuthFailsStaleOrMismatch` | `init.test.ts:1804`: "RECONCILE FAILS ... non-interactive default (b): WARN + config anchor CLEARED, remote NEVER touched" |
-| Any reconcile failure clears the stale anchor and, only interactively, offers (a) a fresh ADDITIONAL per-machine key or (b) degrade to L0; non-interactive always (b). | `init.ts::armAuthFailsStaleOrMismatch`, `init.ts::pickFreshArmAKeySlot` | `init.test.ts:2000`: "arm (a) ... leaves the existing remote key untouched" |
+| Any reconcile failure offers, only interactively, (a) a fresh ADDITIONAL per-machine key or (b) degrade to L0 (non-interactive always (b)); either way it ATTEMPTS to clear the stale anchor, but a flow-style `worker: { ... }` mapping or a parse/verify failure leaves it uncleared with a hand-edit WARN instead. | `init.ts::armAuthFailsStaleOrMismatch`, `init.ts::clearDeployKeyConfigFromYaml` | `init.test.ts:2000` (arm a); the flow-style/failure clear path is untested through this call site — unit-tested only via the sibling writer, `init.test.ts:1022` |
 | A running engine reports the effective tier once per start (log + `deploy-key-tier-detected` event) — disclosure only, never a gate. | `deploy-key-startup-check.ts::detectDeployKeyStartupTier` | `deploy-key-startup-check.test.ts`: "reverse test: ... never blocks" |
 | Branch protection is checked once provisioning/reconcile succeeds (legacy endpoint, then rulesets on a 404); WARN only if both report unprotected, distinct from a "cannot verify" WARN on any other read failure. | `init.ts::checkDefaultBranchProtectionAction` | `init.test.ts:2452`/`2552` (unprotected/ruleset); `init.test.ts:2484`/`2589` (cannot verify) |
 
@@ -69,7 +69,6 @@ sapwood init
 (`init.ts::deployKeyProvisioningFailedAction`); `title: sapwood-worker-<hostname>` for an
 additional per-machine key when reconciling against an already-registered key
 (`init.ts::armAuthFailsStaleOrMismatch`), offered automatically from an interactive terminal.
-Docs-only here, not yet in `docs/guide/`.
 
 **Honest residuals — what L1 does NOT close:**
 
@@ -82,16 +81,15 @@ Docs-only here, not yet in `docs/guide/`.
   API-level scope boundary; no dedicated enforcement or test.
 
 - **Raw git-transport push to the default branch — narrowed, not eliminated.** The guard also
-  blocks `git push` reaching the default branch, active only when `SAPWOOD_DEFAULT_BRANCH` is set
-  (`guard.ts::checkGitPushDefaultBranch`). Argv-visible forms only — a PRE-PERSISTED `git config
-  alias.*` set outside that one Bash call is not caught by an argv scan; accepted, not fixed,
-  branch protection is the backstop of record (`guard.test.ts:654`: "KNOWN RESIDUAL ... a
-  PRE-PERSISTED git-config alias is not detected by an argv scan").
+  blocks `git push` reaching the default branch when `SAPWOOD_DEFAULT_BRANCH` is set
+  (`guard.ts::checkGitPushDefaultBranch`). Argv-visible forms only: an alias set by an earlier,
+  separately-judged command — whether in a prior call or earlier in the SAME call — is not caught
+  by an argv scan; accepted, not fixed, branch protection is the backstop of record
+  (`guard.test.ts:654`: "a PRE-PERSISTED git-config alias is not detected by an argv scan").
 
-- **Host-credential theft: engine-unpluggable.** L1 strips the forge API credential from the
-  worker leg's env but cannot touch the operator's real credential store on the host — not
-  sapwood-closable, host-level access reaches it with or without L1. The worker-leg-reachable
-  instance (the `steal.mjs` PoC reading `~/.config/gh/hosts.yml`) is [role-sessions.md's HONEST
-  SCOPE note](role-sessions.md#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry); L1
-  removes only the credential that read could authenticate with. Branch protection remains the
-  mandatory backstop.
+- **Host-credential theft: engine-unpluggable.** L1 severs the env-var credential-lookup path
+  only; it cannot touch the operator's real credential store on the host, and a leg that reads a
+  stolen credential off disk can still attempt to authenticate with it (a constructed `gh` path,
+  or curling the API directly) — the `steal.mjs` PoC, [role-sessions.md's HONEST SCOPE
+  note](role-sessions.md#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry). Not
+  sapwood-closable; branch protection remains the mandatory backstop regardless.
