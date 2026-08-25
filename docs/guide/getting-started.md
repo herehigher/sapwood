@@ -689,7 +689,8 @@ sapwood dashboard
 (`dashboard/server.ts`) and opens it in your default browser (or prints the URL in a
 headless environment). It runs on `4517` by default — override with `--port` or
 `SAPWOOD_DASHBOARD_PORT`. `--config PATH` loads config from that path instead of
-probing the defaults, matching `status --config`/`events --config`.
+probing the defaults, matching `status --config`/`events --config`. Set `BROWSER=none`
+to suppress the auto-open (headless/CI/scripts).
 
 The control actions (pause, stop, estop) exposed in the dashboard UI go through that
 one write route, `POST /api/control`, gated by the `dashboard.controls` config key —
