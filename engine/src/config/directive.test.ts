@@ -35,7 +35,7 @@ test("resolveRoundDirective: no file, no event -> NO_ROUND_DIRECTIVE placeholder
   });
 });
 
-test("resolveRoundDirective: file present -> content injected, one directive-applied event with the expected payload shape, file archived to data/directives/round-N.md", () => {
+test("resolveRoundDirective: file present -> content injected, one directive-applied event with the expected payload shape, file archived to a sibling directives/round-N.md", () => {
   withTmpDir((d) => {
     const directiveFile = join(d, "DIRECTIVE.md");
     writeFileSync(directiveFile, "Focus on the auth flow this round.", "utf8");
@@ -171,7 +171,7 @@ test("resolveRoundDirective: round-scoped — a directive-applied event from a D
 });
 
 test("directiveArchivePath: a sibling directives/ dir next to the configured directive file, named round-<id>.md", () => {
-  assert.equal(directiveArchivePath("/repo/data/DIRECTIVE.md", 42), "/repo/data/directives/round-42.md");
+  assert.equal(directiveArchivePath("/repo/.sapwood/DIRECTIVE.md", 42), "/repo/.sapwood/directives/round-42.md");
 });
 
 // ── Gate② I1: the idempotent rename must never swallow a FRESH directive ────────────────────

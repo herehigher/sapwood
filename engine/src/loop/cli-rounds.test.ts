@@ -379,7 +379,7 @@ test("#799: the claude-version startup check runs after run-started on the tick 
     // instead of silently proceeding into the exact race this poll exists to prevent. The poll
     // itself stays bounded and condition-based (never a blind sleep, docs/timing-dependent-
     // tests-ban) — only the "what happens when it's never satisfied" behavior changed.
-    const stateDir = join(dir, "data", "sessions", "state");
+    const stateDir = join(dir, ".sapwood", "sessions", "state");
     let quiesced = false;
     for (let i = 0; i < 200; i++) {
       const entries = existsSync(stateDir) ? readdirSync(stateDir) : [];
@@ -1533,8 +1533,8 @@ test("sapwood run (#382 round 2, codex finding 3): a refused start performs ZERO
   const previousCwd = process.cwd();
   try {
     process.chdir(dir);
-    mkdirSync(join(dir, "data"), { recursive: true });
-    const lockPath = join(dir, "data", "sapwood.lock");
+    mkdirSync(join(dir, ".sapwood"), { recursive: true });
+    const lockPath = join(dir, ".sapwood", "sapwood.lock");
     writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: "holder", acquiredAt: "2026-07-31T00:00:00.000Z" }));
     const { code, stderr } = await captureStderr(() =>
       runEngine(["node", "sapwood", "run", "--once"], {
@@ -1545,7 +1545,7 @@ test("sapwood run (#382 round 2, codex finding 3): a refused start performs ZERO
     );
     assert.equal(code, 1);
     assert.match(stderr, /refusing to start/);
-    assert.equal(existsSync(join(dir, "data", "sapwood.sqlite")), false, "no DB file — the holder's data dir saw zero writes");
+    assert.equal(existsSync(join(dir, ".sapwood", "sapwood.sqlite")), false, "no DB file — the holder's data dir saw zero writes");
     const holder = JSON.parse(readFileSync(lockPath, "utf8")) as { token: string };
     assert.equal(holder.token, "holder", "the live holder's lock survives");
   } finally {

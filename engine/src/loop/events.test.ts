@@ -32,7 +32,7 @@ test("parseEventsArgs: defaults — since-id 0, no kind filter, default limit, t
   const parsed = parseEventsArgs(["node", "sapwood", "events"]);
   assert.deepEqual(parsed, {
     help: false,
-    dbPath: "data/sapwood.sqlite",
+    dbPath: ".sapwood/sapwood.sqlite",
     configPath: undefined,
     sinceId: 0,
     kinds: [],
@@ -48,7 +48,7 @@ test("parseEventsArgs: --since-id/--kind/--exclude-kind(repeat rejected together
   const parsed = parseEventsArgs(["node", "sapwood", "events", "--since-id", "42", "--kind", "merged", "--limit", "10", "--json"]);
   assert.deepEqual(parsed, {
     help: false,
-    dbPath: "data/sapwood.sqlite",
+    dbPath: ".sapwood/sapwood.sqlite",
     configPath: undefined,
     sinceId: 42,
     kinds: ["merged"],

@@ -324,7 +324,7 @@ test("runDashboard: a valid --config loads authoritatively and the run proceeds"
     );
     assert.equal(code, 0);
     assert.deepEqual(startedWith, {
-      dbPath: "data/sapwood.sqlite",
+      dbPath: ".sapwood/sapwood.sqlite",
       configPath,
       port: DEFAULT_DASHBOARD_PORT,
       serverEntry: join(dir, "start-stub.js"),
