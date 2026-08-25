@@ -19,16 +19,18 @@
 
 ## Constraints
 
-<!-- Hard limits any change must respect: technical, security, organizational, or process.
-     Locked decisions that later work should not silently re-litigate. -->
+<!-- Locked decisions and hard limits any change must respect: technical, security,
+     organizational, or process — the list later work should not silently re-litigate. Read by
+     the aligning (PO) peripheral and, every round, by the architect peripheral (contradiction
+     checks). -->
 
 ## Architecture
 
-<!-- The system's shape as decided so far: major components, the key boundaries between them,
-     and the design decisions already locked in that new work must respect (the architect
-     peripheral reads exactly this section every round and flags issues that contradict it).
-     If this section is missing or empty, the architect proceeds with an explicit "no
-     architecture chapter available" placeholder — advisory only, it never blocks a round. -->
+<!-- The system's shape: major components and the key boundaries between them. Read by the
+     architect peripheral every round, alongside Constraints above (contradiction checks). The
+     architect reads EXACTLY these two sections from this file — Constraints and Architecture,
+     nothing else — each degrading to its own explicit "no ... section/chapter available"
+     placeholder when missing or empty; advisory only, a missing section never blocks a round. -->
 
 ## Current milestone
 

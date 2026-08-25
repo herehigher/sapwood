@@ -13,7 +13,7 @@
 // validates it (including the candidate-set check), and performs every forge write itself.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -33,7 +33,8 @@ import {
   createArchitectStub,
   defaultArchitectPromptPath,
   extractArchitectureChapter,
-  loadArchitectureChapter,
+  extractConstraintsSection,
+  loadGoalExcerpt,
   renderArchitectPrompt,
   validateArchitectOutput,
 } from "./architect.js";
@@ -339,8 +340,8 @@ test("createArchitectStub #251: a real session dispatch records an input-manifes
   ];
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
   const state = new State(":memory:");
-  // The repo's own docs/PLAN.md — same resolution as loadArchitectureChapter's own real-file test
-  // below (engine/src/roles/architect.test.ts -> engine/../docs/PLAN.md) — needed here so the
+  // The repo's own docs/PLAN.md — same resolution as loadGoalExcerpt's own real-file test below
+  // (engine/src/roles/architect.test.ts -> engine/../docs/PLAN.md) — needed here so the
   // architecture-chapter channel exercises a genuine ok:true read, not the nonexistent-path
   // fixture every other test in this file uses.
   const realPlanPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "docs", "PLAN.md");
@@ -398,8 +399,14 @@ test("createArchitectStub #251: a real session dispatch records an input-manifes
 
   const architectureRow = rows.find((r) => r.channel === "architecture-chapter");
   assert.equal(architectureRow?.ok, true, "a real, readable PLAN.md -> a genuine read success");
-  assert.equal(architectureRow?.version, contentVersionForTest(loadArchitectureChapter(realPlanPath)));
+  assert.equal(architectureRow?.version, contentVersionForTest(loadGoalExcerpt(realPlanPath)));
   assert.equal(architectureRow?.truncated, false, "this module's own read/extract, no length cap applied");
+  // #1089: docs/PLAN.md carries both `## Constraints (locked decisions)` and `## Architecture` —
+  // both sections found -> total 2, rendered 2, omitted 0, detail null.
+  assert.equal(architectureRow?.total, 2, "the two sections (Constraints, Architecture), not one");
+  assert.equal(architectureRow?.rendered, 2);
+  assert.equal(architectureRow?.omitted, 0);
+  assert.equal(architectureRow?.detail, null, "both sections present -> nothing to name");
 
   const candidatesRow = rows.find((r) => r.channel === "candidate-issues");
   assert.equal(candidatesRow?.ok, true);
@@ -427,10 +434,120 @@ test("createArchitectStub #251: a missing/unreadable PLAN.md yields architecture
   assert.equal(architectureRow?.ok, false);
   assert.equal(architectureRow?.version, null, "no fabricated version for a placeholder standing in for a failed read");
   assert.ok(architectureRow?.detail?.includes("/nonexistent/PLAN.md"));
+  assert.equal(architectureRow?.total, 2);
+  assert.equal(architectureRow?.rendered, 0, "a failed read yields zero sections found");
+  assert.equal(architectureRow?.omitted, 2);
   // Every OTHER channel is unaffected — a genuine read failure on ONE channel never contaminates
   // the honesty of the others.
   assert.ok(rows.find((r) => r.channel === "last-merged")?.ok);
   state.close();
+});
+
+test("createArchitectStub #251/#1089: an unreadable PLAN.md (readFileSync throws on an existing, unreadable file — not the ENOENT branch) yields architecture-chapter ok:false, rendered:0, omitted:2", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-architect-unreadable-"));
+  try {
+    const unreadablePath = join(dir, "PLAN.md");
+    writeFileSync(unreadablePath, "# Goal\n\n## Constraints\nlocked\n\n## Architecture\nshape\n");
+    chmodSync(unreadablePath, 0o000);
+    const forge = new FakeForge();
+    forge.planReviewCandidates = [{ number: 10, title: "a", labels: [] }];
+    const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+    const state = new State(":memory:");
+    const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: unreadablePath };
+    await createArchitectStub(deps).run({ roundId: 25, phase: "architecting", marker: null });
+    const rows = state.inputManifestRows(25);
+    const architectureRow = rows.find((r) => r.channel === "architecture-chapter");
+    // A root/CI process can sometimes still read a chmod 0 file — skip rather than false-fail.
+    if (architectureRow?.ok === true) {
+      state.close();
+      return;
+    }
+    assert.equal(architectureRow?.ok, false, "existsSync(true) + readFileSync(throws) -> the catch branch, not ENOENT");
+    assert.equal(architectureRow?.version, null);
+    assert.equal(architectureRow?.total, 2);
+    assert.equal(architectureRow?.rendered, 0);
+    assert.equal(architectureRow?.omitted, 2);
+    assert.ok(architectureRow?.detail?.includes(unreadablePath));
+    state.close();
+  } finally {
+    chmodSync(join(dir, "PLAN.md"), 0o644);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createArchitectStub #251/#1089: Architecture present, Constraints absent -> ok:true, rendered:1, omitted:1, detail names the missing Constraints heading", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-architect-goalexcerpt-"));
+  try {
+    const goalPath = join(dir, "PLAN.md");
+    writeFileSync(goalPath, "# Goal\n\n## Architecture\nthe system's shape\n");
+    const forge = new FakeForge();
+    forge.planReviewCandidates = [{ number: 10, title: "a", labels: [] }];
+    const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+    const state = new State(":memory:");
+    const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: goalPath };
+    await createArchitectStub(deps).run({ roundId: 26, phase: "architecting", marker: null });
+    const rows = state.inputManifestRows(26);
+    const architectureRow = rows.find((r) => r.channel === "architecture-chapter");
+    assert.equal(architectureRow?.ok, true);
+    assert.equal(architectureRow?.total, 2);
+    assert.equal(architectureRow?.rendered, 1);
+    assert.equal(architectureRow?.omitted, 1);
+    assert.ok(architectureRow?.detail?.includes(`no "## Constraints" heading found`));
+    assert.ok(!architectureRow?.detail?.includes(`Architecture`));
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createArchitectStub #251/#1089: Constraints present, Architecture absent -> ok:true, rendered:1, omitted:1, detail names the missing Architecture heading", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-architect-goalexcerpt-"));
+  try {
+    const goalPath = join(dir, "PLAN.md");
+    writeFileSync(goalPath, "# Goal\n\n## Constraints\nhard limits\n");
+    const forge = new FakeForge();
+    forge.planReviewCandidates = [{ number: 10, title: "a", labels: [] }];
+    const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+    const state = new State(":memory:");
+    const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: goalPath };
+    await createArchitectStub(deps).run({ roundId: 27, phase: "architecting", marker: null });
+    const rows = state.inputManifestRows(27);
+    const architectureRow = rows.find((r) => r.channel === "architecture-chapter");
+    assert.equal(architectureRow?.ok, true);
+    assert.equal(architectureRow?.total, 2);
+    assert.equal(architectureRow?.rendered, 1);
+    assert.equal(architectureRow?.omitted, 1);
+    assert.ok(architectureRow?.detail?.includes(`no "## Architecture" heading found`));
+    assert.ok(!architectureRow?.detail?.includes(`Constraints`));
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createArchitectStub #251/#1089: neither Constraints nor Architecture present -> ok:true, rendered:0, omitted:2, detail names both missing headings", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-architect-goalexcerpt-"));
+  try {
+    const goalPath = join(dir, "PLAN.md");
+    writeFileSync(goalPath, "# Goal\n\n## Non-goals\nnothing relevant here\n");
+    const forge = new FakeForge();
+    forge.planReviewCandidates = [{ number: 10, title: "a", labels: [] }];
+    const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
+    const state = new State(":memory:");
+    const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: goalPath };
+    await createArchitectStub(deps).run({ roundId: 28, phase: "architecting", marker: null });
+    const rows = state.inputManifestRows(28);
+    const architectureRow = rows.find((r) => r.channel === "architecture-chapter");
+    assert.equal(architectureRow?.ok, true);
+    assert.equal(architectureRow?.total, 2);
+    assert.equal(architectureRow?.rendered, 0);
+    assert.equal(architectureRow?.omitted, 2);
+    assert.ok(architectureRow?.detail?.includes(`no "## Constraints" heading found`));
+    assert.ok(architectureRow?.detail?.includes(`no "## Architecture" heading found`));
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("createArchitectStub #251: zero drift-review candidates but a NON-EMPTY pool still records the pool-digest channel — the batch-review target that matters most for coverage", async () => {
@@ -1074,18 +1191,154 @@ test("extractArchitectureChapter: a zero-space matching heading starts a section
   assert.equal(extractArchitectureChapter(doc), "## Architecture\nA\n##Architecture second\nB");
 });
 
-test("loadArchitectureChapter: a real docs/PLAN.md resolves to a non-empty chapter mentioning locked decisions", () => {
+// ── #1089: extractConstraintsSection — level-2-only, mirrors extractArchitectureChapter's shape ──
+
+test("extractConstraintsSection: extracts the '## Constraints' heading through the next equal-or-shallower heading", () => {
+  const doc = "# Title\n\n## Constraints\nhard limits\nmore text\n\n## Architecture\nirrelevant here\n";
+  const section = extractConstraintsSection(doc);
+  assert.ok(section);
+  assert.ok(section!.startsWith("## Constraints"));
+  assert.ok(section!.includes("hard limits"));
+  assert.ok(!section!.includes("Architecture"));
+});
+
+test("extractConstraintsSection: no matching heading -> null", () => {
+  assert.equal(extractConstraintsSection("# Title\n\n## Something Else\ntext\n"), null);
+});
+
+test("extractConstraintsSection: a level-3 'Constraints' heading with no level-2 sibling never matches (level-2-only, delegated to extractMarkdownSections' level argument)", () => {
+  const doc = "## Architecture\nchapter body\n### Constraints\nnested, not the real section\nmore body\n## Next\nN";
+  assert.equal(extractConstraintsSection(doc), null);
+});
+
+// ── #1089: loadGoalExcerpt — the two-section (Constraints + Architecture) excerpt ────────────
+
+test("loadGoalExcerpt: a real docs/PLAN.md resolves to a non-empty Constraints section (with a locked-decisions table row) AND a non-empty Architecture chapter, Constraints first — a future PLAN.md heading move fails this, not silently shrinks the architect's payload", () => {
   // The repo's own docs/PLAN.md — engine/src/roles/architect.test.ts -> engine/../docs/PLAN.md.
   const here = dirname(fileURLToPath(import.meta.url));
   const planPath = join(here, "..", "..", "..", "docs", "PLAN.md");
-  const chapter = loadArchitectureChapter(planPath);
-  assert.ok(chapter.startsWith("## Architecture"));
-  assert.ok(!chapter.includes("not found"));
+  const constraints = extractConstraintsSection(readFileSync(planPath, "utf8"));
+  const architecture = extractArchitectureChapter(readFileSync(planPath, "utf8"));
+  assert.ok(constraints, "docs/PLAN.md must carry a level-2 ## Constraints section");
+  assert.match(constraints!, /^\|.*\|$/m, "the locked-decisions table — at least one markdown table row");
+  assert.ok(architecture, "docs/PLAN.md must carry an ## Architecture chapter");
+  const excerpt = loadGoalExcerpt(planPath);
+  assert.ok(excerpt.startsWith("## Constraints"), "Constraints renders first");
+  assert.ok(excerpt.includes(constraints!));
+  assert.ok(excerpt.includes(architecture!));
+  assert.ok(excerpt.indexOf(constraints!) < excerpt.indexOf(architecture!), "Constraints before Architecture");
+  assert.ok(!excerpt.includes("not found"), "both sections present -> no placeholder text");
 });
 
-test("loadArchitectureChapter: missing file degrades to an explicit placeholder, never throws", () => {
-  const chapter = loadArchitectureChapter("/definitely/not/a/real/path/PLAN.md");
-  assert.ok(chapter.includes("not found"));
+test("loadGoalExcerpt: missing file degrades to ONE explicit placeholder naming the path, never throws — not two per-section placeholders (there is nothing to excerpt from)", () => {
+  const excerpt = loadGoalExcerpt("/definitely/not/a/real/path/PLAN.md");
+  assert.ok(excerpt.includes("not found"));
+  assert.ok(excerpt.includes("/definitely/not/a/real/path/PLAN.md"));
+});
+
+test("loadGoalExcerpt: Architecture-only goal file — the Architecture chapter text is unchanged; the only delta from an architecture-only payload is the Constraints placeholder line ahead of it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-goalexcerpt-"));
+  try {
+    const goalPath = join(dir, "PLAN.md");
+    const architectureMd = "## Architecture\nthe system's shape and its boundaries.\n";
+    writeFileSync(goalPath, `# Goal\n\n${architectureMd}`);
+    const excerpt = loadGoalExcerpt(goalPath);
+    assert.ok(excerpt.includes(`No "## Constraints" heading found in ${goalPath}`));
+    assert.ok(excerpt.endsWith(extractArchitectureChapter(readFileSync(goalPath, "utf8"))!), "Architecture chapter text unchanged");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadGoalExcerpt: Constraints-only goal file — Constraints text plus today's Architecture placeholder", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-goalexcerpt-"));
+  try {
+    const goalPath = join(dir, "PLAN.md");
+    writeFileSync(goalPath, "# Goal\n\n## Constraints\nno change without a human sign-off.\n");
+    const excerpt = loadGoalExcerpt(goalPath);
+    assert.ok(excerpt.startsWith("## Constraints\nno change without a human sign-off."));
+    assert.ok(excerpt.includes(`No "## Architecture" heading found in ${goalPath}`));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadGoalExcerpt: neither section present -> both explicit placeholders, never a silent empty payload", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-goalexcerpt-"));
+  try {
+    const goalPath = join(dir, "PLAN.md");
+    writeFileSync(goalPath, "# Goal\n\n## Non-goals\nnothing relevant here\n");
+    const excerpt = loadGoalExcerpt(goalPath);
+    assert.ok(excerpt.includes(`No "## Constraints" heading found in ${goalPath}`));
+    assert.ok(excerpt.includes(`No "## Architecture" heading found in ${goalPath}`));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadGoalExcerpt: only a level-2 '## Constraints' heading counts — an H3 'Constraints' nested inside Architecture with no H2 sibling never gets excerpted twice and the Constraints placeholder still renders", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-goalexcerpt-"));
+  try {
+    const goalPath = join(dir, "PLAN.md");
+    writeFileSync(
+      goalPath,
+      "# Goal\n\n## Architecture\nchapter body\n### Constraints\nnested, not the real section\nmore chapter body\n## Next\nN\n",
+    );
+    const excerpt = loadGoalExcerpt(goalPath);
+    assert.ok(excerpt.includes(`No "## Constraints" heading found in ${goalPath}`));
+    const architectureOccurrences = excerpt.split("### Constraints").length - 1;
+    assert.equal(
+      architectureOccurrences,
+      1,
+      "the nested H3 appears exactly once — inside the Architecture chapter, never excerpted a second time as a standalone Constraints match",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadGoalExcerpt: a goal file with all five template sections yields Constraints + Architecture only, Constraints first — nothing from Goal/Non-goals/Current milestone", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-goalexcerpt-"));
+  try {
+    const goalPath = join(dir, "PLAN.md");
+    writeFileSync(
+      goalPath,
+      [
+        "# Goal",
+        "GOAL_SENTINEL_LINE",
+        "## Non-goals",
+        "NON_GOALS_SENTINEL_LINE",
+        "## Constraints",
+        "CONSTRAINTS_SENTINEL_LINE",
+        "## Architecture",
+        "ARCHITECTURE_SENTINEL_LINE",
+        "## Current milestone",
+        "MILESTONE_SENTINEL_LINE",
+        "",
+      ].join("\n"),
+    );
+    const excerpt = loadGoalExcerpt(goalPath);
+    assert.ok(excerpt.includes("CONSTRAINTS_SENTINEL_LINE"));
+    assert.ok(excerpt.includes("ARCHITECTURE_SENTINEL_LINE"));
+    assert.ok(excerpt.indexOf("CONSTRAINTS_SENTINEL_LINE") < excerpt.indexOf("ARCHITECTURE_SENTINEL_LINE"), "Constraints first");
+    assert.ok(!excerpt.includes("GOAL_SENTINEL_LINE"));
+    assert.ok(!excerpt.includes("NON_GOALS_SENTINEL_LINE"));
+    assert.ok(!excerpt.includes("MILESTONE_SENTINEL_LINE"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadGoalExcerpt: a '# Constraints' H1 wrapping the real '## Constraints' H2 — the H2 is excerpted, not the whole H1-wrapped block", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-goalexcerpt-"));
+  try {
+    const goalPath = join(dir, "PLAN.md");
+    writeFileSync(goalPath, "# Constraints\n## Constraints\nthe real section\n## Architecture\nthe shape\n");
+    const excerpt = loadGoalExcerpt(goalPath);
+    assert.ok(excerpt.startsWith("## Constraints\nthe real section"), "the H2, not the H1 wrapper");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("#128: a real caller (deps.planMdPath omitted) renders {{plan.architectureChapter}} from cfg.goal.file, the single resolved north-star path", async () => {

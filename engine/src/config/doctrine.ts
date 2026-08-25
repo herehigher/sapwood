@@ -4,7 +4,7 @@
 // DSL — the review loop's own judgment rules, not a rules engine. Data, not code — the same
 // shipping/scaffold shape as #128's north-star goal file (engine/prompts/doctrine-template.md,
 // config.ts's `doctrine.file`, init.ts's ensureDoctrineFile), but the LOAD side is its own tiny
-// module (not folded into architect.ts's loadArchitectureChapter) because it's injected into
+// module (not folded into architect.ts's loadGoalExcerpt) because it's injected into
 // THREE prompt surfaces — the worker brief (worker.ts), the architect pass (architect.ts), and
 // referenced by name in the gated-reentry-cap escalation comment (conductor.ts) — not one, and
 // none of those three modules should own the load logic the other two also need.

@@ -1,9 +1,11 @@
 // architect.ts — implements PeripheralStub for the `architecting` phase (#90, #77's round
 // model): a round design/review pass between goal alignment and dispatch. The architect reads
-// this round's candidate issues + the goal file's architecture chapter (+ the PO/goal-
+// this round's candidate issues + the goal file's `## Constraints` section and `## Architecture`
+// chapter (#1089: both, Constraints first — the architecture chapter alone left the locked-
+// decisions list the contradiction check exists to defend unreachable) (+ the PO/goal-
 // alignment peripheral's output, when #89 ships one), produces/updates a round design note —
 // cross-issue consistency, interface boundaries, risks — and flags any candidate issue whose
-// approach contradicts the locked architecture (comment; `blocked` label if severe).
+// approach contradicts the locked constraints/architecture (comment; `blocked` label if severe).
 //
 // #110 PR4 rework: the architect session is PURE COMPUTATION now — no `gh` tool grant is ever
 // exercised by its prompt (the (now-unused) allow/deny-list constants in peripheral.ts are
@@ -81,11 +83,12 @@ export interface ArchitectDeps {
   runner: Pick<RoleRunner, "run">;
   now: () => Date;
   log?: (message: string) => void;
-  /** Path to the repo's north-star goal file — the architecture-chapter source. Override for
-   *  tests; a real caller omits this and gets `cfg.goal.file` (#128), a real,
-   *  config-file-relative-resolved top-level config key, the same one align.ts's goal-file read
-   *  honors. Architecture review stays advisory either way: a missing/unreadable file degrades
-   *  to an explicit placeholder (see loadArchitectureChapter) rather than failing the round. */
+  /** Path to the repo's north-star goal file — the Constraints/Architecture excerpt source
+   *  (#1089). Override for tests; a real caller omits this and gets `cfg.goal.file` (#128), a
+   *  real, config-file-relative-resolved top-level config key, the same one align.ts's goal-file
+   *  read honors. Architecture review stays advisory either way: a missing/unreadable file, or
+   *  either heading simply absent, degrades to an explicit placeholder (see loadGoalExcerpt)
+   *  rather than failing the round. */
   planMdPath?: string;
   /** The round's aligned-goals text from the (not yet shipped, #89) PO/goal-alignment
    *  peripheral. Default: an explicit "not available yet" placeholder — #89 hasn't landed, so
@@ -158,7 +161,7 @@ export function defaultArchitectPromptPath(): string {
 
 const NO_ALIGNED_GOALS_YET =
   "(No PO/goal-alignment peripheral output is available yet for this round. Proceed " +
-  "using only the architecture chapter and this round's candidate issues below.)";
+  "using only the locked constraints/architecture excerpt and this round's candidate issues below.)";
 
 /** #213: the explicit placeholder for an empty round pool (deps.poolIssues omitted, or the round
  *  genuinely selected zero issues into its pool) — never an empty substitution. Same "explicit
@@ -193,9 +196,11 @@ export const NO_CANDIDATES = "(No candidate issues are awaiting gate⓪ review t
 // `last-merged` (deps.lastMerged), `aligned-goals` (deps.alignedGoals), `doctrine`
 // (deps.doctrine), `directive` (this round's resolved directive), `candidate-issues` (the
 // candidates.summary substitution — contradiction-review targets), `architecture-chapter` (the
-// goal/architecture content loadArchitectureChapter produces), and `pool-digest` (the
-// round.pool substitution — #213's batch-review target; a healthy all-approved round can have
-// zero drift-review candidates but a non-empty pool, so this channel matters most for coverage).
+// channel NAME is unchanged, #1089's TWO-section Constraints+Architecture excerpt
+// loadGoalExcerpt produces — see that function's own doc comment for why one channel still
+// covers both), and `pool-digest` (the round.pool substitution — #213's batch-review target; a
+// healthy all-approved round can have zero drift-review candidates but a non-empty pool, so this
+// channel matters most for coverage).
 //
 // TWO HONESTY TIERS, not one blanket `ok: true` (gate② review, PR #258 round 2 — the original
 // draft asserted `ok: true`/`truncated: false` uniformly, which was dishonest for the channels
@@ -214,19 +219,34 @@ export const NO_CANDIDATES = "(No candidate issues are awaiting gate⓪ review t
 //    Row's own contract forbids.
 //  - `candidate-issues`/`architecture-chapter`/`pool-digest` ARE read/capped by this module
 //    itself, so they get the full, honest treatment: `architecture-chapter`'s `ok` reflects
-//    loadArchitectureChapter's ACTUAL read outcome (false + `detail` on a missing/unreadable
-//    PLAN.md — never a fabricated `version` for a placeholder that stands in for a failed read;
-//    a missing "## Architecture" heading in an otherwise-successfully-read file is NOT a read
-//    failure and stays `ok: true`, same distinction align.ts's buildBacklogDigest draws between
-//    "zero issues" and "read threw"). `candidate-issues` has no cap applied at all here, so
-//    `truncated: false` is honestly assertable. `pool-digest` goes through capDigest — a
-//    CHARACTER-count cut, unlike align.ts's packDigestRecords (a whole-RECORD pack) — so this
+//    loadGoalExcerpt's ACTUAL read outcome (false + `detail` on a missing/unreadable PLAN.md —
+//    never a fabricated `version` for a placeholder that stands in for a failed read; a missing
+//    "## Constraints" and/or "## Architecture" heading in an otherwise-successfully-read file is
+//    NOT a read failure and stays `ok: true`, same distinction align.ts's buildBacklogDigest
+//    draws between "zero issues" and "read threw"). #1089: this channel's `total` is 2 (the two
+//    sections), `rendered` the count actually found (0 on a failed read), `omitted = 2 -
+//    rendered`, and `detail` — on `ok: true` with something missing — names which heading(s)
+//    weren't found (null when both are present). `candidate-issues` has no cap applied at all
+//    here, so `truncated: false` is honestly assertable. `pool-digest` goes through capDigest —
+//    a CHARACTER-count cut, unlike align.ts's packDigestRecords (a whole-RECORD pack) — so this
 //    module can state a genuine pre/post-cap `truncated` flag and the real pool size as `total`,
 //    but cannot honestly claim a record-level `rendered`/`omitted` split capDigest doesn't
 //    preserve.
 const INPUT_MANIFEST_PHASE = "architecting";
 const INPUT_MANIFEST_ROLE = "architect";
 const INPUT_MANIFEST_SESSION = "architect";
+
+/** #1089: the architecture-chapter manifest row's `detail` on an `ok: true` read where one or
+ *  both of the two sections is missing — names which heading(s), so a human reading the row
+ *  doesn't have to re-derive it from `rendered`/`omitted` counts alone. null when both were
+ *  found (matching InputManifestRow's own "detail otherwise unset" convention). */
+function describeMissingGoalHeadings(constraintsFound: boolean, architectureFound: boolean): string | null {
+  const missing = [
+    ...(constraintsFound ? [] : [`no "## Constraints" heading found`]),
+    ...(architectureFound ? [] : [`no "## Architecture" heading found`]),
+  ];
+  return missing.length === 0 ? null : missing.join(" and ");
+}
 
 /** Short, stable content fingerprint (#231's manifest `version` field) — same convention as
  *  align.ts's own contentVersion. */
@@ -251,26 +271,57 @@ function recordInputManifest(state: State, row: InputManifestRow, log?: (message
  *  heading-to-next-heading-of-equal-or-shallower-level slicing forge.ts's
  *  extractVerificationPlan uses, generalized to an arbitrary heading pattern. null when no such
  *  heading exists; callers must supply an explicit fallback (never silently substitute the
- *  whole file — a fail-closed stance the caller documents at each call site). */
+ *  whole file — a fail-closed stance the caller documents at each call site). Any-level match,
+ *  unchanged by #1089 — pre-existing behavior, out of that issue's scope. */
 export function extractArchitectureChapter(planMd: string): string | null {
   return extractMarkdownSections(planMd, /Architecture\b/)[0] ?? null;
 }
 
-/** #251 gate② review round 3 (Codex delta-verify F2): ONE read, consumed by BOTH the prompt
- *  substitution (`loadArchitectureChapter` below, unchanged public signature) and the
- *  architecture-chapter input-manifest row — a duplicated existsSync/readFileSync check (this
- *  module's round-2 draft) could disagree with the real read under concurrent file replacement
- *  (a TOCTOU window: the file could be renamed/deleted between the two independent checks), and
- *  "the two can never disagree" was accordingly a false claim. `ok`/`detail` reflect the ACTUAL
- *  read outcome from this single pass (`false` + a reason only for ENOENT/an unreadable file —
- *  never for a missing "## Architecture" heading in an otherwise-successfully-read file, which
- *  is a content-shape issue, not a read failure). */
-function loadArchitectureChapterWithStatus(path: string): { chapter: string; ok: boolean; detail: string | null } {
+/** #1089: extract the goal file's "## Constraints" section — LEVEL-2 ONLY (unlike
+ *  extractArchitectureChapter's any-level match above), enforced by extractMarkdownSections' own
+ *  `level` argument rather than a post-filter over the any-level result: a post-filter can't
+ *  distinguish an unrelated "# Constraints" H1 wrapping the real H2 (the any-level result already
+ *  collapsed the H2 into it) from a genuine any-level match, and can't stop an unrelated H3 named
+ *  "Constraints" nested elsewhere (e.g. inside Architecture) from being excerpted as if it were
+ *  the real section. null when no level-2 match exists; caller supplies the placeholder. */
+export function extractConstraintsSection(planMd: string): string | null {
+  return extractMarkdownSections(planMd, /Constraints\b/, 2)[0] ?? null;
+}
+
+const constraintsPlaceholder = (path: string): string =>
+  `(No "## Constraints" heading found in ${path} — proceeding with no constraints section available.)`;
+const architecturePlaceholder = (path: string): string =>
+  `(No "## Architecture" heading found in ${path} — proceeding with no architecture chapter available.)`;
+
+/** #1089: the architect's goal-file excerpt now carries TWO sections (Constraints first, then
+ *  Architecture, joined by a blank line) rendered into the ONE existing `{{plan.architectureChapter}}`
+ *  slot — the slot/channel names stay unchanged (both are part of a public, operator-customisable
+ *  contract: `roles.architect.promptFile`). `constraintsFound`/`architectureFound` let the
+ *  input-manifest row (below, at this stub's dispatch site) report which section(s) were present
+ *  without re-parsing the rendered excerpt.
+ *
+ *  #251 gate② review round 3 (Codex delta-verify F2)'s ONE-READ rule still applies, now to BOTH
+ *  sections: a duplicated existsSync/readFileSync check per section could disagree with the real
+ *  read under concurrent file replacement (a TOCTOU window), so this single pass feeds both the
+ *  prompt substitution and the architecture-chapter manifest row. `ok`/`detail` reflect the
+ *  ACTUAL read outcome (`false` + a reason only for ENOENT/an unreadable file — never for a
+ *  missing heading in an otherwise-successfully-read file, which is a content-shape issue, not a
+ *  read failure). A missing/unreadable file collapses to ONE placeholder covering the whole
+ *  excerpt (there is nothing to excerpt two sections FROM), not two per-section placeholders. */
+function loadGoalExcerptWithStatus(path: string): {
+  excerpt: string;
+  ok: boolean;
+  detail: string | null;
+  constraintsFound: boolean;
+  architectureFound: boolean;
+} {
   if (!existsSync(path)) {
     return {
-      chapter: `(PLAN.md not found at ${path} — proceeding with no architecture chapter available.)`,
+      excerpt: `(PLAN.md not found at ${path} — proceeding with no constraints section or architecture chapter available.)`,
       ok: false,
       detail: `PLAN.md not found at ${path}`,
+      constraintsFound: false,
+      architectureFound: false,
     };
   }
   let text: string;
@@ -278,28 +329,34 @@ function loadArchitectureChapterWithStatus(path: string): { chapter: string; ok:
     text = readFileSync(path, "utf8");
   } catch (e) {
     return {
-      chapter: `(PLAN.md at ${path} could not be read: ${String(e)} — proceeding with no architecture chapter available.)`,
+      excerpt: `(PLAN.md at ${path} could not be read: ${String(e)} — proceeding with no constraints section or architecture chapter available.)`,
       ok: false,
       detail: `PLAN.md at ${path} could not be read: ${String(e)}`,
+      constraintsFound: false,
+      architectureFound: false,
     };
   }
-  const chapter = extractArchitectureChapter(text);
+  const constraints = extractConstraintsSection(text);
+  const architecture = extractArchitectureChapter(text);
   return {
-    chapter: chapter ?? `(No "## Architecture" heading found in ${path} — proceeding with no architecture chapter available.)`,
+    excerpt: [constraints ?? constraintsPlaceholder(path), architecture ?? architecturePlaceholder(path)].join("\n\n"),
     ok: true,
     detail: null,
+    constraintsFound: constraints != null,
+    architectureFound: architecture != null,
   };
 }
 
-/** Load + extract the architecture chapter from disk. Missing/unreadable file or missing
- *  heading both degrade to an explicit placeholder string (never a throw, never a silent
- *  substitution of the raw file) — architecture review is advisory, so a docs read failure
- *  must not abort the round; the placeholder makes the degradation visible to anyone reading
- *  the architect's rendered prompt/transcript. Public signature UNCHANGED (delegates to
- *  loadArchitectureChapterWithStatus above) — several existing call sites/tests already depend
- *  on this returning a plain string. */
-export function loadArchitectureChapter(path: string): string {
-  return loadArchitectureChapterWithStatus(path).chapter;
+/** Load + extract the Constraints/Architecture excerpt from disk. Missing/unreadable file or
+ *  either heading missing all degrade to an explicit placeholder (never a throw, never a silent
+ *  substitution of the raw file) — architecture review is advisory, so a docs read failure must
+ *  not abort the round; the placeholder makes the degradation visible to anyone reading the
+ *  architect's rendered prompt/transcript. #1089: renamed from loadArchitectureChapter — its
+ *  name said architecture-only, but the payload it returns now carries both sections (this
+ *  codebase's own rule: no architecture-only-named function may do that); every call site/test
+ *  updated alongside the rename. */
+export function loadGoalExcerpt(path: string): string {
+  return loadGoalExcerptWithStatus(path).excerpt;
 }
 
 /** One candidate issue's block in the substituted prompt: number, title, labels, full body —
@@ -635,15 +692,18 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       // #128: deps.planMdPath is a TEST override only now — a real caller omits it and gets
       // cfg.goal.file (config-file-relative resolved, default DEFAULT_GOAL_FILE).
       const architecturePath = deps.planMdPath ?? deps.cfg.goal.file;
-      // #251 gate② review round 3 (F2): ONE read (loadArchitectureChapterWithStatus, above),
-      // consumed by both the prompt substitution and the architecture-chapter manifest row below
-      // — a round-2 draft duplicated existsSync/readFileSync in two places, which could disagree
-      // under concurrent file replacement (TOCTOU); a single read can't disagree with itself.
+      // #251 gate② review round 3 (F2), extended by #1089 to both sections: ONE read
+      // (loadGoalExcerptWithStatus, above), consumed by both the prompt substitution and the
+      // architecture-chapter manifest row below — a round-2 draft duplicated existsSync/
+      // readFileSync in two places, which could disagree under concurrent file replacement
+      // (TOCTOU); a single read can't disagree with itself.
       const {
-        chapter: architectureChapter,
-        ok: architectureChapterOk,
-        detail: architectureChapterDetail,
-      } = loadArchitectureChapterWithStatus(architecturePath);
+        excerpt: goalExcerpt,
+        ok: goalExcerptOk,
+        detail: goalExcerptDetail,
+        constraintsFound,
+        architectureFound,
+      } = loadGoalExcerptWithStatus(architecturePath);
       // The round design note needs SOME issue to live on (GitHub has no round/project-level
       // comment surface this role can write to — its writes are issue comment/label edit only);
       // the lowest-numbered candidate is an arbitrary but deterministic, reproducible anchor —
@@ -684,7 +744,7 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         "round.alignedGoals": alignedGoalsText,
         "round.lastMerged": lastMergedText,
         "round.doctrine": doctrineText,
-        "plan.architectureChapter": architectureChapter,
+        "plan.architectureChapter": goalExcerpt,
         "candidates.summary": candidatesSummaryText,
         "round.pool": poolDigest,
         "labels.blocked": deps.cfg.labels.blocked,
@@ -754,15 +814,18 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
         {
           ...architectManifestBase,
           channel: "architecture-chapter",
-          ok: architectureChapterOk,
+          ok: goalExcerptOk,
           // No fabricated version for a placeholder standing in for a failed read (InputManifest-
           // Row's own contract: version is "absent when there's nothing meaningful to hash").
-          version: architectureChapterOk ? contentVersion(architectureChapter) : null,
-          detail: architectureChapterOk ? null : architectureChapterDetail,
-          total: 1,
-          rendered: architectureChapterOk ? 1 : 0,
-          omitted: architectureChapterOk ? 0 : 1,
-          truncated: false, // loadArchitectureChapter extracts a heading section; it never caps by length
+          version: goalExcerptOk ? contentVersion(goalExcerpt) : null,
+          // #1089: on a failed read, the read-failure reason; on a successful read, which
+          // heading(s) (if any) weren't found — null when both Constraints and Architecture were
+          // present.
+          detail: goalExcerptOk ? describeMissingGoalHeadings(constraintsFound, architectureFound) : goalExcerptDetail,
+          total: 2, // #1089: the two sections (Constraints, Architecture), not one
+          rendered: goalExcerptOk ? [constraintsFound, architectureFound].filter(Boolean).length : 0,
+          omitted: goalExcerptOk ? [constraintsFound, architectureFound].filter((found) => !found).length : 2,
+          truncated: false, // loadGoalExcerpt extracts heading sections; it never caps by length
         },
         deps.log,
       );
