@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { guardDecision } from "./guard.js";
+// #1079 fix round 1 (P2, gate② R1): the test file (unlike guard.ts/guard-hook.ts, which must
+// stay import-free of engine config) may import the canonical runtime-path factory, so the
+// cross-module invariant test below can prove the guard blocks paths PRODUCTION CODE actually
+// resolves, not just its own mirrored `.sapwood` literal.
+import { runtimePaths, SAPWOOD_DIR } from "../config/paths.js";
+import { guardDecision, SAPWOOD_ROOT_SEGMENT } from "./guard.js";
 import { applyGuardMode, hookResponse, resolveGuardMode, responseFromText } from "./guard-hook.js";
 
 test("resolveGuardMode: only the exact 'soft' selects observe-mode; everything else -> hard (fail-safe)", () => {
@@ -261,6 +266,43 @@ test("BLOCK reason text: node kill.js ../../.sapwood/EMERGENCY_STOP names the .s
   assert.ok(d.reason.includes(".sapwood"), `reason must name the .sapwood root: ${d.reason}`);
   assert.ok(d.reason.includes("runtime root"), `reason must name the category: ${d.reason}`);
 });
+
+// #1079 fix round 1 (P2, gate② R1): a cross-module invariant, not a mirrored literal —
+// everything above tests guard.ts against hand-written `.sapwood` strings, which passes
+// whether or not production code actually resolves paths there. This proves two things
+// instead: the guard's segment constant agrees with #1077's `SAPWOOD_DIR` (the ONE place that
+// name is spelled for production code), and the guard actually blocks the REAL absolute/
+// relative paths `runtimePaths()` hands to state.ts/worker.ts/peripheral.ts — not paths this
+// test file invented. Either side drifting fails this test.
+test("#1079 fix round 1: guard's .sapwood segment agrees with #1077's SAPWOOD_DIR (single source of truth)", () => {
+  assert.equal(SAPWOOD_ROOT_SEGMENT, SAPWOOD_DIR);
+});
+
+const REAL_ROOT = `${CWD}/${SAPWOOD_DIR}`;
+const REAL_PATHS = runtimePaths(REAL_ROOT);
+const REAL_PROTECTED: [string, string][] = [
+  ["killSwitch", REAL_PATHS.killSwitch],
+  ["estop", REAL_PATHS.estop],
+  ["pause", REAL_PATHS.pause],
+  ["db (sqlite)", REAL_PATHS.db],
+  ["lock", REAL_PATHS.lock],
+];
+
+for (const [label, absPath] of REAL_PROTECTED) {
+  const relPath = absPath.slice(CWD.length + 1);
+  test(`#1079 fix round 1: Write BLOCK on the REAL runtimePaths() ${label} path, absolute (${absPath})`, () => {
+    const d = guardDecision("Write", { file_path: absPath }, CWD);
+    assert.equal(d.allow, false, `should block: ${absPath}`);
+  });
+  test(`#1079 fix round 1: Edit BLOCK on the REAL runtimePaths() ${label} path, relative (${relPath})`, () => {
+    const d = guardDecision("Edit", { file_path: relPath }, CWD);
+    assert.equal(d.allow, false, `should block: ${relPath}`);
+  });
+  test(`#1079 fix round 1: Bash (touch) BLOCK on the REAL runtimePaths() ${label} path`, () => {
+    const d = bash(`touch ${relPath}`);
+    assert.equal(d.allow, false, `should block: touch ${relPath}`);
+  });
+}
 
 // ── #731: sapwood pause/stop/estop CLI verbs — same control-sentinel boundary as the section
 // above, reached through the CLI verb instead of a literal path argument. Scope is deliberately
@@ -868,7 +910,7 @@ for (const file_path of [
   "README.md",
   "/repo/engine/src/forge.ts",
   ".github/ISSUE_TEMPLATE.md",
-  "data/README.md",
+  "vendor/README.md",
   // #1079 reverse: sibling names (segment must be EXACT) and the string inside a filename
   // segment stay allowed — a substring match would over-block these.
   ".sapwood-notes/x",

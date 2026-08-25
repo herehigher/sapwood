@@ -814,7 +814,11 @@ const PROTECTED_SUFFIXES = [
 // SAPWOOD_ROOT_SEGMENT is spelled locally, not imported from #1077's `runtimePaths()` module:
 // guard-hook.ts is a standalone binary spawned as a Claude CLI PreToolUse hook and must stay
 // free of engine-config imports.
-const SAPWOOD_ROOT_SEGMENT = ".sapwood";
+// Exported (test-only consumer) so guard.test.ts can assert this literal never drifts from
+// #1077's `SAPWOOD_DIR` (engine/src/config/paths.ts) — the guard itself still does not import
+// that module (see the comment above); the test file is the one place cross-module agreement
+// can be checked without pulling engine config into the standalone hook binary.
+export const SAPWOOD_ROOT_SEGMENT = ".sapwood";
 
 /** True when `abs` (a normalized absolute path) contains `.sapwood` as an EXACT path segment —
  *  the root itself or any descendant. Segment equality, not substring: a sibling name

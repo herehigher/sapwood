@@ -1007,10 +1007,10 @@ The asymmetry is compensated, but not erased, by several independent controls:
   [Accepted blind spots](#accepted-blind-spots) section above for what that detector does and
   does not do. Warn-only observation, same as everything else in this paragraph — it never
   enforces the backstop.
-- `engine/src/roles/worker.ts` does not add the engine `data/` directory as a Claude tool
-  root (there is no `--add-dir data`), so the tool layer does not offer a path into it.
-  This is not Bash containment: worker Bash can reach `../../data`, exactly the residual
-  documented under [Sentinel isolation boundary](#sentinel-isolation-boundary-honest-statement).
+- `engine/src/roles/worker.ts` does not add the engine `.sapwood/` runtime root as a Claude
+  tool root (there is no `--add-dir .sapwood`), so the tool layer does not offer a path into
+  it. This is not Bash containment: worker Bash can reach `../../.sapwood`, exactly the
+  residual documented under [Sentinel isolation boundary](#sentinel-isolation-boundary-honest-statement).
 - Merge authority remains a separate choke point. Only
   `engine/src/roles/merge-driver.ts` calls `IForge.mergePR`, after the CI/review gates and a
   final fresh decision; `engine/src/forge/forge.ts` pins the operation with
@@ -1487,15 +1487,18 @@ a review-mode session (`reviewCwd`) NEVER does, enforced structurally in
 `RoleRunner.run()` itself, the same way that mode already hardcodes its tool profile and closes
 its MCP/settings surface.
 
-**Narrowed to two documented classes, not machinery-closed (#656):** the guard's `.sapwood/`
+**Narrowed to three documented classes, not machinery-closed (#656):** the guard's `.sapwood/`
 runtime-root write-deny rule ([Sentinel isolation boundary](#sentinel-isolation-boundary-honest-statement))
 covers a published role-skills hash directory the same way it covers every other path under the
 runtime root — a worker's `Write`/`Edit`/`MultiEdit`/`NotebookEdit`, or a Bash write vector,
-targeting it is denied without a role-skills-specific rule. What remains open is exactly the two
-classes that section documents, no wider: inherited MCP write tools never reach the guard hook,
-and symlink aliasing is judged lexically, on the argument's text, not the filesystem's resolved
-target. Detection/disclosure of anything outside those two classes is still the honest response,
-not a claim that this rule closes every route in.
+targeting it is denied without a role-skills-specific rule. What remains open is exactly the
+three classes that section documents, no wider: inherited MCP write tools never reach the guard
+hook; symlink aliasing is judged lexically, on the argument's text, not the filesystem's
+resolved target; and opaque indirection (an environment-assignment token, a script's hardcoded
+path, or another CLI form the argv walk doesn't parse) is invisible to the same argv-only
+judgment the previous sentinel regex already had. Detection/disclosure of anything outside
+those three classes is still the honest response, not a claim that this rule closes every
+route in.
 
 ### Fix-loop `fixing` lane state
 
@@ -2085,21 +2088,21 @@ semantic, not a rules engine.
 ## Human controls (three tiers)
 
 sapwood has three independent file-sentinel controls, all living next to the engine's
-state DB (`data/`), without requiring a config edit:
+state DB (`.sapwood/`), without requiring a config edit:
 
-- **Emergency stop** (`data/EMERGENCY_STOP`) — the strictest tier. It takes precedence over the
-  kill switch every tick and hard-kills running/fixing lane process groups without a drain
+- **Emergency stop** (`.sapwood/EMERGENCY_STOP`) — the strictest tier. It takes precedence over
+  the kill switch every tick and hard-kills running/fixing lane process groups without a drain
   window. In-flight WIP is lost; killed lanes escalate to `needs-human` with their evidence
   preserved. Use `/sapwood-stop --emergency` to set it and `--clear-emergency` only after human
   review.
-- **Kill switch** (`data/KILL_SWITCH`) — the drain-first tier. Freezes *all* new dispatch and
+- **Kill switch** (`.sapwood/KILL_SWITCH`) — the drain-first tier. Freezes *all* new dispatch and
   merges. Running workers are asked to hand off gracefully within
   `cost.drainWindowSec`; past that window the conductor escalates to a hard
   process-tree kill. Everything else freezes too: no dispatch, no drive/merge, no
   rollback retry, no reclaim-and-requeue of crashed lanes. Set/lift it with
   `/sapwood-stop` (no argument to set, `--lift` to remove) or by touching/removing the
   file directly.
-- **Pause** (`data/PAUSE`) — the gentle tier. Freezes *new dispatch only*. Everything
+- **Pause** (`.sapwood/PAUSE`) — the gentle tier. Freezes *new dispatch only*. Everything
   already in flight — running workers, PRs already moving through the review/merge
   gate — proceeds exactly as normal. No drain, nothing killed. Use this to stop taking
   on new issues while letting the current round finish (e.g. before a maintenance
@@ -2110,23 +2113,23 @@ the kill switch, and either strict tier subsumes pause's dispatch restriction.
 
 **Interaction with `--until-idle`:** a paused engine dispatches nothing, so once its
 in-flight lanes finish it counts as idle and the run exits on its own — "finish the
-round, then stop." Removing `data/PAUSE` afterward doesn't resume anything by itself;
+round, then stop." Removing `.sapwood/PAUSE` afterward doesn't resume anything by itself;
 start a new `sapwood run`. Under the daemon (`forever`) mode, the engine keeps ticking
 and `--resume` takes effect on the very next tick.
 
 ### Sentinel isolation boundary (honest statement)
 
-The engine's `data/` directory (the state DB) sits outside worker git worktrees as a
-**permission-layer boundary** — the worker process is not launched with `--add-dir data`,
+The engine's `.sapwood/` runtime root (the state DB) sits outside worker git worktrees as a
+**permission-layer boundary** — the worker process is not launched with `--add-dir .sapwood`,
 so it has no `claude`-tool path into that directory. This is **not an OS-level sandbox**,
 so the guard (`engine/src/guard/guard.ts`) adds defense-in-depth on top of that boundary.
 
 The guard's write-deny rule (`protectedPathLabel`, `checkControlSentinelArg`) no longer
-enumerates individual filenames — it targets the fixed `.sapwood/` engine runtime root as a
-whole (#1079), so one segment-equality rule covers the three control sentinels together with
-everything else the root holds — sqlite, sessions, the review clone,
-`generated/role-skills/**` (#656) — instead of naming each path separately. A write-class
-built-in tool (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`) or a Bash write vector
+enumerates individual filenames — it targets the fixed `.sapwood/` runtime root as a whole
+(#1079), so one segment-equality rule covers the three control sentinels together with
+everything else the runtime directory holds, instead of naming each path separately (the
+directory's own layout is documented in `docs/configuration.md`, not restated here). A
+write-class built-in tool (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`) or a Bash write vector
 (`touch`/`rm`/`mv`/`sed -i`/`perl -i`/`tee`/`dd`/`cp`/`install`/redirect-to-path, or
 `git rm`/`mv`/`restore`/`checkout`) is denied whenever its lexically normalized target contains an
 exact path segment `.sapwood` — the root itself (`rm -rf .sapwood`) or any descendant
@@ -2139,24 +2142,34 @@ match — segment equality, not substring. Root equality also closes the old "di
 deleted without ever naming a sentinel" gap: `rm -rf ../../.sapwood` now matches directly,
 since the root itself is a hit, not just a file inside it.
 
-Honest scope, stated plainly, not claimed as exhaustive:
+Honest scope, stated plainly, not claimed as exhaustive — three residual classes, not one
+mechanism this rule closes completely:
 
-- **Guarded built-in tool family only.** Inherited MCP write tools never reach the guard
+- **(a) Guarded built-in tool family only.** Inherited MCP write tools never reach the guard
   hook — its PreToolUse matcher names only `Bash`/`Write`/`Edit`/`MultiEdit`/`NotebookEdit`/
   `Read`/`Grep`/`Glob`/`NotebookRead`, no `mcp__` pattern at all (see
   [Worker denylist vs. peripheral allowlist](#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry)
   for the full account). A write/exec-class MCP server an operator's config registers can
   write anywhere on disk, `.sapwood/` included, without the guard ever being asked.
-- **Symlink aliasing is a lexical residual — the same class this rule already carried, not
-  widened or closed by moving from an enumerated regex to a root rule.** The guard judges
+- **(b) Symlink aliasing is a lexical residual — the same class this rule already carried,
+  not widened or closed by moving from an enumerated regex to a root rule.** The guard judges
   the path segments a Bash/file-tool argument spells out after `normalizePath`'s traversal
   collapse; it does not `realpath`/`lstat` anything (no filesystem canonicalisation is
   added). A symlink whose own name carries no `.sapwood` segment but resolves onto
   something under the runtime root — or the reverse — is judged on the argument's text, not
-  the filesystem's resolved target. A script that hardcodes such a path *inside its own
-  source* rather than taking it as a CLI argument is the same kind of gap: the guard judges
-  the Bash command line, not a script's file contents, so `node some-script.js` (no path
-  argument) is opaque to it.
+  the filesystem's resolved target.
+- **(c) Opaque indirection is a lexical residual too — the same class the previous sentinel
+  regex already had, not widened.** The Bash argv walk (`checkControlSentinelArg`) only sees
+  tokens on the command line it can parse as a bare word or a `-`-prefixed glued flag; a path
+  reaching the filesystem some other way is invisible to it: an environment assignment glued
+  to the SAME command line (`TARGET=.sapwood/PAUSE node writer.js` — the token
+  `TARGET=.sapwood/PAUSE` normalizes as one segment, `TARGET=.sapwood`, not `.sapwood`, so it
+  never matches, and the assignment isn't a `-`-prefixed flag either); a script that hardcodes
+  the path *inside its own source* rather than taking it as a CLI argument (`node
+  some-script.js`, no path argument — the guard judges the Bash command line, not a script's
+  file contents); or any other CLI form the walk doesn't reach. No machinery is added here to
+  close this class — the same "document the residual, don't chase it with more machinery"
+  stance this file's other HONEST SCOPE notes already take.
 
 **`sapwood pause`/`stop`/`estop` are NOT an instance of the residual class above —
 they are their own, distinct class the guard fences separately.** The bullets above are
