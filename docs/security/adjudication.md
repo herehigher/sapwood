@@ -14,19 +14,21 @@ independent of any permission boundary.
 | --- | --- | --- |
 | Before a worker spawns, DISPATCH persists `{hash, body, manifest}`; a write failure rolls the claim back like a spawn failure. | `conductor.ts` DISPATCH + `State.recordAcSnapshot` | `conductor.test.ts`: "tick dispatch: an AC snapshot is persisted BEFORE the worker ever spawns …" |
 | A non-`verify:n/a` issue with a missing or malformed checkbox AC set is not dispatchable. | `forge.ts::isDispatchable` | `forge.test.ts`: "isDispatchable: #283 — a malformed/empty checkbox AC set … verify:n/a is exempt" |
-| Before DRIVE reaches `gate.driveOne`, ANY live-body drift from the recorded snapshot fails closed to `needs-human`; `driveOne` is never invoked that tick. | `conductor.ts::checkAcDriftBeforeDrive`; `ac-snapshot.ts::checkAcSnapshotDrift` | `conductor.test.ts`: "tick DRIVE: AC-snapshot drift routes to needs-human … driveOne is NEVER called" |
-| A lane with no recorded snapshot is not treated as drift — it drives normally (only NEW dispatches are tightened). | `conductor.ts::checkAcDriftBeforeDrive` (missing-snapshot arm) | `conductor.test.ts`: "tick DRIVE: a driving lane with NO recorded AC snapshot … is never treated as drift — drives normally" |
-| The AC-authority hash excuses only a well-formed marker line; any other byte change — including a marker-shaped line with extra payload — still drifts. | `ac-snapshot.ts::hashBodyForAcAuthority` | `ac-snapshot.test.ts`: "hashBodyForAcAuthority: a marker-line-only diff … hashes IDENTICALLY" |
+| At drive and at fix-leg spawn, ANY live-body drift from the recorded snapshot fails closed to `needs-human` with a drift-explaining comment; the lane never proceeds that tick. | `conductor.ts::checkAcAuthorityFreshness` (drive, fix-leg-spawn); `ac-snapshot.ts::checkAcSnapshotDrift` | `conductor.test.ts`: "tick DRIVE: AC-snapshot drift routes to needs-human with a drift-explaining comment, and driveOne is NEVER called …"; `ac-snapshot.test.ts`: "checkAcSnapshotDrift: ANY body change (not just inside the AC section) is drift" |
+| A lane that never recorded a snapshot (dispatched before AC snapshots existed) is not treated as drift — it drives normally; only new dispatches are tightened. | `conductor.ts::checkAcDriftBeforeDrive` (legacy-lane arm, null `ac_body_hash`) | `conductor.test.ts`: "tick DRIVE: a driving lane with NO recorded AC snapshot … is never treated as drift — drives normally" |
+| The AC-authority hash excuses a well-formed marker line and whitespace-only normalization (see Boundaries); every other byte change — including a marker-shaped line with extra payload — still drifts. | `ac-snapshot.ts::hashBodyForAcAuthority` | `ac-snapshot.test.ts`: "hashBodyForAcAuthority: a marker-line-only diff … hashes IDENTICALLY" |
 | `hashBody`/`checkBodyDrift` stay raw — a marker edit must still register as a change there. | `ac-snapshot.ts::hashBody`; `comment-cursor-gate.ts::checkBodyDrift` | `comment-cursor-gate.test.ts`: "checkBodyDrift: a marker-only advance … STILL counts as drift" |
 | The pre-drive comment-cursor recheck reads the live body the sibling drift check fetched, never the frozen snapshot body. | `conductor.ts::checkCommentCursorBeforeDrive` | `conductor.test.ts`: "#752 (inverted #676 drift test): a live body edit that ONLY advances the cursor marker … driveOne IS invoked" |
-| Each `WorkerRow` stamps its own dispatch-time hash; a mismatch against the issue's current snapshot, or a missing snapshot, escalates as a fail-closed anomaly. | `conductor.ts::checkAcDriftBeforeDrive` (ownership check) | `conductor.test.ts`: "tick DRIVE (#301 P1#3): a reclaimed lane's stale ac_body_hash … escalates as an ownership anomaly" |
+| Each `WorkerRow` stamps its own dispatch-time hash; a mismatch against the issue's current snapshot, or that snapshot going missing despite this lane having recorded one, escalates as a fail-closed anomaly. | `conductor.ts::checkAcDriftBeforeDrive` (ownership check) | `conductor.test.ts`: "tick DRIVE (#301 P1#3): a reclaimed lane's stale ac_body_hash … escalates as an ownership anomaly" |
 | The engine-agent session reads the frozen snapshot body/manifest, never re-fetching or re-extracting; a missing snapshot is `unavailable`, fail-closed. | `engine-agent.ts::EngineAgentReviewer.evaluate` | `engine-agent.test.ts`: "evaluate(): no AC snapshot recorded for the issue -> unavailable, fail closed …" |
 | AC manifest ids (ordinal+hash) are stable per extraction only; drift detection stops a changed body being re-extracted as an equivalent id set. | `forge.ts::extractAcceptanceCriteria` (id scheme) | `forge.test.ts`: "extractAcceptanceCriteria corpus: editing one criterion's text changes only ITS id …" |
 
 **Boundaries**
 
-- The hash also folds CRLF→LF and collapses blank-line-run/trailing whitespace, whole-body (not
-  fence-aware, unlike the marker strip) — `ac-snapshot.ts::normalizeForAcAuthority`;
+- A well-formed marker is the ENTIRE trimmed line `<!-- sapwood:comments-adjudicated-through: N -->`
+  where `N` is `0` or a bare digit run (the standalone-line convention `comment-cursor.ts` also
+  follows). The hash also folds CRLF→LF and collapses blank-line-run/trailing whitespace, whole-body
+  (not fence-aware, unlike the marker strip) — `ac-snapshot.ts::normalizeForAcAuthority`;
   `ac-snapshot.test.ts`: "a marker newly appended MID-BODY … hashes identically".
 - A drifted lane has no re-extraction path — only a renewed gate⓪ pass lets it drive again
   (`conductor.ts::checkAcDriftBeforeDrive`).
@@ -34,9 +36,10 @@ independent of any permission boundary.
   `@codex review` comment (`reviewer.ts::CodexReviewer.triggerReview`); the conductor's drift gate
   runs before either reviewer kind reaches its gate path, so a drifted lane never reaches that read
   either.
-- The comment-cursor recheck's live-body argument is `null` only on the pre-#283 legacy-lane arm
-  (no snapshot to drift-check against); on that arm it falls back to the snapshot body and does not
-  re-verify ownership — a pre-existing, unwidened gap, not introduced here.
+- The comment-cursor recheck (at drive and fix-leg spawn) has a `null` live-body argument only on
+  the legacy arm (a lane dispatched before AC snapshots existed, no snapshot to drift-check
+  against); it then falls back to the snapshot body and does not re-verify ownership — a
+  pre-existing, unwidened gap, not introduced here.
 - `ac_snapshots` is upsert-by-issue: a `failed`-with-PR lane awaiting GATED RECLAIM does not block
   a fresh dispatch of the same issue, so a later dispatch can legitimately overwrite the snapshot an
   older, un-reclaimed lane still depends on — the per-lane ownership check above
@@ -45,11 +48,12 @@ independent of any permission boundary.
 ## CI execution evidence for engine-agent review
 
 A code-verifiable AC reaches `confirmed` only through two checks: the review session statically
-maps the AC to a named, substantive, non-skipped test and checks its assertions are meaningful;
-separately, `review/ci-evidence.ts::requiredChecksSatisfied` requires every configured
-`ci.requiredChecks` `{name, app}` pair to match a current-head CheckRun with conclusion `SUCCESS`
-from that exact GitHub App slug — a same-named check from another app is not evidence, and legacy
-status contexts, `SKIPPED`, `NEUTRAL`, queued, and in-progress CheckRuns never satisfy this chain.
+maps the AC to a named, substantive, non-skipped test on the discovery path and checks its
+assertions are meaningful; separately, `review/ci-evidence.ts::requiredChecksSatisfied` requires
+every configured `ci.requiredChecks` `{name, app}` pair to match a current-head CheckRun with
+conclusion `SUCCESS` from that exact GitHub App slug — a same-named check from another app is not
+evidence, and legacy status contexts, `SKIPPED`, `NEUTRAL`, queued, and in-progress CheckRuns never
+satisfy this chain.
 
 `ci.requiredChecks: []` parses but warns under `reviewer.mode: engine-agent` (`config.ts`); every
 PR then queues forever at the CI-evidence preflight without ever spending on a review session.
@@ -64,7 +68,7 @@ never statically proves a named CheckRun executed a particular command.
 which checks count as trusted EVIDENCE for a code-verifiable AC; it never narrows which checks gate
 the merge itself. `PRStatus.ciGreen` (`forge.ts`) requires the entire status-check rollup to pass —
 a non-required check can still block a merge by being red, pending, or concluding without ever
-passing (`ciInert` — SKIPPED/NEUTRAL/CANCELLED/STALE/ACTION_REQUIRED), but can never authorize one
+passing (`ciInert` — e.g. SKIPPED/NEUTRAL/CANCELLED/STALE/ACTION_REQUIRED), but can never authorize one
 on its own; only a fully green rollup does that.
 
 ## The comment-adjudication cursor
