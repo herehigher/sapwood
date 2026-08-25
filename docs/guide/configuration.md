@@ -51,25 +51,38 @@ required; every other key has a default.
 ## The `.sapwood/` runtime directory
 
 `.sapwood/` is the fixed name of the engine's own runtime root — every runtime path in the
-codebase is spelled from `engine/src/config/paths.ts`'s `runtimePaths()`, so this tree is exact,
-not illustrative:
+codebase is spelled from `engine/src/config/paths.ts`'s `runtimePaths()`. Every line below is
+one `runtimePaths()` field's relative path, verbatim; `scripts/runtime-dir-docs.test.ts` parses
+this block and diffs it against `runtimePaths()` directly, so the tree cannot silently drift
+from the code:
 
 ```
-<repo>/.sapwood/                 ← fixed name; engine-exclusive; resolved from cwd (= repo root)
-  .gitignore                     ← "*" — written when the engine/init creates the dir
-  sapwood.sqlite (+ -wal, -shm)  ← durable recovery truth
-  sapwood.lock (+ .tmp-*, .takeover/)
-  KILL_SWITCH | EMERGENCY_STOP | PAUSE | ESCALATION
-  DIRECTIVE.md ; directives/round-N.md
-  rounds/round-N.md
-  proxy-bundles/<hash>.json      ← evidence indexed by sqlite (state)
-  logs/sapwood.log[.1]           ← default; `logging.path` may point elsewhere
-  keys/worker-deploy-key[-<host>] (+.pub)   ← 0600
-  sessions/{state,roles,review-codex}/      ← state (recovery truth)
-  attention-dismissals.jsonl
-  cache/                         ← CACHEDIR.TAG (standard signature); delete only when no engine runs
-    review/clone.git ; review/trees/
-    generated/role-skills/<hash>/ (+ .stage-*)
+.sapwood/                     ← engine-exclusive; resolved from cwd (= repo root)
+.gitignore                    ← "*" — written when the engine/init creates the dir
+sapwood.sqlite                ← durable recovery truth
+sapwood.sqlite-wal
+sapwood.sqlite-shm
+sapwood.lock                  ← + .tmp-* / .takeover/ while a takeover is in progress
+KILL_SWITCH
+EMERGENCY_STOP
+PAUSE
+ESCALATION
+DIRECTIVE.md                  ← current round directive
+directives                    ← archived past directives, one per round
+rounds                        ← derived round-close Markdown, one per round
+proxy-bundles                 ← evidence bundles indexed by sqlite, one <hash>.json each
+logs                          ← rotates to logs/sapwood.log.1
+logs/sapwood.log              ← default; `logging.path` may point elsewhere
+keys                          ← worker-deploy-key[-<host>] (+ .pub), 0600
+sessions/state
+sessions/roles
+sessions/review-codex
+attention-dismissals.jsonl
+cache                         ← CACHEDIR.TAG signature; delete only when no engine runs
+cache/CACHEDIR.TAG
+cache/review/clone.git
+cache/review/trees
+cache/generated/role-skills   ← per-round hash dirs, each with a .stage-* sibling while materializing
 ```
 
 **Two classes.** **State** is everything directly under `.sapwood/`: back it up, and never
