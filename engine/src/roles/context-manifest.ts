@@ -23,11 +23,11 @@
 // is data the caller already gathered) so the "fixture env in, manifest out" shape the #236
 // verification plan asks for needs no real filesystem or spawned CLI. resolveWorktreeHead is the
 // one exception: it reads git's own plumbing files directly (`.git`, `HEAD`, loose/packed refs)
-// — PURE FILESYSTEM, never a subprocess. That's deliberate: worker.test.ts's #69 grep-invariant
-// test pins that `node:child_process` is importable ONLY by worker.ts (spawning the `claude` CLI
-// itself) and gh.ts (`gh` via execFile) — no engine module, this one included, may ever exec
-// `git`. Reading git's plumbing files by hand is the only way to recover a worktree's HEAD
-// commit without crossing that boundary.
+// — PURE FILESYSTEM, never a subprocess. That's deliberate: no git subprocess is ever run against
+// a session-controlled worktree — a worker-set `filter.<name>.clean` turns even `git status` into
+// code execution (the #65 RCE class; docs/security/ambient-repo-context.md). Reading git's
+// plumbing files by hand is the only way to recover a worktree's HEAD commit without ever
+// invoking `git` against it.
 //
 // Persistence lives in state.ts's context_manifests table (own table, own methods — see the
 // schema v13->v14 migration comment), keyed by (round, phase, role, session, attempt). Issue
@@ -95,9 +95,10 @@ export interface WorktreeGitState {
   head: string | null;
   headResolution: "resolved" | "unresolved";
   dirty: boolean;
-  /** How `dirty` was determined — never a measured `git status` call (this engine execs `git`
-   *  nowhere outside worker.ts's claude-launch spawn / gh.ts's `gh` calls; see this module's
-   *  header doc), so every value here is a DERIVATION, not a live read:
+  /** How `dirty` was determined — never a measured `git status` call (no git subprocess is ever
+   *  run against a session-controlled worktree; a worker-set `filter.<name>.clean` turns that
+   *  into code execution, the #65 RCE class — see docs/security/ambient-repo-context.md), so
+   *  every value here is a DERIVATION, not a live read:
    *  - `"structural-no-write-tools"` — the session's effective ENGINE-GRANTED `--allowedTools`
    *    string carries NO WRITE-CAPABLE tool NAME (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`/any
    *    `Bash(...)` entry — every peripheral role's `ROLE_ALLOWED_TOOLS`/`PO_ALLOWED_TOOLS`/
@@ -392,12 +393,11 @@ function isWorktreeLocalRef(ref: string): boolean {
 }
 
 /** Resolve `worktreePath`'s current HEAD commit via PURE FILESYSTEM reads of git's own plumbing
- *  files — no subprocess (see this module's header doc for why: the engine structurally never
- *  execs `git` outside worker.ts's claude-CLI-launch spawn and gh.ts's `gh` calls, pinned by
- *  worker.test.ts's #69 grep-invariant test). Handles the linked-worktree `.git` FILE form
- *  `git worktree add` always produces (a `gitdir:` pointer) — never a plain `.git` DIRECTORY,
- *  which resolves to null here (this function is only meant to run against an actual linked
- *  worktree). Resolves a detached HEAD directly, or a symbolic ref.
+ *  files — no subprocess (see this module's header doc for why: no git subprocess is ever run
+ *  against a session-controlled worktree, docs/security/ambient-repo-context.md). Handles the
+ *  linked-worktree `.git` FILE form `git worktree add` always produces (a `gitdir:` pointer) —
+ *  never a plain `.git` DIRECTORY, which resolves to null here (this function is only meant to
+ *  run against an actual linked worktree). Resolves a detached HEAD directly, or a symbolic ref.
  *
  *  NAMESPACE-AWARE lookup (Codex F4, corrected direction in R3): a ref under one of the small,
  *  ENUMERATED worktree-local namespaces (`refs/bisect/*`, `refs/rewritten/*`,

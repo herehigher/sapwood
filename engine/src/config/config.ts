@@ -943,7 +943,7 @@ const ProxyConfig = z
 // PO_ALIGN_ALLOWED_TOOLS/PO_TRIAGE_ALLOWED_TOOLS named exports). Default true: the capability is
 // read-only, carries no credential into any project system, is strictly weaker than the egress
 // the worker already has unrestricted (docs/security/egress.md#worker-network-egress-bash-channel-containment-available-as-a-hardening-profile
-// "Worker network egress: accepted blind spot"), and every call is journalled through the SAME scanEgressSuspects path the worker's own
+// "Worker network egress: Bash-channel containment available as a hardening profile"), and every call is journalled through the SAME scanEgressSuspects path the worker's own
 // tripwire uses (worker.ts). `false` falls every one of those three sessions back to the base
 // ROLE_ALLOWED_TOOLS/PO_ALLOWED_TOOLS pair — no WebSearch/WebFetch reaches them at all. The
 // review family (verification-plan-reviewer/verification-plan-drafter/verification-plan-reviewer-confirm, and every gate② reviewer
