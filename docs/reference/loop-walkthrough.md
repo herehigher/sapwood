@@ -286,7 +286,7 @@ Done}; `Done` is terminal.
 
 ## 8. Frontend responsibilities and boundaries
 
-**The dashboard is a read-only truth renderer.** Its entire authority:
+**The dashboard is a truth renderer that reads engine state read-only.** Its entire authority:
 
 - **Reads**: state DB read-only (`node:sqlite`), `.sapwood/` sentinel existence,
   `.sapwood/rounds/*.md`. `round_artifacts` **is** the round-history contract

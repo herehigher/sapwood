@@ -188,7 +188,7 @@ Commands:
                  in-flight workers, then hard-kill (see --help)
   estop [clear]  Create/remove the .sapwood/EMERGENCY_STOP sentinel — immediate hard kill, no
                  drain, in-flight WIP is lost. Activating REQUIRES --confirm (see --help)
-  dashboard      Start the read-only dashboard server and open it in a browser (see --help)
+  dashboard      Start the dashboard server and open it in a browser (see --help)
     --port PORT    Bind this port instead of the default (see --help)
     --config PATH  Load config from this path instead of probing the defaults
   validate [path]  Load + validate a sapwood config file, report OK or the issues
@@ -1855,17 +1855,19 @@ export function runEstop(argv: string[]): { stdout: string; stderr: string; code
   return runSentinelCommand(argv, SENTINEL_SPECS.estop);
 }
 
-// ── #743: `sapwood dashboard` — start the read-only data server + open a browser ───────────
+// ── #743: `sapwood dashboard` — start the dashboard server + open a browser ────────────────
 
 const DASHBOARD_BUILD_HINT = "npm run build -w dashboard";
 
 const DASHBOARD_USAGE = `\
 usage: sapwood dashboard [--port PORT] [--config PATH]
 
-Starts the dashboard's read-only data server (dashboard/server.ts) against the same state DB
-\`sapwood run\`/\`status\` use (${DEFAULT_DB_PATH}), then opens it in your default browser. In a
-headless/no-display environment where no browser can be opened, the server still runs — the URL
-is printed instead, and the process keeps serving until you press Ctrl+C.
+Starts the dashboard's data server (dashboard/server.ts) against the same state DB
+\`sapwood run\`/\`status\` use (${DEFAULT_DB_PATH}), then opens it in your default browser. The
+state DB is opened read-only; with \`dashboard.controls\` enabled (the default), the server also
+serves loopback-only control routes. In a headless/no-display environment where no browser can
+be opened, the server still runs — the URL is printed instead, and the process keeps serving
+until you press Ctrl+C.
 
 Flags:
   --port PORT    Bind this port instead of the default (${DEFAULT_DASHBOARD_PORT}). Overrides
