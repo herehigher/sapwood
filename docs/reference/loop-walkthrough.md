@@ -218,25 +218,18 @@ the matching vocabulary.
 
 ## 7. Board Status ownership — who moves what, when
 
-Board Status transitions each have **exactly one owner**, and ownership is
-structural, not conventional: peripheral roles carry no engine-granted `gh`
-capability at all; the normal worker profile pairs a `Bash(gh *)` grant with
-a deny list that denies `gh pr merge*`, `gh pr ready*`, `gh pr review*`, `gh
-release*`, `gh issue edit*`, `gh label*`, and `gh project*` as WHOLE verbs
-(`engine/src/roles/worker.ts::WORKER_DISALLOWED_TOOLS`). The guard hook
-blocks independently, at the argv layer: `gh pr merge`/`gh pr ready`/`gh
-label`/`gh project`/`gh release` as whole subcommands too, but only a
-narrower slice of `gh pr review` (`--approve`/`--request-changes`) and `gh
-issue edit` (governance-flagged mutations only — a plain `--body` edit still
-passes), plus `gh issue` lifecycle verbs (`close`/`reopen`/`transfer`/
-`delete`), `gh graphql` mutations outright, and `gh api` mutations scoped to
-issue-governance/release/PR-merge paths (`engine/src/guard/guard.ts`'s
-`checkCategoryC`/`checkGhApi`). Neither layer is absolute — an inherited
-ambient MCP server (the guard's matcher never covers `mcp__` tools) or a
-host with `allowManagedPermissionRulesOnly` set can bypass it entirely, an
-accepted blind spot ([`docs/security.md`](../security.md#accepted-blind-spots))
-— so every Status write a session CAN reach leaves only through the
-engine's `setBoardStatus`. The board is the management-side *view*; the runtime truth
+Board Status transitions are assigned an owner on sapwood's engine-supplied
+tool paths: peripheral roles have no engine-granted `gh` capability; the
+normal worker profile pairs `Bash(gh *)` with `WORKER_DISALLOWED_TOOLS`; and
+the guard separately blocks the named `gh` governance commands, including
+`gh project` and relevant `gh api`/`gh api graphql` mutations. These layers
+are not absolute: `allowManagedPermissionRulesOnly` discards the CLI
+allow/deny arguments but not the guard hook, while a differently named
+ambient MCP server evades the name-based MCP denies and never reaches the
+guard matcher; both are accepted blind spots
+([`docs/security.md`](../security.md#accepted-blind-spots)). Engine-owned
+Status transitions go through `setBoardStatus`, while backlog → Ready
+remains human-owned. The board is the management-side *view*; the runtime truth
 source is SQLite + sentinels (§6) — the engine writes Status but never reads
 it back for recovery (the one read is the Ready lane: the human authorization
 channel, not a recovery channel).
