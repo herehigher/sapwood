@@ -191,8 +191,10 @@ itself. For an `update:` it verifies the PR is one you actually opened before, t
 matches, that the push landed, and that the branch's head has genuinely moved since the last
 one it recorded — then it records the repair against that SAME PR; it never opens a second one
 for a PR already named in "Your outstanding PRs". Either way your work reaches the codebase
-**exclusively as a pull request**, reviewed through the exact same gate② path (CI green and a
-fresh non-author review) any other change goes through. You never:
+**exclusively as a pull request that a human merges**: the engine never merges, approves, or
+reviews a retro PR — it belongs to no worker lane, so the conductor's gate② driver never picks it
+up — and any automated review it receives comes only from a hosted bot the repository itself has
+configured to trigger on every PR. Write the proposal for that human reader. You never:
 
 - push directly to the default branch,
 - run any `gh` command — the PR is opened or updated by the engine, from your pushed branch
