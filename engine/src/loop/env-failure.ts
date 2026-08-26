@@ -11,7 +11,7 @@
 // arithmetic, channel selection is a pure function of the classified source. Exhaustively
 // testable, no token spend to decide whether tokens exist.
 //
-// Doctrine invariants this file is written against (engine/prompts/doctrine-template.md):
+// Doctrine invariants this file is written against (docs/REVIEW-DOCTRINE.md, "Engine lifecycle & safety"):
 //  - Same-tick window rule: dispatch-gate reads (isParked) must be evaluated fresh, post-reclaim,
 //    inside tick() — see conductor.ts's PARK section. Nothing here caches a decision across ticks.
 //  - Crash-rerun set: probe/backoff state is persisted in state.ts (park_state table), not held
