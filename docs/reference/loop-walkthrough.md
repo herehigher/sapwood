@@ -219,8 +219,11 @@ the matching vocabulary.
 ## 7. Board Status ownership — who moves what, when
 
 Board Status transitions each have **exactly one owner**, and ownership is
-structural, not conventional: workers and roles carry zero `gh` grants
-(#110), so every Status write can only leave through the engine's
+structural, not conventional: peripheral roles carry no engine-granted `gh`
+capability at all, while workers have a limited `Bash(gh *)` grant whose deny
+list (`gh pr merge`, `gh pr ready`, `gh pr review`, `gh release`, `gh issue
+edit`, `gh label`, `gh project`) plus the guard hook block every governance
+write, so every Status write can only leave through the engine's
 `setBoardStatus`. The board is the management-side *view*; the runtime truth
 source is SQLite + sentinels (§6) — the engine writes Status but never reads
 it back for recovery (the one read is the Ready lane: the human authorization
@@ -284,9 +287,12 @@ Done}; `Done` is terminal.
   `.sapwood/rounds/*.md`. `round_artifacts` **is** the round-history contract
   (schema-versioned; the UI checks `schemaVersion` and says "newer schema —
   update the dashboard" rather than mis-render).
-- **Writes: none.** No sentinel creation (kill/pause stay CLI/human acts —
-  a write path would break the read-only security posture and turn the
-  dashboard into an attack surface), no config editing, no GitHub writes.
+- **Writes:** with `dashboard.controls` enabled, the loopback-only
+  `POST /api/control` creates or removes engine sentinels and
+  `POST /api/attention/dismiss` appends the operator-owned dismissals file —
+  gated by config so a spectator deployment has no such route to POST at,
+  preserving the read-only security posture; it never writes SQLite, config,
+  or GitHub.
   The dashboard may *display* the exact command to run (`touch
   .sapwood/KILL_SWITCH`), never a button that runs it.
 - **Not the frontend's job**: deciding state (the truth table above is

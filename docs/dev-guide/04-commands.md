@@ -6,10 +6,10 @@ The suite uses colocated `node:test` files loaded through `tsx`. The source carr
 
 | Working directory | Command | What it runs |
 | --- | --- | --- |
-| repository root | `npm test` | `npm run -ws test`; currently the engine's `node --import tsx --test "src/**/*.test.ts"`. |
+| repository root | `npm test` | `npm run -ws test && node --test scripts/*.test.ts`; runs the engine and dashboard workspace suites plus the root scripts suite. |
 | repository root | `npm run lint` | `biome ci .` using `biome.json`. |
-| repository root | `npm run typecheck` | `npm run -ws typecheck`; currently `tsc -p tsconfig.typecheck.json` in the engine. |
-| repository root | `npm run build` | `npm run -ws build`; currently `tsc` into `engine/dist/`. |
+| repository root | `npm run typecheck` | `npm run -ws typecheck && tsc -p scripts`; runs the engine and dashboard workspace typechecks plus the root scripts check. |
+| repository root | `npm run build` | `npm run -ws build`; builds the engine and dashboard workspaces. |
 | `engine/` | `npm test` | All `src/**/*.test.ts` through `node:test` and `tsx`. |
 | `engine/` | `npm run lint` | `biome ci src`. |
 | `engine/` | `npm run typecheck` | `tsc -p tsconfig.typecheck.json`. |

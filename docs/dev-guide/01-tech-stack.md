@@ -21,7 +21,7 @@ Everything else uses Node built-ins, including SQLite, HTTP, crypto, child proce
 
 ## Dev tooling
 
-- npm workspaces: the root `package.json` currently lists only `engine`; root scripts fan out with `npm run -ws` where applicable.
+- npm workspaces: the root `package.json` lists `engine` and `dashboard`; root scripts fan out with `npm run -ws` where applicable.
 - TypeScript: `tsc` emits `engine/dist/`; `tsc --noEmit` performs type checking (`engine/package.json`).
 - Tests: colocated `*.test.ts` files use `node:test`, loaded through `tsx`; there is no Jest or Vitest dependency. This keeps the test framework in Node (`engine/package.json`, `docs/PLAN.md`).
 - Biome: `biome.json` supplies formatting and recommended lint rules for `engine/src/**/*.ts`; the root `lint` script runs `biome ci .`.

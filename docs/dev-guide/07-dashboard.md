@@ -36,8 +36,9 @@ once before the first local run. This is the tool #729's dispatch material
 points reviewers at for before/after visual comparison.
 
 **The data server** (`dashboard/server.ts`, #142/#360) serves the whole data
-contract: four read routes (`GET /api/loop/state`, `/api/events`, `/api/spend`,
-`/api/rounds`), the single `dashboard.controls`-gated `POST /api/control`, and
+contract: five read routes (`GET /api/loop/state`, `/api/events`, `/api/spend`,
+`/api/rounds`, `/api/attention/dismissals`), two `dashboard.controls`-gated
+write routes (`POST /api/control`, `POST /api/attention/dismiss`), and
 the `dashboard/dist` statics. `createDashboardServer()` opens the engine's own
 `State` in `readOnly` mode and binds `127.0.0.1` (default port 4517). It imports
 the engine's `State`/config rather than re-querying SQLite, so `sapwood status`

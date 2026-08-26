@@ -1191,7 +1191,7 @@ pattern as §7's copy-map-extension rule above.
 ## 8. Data contract
 
 The four ledger GET endpoints are served from the existing SQLite tables
-(schema v11, `engine/src/state/state.ts` — including `rounds` and
+(`engine/src/state/state.ts` — including `rounds` and
 `round_artifacts`); no dashboard-specific engine tables. Their response
 shapes mirror what `StatusSnapshot` (`engine/src/cli.ts`) already computes for
 `sapwood status`. `GET /api/attention/dismissals` is the one non-ledger read,
@@ -1436,8 +1436,8 @@ lands as a separate human-authored change.
 statics.
 `createDashboardServer({ dbPath, configPath, port, staticDir })` opens `State`
 in `readOnly` mode, binds `127.0.0.1` (default port 4517), and dispatches
-through a pathname→method route table. There is no CLI entry point yet — until
-`sapwood dashboard` lands, the server is started from code.
+through a pathname→method route table. `sapwood dashboard` is the CLI entry
+point that starts it (see above).
 
 Security posture (loopback-only, no auth boundary, raw event feed) is
 documented in [`docs/security.md` "Dashboard: loopback bind, not an auth

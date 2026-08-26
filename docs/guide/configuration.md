@@ -638,7 +638,7 @@ Raising the reviewer *above* opus (rather than swapping the pair) keeps the expe
 unchanged: workers dominate spend and are untouched, while reviews are capped an order of
 magnitude below them — the dollar-capped review just buys fewer, stronger tokens. The rejected
 alternative (worker→sonnet / reviewer→opus) made a config that sets only `worker.model: opus` —
-including this repo's own — collide with its defaulted reviewer under D5.
+including this repo's own config at the time — collide with its defaulted reviewer under D5.
 
 **`sapwood validate` warns on an inversion.** When the configured `reviewer.agent.model` is
 priced *below* `worker.model` in the loaded rate table (`worker.pricingFile`, or the shipped

@@ -90,4 +90,6 @@ The proxy is a local, per-session, read-only MCP server. `startForgeProxyServer(
 `commands/sapwood-run.md`, `commands/sapwood-status.md`, and `commands/sapwood-dashboard.md`
 use the shared package wrapper; [09 — Plugin, commands & prompts](09-plugin-commands-prompts.md#slash-commands-commands)
 owns its resolution details. `commands/sapwood-stop.md` manages
-`EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE`; it does not map to a CLI subcommand.
+`EMERGENCY_STOP`/`KILL_SWITCH`/`PAUSE` through the `sapwood pause`, `sapwood stop`,
+and `sapwood estop` CLI subcommands; the command file only picks which verb to run
+and never touches a sentinel file directly.
