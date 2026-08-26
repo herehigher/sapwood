@@ -32,3 +32,5 @@ Send doc changes through the same review gate as code.
 - Where text renders (target repo vs this repo) and issue-ref rules: `docs/dev-guide/11-writing-for-audiences.md`.
 - Board number, labels, queue mechanics: `sapwood.config.yaml` is authoritative.
 - Build/test/lint commands, including running a focused test subset: `docs/dev-guide/04-commands.md`.
+- Codebase orientation — layout, modules, vocabulary, and task-based reading paths: start at `docs/dev-guide/README.md`; follow its links, and do not read the guide wholesale.
+- Failed-run debugging and `.sapwood/` output: `docs/dev-guide/03-running.md`, "Debugging a failed run".

@@ -1,21 +1,23 @@
 # 02 — Repository layout
 
-Risk labels below mean **CORE** (central behavior; review carefully), **NORMAL** (ordinary contributor surface), and **HANDS-OFF** (human-merge-only; see [08 — Change-risk map](08-change-risk.md)).
+Risk labels below mean **CORE** (central behavior; review carefully), **NORMAL** (ordinary contributor surface), **HANDS-OFF** (human-merge-only; see [08 — Change-risk map](08-change-risk.md)), and **runtime** (engine-generated and intentionally untracked).
 
 ## Top level
 
 | Path | Risk | Purpose |
 | --- | --- | --- |
 | `engine/` | CORE | npm workspace containing the TypeScript engine, prompts, pricing data, tests, and compiled `dist/`. |
+| `bin/` | NORMAL | Shared entry point for plugin slash commands; it prefers a local `engine/dist` CLI and otherwise runs the npm package pinned to the plugin version. |
 | `commands/` | NORMAL | Claude Code slash-command definitions that invoke the engine CLI or manage control sentinels. |
+| `dashboard/` | NORMAL | The `@sapwood/dashboard` Vite/React viewer and Node data-server workspace; see [07 — Dashboard](07-dashboard.md). |
 | `docs/` | NORMAL | Durable architecture, configuration, security, usage, and contributor knowledge. Security-policy edits require elevated review. |
 | `.sapwood/` | runtime | The engine's runtime directory — see [Configuration — The `.sapwood/` runtime directory](../guide/configuration.md#the-sapwood-runtime-directory). |
 | `sapwood.config.yaml` | CORE | This repository's live configuration — the loop runs from it (no `--config`); the whole file is human-merge-only. Starter for other repos: `sapwood.config.example.yaml`. |
 | `biome.json` | NORMAL | Formatting and lint policy for TypeScript sources. |
 | `tsconfig.base.json` | NORMAL | Shared strict TypeScript/NodeNext compiler policy. |
 | `package.json` | NORMAL | Private npm workspace root and root quality scripts. |
-| `scripts/` | NORMAL | Repo-level maintenance scripts with no engine dependency (e.g. `check-links.ts`) — distinct from `engine/scripts/`, which is scoped to the engine npm workspace. |
-| `.claude-plugin/` | NORMAL | Claude Code plugin manifest and plugin-facing instructions. Guard hooks are currently wired per session in `worker.ts` and `peripheral.ts`, not registered here. |
+| `scripts/` | NORMAL | Repository-level maintenance and documentation-oracle tooling; `catalog/` holds the marketplace catalog CI workflow template. |
+| `.claude-plugin/` | NORMAL | Plugin manifest, marketplace metadata, target-repository instructions, and shipped skills; see [09 — Plugin, commands & prompts](09-plugin-commands-prompts.md). |
 | `.github/` | HANDS-OFF for workflows | Issue templates and CI workflow; workflow writes are guard-protected. |
 
 ## engine/src — the engine workspace
@@ -32,16 +34,17 @@ Tests are colocated with their modules as `*.test.ts`.
 | `loop/` | Scheduler and lifecycle: tick phases (`conductor.ts`), flat driver (`driver.ts`), round orchestration (`round.ts`), alignment/pool selection (`align.ts`), initialization (`init.ts`), startup reconciliation, harvest, dissent, environment-failure parking, and round artifacts. |
 | `proxy/` | Per-session read-only forge MCP server (`mcp-server.ts`), role/tool access matrix (`access.ts`), scoped minting (`mint.ts`), tool algebra/caps (`tools.ts`), and write-ahead journal/evidence bundles (`journal.ts`). |
 | `retro/` | Builds the bounded round digest (`retro-digest.ts`) and runs the self-improvement role whose changes can only arrive through a branch and PR (`retro.ts`). |
+| `review/` | Independent reviewer execution, convergence, evidence, audit, and escalation support for the merge gate; see [05 — Core modules](05-core-modules.md), "Merge gate". |
 | `roles/` | Worker process/worktree protocol (`worker.ts`), role-session runner (`peripheral.ts`), merge gate (`merge-driver.ts`), reviewer adapters (`reviewer.ts`), plan review, architect, prompts, and ambient context manifests. `reviewer.ts` and `merge-driver.ts` are HANDS-OFF. |
-| `state/` | SQLite schema and state API (`state.ts`) plus sentinel-delimited structured-output parsing (`structured-output.ts`). |
-| `util/` | Small shared utilities; currently Markdown-safe truncation/rendering in `markdown.ts`. |
+| `state/` | SQLite schema and state API (`state.ts`), read-model queries (`read-model.ts`), the tagged event-kind registry (`event-kinds/`), and sentinel-delimited structured-output parsing (`structured-output.ts`). |
+| `util/` | Small dependency-free helpers shared across modules. |
 
 Outside `src/`, the engine package also carries `engine/prompts/` (shipped role
 prompts, init templates, and issue templates — the non-TypeScript behavior
 surface; see [09 — Plugin, commands & prompts](09-plugin-commands-prompts.md)),
 `engine/pricing.yaml` (the token-pricing table read by `config/pricing.ts`), and
-`engine/scripts/` (developer utilities, currently a retro-digest dry-run). The
-repo root's `.nvmrc` pins the Node major for version managers.
+`engine/scripts/` (developer utilities). The repo root's `.nvmrc` pins the Node
+major for version managers.
 
 ## commands/ — Claude Code plugin surface
 
