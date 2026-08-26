@@ -67,8 +67,8 @@ recipe](docs/guide/getting-started.md#l1--supervise-one-issue).
 ## Why sapwood
 
 sapwood turns a GitHub backlog into governed autonomy, trusted repos
-first — never handing a worker the keys to its own review. Like sapwood
-in a tree, growth happens at the living edge into heartwood.
+first — no worker holds the keys to its own review. Like sapwood in a
+tree, it grows at the living edge and hardens into heartwood.
 
 ## Design principles
 
