@@ -44,14 +44,41 @@ ships in this PR — this file is the recipe, not the artifact.
 
 ## Regeneration recipe
 
-1. Copy the Mermaid source straight from `README.md` (Diagrams 1–3) — never
-   hand-retype it, so the image never drifts from the shipped diagram.
-2. Render with the `mermaid-expert` skill/agent, or the Mermaid CLI
-   (`mmdc`) with a theme config applying the palette and shapes above via
-   `themeVariables`/`classDef` — never by hand-editing node text.
-3. Export at 2× the diagram's natural size, targeting roughly 800px on the
-   longer edge: sharp at normal zoom, a reasonable file size for a repo
-   asset.
-4. Save under `docs/assets/`, named for the diagram (`hero-loop.png`,
+`README.md`'s Mermaid blocks (Diagrams 1–3) are the semantic spec — the
+authoritative set of nodes, edges, and labels. A regenerated image may
+re-declare node shapes per this file's rules above; it never invents a
+node or edge the Mermaid source doesn't have.
+
+**Faithful export** — a literal, unstyled render straight from the shipped
+source, for proofing that an image still matches the diagram:
+
+1. Copy the Mermaid code block verbatim out of `README.md` into a `.mmd`
+   file — never hand-retype it, so the export can't drift from the source.
+2. Render with the Mermaid CLI:
+   ```
+   npx -y @mermaid-js/mermaid-cli@11 -i <diagram>.mmd -o <name>.png -s 2
+   ```
+   Verified against `npx -y @mermaid-js/mermaid-cli@11 --help` (mermaid-cli
+   11.x): `-s`/`--scale` is the Puppeteer scale factor, and it's what
+   actually doubles the output's pixel dimensions for a sharp 2× export.
+   `-w`/`--width` sets the rendering page width, not the diagram's own
+   size — Mermaid auto-sizes its SVG to the diagram's content regardless of
+   page width, so passing `-w` has no effect on these three diagrams and
+   should be omitted. At `-s 2` the three shipped diagrams render at
+   roughly 1050–1570px on the longer edge (measured 2026-08-26); there is
+   no fixed target size to pin, since each diagram's pixel size follows its
+   own content layout, not a page setting.
+3. Save under `docs/assets/`, named for the diagram (`hero-loop.png`,
    `architecture.png`, `worker-lifecycle.png`). Do not commit an export
    until a follow-up issue asks for it — this PR ships text only.
+
+**Styled poster** — a hand-designed image applying this file's palette,
+shapes, and label rules (for a docs export or social-preview card), made
+with whatever image tool the owner chooses for that piece of work; this
+file assumes no specific tool beyond the mermaid-cli export above. Give
+whichever tool is used exactly these two inputs, nothing else:
+
+- the relevant `README.md` Mermaid block(s), verbatim, as the node/edge/
+  label spec;
+- this file's Palette, Node shape per layer, and Label rules sections, as
+  the restyling spec.

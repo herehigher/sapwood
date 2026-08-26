@@ -651,7 +651,8 @@ degrade; that's the one case still left to a human, and it's salvaged the same w
   `park clear`) — never a merge decision. The owner may extend a session's scope to
   merging under the configured merge gate (`docs/security.md`) by an explicit
   authorization given at session start; `sapwood:human-merge-only` PRs remain a human's
-  call structurally, not a supervisor's to route around.
+  call: enforced structurally against the engine's merge path, and binding as session
+  policy on an authorized supervisor.
 - **Owner decides, supervisor records+nags.** Scope/policy/merge-authorization decisions
   are the owner's; a supervisor session's job is to surface the queues that need a
   decision, record the decision once made (see [Batch close ritual](#batch-close-ritual)
