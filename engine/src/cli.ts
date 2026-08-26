@@ -161,7 +161,7 @@ const USAGE = `\
 usage: sapwood <command> [options]
 
 Commands:
-  init          Scaffold .sapwood config and verify GitHub auth
+  init          Scaffold sapwood.config.yaml (repo root) and verify GitHub auth
   run           Run the engine loop (tick on a fixed cadence)
     --once         Run exactly one tick, then exit (exit 1 if the tick failed)
     --until-idle   Keep ticking until no lanes are in flight, then exit
@@ -2049,7 +2049,7 @@ export async function runDashboard(validated: ValidatedDashboardArgs, deps: Dash
 const INIT_USAGE = `\
 usage: sapwood init
 
-Scaffold .sapwood config and verify GitHub auth: creates labels/milestones, the
+Scaffold sapwood.config.yaml at the repo root and verify GitHub auth: creates labels/milestones, the
 project board, the starter config + goal/doctrine/issue templates, and
 provisions the worker's write deploy key and related gh-side resources — credentialed
 network writes, so a bare \`--help\` must never trigger them.
