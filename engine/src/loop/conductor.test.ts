@@ -7332,6 +7332,91 @@ test("tick DRIVE (#450, flat): non-decreasing finding count for two consecutive 
   st.close();
 });
 
+test("tick DRIVE (#1132): a label-write failure AFTER the non-convergence comment landed re-enters next tick and retries ONLY the label — no duplicate comment, terminal write fires once the label succeeds", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 2 });
+  const keyA = classicThreadFindingKey({ id: "TA", path: "src/a.ts", findingDigest: "dA" }).key;
+  const keyB = classicThreadFindingKey({ id: "TB", path: "src/b.ts", findingDigest: "dB" }).key;
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    findings: [{ key: keyA, severity: "blocking" }],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 2,
+    reason: "r2",
+    findings: [
+      { key: keyA, severity: "blocking" },
+      { key: keyB, severity: "blocking" },
+    ],
+    fixDiffPaths: [],
+    head: "H2",
+  });
+  forge.prReviewData = {
+    ...forge.prReviewData,
+    headOid: "H3",
+    unresolvedThreads: 2,
+    threads: [cvThread("TA", "src/a.ts", "dA"), cvThread("TC", "src/c.ts", "dC")],
+  };
+  forge.compareResults["H2...H3"] = { files: [], complete: true };
+  forge.throwOnAddPRLabel = true;
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = { kind: "fixable", pr: 55, reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=2:ciRed=false" };
+  const deps = {
+    now: () => new Date("2026-08-26T00:00:00.000Z"),
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  };
+
+  // Tick 1: comment succeeds (write order is comment-then-label, #1132), the label write fails —
+  // no fix leg, row stays driving, no review-non-convergent event, exactly one label-failed
+  // companion event.
+  const r1 = await tick(deps);
+  assert.deepEqual(sup.resumeCalls, [], "no fix leg dispatched despite the label failure");
+  assert.equal(forge.prComments.length, 1, "the comment DID land — it is written before the label");
+  assert.deepEqual(forge.prLabelsAdded, [], "the label write failed");
+  const rowAfterTick1 = st.getWorker("lane-a")!;
+  assert.equal(rowAfterTick1.state, "driving", "no terminal transition without the label landing");
+  assert.equal(r1.driven[0]?.kind, "queued");
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]), []);
+  const failedLabelEvents = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent-label-failed"]);
+  assert.equal(failedLabelEvents.length, 1);
+
+  // Tick 2: the label write now succeeds. The row was never labeled after tick 1, so deriveGate
+  // does not bypass this branch into the generic HUMAN escalation — it re-enters the SAME
+  // review-non-convergent branch, whose marker-check finds tick 1's comment already posted and
+  // skips reposting it; only the label write and the terminal record are retried. Nothing about
+  // the classification fold changed between ticks (no new drive-fixup event, no episode-reset
+  // event), so the SAME stall verdict (flat) re-derives identically.
+  forge.throwOnAddPRLabel = false;
+  const r2 = await tick(deps);
+  assert.equal(forge.prComments.length, 1, "no duplicate comment — the marker-check-before-post path skipped the re-post");
+  assert.deepEqual(forge.prLabelsAdded, [[55, "needs-human"]]);
+  const row = st.getWorker("lane-a")!;
+  assert.equal(row.state, "failed");
+  assert.equal(row.gated_escalation_labeled, 1);
+  assert.equal(row.fix_rounds, 2, "unchanged — this escalation never spends a fix round");
+  assert.deepEqual(r2.driven[0], { kind: "needs-human", worker: "lane-a", issue: 2, pr: 55, reason: "review-non-convergent:flat" });
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]);
+  assert.equal(events.length, 1);
+  assert.equal((events[0]!.payload as { signal: string }).signal, "flat");
+  st.close();
+});
+
 // ── #450 gate② Codex cross-vendor (PM-narrowed ruling, 2026-08-01): a capped finding snapshot's
 // COUNT is a floor, not a fact — the EXACT 100->75->51 scenario the finding names, wired end-to-end
 // through gatherFixupFindingRecord/classifyConvergenceProgress. ───────────────────────────────────
@@ -7952,7 +8037,7 @@ test("tick DRIVE (#450, gate② P3a): a label-write failure leaves the row drivi
   st.close();
 });
 
-test("tick DRIVE (#450, gate② P3a): a comment-write failure (label already landed) leaves the row driving, never terminalizes, no review-non-convergent event — the comment-failure ordering leg", async () => {
+test("tick DRIVE (#450, gate② P3a; reordered #1132): a comment-write failure leaves the row driving, no label attempted, no review-non-convergent event — the comment-first ordering leg", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
@@ -7991,7 +8076,7 @@ test("tick DRIVE (#450, gate② P3a): a comment-write failure (label already lan
     [],
     "no success event without a successful comment write",
   );
-  assert.deepEqual(forge.prLabelsAdded, [[55, "needs-human"]], "the label DID land — this is the ordering-after-label leg");
+  assert.deepEqual(forge.prLabelsAdded, [], "comment-first order (#1132): the label is never attempted after a comment failure");
   const failedCommentEvents = st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent-comment-failed"]);
   assert.equal(failedCommentEvents.length, 1);
   assert.equal((failedCommentEvents[0]!.payload as { fixRounds: number }).fixRounds, 1);

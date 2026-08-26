@@ -6999,9 +6999,16 @@ const REVIEW_NON_CONVERGENT_ESCALATION_FAILURE_RESET_KINDS = ["review-non-conver
  * `escalateReviewDisputed` established for disputes (`w.fix_rounds` is carried through UNCHANGED
  * on the terminal upsert; this branch never calls `startFixLeg`).
  *
+ * WRITE ORDER — comment, THEN label, THEN the atomic terminal write (#1132; same order
+ * `escalateOperatorOwned` below uses — see that function's own doc for the full hazard writeup):
+ * a label-write failure after the comment already landed leaves NO human label yet, so
+ * `deriveGate` (merge-driver.ts) does not bypass this branch, and the next tick re-enters it —
+ * `commentOnEscalationCarrier`'s live marker-check skips the already-posted comment and retries
+ * only the label.
+ *
  * Modeled directly on `escalateReviewDisputed`'s own shape — the amendment's own instruction is
  * "matching review-disputed's shape where applicable" — same forge-before-terminal-upsert
- * discipline, the same ATOMIC `state.upsertWorkerWithEvent` terminal write (label AND comment land
+ * discipline, the same ATOMIC `state.upsertWorkerWithEvent` terminal write (comment AND label land
  * BEFORE the `review-non-convergent` event, and that event lands in the SAME transaction as the
  * terminal worker-row write: a crash between a bare `upsertWorker` and a separate `appendEvent`
  * would otherwise leave the row `failed` with no durable escalation record — permanently, since a
@@ -7046,12 +7053,6 @@ async function escalateNonConvergent(
   // #398 (review round 2): PR-born, for exactly the reasons escalateReviewDisputed above is —
   // same non-nullable `pr`, same entirely-about-this-PR comment, same gate② branch.
   const carrier = escalationCarrier(pr);
-  try {
-    await labelEscalationCarrier(forge, cfg, carrier, w.issue, pr);
-  } catch (e) {
-    dedupeFailure("review-non-convergent-label-failed", e);
-    return null;
-  }
   const boundedPrev = boundRecords(
     (prevFindings ?? []).map((f) => f.key),
     REVIEW_NON_CONVERGENT_MAX_KEYS_IN_COMMENT,
@@ -7081,6 +7082,12 @@ async function escalateNonConvergent(
     await commentOnEscalationCarrier(forge, cfg, carrier, w.issue, pr, marker, comment);
   } catch (e) {
     dedupeFailure("review-non-convergent-comment-failed", e);
+    return null;
+  }
+  try {
+    await labelEscalationCarrier(forge, cfg, carrier, w.issue, pr);
+  } catch (e) {
+    dedupeFailure("review-non-convergent-label-failed", e);
     return null;
   }
   // Same crash window closed the same way as escalateReviewDisputed's own terminal write: the
@@ -7129,10 +7136,9 @@ function operatorOwnedCommentMarker(worker: string, pr: number, verdictRunId: st
  * no-further-progress-possible cases (`w.fix_rounds` is carried through UNCHANGED on the
  * terminal upsert; this branch never calls `startFixLeg`).
  *
- * WRITE ORDER — comment, THEN label, THEN the atomic terminal write — deliberately NOT
- * `escalateNonConvergent`'s own label-then-comment order (that function, like
- * `escalateReviewDisputed`, labels first and is exposed to the SAME partial-state hazard this
- * reordering closes; fixing it there is out of scope for this leg). The hazard: `deriveGate`
+ * WRITE ORDER — comment, THEN label, THEN the atomic terminal write — the SAME order
+ * `escalateNonConvergent` above now uses (#1132); `escalateReviewDisputed` alone still labels
+ * first. The hazard this order closes: `deriveGate`
  * (merge-driver.ts) resolves any lane carrying a human-hold label to `HUMAN` UNCONDITIONALLY,
  * before this file's `case "fixable"` (and this function) ever runs again — so once the label
  * lands, a next tick that finds the comment still unposted can no longer re-enter THIS branch to
