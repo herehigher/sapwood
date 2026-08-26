@@ -1,8 +1,8 @@
 # Diagram style — regeneration guide
 
 The style spec for hand-regenerating `README.md`'s three Mermaid diagrams as
-static images later (e.g. a docs export or social-preview card). No image
-ships in this PR — this file is the recipe, not the artifact.
+static images (e.g. a docs export or social-preview card). No exported
+image is committed; this file is the recipe, not the artifact.
 
 ## Palette
 
@@ -65,12 +65,11 @@ source, for proofing that an image still matches the diagram:
    size — Mermaid auto-sizes its SVG to the diagram's content regardless of
    page width, so passing `-w` has no effect on these three diagrams and
    should be omitted. At `-s 2` the three shipped diagrams render at
-   roughly 1050–1570px on the longer edge (measured 2026-08-26); there is
-   no fixed target size to pin, since each diagram's pixel size follows its
-   own content layout, not a page setting.
+   roughly 1050–1570px on the longer edge; there is no fixed target size to
+   pin, since each diagram's pixel size follows its own content layout, not
+   a page setting.
 3. Save under `docs/assets/`, named for the diagram (`hero-loop.png`,
-   `architecture.png`, `worker-lifecycle.png`). Do not commit an export
-   until a follow-up issue asks for it — this PR ships text only.
+   `architecture.png`, `worker-lifecycle.png`).
 
 **Styled poster** — a hand-designed image applying this file's palette,
 shapes, and label rules (for a docs export or social-preview card), made

@@ -439,8 +439,10 @@ without waiting for a human click.
   guard enforcement, cost ceilings, pause, and the kill switch remain active.
 - **What you see:** issues move through the board to reviewed, merged PRs; status and
   run logs provide the operating view, while exceptions escalate to human attention.
-- **Step up:** L3 is the top of the engine-authority ladder; the LLM-supervised level
-  (L4) changes who watches, not what the engine may do — see [Governance
+- **Step up:** L3 is the top of the engine-authority ladder — increase scope or
+  concurrency only through the existing `round.milestone`, `lanes.max`, and
+  `lanes.roundDispatchCap` controls. The LLM-supervised level (L4) changes who
+  watches, not what the engine may do — see [Governance
   lines](supervision.md#governance-lines).
 - **Step down:** stop the run, change `merge.mode` back to `produce-pr-and-stop` for
   L2 (or restore the L1 profile for single-issue supervision), then restart. Config
