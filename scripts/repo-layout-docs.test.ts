@@ -79,17 +79,64 @@ function extractSection(lines: string[], heading: string): string[] {
 }
 
 // Blanks out (preserving line count, so callers needn't re-index) fenced code blocks and HTML
-// comments before table search — a table living inside either (e.g. commented out to "remove"
-// it without deleting it) must be invisible to the parser, not accepted as real documentation.
-const FENCED_CODE_BLOCK_RE = /```[\s\S]*?```/g;
+// comments across the WHOLE file before section/table search — a table (or a heading) living
+// inside either (e.g. commented out to "remove" it without deleting it) must be invisible to the
+// parser, not accepted as real documentation or as a section boundary.
 const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
 
 function blankMatch(match: string): string {
   return match.replace(/[^\n]/g, "");
 }
 
-function stripNonProseBlocks(sectionText: string): string {
-  return sectionText.replace(FENCED_CODE_BLOCK_RE, blankMatch).replace(HTML_COMMENT_RE, blankMatch);
+// A fence opener is a line starting with 3+ backticks or 3+ tildes (optionally followed by an
+// info string); it closes at the next line starting with the SAME character repeated at least
+// as many times, per CommonMark. Line-based, not regex, so an UNCLOSED fence fails closed:
+// every line through EOF is consumed and blanked by the same scan that never finds a closer,
+// rather than a regex simply failing to match and leaving the "hidden" content searchable.
+const FENCE_OPENER_RE = /^\s*([`~]{3,})/;
+
+function matchFenceOpener(line: string): { char: string; length: number } | null {
+  const match = FENCE_OPENER_RE.exec(line);
+  if (!match) return null;
+  const marker = match[1]!;
+  return { char: marker[0]!, length: marker.length };
+}
+
+function isFenceCloser(line: string, char: string, minLength: number): boolean {
+  const trimmed = line.trim();
+  if (trimmed.length < minLength) return false;
+  for (const ch of trimmed) {
+    if (ch !== char) return false;
+  }
+  return true;
+}
+
+function stripFencedCodeBlocks(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const opener = matchFenceOpener(lines[i]!);
+    if (!opener) {
+      out.push(lines[i]!);
+      i++;
+      continue;
+    }
+    out.push(""); // the opener line is itself inside the fence
+    i++;
+    while (i < lines.length) {
+      const candidate = lines[i]!;
+      out.push("");
+      i++;
+      if (isFenceCloser(candidate, opener.char, opener.length)) break;
+      // else: unclosed so far — keep consuming and blanking through EOF if no closer ever appears
+    }
+  }
+  return out.join("\n");
+}
+
+function stripNonProseBlocks(text: string): string {
+  return stripFencedCodeBlocks(text).replace(HTML_COMMENT_RE, blankMatch);
 }
 
 // A header row followed by a same-shaped separator of the WRONG cell count fails the parse
@@ -131,10 +178,12 @@ function parsePathCell(cell: string): string {
 
 /** Parses one section's table into documented rows: exact header, exact cell count per row,
  *  Path-is-a-code-span, and no duplicate Path values. `riskColumn` names which cell (if any)
- *  becomes the row's preserved Risk value, for the top-level table's runtime exemption. */
+ *  becomes the row's preserved Risk value, for the top-level table's runtime exemption.
+ *  `lines` must already be `stripNonProseBlocks`-ed — this function trusts its input and does
+ *  not re-strip, since stripping has to run on the WHOLE file before section extraction (a
+ *  heading hidden inside a fence/comment must not control section boundaries either). */
 function parseDocumentedRows(heading: string, headerCells: string[], lines: string[], riskColumn?: number): DocumentedRow[] {
-  const rawSection = extractSection(lines, heading);
-  const section = stripNonProseBlocks(rawSection.join("\n")).split("\n");
+  const section = extractSection(lines, heading);
   const { header, bodyLines } = findFirstTable(section);
   assert.deepEqual(header, headerCells, `unexpected header cells under ${JSON.stringify(heading)}`);
 
@@ -156,11 +205,13 @@ function parseDocumentedRows(heading: string, headerCells: string[], lines: stri
 }
 
 function parseTopLevelRows(content: string): DocumentedRow[] {
-  return parseDocumentedRows(TOP_LEVEL_HEADING, TOP_LEVEL_HEADER_CELLS, content.split("\n"), TOP_LEVEL_RISK_COLUMN);
+  const strippedLines = stripNonProseBlocks(content).split("\n");
+  return parseDocumentedRows(TOP_LEVEL_HEADING, TOP_LEVEL_HEADER_CELLS, strippedLines, TOP_LEVEL_RISK_COLUMN);
 }
 
 function parseEngineSrcRows(content: string): DocumentedRow[] {
-  return parseDocumentedRows(ENGINE_SRC_HEADING, ENGINE_SRC_HEADER_CELLS, content.split("\n"));
+  const strippedLines = stripNonProseBlocks(content).split("\n");
+  return parseDocumentedRows(ENGINE_SRC_HEADING, ENGINE_SRC_HEADER_CELLS, strippedLines);
 }
 
 // ── Git oracle ───────────────────────────────────────────────────────────────────────────
@@ -263,8 +314,51 @@ test("fixture: a table hidden inside an HTML comment is invisible to the parser 
     "",
   ].join("\n");
 
+  const strippedLines = stripNonProseBlocks(content).split("\n");
   assert.throws(
-    () => parseDocumentedRows(heading, TOP_LEVEL_HEADER_CELLS, content.split("\n"), TOP_LEVEL_RISK_COLUMN),
+    () => parseDocumentedRows(heading, TOP_LEVEL_HEADER_CELLS, strippedLines, TOP_LEVEL_RISK_COLUMN),
+    /no Markdown table found in section/,
+  );
+});
+
+test("fixture: a table hidden inside a ~~~ fence is invisible to the parser — fails as 'no table found'", () => {
+  const heading = "## Fixture: tilde-fenced table";
+  const content = [
+    heading,
+    "",
+    "~~~",
+    "| Path | Risk | Purpose |",
+    "| --- | --- | --- |",
+    "| `ghost/` | NORMAL | should never be seen |",
+    "~~~",
+    "",
+    "## Next heading",
+    "",
+  ].join("\n");
+
+  const strippedLines = stripNonProseBlocks(content).split("\n");
+  assert.throws(
+    () => parseDocumentedRows(heading, TOP_LEVEL_HEADER_CELLS, strippedLines, TOP_LEVEL_RISK_COLUMN),
+    /no Markdown table found in section/,
+  );
+});
+
+test("fixture: a table after an unclosed ``` fence is treated as fenced through EOF (fail-closed) — fails as 'no table found'", () => {
+  const heading = "## Fixture: unclosed-fence table";
+  const content = [
+    heading,
+    "",
+    "```",
+    "some example that never closes",
+    "",
+    "| Path | Risk | Purpose |",
+    "| --- | --- | --- |",
+    "| `ghost/` | NORMAL | should never be seen |",
+  ].join("\n");
+
+  const strippedLines = stripNonProseBlocks(content).split("\n");
+  assert.throws(
+    () => parseDocumentedRows(heading, TOP_LEVEL_HEADER_CELLS, strippedLines, TOP_LEVEL_RISK_COLUMN),
     /no Markdown table found in section/,
   );
 });
