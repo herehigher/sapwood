@@ -49,8 +49,7 @@ verification headings may be in any language, but their exact own-line lower-cas
 must be `<!-- sapwood:ac -->` and `<!-- sapwood:verification -->` as the first non-blank line
 after the headings.
 New prose with no existing content to match — a fresh finding, a brief with nothing prior to
-continue — defaults to the configured working language `{{lang.issuesAndPrs}}` (a BCP-47-ish tag;
-`en` by default; set via `language.issuesAndPrs` in `sapwood.config.yaml`).
+continue — defaults to the configured working language `{{lang.issuesAndPrs}}`.
 
 - **Acceptance criteria are checkbox items — mandatory, not stylistic.** Every criterion must
   be its own literal `- [ ]` line under the anchored acceptance-criteria heading; the engine parses

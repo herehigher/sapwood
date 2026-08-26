@@ -499,11 +499,9 @@ Every key defaults to `en` (English) — an unset section leaves the working-lan
 unchanged from before this key existed: each surface's directive resolves to `en`, the same
 language every shipped prompt already used. This is a behavioral invariant, not a byte-identical
 one — the default render now additionally CONTAINS that resolved directive line, so every shipped
-prompt that gained one has a new rendered form (and, for the pinned ones, a new `prompts.test.ts`
-snapshot hash). Those pins guard against FUTURE unintended drift of this default render; they
-don't assert identity with the prompt bytes from before this key existed. Values are opaque
-BCP-47-ish tags: sapwood never validates them against a language list, so any tag the underlying
-model can actually write in works, fail-open by design.
+prompt that gained one has a new rendered form. Values are opaque BCP-47-ish tags: sapwood never
+validates them against a language list, so any tag the underlying model can actually write in
+works, fail-open by design.
 
 **Mechanics.** Each surface's tag is threaded to the relevant shipped prompts as a `{{lang.*}}`
 template variable (the same `promptFile`/template-var pattern every other config-to-prompt key in
