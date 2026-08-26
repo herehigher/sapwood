@@ -433,14 +433,17 @@ without waiting for a human click.
   Run `sapwood run`. A bounded unattended run can use an existing stop control, for
   example `sapwood run --milestone "M"` to scope dispatch to that exact milestone and
   wind down when it is complete.
-- **Risk profile:** this is the highest-autonomy level. Once gate① (CI) and gate② (the
+- **Risk profile:** this is the highest engine-authority level. Once gate① (CI) and gate② (the
   configured fresh non-author review) pass, the conductor squash-merges the exact
   reviewed head. The producer still cannot review, approve, or merge its own work;
   guard enforcement, cost ceilings, pause, and the kill switch remain active.
 - **What you see:** issues move through the board to reviewed, merged PRs; status and
   run logs provide the operating view, while exceptions escalate to human attention.
-- **Step up:** L3 is the top of this ladder; increase scope or concurrency only through
-  the existing `round.milestone`, `lanes.max`, and `lanes.roundDispatchCap` controls.
+- **Step up:** L3 is the top of the engine-authority ladder — increase scope or
+  concurrency only through the existing `round.milestone`, `lanes.max`, and
+  `lanes.roundDispatchCap` controls. The LLM-supervised level (L4) changes who
+  watches, not what the engine may do — see [Governance
+  lines](supervision.md#governance-lines).
 - **Step down:** stop the run, change `merge.mode` back to `produce-pr-and-stop` for
   L2 (or restore the L1 profile for single-issue supervision), then restart. Config
   is loaded once at `runEngine()` startup; editing YAML does not change a running

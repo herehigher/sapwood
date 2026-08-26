@@ -1,6 +1,6 @@
 # CLAUDE.md — sapwood
 
-sapwood is the autonomous coding loop with governance built in — a Claude Code plugin that turns a GitHub backlog into reviewed PRs (issues in → reviewed PRs out).
+sapwood is the autonomous coding loop with governance built in (issues in → reviewed PRs out): a Claude Code plugin bundle (slash commands, skills, the guard hook) around the `sapwood` engine CLI. Install the plugin (recommended), or run the CLI from npm on its own — both are complete paths.
 
 ## Verification
 
