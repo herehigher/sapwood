@@ -1337,13 +1337,10 @@ const Recovery = z
 //                     fix.md — a fix leg only receives `{{lang.codeComments}}` (its narrower var
 //                     set); it never touches docs prose.
 //
-// Precedence (docs/guide/configuration.md "Language customization"): this config key takes
-// precedence over the target repo's own CLAUDE.md prose — that entry point remains the fallback
-// carrier for a repo that never sets this section. This key governs the DEFAULT language for
-// content a role ORIGINATES; it does not override a role's separate, pre-existing duty (every
-// prompt below still states it) to preserve/match an existing issue's own already-established
-// language when continuing human-authored content — those are orthogonal concerns, not a
-// precedence conflict.
+// This key governs the DEFAULT language for content a role ORIGINATES (docs/guide/configuration.md
+// "Language customization"); it does not override a role's separate, pre-existing duty — where a
+// prompt states it — to preserve/match an existing issue's own already-established language when
+// continuing human-authored content. Those are orthogonal concerns.
 const Language = z
   .object({
     codeComments: z.string().min(1).default("en"),

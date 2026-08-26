@@ -942,11 +942,13 @@ test("negative lint: no shipped engine/prompts, commands, or the generated event
 // `sapwood.config.yaml` elsewhere (the protected-path list), and that mention must stay clear.
 
 test("#1119: no shipped prompt's {{lang.*}} paragraph restates the BCP-47/default/config-key operator-doc fact that belongs solely to docs/guide/configuration.md", () => {
+  // Top-level only (no `recursive: true`): `issue-templates/` holds human-facing issue
+  // templates, not role prompts with a {{lang.*}} block, and is out of scope for this lint.
   const promptsDir = dirname(defaultPromptPath());
-  const shippedPrompts = readdirSync(promptsDir, { recursive: true })
-    .filter((f): f is string => typeof f === "string" && f.endsWith(".md"))
+  const shippedPrompts = readdirSync(promptsDir)
+    .filter((f) => f.endsWith(".md"))
     .map((f) => join(promptsDir, f));
-  assert.ok(shippedPrompts.length >= 14, `sanity: expected the full shipped-prompt set, got ${shippedPrompts.length} .md files`);
+  assert.equal(shippedPrompts.length, 14, `sanity: expected the 14 top-level shipped prompts, got ${shippedPrompts.length} .md files`);
   const bannedInLangParagraph = [
     /BCP-47/,
     /language\.issuesAndPrs/,

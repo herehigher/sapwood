@@ -475,12 +475,9 @@ appears in a public PR comment.
 
 ### `language` — the development-language policy
 
-Every spawned session (worker, and every peripheral role) runs as a Claude Code session inside
-the target repo's own checkout, and Claude Code loads that repo's `CLAUDE.md` automatically —
-so a language preference has always been expressible there. `language` adds
-an explicit, user-visible config knob for the same fact, per **surface**, so an operator adopting
+`language` is an explicit, user-visible config knob, per **surface**, so an operator adopting
 sapwood on a non-English codebase has a supported way to say "our code comments are Japanese, our
-PRs are English" without hand-writing that as `CLAUDE.md` prose:
+PRs are English":
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -512,13 +509,10 @@ and `{{lang.docs}}` (worker.md, architect.md — **not** fix.md, whose deliberat
 carries `{{lang.codeComments}}` only). Prompts receive the policy; they never
 hardcode a language directive.
 
-**Precedence.** This config key takes precedence over the target repo's own `CLAUDE.md` prose —
-its `CLAUDE.md` entry point becomes the **fallback** carrier for a repo that never sets
-`language` here. The config key governs the DEFAULT language a role uses for content it
-*originates*; it is orthogonal to (never overrides) a role's separate, pre-existing duty — every
-authoring prompt above still states it — to preserve or match an **existing** issue's own
-already-established language when continuing human-authored content (see "Issue-facing prose"
-below).
+**Default language.** The config key governs the DEFAULT language a role uses for content it
+*originates*; it is orthogonal to (never overrides) a role's separate, pre-existing duty — where a
+prompt states it — to preserve or match an **existing** issue's own already-established language
+when continuing human-authored content (see "Issue-facing prose" below).
 
 **Interplay with parsing-language-freedom.** The engine's PARSING side is
 language-free: non-English issue-body section headings are recognized via the exact
