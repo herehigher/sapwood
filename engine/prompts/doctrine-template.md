@@ -1,9 +1,9 @@
 <!--
   sapwood review doctrine — this repository's own review knowledge, read by the worker dispatch
-  brief, the fix leg, and the architect pass every round. Generic doctrine — including how the
-  loop should treat review findings in general — ships in the framework and is injected before
-  this file at every one of those sites; do not copy it here. See
-  docs/guide/configuration.md#doctrine for the full topology.
+  brief, the fix leg, the architect pass, and the engine-agent reviewer every round. Generic
+  doctrine — including how the loop should treat review findings in general — ships in the
+  framework and is injected before this file at every one of those sites; do not copy it here.
+  See docs/guide/configuration.md#doctrine for the full topology.
 
   This file was scaffolded because none existed yet — there is no review history to distill a
   real doctrine from on a fresh repo. It ships with placeholder EXAMPLE entries showing the shape

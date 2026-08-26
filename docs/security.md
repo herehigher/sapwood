@@ -320,7 +320,8 @@ would be redundant machinery. The label carries the **verdict**, not a new detec
 
 The review-doctrine file (`doctrine.file`, default `docs/REVIEW-DOCTRINE.md`) is
 user-editable repo prose and is **not** guard-protected — its content is injected into the
-worker brief, the fix leg, and the architect pass, so it can influence what those sessions do.
+worker brief, the fix leg, the architect pass, and the engine-agent reviewer, so it can
+influence what those sessions do.
 The hosted gate② review-trigger comment no longer carries any doctrine text; a hosted bot's own
 standing review guidance lives in its own instruction file instead (`docs/guide/configuration.md#hosted-bot-review-guidelines`).
 It sits inside this page's trusted-repo assumption: doctrine content is trusted

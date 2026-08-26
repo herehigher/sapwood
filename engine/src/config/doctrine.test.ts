@@ -94,12 +94,21 @@ test("loadDoctrine: a PRESENT-but-unreadable repo path (a directory, not a file)
   }
 });
 
-// A missing core throws naming the path (loadDoctrine's own guard, symmetric with the repo-part
-// unreadable-path test above) — not independently exercised here: `defaultDoctrineCorePath()`
-// resolves a fixed, real, shipped location this process shares with every other test file in the
-// same run, so moving/deleting it to force the branch would race concurrently running suites that
-// also call `loadDoctrine`. The guard itself is a one-line `existsSync` check with no branching
-// logic to hide a bug in.
+test("loadDoctrine: a missing shipped core throws naming the path — never degrades to a placeholder", () => {
+  // `corePath`'s default resolves the real, shared, installed core (defaultDoctrineCorePath()) —
+  // moving/deleting THAT would race every other concurrently running suite that also calls
+  // loadDoctrine. Passing an explicit nonexistent corePath exercises the same guard without
+  // touching the shared file.
+  const missingCorePath = "/nonexistent/doctrine-core.md";
+  assert.throws(
+    () => loadDoctrine("/nonexistent/REVIEW-DOCTRINE.md", 1000, missingCorePath),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok(err.message.includes(missingCorePath), `expected error to name the path ${missingCorePath}, got: ${err.message}`);
+      return true;
+    },
+  );
+});
 
 test("doctrine-core.md: measures <= 8000 chars, the release-controlled ceiling (a CI test, not config)", () => {
   assert.ok(CORE_TEXT.length <= 8000, `expected the core to be <= 8000 chars, got ${CORE_TEXT.length}`);
