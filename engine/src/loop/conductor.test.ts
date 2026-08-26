@@ -5954,7 +5954,7 @@ test("tick DRIVE (#865): an all-operator-owned rejected verdict escalates straig
   const gate = new FakeMergeGate();
   gate.outcomes[66] = engineAgentFixable(66, "run-1");
   const r = await tick({
-    now: realClock,
+    now: () => new Date("2026-08-26T00:00:00.000Z"),
     forge,
     state: st,
     supervisor: sup,
@@ -5999,7 +5999,7 @@ test("tick DRIVE (#865): a label-write failure leaves the row driving — never 
   const gate = new FakeMergeGate();
   gate.outcomes[66] = engineAgentFixable(66, "run-1");
   const r = await tick({
-    now: realClock,
+    now: () => new Date("2026-08-26T00:00:00.000Z"),
     forge,
     state: st,
     supervisor: sup,
@@ -6024,7 +6024,7 @@ test("tick DRIVE (#865): an all-producer rejected verdict (owner absent, today's
   const gate = new FakeMergeGate();
   gate.outcomes[66] = engineAgentFixable(66, "run-1");
   const r = await tick({
-    now: realClock,
+    now: () => new Date("2026-08-26T00:00:00.000Z"),
     forge,
     state: st,
     supervisor: sup,
@@ -6059,7 +6059,7 @@ test("tick DRIVE (#865): a recorded finding dispute for THIS runId wins over the
   const gate = new FakeMergeGate();
   gate.outcomes[66] = engineAgentFixable(66, "run-1");
   const r = await tick({
-    now: realClock,
+    now: () => new Date("2026-08-26T00:00:00.000Z"),
     forge,
     state: st,
     supervisor: sup,
@@ -6079,6 +6079,119 @@ test("tick DRIVE (#865): a recorded finding dispute for THIS runId wins over the
     "review-disputed carries this escalation, not the reused drive-needs-human kind the operator branch uses",
   );
   assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed"]).length, 1);
+  st.close();
+});
+
+test("tick DRIVE (#865, #1131 fix leg 1 finding 1): a label-write failure AFTER the comment already landed re-enters next tick and retries ONLY the label — no duplicate comment, terminal write fires once the label succeeds", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-b", 3, 66, { fix_rounds: 0 });
+  seedOwnerVerdict(st, "lane-b", "run-1", "head-1", [{ id: "F-0", body: "operator-only gap", owner: "operator" }]);
+  forge.throwOnAddPRLabel = true;
+  const gate = new FakeMergeGate();
+  gate.outcomes[66] = engineAgentFixable(66, "run-1");
+  const deps = {
+    now: () => new Date("2026-08-26T00:00:00.000Z"),
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  };
+
+  // Tick 1: comment succeeds (write order is comment-then-label, #1131 fix leg 1 finding 1), the
+  // label write fails — no fix leg, row stays driving, no drive-needs-human event.
+  const r1 = await tick(deps);
+  assert.deepEqual(sup.resumeCalls, [], "no fix leg dispatched despite the label failure");
+  assert.equal(forge.prComments.length, 1, "the comment DID land — it is written before the label");
+  assert.deepEqual(forge.prLabelsAdded, [], "the label write failed");
+  const rowAfterTick1 = st.getWorker("lane-b")!;
+  assert.equal(rowAfterTick1.state, "driving", "no terminal transition without the label landing");
+  assert.equal(r1.driven[0]?.kind, "queued");
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-needs-human"]), [], "no event without a successful label write");
+
+  // Tick 2: the label write now succeeds. The row was never labeled after tick 1, so deriveGate
+  // does not bypass this branch into the generic HUMAN escalation — it re-enters the SAME
+  // operator-owned branch, whose marker-check finds tick 1's comment already posted and skips
+  // reposting it; only the label write and the terminal record are retried.
+  forge.throwOnAddPRLabel = false;
+  const r2 = await tick(deps);
+  assert.equal(forge.prComments.length, 1, "no duplicate comment — the marker-check-before-post path skipped the re-post");
+  assert.deepEqual(forge.prLabelsAdded, [[66, "needs-human"]], "the label write now succeeds");
+  const row = st.getWorker("lane-b")!;
+  assert.equal(row.state, "failed");
+  assert.equal(row.fix_rounds, 0, "fix_rounds unchanged across both ticks — no fix leg was ever dispatched");
+  assert.equal(r2.driven[0]!.kind, "needs-human");
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-needs-human"]);
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0]!.payload, {
+    worker: "lane-b",
+    issue: 3,
+    pr: 66,
+    reason: "operator-owned-only:1",
+    labeled: 1,
+    carrier: "pr",
+  });
+  st.close();
+});
+
+test("tick DRIVE (#865, #1131 fix leg 1 finding 2): a same-head reentry that lands a NEW review run posts a second, distinct comment keyed on the new run — the prior run's marker never suppresses it", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-b", 3, 66, { fix_rounds: 0 });
+  seedOwnerVerdict(st, "lane-b", "run-1", "head-1", [{ id: "F-0", body: "missing tier-C record (round 1)", owner: "operator" }]);
+  const gate = new FakeMergeGate();
+  gate.outcomes[66] = engineAgentFixable(66, "run-1");
+  const deps = {
+    now: () => new Date("2026-08-26T00:00:00.000Z"),
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  };
+  await tick(deps);
+  const rowAfterRun1 = st.getWorker("lane-b")!;
+  assert.equal(rowAfterRun1.state, "failed");
+  assert.equal(forge.prComments.length, 1, "run-1's escalation comment landed");
+  const firstComment = forge.prComments[0]![1];
+  assert.match(firstComment, /run-1#0/);
+
+  // A human reclaims (#147: clears the label on the carrier the escalation wrote) and — per the
+  // design's own reentry note — posts the missing evidence into the issue body, which triggers a
+  // fresh review at the SAME head. That review comes back with a DIFFERENT all-operator verdict:
+  // a NEW WAL run, same head, different findings — exactly the case a headOid-keyed marker (the
+  // pre-fix-leg key) would have wrongly suppressed.
+  forge.prLabelsByPr[66] = [];
+  seedOwnerVerdict(st, "lane-b", "run-2", "head-1", [
+    { id: "F-1", body: "missing tier-C record (round 2, a different gap)", owner: "operator" },
+  ]);
+  gate.outcomes[66] = engineAgentFixable(66, "run-2");
+  const r2 = await tick(deps);
+
+  assert.deepEqual(r2.gatedReclaimed, [{ kind: "reclaimed", worker: "lane-b", issue: 3, pr: 66, attempt: 1 }]);
+  assert.equal(forge.prComments.length, 2, "a SECOND, distinct comment — run-1's marker never suppresses run-2's");
+  const secondComment = forge.prComments[1]![1];
+  assert.match(secondComment, /run-2#0/);
+  assert.match(secondComment, /missing tier-C record \(round 2, a different gap\)/);
+  assert.notEqual(firstComment, secondComment);
+  const row = st.getWorker("lane-b")!;
+  assert.equal(row.state, "failed");
+  assert.equal(row.fix_rounds, 0);
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-needs-human"]);
+  assert.equal(events.length, 2, "run-2's escalation fires its OWN drive-needs-human event");
+  assert.deepEqual(events[1]!.payload, {
+    worker: "lane-b",
+    issue: 3,
+    pr: 66,
+    reason: "operator-owned-only:1",
+    labeled: 1,
+    carrier: "pr",
+  });
   st.close();
 });
 
@@ -7405,7 +7518,7 @@ test("tick DRIVE (#865, gatherFixupFindingRecord owner filter): a constant opera
     verdictRunId: "run-9",
   };
   const r = await tick({
-    now: realClock,
+    now: () => new Date("2026-08-26T00:00:00.000Z"),
     forge,
     state: st,
     supervisor: sup,

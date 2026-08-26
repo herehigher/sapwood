@@ -5569,12 +5569,18 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
           // argument) and BEFORE #457's verdict-rerun breaker below (this is pure state, decided
           // BEFORE any fix leg would have run, not a leg that already ran and produced nothing).
           // Engine-agent path only, same `verdictRunId` discriminator `findingDispute` above uses.
-          const operatorOwned =
-            outcome.prescription === "findings" && outcome.verdictRunId !== undefined
-              ? computeOperatorOwnedEscalation(state, w.name, outcome.verdictRunId)
-              : null;
+          // `operatorOwnedRunId` travels alongside the computed escalation (not re-derived from
+          // it) so `escalateOperatorOwned` can key its comment marker on the review-artifact
+          // identity this verdict actually came from — see that function's own doc (#1131 fix
+          // leg 1, finding 2).
+          let operatorOwned: OperatorOwnedEscalation | null = null;
+          let operatorOwnedRunId = "";
+          if (outcome.prescription === "findings" && outcome.verdictRunId !== undefined) {
+            operatorOwnedRunId = outcome.verdictRunId;
+            operatorOwned = computeOperatorOwnedEscalation(state, w.name, operatorOwnedRunId);
+          }
           if (operatorOwned) {
-            const escalated = await escalateOperatorOwned(forge, state, cfg, w, pr, operatorOwned, iso);
+            const escalated = await escalateOperatorOwned(forge, state, cfg, w, pr, operatorOwned, operatorOwnedRunId, iso);
             if (escalated) {
               driveFixBlockedLanes.add(w.name);
               driven.push(escalated);
@@ -7097,27 +7103,52 @@ async function escalateNonConvergent(
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `review-non-convergent:${signal}` };
 }
 
-/** #865 (design #1123 D4): the marker for `escalateOperatorOwned`'s comment, keyed on
- *  (worker, pr, headOid) — the same live-read-before-repost shape `reviewDisputedCommentMarker`/
- *  `reviewNonConvergentCommentMarker` already take, for the same ambiguous-write-outcome reason
- *  (`commentOnEscalationCarrier`'s own doc). Keyed on `headOid`, not `runId`: the WAL's `head` IS
- *  the reviewed object this escalation is about, and a later verdict against a NEW head is never
- *  mistaken for the same, already-posted episode. */
-function operatorOwnedCommentMarker(worker: string, pr: number, headOid: string): string {
-  return `<!-- sapwood:operator-owned:${worker}:${pr}:${headOid} -->`;
+/** #865 (design #1123 D4); re-keyed #1131 fix leg 1 (finding 2): the marker for
+ *  `escalateOperatorOwned`'s comment, keyed on (worker, pr, verdictRunId) — NOT `headOid`. A
+ *  gated reentry re-snapshots the issue **body** without moving the PR head (D4's own reclaim
+ *  note: "the AC-snapshot re-baseline on reentry"), so a second review at the SAME head can still
+ *  produce a NEW WAL run (a new `verdictRunId`) carrying different operator-owned findings — a
+ *  marker keyed on `headOid` alone would suppress that run's comment (the old marker already
+ *  "matches") while the new `drive-needs-human` event still fires, leaving the row terminal with
+ *  no explanation for what changed. `verdictRunId` is the identity of the review ARTIFACT this
+ *  escalation's evidence came from (`computeOperatorOwnedEscalation`'s own WAL-currency
+ *  argument), so keying on it — the same live-read-before-repost shape
+ *  `reviewDisputedCommentMarker`/`reviewNonConvergentCommentMarker` already take, for the same
+ *  ambiguous-write-outcome reason (`commentOnEscalationCarrier`'s own doc) — makes each distinct
+ *  run's comment independently postable and independently idempotent. */
+function operatorOwnedCommentMarker(worker: string, pr: number, verdictRunId: string): string {
+  return `<!-- sapwood:operator-owned:${worker}:${pr}:${verdictRunId} -->`;
 }
 
 /**
- * #865 (design #1123 D4): the operator-owned escalation — a FIXABLE tick whose standing verdict
- * is rejected ONLY on operator-owned findings (`computeOperatorOwnedEscalation` above) escalates
- * straight to `needs-human` WITHOUT dispatching a fix leg, spending ZERO fix rounds — the same
- * "zero paid fix legs" property `escalateReviewDisputed`/`escalateNonConvergent` already have for
- * their own no-further-progress-possible cases (`w.fix_rounds` is carried through UNCHANGED on
- * the terminal upsert; this branch never calls `startFixLeg`).
+ * #865 (design #1123 D4); reordered #1131 fix leg 1 (finding 1): the operator-owned escalation —
+ * a FIXABLE tick whose standing verdict is rejected ONLY on operator-owned findings
+ * (`computeOperatorOwnedEscalation` above) escalates straight to `needs-human` WITHOUT
+ * dispatching a fix leg, spending ZERO fix rounds — the same "zero paid fix legs" property
+ * `escalateReviewDisputed`/`escalateNonConvergent` already have for their own
+ * no-further-progress-possible cases (`w.fix_rounds` is carried through UNCHANGED on the
+ * terminal upsert; this branch never calls `startFixLeg`).
  *
- * Modeled directly on `escalateNonConvergent`'s own shape: the SAME `labelEscalationCarrier` /
+ * WRITE ORDER — comment, THEN label, THEN the atomic terminal write — deliberately NOT
+ * `escalateNonConvergent`'s own label-then-comment order (that function, like
+ * `escalateReviewDisputed`, labels first and is exposed to the SAME partial-state hazard this
+ * reordering closes; fixing it there is out of scope for this leg). The hazard: `deriveGate`
+ * (merge-driver.ts) resolves any lane carrying a human-hold label to `HUMAN` UNCONDITIONALLY,
+ * before this file's `case "fixable"` (and this function) ever runs again — so once the label
+ * lands, a next tick that finds the comment still unposted can no longer re-enter THIS branch to
+ * finish the job; it falls into the generic `escalateNeedsHuman` path instead, which posts a
+ * generic reason, never the operator-owned evidence list this escalation exists to deliver.
+ * Posting the marker-idempotent comment FIRST closes that gap: the only reachable partial state
+ * becomes "comment posted, label not yet applied" — no human label yet, so `deriveGate` does NOT
+ * bypass this branch, and a next tick re-enters it; `commentOnEscalationCarrier`'s live
+ * marker-check (re-fetched from the forge, not cached) finds the already-posted comment and skips
+ * re-posting; only the label write is retried. A comment-write failure, by contrast, leaves
+ * NOTHING durable behind (no label, no comment) — the row simply retries the whole branch fresh,
+ * same as today.
+ *
+ * Otherwise modeled on `escalateNonConvergent`'s own shape: the SAME `labelEscalationCarrier` /
  * `commentOnEscalationCarrier` plumbing, the same forge-before-terminal-upsert discipline, and
- * the same ATOMIC `state.upsertWorkerWithEvent` terminal write (label AND comment land BEFORE the
+ * the same ATOMIC `state.upsertWorkerWithEvent` terminal write (comment AND label land BEFORE the
  * `drive-needs-human` event, and that event lands in the SAME transaction as the terminal
  * worker-row write — a crash between a bare `upsertWorker` and a separate `appendEvent` would
  * otherwise leave the row `failed` with no durable escalation record). REUSES the existing
@@ -7126,7 +7157,7 @@ function operatorOwnedCommentMarker(worker: string, pr: number, headOid: string)
  * proves ownership via `labeled: 1` in the payload, so this escalation is visible to the
  * needs-attention strip and the reclaim sweep with zero registry changes.
  *
- * A label or comment write failure returns `null` — the caller leaves the row `driving` and
+ * A comment or label write failure returns `null` — the caller leaves the row `driving` and
  * retries the WHOLE branch next tick (D4: "A label/comment failure leaves the row driving,
  * returns a queued outcome, and must not fall through to `startFixLeg`"). Unlike
  * `escalateReviewDisputed`/`escalateNonConvergent`, this does not maintain its own per-episode
@@ -7143,16 +7174,12 @@ async function escalateOperatorOwned(
   w: WorkerRow,
   pr: number,
   escalation: OperatorOwnedEscalation,
+  verdictRunId: string,
   iso: () => string,
 ): Promise<DrivenOutcome | null> {
   const carrier = escalationCarrier(pr);
-  try {
-    await labelEscalationCarrier(forge, cfg, carrier, w.issue, pr);
-  } catch {
-    return null;
-  }
   const evidence = escalation.items.map((t) => `\`${t.ref}\` — ${capDigest(t.findingBody, REVIEW_DISPUTED_EXCERPT_MAX_CHARS)}`).join("; ");
-  const marker = operatorOwnedCommentMarker(w.name, pr, escalation.headOid);
+  const marker = operatorOwnedCommentMarker(w.name, pr, verdictRunId);
   const comment =
     capDigest(
       `sapwood: PR #${pr}'s review rejected it only on findings the reviewer classified as operator-owned — ` +
@@ -7164,6 +7191,11 @@ async function escalateOperatorOwned(
     ) + `\n\n${marker}`;
   try {
     await commentOnEscalationCarrier(forge, cfg, carrier, w.issue, pr, marker, comment);
+  } catch {
+    return null;
+  }
+  try {
+    await labelEscalationCarrier(forge, cfg, carrier, w.issue, pr);
   } catch {
     return null;
   }
