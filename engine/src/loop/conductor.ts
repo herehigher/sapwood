@@ -7029,10 +7029,9 @@ async function escalateNonConvergent(
     capDigest(
       `sapwood: PR #${pr}'s review is not converging — the progress signal is **${signal}** ` +
         `(${fixRoundsSpent} fix round(s) already spent). Escalating directly to ` +
-        `\`${cfg.labels.needsHuman}\` instead of dispatching another fix leg, per ` +
-        `<${DOC_LINKS.reviewDoctrine}>'s adjudication principle 4: runaway complexity escalates to the ` +
-        `top of the loop, not more patches — the intended response is DESIGN RE-ENTRY ` +
-        `(architect/plan re-review), not merely this human notification.\n\n` +
+        `\`${cfg.labels.needsHuman}\` instead of dispatching another fix leg: runaway complexity ` +
+        `escalates to the top of the loop, not more patches — the intended response is DESIGN ` +
+        `RE-ENTRY (architect/plan re-review), not merely this human notification.\n\n` +
         `Round r-1 finding keys${boundedPrev.truncated ? " (truncated)" : ""}:\n` +
         `${boundedPrev.entries.map((k) => `- \`${k}\``).join("\n") || "(none — round 1 has no r-1 to compare against)"}\n\n` +
         `Current round finding keys${boundedCurr.truncated ? " (truncated)" : ""}:\n` +

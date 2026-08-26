@@ -7323,7 +7323,7 @@ test("tick DRIVE (#450, two lanes, one tick): the two facts stay separable — a
   st.close();
 });
 
-test("tick DRIVE (#450, escalation comment content): cites the signal, both rounds' finding keys, and design re-entry (docs/REVIEW-DOCTRINE.md adjudication principle 4)", async () => {
+test("tick DRIVE (#450, escalation comment content): cites the signal, both rounds' finding keys, and design re-entry, with no doctrine ordinal", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
   const sup = new FakeSupervisor();
@@ -7356,8 +7356,8 @@ test("tick DRIVE (#450, escalation comment content): cites the signal, both roun
   const comment = forge.prComments[0]![1];
   assert.match(comment, /\*\*recurrence\*\*/, "the signal name");
   assert.match(comment, new RegExp(keyA.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "round r-1's finding key");
-  assert.match(comment, /adjudication principle 4/i, "design re-entry citation");
-  assert.match(comment, /REVIEW-DOCTRINE\.md/, "the doctrine file, by name");
+  assert.doesNotMatch(comment, /principle\s+\d/i, "no doctrine ordinal — a target repo has no such list");
+  assert.doesNotMatch(comment, /REVIEW-DOCTRINE\.md/, "no link into sapwood's own doctrine doc");
   assert.match(comment, /design re-entry/i, "design re-entry, not merely human escalation");
   assert.match(comment, /to reclaim\./, "the existing return path — no new re-entry channel");
   st.close();
