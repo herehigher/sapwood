@@ -1,191 +1,230 @@
 # sapwood
 
 [![CI](https://github.com/herehigher/sapwood/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/herehigher/sapwood/actions/workflows/ci.yml?query=branch%3Amain)
+[![npm version](https://img.shields.io/npm/v/sapwood)](https://www.npmjs.com/package/sapwood)
+[![node >= 24](https://img.shields.io/badge/node-%E2%89%A524-blue)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **The autonomous coding loop with governance built in.**
 
-sapwood turns a GitHub backlog into merged, reviewed code: *issues in → reviewed
-PRs out*. It is a [Claude Code](https://claude.com/claude-code) plugin that drives
-self-directed development through a real governance layer — not a black box that
-self-merges and hopes for the best. Adopt it at the level you trust today, then step
-up or down through the [L0–L3 autonomy ladder](docs/guide/getting-started.md#l0l3-autonomy-ladder):
-read-only preview, one supervised issue, human-merged PRs, or governed unattended
-merge.
-
-## Design principles
-
-- **producer ≠ reviewer ≠ merger** — **plugin-enforced for covered built-in
-  Bash/file-tool actions:** the fail-closed guard prevents a worker from
-  approving or merging its own work, rather than asking it to refrain in a
-  prompt. Ambient MCP tools and unknown servers are documented accepted blind
-  spots; protected branches and a distinct merger identity are the mandatory
-  deployment backstop for the full boundary.
-- **GitHub is the source of truth for the cross-actor development process** —
-  **plugin-enforced:** the engine uses the ProjectV2 board, issues, pull
-  requests, and checks as process state, with no hidden second work queue to
-  maintain. Its local SQLite ledger holds single-machine runtime state (lanes,
-  events, and spend), not a parallel task board.
-- **fail-closed, not advisory** — **plugin-enforced:** an invalid or blocked
-  guarded action is denied, and the merge path waits for its configured gates.
-  Unlike advisory-only AI review, its conclusion is not merely a recommendation
-  that the producer can act around.
-- **legible, ledger-checked cost** — **plugin-enforced for recorded worker,
-  round, and daily spend:** ledger-based ceilings are checked post-hoc at
-  admission/drain points; dry-run preview and a kill switch make the controls
-  visible. The `codex-exec` review cost cap is advisory (with a hard wall-clock
-  timeout); non-decisive review attempts are unledgered, and subagent fan-out
-  is a documented blind spot.
-
-**Deployment prerequisite.** The plugin's guard mediates the covered built-in
-Bash/file-tool family, not inherited ambient MCP tools or unknown servers. For
-unattended merge, protected branches and a distinct merger identity establish the
-load-bearing boundary described in [Trust model prerequisites](docs/guide/getting-started.md#trust-model-prerequisites).
-A fresh installation does not establish those repository settings.
-
-> Status: **early development** (pre-v1). The framework is being extracted and
-> re-implemented from a proven private project; see [`docs/PLAN.md`](docs/PLAN.md)
-> for the full goals, architecture, and roadmap.
-
-## Why "sapwood"?
-
-In a tree, sapwood is the living layer between bark and heartwood — the only part
-of the trunk that grows. New wood forms there and, as it matures, hardens into
-heartwood: the stable core that holds the tree up.
-
-That is this loop. Bark — the fail-closed guard — protects the living layer from
-the outside. Sapwood is where the work grows: workers producing new code in
-parallel. Heartwood is `main` — with the [Trust model
-prerequisites](docs/guide/getting-started.md#trust-model-prerequisites) in place, nothing
-becomes heartwood until it has passed the review gate and hardened. Growth at the
-edge, structure at the core, protection in between.
-
-## Why it's different
-
-Most autonomous coding tools ask you to trust the model and let it merge. sapwood's
-plugin enforces a governance path instead of treating review as advice.
-
-- **Configurable review chain** — **plugin-enforced:** the merge path is gated on
-  CI and a fresh review before the conductor can merge. The reviewer is pluggable,
-  and a *produce-PR-and-stop* mode (a human clicks merge) is available when you
-  want a tighter leash. The protected-branch and distinct-identity requirements
-  remain [deployment prerequisites](docs/guide/getting-started.md#trust-model-prerequisites).
-
-## Prior art & inspiration
-
-sapwood acknowledges [loop-engineering](https://github.com/cobusgreyling/loop-engineering)
-and the [loop-engineering orange book](https://github.com/alchaincyf/loop-engineering-orange-book)
-as methodological prior art, including the threads they collect. They inform the
-craft of building and documenting agent loops; they are not sapwood's category label.
-
-## How it works
-
-A nested loop dispatches one **headless worker per issue**, each in its own git
-worktree. Workers do TDD and push their branch, but do not approve or merge. The
-engine opens the PR, and worker completion is signaled by the wrapper writing sentinel
-files, not by the model's self-report. The conductor reclaims finished lanes, drives
-PRs through the review gate, and (in autonomous mode) merges when the deployment
-prerequisites above are in place.
-
-```
-GitHub issue (Ready)
-   → claim → isolated worktree → TDD → push → engine opens PR (Closes #N) → independent review
-   → [default] CI green + review → conductor merges   |   [opt] stop for human merge
-   → board: Done
-```
-
-## Architecture
-
-<!-- ARCHITECTURE-DIAGRAM: canonical home. docs/dev-guide/README.md links
-     here instead of duplicating — keep it single-source. -->
+- issues in → reviewed PRs out.
+- producer ≠ reviewer ≠ merger, fail-closed within the guarded built-in tool
+  family — branch protection + distinct merger identity are the deployment
+  backstop (see [Trust model
+  prerequisites](docs/guide/getting-started.md#trust-model-prerequisites)).
+- sapwood is a Claude Code plugin bundle (slash commands, skills, the guard
+  hook) around the `sapwood` engine CLI. Install the plugin (recommended),
+  or run the CLI from npm on its own — both are complete paths.
 
 ```mermaid
 flowchart LR
-  subgraph GH["GitHub — source of truth for process"]
-    BOARD["ProjectV2 board<br/>Status + labels = work queue"]
-    ISSUES["Issues<br/>(Ready = dispatchable)"]
-    PRS["Pull requests"]
-    CI["CI checks"]
-  end
-
-  subgraph ENGINE["sapwood engine (TypeScript, Node ≥ 24)"]
-    ROUND["Round driver (runRounds)<br/>aligning → architecting → plan_review →<br/>executing → harvesting → retro<br/>(loop/round.ts)"]
-    CONDUCTOR["Conductor<br/>tick loop (loop/conductor.ts)"]
-    GATE["MergeDriver — merge gate<br/>gate① CI + gate② review + FIXABLE<br/>(roles/merge-driver.ts)"]
-    PERIPH["Peripheral roles<br/>architect · plan-review · PO triage · retro<br/>(roles/, retro/)"]
-    STATE[("SQLite state<br/>lanes · events · spend ledger<br/>(state/state.ts)")]
-    PROXY["Forge MCP proxy<br/>read-only, token-minted per session<br/>(proxy/)"]
-    FORGE["Forge adapter<br/>gh CLI wrapper (forge/)"]
-  end
-
-  subgraph SESSIONS["Headless Claude sessions"]
-    WORKER["Workers<br/>one git worktree per issue<br/>TDD → push, never merge"]
-    GUARD["guard.ts<br/>fail-closed PreToolUse hook"]
-    WORKER --- GUARD
-  end
-
-  REVIEWER["Independent reviewer<br/>(different model — hosted bot or engine-agent session)"]
-
-  ISSUES -->|Ready| CONDUCTOR
-  ROUND -->|"drives ticks (executing phase)"| CONDUCTOR
-  CONDUCTOR -->|dispatch| WORKER
-  WORKER -->|"push branch"| PRS
-  FORGE -->|"open PR"| PRS
-  WORKER -.->|"sentinel files (local)"| CONDUCTOR
-  CONDUCTOR --> GATE
-  GATE -->|trigger review| REVIEWER
-  REVIEWER -->|verdict| GATE
-  CI --> GATE
-  GATE -->|"merge (or stop for human)"| PRS
-  ENGINE <--> FORGE
-  FORGE <--> GH
-  SESSIONS <-->|"scoped reads (config-gated)"| PROXY
-  PROXY --> FORGE
-  ENGINE <--> STATE
-  ROUND --> PERIPH
+A["Ready issue"] --> B["Worktree worker"]
+B --> C["push"]
+C --> D["Engine opens PR"]
+D --> E["CI + independent review"]
+E --> F["Merge (or stop for human)"]
+F --> G["Done"]
 ```
+A worker claims a Ready issue, pushes; the engine opens the PR, gates it on CI + review, then merges or stops for a human.
+
+## Quick start
+
+**Requirements**
+
+- Node.js ≥ 24
+- Claude Code CLI ≥ 2.1.209
+- `gh` authenticated with the `project` scope
+- A GitHub repo with a ProjectV2 board sapwood may drive
+
+```
+/plugin marketplace add herehigher/sapwood-plugin
+/plugin install sapwood@sapwood
+```
+
+```yaml
+board:
+  owner: YOU
+  repo: REPOSITORY
+  projectNumber: PROJECT_NUMBER
+```
+
+```
+npx sapwood@<version> validate
+npx sapwood@<version> init
+npx sapwood@<version> run --dry-run
+```
+
+`init` provisions labels, board lanes, starter files, and (with repo
+admin) a deploy key — best-effort, idempotent. `run --dry-run` reads only,
+nothing is written.
+
+npm only: `npm i -g sapwood@alpha` gives the same CLI without slash
+commands. Pre-release: both channels go live with the first tagged release.
+
+See [Install](docs/guide/getting-started.md#install) and the [L1
+recipe](docs/guide/getting-started.md#l1--supervise-one-issue).
+
+## Why sapwood
+
+sapwood exists so a GitHub backlog can drive development without handing
+an autonomous worker the keys to its own review — governed
+autonomy, stepped up or down as trust is earned, trusted repos first. Like
+sapwood in a tree, growth happens at the living edge, protected by bark,
+until it hardens into heartwood.
+
+## Design principles
+
+- **producer ≠ reviewer ≠ merger** — plugin-enforced for the guarded
+  built-in tool family; documented MCP/host blind spots; branch protection
+  + distinct merger identity are the deployment backstop.
+- **GitHub is the process truth** — board, issues, PRs, checks are the
+  queue; no second queue.
+- **fail-closed, not advisory** — a blocked action is denied outright, not
+  merely advised against.
+- **deterministic engine, model tokens only on legs that need thought** —
+  orchestration is plain TypeScript.
+- **rare edges degrade to `needs-human`, never to more machinery** —
+  low-probability edges get a human, not new code.
+- **legible, ledger-checked cost** — a capability with its existing
+  caveats, not a differentiator.
+
+**Three sources of truth:**
+
+- **GitHub** — cross-actor process truth: board status, labels, issues, PRs.
+- **SQLite** — the engine's own actions: dispatched, observed, spent.
+- **Repository docs** — durable knowledge: what is true now.
+
+See [Persistence](docs/dev-guide/06-persistence.md#principles--boundary--what-belongs-in-sqlite).
+
+## How it is different
+
+Claude Code is today's worker runtime — sapwood dispatches it as headless
+sessions; sapwood is the loop and governance layer above the coding agent,
+not a competitor to it.
+
+| What sapwood states | What to ask any harness |
+| --- | --- |
+| Merge authority: only the merge driver calls merge — never the producer. | Who can call merge, and can producer reach it? |
+| Enforcement: fail-closed within the guarded built-in tool family; not a sandbox; documented MCP/host blind spots. | What tool surface is mediated, and what is ambient? |
+| Queue & exit: GitHub holds process truth; the trail survives uninstall and the runner machine. | Where does the queue live, and what remains after? |
+| Control flow: deterministic TypeScript orchestration, not model-decided transitions. | Is scheduling code, or a prompt the model can argue around? |
+| Interruption: soft-budget handoff (resumable work) → kill switch drains → emergency stop hard-kills and sacrifices in-flight WIP. | What happens to in-flight work at the e-stop? |
+
+See [`docs/security.md`](docs/security.md).
+
+## Architecture
+
+```mermaid
+flowchart TB
+subgraph L1["GitHub"]
+ GH["Board · issues · PRs · CI"]
+end
+subgraph L2["Engine"]
+ RD["Round driver"]
+ CD["Conductor"]
+ MG["Merge gate"]
+ ST["SQLite state"]
+ FA["Forge adapter"]
+end
+subgraph L3["Headless sessions"]
+ WK["Workers + guard hook"]
+ ER["engine-agent reviewer"]
+end
+subgraph L4["Reviewer adapter"]
+ RA["engine-agent · hosted bot · same-model-trusted · human"]
+end
+GH <--> FA
+FA <--> CD
+RD --> CD
+CD --> WK
+WK --> FA
+CD --> MG
+MG --> RA
+```
+GitHub holds process truth; the engine orchestrates; headless sessions do the work; a pluggable adapter reviews it.
+
+```mermaid
+stateDiagram-v2
+[*] --> running
+running --> driving
+driving --> fixing
+fixing --> driving
+running --> handoff
+fixing --> handoff
+handoff --> running: resume by origin
+handoff --> fixing: resume by origin
+running --> done
+driving --> done
+running --> failed
+fixing --> failed
+driving --> failed
+failed --> driving: eligible lanes only
+```
+A worker lane's lifecycle: `done` is terminal; `failed` can resume; a soft-budget `handoff` returns to where it started.
+
+Round phases: `aligning → architecting → plan_review → executing →
+harvesting → retro → closed`. Default board lanes: `Todo → Ready → In
+Progress → Done` (names are configurable). Detail:
+[05](docs/dev-guide/05-core-modules.md) ·
+[06](docs/dev-guide/06-persistence.md) ·
+[loop-walkthrough](docs/reference/loop-walkthrough.md).
+
+## Autonomy levels
+
+Lower = safer, more human effort; higher = more autonomous.
+
+| Level | Unattended | Merges | Watches | To step up |
+| --- | --- | --- | --- | --- |
+| [L0 — Observe](docs/guide/getting-started.md#l0--observe) | Nothing — read-only | n/a | — | Move to L1 (single issue) |
+| [L1 — Supervise one issue](docs/guide/getting-started.md#l1--supervise-one-issue) | Claim, push, open PR, review (1 issue) | Human | Human | Restore round driver; human merge |
+| [L2 — Delegate work, keep merge](docs/guide/getting-started.md#l2--delegate-work-keep-merge) | Full rounds, capped lanes | Human | Human | Trust review/CI, switch merge mode |
+| [L3 — Governed unattended merge](docs/guide/getting-started.md#l3--governed-unattended-merge) | Full rounds, gated merge | Conductor | Human | Add an LLM watcher |
+| L4 — LLM-supervised run | Full rounds, gated merge (as L3) | Conductor | Trusted LLM | Top of the ladder |
+
+L4 keeps L3's engine authority; scope: watch, record, nag, clear breaker
+parks (with reason), trip pause/kill switch (see [Governance
+lines](docs/guide/supervision.md#governance-lines)). By default it never
+adjudicates merge; owner may extend by explicit session-start
+authorization. `sapwood:human-merge-only` PRs stay a human's call.
+
+Human controls (pause / kill switch / e-stop) exist at every level (see
+[Human controls](docs/security.md#human-controls-three-tiers)); L3 and L4
+require the [Trust model
+prerequisites](docs/guide/getting-started.md#trust-model-prerequisites).
+
+## Status
+
+Implemented on main, pre-release: engine, guard, round orchestrator,
+dashboard. Release chain (marketplace catalog, npm publish) in progress.
+See [CHANGELOG.md](CHANGELOG.md) "Unreleased" and [PLAN.md "Current
+milestone"](docs/PLAN.md#current-milestone).
 
 ## Documentation
 
-- [`docs/guide/getting-started.md`](docs/guide/getting-started.md) — install,
-  `sapwood init`, the L0–L3 autonomy ladder, slash commands, writing a `Ready` issue.
-- [`docs/security.md`](docs/security.md) — the trust/governance model: guard hook,
-  human-merge-only paths, the e-stop/kill switch/pause control tiers, cost ceilings.
-- See [`docs/README.md`](docs/README.md) for the full documentation map — guides,
-  configuration, the contributor dev-guide, and durable design references.
+- [`getting-started.md`](docs/guide/getting-started.md) — install,
+  `sapwood init`, the autonomy ladder.
+- [`security.md`](docs/security.md) — the trust/governance model.
+- [`docs/README.md`](docs/README.md) — the documentation map.
+- [`dev-guide/README.md`](docs/dev-guide/README.md) — the contributor tour.
 
-## Requirements
+## Acknowledgements
 
-- **Node.js ≥ 24** — the engine uses the built-in `node:sqlite` (WAL) for durable
-  state, so no native build step.
-- **Claude Code CLI ≥ 2.0** — workers run as headless `claude -p` sessions; the
-  worker module pins the exact flags it depends on.
-- **GitHub CLI (`gh`)** authenticated with the `project` scope (the loop drives a
-  ProjectV2 board).
+sapwood is inspired by, and acknowledges:
 
-## Roadmap
+- [Harness Engineering](https://github.com/walkinglabs/learn-harness-engineering)
+- [orange book](https://github.com/alchaincyf/loop-engineering-orange-book)
+- [loop-engineering](https://github.com/cobusgreyling/loop-engineering)
+- [@AnatoliKopadze](https://x.com/AnatoliKopadze/status/2068328135611822149)
+- [@0xCodez](https://x.com/0xCodez/status/2064374643729773029)
+- [@0xCodez](https://x.com/0xCodez/status/2079165300625330317)
 
-| Milestone | Focus |
-|-----------|-------|
-| M0 ✅ | Plugin skeleton, config schema, `IForge` interface, SQLite state — **shipped** |
-| M0.5 ✅ | Turnkey onboarding (`sapwood init`: board/labels/milestones) — **shipped** |
-| M1 ✅ | Guard port — the fail-closed safety core (ships green first) — **shipped** |
-| M2 ✅ | Engine core (conductor + worker + guard wired live) — dogfooded end-to-end; **sapwood now builds sapwood** — **shipped** |
-| M3 ✅ | Review gate + opt-in autonomous-merge + cost ceiling + kill switch — the engine can now finish work under the two-gate policy — **shipped** |
-| M4 ✅ | Loop driver, commands + status CLI + dry-run, docs — **shipped** |
-| v0.2 | Round orchestrator (peripheral roles, gate⓪, round ledger) ✅ — now `sapwood run`'s default driver; Dashboard — designed and **built**, shipping inside the npm package — **release chain (marketplace catalog, publish gating) in progress** |
+These inform the craft of building and documenting agent loops —
+methodological prior art, not sapwood's category label.
 
-Built in TypeScript. Targets your own / your team's repos first (trusted context),
-architected toward public-repo hardening.
-
-For a fine-grained view of recent work, see [CHANGELOG.md](CHANGELOG.md) "Unreleased".
-
-## Contributing
+## Contributing · Security · License
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and
-[docs/dev-guide/](docs/dev-guide/README.md) for the codebase tour. Security
-reports: [SECURITY.md](SECURITY.md).
-
-## License
+[docs/dev-guide/](docs/dev-guide/README.md) for the codebase tour. Security:
+[SECURITY.md](SECURITY.md).
 
 [MIT](LICENSE).

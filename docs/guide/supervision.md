@@ -646,11 +646,12 @@ degrade; that's the one case still left to a human, and it's salvaged the same w
 
 ## Governance lines
 
-- **List-never-merge.** A supervisor session's job is visibility and, where authorized,
-  narrowly-scoped intervention (the kill switch, the pause sentinel, `park clear`) — it
-  is never a merge decision. Merge authority follows the configured merge gate
-  (`docs/security.md`), and `sapwood:human-merge-only` PRs are a human's call
-  structurally, not a supervisor's to route around.
+- **Default: never merge.** By default, a supervisor session's job is visibility and,
+  where authorized, narrowly-scoped intervention (the kill switch, the pause sentinel,
+  `park clear`) — never a merge decision. The owner may extend a session's scope to
+  merging under the configured merge gate (`docs/security.md`) by an explicit
+  authorization given at session start; `sapwood:human-merge-only` PRs remain a human's
+  call structurally, not a supervisor's to route around.
 - **Owner decides, supervisor records+nags.** Scope/policy/merge-authorization decisions
   are the owner's; a supervisor session's job is to surface the queues that need a
   decision, record the decision once made (see [Batch close ritual](#batch-close-ritual)
