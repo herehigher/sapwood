@@ -683,6 +683,30 @@ looks for `COMMENTED`/`APPROVED` review states from a Codex-bot (or
 verdict shape is not yet understood by gate②; this trigger/parse contract does not apply to the
 engine-agent's structured session output.
 
+### Hosted-bot review guidelines
+
+The engine posts each review request with the issue's verification plan, the repository's review
+doctrine (`doctrine.file`, if adopted), the diff scope (the full PR, or the delta since the last
+reviewed head), and the head commit the verdict must bind to. Standing review-round discipline for
+a hosted bot is **not** carried in that comment: a hosted bot reads its own instruction file, and
+comment-carried instructions are honored best-effort at most. For Codex, that file is the
+repository's root `AGENTS.md` under a `## Review guidelines` heading. A starting set that keeps
+repeated reviews additive instead of circular:
+
+```markdown
+## Review guidelines
+
+- Do not re-raise a settled finding. A finding is settled when its resolved review thread records a disposition (fixed, deferred, or rejected with a reason), or when the linked issue's acceptance criteria record an adjudication. If you disagree with a disposition, reply in that thread; do not open a new one.
+- Continue an existing open thread for the same code and concern, including a partial fix. Open a new thread only for a genuinely new concern.
+- On a re-review, limit new findings to what the latest push introduced. Style preferences and speculative refactors are out of scope. If no blocking finding remains, say so plainly; an empty round is a valid result.
+```
+
+A hosted bot reads the PR head's copy of its instruction file, so a PR could rewrite the rules for
+its own review; instruction files such as `AGENTS.md` are on `escalation.instructionPaths` by
+default, so such a PR is labelled human-merge-only instead of reaching autonomous merge.
+Repository-specific review knowledge belongs in `doctrine.file`, which reaches the bot through the
+review-request comment.
+
 ## `merge`
 
 | Key | Default | Meaning |

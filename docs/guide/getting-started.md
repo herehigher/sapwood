@@ -252,6 +252,10 @@ configured lanes exist.
 > queueing every PR fail-closed forever — `sapwood validate` reports the same refusal.
 > Configure the check above before your first run. Do not start an unattended run until the
 > pull-request check above is visible and green on a human-authored test PR.
+>
+> Switching to a hosted bot? See
+> [Hosted-bot review guidelines](configuration.md#hosted-bot-review-guidelines) for the standing
+> rules to put in the bot's own instruction file.
 
 For the operational distinction between a healthy wait, standby, a frozen ceiling, and a
 genuine wedge, use the [engine-state reference table](troubleshooting.md#reading-engine-state-at-a-glance).
