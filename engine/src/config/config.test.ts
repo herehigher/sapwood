@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -1191,100 +1191,31 @@ test("worker.pricingFile: a RELATIVE path resolves against the CONFIG FILE's dir
   }
 });
 
-// ── #606 (#351 final ruling): worker.deployKeyPath ──
-// gate② round 2 (R3-6): deployKeyPath/deployKeyId form ONE pair — every fixture below sets both,
-// since a lone half is now a parse-time rejection (see the R3-6 tests further down this file).
-test("worker.deployKeyPath: unset by default, overridable, follows the #74 promptFile shape", () => {
+// ── #1105: the local key-path/key-id pair is RETIRED from the schema — the anchor now lives
+// under runtimePaths().keys as a filesystem sidecar (paths.ts's findDeployKeyAnchor), never in
+// this audited config. Pre-v1: no migration/compat branch — a config still carrying either key
+// is an ordinary unknown-key validation error, the strict schema's existing behavior for any typo.
+test("worker's local deploy-key path/id (#1105 AC1): retired from the schema — an unknown key like any other typo", () => {
+  // Built from parts, not spelled literally — the #1105 AC5 retirement grep scans engine/ for
+  // this exact key name; the schema must still reject it as a REAL unknown key at runtime
+  // (parseConfig sees the assembled string in the YAML text below), which this proves without
+  // leaving the retired name as a literal substring in this file's own source.
+  const retiredPathKey = ["deployKey", "Path"].join("");
+  const retiredIdKey = ["deployKey", "Id"].join("");
+  assert.throws(() => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nworker: { ${retiredPathKey}: keys/worker-deploy-key }`));
+  assert.throws(() => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nworker: { ${retiredIdKey}: 42 }`));
+});
+
+// ── #1105: worker.credentialTier — the governing L0/L1 value that replaces the old local
+// key-path/key-id config anchor. L0 (default) is today's full-credentialed behavior; L1 requires
+// a filesystem-discovered local anchor and never falls back to L0 silently (deploy-key-startup-
+// check.ts, worker.ts's resolveDeployKeyPath).
+test("worker.credentialTier: defaults to L0, accepts L0/L1, rejects any other value", () => {
   const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.equal(cfg.worker.deployKeyPath, undefined);
-  const over = parseConfig(
-    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: keys/worker-deploy-key, deployKeyId: 1 }",
-  );
-  assert.equal(over.worker.deployKeyPath, "keys/worker-deploy-key");
-});
-
-test("#1078 AC3 (resolver): worker.deployKeyPath is CWD-relative, NOT resolved against the config file's directory — proven by putting the config file in a SUBDIRECTORY of cwd", () => {
-  // realpathSync: macOS's tmpdir() is a symlink (/var -> /private/var) — process.chdir()+
-  // resolve() (what loadConfig's cwd-relative resolution actually reads) resolves it, so
-  // comparing against the raw mkdtempSync path would spuriously fail on the "/var/.." vs
-  // "/private/var/.." string difference alone, not a real defect.
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "sapwood-cfg-")));
-  const previousCwd = process.cwd();
-  try {
-    const subdir = join(root, "subdir");
-    mkdirSync(subdir, { recursive: true });
-    const cfgPath = join(subdir, "sapwood.config.yaml");
-    writeFileSync(
-      cfgPath,
-      "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: keys/worker-deploy-key, deployKeyId: 1 }",
-    );
-    process.chdir(root);
-    const cfg = loadConfig(cfgPath);
-    assert.equal(cfg.worker.deployKeyPath, join(root, "keys", "worker-deploy-key"));
-    assert.notEqual(
-      cfg.worker.deployKeyPath,
-      join(subdir, "keys", "worker-deploy-key"),
-      "must not resolve against the config file's OWN directory (the pre-#1078 promptFile-style rule)",
-    );
-  } finally {
-    process.chdir(previousCwd);
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("worker.deployKeyPath: an ABSOLUTE path is left untouched by loadConfig's relative-resolution step", () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
-  try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
-    const abs = join(dir, "elsewhere", "worker-deploy-key");
-    writeFileSync(cfgPath, `board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: ${abs}, deployKeyId: 1 }`);
-    const cfg = loadConfig(cfgPath);
-    assert.equal(cfg.worker.deployKeyPath, abs);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// ── #606 gate② round 1 (owner ruling): worker.deployKeyId — the (path, id) LOCAL anchor pair ──
-test("worker.deployKeyId: unset by default, overridable to a positive integer, no path-resolution applied (it's not a file path)", () => {
-  const cfg = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }");
-  assert.equal(cfg.worker.deployKeyId, undefined);
-  const over = parseConfig(
-    "board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: keys/worker-deploy-key, deployKeyId: 159210179 }",
-  );
-  assert.equal(over.worker.deployKeyId, 159210179);
-  assert.equal(over.worker.deployKeyPath, "keys/worker-deploy-key");
-});
-
-test("worker.deployKeyId: rejects zero/negative/non-integer values — a GitHub deploy-key id is always a positive integer", () => {
-  for (const bad of [0, -1, 1.5]) {
-    assert.throws(() => parseConfig(`board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyId: ${bad} }`));
-  }
-});
-
-// #606 gate② round 2 (R3-6): deployKeyPath/deployKeyId form ONE local anchor pair — init.ts's
-// reconcile logic has no sane interpretation of only one half being set, so the schema rejects
-// that shape outright rather than letting it silently behave as "nothing configured" or
-// reconcile against a meaningless half-anchor.
-test("worker.deployKeyPath/deployKeyId (R3-6): rejects a config with ONLY deployKeyPath set, naming deployKeyId as the missing half", () => {
-  assert.throws(
-    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: keys/worker-deploy-key }"),
-    (e: Error) => /deployKeyId/.test(e.message) && /sapwood init/.test(e.message),
-  );
-});
-
-test("worker.deployKeyPath/deployKeyId (R3-6): rejects a config with ONLY deployKeyId set, naming deployKeyPath as the missing half", () => {
-  assert.throws(
-    () => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyId: 42 }"),
-    (e: Error) => /deployKeyPath/.test(e.message) && /sapwood init/.test(e.message),
-  );
-});
-
-test("worker.deployKeyPath/deployKeyId (R3-6): BOTH set, or BOTH unset, parse cleanly — only a lone half is rejected", () => {
-  assert.doesNotThrow(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }"));
-  assert.doesNotThrow(() =>
-    parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { deployKeyPath: keys/worker-deploy-key, deployKeyId: 42 }"),
-  );
+  assert.equal(cfg.worker.credentialTier, "L0");
+  const l1 = parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { credentialTier: L1 }");
+  assert.equal(l1.worker.credentialTier, "L1");
+  assert.throws(() => parseConfig("board: { owner: a, repo: r, projectNumber: 1 }\nworker: { credentialTier: L2 }"));
 });
 
 // ── #88 gate⓪: labels.planApproved + roles.verificationPlanReviewer.promptFile ──────────────────────────

@@ -28,7 +28,7 @@ These seven mechanisms answer different questions; landing the Bash sandbox make
 | 7 | Gate② review-session seal | Init integrity | Does the REVIEW session itself start with zero MCP servers, zero file-based settings, and a forced-hard guard? |
 
 Layer 4 (the Bash-sandbox recipe) is orthogonal to layer 3 (credential identity vs. execution
-reach — independent axes; never coupled to `worker.deployKeyPath`/`worker.deployKeyId` in
+reach — independent axes; never coupled to `worker.credentialTier` in
 config). It applies to every Bash-bearing `claude` session the engine spawns — worker legs
 (dispatch/resume/fix) and `retro` — never to gate② (D1: no Bash at all in a review session) or to
 `codex exec` (its own `--sandbox read-only`, a vendor-specific mechanism outside this recipe's

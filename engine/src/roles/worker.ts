@@ -21,9 +21,11 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  accessSync,
   closeSync,
   type Dirent,
   existsSync,
+  constants as fsConstants,
   lstatSync,
   mkdirSync,
   openSync,
@@ -39,13 +41,12 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SapwoodConfig } from "../config/config.js";
 import { loadDoctrine } from "../config/doctrine.js";
-import { defaultRuntimeRoot, ensureRuntimeRoot, runtimePaths } from "../config/paths.js";
+import { defaultRuntimeRoot, ensureRuntimeRoot, findDeployKeyAnchor, runtimePaths } from "../config/paths.js";
 import { estimateUsd, loadPricingTable, type PricingTable } from "../config/pricing.js";
 import type { Issue, LanePrOutcome } from "../forge/forge.js";
 import type { LaneProbe, ReclaimResult, ResumeIntentState, Supervisor, WorktreeSettleOutcome } from "../loop/conductor.js";
 import type { ForgeProxyHandle } from "../proxy/mcp-server.js";
 import type { CategorizedTokenUsage, ContextManifestKey, ModelUsageEntry, State } from "../state/state.js";
-import { DOC_LINKS } from "../util/doc-links.js";
 import { createHeartbeatGate, type HeartbeatGate } from "../util/heartbeat.js";
 import { sanitizeUpstreamError } from "../util/sanitize.js";
 import { awaitSpawnConfirmation } from "../util/spawn-confirm.js";
@@ -1957,11 +1958,17 @@ export interface WorkerDeps {
   renderPrompt?: (issue: Issue) => string;
   /** Path to the compiled guard hook (node <path>). Default: the dist sibling of this module. */
   guardHookPath?: string;
-  /** #606: injected SSH-auth preflight for `cfg.worker.deployKeyPath` — a test double so
-   *  L1-activation tests never shell out to a real `ssh`. Default: probeDeployKeySsh. Probed at
-   *  most once per WorkerSupervisor life (see resolveDeployKeyEnv), so this is called at most
-   *  once even across many dispatch()/resume() calls. */
-  probeDeployKeySsh?: (deployKeyPath: string) => Promise<LlmPingResult>;
+  /** #606: injected SSH-auth preflight for the L1 deploy key — a test double so L1-activation
+   *  tests never shell out to a real `ssh`. Default: probeDeployKeySsh. Probed at most once per
+   *  WorkerSupervisor life (see resolveDeployKeyPath), so this is called at most once even across
+   *  many dispatch()/resume() calls. */
+  probeDeployKeySsh?: (keyPath: string) => Promise<LlmPingResult>;
+  /** This machine's local (key path, key id) anchor for L1 — production discovers it from
+   *  `.sapwood/keys/` (paths.ts's findDeployKeyAnchor, called lazily inside resolveDeployKeyPath)
+   *  and leaves this unset; tests inject a fixture pair here rather than writing real files under
+   *  a real runtime root. worker.ts's own runtime never reads the id half — only the key path
+   *  matters for env-building and the SSH preflight. */
+  deployKeyAnchor?: { keyPath: string; keyId: number };
   heartbeatMs?: number; // default 30_000
   now: () => Date;
   /** #395: injected timer so a test can deterministically win the spawn-confirmation watchdog
@@ -2157,15 +2164,15 @@ export function workerCredentialFreeEnv(ghConfigDir: string): NodeJS.ProcessEnv 
  *  workerDeployKeyEnv's own base (which would fight workerCredentialFreeEnv's GH_CONFIG_DIR/
  *  GIT_CONFIG_GLOBAL/SYSTEM choices instead of composing with them — the two base envs strip
  *  the SAME credential family, but a fix leg's base must be workerCredentialFreeEnv's, the
- *  stricter of the two, per that finding). `deployKeyPath` is shell-quoted (P2-9,
- *  shellSingleQuote) — GIT_SSH_COMMAND is shell-PARSED by git, so an unquoted path containing a
- *  space or shell metacharacter would break or mutate the command. */
-export function deployKeyTransportOverlay(deployKeyPath: string, owner: string, repo: string): NodeJS.ProcessEnv {
+ *  stricter of the two, per that finding). `keyPath` is shell-quoted (shellSingleQuote) —
+ *  GIT_SSH_COMMAND is shell-PARSED by git, so an unquoted path containing a space or shell
+ *  metacharacter would break or mutate the command. */
+export function deployKeyTransportOverlay(keyPath: string, owner: string, repo: string): NodeJS.ProcessEnv {
   const sshBase = `git@github.com:${owner}/${repo}.git`;
   const httpsWithGit = `https://github.com/${owner}/${repo}.git`;
   const httpsNoGit = `https://github.com/${owner}/${repo}`;
   return {
-    GIT_SSH_COMMAND: `ssh -i ${shellSingleQuote(deployKeyPath)} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`,
+    GIT_SSH_COMMAND: `ssh -i ${shellSingleQuote(keyPath)} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`,
     GIT_CONFIG_COUNT: "2",
     GIT_CONFIG_KEY_0: `url.${sshBase}.insteadOf`,
     GIT_CONFIG_VALUE_0: httpsWithGit,
@@ -2191,10 +2198,10 @@ export function deployKeyTransportOverlay(deployKeyPath: string, owner: string, 
  *  GIT_CONFIG_COUNT/KEY_n/VALUE_n injects config via env vars — a DIFFERENT mechanism entirely,
  *  so the two are not in tension: the env-injected url.insteadOf rewrite still applies even
  *  though the (irrelevant, now-nulled) global config file is never read. */
-export function workerDeployKeyEnv(deployKeyPath: string, ghConfigDir: string, owner: string, repo: string): NodeJS.ProcessEnv {
+export function workerDeployKeyEnv(keyPath: string, ghConfigDir: string, owner: string, repo: string): NodeJS.ProcessEnv {
   return {
     ...workerCredentialFreeEnv(ghConfigDir),
-    ...deployKeyTransportOverlay(deployKeyPath, owner, repo),
+    ...deployKeyTransportOverlay(keyPath, owner, repo),
   };
 }
 
@@ -2225,7 +2232,7 @@ export function spawnSshKeygen(path: string): Promise<void> {
   });
 }
 
-/** #606: the L1 preflight — proves the deploy key at `deployKeyPath` actually authenticates
+/** #606: the L1 preflight — proves the deploy key at `keyPath` actually authenticates
  *  against GitHub over SSH, the same signal `sapwood init`'s own preflight checks at provisioning
  *  time. GitHub's SSH endpoint never grants shell access even to a valid key: a successful auth
  *  is `ssh -T git@github.com` exiting 1 with stderr containing "successfully authenticated" — NOT
@@ -2237,7 +2244,7 @@ export function spawnSshKeygen(path: string): Promise<void> {
  *  with a detail string — the caller's job (WARN + fall back to L0), never this function's.
  *  `sshBin` (default `"ssh"`, resolved off PATH) mirrors probeLlmPing's own `claudeBin` param —
  *  an explicit override so tests can point this at a stub script instead of a real network call. */
-export function probeDeployKeySsh(deployKeyPath: string, timeoutSec = 15, sshBin = "ssh"): Promise<LlmPingResult> {
+export function probeDeployKeySsh(keyPath: string, timeoutSec = 15, sshBin = "ssh"): Promise<LlmPingResult> {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (r: LlmPingResult): void => {
@@ -2252,7 +2259,7 @@ export function probeDeployKeySsh(deployKeyPath: string, timeoutSec = 15, sshBin
         [
           "-T",
           "-i",
-          deployKeyPath,
+          keyPath,
           "-o",
           "IdentitiesOnly=yes",
           "-o",
@@ -2697,13 +2704,16 @@ export class WorkerSupervisor implements Supervisor {
   // init-line poll (100ms/30s default) — see capturePreSpawnManifestForLane's own doc.
   private readonly preSpawnCaptureTimeoutMs: number;
   private readonly preSpawnCapturePollMs: number;
-  // #606: memoized SSH-auth preflight for cfg.worker.deployKeyPath — probed at most once per
-  // supervisor life (mirrors detectManagedPermissionMode/detectRapidRestart's "once per engine
-  // start" stance for a degrade WARN). undefined = not yet probed; a settled Promise thereafter,
-  // so every dispatch()/resume() after the first awaits the SAME probe rather than re-shelling
-  // to `ssh` per lane. The WARN-on-failure log fires exactly once, inside the Promise's own
-  // `.then` (see resolveDeployKeyEnv), never re-logged on a later dispatch that just re-awaits it.
-  private deployKeyProbe?: Promise<LlmPingResult>;
+  // #606: memoized SSH-auth preflight for this machine's discovered deploy-key anchor —
+  // probed at most once per supervisor life (mirrors detectManagedPermissionMode/
+  // detectRapidRestart's "once per engine start" stance for a degrade WARN), so every
+  // dispatch()/resume() after the first awaits the SAME probe rather than re-shelling to `ssh`
+  // per lane. Keyed on the anchor identity it was probed FOR (not just a bare Promise) — a
+  // successful probe for one (keyPath, keyId) pair must never be reused to authorize a
+  // DIFFERENT one that appears later (a rotated sidecar, a second `sapwood init` mid-run):
+  // resolveDeployKeyPath re-resolves the anchor on every call and refuses outright when it no
+  // longer matches what this memo was seeded with.
+  private deployKeyProbe?: { anchor: { keyPath: string; keyId: number }; probe: Promise<LlmPingResult> };
   // #679: memoized SAPWOOD_DEFAULT_BRANCH resolution — same "probe once per supervisor life"
   // stance as deployKeyProbe above (see resolveDefaultBranch's own doc for the rationale).
   private defaultBranchProbe?: Promise<string>;
@@ -2742,34 +2752,50 @@ export class WorkerSupervisor implements Supervisor {
     (this.deps.log ?? console.error)(message);
   }
 
-  /** #606 gate② round 1 (P1-4): resolves whether the L1 scoped-worker-identity deploy key is
-   *  usable for THIS dispatch/resume/fix leg — called UNCONDITIONALLY now (both by an ordinary
-   *  leg building its own workerDeployKeyEnv, and by a `credentialFree` leg deciding whether to
-   *  compose deployKeyTransportOverlay onto its stricter base), since a fix leg needs to know
-   *  this too. Returns `undefined` (⇒ caller falls back to whatever its OWN base env already is)
-   *  when `cfg.worker.deployKeyPath` is unset, or when the memoized SSH-auth preflight against it
-   *  has failed — never throws, never blocks a dispatch. The preflight itself runs at most once
-   *  per supervisor life (`this.deployKeyProbe`); a failure logs the guidance-carrying WARN
-   *  exactly once, inside the memoized promise's own `.then`, so replaying this method on a
-   *  later dispatch re-awaits the SAME settled promise without re-logging or re-shelling to
-   *  `ssh`. */
+  /** #1105 (see docs/security/credential-tiers.md): a leg that claims L1 must never silently run
+   *  at the wider tier or under a different key, so every L1 failure here throws — the startup
+   *  gate already refused a run with no working anchor, so a failure here means the key broke or
+   *  moved mid-run, or a caller bypassed that gate. The anchor is re-read from disk per call so an
+   *  in-flight rotation is caught fresh; the SSH preflight runs once per (supervisor life, anchor
+   *  identity) — `this.deployKeyProbe`, shared with checkDeployKeyPreflight. */
   private async resolveDeployKeyPath(): Promise<string | undefined> {
-    const path = this.deps.cfg.worker.deployKeyPath;
-    if (!path) return undefined;
-    if (this.deployKeyProbe === undefined) {
-      this.deployKeyProbe = (this.deps.probeDeployKeySsh ?? probeDeployKeySsh)(path).then((r) => {
-        if (!r.ok) {
-          this.log(
-            `[sapwood:deploy-key] L1 preflight failed for ${path}${r.detail ? `: ${r.detail}` : ""} — ` +
-              `re-run "sapwood init" to re-provision the deploy key (see <${DOC_LINKS.security}>'s worker ` +
-              `credential tiers). Dispatch continues at L0 (full credentialed env) until then; nothing wedges.`,
-          );
-        }
-        return r;
-      });
+    if (this.deps.cfg.worker.credentialTier !== "L1") return undefined;
+    const anchor = this.deps.deployKeyAnchor ?? findDeployKeyAnchor(defaultRuntimeRoot());
+    if (anchor === undefined) {
+      throw new Error(
+        'worker.credentialTier is "L1" but this machine has no local deploy-key anchor under .sapwood/keys/ — ' +
+          'run "sapwood init" to provision one.',
+      );
     }
-    const result = await this.deployKeyProbe;
-    return result.ok ? path : undefined;
+    if (
+      this.deployKeyProbe !== undefined &&
+      (this.deployKeyProbe.anchor.keyPath !== anchor.keyPath || this.deployKeyProbe.anchor.keyId !== anchor.keyId)
+    ) {
+      throw new Error(
+        `worker.credentialTier is "L1" but the deploy-key anchor changed (was ${this.deployKeyProbe.anchor.keyPath}, ` +
+          `now ${anchor.keyPath}) since this engine run started — a leg must never run under a key this run's ` +
+          'startup gate never validated. Restart "sapwood run" to pick up the new anchor.',
+      );
+    }
+    try {
+      accessSync(anchor.keyPath, fsConstants.R_OK);
+    } catch (e) {
+      throw new Error(
+        `worker.credentialTier is "L1" but the deploy key at ${anchor.keyPath} is not currently readable ` +
+          `(${e instanceof Error ? e.message : String(e)}) — run "sapwood init" to re-provision it.`,
+      );
+    }
+    if (this.deployKeyProbe === undefined) {
+      this.deployKeyProbe = { anchor, probe: (this.deps.probeDeployKeySsh ?? probeDeployKeySsh)(anchor.keyPath) };
+    }
+    const result = await this.deployKeyProbe.probe;
+    if (!result.ok) {
+      throw new Error(
+        `worker.credentialTier is "L1" but the SSH auth preflight failed for ${anchor.keyPath}` +
+          `${result.detail ? `: ${result.detail}` : ""} — run "sapwood init" to re-provision it.`,
+      );
+    }
+    return anchor.keyPath;
   }
 
   /** #679: resolves the repository's default branch name for the SAPWOOD_DEFAULT_BRANCH spawn
@@ -2797,19 +2823,53 @@ export class WorkerSupervisor implements Supervisor {
     return this.defaultBranchProbe;
   }
 
-  /** #671: public wrapper around resolveDeployKeyPath()'s memoized SSH preflight, for cli.ts's
-   *  startup deploy-key tier check (deploy-key-startup-check.ts). Triggering the preflight here
-   *  SEEDS `this.deployKeyProbe`, so the first real dispatch()/resume() later on this SAME
-   *  instance just re-awaits the settled promise instead of re-shelling to `ssh` — startup +
-   *  first dispatch cost at most one SSH probe total. Returns `undefined` when
-   *  `cfg.worker.deployKeyPath` is unset (nothing to probe); otherwise the settled
-   *  {ok, detail} the memoized preflight resolved to, so the caller can report the failure
-   *  detail itself rather than re-deriving it. Never throws — same stance as
-   *  resolveDeployKeyPath, which this delegates to entirely. */
-  async checkDeployKeyPreflight(): Promise<LlmPingResult | undefined> {
-    if (!this.deps.cfg.worker.deployKeyPath) return undefined;
-    await this.resolveDeployKeyPath();
-    return this.deployKeyProbe;
+  /** #671: public wrapper around the SAME memoized SSH preflight resolveDeployKeyPath
+   *  uses, for cli.ts's startup deploy-key tier check (deploy-key-startup-check.ts). Takes the
+   *  anchor the startup check itself already resolved and remotely reconciled, rather than
+   *  re-resolving one independently — two independent resolutions, one racing a sidecar swap
+   *  between them, could seed the memo with an anchor the startup check never actually
+   *  validated. Triggering the preflight here SEEDS `this.deployKeyProbe` with THIS SAME anchor
+   *  value, so the first real dispatch()/resume() later on this SAME instance just re-awaits the
+   *  settled promise rather than re-shelling to `ssh` — startup + first dispatch cost at most one
+   *  SSH probe total (and resolveDeployKeyPath's own anchor-changed rejection still fires if the
+   *  filesystem anchor moves between this call and that later one).
+   *
+   *  Unlike resolveDeployKeyPath, this NEVER throws — it reports the outcome instead, so the
+   *  startup check can build its own guidance message per distinct failure shape before deciding
+   *  to refuse startup itself. Returns `undefined` only when `credentialTier` isn't `"L1"`.
+   *  Called exactly once, before any dispatch, so it is always the call that SEEDS the memo — it
+   *  never needs resolveDeployKeyPath's own anchor-changed rejection itself. */
+  async checkDeployKeyPreflight(anchor: { keyPath: string; keyId: number }): Promise<LlmPingResult | undefined> {
+    if (this.deps.cfg.worker.credentialTier !== "L1") return undefined;
+    if (
+      this.deployKeyProbe === undefined ||
+      this.deployKeyProbe.anchor.keyPath !== anchor.keyPath ||
+      this.deployKeyProbe.anchor.keyId !== anchor.keyId
+    ) {
+      this.deployKeyProbe = { anchor, probe: (this.deps.probeDeployKeySsh ?? probeDeployKeySsh)(anchor.keyPath) };
+    }
+    return this.deployKeyProbe.probe;
+  }
+
+  /** Fails closed on both axes the startup gate depends on, unlike `otherLaneOnBranch` on this
+   *  same directory (that caller only WARNs; this one refuses startup, so "couldn't tell what is
+   *  running" must never read as "nothing is running"). Only `*.running.json` — a terminal
+   *  sentinel's process has already exited. No liveness check on `pid`; the ceiling and upgrade
+   *  trigger are stated at the startup gate's mismatch refusal. */
+  listRunningCredentialTiers(): Array<{ name: string; tier: unknown; session_id: unknown; pid: unknown }> {
+    const entries = readdirSync(this.dir);
+    const out: Array<{ name: string; tier: unknown; session_id: unknown; pid: unknown }> = [];
+    for (const entry of entries) {
+      if (!entry.endsWith(".running.json")) continue;
+      const running = this.readJson(join(this.dir, entry));
+      out.push({
+        name: entry.slice(0, -".running.json".length),
+        tier: running?.credential_tier,
+        session_id: running?.session_id,
+        pid: running?.wrapper_pid,
+      });
+    }
+    return out;
   }
 
   /** #244 (Codex sol-high PR #260 review, P2): durable mint-failure observability — a
@@ -3000,7 +3060,33 @@ export class WorkerSupervisor implements Supervisor {
     // UNCONDITIONALLY — a credentialFree fix leg needs to know this too, to COMPOSE the deploy
     // key's transport overlay onto its own stricter base env (see baseEnv below). No longer
     // "mutually exclusive" with credentialFree — the two postures COMPOSE.
-    const deployKeyPath = await this.resolveDeployKeyPath();
+    // L1 with a broken anchor THROWS (resolveDeployKeyPath's own doc) — this dispatch must
+    // never proceed at the wider tier. Same fresh-jsonl cleanup as the credentialFree
+    // mint-failure branch above, since this is also a refused-before-spawn dispatch.
+    let keyPath: string | undefined;
+    try {
+      keyPath = await this.resolveDeployKeyPath();
+    } catch (e) {
+      try {
+        closeSync(jsonlFd);
+      } catch {
+        /* noop */
+      }
+      this.removeIfExists(jsonlPath);
+      // A proxy minted above (fail-open, non-credentialFree case, or a credentialFree mint that
+      // itself succeeded) is a live listener holding a bearer token — this refused-before-spawn
+      // dispatch must not leak it, same as every other pre-spawn failure branch in this method.
+      if (proxyHandle) {
+        try {
+          await proxyHandle.stop();
+        } catch (te) {
+          this.log(
+            `[sapwood:forge-proxy] lane ${laneName}: teardown failed after deploy-key resolution error (non-fatal): ${sanitizeUpstreamError(te instanceof Error ? te.message : String(te))}`,
+          );
+        }
+      }
+      throw e;
+    }
     // #679: resolved unconditionally too — every dispatch gets SAPWOOD_DEFAULT_BRANCH in its
     // spawn env when deps.getDefaultBranch is wired (see resolveDefaultBranch's own doc).
     const defaultBranch = await this.resolveDefaultBranch();
@@ -3010,13 +3096,13 @@ export class WorkerSupervisor implements Supervisor {
     // than conditioned on opts). Only actually pointed at by the spawn env in either of those
     // cases (workerCredentialFreeEnv/workerDeployKeyEnv below).
     const ghConfigDir = this.path(laneName, "gh-config-empty");
-    if (opts?.proxy?.credentialFree || deployKeyPath) mkdirSync(ghConfigDir, { recursive: true });
+    if (opts?.proxy?.credentialFree || keyPath) mkdirSync(ghConfigDir, { recursive: true });
     // Non-credentialFree L1: build the full workerDeployKeyEnv here (used as baseEnv below).
     // credentialFree legs compose deployKeyTransportOverlay onto workerCredentialFreeEnv instead
     // (see baseEnv) — deployKeyEnv here stays undefined for them, on purpose.
     const deployKeyEnv =
-      !opts?.proxy?.credentialFree && deployKeyPath
-        ? workerDeployKeyEnv(deployKeyPath, ghConfigDir, this.deps.cfg.board.owner, this.deps.cfg.board.repo)
+      !opts?.proxy?.credentialFree && keyPath
+        ? workerDeployKeyEnv(keyPath, ghConfigDir, this.deps.cfg.board.owner, this.deps.cfg.board.repo)
         : undefined;
     // NB: NO --add-dir for the engine `.sapwood/` tree — mounting it would let the worker write its
     // own .done/.failed or mutate state, defeating wrapper-signaled completion (Codex R3 P1).
@@ -3097,7 +3183,7 @@ export class WorkerSupervisor implements Supervisor {
     const baseEnv = opts?.proxy?.credentialFree
       ? {
           ...workerCredentialFreeEnv(ghConfigDir),
-          ...(deployKeyPath ? deployKeyTransportOverlay(deployKeyPath, this.deps.cfg.board.owner, this.deps.cfg.board.repo) : {}),
+          ...(keyPath ? deployKeyTransportOverlay(keyPath, this.deps.cfg.board.owner, this.deps.cfg.board.repo) : {}),
         }
       : (deployKeyEnv ?? process.env);
     const child = spawn(this.bin, args, {
@@ -3143,7 +3229,7 @@ export class WorkerSupervisor implements Supervisor {
       // credentialFree OR an L1 deploy key is in play — cleanup (removeGhConfigDir via
       // lane.ghConfigDir) must track the same condition, or an ordinary L1-only leg's directory
       // is never removed on exit.
-      ...(opts?.proxy?.credentialFree || deployKeyPath ? { ghConfigDir } : {}),
+      ...(opts?.proxy?.credentialFree || keyPath ? { ghConfigDir } : {}),
     };
     this.lanes.set(laneName, lane);
     child.on("exit", (code) => this.onExit(laneName, code));
@@ -3232,6 +3318,11 @@ export class WorkerSupervisor implements Supervisor {
         // wall-clock timeout — baselining retention on that would judge pre-handoff WIP (older
         // than the new start) CLEAN and delete it. dispatched_at never moves once set.
         dispatched_at: startedIso,
+        // The tier THIS process was actually launched under — a cross-restart adoption
+        // (resume()'s own crash-matrix branch) compares this against the CURRENT config before
+        // ever trusting a live child it didn't itself spawn; a config edit between crash and
+        // restart must never let an L0-launched process keep running under an L1 claim.
+        credential_tier: this.deps.cfg.worker.credentialTier,
       });
       this.touchHeartbeat(laneName);
       lane.hb = setInterval(() => this.heartbeatTick(laneName), this.hbMs);
@@ -3357,6 +3448,20 @@ export class WorkerSupervisor implements Supervisor {
     // check is entry-mode-agnostic — it's about THIS resume() call's own durable spawn-intent
     // marker, not about which sentinel authorized the call in the first place.
     if (matchingResumeIntent && running.spawn_confirmed === true) {
+      // A confirmed spawn proves a child exists, but not WHICH env it was launched with —
+      // between the crash that stranded this marker and this restart, an operator could have
+      // flipped worker.credentialTier to L1. Adopting silently would keep an L0-launched process
+      // (full credentialed env, no scoped deploy key) running under a claimed-L1 run. Refuse the
+      // adoption — the caller treats a thrown resume() as a failed lane, same as every other
+      // resume() failure path.
+      const persistedTier = typeof running.credential_tier === "string" ? running.credential_tier : undefined;
+      if (this.deps.cfg.worker.credentialTier === "L1" && persistedTier !== "L1") {
+        throw new Error(
+          `resume: ${name} has a confirmed spawn but its running marker's credential tier ` +
+            `(${persistedTier ?? "none recorded"}) does not match this run's worker.credentialTier ("L1") — ` +
+            "refusing to adopt a live process this run's L1 startup gate never validated.",
+        );
+      }
       this.removeIfExists(handoffPath);
       return {
         name,
@@ -3434,7 +3539,7 @@ export class WorkerSupervisor implements Supervisor {
     let runningMarker: Record<string, unknown>;
     // #606 gate② round 1: resolved outside the try block's scope so baseEnv (below, after the
     // try) and the catch's own cleanup can read them.
-    let deployKeyPath: string | undefined;
+    let keyPath: string | undefined;
     let deployKeyEnv: NodeJS.ProcessEnv | undefined;
     try {
       // #245: mint BEFORE argv — same ordering as dispatch() (WorkerProxyOpts' doc): the handle's
@@ -3462,18 +3567,18 @@ export class WorkerSupervisor implements Supervisor {
       // unconditional resolution + composition rule as dispatch(), see that call site's own
       // comment. A fix leg (resume()'s ONLY production credentialFree caller, conductor.ts's
       // startFixLeg) needs this to compose the deploy key onto its stricter base env.
-      deployKeyPath = await this.resolveDeployKeyPath();
+      keyPath = await this.resolveDeployKeyPath();
       // #245: same fresh/empty per-lane GH_CONFIG_DIR scratch directory dispatch() creates —
       // created whenever EITHER credentialFree OR an L1 deploy key is in play (cheap; lifecycle
       // tied to this lane's own stateDir). Only actually pointed at by the spawn env in either
       // of those cases.
-      if (opts?.proxy?.credentialFree || deployKeyPath) mkdirSync(ghConfigDir, { recursive: true });
+      if (opts?.proxy?.credentialFree || keyPath) mkdirSync(ghConfigDir, { recursive: true });
       // Non-credentialFree L1: build the full workerDeployKeyEnv here (used as baseEnv below).
       // credentialFree legs compose deployKeyTransportOverlay onto workerCredentialFreeEnv
       // instead (see baseEnv) — deployKeyEnv here stays undefined for them, on purpose.
       deployKeyEnv =
-        !opts?.proxy?.credentialFree && deployKeyPath
-          ? workerDeployKeyEnv(deployKeyPath, ghConfigDir, this.deps.cfg.board.owner, this.deps.cfg.board.repo)
+        !opts?.proxy?.credentialFree && keyPath
+          ? workerDeployKeyEnv(keyPath, ghConfigDir, this.deps.cfg.board.owner, this.deps.cfg.board.repo)
           : undefined;
       const settingsJson = JSON.stringify(guardSettings(this.guardHookPath));
       args = claudeArgs({
@@ -3520,6 +3625,8 @@ export class WorkerSupervisor implements Supervisor {
         jsonl_leg_offset: jsonlLegOffset,
         resume_pending_db: true,
         spawn_confirmed: false,
+        // Same tier-provenance field dispatch() writes — see that call site's own doc.
+        credential_tier: this.deps.cfg.worker.credentialTier,
         // Preserve the original first-dispatch baseline (not this resume's start).
         ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
       };
@@ -3541,7 +3648,7 @@ export class WorkerSupervisor implements Supervisor {
           );
         }
       }
-      this.removeGhConfigDir(opts?.proxy?.credentialFree || deployKeyPath ? ghConfigDir : undefined, name);
+      this.removeGhConfigDir(opts?.proxy?.credentialFree || keyPath ? ghConfigDir : undefined, name);
       throw e;
     }
     let child: ChildProcess;
@@ -3553,7 +3660,7 @@ export class WorkerSupervisor implements Supervisor {
     const baseEnv = opts?.proxy?.credentialFree
       ? {
           ...workerCredentialFreeEnv(ghConfigDir),
-          ...(deployKeyPath ? deployKeyTransportOverlay(deployKeyPath, this.deps.cfg.board.owner, this.deps.cfg.board.repo) : {}),
+          ...(keyPath ? deployKeyTransportOverlay(keyPath, this.deps.cfg.board.owner, this.deps.cfg.board.repo) : {}),
         }
       : (deployKeyEnv ?? process.env);
     // #679: same unconditional resolution as dispatch() — a resumed leg (including a fix leg,
@@ -3592,7 +3699,7 @@ export class WorkerSupervisor implements Supervisor {
           );
         }
       }
-      this.removeGhConfigDir(opts?.proxy?.credentialFree || deployKeyPath ? ghConfigDir : undefined, name);
+      this.removeGhConfigDir(opts?.proxy?.credentialFree || keyPath ? ghConfigDir : undefined, name);
       throw new Error(`worker resume-spawn failed (${this.bin}): ${String(e)}`);
     }
     const lane: Lane = {
@@ -3613,7 +3720,7 @@ export class WorkerSupervisor implements Supervisor {
       ...(proxyHandle ? { proxyHandle } : {}),
       // #606 gate② round 1 (P1-3): same "GH_CONFIG_DIR exists whenever credentialFree OR an L1
       // deploy key is in play" condition as dispatch() — cleanup must track the same condition.
-      ...(opts?.proxy?.credentialFree || deployKeyPath ? { ghConfigDir } : {}),
+      ...(opts?.proxy?.credentialFree || keyPath ? { ghConfigDir } : {}),
     };
     this.lanes.set(name, lane);
     child.on("exit", (code) => this.onExit(name, code));
@@ -3678,7 +3785,7 @@ export class WorkerSupervisor implements Supervisor {
           );
         }
       }
-      this.removeGhConfigDir(opts?.proxy?.credentialFree || deployKeyPath ? ghConfigDir : undefined, name);
+      this.removeGhConfigDir(opts?.proxy?.credentialFree || keyPath ? ghConfigDir : undefined, name);
       throw new Error(`worker resume-spawn failed (${this.bin}): ${String(spawnErr)}`);
     }
     child.on("error", () => this.onExit(name, 1));

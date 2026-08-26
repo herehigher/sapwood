@@ -221,6 +221,9 @@ const BLOCK: [string, string, string][] = [
   ["touch .sapwood/KILL_SWITCH", CWD, "write-path"],
   ["touch .sapwood/EMERGENCY_STOP", CWD, "write-path"],
   ["touch .sapwood/cache/x", CWD, "write-path"],
+  // #1105 AC5: the L1 deploy-key anchor sidecar is denied the same as every other `.sapwood/**`
+  // path — no special-casing needed, this just pins that the existing rule already covers it.
+  ["touch .sapwood/keys/worker-deploy-key.id", CWD, "write-path"],
   ["rm .sapwood/KILL_SWITCH", CWD, "write-path"],
   ["rm -f .sapwood/PAUSE", CWD, "write-path"],
   ["rm ../../.sapwood/KILL_SWITCH", CWD, "write-path"],

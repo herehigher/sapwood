@@ -294,15 +294,14 @@ test("run --config fails closed on a missing or flag-shaped operand", () => {
   }
 });
 
-test("run --help documents config-relative file keys and cwd-relative runtime paths (#1078: logging.path/deployKeyPath split — SET logging.path is config-relative, UNSET/deployKeyPath are cwd-relative)", () => {
+test("run --help documents config-relative file keys and cwd-relative runtime paths (#1078: logging.path split — SET is config-relative, UNSET is cwd-relative; #1105: the deploy-key anchor is never config-relative at all, it's discovered filesystem state)", () => {
   const result = runCli(["node", "sapwood", "run", "--help"]);
   assert.match(result.stdout, /--config PATH/);
   assert.match(result.stdout, /config-file-relative promptFile, goal\.file, doctrine\.file, and \(only when\s+SET\) logging\.path keys/);
-  assert.match(result.stdout, /An UNSET logging\.path, and worker\.deployKeyPath/);
-  assert.match(result.stdout, /whenever it's relative, resolve against the current working directory/);
+  assert.match(result.stdout, /An UNSET logging\.path resolves against the current\s+working directory/);
   assert.match(
     result.stdout,
-    /instead — the same convention the DB \(\.sapwood\/sapwood\.sqlite\),\s+EMERGENCY_STOP\/KILL_SWITCH\/PAUSE, sessions, and worktree roots already use/,
+    /instead — the same convention the DB\s+\(\.sapwood\/sapwood\.sqlite\),\s+EMERGENCY_STOP\/KILL_SWITCH\/PAUSE, sessions,\s+worktree roots, and the L1 deploy-key anchor \(\.sapwood\/keys\/\) already use/,
   );
 });
 

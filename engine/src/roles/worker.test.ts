@@ -19,11 +19,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
+import { keyIdSidecarPath, runtimePaths } from "../config/paths.js";
 import { estimateUsd, loadPricingTable } from "../config/pricing.js";
 import { closeOutMergedHumanMergeOnlyLanes } from "../loop/conductor.js";
 import { classifyEnvFailure, DEFAULT_FORGE_FAILURE_PATTERNS, DEFAULT_LLM_FAILURE_PATTERNS } from "../loop/env-failure.js";
@@ -8362,18 +8363,24 @@ test("spawnSshKeygen: a nonexistent parent directory rejects (does not throw syn
   await assert.rejects(() => spawnSshKeygen("/no/such/dir/sapwood-606/worker-deploy-key"));
 });
 
-// #606 gate② round 2 (R3-6): the config schema now enforces deployKeyPath/deployKeyId as a PAIR
-// (init.ts owns reconciling them; worker.ts's own runtime never reads deployKeyId at all — only
-// resolveDeployKeyPath's SSH preflight against deployKeyPath matters here), so every fixture
-// built from this helper needs a syntactically-valid deployKeyId alongside deployKeyPath purely
-// to satisfy the schema. The exact number is never read by anything under test in this file.
-const cfgWithDeployKey = (deployKeyPath: string): SapwoodConfig =>
-  ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { deployKeyPath, deployKeyId: 1 } });
+// #1105: the local key-path/key-id pair moved out of the schema — L1 activation now reads
+// worker.credentialTier PLUS a discovered filesystem anchor (paths.ts's findDeployKeyAnchor).
+// `deployKeyAnchor()` builds the WorkerDeps override every L1 test below injects directly (never
+// through a real runtime root) — the same DI seam `probeDeployKeySsh` already uses. It DOES write
+// a real, readable dummy file at `keyPath` (not merely a plausible-looking string): resolveDeployKeyPath
+// (#1105) now calls `accessSync(keyPath, R_OK)` itself, independent of the mocked probe.
+const l1Cfg: SapwoodConfig = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 4 }, worker: { credentialTier: "L1" } });
+const deployKeyAnchor = (keyPath: string): { keyPath: string; keyId: number } => {
+  mkdirSync(dirname(keyPath), { recursive: true });
+  writeFileSync(keyPath, "fake-deploy-key-material");
+  return { keyPath, keyId: 1 };
+};
 
-test("dispatch: worker.deployKeyPath configured + preflight OK -> L1 active — GIT_SSH_COMMAND present, no gh credential reachable via env, Bash(gh *) absent from --allowedTools, Bash(git *) stays", async () => {
+test("dispatch: worker.credentialTier L1 + a discovered anchor + preflight OK -> L1 active — GIT_SSH_COMMAND present, no gh credential reachable via env, Bash(gh *) absent from --allowedTools, Bash(git *) stays", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const previous = { GH_TOKEN: process.env.GH_TOKEN, GITHUB_TOKEN: process.env.GITHUB_TOKEN };
   const release = join(dir, "release-l1-dispatch");
+  const dispatchKeyPath = join(dir, "fake-deploy-key-606");
   let s: WorkerSupervisor | undefined;
   try {
     process.env.GH_TOKEN = "poison-gh-token";
@@ -8387,22 +8394,25 @@ test("dispatch: worker.deployKeyPath configured + preflight OK -> L1 active — 
       dir,
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${join(dir, "args.seen.tmp")}"\nmv "${join(dir, "args.seen.tmp")}" "${join(dir, "args.seen")}"\nenv > "${join(dir, "env.seen.tmp")}"\nmv "${join(dir, "env.seen.tmp")}" "${join(dir, "env.seen")}"\nfor _ in $(seq 1 400); do [ -f "${release}" ] && break; sleep 0.02; done\necho '{"type":"result","total_cost_usd":0}'\nexit 0\n`,
     );
-    const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-606");
     s = new WorkerSupervisor({
       now: realClock,
-      cfg: deployKeyCfg,
+      cfg: l1Cfg,
       stateDir: dir,
       claudeBin: bin,
       renderPrompt: () => "p",
       guardHookPath: hook,
       probeDeployKeySsh: async () => ({ ok: true }),
+      deployKeyAnchor: deployKeyAnchor(dispatchKeyPath),
     });
     await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-l1-dispatch");
     await waitForFile(join(dir, "env.seen"), "L1 dispatch env was not published");
     const envText = readFileSync(join(dir, "env.seen"), "utf8");
     assert.match(
       envText,
-      /^GIT_SSH_COMMAND=ssh -i '\/tmp\/fake-deploy-key-606' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new$/m,
+      new RegExp(
+        `^GIT_SSH_COMMAND=ssh -i '${dispatchKeyPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new$`,
+        "m",
+      ),
     );
     assert.doesNotMatch(envText, /GH_TOKEN=poison/);
     assert.doesNotMatch(envText, /GITHUB_TOKEN=poison/);
@@ -8434,7 +8444,7 @@ test("dispatch: worker.deployKeyPath configured + preflight OK -> L1 active — 
   }
 });
 
-test("dispatch: worker.deployKeyPath UNSET -> L0, byte-identical to today (reverse test) — GH_TOKEN inherited, Bash(gh *) present, the injected probeDeployKeySsh dep is never even called", async () => {
+test("dispatch: worker.credentialTier L0 (default) -> byte-identical to today (reverse test) — GH_TOKEN inherited, Bash(gh *) present, the injected probeDeployKeySsh dep is never even called, L0 never reads the key", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const previous = { GH_TOKEN: process.env.GH_TOKEN };
   let s: WorkerSupervisor | undefined;
@@ -8448,7 +8458,7 @@ test("dispatch: worker.deployKeyPath UNSET -> L0, byte-identical to today (rever
     let probeCalled = false;
     s = new WorkerSupervisor({
       now: realClock,
-      cfg, // no worker.deployKeyPath set — the shared, default test cfg
+      cfg, // worker.credentialTier defaults to L0 — the shared, default test cfg
       stateDir: dir,
       claudeBin: bin,
       renderPrompt: () => "p",
@@ -8457,6 +8467,8 @@ test("dispatch: worker.deployKeyPath UNSET -> L0, byte-identical to today (rever
         probeCalled = true;
         return { ok: true };
       },
+      // Deliberately no deployKeyAnchor override either — even if one were found on disk, L0
+      // must never look for it, let alone read it.
     });
     await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-l0-reverse");
     await waitForFile(join(dir, "env.seen"), "L0 dispatch env was not published");
@@ -8470,7 +8482,7 @@ test("dispatch: worker.deployKeyPath UNSET -> L0, byte-identical to today (rever
     const argLines = args.trim().split("\n");
     const allowedTools = argLines[argLines.indexOf("--allowedTools") + 1]!;
     assert.match(allowedTools, /Bash\(gh \*\)/, "L0 keeps Bash(gh *) — unchanged from today");
-    assert.equal(probeCalled, false, "deployKeyPath unset -> resolveDeployKeyEnv must short-circuit before ever probing");
+    assert.equal(probeCalled, false, "credentialTier L0 -> resolveDeployKeyPath must short-circuit before ever probing");
   } finally {
     killAnyRunningLanes(s);
     s?.dispose();
@@ -8480,31 +8492,34 @@ test("dispatch: worker.deployKeyPath UNSET -> L0, byte-identical to today (rever
   }
 });
 
-test("dispatch (#554 pattern): deployKeyPath set but preflight auth fails -> guidance-carrying WARN naming the re-provision fix, dispatch continues at L0 (never wedges)", async () => {
+// #1105: the old "#554 pattern" (WARN, dispatch continues at L0) is RETIRED for L1 — a
+// credentialTier: L1 leg whose preflight fails now REJECTS the dispatch outright, naming the
+// re-provision fix. No silent downgrade to the full-credentialed env remains anywhere.
+test("dispatch: credentialTier L1 + discovered anchor but preflight auth fails -> REJECTS naming the re-provision fix, never dispatches at L0", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
-    const logs: string[] = [];
-    const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-606-preflight-fail");
     s = new WorkerSupervisor({
       now: realClock,
-      cfg: deployKeyCfg,
+      cfg: l1Cfg,
       stateDir: dir,
       claudeBin: bin,
       renderPrompt: () => "p",
       guardHookPath: hook,
-      log: (m) => logs.push(m),
       probeDeployKeySsh: async () => ({ ok: false, detail: "Permission denied (publickey)." }),
+      deployKeyAnchor: deployKeyAnchor(join(dir, "fake-deploy-key-606-preflight-fail")),
     });
-    await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-l1-preflight-fail");
-    await waitFor(() => logs.some((l) => l.includes("deploy-key")), "expected a deploy-key preflight WARN log line");
-    const warn = logs.find((l) => l.includes("deploy-key"))!;
-    assert.match(warn, /preflight failed/i);
-    assert.match(warn, /Permission denied \(publickey\)/);
-    assert.match(warn, /sapwood init/, "the WARN must name the exact re-provision fix");
-    assert.match(warn, /L0/);
+    await assert.rejects(
+      () => s!.dispatch({ number: 1, title: "t", labels: [] }, "lane-l1-preflight-fail"),
+      (e: Error) => {
+        assert.match(e.message, /preflight failed/i);
+        assert.match(e.message, /Permission denied \(publickey\)/);
+        assert.match(e.message, /sapwood init/, "the error must name the exact re-provision fix");
+        return true;
+      },
+    );
   } finally {
     killAnyRunningLanes(s);
     s?.dispose();
@@ -8512,33 +8527,29 @@ test("dispatch (#554 pattern): deployKeyPath set but preflight auth fails -> gui
   }
 });
 
-test("dispatch: the deploy-key preflight probe is memoized — TWO dispatches share ONE probe call and ONE WARN log line, never re-probed per lane", async () => {
+test("dispatch: the deploy-key preflight probe is memoized — a SECOND dispatch after a preflight-failure rejection reuses the SAME settled probe, never re-shells to ssh", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let s: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
-    const logs: string[] = [];
     let probeCount = 0;
-    const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-606-memo");
     s = new WorkerSupervisor({
       now: realClock,
-      cfg: deployKeyCfg,
+      cfg: l1Cfg,
       stateDir: dir,
       claudeBin: bin,
       renderPrompt: () => "p",
       guardHookPath: hook,
-      log: (m) => logs.push(m),
       probeDeployKeySsh: async () => {
         probeCount++;
         return { ok: false, detail: "network unreachable" };
       },
+      deployKeyAnchor: deployKeyAnchor(join(dir, "fake-deploy-key-606-memo")),
     });
-    await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-l1-memo-1");
-    await s.dispatch({ number: 2, title: "t2", labels: [] }, "lane-l1-memo-2");
-    await waitFor(() => existsSync(join(dir, "lane-l1-memo-2.done.json")), "second dispatch did not complete");
+    await assert.rejects(() => s!.dispatch({ number: 1, title: "t", labels: [] }, "lane-l1-memo-1"));
+    await assert.rejects(() => s!.dispatch({ number: 2, title: "t2", labels: [] }, "lane-l1-memo-2"));
     assert.equal(probeCount, 1, "the SSH-auth preflight must run at most once per supervisor life");
-    assert.equal(logs.filter((l) => l.includes("preflight failed")).length, 1, "the WARN must fire exactly once, not once per dispatch");
   } finally {
     killAnyRunningLanes(s);
     s?.dispose();
@@ -8546,7 +8557,7 @@ test("dispatch: the deploy-key preflight probe is memoized — TWO dispatches sh
   }
 });
 
-test("checkDeployKeyPreflight: unset deployKeyPath -> undefined, never probes", async () => {
+test("checkDeployKeyPreflight: credentialTier L0 -> undefined, never probes", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let s: WorkerSupervisor | undefined;
   try {
@@ -8555,7 +8566,7 @@ test("checkDeployKeyPreflight: unset deployKeyPath -> undefined, never probes", 
     let probeCalled = false;
     s = new WorkerSupervisor({
       now: realClock,
-      cfg, // no worker.deployKeyPath set
+      cfg, // worker.credentialTier defaults to L0
       stateDir: dir,
       claudeBin: bin,
       renderPrompt: () => "p",
@@ -8565,7 +8576,9 @@ test("checkDeployKeyPreflight: unset deployKeyPath -> undefined, never probes", 
         return { ok: true };
       },
     });
-    const result = await s.checkDeployKeyPreflight();
+    // L0 returns undefined unconditionally, before ever consulting the passed-in anchor — this
+    // placeholder is never dereferenced.
+    const result = await s.checkDeployKeyPreflight({ keyPath: join(dir, "unused"), keyId: 0 });
     assert.equal(result, undefined);
     assert.equal(probeCalled, false);
   } finally {
@@ -8582,10 +8595,10 @@ test("checkDeployKeyPreflight (#671): seeds the SAME memoized probe a later disp
     const hook = mkHook(dir);
     const bin = mkStub(dir, FAST_STUB);
     let probeCount = 0;
-    const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-671-startup");
+    const anchor = deployKeyAnchor(join(dir, "fake-deploy-key-671-startup"));
     s = new WorkerSupervisor({
       now: realClock,
-      cfg: deployKeyCfg,
+      cfg: l1Cfg,
       stateDir: dir,
       claudeBin: bin,
       renderPrompt: () => "p",
@@ -8594,8 +8607,9 @@ test("checkDeployKeyPreflight (#671): seeds the SAME memoized probe a later disp
         probeCount++;
         return { ok: true };
       },
+      deployKeyAnchor: anchor,
     });
-    const startupResult = await s.checkDeployKeyPreflight();
+    const startupResult = await s.checkDeployKeyPreflight(anchor);
     assert.deepEqual(startupResult, { ok: true });
     await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-l1-startup-seeded");
     await waitFor(() => existsSync(join(dir, "lane-l1-startup-seeded.done.json")), "dispatch did not complete");
@@ -8607,21 +8621,85 @@ test("checkDeployKeyPreflight (#671): seeds the SAME memoized probe a later disp
   }
 });
 
-test("resume: worker.deployKeyPath configured + preflight OK -> L1 active on a resumed leg too (same env/tool-narrowing as dispatch)", async () => {
+test("listRunningCredentialTiers (#1105): reads every *.running.json marker's own credential_tier/session_id/pid, ignores terminal sentinels, REPORTS (never excludes) an unparseable marker", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: dir,
+      claudeBin: mkStub(dir, FAST_STUB),
+      renderPrompt: () => "p",
+      guardHookPath: mkHook(dir),
+    });
+    // A live-shaped L1 marker, carrying the session_id/pid fields the startup refusal renders.
+    writeFileSync(
+      join(dir, "lane-a.running.json"),
+      JSON.stringify({ name: "lane-a", credential_tier: "L1", session_id: "sess-a", wrapper_pid: 4242 }),
+    );
+    // A live-shaped marker that never recorded a tier at all.
+    writeFileSync(join(dir, "lane-b.running.json"), JSON.stringify({ name: "lane-b" }));
+    // A terminal sentinel must never be reported, even one that happens to carry the field.
+    writeFileSync(join(dir, "lane-c.done.json"), JSON.stringify({ name: "lane-c", credential_tier: "L0" }));
+    // A corrupt marker is REPORTED with tier/session_id/pid all undefined — it then mismatches
+    // the caller's tier check exactly like a marker with no tier recorded, never silently
+    // excluded from the scan.
+    writeFileSync(join(dir, "lane-d.running.json"), "not json");
+    const result = s.listRunningCredentialTiers();
+    assert.deepEqual(
+      result.sort((a, b) => a.name.localeCompare(b.name)),
+      [
+        { name: "lane-a", tier: "L1", session_id: "sess-a", pid: 4242 },
+        { name: "lane-b", tier: undefined, session_id: undefined, pid: undefined },
+        { name: "lane-d", tier: undefined, session_id: undefined, pid: undefined },
+      ],
+    );
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("listRunningCredentialTiers (#1105): an unreadable/missing state dir THROWS rather than returning [] — a scan that can't see what's running must never read as 'nothing is running'", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  const missingStateDir = join(dir, "does-not-exist");
+  let s: WorkerSupervisor | undefined;
+  try {
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg,
+      stateDir: missingStateDir,
+      claudeBin: mkStub(dir, FAST_STUB),
+      renderPrompt: () => "p",
+      guardHookPath: mkHook(dir),
+    });
+    rmSync(missingStateDir, { recursive: true, force: true });
+    assert.throws(() => s!.listRunningCredentialTiers());
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume: credentialTier L1 + discovered anchor + preflight OK -> L1 active on a resumed leg too (same env/tool-narrowing as dispatch)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let s: WorkerSupervisor | undefined;
   let s2: WorkerSupervisor | undefined;
   try {
     const hook = mkHook(dir);
-    const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-606-resume");
+    const anchor = deployKeyAnchor(join(dir, "fake-deploy-key-606-resume"));
     s = new WorkerSupervisor({
       now: realClock,
-      cfg: deployKeyCfg,
+      cfg: l1Cfg,
       stateDir: dir,
       claudeBin: mkStub(dir, FAST_STUB),
       renderPrompt: () => "p",
       guardHookPath: hook,
       probeDeployKeySsh: async () => ({ ok: true }),
+      deployKeyAnchor: anchor,
     });
     const { name } = await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-l1-resume");
     await waitFor(() => existsSync(join(dir, `${name}.done.json`)), "initial dispatch did not complete");
@@ -8632,12 +8710,13 @@ test("resume: worker.deployKeyPath configured + preflight OK -> L1 active on a r
     );
     s2 = new WorkerSupervisor({
       now: realClock,
-      cfg: deployKeyCfg,
+      cfg: l1Cfg,
       stateDir: dir,
       claudeBin: bin2,
       renderPrompt: () => "p",
       guardHookPath: hook,
       probeDeployKeySsh: async () => ({ ok: true }),
+      deployKeyAnchor: anchor,
     });
     // A resumed leg needs a fresh handoff sentinel (dispatch() above already reached .done, not
     // .handoff) — write one directly, mirroring the shape requestHandoff itself writes.
@@ -8650,7 +8729,10 @@ test("resume: worker.deployKeyPath configured + preflight OK -> L1 active on a r
     const envText = readFileSync(join(dir, "env2.seen"), "utf8");
     assert.match(
       envText,
-      /^GIT_SSH_COMMAND=ssh -i '\/tmp\/fake-deploy-key-606-resume' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new$/m,
+      new RegExp(
+        `^GIT_SSH_COMMAND=ssh -i '${anchor.keyPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new$`,
+        "m",
+      ),
     );
     // #606 gate② round 1 (P1-3): full severing on a resumed L1 leg too, not just dispatch.
     const ghConfigDirLine = envText.split("\n").find((l) => l.startsWith("GH_CONFIG_DIR="));
@@ -8666,6 +8748,225 @@ test("resume: worker.deployKeyPath configured + preflight OK -> L1 active on a r
     killAnyRunningLanes(s, s2);
     s?.dispose();
     s2?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch: credentialTier L1 + a discovered anchor whose key file is not currently readable -> REJECTS naming re-provision, independent of what the mocked probe would say", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg: l1Cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      // The probe would say ok — this must never even be reached, since accessSync fails first.
+      probeDeployKeySsh: async () => ({ ok: true }),
+      deployKeyAnchor: { keyPath: join(dir, "does-not-exist-key"), keyId: 1 },
+    });
+    await assert.rejects(
+      () => s!.dispatch({ number: 1, title: "t", labels: [] }, "lane-l1-unreadable"),
+      (e: Error) => {
+        assert.match(e.message, /not currently readable/);
+        assert.match(e.message, /sapwood init/);
+        return true;
+      },
+    );
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch (#1105): the deploy-key anchor changing between two dispatches on the SAME supervisor is REJECTED — a probe for key A is never reused to authorize key B", async () => {
+  const scratch = mkdtempSync(join(tmpdir(), "sapwood-worker-anchor-swap-"));
+  const previousCwd = process.cwd();
+  let s: WorkerSupervisor | undefined;
+  try {
+    process.chdir(scratch);
+    const keysDir = runtimePaths(join(scratch, ".sapwood")).keysDir;
+    mkdirSync(keysDir, { recursive: true });
+    const keyA = join(keysDir, "worker-deploy-key");
+    writeFileSync(keyA, "key-a-material");
+    writeFileSync(keyIdSidecarPath(keyA), "1\n");
+    // #1105: mtime ordering, not real-time delay — utimesSync sets each sidecar's mtime
+    // explicitly (same recipe as paths.test.ts's own "most recently WRITTEN wins" pin) so the
+    // anchor swap below is deterministic on any filesystem's mtime granularity, never dependent
+    // on how much real wall-clock time elapses between the two writeFileSync calls.
+    utimesSync(keyIdSidecarPath(keyA), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+
+    const hook = mkHook(scratch);
+    let probeCount = 0;
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg: l1Cfg,
+      stateDir: scratch,
+      claudeBin: mkStub(scratch, FAST_STUB),
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      // #1105: NO deployKeyAnchor override here — the anchor is re-discovered from the real
+      // filesystem on every call, which is the whole point of this test (a fixed injected
+      // anchor can never change mid-run).
+      probeDeployKeySsh: async () => {
+        probeCount++;
+        return { ok: true };
+      },
+    });
+    await s.dispatch({ number: 1, title: "t", labels: [] }, "lane-anchor-a");
+    await waitFor(() => existsSync(join(scratch, "lane-anchor-a.done.json")), "first dispatch did not complete");
+    assert.equal(probeCount, 1, "the first dispatch must probe key A exactly once");
+
+    // Swap the anchor: a second, DIFFERENT key becomes the newest sidecar — findDeployKeyAnchor
+    // now discovers key B instead of key A, mid-supervisor-life.
+    const keyB = join(keysDir, "worker-deploy-key-other");
+    writeFileSync(keyB, "key-b-material");
+    writeFileSync(keyIdSidecarPath(keyB), "2\n");
+    utimesSync(keyIdSidecarPath(keyB), new Date(), new Date());
+
+    await assert.rejects(
+      () => s!.dispatch({ number: 2, title: "t2", labels: [] }, "lane-anchor-b"),
+      (e: Error) => {
+        assert.match(e.message, /anchor changed/);
+        assert.match(e.message, new RegExp(keyA.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+        assert.match(e.message, new RegExp(keyB.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+        return true;
+      },
+    );
+    assert.equal(probeCount, 1, "the rejected second dispatch must never probe key B — it refuses before that");
+  } finally {
+    process.chdir(previousCwd);
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("dispatch (#1105): an L1 anchor-resolution failure with a proxy already minted tears down the proxy (never leaks a live listener/token) — mirrors resume()'s own cleanup", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    const bin = mkStub(dir, FAST_STUB);
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg: l1Cfg,
+      stateDir: dir,
+      claudeBin: bin,
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      deployKeyAnchor: { keyPath: join(dir, "does-not-exist-key"), keyId: 1 },
+    });
+    const { calls, handle } = fakeWorkerProxyHandle();
+    await assert.rejects(() =>
+      s!.dispatch({ number: 1, title: "t", labels: [] }, "lane-l1-proxy-leak", {
+        proxy: {
+          mint: async () => {
+            calls.minted++;
+            return handle as never;
+          },
+        },
+      }),
+    );
+    assert.equal(calls.minted, 1, "the proxy must have actually minted before the deploy-key resolution failed");
+    assert.equal(calls.stopped, 1, "a refused-before-spawn dispatch must stop the already-minted proxy, never leak it");
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume (#1105): crash-adoption REFUSES a confirmed spawn whose persisted credential_tier does not match this run's L1 config — never adopts a live process this run's startup gate never validated", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg: l1Cfg,
+      stateDir: dir,
+      claudeBin: mkStub(dir, FAST_STUB),
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      probeDeployKeySsh: async () => ({ ok: true }),
+      deployKeyAnchor: deployKeyAnchor(join(dir, "fake-deploy-key-606-tiermismatch")),
+    });
+    // Model a marker left behind by a PRIOR engine process that ran this same lane at L0 (no
+    // credential_tier recorded — an unpatched producer, or a genuinely pre-#1105 marker) and
+    // crashed with a confirmed spawn.
+    const name = "lane-tier-mismatch";
+    writeFileSync(
+      join(dir, `${name}.running.json`),
+      JSON.stringify({
+        name,
+        issue: 1,
+        session_id: "stranded-session",
+        wrapper_pid: 999999,
+        started_at: new Date().toISOString(),
+        resume_pending_db: true,
+        spawn_confirmed: true,
+        // credential_tier deliberately OMITTED — the "missing" half of "≠ L1 (or missing)".
+      }),
+    );
+    await assert.rejects(
+      () => s!.resume({ number: 1, title: "t", labels: [] }, name),
+      (e: Error) => {
+        assert.match(e.message, /credential tier/);
+        assert.match(e.message, /L1/);
+        return true;
+      },
+    );
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resume (#1105): crash-adoption ADOPTS a confirmed spawn whose persisted credential_tier MATCHES this run's L1 config", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
+  let s: WorkerSupervisor | undefined;
+  try {
+    const hook = mkHook(dir);
+    s = new WorkerSupervisor({
+      now: realClock,
+      cfg: l1Cfg,
+      stateDir: dir,
+      claudeBin: mkStub(dir, FAST_STUB),
+      renderPrompt: () => "p",
+      guardHookPath: hook,
+      probeDeployKeySsh: async () => ({ ok: true }),
+      deployKeyAnchor: deployKeyAnchor(join(dir, "fake-deploy-key-606-tiermatch")),
+    });
+    const name = "lane-tier-match";
+    writeFileSync(
+      join(dir, `${name}.running.json`),
+      JSON.stringify({
+        name,
+        issue: 1,
+        session_id: "stranded-session",
+        wrapper_pid: 999999,
+        started_at: new Date().toISOString(),
+        resume_pending_db: true,
+        spawn_confirmed: true,
+        credential_tier: "L1",
+      }),
+    );
+    assert.deepEqual(await s.resume({ number: 1, title: "t", labels: [] }, name), {
+      name,
+      sessionId: "stranded-session",
+      pid: 999999,
+      worktreePath: join(process.cwd(), ".claude", "worktrees", name),
+    });
+  } finally {
+    killAnyRunningLanes(s);
+    s?.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -9583,9 +9884,9 @@ test("resume: FIX-LEG ENTRY (opts.sessionId, no .handoff sentinel) — real Work
 // deployKeyEnv and credentialFree as MUTUALLY EXCLUSIVE, so a fix leg with an L1 deploy key
 // configured got NEITHER an API credential NOR the deploy key and could not push its own fix.
 // This test is the "genuinely fix-shaped" case: opts.sessionId + opts.prompt (fix-leg entry,
-// mirroring the FIX-LEG ENTRY test above) PLUS a credentialFree proxy PLUS worker.deployKeyPath
-// configured — asserting the two postures COMPOSE rather than one silently winning.
-test("resume: FIX-LEG ENTRY (opts.sessionId+prompt) WITH credentialFree AND worker.deployKeyPath configured -> composed env: GIT_SSH_COMMAND present (the fix leg can push via the deploy key) AND the credential-free severing stays fully intact (GH_CONFIG_DIR fresh empty dir, GIT_CONFIG_GLOBAL/SYSTEM=/dev/null, no GH_TOKEN)", async () => {
+// mirroring the FIX-LEG ENTRY test above) PLUS a credentialFree proxy PLUS credentialTier: L1
+// with a discovered anchor — asserting the two postures COMPOSE rather than one silently winning.
+test("resume: FIX-LEG ENTRY (opts.sessionId+prompt) WITH credentialFree AND credentialTier L1 configured -> composed env: GIT_SSH_COMMAND present (the fix leg can push via the deploy key) AND the credential-free severing stays fully intact (GH_CONFIG_DIR fresh empty dir, GIT_CONFIG_GLOBAL/SYSTEM=/dev/null, no GH_TOKEN)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const previousGhToken = process.env.GH_TOKEN;
   // #606 gate② round 1 (P1-3/P1-4): the --resume leg PAUSES on `release` before exiting — the
@@ -9593,6 +9894,7 @@ test("resume: FIX-LEG ENTRY (opts.sessionId+prompt) WITH credentialFree AND work
   // (onExit removes it as soon as the child exits; same release-gate pattern the credentialFree
   // tests above already use).
   const release = join(dir, "release-fix-p14");
+  const fixLegKeyPath = join(dir, "fake-deploy-key-606-p14");
   let s: WorkerSupervisor | undefined;
   try {
     process.env.GH_TOKEN = "poison-gh-token-p14";
@@ -9613,16 +9915,16 @@ test("resume: FIX-LEG ENTRY (opts.sessionId+prompt) WITH credentialFree AND work
         "exit 0",
       ].join("\n"),
     );
-    const deployKeyCfg = cfgWithDeployKey("/tmp/fake-deploy-key-606-p14");
     s = new WorkerSupervisor({
       now: realClock,
-      cfg: deployKeyCfg,
+      cfg: l1Cfg,
       stateDir: dir,
       claudeBin: bin,
       renderPrompt: () => "issue-rendered-prompt",
       heartbeatMs: 50,
       guardHookPath: hook,
       probeDeployKeySsh: async () => ({ ok: true }),
+      deployKeyAnchor: deployKeyAnchor(fixLegKeyPath),
     });
     // Fresh dispatch -> done (the driving-lane precondition a fix leg starts from).
     const { name, sessionId } = await s.dispatch({ number: 21, title: "t", labels: [] });
@@ -9642,7 +9944,10 @@ test("resume: FIX-LEG ENTRY (opts.sessionId+prompt) WITH credentialFree AND work
     // The deploy-key overlay: the fix leg CAN push through the deploy key.
     assert.match(
       envText,
-      /^GIT_SSH_COMMAND=ssh -i '\/tmp\/fake-deploy-key-606-p14' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new$/m,
+      new RegExp(
+        `^GIT_SSH_COMMAND=ssh -i '${fixLegKeyPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new$`,
+        "m",
+      ),
     );
     assert.match(envText, /^GIT_CONFIG_COUNT=2$/m);
     // ...and the credential-free severing stays fully intact — COMPOSED, never replaced.

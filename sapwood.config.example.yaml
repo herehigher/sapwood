@@ -75,12 +75,9 @@ worker:
   #                                   # only for fix-leg resumes
   # pricingFile: pricing/my-rates.yaml # default: unset — engine's shipped pricing.yaml rate
   #                                     # table; your file REPLACES it entirely, no merging
-  # deployKeyPath: .sapwood/keys/worker-deploy-key # default: unset (L0, full credentialed env) —
-  #                                        # set TOGETHER with deployKeyId to activate the L1
-  #                                        # scoped SSH deploy key; `sapwood init` provisions
-  #                                        # both. Resolves against CWD, not this config file's
-  #                                        # directory (unlike promptFile/pricingFile above).
-  # deployKeyId: 12345678 # default: unset — the deploy key's GitHub-assigned numeric id
+  # credentialTier: L0 # default: L0 (full credentialed worker env) — L1 requires `sapwood init`
+  #                     # to have provisioned a local deploy-key anchor under .sapwood/keys/ first;
+  #                     # `sapwood run` refuses to start if L1 is set but no anchor is found
 
 # guard:
 #   mode: hard # default: hard — fail-closed PreToolUse enforcement; "soft" only observes and
