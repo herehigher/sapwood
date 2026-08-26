@@ -1290,8 +1290,8 @@ test("init: RECONCILE — a discovered local anchor, local file exists, id liste
     labels: requiredLabels(cfg).map((l) => l.name),
     boardExists: true,
     boardOptions: ["Todo", "Ready", "In Progress", "Done"],
-    // #606 gate② round 2 (R3-1, carried forward): the id-matched entry's `key` must match the
-    // LOCAL `.pub` file content below for reconcile's cross-check to go green.
+    // The id-matched entry's `key` must match the LOCAL `.pub` file content below for
+    // reconcile's cross-check to go green.
     deployKeyEntries: [{ id: 159210179, title: "sapwood-worker", key: FAKE_PUB_KEY }],
   });
   try {
@@ -1562,8 +1562,8 @@ test("init (#1105 AC4, TTY arm (a)): re-running init after a reconcile-fail stat
   const dir = tmpCwd();
   const staleKeyPath = cfgKeyPath(dir);
   try {
-    // Round 1: local key file MISSING -> reconcile fails -> non-interactive default (b) -> WARN,
-    // no file touched.
+    // First init run: local key file MISSING -> reconcile fails -> non-interactive default (b)
+    // -> WARN, no file touched.
     writeAnchorSidecar(staleKeyPath, 42);
     const { run: run1 } = fakeRun({
       labels: requiredLabels(cfg).map((l) => l.name),
@@ -1573,11 +1573,15 @@ test("init (#1105 AC4, TTY arm (a)): re-running init after a reconcile-fail stat
     });
     const first = await init(cfg, { run: run1, getAuthStatus: async () => OK_AUTH, cwd: dir, ...nonInteractive });
     assert.ok(first.actions.some((a) => a.startsWith("deploy key: WARN")));
-    assert.equal(readFileSync(keyIdSidecarPath(staleKeyPath), "utf8").trim(), "42", "round 1 leaves the stale sidecar exactly as it was");
+    assert.equal(
+      readFileSync(keyIdSidecarPath(staleKeyPath), "utf8").trim(),
+      "42",
+      "first init run leaves the stale sidecar exactly as it was",
+    );
 
-    // Round 2 ("re-run sapwood init" from an interactive terminal): the OLD "sapwood-worker"-
-    // titled key is STILL registered (never deleted) — operator chooses (a) to register an
-    // ADDITIONAL per-machine key instead.
+    // Second init run ("re-run sapwood init" from an interactive terminal): the OLD
+    // "sapwood-worker"-titled key is STILL registered (never deleted) — operator chooses (a) to
+    // register an ADDITIONAL per-machine key instead.
     const { run: run2, calls: calls2 } = fakeRun({
       labels: requiredLabels(cfg).map((l) => l.name),
       boardExists: true,
@@ -1599,9 +1603,10 @@ test("init (#1105 AC4, TTY arm (a)): re-running init after a reconcile-fail stat
     const newKeyPath = join(dir, ".sapwood", "keys", "worker-deploy-key-converge-host");
     assert.equal(readFileSync(keyIdSidecarPath(newKeyPath), "utf8").trim(), "43"); // fakeRun assigns max(existing)+1
     assert.ok(second.actions.some((a) => /SSH auth preflight OK/.test(a)));
-    // The stale slot from round 1 is untouched — only the NEW key + its own sidecar were written.
+    // The stale slot from the first init run is untouched — only the NEW key + its own sidecar
+    // were written.
     assert.equal(readFileSync(keyIdSidecarPath(staleKeyPath), "utf8").trim(), "42");
-    assert.equal(existsSync(staleKeyPath), false, "round 1 never wrote a key file at the stale slot, only its sidecar");
+    assert.equal(existsSync(staleKeyPath), false, "the first init run never wrote a key file at the stale slot, only its sidecar");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

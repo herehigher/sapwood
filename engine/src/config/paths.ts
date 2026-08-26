@@ -136,20 +136,16 @@ export function keyIdSidecarPath(keyPath: string): string {
   return `${keyPath}.id`;
 }
 
-/** #1105 (see docs/security/credential-tiers.md): this machine's own local deploy-key anchor,
- *  discovered from `runtimePaths(root).keysDir` directly — the anchor is filesystem state now (a
- *  gitignored `<key>.id` sidecar beside the key itself), never a fact recorded in the audited
- *  `sapwood.config.yaml`. Every `*.id` file in the directory is a candidate: the fixed primary
- *  slot (`deployKeySidecar` above), or a per-host suffixed sibling init.ts's
- *  armAuthFailsStaleOrMismatch mints when the primary anchor fails to reconcile and an operator
- *  registers an additional key — that arm never deletes the stale sidecar it's replacing (a
- *  WARN-only outcome touches no file), so more than one can coexist. The most recently WRITTEN
- *  one wins: it is the anchor a `sapwood init` run (or an operator by hand) most recently
- *  confirmed. Ceiling: two operators' keys on one shared machine means the newest `sapwood init`
- *  silently wins over the other's. Upgrade trigger: add a per-host selection rule once that
- *  ambiguity is actually observed. Real filesystem I/O (unlike `runtimePaths()` itself) —
- *  returns undefined when the directory has no valid sidecar at all (a fresh machine, or
- *  `sapwood init` never ran), never throws. */
+/** #1105 (see docs/security/credential-tiers.md): this machine's own local deploy-key anchor.
+ *  Single source of truth: only this gitignored `<key>.id` sidecar carries it — `sapwood.config.yaml`
+ *  never does, so a stale committed value can never contradict what reconcile itself reads. Host-
+ *  locality: a per-host suffixed sibling (init.ts's armAuthFailsStaleOrMismatch) can coexist with
+ *  the primary slot, since that arm is WARN-only and never deletes the sidecar it's replacing; the
+ *  most recently WRITTEN one wins. Ceiling: two operators' keys on one shared machine means the
+ *  newest `sapwood init` silently wins over the other's. Upgrade trigger: add a per-host selection
+ *  rule once that ambiguity is actually observed. Candidate-level errors (unreadable sidecar,
+ *  missing key, stat failure) skip that candidate; a directory-enumeration error propagates to
+ *  the caller. */
 export function findDeployKeyAnchor(root: string): { keyPath: string; keyId: number } | undefined {
   const dir = runtimePaths(root).keysDir;
   if (!existsSync(dir)) return undefined;
@@ -171,8 +167,7 @@ export function findDeployKeyAnchor(root: string): { keyPath: string; keyId: num
     if (!Number.isInteger(keyId) || keyId <= 0) continue;
     // A sidecar with no co-located key file (or one that is not a regular file) is not a real
     // anchor — every filesystem call stays inside this try so a stat race or permission error
-    // is just a rejected candidate, never an uncaught throw out of a function documented as
-    // never throwing.
+    // is just a rejected candidate, not a throw.
     let mtimeMs: number;
     try {
       const keyStat = statSync(keyPath);

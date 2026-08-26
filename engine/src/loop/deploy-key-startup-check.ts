@@ -26,7 +26,6 @@ import type { State } from "../state/state.js";
 import { DOC_LINKS } from "../util/doc-links.js";
 import { parseDeployKeys } from "./init.js";
 
-/** Which of the shapes the issue names produced the reported tier. */
 export type DeployKeyStartupArm = "l0" | "missing" | "running-tier-mismatch" | "stale" | "preflight-failed" | "active";
 
 export interface DeployKeyStartupResult {
@@ -46,14 +45,11 @@ export interface DeployKeyPreflightSupervisor {
 }
 
 /** Run once per engine start (cli.ts, immediately after `WorkerSupervisor` construction — see
- *  this module's own doc for why), strictly BEFORE the driver loop (runDriver/runRounds) can
- *  dispatch anything. `L0` (default) is disclosure only — logs the tier and returns, never
- *  throws. `L1` fails CLOSED: no local anchor, an unreadable key file, a still-running lane whose
- *  own persisted tier doesn't match, a remote id that has been removed or demoted to read-only,
- *  or a failed SSH preflight each log a guidance-carrying message AND throw — the caller
- *  (runTickEngine/runRoundsEngine's own try/catch) already turns an uncaught startup error into
- *  a non-zero exit, so this is the ONE place `worker.credentialTier: L1` becomes an actual
- *  startup gate rather than a WARN. */
+ *  this module's own doc for why), strictly BEFORE the driver loop can dispatch anything: only
+ *  here can an operator who explicitly set `L1` be refused before this run ever commits to a
+ *  silently downgraded credential. `L0` never throws (disclosure only); every `L1` failure below
+ *  logs a guidance-carrying message and throws, since the caller's own try/catch is what turns an
+ *  uncaught startup error into the actual non-zero exit. */
 export async function detectDeployKeyStartupTier(
   supervisor: DeployKeyPreflightSupervisor,
   cfg: {
@@ -110,18 +106,11 @@ export async function detectDeployKeyStartupTier(
     throw new Error(message);
   }
 
-  // A lane still on disk from BEFORE this restart may have been spawned under a different tier
-  // (an operator flipped worker.credentialTier between the crash and now). resume()'s own
-  // crash-matrix guard catches this for the ONE adoption path it owns, but a detached lane can
-  // also be picked up by ordinary probe()/reconcile classification without ever going through
-  // resume() at all — so this is checked HERE too, once, at the one place every restart passes
-  // through before any dispatch, rather than threaded into every adoption path individually. A
-  // marker that never recorded a tier at all counts as a mismatch — it was never confirmed L1,
-  // so it must never be silently trusted as one.
-  //
-  // A scan that can't even list the running-lane state directory is refused the same way as a
-  // mismatch — "couldn't see what's running" must never read as "nothing is running" and let
-  // startup proceed.
+  // A detached lane can be adopted by ordinary probe()/reconcile classification without ever
+  // passing through resume()'s own crash-matrix guard, so it's checked once here too, at the one
+  // place every restart passes through before any dispatch. A marker with no recorded tier, or a
+  // scan that cannot list the running-lane state directory, counts as a mismatch: neither is
+  // "confirmed L1," and "couldn't see what's running" must never read as "nothing is running."
   let runningMarkers: Array<{ name: string; tier: unknown; session_id: unknown; pid: unknown }>;
   try {
     runningMarkers = supervisor.listRunningCredentialTiers();

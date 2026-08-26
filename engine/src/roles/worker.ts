@@ -2753,21 +2753,13 @@ export class WorkerSupervisor implements Supervisor {
   }
 
   /** #1105 (see docs/security/credential-tiers.md): resolves the L1 scoped-worker-identity
-   *  deploy key's local path for THIS dispatch/resume/fix leg — called UNCONDITIONALLY (both by
-   *  an ordinary leg building its own workerDeployKeyEnv, and by a `credentialFree` leg deciding
-   *  whether to compose deployKeyTransportOverlay onto its stricter base), since a fix leg needs
-   *  to know this too.
-   *
-   *  `worker.credentialTier: L0` (the default) returns `undefined` immediately — L0 never reads
-   *  or probes the key at all. `L1` NEVER falls back to `undefined`: no local anchor, an anchor
-   *  that changed identity since this instance last bound to one, an unreadable key file, or a
-   *  failed SSH preflight all THROW — the startup gate (deploy-key-startup-check.ts) already
-   *  refuses `sapwood run` before any dispatch when L1 has no working anchor, so reaching any of
-   *  these failures here means the key broke (or moved) mid-run, or a caller constructed a
-   *  WorkerSupervisor directly, bypassing that gate; either way, a leg that claims L1 must never
-   *  silently run at the wider tier, or under a different key than the one this run's startup
-   *  gate validated. The anchor is re-resolved from disk on EVERY call (never cached itself —
-   *  only its probe result is), so a leg always sees the current filesystem state; the SSH
+   *  deploy key's local path for THIS dispatch/resume/fix leg — called unconditionally, since a
+   *  fix leg needs it too. `L0` returns `undefined` immediately. `L1` never falls back to
+   *  `undefined`: every failure throws, because the startup gate already refused a run with no
+   *  working anchor, so reaching a failure here means the key broke (or moved) mid-run, or a
+   *  caller bypassed that gate — either way, a leg that claims L1 must never silently run at the
+   *  wider tier or under a different key. The anchor is re-resolved from disk on every call (an
+   *  in-flight rotation or race must be caught fresh, not read from a stale cache), while the SSH
    *  preflight itself still runs at most once per (supervisor life, anchor identity) pair —
    *  `this.deployKeyProbe`, shared with checkDeployKeyPreflight. */
   private async resolveDeployKeyPath(): Promise<string | undefined> {
@@ -2864,27 +2856,19 @@ export class WorkerSupervisor implements Supervisor {
   }
 
   /** The marker reader deploy-key-startup-check.ts's restart-adoption gate consumes — reuses
-   *  `readJson` (this file's one generic try/catch JSON parser, the same one every running.json
-   *  read in this class already goes through) plus the same directory-listing idiom
-   *  `otherLaneOnBranch` above already establishes, rather than a second implementation of
-   *  either. Scoped to `*.running.json` only (a lane still in flight, per SENTINEL_FILE's own
-   *  extension set) — a terminal sentinel's process has already exited, so its tier provenance
-   *  is moot to a startup adoption-safety check.
+   *  `readJson` and the directory-listing idiom `otherLaneOnBranch` already establishes, rather
+   *  than a second implementation of either. Scoped to `*.running.json`: a terminal sentinel's
+   *  process has already exited, so its tier provenance is moot to a startup adoption-safety
+   *  check.
    *
-   *  FAIL CLOSED on both axes the startup gate depends on, unlike `otherLaneOnBranch`'s
-   *  fail-open stance on this same directory (that method's caller degrades to a WARN either
-   *  way; this one's caller refuses startup, so "couldn't tell" must never read as "nothing is
-   *  running"): a directory-listing failure THROWS rather than returning `[]`, and an
-   *  unparseable marker is still REPORTED (with `tier: undefined`, via `readJson`'s own
-   *  null-on-parse-failure return) rather than silently excluded — the caller's mismatch check
-   *  (`tier !== "L1"`) then refuses on it exactly like a marker with the field absent.
-   *
-   *  `tier`/`session_id`/`pid` are all `unknown`, not narrowed — deliberately: the caller decides
-   *  what counts as a mismatch and how to render an absent field; this method only reports what's
-   *  on disk verbatim, including a legacy marker missing some or all of these fields entirely.
-   *  `pid` is the marker's own `wrapper_pid` (the CONFIRMED spawn's field, see `resume`'s doc
-   *  above) — this method performs no liveness check on it, and neither does its caller; a dead
-   *  PID's marker still refuses, the caller's remedy text just can't `kill` it. */
+   *  FAIL CLOSED on both axes the startup gate depends on, unlike `otherLaneOnBranch`'s fail-open
+   *  stance on this same directory (this method's caller refuses startup, so "couldn't tell" must
+   *  never read as "nothing is running"): a directory-listing failure THROWS rather than
+   *  returning `[]`, and an unparseable marker is still REPORTED rather than silently excluded —
+   *  the caller's mismatch check then refuses on it exactly like a marker with the field absent.
+   *  `pid` is the marker's own `wrapper_pid`; this method performs no liveness check on it, and
+   *  neither does its caller — a dead PID's marker still refuses, the caller's remedy text just
+   *  can't `kill` it. */
   listRunningCredentialTiers(): Array<{ name: string; tier: unknown; session_id: unknown; pid: unknown }> {
     const entries = readdirSync(this.dir);
     const out: Array<{ name: string; tier: unknown; session_id: unknown; pid: unknown }> = [];

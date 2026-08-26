@@ -667,12 +667,14 @@ async function addDeployKeyCapturingNewId(run: GhRunner, repo: string, keyPath: 
 
 /** Records the local (key, id) anchor as a sidecar file beside the key itself. A plain
  *  positive-integer text file, not YAML/JSON — nothing here is ever hand-edited or re-parsed as
- *  a config, so there is no format to keep stable. Created with mode 0600 directly (no separate
- *  ambient-mode window between write and chmod) and chmodded again afterward via the same
- *  injectable fs seam enforceDeployKeyPermissions uses, since the create-time mode is still
- *  subject to the process umask. Throws on any write/chmod failure — every caller wraps this in
- *  its own try/catch, so a sidecar-persistence failure is reported as an ordinary provisioning
- *  failure, never an escape past the WARN-and-degrade contract every other step here has. */
+ *  a config, so there is no format to keep stable. Ceiling: holds exactly one numeric id, nothing
+ *  more. Upgrade trigger: move to a versioned structured format the day the anchor needs a second
+ *  field. Created with mode 0600 directly (no separate ambient-mode window between write and
+ *  chmod) and chmodded again afterward via the same injectable fs seam enforceDeployKeyPermissions
+ *  uses, since the create-time mode is still subject to the process umask. Throws on any
+ *  write/chmod failure — every caller wraps this in its own try/catch, so a sidecar-persistence
+ *  failure is reported as an ordinary provisioning failure, never an escape past the
+ *  WARN-and-degrade contract every other step here has. */
 function writeDeployKeyIdSidecar(keyPath: string, keyId: number, fs: DeployKeyPermissionsFsOps = realDeployKeyPermissionsFsOps): void {
   const idPath = keyIdSidecarPath(keyPath);
   writeFileSync(idPath, `${keyId}\n`, { mode: 0o600 });
@@ -735,23 +737,12 @@ async function checkDefaultBranchProtectionAction(run: GhRunner, repo: string): 
   }
 }
 
-/** The reconcile-failure / no-local-anchor state. The engine never invokes or scripts
- *  remote deploy-key deletion or modification — the remote inventory is never authoritative for
- *  "mine"; a `sapwood-worker`-titled key may validly belong to a different machine/operator, so
- *  this machine can only ever ADD a new key of its own. Stale/foreign keys are surfaced in the
- *  WARN for a HUMAN to review, never touched here. This NEVER deletes or overwrites an existing
- *  local sidecar — a WARN-only outcome (choice (b), or no TTY) touches no file at all; the next
- *  `sapwood init` run simply reconciles against the same anchor again and reports the same WARN,
- *  which is honest (nothing changed) rather than a false convergence promise.
- *
- *  WARN + operator choice when `deps.isInteractive()`:
- *  (a) leave every remote key untouched; generate a FRESH keypair at a new local slot
- *      (pickFreshArmAKeySlot — never reuses a locally-existing path or a remotely-registered
- *      per-host title); register it as an ADDITIONAL deploy key; write its own sidecar (via a
- *      before/after id-diff, never a title match); preflight.
- *  (b) leave every remote key AND every local file untouched; proceed degraded at L0.
- *  No TTY -> default (b), the no-write, never-wedge path — the WARN still names (a)'s manual
- *  steps. */
+/** The reconcile-failure / no-local-anchor state. A remote title is never authoritative for
+ *  "mine" — a `sapwood-worker`-titled key may validly belong to a different machine/operator, so
+ *  this machine only ever ADDS a new key of its own, never deletes or overwrites a remote or
+ *  existing local one; a WARN-only outcome (choice (b), or no TTY) touches no file, so the next
+ *  `sapwood init` run reconciles against the same anchor again and reports the same WARN —
+ *  honest non-convergence rather than a false promise. */
 async function armAuthFailsStaleOrMismatch(
   run: GhRunner,
   repo: string,
@@ -853,21 +844,12 @@ async function armAuthFailsStaleOrMismatch(
   return actions;
 }
 
-/** Both a local key file AND its id sidecar discovered (findDeployKeyAnchor) -> RECONCILE
- *  (never skip — a stale/rotated/mismatched key
- *  must be actively detected, not assumed good because a path is on file). FIVE checks, ALL must
- *  be green: the local key file exists; the recorded id is present in `gh repo deploy-key list`;
- *  that id-matched remote entry's OWN public key content matches the local `.pub` file (proves
- *  the (key, id) pair is genuinely the SAME key that was recorded together, not merely "an id
- *  that happens to be registered" plus "a local key that happens to authenticate"
- *  independently, which a hand-edited or foreign id sharing a DIFFERENT but also-registered key
- *  could otherwise fake); the SSH preflight succeeds; its directory/file permissions (key AND id
- *  sidecar) are repairable to 0700/0600 (#1080 — a directory or symlink standing in for either is
- *  a preserved collision, not a repair target). All green -> a positive confirmation action line
- *  (+ branch-protection check). Any failure -> the auth-fails/stale/mismatch arm
- *  (armAuthFailsStaleOrMismatch) — permission repair is attempted ONLY once the other four
- *  checks already agree this anchor is otherwise valid, so a stale id / content mismatch /
- *  failed preflight reaches that WARN-only arm having touched nothing on disk. */
+/** Both a local key file AND its id sidecar discovered (findDeployKeyAnchor) -> RECONCILE, never
+ *  skipped: a stale/rotated/mismatched key must be actively detected, not assumed good because a
+ *  path is on file. Permission repair is attempted only once every other check already agrees
+ *  this anchor is otherwise valid, so a stale id / content mismatch / failed preflight reaches
+ *  the auth-fails/stale/mismatch arm (armAuthFailsStaleOrMismatch) having touched nothing on
+ *  disk. */
 async function reconcileDeployKey(
   run: GhRunner,
   repo: string,
@@ -940,16 +922,14 @@ async function reconcileDeployKey(
   return armAuthFailsStaleOrMismatch(run, repo, cwd, staleForeign, reasons, deps, permissionsFs);
 }
 
-/** Orchestrator: a local anchor discovered (findDeployKeyAnchor) -> reconcile; none discovered
- *  and no sapwood-titled remote key -> fresh provisioning
- *  (ssh-keygen -> `gh repo deploy-key add --allow-write --title sapwood-worker` -> read back the
- *  new key's id via a before/after id diff, never a title match -> preflight -> write its
- *  id sidecar -> branch-protection check); none discovered but a sapwood-titled key already
- *  exists remotely (this machine has no recorded anchor for it) -> the auth-fails/stale/mismatch
- *  arm, same as a reconcile failure (never assume ownership from a title alone). Every failure
- *  degrades to an L0 guidance-carrying WARN (never a thrown error) — `init()` itself never fails
- *  because L1 provisioning didn't complete; whether that failure actually MATTERS is decided at
- *  `sapwood run` time by `worker.credentialTier` (deploy-key-startup-check.ts), not here. */
+/** Orchestrator: a local anchor discovered (findDeployKeyAnchor) -> reconcile; none discovered,
+ *  with no sapwood-titled remote key -> fresh provisioning; none discovered but a sapwood-titled
+ *  key already exists remotely -> the auth-fails/stale/mismatch arm, same as a reconcile failure
+ *  — a remote title alone can never establish "mine," so an unrecorded sapwood-titled key is
+ *  treated as foreign, never adopted by name. Every failure degrades to an L0 guidance-carrying
+ *  WARN, never a thrown error — `init()` itself never fails because L1 provisioning didn't
+ *  complete; whether that failure actually MATTERS is decided at `sapwood run` time by
+ *  `worker.credentialTier` (deploy-key-startup-check.ts), not here. */
 export async function ensureDeployKey(
   run: GhRunner,
   repo: string,
@@ -974,9 +954,7 @@ export async function ensureDeployKey(
   }
   const priorSapwoodKeys = existingKeys.filter((k) => isSapwoodWorkerTitle(k.title));
   if (priorSapwoodKeys.length > 0) {
-    // A sapwood-titled key exists remotely, but THIS machine has no recorded local anchor for it
-    // — per the owner ruling, a title is never authoritative for "mine": it may validly belong to
-    // a different machine/operator. Never assume ownership, never touch it.
+    // Per the owner ruling: a title alone is never authoritative for "mine". Never touch it.
     return armAuthFailsStaleOrMismatch(run, repo, cwd, priorSapwoodKeys, [], deps, permissionsFs);
   }
 
