@@ -4,9 +4,7 @@ A contributor-facing tour of the codebase: what the pieces are, where they
 live, how to run and test them, and which parts are dangerous to touch.
 User-facing docs live under [../guide/](../guide/) ([getting-started](../guide/getting-started.md),
 [configuration](../guide/configuration.md)) and [security](../security.md); this
-guide is for people **changing sapwood itself**. Contribution mechanics
-(branch/PR, quality gate, human-merge-only rules) are in the root
-[CONTRIBUTING.md](../../CONTRIBUTING.md).
+guide is for people **changing sapwood itself**. Repository requirements are in the root [CLAUDE.md](../../CLAUDE.md); [CONTRIBUTING.md](../../CONTRIBUTING.md) covers how to land a change and where to find release guidance.
 
 > Status tracks the engine at pre-v1. The dashboard is designed
 > ([frontend-design.md](../reference/frontend-design.md)) and built — see
