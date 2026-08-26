@@ -127,11 +127,6 @@ export function runtimePaths(root: string): RuntimePaths {
   };
 }
 
-/** The local (path, id) anchor's id half — a sidecar file beside the deploy key itself, same
- *  0600 permission the key file gets. Not itself a fixed `runtimePaths()` field (the key's own
- *  basename varies — the primary slot, or a per-host suffixed sibling minted when the primary
- *  fails to reconcile) — this derives the sidecar name from whatever key path the caller already
- *  has, the same way every `.pub` public-key sibling is named. */
 export function keyIdSidecarPath(keyPath: string): string {
   return `${keyPath}.id`;
 }

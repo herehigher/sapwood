@@ -922,14 +922,10 @@ async function reconcileDeployKey(
   return armAuthFailsStaleOrMismatch(run, repo, cwd, staleForeign, reasons, deps, permissionsFs);
 }
 
-/** Orchestrator: a local anchor discovered (findDeployKeyAnchor) -> reconcile; none discovered,
- *  with no sapwood-titled remote key -> fresh provisioning; none discovered but a sapwood-titled
- *  key already exists remotely -> the auth-fails/stale/mismatch arm, same as a reconcile failure
- *  — a remote title alone can never establish "mine," so an unrecorded sapwood-titled key is
- *  treated as foreign, never adopted by name. Every failure degrades to an L0 guidance-carrying
- *  WARN, never a thrown error — `init()` itself never fails because L1 provisioning didn't
- *  complete; whether that failure actually MATTERS is decided at `sapwood run` time by
- *  `worker.credentialTier` (deploy-key-startup-check.ts), not here. */
+/** A remote key's title alone never establishes "mine": a sapwood-titled key with no local
+ *  anchor is treated as foreign, never adopted by name. Every failure here is a guidance-carrying
+ *  WARN, never a throw — whether a missing L1 key MATTERS is decided by `worker.credentialTier`
+ *  at `sapwood run` startup (deploy-key-startup-check.ts), not by `init()`. */
 export async function ensureDeployKey(
   run: GhRunner,
   repo: string,
@@ -954,7 +950,7 @@ export async function ensureDeployKey(
   }
   const priorSapwoodKeys = existingKeys.filter((k) => isSapwoodWorkerTitle(k.title));
   if (priorSapwoodKeys.length > 0) {
-    // Per the owner ruling: a title alone is never authoritative for "mine". Never touch it.
+    // A title alone is never authoritative for "mine"; a key this machine did not record is never touched.
     return armAuthFailsStaleOrMismatch(run, repo, cwd, priorSapwoodKeys, [], deps, permissionsFs);
   }
 

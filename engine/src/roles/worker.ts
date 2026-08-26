@@ -2752,16 +2752,12 @@ export class WorkerSupervisor implements Supervisor {
     (this.deps.log ?? console.error)(message);
   }
 
-  /** #1105 (see docs/security/credential-tiers.md): resolves the L1 scoped-worker-identity
-   *  deploy key's local path for THIS dispatch/resume/fix leg — called unconditionally, since a
-   *  fix leg needs it too. `L0` returns `undefined` immediately. `L1` never falls back to
-   *  `undefined`: every failure throws, because the startup gate already refused a run with no
-   *  working anchor, so reaching a failure here means the key broke (or moved) mid-run, or a
-   *  caller bypassed that gate — either way, a leg that claims L1 must never silently run at the
-   *  wider tier or under a different key. The anchor is re-resolved from disk on every call (an
-   *  in-flight rotation or race must be caught fresh, not read from a stale cache), while the SSH
-   *  preflight itself still runs at most once per (supervisor life, anchor identity) pair —
-   *  `this.deployKeyProbe`, shared with checkDeployKeyPreflight. */
+  /** #1105 (see docs/security/credential-tiers.md): a leg that claims L1 must never silently run
+   *  at the wider tier or under a different key, so every L1 failure here throws — the startup
+   *  gate already refused a run with no working anchor, so a failure here means the key broke or
+   *  moved mid-run, or a caller bypassed that gate. The anchor is re-read from disk per call so an
+   *  in-flight rotation is caught fresh; the SSH preflight runs once per (supervisor life, anchor
+   *  identity) — `this.deployKeyProbe`, shared with checkDeployKeyPreflight. */
   private async resolveDeployKeyPath(): Promise<string | undefined> {
     if (this.deps.cfg.worker.credentialTier !== "L1") return undefined;
     const anchor = this.deps.deployKeyAnchor ?? findDeployKeyAnchor(defaultRuntimeRoot());
@@ -2855,20 +2851,11 @@ export class WorkerSupervisor implements Supervisor {
     return this.deployKeyProbe.probe;
   }
 
-  /** The marker reader deploy-key-startup-check.ts's restart-adoption gate consumes — reuses
-   *  `readJson` and the directory-listing idiom `otherLaneOnBranch` already establishes, rather
-   *  than a second implementation of either. Scoped to `*.running.json`: a terminal sentinel's
-   *  process has already exited, so its tier provenance is moot to a startup adoption-safety
-   *  check.
-   *
-   *  FAIL CLOSED on both axes the startup gate depends on, unlike `otherLaneOnBranch`'s fail-open
-   *  stance on this same directory (this method's caller refuses startup, so "couldn't tell" must
-   *  never read as "nothing is running"): a directory-listing failure THROWS rather than
-   *  returning `[]`, and an unparseable marker is still REPORTED rather than silently excluded —
-   *  the caller's mismatch check then refuses on it exactly like a marker with the field absent.
-   *  `pid` is the marker's own `wrapper_pid`; this method performs no liveness check on it, and
-   *  neither does its caller — a dead PID's marker still refuses, the caller's remedy text just
-   *  can't `kill` it. */
+  /** Fails closed on both axes the startup gate depends on, unlike `otherLaneOnBranch` on this
+   *  same directory (that caller only WARNs; this one refuses startup, so "couldn't tell what is
+   *  running" must never read as "nothing is running"). Only `*.running.json` — a terminal
+   *  sentinel's process has already exited. No liveness check on `pid`; the ceiling and upgrade
+   *  trigger are stated at the startup gate's mismatch refusal. */
   listRunningCredentialTiers(): Array<{ name: string; tier: unknown; session_id: unknown; pid: unknown }> {
     const entries = readdirSync(this.dir);
     const out: Array<{ name: string; tier: unknown; session_id: unknown; pid: unknown }> = [];
