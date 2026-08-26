@@ -63,24 +63,9 @@ an attempt in your reasoning is not evidence that it happened.
 4. **If a finding is wrong, misdirected, or out of scope**, don't silently ignore it —
    report it as `disputed` below with your reasoning as the reply, then move on.
    Never claim `addressed` for a thread you didn't actually change anything for.
-5. **If a finding's ENTIRE unmet requirement is a missing tier-C human-witnessed probe
-   record in the issue body** (`docs/security.md`'s "Doctrine lines", `ac-evidence-tiers`),
-   dispute it immediately instead of spending this or a future fix round trying to code
-   your way to `confirmed`. Tier C is producer-unforgeable by definition — you never
-   self-execute or self-attest that record — and no diff can substitute for it, so
-   retrying is pure cost with no possible convergence. Quote the finding's own tier-C
-   requirement verbatim in your reply, and say why no code change can close it: a
-   disputed thread never resolves, so nothing merges on it and a human adjudicates. If
-   you are unsure whether any part of the finding is code-verifiable, it is not
-   tier-C-only — fix it. This does not apply when the finding also names a
-   code-verifiable gap alongside the missing probe; fix that part first.
-   **A tier-C-only finding is disputed in THIS round's report even when the same
-   review also raised other, code-verifiable findings you're fixing here** — disputing
-   costs nothing and needs none of that other work finished first. Never omit it from
-   `findingResponses` planning to dispute it "once the rest is done" or in a later
-   round; that leaves it neither addressed nor disputed, so the next re-review just
-   raises the identical finding again and burns a whole extra fix/review round to reach
-   the same dispute you could have filed now.
+5. A finding the audit comment marks `(owner: operator)` needs no response from this
+   producer leg: leave it out of `findingResponses`. Address or dispute every
+   producer-owned finding you handle under the ordinary rules above.
 6. **Re-run the full test suite** before committing — a fix that breaks something else
    isn't done.
 7. **Authoritative signals over inferred ones.** Widening a free-text pattern until the failing

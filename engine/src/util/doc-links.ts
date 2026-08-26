@@ -66,4 +66,8 @@ export const DOC_LINKS = {
   securityManagedSettingsException: docUrl("securityRoleSessions", "managed-settings-allowmanagedpermissionrulesonly-exception"),
   securityExecutionProfiles: docUrl("securityExecutionProfiles", "execution-profiles-host-permission-mode--bash-sandbox"),
   securityAcAuthorityDispatchSnapshot: docUrl("securityAdjudication", "the-ac-authority-dispatch-snapshot"),
+  // #1123 PR-3 (#865): the AC evidence-tier doctrine (tier A-D, including tier C's
+  // human-witnessed-probe rule) — the operator-owned escalation comment points here so an
+  // operator knows exactly what record to post into the issue body to reclaim the lane.
+  securityAcEvidenceTiers: docUrl("security", "doctrine-lines"),
 } as const;

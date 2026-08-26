@@ -152,6 +152,30 @@ test("#461: every rendered finding carries its ARTIFACT index — the dispute ha
   assert.match(body.slice(advisoryIdx), /- \*\*\[1\] F-b\*\*/);
 });
 
+test("#865: an operator-owned finding renders an (owner: operator) suffix; a producer-owned (default) finding renders none", () => {
+  const mixed: EngineReviewArtifact = {
+    ...artifact,
+    findings: [
+      { id: "F-operator", body: "missing tier-C probe record", owner: "operator" },
+      { id: "F-producer", body: "a code-fixable defect" },
+    ],
+  };
+  const body = buildAuditComment(wal, mixed);
+  assert.match(body, /- \*\*\[0\] F-operator\*\* \(owner: operator\)\n> missing tier-C probe record/);
+  assert.match(body, /- \*\*\[1\] F-producer\*\*\n> a code-fixable defect/);
+  assert.doesNotMatch(body, /F-producer\*\* \(owner/);
+});
+
+test("#865: parseEngineReviewArtifact round-trips a persisted finding's owner field", () => {
+  const withOwner: EngineReviewArtifact = {
+    ...artifact,
+    findings: [{ id: "F-op", body: "operator-only evidence", owner: "operator" }],
+  };
+  const parsed = parseEngineReviewArtifact(JSON.stringify(withOwner));
+  assert.ok(parsed);
+  assert.equal(parsed.findings[0]!.owner, "operator");
+});
+
 test("#288 crash after post before receipt: restart discovers exact marker and records receipt without duplicate post", async () => {
   const existing: PRTopLevelComment = {
     id: "IC_existing",

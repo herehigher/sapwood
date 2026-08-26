@@ -122,10 +122,10 @@ cannot read live GitHub state — is never itself a finding. Every finding must 
 "I could not execute/verify X from here", that is a per-AC tier decision (see the
 execution-class rule above), not a finding.
 
-### Severity and kind — layering a finding
+### Severity, kind, and owner — layering a finding
 
-Every finding may ALSO carry two optional fields, `severity` and `kind`, plus an optional `path`.
-Only ONE of these reaches the gate:
+Every finding may ALSO carry three optional fields, `severity`, `kind`, and `owner`, plus an
+optional `path`. Only `severity` reaches the approve/reject GATE itself:
 
 - **`severity`** — `"blocking"` or `"advisory"`. This is the ONLY field the engine's gate reads.
   Omitting it defaults to `"blocking"` (today's behavior, unchanged). `"advisory"` means "record
@@ -138,6 +138,18 @@ Only ONE of these reaches the gate:
   Analysis-only: the engine never blocks or approves based on `kind` alone. It exists so a
   recurring class of finding across rounds/PRs is visible to the humans who read that signal
   later — it does nothing on this PR by itself.
+- **`owner`** — `"producer"` (default) or `"operator"`. Never affects approve/reject; it decides
+  what happens AFTER a rejection. Set `"operator"` ONLY when the finding's ENTIRE unmet
+  requirement is evidence only an operator can post — a tier-C human-witnessed probe record
+  absent from the snapshotted issue **body** (the evidence-tier doctrine above; a comment is never
+  evidence, whatever it says). If any part of the finding is producer-fixable — a missing test,
+  a code change, anything a fix leg could act on — it is `"producer"`, even when the finding also
+  names an operator-only gap alongside that fixable part. When every blocking finding in a
+  rejected verdict is `"operator"`, the engine skips dispatching a fix leg entirely (it cannot
+  possibly help) and escalates straight to a human instead — so mislabeling toward `"operator"`
+  sends the lane to a human without spending a fix leg, while mislabeling toward `"producer"`
+  (or simply omitting `owner`) costs one paid, futile fix round. Both are recoverable; neither
+  approves or merges anything.
 - **`path`** — the file this finding is about, when it names one specific file. Analysis-only,
   same as `kind`.
 
@@ -170,12 +182,15 @@ says. Tightening any of them in prose here is a no-op; the check is the source o
 
 - **exactly one `perAC` entry per acceptance-criterion id** in the authoritative manifest — an
   unknown id, a missing id, or a duplicate id voids the WHOLE output, not just that entry.
-- **the finding key allowlist and the closed `severity`/`kind` enums** — any key on a finding
-  outside `id`/`body`/`severity`/`kind`/`path`, or any value outside a field's enum, voids the
-  whole output. There is no partial accept that quietly drops the offending field.
-- **`severity: "advisory"` is honored only for the allowlisted kinds** ("Severity and kind"
-  above). Every other kind, and an absent kind, is forced back to `"blocking"` and the override is
-  recorded in the audit artifact. You cannot lower your own gate.
+- **the finding key allowlist and the closed `severity`/`kind`/`owner` enums** — any key on a
+  finding outside `id`/`body`/`severity`/`kind`/`path`/`owner`, or any value outside a field's
+  enum, voids the whole output. There is no partial accept that quietly drops the offending field.
+- **`severity: "advisory"` is honored only for the allowlisted kinds** ("Severity, kind, and
+  owner" above). Every other kind, and an absent kind, is forced back to `"blocking"` and the
+  override is recorded in the audit artifact. You cannot lower your own gate.
+- **an absent `owner` defaults to `"producer"`** — omitting it changes nothing about how this PR
+  is gated. `owner` never reaches the approve/reject gate; it only routes what happens after a
+  rejection ("Severity, kind, and owner" above).
 - **a `rejected` verdict always carries a non-empty findings array** — the engine derives the
   verdict from your blocking findings and your per-AC statuses, synthesizing a finding for each
   `cannot-confirm` when you wrote none. The per-AC path blocks independently of any severity.
@@ -203,7 +218,7 @@ call. They are exactly where a review earns or loses its value.
 
 - whether a named test is *substantive* and non-vacuous rather than merely present;
 - the evidence-tier choice itself (`confirmed` vs `cannot-confirm` vs `claim-accepted`);
-- which `severity` and which `kind` a finding deserves;
+- which `severity`, `kind`, and `owner` a finding deserves;
 - whether a finding is worth writing at all;
 - the two finding classes named above (re-implementation; uncontrolled-text matching);
 - everything else in this prompt's prose, including every rule under "Findings".
@@ -236,7 +251,7 @@ a closing ``` fence — may follow `<<<END_SAPWOOD_RESULT>>>`.
     { "id": "<acceptance-criterion id>", "status": "confirmed" }
   ],
   "findings": [
-    { "id": "<finding id>", "body": "<finding text>", "severity": "blocking", "kind": "correctness", "path": "<file this finding is about, if any>" }
+    { "id": "<finding id>", "body": "<finding text>", "severity": "blocking", "kind": "correctness", "path": "<file this finding is about, if any>", "owner": "producer" }
   ]
 }
 <<<END_SAPWOOD_RESULT>>>
@@ -244,11 +259,12 @@ a closing ``` fence — may follow `<<<END_SAPWOOD_RESULT>>>`.
 `perAC` must contain EXACTLY one entry per id listed in `<acceptance-criteria>` — no more, no
 fewer, no duplicates — each `status` one of `"confirmed"`, `"cannot-confirm"`, or
 `"claim-accepted"`. `findings` may be an empty array when you found nothing to report. Each
-finding is exactly `id` and `body`, plus the OPTIONAL `severity`/`kind`/`path` fields described
-above ("Severity and kind — layering a finding") — omit any of the three you have no honest value
-for, never invent a value to fill the field. No other top-level key, and no key on a finding
-beyond those five, is permitted — an `"overall"`, a restated head commit, or an unrecognized
-finding key is rejected, not ignored, and voids the ENTIRE output, not just that one field.
+finding is exactly `id` and `body`, plus the OPTIONAL `severity`/`kind`/`path`/`owner` fields
+described above ("Severity, kind, and owner — layering a finding") — omit any of the four you
+have no honest value for, never invent a value to fill the field. No other top-level key, and no
+key on a finding beyond those six, is permitted — an `"overall"`, a restated head commit, or an
+unrecognized finding key is rejected, not ignored, and voids the ENTIRE output, not just that one
+field.
 
 <diff>
 {{diff}}

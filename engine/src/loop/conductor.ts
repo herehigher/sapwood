@@ -33,7 +33,7 @@ import {
   countBlocking,
 } from "../review/convergence.js";
 import { buildCiInertEscalationComment, type EngineAgentDriveDeps } from "../review/drive.js";
-import { effectiveSeverity, type FindingKind, type FindingSeverity } from "../review/finding-axes.js";
+import { effectiveOwner, effectiveSeverity, type FindingKind, type FindingSeverity } from "../review/finding-axes.js";
 import { boundRecords, classicThreadFindingKey, engineAgentFindingKey } from "../review/finding-key.js";
 import type { CiPendingPin, DriveOutcome } from "../roles/merge-driver.js";
 import { NO_CI_PENDING_PIN, pinElapsedSec } from "../roles/merge-driver.js";
@@ -71,8 +71,10 @@ import {
   computeDisputeEscalation,
   computeFindingDisputeEscalation,
   computeFixResponseHarvest,
+  computeOperatorOwnedEscalation,
   type DisputeEscalation,
   type FixResponseWriteOutcome,
+  type OperatorOwnedEscalation,
 } from "./fix-response.js";
 import { syncLaneStateLabels } from "./lane-state-label.js";
 import { reviveEnvFailedPrLanes, sweepMidRunOrphanPrs } from "./reconcile.js";
@@ -680,15 +682,23 @@ async function gatherFixupFindingRecord(
         currentHead = wal.head;
         const artifact = wal.reviewArtifactJson ? parseEngineReviewArtifact(wal.reviewArtifactJson) : null;
         if (artifact) {
-          rawFindings = artifact.findings.map((f) => ({
-            key: engineAgentFindingKey({
-              id: f.id,
+          // #865 (design #1123 D4): an operator-owned finding is filtered OUT of the convergence
+          // set before bounding/recording it, using the SAME `effectiveOwner` definition
+          // `computeOperatorOwnedEscalation` reads — reuse, not a second derivation. Row 4's flat
+          // stall counts blocking findings regardless of path, so an unfiltered constant
+          // operator-owned term (one that, by construction, no fix leg can ever change) could
+          // stall a MIXED lane's producer-owned share even while it is genuinely converging.
+          rawFindings = artifact.findings
+            .filter((f) => effectiveOwner(f) === "producer")
+            .map((f) => ({
+              key: engineAgentFindingKey({
+                id: f.id,
+                ...(f.kind !== undefined ? { kind: f.kind } : {}),
+                ...(f.path !== undefined ? { path: f.path } : {}),
+              }).key,
+              severity: effectiveSeverity(f),
               ...(f.kind !== undefined ? { kind: f.kind } : {}),
-              ...(f.path !== undefined ? { path: f.path } : {}),
-            }).key,
-            severity: effectiveSeverity(f),
-            ...(f.kind !== undefined ? { kind: f.kind } : {}),
-          }));
+            }));
         }
       }
     } else {
@@ -5550,6 +5560,32 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
             driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "review-disputed-escalation-write-failed" });
             break;
           }
+          // #865 (design #1123 D4): a rejected verdict whose EVERY blocking finding is
+          // operator-owned (`effectiveOwner`, `review/finding-axes.ts`) cannot be advanced by any
+          // fix leg — the leg holds no channel to post the missing evidence, so dispatching one is
+          // pure cost with a predetermined outcome (needs-human, since a producer can only dispute
+          // it). Checked AFTER the two dispute short-circuits above (a recorded dispute on this
+          // exact runId still wins outright — see `computeFindingDisputeEscalation`'s own currency
+          // argument) and BEFORE #457's verdict-rerun breaker below (this is pure state, decided
+          // BEFORE any fix leg would have run, not a leg that already ran and produced nothing).
+          // Engine-agent path only, same `verdictRunId` discriminator `findingDispute` above uses.
+          const operatorOwned =
+            outcome.prescription === "findings" && outcome.verdictRunId !== undefined
+              ? computeOperatorOwnedEscalation(state, w.name, outcome.verdictRunId)
+              : null;
+          if (operatorOwned) {
+            const escalated = await escalateOperatorOwned(forge, state, cfg, w, pr, operatorOwned, iso);
+            if (escalated) {
+              driveFixBlockedLanes.add(w.name);
+              driven.push(escalated);
+              break;
+            }
+            // Same "leave the row driving, retry the WHOLE branch next tick" contract the dispute
+            // escalations above take on a label/comment write failure — never falls through to
+            // startFixLeg on a failure this function could not durably record.
+            driven.push({ kind: "queued", worker: w.name, issue: w.issue, pr, reason: "operator-owned-escalation-write-failed" });
+            break;
+          }
           // #457 (F36): verdict-rerun breaker — see priorFixLegForVerdict's own doc. A prior
           // `drive-fixup` for this exact engine-agent verdict means its one leg already ran and
           // pushed nothing; a rerun gets byte-identical inputs, so no further fix round is spent
@@ -7059,6 +7095,85 @@ async function escalateNonConvergent(
     },
   );
   return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason: `review-non-convergent:${signal}` };
+}
+
+/** #865 (design #1123 D4): the marker for `escalateOperatorOwned`'s comment, keyed on
+ *  (worker, pr, headOid) — the same live-read-before-repost shape `reviewDisputedCommentMarker`/
+ *  `reviewNonConvergentCommentMarker` already take, for the same ambiguous-write-outcome reason
+ *  (`commentOnEscalationCarrier`'s own doc). Keyed on `headOid`, not `runId`: the WAL's `head` IS
+ *  the reviewed object this escalation is about, and a later verdict against a NEW head is never
+ *  mistaken for the same, already-posted episode. */
+function operatorOwnedCommentMarker(worker: string, pr: number, headOid: string): string {
+  return `<!-- sapwood:operator-owned:${worker}:${pr}:${headOid} -->`;
+}
+
+/**
+ * #865 (design #1123 D4): the operator-owned escalation — a FIXABLE tick whose standing verdict
+ * is rejected ONLY on operator-owned findings (`computeOperatorOwnedEscalation` above) escalates
+ * straight to `needs-human` WITHOUT dispatching a fix leg, spending ZERO fix rounds — the same
+ * "zero paid fix legs" property `escalateReviewDisputed`/`escalateNonConvergent` already have for
+ * their own no-further-progress-possible cases (`w.fix_rounds` is carried through UNCHANGED on
+ * the terminal upsert; this branch never calls `startFixLeg`).
+ *
+ * Modeled directly on `escalateNonConvergent`'s own shape: the SAME `labelEscalationCarrier` /
+ * `commentOnEscalationCarrier` plumbing, the same forge-before-terminal-upsert discipline, and
+ * the same ATOMIC `state.upsertWorkerWithEvent` terminal write (label AND comment land BEFORE the
+ * `drive-needs-human` event, and that event lands in the SAME transaction as the terminal
+ * worker-row write — a crash between a bare `upsertWorker` and a separate `appendEvent` would
+ * otherwise leave the row `failed` with no durable escalation record). REUSES the existing
+ * `drive-needs-human` kind (D4: "No new event kind") rather than minting an `operator-owned-only`
+ * kind of its own — `escalation-reconcile.ts`'s `ESCALATION_SOURCES["drive-needs-human"]` already
+ * proves ownership via `labeled: 1` in the payload, so this escalation is visible to the
+ * needs-attention strip and the reclaim sweep with zero registry changes.
+ *
+ * A label or comment write failure returns `null` — the caller leaves the row `driving` and
+ * retries the WHOLE branch next tick (D4: "A label/comment failure leaves the row driving,
+ * returns a queued outcome, and must not fall through to `startFixLeg`"). Unlike
+ * `escalateReviewDisputed`/`escalateNonConvergent`, this does not maintain its own per-episode
+ * failure-dedup event: D4/D6 name no new event kind for this escalation, and a transient forge
+ * hiccup here is bounded by the SAME retry-next-tick posture every other write-failure branch in
+ * this `case "fixable"` block already takes (see, e.g., the fix-rounds-cap label/comment writes
+ * below) — a genuinely persistent failure is visible via the repeated `queued` outcome itself,
+ * not a dedicated companion kind.
+ */
+async function escalateOperatorOwned(
+  forge: IForge,
+  state: State,
+  cfg: SapwoodConfig,
+  w: WorkerRow,
+  pr: number,
+  escalation: OperatorOwnedEscalation,
+  iso: () => string,
+): Promise<DrivenOutcome | null> {
+  const carrier = escalationCarrier(pr);
+  try {
+    await labelEscalationCarrier(forge, cfg, carrier, w.issue, pr);
+  } catch {
+    return null;
+  }
+  const evidence = escalation.items.map((t) => `\`${t.ref}\` — ${capDigest(t.findingBody, REVIEW_DISPUTED_EXCERPT_MAX_CHARS)}`).join("; ");
+  const marker = operatorOwnedCommentMarker(w.name, pr, escalation.headOid);
+  const comment =
+    capDigest(
+      `sapwood: PR #${pr}'s review rejected it only on findings the reviewer classified as operator-owned — ` +
+        `nothing here is producer-actionable, so no fix leg was dispatched. Findings: ${evidence}\n\n` +
+        `To proceed, post the required record into issue #${w.issue}'s **body** (see ` +
+        `<${DOC_LINKS.securityAcEvidenceTiers}>), then remove \`${cfg.labels.needsHuman}\` ${carrierNoun(carrier)} to reclaim; ` +
+        `the reentry re-snapshots the body for the next review.`,
+      REVIEW_DISPUTED_COMMENT_MAX_CHARS,
+    ) + `\n\n${marker}`;
+  try {
+    await commentOnEscalationCarrier(forge, cfg, carrier, w.issue, pr, marker, comment);
+  } catch {
+    return null;
+  }
+  const reason = `operator-owned-only:${escalation.items.length}`;
+  state.upsertWorkerWithEvent(
+    { ...w, state: "failed", ended_at: iso(), gated_escalation_labeled: 1, gated_escalation_carrier: carrier },
+    "drive-needs-human",
+    { worker: w.name, issue: w.issue, pr, reason, labeled: 1, carrier },
+  );
+  return { kind: "needs-human", worker: w.name, issue: w.issue, pr, reason };
 }
 
 /** #450 (design #402 R3, §3c): folds this (worker, pr)'s `drive-fixup` history — BOUNDED to the

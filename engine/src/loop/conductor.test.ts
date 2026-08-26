@@ -5916,6 +5916,172 @@ test("tick DRIVE (#461): a dispute recorded against a SUPERSEDED verdict never e
   st.close();
 });
 
+// ── #865 (design #1123 D4): the operator-owned short-circuit — a rejected verdict whose EVERY
+// blocking finding is operator-owned skips the fix leg entirely and escalates straight to
+// needs-human, at zero fix-round cost, via the SAME `drive-needs-human` kind every other
+// engine-derived escalation in this file already uses. ─────────────────────────────────────────
+
+function seedOwnerVerdict(
+  st: State,
+  worker: string,
+  runId: string,
+  head: string,
+  findings: { id: string; body: string; severity?: "blocking" | "advisory"; kind?: string; owner?: "producer" | "operator" }[],
+): void {
+  st.recordEngineReviewWal(worker, { runId, head, base: "base-1", diffHash: "d", attemptStart: "t" });
+  st.recordEngineReviewWalArtifact(
+    worker,
+    runId,
+    "rejected",
+    JSON.stringify({
+      perAC: [],
+      findings,
+      sessionActualIdentities: [{ provider: "anthropic", model: "m" }],
+      sessionSpends: [{ kind: "known", usd: 0 }],
+      promptHash: "p",
+    }),
+  );
+}
+
+test("tick DRIVE (#865): an all-operator-owned rejected verdict escalates straight to needs-human — no fix leg dispatched, fix_rounds unchanged", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-b", 3, 66, { fix_rounds: 0 });
+  seedOwnerVerdict(st, "lane-b", "run-1", "head-1", [
+    { id: "F-0", body: "missing tier-C human-witnessed probe record", owner: "operator" },
+  ]);
+  const gate = new FakeMergeGate();
+  gate.outcomes[66] = engineAgentFixable(66, "run-1");
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.deepEqual(sup.resumeCalls, [], "no fix leg dispatched — no paid leg for a verdict no leg could ever advance");
+  const row = st.getWorker("lane-b")!;
+  assert.equal(row.state, "failed");
+  assert.equal(row.fix_rounds, 0, "zero fix rounds spent");
+  assert.deepEqual(forge.prLabelsAdded, [[66, "needs-human"]], "PR-born, same carrier every engine-agent escalation in this file uses");
+  assert.equal(r.driven[0]!.kind, "needs-human");
+  assert.equal((r.driven[0] as { reason: string }).reason, "operator-owned-only:1");
+  const comment = forge.prComments[0]![1];
+  assert.match(comment, /operator-owned/);
+  assert.match(comment, /run-1#0/);
+  assert.match(comment, /missing tier-C human-witnessed probe record/);
+  assert.match(comment, /doctrine-lines/, "points at the evidence-tier doctrine anchor");
+  const events = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-needs-human"]);
+  assert.equal(events.length, 1, "reuses the existing drive-needs-human kind — no new event kind minted");
+  assert.deepEqual(events[0]!.payload, {
+    worker: "lane-b",
+    issue: 3,
+    pr: 66,
+    reason: "operator-owned-only:1",
+    labeled: 1,
+    carrier: "pr",
+  });
+  assert.equal(st.getEngineReviewWal("lane-b")!.decisiveOutcome, "rejected", "no auto-approval, no verdict mutation");
+  assert.deepEqual(forge.merged, []);
+  st.close();
+});
+
+test("tick DRIVE (#865): a label-write failure leaves the row driving — never falls through to startFixLeg", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-b", 3, 66, { fix_rounds: 0 });
+  seedOwnerVerdict(st, "lane-b", "run-1", "head-1", [{ id: "F-0", body: "operator-only gap", owner: "operator" }]);
+  forge.throwOnAddPRLabel = true;
+  const gate = new FakeMergeGate();
+  gate.outcomes[66] = engineAgentFixable(66, "run-1");
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.deepEqual(sup.resumeCalls, [], "no fix leg dispatched despite the label failure");
+  const row = st.getWorker("lane-b")!;
+  assert.equal(row.state, "driving", "no terminal transition without the label landing");
+  assert.equal(r.driven[0]?.kind, "queued");
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-needs-human"]), [], "no event without a successful label write");
+  st.close();
+});
+
+test("tick DRIVE (#865): an all-producer rejected verdict (owner absent, today's default) dispatches the fix leg exactly as before", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-b", 3, 66, { fix_rounds: 0 });
+  seedOwnerVerdict(st, "lane-b", "run-1", "head-1", [{ id: "F-0", body: "a code-fixable defect" }]);
+  const gate = new FakeMergeGate();
+  gate.outcomes[66] = engineAgentFixable(66, "run-1");
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(r.driven[0]?.kind, "fixup");
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-needs-human"]), []);
+  st.close();
+});
+
+test("tick DRIVE (#865): a recorded finding dispute for THIS runId wins over the operator-owned branch — dispute precedence preserved", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-b", 3, 66, { fix_rounds: 1 });
+  seedOwnerVerdict(st, "lane-b", "run-1", "head-2", [{ id: "F-0", body: "THE REVIEWER FINDING BODY", owner: "operator" }]);
+  st.appendEvent("fix-response-queued", {
+    worker: "lane-b",
+    issue: 3,
+    pr: 66,
+    batchKey: "lane-b#66#1",
+    fixRounds: 1,
+    count: 0,
+    headOid: "head-2",
+    threadless: true,
+    newHead: null,
+    writes: [],
+    findingWrites: [{ runId: "run-1", findingIndex: 0, resolution: "disputed", reply: "THE PRODUCER REPLY" }],
+  });
+  const gate = new FakeMergeGate();
+  gate.outcomes[66] = engineAgentFixable(66, "run-1");
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  assert.equal(r.driven[0]!.kind, "needs-human");
+  assert.match(
+    (r.driven[0] as { reason: string }).reason,
+    /^review-finding-disputed:/,
+    "the dispute short-circuit wins, not operator-owned-only",
+  );
+  assert.deepEqual(
+    st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-needs-human"]),
+    [],
+    "review-disputed carries this escalation, not the reused drive-needs-human kind the operator branch uses",
+  );
+  assert.equal(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-disputed"]).length, 1);
+  st.close();
+});
+
 test("tick DRIVE (#451, AC7): a review-disputed escalation is reclaimable through the existing #147 GATED RECLAIM path once a human clears the label — no new re-entry channel", async () => {
   const st = new State(":memory:");
   const forge = new FakeForge();
@@ -7182,6 +7348,82 @@ test("tick DRIVE (#450, advisories excluded, engine-agent path): a NEW advisory 
   });
   assert.equal(r.driven[0]?.kind, "fixup", "the advisory finding must not fake marginal-complexity");
   assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]), []);
+  st.close();
+});
+
+test("tick DRIVE (#865, gatherFixupFindingRecord owner filter): a constant operator-owned term surviving unchanged across rounds does not fake review-non-convergent:recurrence while the PRODUCER finding set is genuinely disjoint (improving)", async () => {
+  const st = new State(":memory:");
+  const forge = new FakeForge();
+  const sup = new FakeSupervisor();
+  seedDriving(st, "lane-a", 2, 55, { fix_rounds: 1 });
+  const keyOp = engineAgentFindingKey({ id: "op1", kind: "security", path: "src/op.ts" }).key;
+  const keyA1 = engineAgentFindingKey({ id: "f1", kind: "correctness", path: "src/a.ts" }).key;
+  // Round 1's recorded set deliberately carries the operator key too — a worst-case prior round
+  // (pre-existing state, or a stale record) that this fix does NOT rely on for correctness: what
+  // matters is that THIS round's own gatherFixupFindingRecord call filters its OWN raw findings
+  // before ever reaching the classifier, so a shared operator key in `prev` alone can never, by
+  // itself, produce a non-empty `curr ∩ prev` — only a producer key surviving in BOTH sets could.
+  st.appendEvent("drive-fixup", {
+    worker: "lane-a",
+    issue: 2,
+    pr: 55,
+    fixRounds: 1,
+    reason: "r1",
+    verdictRunId: "run-1",
+    findings: [
+      { key: keyOp, severity: "blocking", kind: "security" },
+      { key: keyA1, severity: "blocking", kind: "correctness" },
+    ],
+    fixDiffPaths: [],
+    head: "H1",
+  });
+  // Round 2 (live): the operator finding survives with the IDENTICAL id/kind/path (same key,
+  // "constant... across two rounds") — but round 1's OLD producer finding (f1/src/a.ts) is GONE
+  // and a brand-new, unrelated producer finding (f2/src/c.ts) has appeared: the producer's own
+  // finding set is DISJOINT round-over-round (genuinely improving, design #402 §3b row 2), never
+  // recurring. `fixDiffPaths` (H1...H2) touches BOTH src/op.ts (the operator's own path) and
+  // src/c.ts — if the operator finding were not filtered out of `curr`, its shared key with
+  // round 1's `prev` plus its touched path would trip row 3 (recurrence) outright.
+  st.recordEngineReviewWal("lane-a", { runId: "run-9", head: "H2", base: "H1", diffHash: "d2", attemptStart: "2026-01-01T00:00:00.000Z" });
+  const artifact: EngineReviewArtifact = {
+    perAC: [],
+    findings: [
+      { id: "op1", body: "still an operator-only gap", owner: "operator", kind: "security", path: "src/op.ts" },
+      { id: "f2", body: "a NEW, unrelated producer defect", kind: "correctness", path: "src/c.ts" },
+    ],
+    sessionActualIdentities: [{ provider: "anthropic", model: "sonnet" }],
+    sessionSpends: [{ kind: "known", usd: 0.05 }],
+    promptHash: "hash",
+  };
+  st.recordEngineReviewWalArtifact("lane-a", "run-9", "rejected", JSON.stringify(artifact));
+  forge.compareResults["H1...H2"] = { files: [{ filename: "src/op.ts" }, { filename: "src/c.ts" }], complete: true };
+  const gate = new FakeMergeGate();
+  gate.outcomes[55] = {
+    kind: "fixable",
+    pr: 55,
+    reason: "gate:FIXABLE:HANDLE_THREADS:unresolvedThreads=0:ciRed=false",
+    verdictRunId: "run-9",
+  };
+  const r = await tick({
+    now: realClock,
+    forge,
+    state: st,
+    supervisor: sup,
+    cfg: mkCfg(),
+    mergeGate: gate,
+    fixLegResume: { renderFixPrompt: () => "p", mintProxy: async () => ({}) as never },
+  });
+  // Mixed verdict (one producer-owned blocking finding remains) -> the #865 operator-owned
+  // short-circuit does NOT fire (it requires ALL blocking findings to be operator-owned) -> the
+  // ordinary FIXUP path dispatches, and it must not read as a stall.
+  assert.equal(r.driven[0]?.kind, "fixup", "disjoint producer findings + a filtered-out operator term must never read as recurrence");
+  assert.deepEqual(st.eventsSince("1970-01-01T00:00:00.000Z", ["review-non-convergent"]), []);
+  const round2 = st.eventsSince("1970-01-01T00:00:00.000Z", ["drive-fixup"])[1]!.payload as { findings: { key: string }[] };
+  assert.deepEqual(
+    round2.findings.map((f) => f.key),
+    [engineAgentFindingKey({ id: "f2", kind: "correctness", path: "src/c.ts" }).key],
+    "the operator-owned finding never enters the recorded convergence snapshot at all",
+  );
   st.close();
 });
 

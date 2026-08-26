@@ -37,6 +37,12 @@ All notable changes to sapwood are documented here. Format:
   before this change, delete its `## Adjudication doctrine` section (principles 1–4) and its
   "Authoritative signals over inferred text" bullet — both now ship in the framework core and
   would otherwise be redundant.
+- The engine-agent review session's structured findings gain a per-finding `owner` tag
+  (`producer` default, or `operator` — the finding's entire unmet requirement is evidence only
+  an operator can post, e.g. a tier-C human-witnessed probe record). A rejected verdict whose
+  blocking findings are ALL operator-owned now escalates straight to `needs-human` without
+  dispatching a fix leg; a mixed verdict still dispatches for its producer-owned share, with the
+  operator-owned findings excluded from convergence tracking.
 
 ### Added
 - Bare `sapwood` npm package, including the packaged dashboard; post-publish dashboard canary

@@ -47,6 +47,7 @@ import type { SapwoodConfig } from "../config/config.js";
 import type { IForge, ReviewThreadsPage } from "../forge/forge.js";
 import { TOOL_PR_AUDIT_COMMENTS, TOOL_PR_REVIEW_THREADS } from "../proxy/tools.js";
 import { parseEngineReviewArtifact } from "../review/audit.js";
+import { effectiveOwner, effectiveSeverity } from "../review/finding-axes.js";
 import { kindsTagged } from "../state/event-kinds/index.js";
 import type { FixResponseSettleOutcome, ForgeProxyJournalRow, PendingThreadWrite, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
@@ -509,6 +510,18 @@ export interface DisputeEscalation {
   items: DisputedEvidence[];
 }
 
+/** #865 (design #1123 D4): the operator-owned short-circuit's evidence — every blocking finding
+ *  in the standing verdict, once `computeOperatorOwnedEscalation` (below) has already proven all
+ *  of them are `effectiveOwner === "operator"`. `ref` follows the SAME `<runId>#<findingIndex>`
+ *  handle `DisputedEvidence.ref` uses for an engine-agent finding — the audit comment's own `[N]`
+ *  index — so `conductor.ts::escalateOperatorOwned`'s comment can point back at the exact
+ *  artifact entries the way `escalateReviewDisputed`'s does. No `reply` field: unlike a dispute,
+ *  no producer ever responded to these findings — there was no fix leg for them to respond in. */
+export interface OperatorOwnedEscalation {
+  headOid: string;
+  items: { ref: string; findingBody: string }[];
+}
+
 /** #451 (design #402 §4/D4): true iff EVERY unresolved review thread on the PR's CURRENT head has
  *  a durably-recorded `disputed` resolution for that SAME head — the one condition under which a
  *  FIXABLE tick escalates directly to `needs-human` instead of dispatching a fix leg, at zero paid
@@ -663,6 +676,41 @@ export function computeFindingDisputeEscalation(
       reply: r.reply,
     }));
   return items.length > 0 ? { headOid: wal.head, source: "finding", items } : null;
+}
+
+/** #865 (design #1123 D4): the evidence for the operator-owned short-circuit — a rejected verdict
+ *  whose every EFFECTIVE-BLOCKING finding is `effectiveOwner === "operator"` (`finding-axes.ts`)
+ *  cannot be advanced by any fix leg, so `conductor.ts`'s `case "fixable"` skips dispatching one
+ *  entirely and escalates straight to needs-human. Reads the runId-matched WAL artifact exactly
+ *  as `computeFindingDisputeEscalation` above does — same fail-closed posture, same currency
+ *  argument (that function's own doc): a stale `verdictRunId` never speaks for the current
+ *  verdict.
+ *
+ *  Advisory findings do not participate (D4: "advisory findings do not participate") — only
+ *  `effectiveSeverity(f) === "blocking"` findings are consulted, matching `deriveApprovalResult`'s
+ *  own definition of what a rejected verdict is actually gating on. An APPROVED verdict (zero
+ *  blocking findings) has nothing to escalate and returns `null`, same as a mixed or all-producer
+ *  one — the caller (`conductor.ts`) only ever calls this on a FIXABLE outcome, where at least one
+ *  blocking finding is guaranteed to exist, but this function stays correct even off that path.
+ *
+ *  FAIL-CLOSED, same shape as `computeFindingDisputeEscalation`: no WAL row, a WAL that has moved
+ *  past `verdictRunId`, or an unparseable artifact all yield `null` — the caller falls through to
+ *  the ordinary FIXUP/ESCALATE decision, never an escalation this function cannot show its
+ *  evidence for. */
+export function computeOperatorOwnedEscalation(
+  state: Pick<State, "getEngineReviewWal">,
+  worker: string,
+  verdictRunId: string,
+): OperatorOwnedEscalation | null {
+  const wal = state.getEngineReviewWal(worker);
+  if (!wal || wal.runId !== verdictRunId || !wal.reviewArtifactJson) return null;
+  const artifact = parseEngineReviewArtifact(wal.reviewArtifactJson);
+  if (!artifact) return null;
+  const indexed = artifact.findings.map((finding, index) => ({ finding, index }));
+  const blocking = indexed.filter((e) => effectiveSeverity(e.finding) === "blocking");
+  if (blocking.length === 0 || !blocking.every((e) => effectiveOwner(e.finding) === "operator")) return null;
+  const items = blocking.map((e) => ({ ref: `${verdictRunId}#${e.index}`, findingBody: e.finding.body }));
+  return { headOid: wal.head, items };
 }
 
 // ── Durable-queue execution (mirrors conductor.ts's attemptRollback shape, #31) ─────────────

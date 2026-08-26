@@ -662,12 +662,27 @@ test("#448 validateAgentReviewOutput: kind outside its enum voids the WHOLE outp
   assert.equal(out, null);
 });
 
-test("#448 validateAgentReviewOutput: an ABSENT severity/kind does NOT void — only an out-of-enum VALUE does", () => {
+// #865 (design #1123 D4): owner is a closed enum, exactly like severity/kind — an invalid value
+// voids the WHOLE output; an absent value is fine (defaulted downstream by `effectiveOwner`).
+
+test("#865 validateAgentReviewOutput: owner outside its enum voids the WHOLE output", () => {
+  const out = validateAgentReviewOutput({ perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "x", owner: "reviewer" }] }, MANIFEST);
+  assert.equal(out, null);
+});
+
+test("#865 validateAgentReviewOutput: a valid owner value parses and round-trips", () => {
+  const out = validateAgentReviewOutput({ perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "x", owner: "operator" }] }, MANIFEST);
+  assert.ok(out);
+  assert.equal(out.findings[0]!.owner, "operator");
+});
+
+test("#448/#865 validateAgentReviewOutput: an ABSENT severity/kind/owner does NOT void — only an out-of-enum VALUE does", () => {
   const out = validateAgentReviewOutput({ perAC: ALL_CONFIRMED, findings: [{ id: "f1", body: "x" }] }, MANIFEST);
   assert.ok(out);
   assert.equal(out.findings.length, 1);
   assert.equal(out.findings[0]!.severity, undefined);
   assert.equal(out.findings[0]!.kind, undefined);
+  assert.equal(out.findings[0]!.owner, undefined);
 });
 
 // item 3: fail-closed default is byte-for-byte today's outcome (pinned expectations, unmodified).
