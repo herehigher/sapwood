@@ -8621,7 +8621,7 @@ test("checkDeployKeyPreflight (#671): seeds the SAME memoized probe a later disp
   }
 });
 
-test("listRunningCredentialTiers (#1105 round 3, P2): reads every *.running.json marker's own credential_tier/session_id/pid, ignores terminal sentinels, REPORTS (never excludes) an unparseable marker", async () => {
+test("listRunningCredentialTiers (#1105): reads every *.running.json marker's own credential_tier/session_id/pid, ignores terminal sentinels, REPORTS (never excludes) an unparseable marker", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   let s: WorkerSupervisor | undefined;
   try {
@@ -8638,13 +8638,13 @@ test("listRunningCredentialTiers (#1105 round 3, P2): reads every *.running.json
       join(dir, "lane-a.running.json"),
       JSON.stringify({ name: "lane-a", credential_tier: "L1", session_id: "sess-a", wrapper_pid: 4242 }),
     );
-    // A live-shaped legacy marker (pre-#1105, no field at all).
+    // A live-shaped marker that never recorded a tier at all.
     writeFileSync(join(dir, "lane-b.running.json"), JSON.stringify({ name: "lane-b" }));
     // A terminal sentinel must never be reported, even one that happens to carry the field.
     writeFileSync(join(dir, "lane-c.done.json"), JSON.stringify({ name: "lane-c", credential_tier: "L0" }));
-    // #1105 round 3 (P2): a corrupt marker is REPORTED with tier/session_id/pid all undefined —
-    // it then mismatches the caller's tier check exactly like a legacy marker — never silently
-    // excluded from the scan the way it was before this fix.
+    // A corrupt marker is REPORTED with tier/session_id/pid all undefined — it then mismatches
+    // the caller's tier check exactly like a marker with no tier recorded, never silently
+    // excluded from the scan.
     writeFileSync(join(dir, "lane-d.running.json"), "not json");
     const result = s.listRunningCredentialTiers();
     assert.deepEqual(
@@ -8662,7 +8662,7 @@ test("listRunningCredentialTiers (#1105 round 3, P2): reads every *.running.json
   }
 });
 
-test("listRunningCredentialTiers (#1105 round 3, P2): an unreadable/missing state dir THROWS rather than returning [] — a scan that can't see what's running must never read as 'nothing is running'", () => {
+test("listRunningCredentialTiers (#1105): an unreadable/missing state dir THROWS rather than returning [] — a scan that can't see what's running must never read as 'nothing is running'", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-worker-"));
   const missingStateDir = join(dir, "does-not-exist");
   let s: WorkerSupervisor | undefined;

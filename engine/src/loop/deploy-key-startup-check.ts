@@ -1,11 +1,9 @@
-// deploy-key-startup-check.ts (#671, #1105): startup enforcement for the effective
-// worker-credential tier — L0 disclosure only (a legal, zero-effect mode), L1 a hard FAIL-CLOSED
-// gate. Batch-9 (2026-08-05) ran an entire dogfood batch at L0 because the deploy key was absent
-// in the run environment, and the operator only found out by debugging a single leg's degrade
-// deep inside worker.ts's own lazy, per-dispatch resolution — nothing at startup said "this whole
-// batch is L0, and here's why." An operator who explicitly configures L1 must never get a silent
-// downgrade at all — no reconciled local anchor is a startup refusal, before any dispatch, naming
-// `sapwood init` as the fix.
+// deploy-key-startup-check.ts (#671, #1105; see docs/security/credential-tiers.md): startup
+// enforcement for the effective worker-credential tier — L0 disclosure only (a legal,
+// zero-effect mode), L1 a hard FAIL-CLOSED gate. Startup, not a per-dispatch preflight buried
+// inside worker.ts, is where the effective tier must be disclosed/refused: an operator who
+// explicitly configures L1 must never get a silent downgrade at all — no reconciled local anchor
+// is a startup refusal, before any dispatch, naming `sapwood init` as the fix.
 //
 // Same placement/never-blocks-for-L0 stance as detectManagedPermissionMode/detectRapidRestart/
 // detectConsecutiveStalls (cli.ts: run once per engine start, strictly after run-started).
@@ -17,7 +15,7 @@
 // probeDeployKeySsh, via WorkerSupervisor's own memoized preflight (checkDeployKeyPreflight),
 // never a second implementation. Calling it here SEEDS that same supervisor instance's
 // `deployKeyProbe` memo, so the first real dispatch()/resume() later on this run re-awaits the
-// SAME settled promise instead of re-shelling to `ssh` — startup + first dispatch cost at most
+// SAME settled promise rather than re-shelling to `ssh` — startup + first dispatch cost at most
 // one SSH probe total.
 import { readFileSync } from "node:fs";
 import type { SapwoodConfig } from "../config/config.js";
@@ -40,11 +38,10 @@ export interface DeployKeyStartupResult {
  *  without constructing a real supervisor. */
 export interface DeployKeyPreflightSupervisor {
   checkDeployKeyPreflight(anchor: { keyPath: string; keyId: number }): Promise<LlmPingResult | undefined>;
-  /** #1105 (round 3, P2/P3): every still-running lane's own `credential_tier` provenance, plus
-   *  its `session_id`/`pid` for the refusal message below — see
-   *  WorkerSupervisor.listRunningCredentialTiers' own doc for what it scans and its fail-closed
-   *  contract (throws on a directory-listing failure; reports, rather than excludes, an
-   *  unparseable marker). */
+  /** Every still-running lane's own `credential_tier` provenance, plus its `session_id`/`pid`
+   *  for the refusal message below — see WorkerSupervisor.listRunningCredentialTiers' own doc
+   *  for what it scans and its fail-closed contract (throws on a directory-listing failure;
+   *  reports, rather than excludes, an unparseable marker). */
   listRunningCredentialTiers(): Array<{ name: string; tier: unknown; session_id: unknown; pid: unknown }>;
 }
 
@@ -52,11 +49,11 @@ export interface DeployKeyPreflightSupervisor {
  *  this module's own doc for why), strictly BEFORE the driver loop (runDriver/runRounds) can
  *  dispatch anything. `L0` (default) is disclosure only — logs the tier and returns, never
  *  throws. `L1` fails CLOSED: no local anchor, an unreadable key file, a still-running lane whose
- *  own persisted tier doesn't match, a remote id that is no longer listed or has been demoted to
- *  read-only, or a failed SSH preflight each log a guidance-carrying message AND throw — the
- *  caller (runTickEngine/runRoundsEngine's own
- *  try/catch) already turns an uncaught startup error into a non-zero exit, so this is the ONE
- *  place `worker.credentialTier: L1` becomes an actual startup gate rather than a WARN. */
+ *  own persisted tier doesn't match, a remote id that has been removed or demoted to read-only,
+ *  or a failed SSH preflight each log a guidance-carrying message AND throw — the caller
+ *  (runTickEngine/runRoundsEngine's own try/catch) already turns an uncaught startup error into
+ *  a non-zero exit, so this is the ONE place `worker.credentialTier: L1` becomes an actual
+ *  startup gate rather than a WARN. */
 export async function detectDeployKeyStartupTier(
   supervisor: DeployKeyPreflightSupervisor,
   cfg: {
@@ -113,18 +110,18 @@ export async function detectDeployKeyStartupTier(
     throw new Error(message);
   }
 
-  // #1105: a lane still on disk from BEFORE this restart may have been spawned under a
-  // different tier (an operator flipped worker.credentialTier between the crash and now).
-  // resume()'s own crash-matrix guard catches this for the ONE adoption path it owns, but a
-  // detached lane can also be picked up by ordinary probe()/reconcile classification without
-  // ever going through resume() at all — so this is checked HERE too, once, at the one place
-  // every restart passes through before any dispatch, rather than threaded into every adoption
-  // path individually. A marker with no `credential_tier` recorded at all (pre-#1105) counts as
-  // a mismatch — it was never confirmed L1, so it must never be silently trusted as one.
+  // A lane still on disk from BEFORE this restart may have been spawned under a different tier
+  // (an operator flipped worker.credentialTier between the crash and now). resume()'s own
+  // crash-matrix guard catches this for the ONE adoption path it owns, but a detached lane can
+  // also be picked up by ordinary probe()/reconcile classification without ever going through
+  // resume() at all — so this is checked HERE too, once, at the one place every restart passes
+  // through before any dispatch, rather than threaded into every adoption path individually. A
+  // marker that never recorded a tier at all counts as a mismatch — it was never confirmed L1,
+  // so it must never be silently trusted as one.
   //
-  // #1105 (round 3, P2): a scan that can't even list the running-lane state directory is refused
-  // the same way as a mismatch — "couldn't see what's running" must never read as "nothing is
-  // running" and let startup proceed.
+  // A scan that can't even list the running-lane state directory is refused the same way as a
+  // mismatch — "couldn't see what's running" must never read as "nothing is running" and let
+  // startup proceed.
   let runningMarkers: Array<{ name: string; tier: unknown; session_id: unknown; pid: unknown }>;
   try {
     runningMarkers = supervisor.listRunningCredentialTiers();
@@ -140,13 +137,16 @@ export async function detectDeployKeyStartupTier(
   }
   const mismatched = runningMarkers.filter((m) => m.tier !== "L1");
   if (mismatched.length > 0) {
-    // #1105 (round 3, P2): no process sweep and no liveness probe here — a recovery mechanism
-    // must not become a new problem source (the operator can wait or kill directly). The message
-    // gives the operator everything on disk per lane (session id, pid, recorded tier) and exactly
-    // two remedies that don't require THIS engine to touch the other process. `sapwood estop` is
-    // deliberately NOT one of the remedies: it only writes a sentinel for a RUNNING engine to
-    // notice, and the engine that owned these lanes is by definition not around to notice it —
-    // this refusal fires on THIS restart, after that prior engine is already gone.
+    // No process sweep and no liveness probe here — a recovery mechanism must not become a new
+    // problem source (the operator can wait or kill directly). Ceiling: a dead process's stale
+    // marker refuses until the operator deletes it. Upgrade trigger: if stale-marker refusals
+    // become a recurring operator chore, add a liveness check on the recorded pid — that and
+    // nothing more. The message gives the operator everything on disk per lane (session id, pid,
+    // recorded tier) and exactly two remedies that don't require THIS engine to touch the other
+    // process. `sapwood estop` is deliberately NOT one of the remedies: it only writes a
+    // sentinel for a RUNNING engine to notice, and the engine that owned these lanes is by
+    // definition not around to notice it — this refusal fires on THIS restart, after that prior
+    // engine is already gone.
     const rows = mismatched
       .map((m) => {
         const session = typeof m.session_id === "string" && m.session_id ? m.session_id : "unknown";
@@ -187,11 +187,11 @@ export async function detectDeployKeyStartupTier(
     record({ tier: "L1", arm: "stale" });
     throw new Error(message);
   }
-  // #1105: require an EXPLICIT `readOnly: false` — a missing/non-boolean field (an older `gh`
-  // that doesn't emit it, or an unexpected response shape) must never be READ as "confirmed
-  // write access". `parseDeployKeys` only ever sets `readOnly` from a genuine JSON boolean, so
-  // "not === false" here catches both the confirmed-true case and every "we don't actually
-  // know" case in one branch.
+  // Require an EXPLICIT `readOnly: false` — a missing/non-boolean field (an older `gh` that
+  // doesn't emit it, or an unexpected response shape) must never be READ as "confirmed write
+  // access". `parseDeployKeys` only ever sets `readOnly` from a genuine JSON boolean, so "not
+  // === false" here catches both the confirmed-true case and every "we don't actually know" case
+  // in one branch.
   if (remoteEntry === undefined || remoteEntry.readOnly !== false) {
     const reason =
       remoteEntry === undefined

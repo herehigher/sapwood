@@ -967,12 +967,9 @@ test("init (#492): the guard-hook action line reports the hook as built and wire
   }
 });
 
-// ── #1105 (was #606 gate② round 1's OWNER RULING): L1 scoped-worker-identity deploy-key
-//    provisioning, anchored on a LOCAL (key file, id sidecar) pair under .sapwood/keys/ — never
-//    a value in the audited sapwood.config.yaml. `sapwood init` never edits sapwood.config.yaml
-//    after its initial scaffold write (AC3); the JSON/YAML config-surgery this section used to
-//    test (writeDeployKeyConfigIntoYaml / clearDeployKeyConfigFrom{Yaml,Json}) is retired along
-//    with the config fields it edited. ──
+// ── #1105: L1 scoped-worker-identity deploy-key provisioning, anchored on a LOCAL (key file, id
+//    sidecar) pair under .sapwood/keys/ — never a value in the audited sapwood.config.yaml.
+//    `sapwood init` never edits sapwood.config.yaml after its initial scaffold write (AC3). ──
 
 test("parseDeployKeys: parses the --json id,title array; malformed/non-array JSON degrades to empty, never throws", () => {
   assert.deepEqual(

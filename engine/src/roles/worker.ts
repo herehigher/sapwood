@@ -1963,9 +1963,9 @@ export interface WorkerDeps {
    *  WorkerSupervisor life (see resolveDeployKeyPath), so this is called at most once even across
    *  many dispatch()/resume() calls. */
   probeDeployKeySsh?: (keyPath: string) => Promise<LlmPingResult>;
-  /** #1105: this machine's local (key path, key id) anchor for L1 — production discovers it from
+  /** This machine's local (key path, key id) anchor for L1 — production discovers it from
    *  `.sapwood/keys/` (paths.ts's findDeployKeyAnchor, called lazily inside resolveDeployKeyPath)
-   *  and leaves this unset; tests inject a fixture pair here instead of writing real files under
+   *  and leaves this unset; tests inject a fixture pair here rather than writing real files under
    *  a real runtime root. worker.ts's own runtime never reads the id half — only the key path
    *  matters for env-building and the SSH preflight. */
   deployKeyAnchor?: { keyPath: string; keyId: number };
@@ -2164,9 +2164,9 @@ export function workerCredentialFreeEnv(ghConfigDir: string): NodeJS.ProcessEnv 
  *  workerDeployKeyEnv's own base (which would fight workerCredentialFreeEnv's GH_CONFIG_DIR/
  *  GIT_CONFIG_GLOBAL/SYSTEM choices instead of composing with them — the two base envs strip
  *  the SAME credential family, but a fix leg's base must be workerCredentialFreeEnv's, the
- *  stricter of the two, per that finding). `keyPath` is shell-quoted (P2-9,
- *  shellSingleQuote) — GIT_SSH_COMMAND is shell-PARSED by git, so an unquoted path containing a
- *  space or shell metacharacter would break or mutate the command. */
+ *  stricter of the two, per that finding). `keyPath` is shell-quoted (shellSingleQuote) —
+ *  GIT_SSH_COMMAND is shell-PARSED by git, so an unquoted path containing a space or shell
+ *  metacharacter would break or mutate the command. */
 export function deployKeyTransportOverlay(keyPath: string, owner: string, repo: string): NodeJS.ProcessEnv {
   const sshBase = `git@github.com:${owner}/${repo}.git`;
   const httpsWithGit = `https://github.com/${owner}/${repo}.git`;
@@ -2704,7 +2704,7 @@ export class WorkerSupervisor implements Supervisor {
   // init-line poll (100ms/30s default) — see capturePreSpawnManifestForLane's own doc.
   private readonly preSpawnCaptureTimeoutMs: number;
   private readonly preSpawnCapturePollMs: number;
-  // #606, #1105: memoized SSH-auth preflight for this machine's discovered deploy-key anchor —
+  // #606: memoized SSH-auth preflight for this machine's discovered deploy-key anchor —
   // probed at most once per supervisor life (mirrors detectManagedPermissionMode/
   // detectRapidRestart's "once per engine start" stance for a degrade WARN), so every
   // dispatch()/resume() after the first awaits the SAME probe rather than re-shelling to `ssh`
@@ -2752,26 +2752,24 @@ export class WorkerSupervisor implements Supervisor {
     (this.deps.log ?? console.error)(message);
   }
 
-  /** #1105: resolves the L1 scoped-worker-identity deploy key's local path for THIS
-   *  dispatch/resume/fix leg — called UNCONDITIONALLY
-   *  now (both by an ordinary leg building its own workerDeployKeyEnv, and by a `credentialFree`
-   *  leg deciding whether to compose deployKeyTransportOverlay onto its stricter base), since a
-   *  fix leg needs to know this too.
+  /** #1105 (see docs/security/credential-tiers.md): resolves the L1 scoped-worker-identity
+   *  deploy key's local path for THIS dispatch/resume/fix leg — called UNCONDITIONALLY (both by
+   *  an ordinary leg building its own workerDeployKeyEnv, and by a `credentialFree` leg deciding
+   *  whether to compose deployKeyTransportOverlay onto its stricter base), since a fix leg needs
+   *  to know this too.
    *
    *  `worker.credentialTier: L0` (the default) returns `undefined` immediately — L0 never reads
-   *  or probes the key at all, the same "zero behavior change" contract this repo's config docs
-   *  promise. `L1` NEVER falls back to `undefined` (the old silent-downgrade-to-full-credentialed
-   *  shape, retired): no local anchor, an anchor that changed identity since this instance last
-   *  bound to one, an unreadable key file, or a failed SSH preflight, THROWS instead — the
-   *  startup gate (deploy-key-startup-check.ts) already refuses `sapwood run` before any dispatch
-   *  when L1 has no working anchor, so reaching any of these failures here means the key broke
-   *  (or moved) mid-run, or a caller constructed a WorkerSupervisor directly, bypassing that
-   *  gate; either way, a leg that claims L1 must never silently run at the wider tier, or under a
-   *  different key than the one this run's startup gate validated, instead. The anchor is
-   *  re-resolved from disk on EVERY call (never cached itself — only its probe result is), so a
-   *  leg always sees the current filesystem state; the SSH preflight itself still runs at most
-   *  once per (supervisor life, anchor identity) pair — `this.deployKeyProbe`, shared with
-   *  checkDeployKeyPreflight. */
+   *  or probes the key at all. `L1` NEVER falls back to `undefined`: no local anchor, an anchor
+   *  that changed identity since this instance last bound to one, an unreadable key file, or a
+   *  failed SSH preflight all THROW — the startup gate (deploy-key-startup-check.ts) already
+   *  refuses `sapwood run` before any dispatch when L1 has no working anchor, so reaching any of
+   *  these failures here means the key broke (or moved) mid-run, or a caller constructed a
+   *  WorkerSupervisor directly, bypassing that gate; either way, a leg that claims L1 must never
+   *  silently run at the wider tier, or under a different key than the one this run's startup
+   *  gate validated. The anchor is re-resolved from disk on EVERY call (never cached itself —
+   *  only its probe result is), so a leg always sees the current filesystem state; the SSH
+   *  preflight itself still runs at most once per (supervisor life, anchor identity) pair —
+   *  `this.deployKeyProbe`, shared with checkDeployKeyPreflight. */
   private async resolveDeployKeyPath(): Promise<string | undefined> {
     if (this.deps.cfg.worker.credentialTier !== "L1") return undefined;
     const anchor = this.deps.deployKeyAnchor ?? findDeployKeyAnchor(defaultRuntimeRoot());
@@ -2837,14 +2835,14 @@ export class WorkerSupervisor implements Supervisor {
     return this.defaultBranchProbe;
   }
 
-  /** #671, #1105: public wrapper around the SAME memoized SSH preflight resolveDeployKeyPath
+  /** #671: public wrapper around the SAME memoized SSH preflight resolveDeployKeyPath
    *  uses, for cli.ts's startup deploy-key tier check (deploy-key-startup-check.ts). Takes the
    *  anchor the startup check itself already resolved and remotely reconciled, rather than
    *  re-resolving one independently — two independent resolutions, one racing a sidecar swap
    *  between them, could seed the memo with an anchor the startup check never actually
    *  validated. Triggering the preflight here SEEDS `this.deployKeyProbe` with THIS SAME anchor
    *  value, so the first real dispatch()/resume() later on this SAME instance just re-awaits the
-   *  settled promise instead of re-shelling to `ssh` — startup + first dispatch cost at most one
+   *  settled promise rather than re-shelling to `ssh` — startup + first dispatch cost at most one
    *  SSH probe total (and resolveDeployKeyPath's own anchor-changed rejection still fires if the
    *  filesystem anchor moves between this call and that later one).
    *
@@ -2865,10 +2863,10 @@ export class WorkerSupervisor implements Supervisor {
     return this.deployKeyProbe.probe;
   }
 
-  /** #1105 (round 3, P2): the marker reader deploy-key-startup-check.ts's restart-adoption gate
-   *  consumes — reuses `readJson` (this file's one generic try/catch JSON parser, the same one
-   *  every running.json read in this class already goes through) plus the same directory-listing
-   *  idiom `otherLaneOnBranch` above already establishes, rather than a second implementation of
+  /** The marker reader deploy-key-startup-check.ts's restart-adoption gate consumes — reuses
+   *  `readJson` (this file's one generic try/catch JSON parser, the same one every running.json
+   *  read in this class already goes through) plus the same directory-listing idiom
+   *  `otherLaneOnBranch` above already establishes, rather than a second implementation of
    *  either. Scoped to `*.running.json` only (a lane still in flight, per SENTINEL_FILE's own
    *  extension set) — a terminal sentinel's process has already exited, so its tier provenance
    *  is moot to a startup adoption-safety check.
@@ -2876,10 +2874,10 @@ export class WorkerSupervisor implements Supervisor {
    *  FAIL CLOSED on both axes the startup gate depends on, unlike `otherLaneOnBranch`'s
    *  fail-open stance on this same directory (that method's caller degrades to a WARN either
    *  way; this one's caller refuses startup, so "couldn't tell" must never read as "nothing is
-   *  running"): a directory-listing failure THROWS instead of returning `[]`, and an unparseable
-   *  marker is still REPORTED (with `tier: undefined`, via `readJson`'s own null-on-parse-failure
-   *  return) rather than silently excluded — the caller's mismatch check (`tier !== "L1"`) then
-   *  refuses on it exactly like a legacy marker with the field absent.
+   *  running"): a directory-listing failure THROWS rather than returning `[]`, and an
+   *  unparseable marker is still REPORTED (with `tier: undefined`, via `readJson`'s own
+   *  null-on-parse-failure return) rather than silently excluded — the caller's mismatch check
+   *  (`tier !== "L1"`) then refuses on it exactly like a marker with the field absent.
    *
    *  `tier`/`session_id`/`pid` are all `unknown`, not narrowed — deliberately: the caller decides
    *  what counts as a mismatch and how to render an absent field; this method only reports what's
@@ -3091,10 +3089,9 @@ export class WorkerSupervisor implements Supervisor {
     // UNCONDITIONALLY — a credentialFree fix leg needs to know this too, to COMPOSE the deploy
     // key's transport overlay onto its own stricter base env (see baseEnv below). No longer
     // "mutually exclusive" with credentialFree — the two postures COMPOSE.
-    // #1105: L1 with a broken anchor THROWS (resolveDeployKeyPath's own doc) — this dispatch
-    // must never proceed at the wider tier instead. Same fresh-jsonl cleanup as the
-    // credentialFree mint-failure branch above, since this is also a refused-before-spawn
-    // dispatch.
+    // L1 with a broken anchor THROWS (resolveDeployKeyPath's own doc) — this dispatch must
+    // never proceed at the wider tier. Same fresh-jsonl cleanup as the credentialFree
+    // mint-failure branch above, since this is also a refused-before-spawn dispatch.
     let keyPath: string | undefined;
     try {
       keyPath = await this.resolveDeployKeyPath();
@@ -3350,7 +3347,7 @@ export class WorkerSupervisor implements Supervisor {
         // wall-clock timeout — baselining retention on that would judge pre-handoff WIP (older
         // than the new start) CLEAN and delete it. dispatched_at never moves once set.
         dispatched_at: startedIso,
-        // #1105: the tier THIS process was actually launched under — a cross-restart adoption
+        // The tier THIS process was actually launched under — a cross-restart adoption
         // (resume()'s own crash-matrix branch) compares this against the CURRENT config before
         // ever trusting a live child it didn't itself spawn; a config edit between crash and
         // restart must never let an L0-launched process keep running under an L1 claim.
@@ -3480,12 +3477,12 @@ export class WorkerSupervisor implements Supervisor {
     // check is entry-mode-agnostic — it's about THIS resume() call's own durable spawn-intent
     // marker, not about which sentinel authorized the call in the first place.
     if (matchingResumeIntent && running.spawn_confirmed === true) {
-      // #1105: a confirmed spawn proves a child exists, but not WHICH env it was launched with —
+      // A confirmed spawn proves a child exists, but not WHICH env it was launched with —
       // between the crash that stranded this marker and this restart, an operator could have
       // flipped worker.credentialTier to L1. Adopting silently would keep an L0-launched process
       // (full credentialed env, no scoped deploy key) running under a claimed-L1 run. Refuse the
-      // adoption instead — the caller treats a thrown resume() as a failed lane, same as every
-      // other resume() failure path.
+      // adoption — the caller treats a thrown resume() as a failed lane, same as every other
+      // resume() failure path.
       const persistedTier = typeof running.credential_tier === "string" ? running.credential_tier : undefined;
       if (this.deps.cfg.worker.credentialTier === "L1" && persistedTier !== "L1") {
         throw new Error(
@@ -3657,7 +3654,7 @@ export class WorkerSupervisor implements Supervisor {
         jsonl_leg_offset: jsonlLegOffset,
         resume_pending_db: true,
         spawn_confirmed: false,
-        // #1105: same tier-provenance field dispatch() writes — see that call site's own doc.
+        // Same tier-provenance field dispatch() writes — see that call site's own doc.
         credential_tier: this.deps.cfg.worker.credentialTier,
         // Preserve the original first-dispatch baseline (not this resume's start).
         ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),

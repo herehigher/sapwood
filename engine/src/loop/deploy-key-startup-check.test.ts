@@ -156,8 +156,8 @@ test("arm running-tier-mismatch: credentialTier L1, a still-running lane's marke
     );
     assert.equal(supervisor.calls, 0, "a running-tier mismatch must never reach the shared preflight");
     assert.equal(logs.length, 1);
-    // #1105 round 3 (P2/P3): lane, session id, pid, and recorded tier must all be visible so the
-    // operator can act on THIS lane without guessing which process the refusal means.
+    // Lane, session id, pid, and recorded tier must all be visible so the operator can act on
+    // THIS lane without guessing which process the refusal means.
     assert.match(logs[0]!, /lane-stale-l0/);
     assert.match(logs[0]!, /sess-1234/);
     assert.match(logs[0]!, /5678/);
@@ -165,8 +165,8 @@ test("arm running-tier-mismatch: credentialTier L1, a still-running lane's marke
     // Exactly two remedies, neither of which requires this engine to touch the other process.
     assert.match(logs[0]!, /wait for those processes to exit/i);
     assert.match(logs[0]!, /kill <pid>/);
-    // #1105 round 3 (P2): `sapwood estop` cannot act on a lane once the prior engine that owned
-    // it is dead — it must never be offered as a remedy here.
+    // `sapwood estop` cannot act on a lane once the prior engine that owned it is dead — it must
+    // never be offered as a remedy here.
     assert.doesNotMatch(logs[0]!, /estop/i);
     assert.match(logs[0]!, /Refusing to start before any dispatch/);
     assert.equal(events.length, 1);
@@ -176,7 +176,7 @@ test("arm running-tier-mismatch: credentialTier L1, a still-running lane's marke
   }
 });
 
-test("arm running-tier-mismatch: a marker with NO credential_tier recorded at all (pre-#1105) counts as a mismatch, never as a silent pass; absent session/pid render as 'unknown'", async () => {
+test("arm running-tier-mismatch: a marker that never recorded a credential_tier counts as a mismatch, never as a silent pass; absent session/pid render as 'unknown'", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-deploy-key-startup-"));
   try {
     const keyPath = join(dir, "worker-deploy-key");
@@ -421,9 +421,9 @@ test("arm 6b: credentialTier L1, every running marker already carries a matching
       { name: "lane-a", tier: "L1" },
       { name: "lane-b", tier: "L1" },
     ]);
-    // #1105 round 3 (P3): spy on the injected lister so this test fails if the scan is ever
-    // removed from the L1 path — an all-L1 fixture that never invokes it would otherwise "pass"
-    // for the wrong reason (nothing to mismatch against) rather than because the gate ran.
+    // Spy on the injected lister so this test fails if the scan is ever removed from the L1
+    // path — an all-L1 fixture that never invokes it would otherwise "pass" for the wrong reason
+    // (nothing to mismatch against) rather than because the gate ran.
     let scanCalls = 0;
     const originalList = supervisor.listRunningCredentialTiers;
     supervisor.listRunningCredentialTiers = () => {

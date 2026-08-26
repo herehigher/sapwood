@@ -369,10 +369,11 @@ function sampleConfig(): string {
   return "board:\n  owner: CHANGEME\n  repo: CHANGEME\n  projectNumber: 0\n";
 }
 
-// ---- #1105: L1 scoped-worker-identity deploy-key provisioning, anchored on a LOCAL (key file, id sidecar)
-// pair under `.sapwood/keys/`. The engine never invokes or scripts remote deploy-key deletion — the bare
-// remote title may validly belong to a different machine/operator, so a foreign or stale key is
-// only ever surfaced in a WARN for a HUMAN to review, never touched by this file. ---------------
+// ---- #1105 (see docs/security/credential-tiers.md): L1 scoped-worker-identity deploy-key
+// provisioning, anchored on a LOCAL (key file, id sidecar) pair under `.sapwood/keys/`. The
+// engine never invokes or scripts remote deploy-key deletion — the bare remote title may validly
+// belong to a different machine/operator, so a foreign or stale key is only ever surfaced in a
+// WARN for a HUMAN to review, never touched by this file. ----------------------------------
 
 // Exported (#671): deploy-key-startup-check.ts's "missing/unreadable key file" arm reuses this
 // as the generic title argument to deployKeyProvisioningFailedAction below — the same guidance
@@ -480,7 +481,7 @@ export interface DeployKeyListEntry {
   // to prove the (path, id) pair is genuinely the SAME key, not merely "an id that happens to be
   // registered" plus "a local key that happens to authenticate" independently.
   key?: string;
-  // #1105: whether this deploy key is registered read-only (no push access) — requested via
+  // Whether this deploy key is registered read-only (no push access) — requested via
   // `--json ...,readOnly` only by the startup tier check (deploy-key-startup-check.ts), which
   // must refuse L1 for an anchor that authenticates but cannot push. Optional for the same
   // reason `key` is: most callers here never request the field.
@@ -664,7 +665,7 @@ async function addDeployKeyCapturingNewId(run: GhRunner, repo: string, keyPath: 
 // repo's own `.gitignore` here; this file also never removes an existing rule from a user's
 // `.gitignore`.
 
-/** #1105: records the local (key, id) anchor as a sidecar file beside the key itself. A plain
+/** Records the local (key, id) anchor as a sidecar file beside the key itself. A plain
  *  positive-integer text file, not YAML/JSON — nothing here is ever hand-edited or re-parsed as
  *  a config, so there is no format to keep stable. Created with mode 0600 directly (no separate
  *  ambient-mode window between write and chmod) and chmodded again afterward via the same
@@ -734,7 +735,7 @@ async function checkDefaultBranchProtectionAction(run: GhRunner, repo: string): 
   }
 }
 
-/** #1105: the reconcile-failure / no-local-anchor state. The engine never invokes or scripts
+/** The reconcile-failure / no-local-anchor state. The engine never invokes or scripts
  *  remote deploy-key deletion or modification — the remote inventory is never authoritative for
  *  "mine"; a `sapwood-worker`-titled key may validly belong to a different machine/operator, so
  *  this machine can only ever ADD a new key of its own. Stale/foreign keys are surfaced in the
@@ -852,8 +853,8 @@ async function armAuthFailsStaleOrMismatch(
   return actions;
 }
 
-/** #1105: both a local key file AND its id sidecar
- *  discovered (findDeployKeyAnchor) -> RECONCILE (never skip — a stale/rotated/mismatched key
+/** Both a local key file AND its id sidecar discovered (findDeployKeyAnchor) -> RECONCILE
+ *  (never skip — a stale/rotated/mismatched key
  *  must be actively detected, not assumed good because a path is on file). FIVE checks, ALL must
  *  be green: the local key file exists; the recorded id is present in `gh repo deploy-key list`;
  *  that id-matched remote entry's OWN public key content matches the local `.pub` file (proves
@@ -939,8 +940,8 @@ async function reconcileDeployKey(
   return armAuthFailsStaleOrMismatch(run, repo, cwd, staleForeign, reasons, deps, permissionsFs);
 }
 
-/** #1105 orchestrator: a local anchor discovered (findDeployKeyAnchor)
- *  -> reconcile; none discovered and no sapwood-titled remote key -> fresh provisioning
+/** Orchestrator: a local anchor discovered (findDeployKeyAnchor) -> reconcile; none discovered
+ *  and no sapwood-titled remote key -> fresh provisioning
  *  (ssh-keygen -> `gh repo deploy-key add --allow-write --title sapwood-worker` -> read back the
  *  new key's id via a before/after id diff, never a title match -> preflight -> write its
  *  id sidecar -> branch-protection check); none discovered but a sapwood-titled key already
@@ -1203,12 +1204,12 @@ export async function init(cfg: SapwoodConfig, deps: Partial<InitDeps> = {}): Pr
     );
   }
 
-  // #1105: L1 scoped-worker-identity deploy key — provisioned AFTER
-  // the config file exists (ensureConfig above), so a fresh onboarding's repo/board facts are
-  // already resolved. Every failure degrades to a guidance-carrying WARN; init() itself never
-  // fails because L1 provisioning didn't complete (`worker.credentialTier` governs whether that
-  // actually matters at `sapwood run` time — deploy-key-startup-check.ts, not here). This never
-  // touches sapwood.config.yaml — the anchor lands under `.sapwood/keys/` instead.
+  // L1 scoped-worker-identity deploy key — provisioned AFTER the config file exists (ensureConfig
+  // above), so a fresh onboarding's repo/board facts are already resolved. Every failure degrades
+  // to a guidance-carrying WARN; init() itself never fails because L1 provisioning didn't
+  // complete (`worker.credentialTier` governs whether that actually matters at `sapwood run` time
+  // — deploy-key-startup-check.ts, not here). This never touches sapwood.config.yaml — the anchor
+  // lands under `.sapwood/keys/` instead.
   actions.push(
     ...(await ensureDeployKey(run, repo, cwd, {
       sshKeygen,

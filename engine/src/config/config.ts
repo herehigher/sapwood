@@ -148,22 +148,10 @@ const Worker = z
     // unreadable/malformed is a fail-fast startup error (loadPricingTable, loaded once at
     // supervisor construction) — never a silent fallback to the shipped default.
     pricingFile: z.string().optional(),
-    // #1105 (was #606's config-anchored local key-path/key-id pair, retired — see
-    // docs/security/credential-tiers.md): the GOVERNING half of the L1 scoped-worker-identity
-    // deploy key — WHETHER a worker leg must run scoped, not WHERE its key lives on this
-    // machine. That locality fact is now filesystem state (`runtimePaths().keys`'s id sidecar,
-    // paths.ts's findDeployKeyAnchor), never a value in this audited file: a shared committed
-    // anchor let two operator machines on one repo thrash each other's `sapwood init` writes,
-    // and a missing key on a fresh clone silently ran the worker at the WIDER tier (L0) instead
-    // of refusing — both fixed by separating "may this repo's worker use L1" (here, human-
-    // reviewed) from "does THIS machine currently have a working key" (discovered, never
-    // written back).
-    // L0 (default): today's behavior — a worker leg inherits the operator's full credentialed
-    // env; L0 never reads or probes a deploy key at all.
-    // L1: every dispatch/resume/fix leg MUST run with the deploy key (git-transport-only env,
-    // `Bash(gh *)` dropped from the leg's tool grant) and never falls back to L0 silently — no
-    // reconciled local anchor at startup is a hard refusal before any dispatch (`sapwood run`,
-    // see deploy-key-startup-check.ts), naming `sapwood init` as the fix.
+    // #1105: the GOVERNING half of the L1 scoped-worker-identity deploy key — WHETHER a worker
+    // leg must run scoped, not WHERE its key lives. Locality is filesystem state under
+    // `.sapwood/keys/` (paths.ts's findDeployKeyAnchor), never written back into this audited
+    // file. See docs/security/credential-tiers.md.
     credentialTier: z.enum(["L0", "L1"]).default("L0"),
   })
   .strict();

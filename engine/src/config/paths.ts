@@ -23,8 +23,8 @@ export const SAPWOOD_ESTOP_FILENAME = "EMERGENCY_STOP";
 export const SAPWOOD_PAUSE_FILENAME = "PAUSE";
 export const SAPWOOD_ESCALATION_FILENAME = "ESCALATION";
 export const SAPWOOD_ATTENTION_DISMISSALS_FILENAME = "attention-dismissals.jsonl";
-// #1105: the primary (non-host-suffixed) worker deploy key's basename — the ONE slot every
-// machine's first-ever `sapwood init` provisions into; init.ts's own per-host fallback
+// The primary (non-host-suffixed) worker deploy key's basename — the ONE slot every machine's
+// first-ever `sapwood init` provisions into; init.ts's own per-host fallback
 // (pickFreshArmAKeySlot) derives its sibling names from this same string rather than a second
 // literal.
 export const DEPLOY_KEY_BASENAME = "worker-deploy-key";
@@ -65,8 +65,8 @@ export interface RuntimePaths {
   /** #1080: the worker deploy key(s) live here — `worker-deploy-key[-<host>]` + `.pub`,
    *  0600/dir 0700 — instead of the pre-#1080 `data/` location. */
   readonly keysDir: string;
-  /** #1105: the primary key's id sidecar — the local half of the (key, id) anchor `sapwood
-   *  init`'s reconcile pass keys on. This ONE fixed name is the canonical slot every machine's
+  /** The primary key's id sidecar — the local half of the (key, id) anchor `sapwood init`'s
+   *  reconcile pass keys on. This ONE fixed name is the canonical slot every machine's
    *  first-ever provisioning writes to; a per-host suffixed sibling (minted only when the
    *  primary anchor fails to reconcile — init.ts's armAuthFailsStaleOrMismatch) is discovered
    *  dynamically instead (findDeployKeyAnchor below), never a second RuntimePaths field, since
@@ -127,26 +127,29 @@ export function runtimePaths(root: string): RuntimePaths {
   };
 }
 
-/** #1105: the local (path, id) anchor's id half — a sidecar file beside the deploy key itself,
- *  same 0600 permission the key file gets. Not itself a fixed `runtimePaths()` field (the key's
- *  own basename varies — the primary slot, or a per-host suffixed sibling minted when the
- *  primary fails to reconcile) — this derives the sidecar name from whatever key path the caller
- *  already has, the same way every `.pub` public-key sibling is named. */
+/** The local (path, id) anchor's id half — a sidecar file beside the deploy key itself, same
+ *  0600 permission the key file gets. Not itself a fixed `runtimePaths()` field (the key's own
+ *  basename varies — the primary slot, or a per-host suffixed sibling minted when the primary
+ *  fails to reconcile) — this derives the sidecar name from whatever key path the caller already
+ *  has, the same way every `.pub` public-key sibling is named. */
 export function keyIdSidecarPath(keyPath: string): string {
   return `${keyPath}.id`;
 }
 
-/** #1105: this machine's own local deploy-key anchor, discovered from `runtimePaths(root)
- *  .keysDir` directly — the anchor is filesystem state now (a gitignored `<key>.id` sidecar
- *  beside the key itself), never a fact recorded in the audited `sapwood.config.yaml`. Every
- *  `*.id` file in the directory is a candidate: the fixed primary slot (`deployKeySidecar`
- *  above), or a per-host suffixed sibling init.ts's armAuthFailsStaleOrMismatch mints when the
- *  primary anchor fails to reconcile and an operator registers an additional key — that arm
- *  never deletes the stale sidecar it's replacing (a WARN-only outcome touches no file), so more
- *  than one can coexist. The most recently WRITTEN one wins: it is the anchor a `sapwood init`
- *  run (or an operator by hand) most recently confirmed. Real filesystem I/O (unlike
- *  `runtimePaths()` itself) — returns undefined when the directory has no valid sidecar at all
- *  (a fresh machine, or `sapwood init` never ran), never throws. */
+/** #1105 (see docs/security/credential-tiers.md): this machine's own local deploy-key anchor,
+ *  discovered from `runtimePaths(root).keysDir` directly — the anchor is filesystem state now (a
+ *  gitignored `<key>.id` sidecar beside the key itself), never a fact recorded in the audited
+ *  `sapwood.config.yaml`. Every `*.id` file in the directory is a candidate: the fixed primary
+ *  slot (`deployKeySidecar` above), or a per-host suffixed sibling init.ts's
+ *  armAuthFailsStaleOrMismatch mints when the primary anchor fails to reconcile and an operator
+ *  registers an additional key — that arm never deletes the stale sidecar it's replacing (a
+ *  WARN-only outcome touches no file), so more than one can coexist. The most recently WRITTEN
+ *  one wins: it is the anchor a `sapwood init` run (or an operator by hand) most recently
+ *  confirmed. Ceiling: two operators' keys on one shared machine means the newest `sapwood init`
+ *  silently wins over the other's. Upgrade trigger: add a per-host selection rule once that
+ *  ambiguity is actually observed. Real filesystem I/O (unlike `runtimePaths()` itself) —
+ *  returns undefined when the directory has no valid sidecar at all (a fresh machine, or
+ *  `sapwood init` never ran), never throws. */
 export function findDeployKeyAnchor(root: string): { keyPath: string; keyId: number } | undefined {
   const dir = runtimePaths(root).keysDir;
   if (!existsSync(dir)) return undefined;

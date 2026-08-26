@@ -195,8 +195,8 @@ sapwood init
    all**: it structurally cannot open a PR, approve a review, label an issue, or touch the
    board — the engine does all of that from its own, separately-held credential (see
    [Worker credential tiers](../security/credential-tiers.md#worker-credential-tiers) for the full L0/L1
-   picture and honest residuals). `worker.credentialTier` defaults to `L0` (today's
-   fuller-credentialed behavior, byte-for-byte unchanged) — this repo's own config keeps it. If
+   picture and honest residuals). `worker.credentialTier` defaults to `L0` (the full-credentialed
+   env, never reading or probing a deploy key) — this repo's own config keeps it. If
    `credentialTier` is `L1` and no working key is found at `sapwood run` startup, the run
    **refuses to start, before any dispatch or board/label mutation**, naming `sapwood init` as
    the fix — never a silent fallback to L0. If you don't have repo admin, `init` logs exactly what to do by hand and moves
