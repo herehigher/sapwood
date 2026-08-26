@@ -31,14 +31,9 @@
 Two kinds of content: technical invariants this repo's review history has already flagged more
 than once, and doctrine for how the loop should treat review findings in general.
 
-**Carrier split.** This file carries this repository's review doctrine; the engine substitutes it
-into the engine-agent review session and, in hosted-bot mode, appends it to the review-request
-comment (the `same-model-trusted` and `human` modes post no trigger, so nothing carries it to
-those reviewers). Standing review-round discipline for a hosted bot lives in that bot's own
-instruction file — see
-[Hosted-bot review guidelines](guide/configuration.md#hosted-bot-review-guidelines); per-PR
-verification, diff scope, and reviewed-head identity travel in the review-request comment. Keep
-each rule in one carrier.
+**Carrier split.** This file is the repository's review doctrine. Hosted-bot round discipline
+lives in the bot's own instruction file — see
+[Hosted-bot review guidelines](guide/configuration.md#hosted-bot-review-guidelines).
 
 ## Technical invariants
 
