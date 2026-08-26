@@ -3,7 +3,6 @@
   (`engine/prompts/doctrine-core.md`) is injected before this file at every render site — do not
   duplicate anything that already lives there.
 
-  Configured as `doctrine.file`; `doctrine.maxChars` bounds this file's own content only.
   Deliberately PROSE, not a lint/DSL. Curation rule: one-in-one-out above ~85% of the budget — an
   addition evicts or merges at least as much as it adds, joining an existing family rather than
   opening a new top-level bullet. A bold lead is an identifier: `git grep` it before renaming.

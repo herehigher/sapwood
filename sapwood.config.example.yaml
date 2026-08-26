@@ -138,10 +138,18 @@ cost:
 #   file: docs/GOAL.md # default: docs/GOAL.md — the project's north-star goal file (`sapwood init`
   #                      # scaffolds it from the shipped template when missing)
 
+# doctrine: a two-carrier composition. The framework's own generic doctrine ships in the engine
+  #          (`engine/prompts/doctrine-core.md`) and is always injected first — not configurable
+  #          here. `file` below is this repository's own optional residue: recurring findings
+  #          specific to this codebase. Both halves reach the four engine-composed surfaces
+  #          (worker brief, fix leg, architect pass, engine-agent reviewer) — never the hosted
+  #          review-request comment.
 # doctrine:
-#   file: docs/REVIEW-DOCTRINE.md # default shown — repo-level review invariants +
-  #                                # adjudication doctrine, injected into worker/architect prompts
-#   maxChars: 20000 # default: 20000 — deterministic-truncation cap on the doctrine text
+#   file: docs/REVIEW-DOCTRINE.md # default shown — this repo's own review-doctrine residue,
+  #                                # optional (a missing file degrades to the core alone, not an
+  #                                # error)
+#   maxChars: 20000 # default: 20000 — deterministic-truncation cap on the residue text only;
+  #                  # the framework core is release-controlled and bounded by its own CI ceiling
 
 # recovery:
 #   rollbackRetryCap: 5 # default: 5 — bounded retries for a durably-persisted rollback/requeue

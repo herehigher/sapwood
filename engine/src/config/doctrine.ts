@@ -50,9 +50,11 @@ export const NO_REPO_DOCTRINE =
  *  else the explicit `NO_REPO_DOCTRINE` sentence — `maxChars` bounds the repo part ONLY; the core
  *  is release-controlled and fixed-size by construction (its own ceiling is a CI test, not
  *  config). A repo file that IS present but unreadable still throws, naming the path — a
- *  misconfiguration, not "no doctrine adopted." */
-export function loadDoctrine(path: string, maxChars: number): string {
-  const corePath = defaultDoctrineCorePath();
+ *  misconfiguration, not "no doctrine adopted." `corePath` defaults to the real shipped location
+ *  and exists only as a test seam (a missing-core throw is otherwise unreachable without moving
+ *  the real installed file, racing every other concurrently running suite that also calls
+ *  `loadDoctrine`); every production caller omits it and gets the real path. */
+export function loadDoctrine(path: string, maxChars: number, corePath: string = defaultDoctrineCorePath()): string {
   if (!existsSync(corePath)) {
     throw new Error(`doctrine core missing at ${corePath} — a packaging bug, refusing to proceed`);
   }
