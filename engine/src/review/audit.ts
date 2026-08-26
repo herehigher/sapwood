@@ -5,7 +5,7 @@
 import type { IForge, PRTopLevelComment } from "../forge/forge.js";
 import type { PerAcResult } from "./agent-output.js";
 import type { AuditDeliveryResult, EngineReviewWal } from "./drive.js";
-import { type ClassifiedFinding, effectiveSeverity } from "./finding-axes.js";
+import { type ClassifiedFinding, effectiveOwner, effectiveSeverity } from "./finding-axes.js";
 import { formatIdentity, type ReviewSessionIdentity, type ReviewSessionSpend } from "./review-session.js";
 
 export const AUDIT_MARKER_PREFIX = "<!-- sapwood-audit ";
@@ -68,17 +68,20 @@ function escapeCell(value: string): string {
  *  line-start anchors in CLEAN_VERDICT_RE and REVIEWED_HEAD_OID_RE, so finding text — blocking OR
  *  advisory — can never become an approval-parseable engine comment (#448, design #402 §2: the
  *  Advisory section gets "the SAME blockquoted, write-boundary-sanitized rendering `audit.ts`
- *  already applies"). */
+ *  already applies"). #865: an `(owner: operator)` suffix on the `[N] id` line is this comment's
+ *  own copy of the owner axis — `fix.md` rule 5 reads it to know which findings need no
+ *  `findingResponses` entry; a producer-owned finding (the default) renders no suffix at all,
+ *  byte-for-byte identical to every pre-#865 artifact. */
 function renderFindingsList(entries: readonly IndexedFinding[]): string {
   return entries.length > 0
     ? entries
-        .map(
-          ({ index, finding }) =>
-            `- **[${index}] ${escapeCell(finding.id)}**\n${finding.body
-              .split("\n")
-              .map((line) => `> ${line}`)
-              .join("\n")}`,
-        )
+        .map(({ index, finding }) => {
+          const ownerSuffix = effectiveOwner(finding) === "operator" ? " (owner: operator)" : "";
+          return `- **[${index}] ${escapeCell(finding.id)}**${ownerSuffix}\n${finding.body
+            .split("\n")
+            .map((line) => `> ${line}`)
+            .join("\n")}`;
+        })
         .join("\n")
     : "- None recorded.";
 }

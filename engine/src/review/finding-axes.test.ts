@@ -11,8 +11,10 @@ import {
   applySeverityOverride,
   type ClassifiedFinding,
   changedPathsFromDiff,
+  effectiveOwner,
   effectiveSeverity,
   FINDING_KINDS,
+  FINDING_OWNERS,
   resolveFindingPath,
 } from "./finding-axes.js";
 
@@ -22,8 +24,8 @@ test("FINDING_KINDS is the exact five-member taxonomy design #402 §1 specifies"
   assert.deepEqual([...FINDING_KINDS], ["correctness", "security", "design", "test-coverage", "style"]);
 });
 
-test("ALLOWED_FINDING_KEYS is exactly {id, body, severity, kind, path}", () => {
-  assert.deepEqual([...ALLOWED_FINDING_KEYS].sort(), ["body", "id", "kind", "path", "severity"]);
+test("ALLOWED_FINDING_KEYS (#865) is exactly {id, body, severity, kind, path, owner}", () => {
+  assert.deepEqual([...ALLOWED_FINDING_KEYS].sort(), ["body", "id", "kind", "owner", "path", "severity"]);
 });
 
 test("ADVISORY_ELIGIBLE_KINDS (D3) is exactly {style, test-coverage} — security/correctness/design excluded", () => {
@@ -64,6 +66,25 @@ test("effectiveSeverity (D3): severity 'advisory' + kind NOT eligible -> forced 
 
 test("effectiveSeverity (D3): severity 'advisory' + kind ABSENT -> forced blocking (unclassified is never advisory-eligible)", () => {
   assert.equal(effectiveSeverity({ id: "f1", body: "x", severity: "advisory" }), "blocking");
+});
+
+// ── #865 (design #1123 D4): the owner axis — FINDING_OWNERS, effectiveOwner's fail-closed default ──
+
+test("FINDING_OWNERS is the exact two-member taxonomy design #1123 D4 specifies", () => {
+  assert.deepEqual([...FINDING_OWNERS], ["producer", "operator"]);
+});
+
+test("effectiveOwner: owner absent -> producer (today-equivalent, fail-closed)", () => {
+  const f: ClassifiedFinding = { id: "f1", body: "x" };
+  assert.equal(effectiveOwner(f), "producer");
+});
+
+test("effectiveOwner: owner 'producer' explicit -> producer", () => {
+  assert.equal(effectiveOwner({ id: "f1", body: "x", owner: "producer" }), "producer");
+});
+
+test("effectiveOwner: owner 'operator' explicit -> operator", () => {
+  assert.equal(effectiveOwner({ id: "f1", body: "x", owner: "operator" }), "operator");
 });
 
 // ── applySeverityOverride: D3's engine-recorded override ────────────────────────────────────────

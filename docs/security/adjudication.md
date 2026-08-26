@@ -71,6 +71,32 @@ a non-required check can still block a merge by being red, pending, or concludin
 passing (`ciInert` — e.g. SKIPPED/NEUTRAL/CANCELLED/STALE/ACTION_REQUIRED), but can never authorize one
 on its own; only a fully green rollup does that.
 
+## The finding owner axis
+
+A rejected engine-agent verdict whose only outstanding findings are tier-C evidence (a
+human-witnessed probe record absent from the snapshotted issue body) still gated as `FIXABLE`:
+`driveDecision` dispatched a paid fix leg that could not produce the missing record by
+construction, the leg disputed it, and the lane escalated `needs-human` anyway — the same outcome
+reachable at zero cost. The `owner` axis lets the review session mark that outcome up front, so
+the engine can skip the futile leg entirely.
+
+| Invariant | Enforcement point | Test |
+| --- | --- | --- |
+| Every finding carries an optional `owner: "producer" \| "operator"`; an out-of-enum value voids the WHOLE review output, exactly like an invalid `severity`/`kind`. | `review/finding-axes.ts` (`FINDING_OWNERS`, `ALLOWED_FINDING_KEYS`); `review/agent-output.ts::validateAgentFindings` | `finding-axes.test.ts`; `agent-output.test.ts`: "owner outside its enum voids the WHOLE output" |
+| An absent `owner` defaults to `"producer"` — fail-closed, today-equivalent: a classic-path finding, or an engine-agent finding from before this axis existed, is unaffected. | `review/finding-axes.ts::effectiveOwner` | `finding-axes.test.ts`: "effectiveOwner: owner absent -> producer" |
+| A rejected verdict whose every EFFECTIVE-BLOCKING finding is operator-owned dispatches NO fix leg — the engine escalates straight to `needs-human`, `fix_rounds` unchanged. A mixed or all-producer verdict is unaffected; advisory findings never participate. | `loop/fix-response.ts::computeOperatorOwnedEscalation`; `loop/conductor.ts` `case "fixable"` (`escalateOperatorOwned`) | `fix-response.test.ts`: "all-operator -> the full blocking-finding evidence list", "mixed producer+operator -> null"; `conductor.test.ts` |
+| The operator-owned check runs AFTER both dispute short-circuits (a recorded dispute for this exact verdict still wins) and BEFORE the verdict-rerun breaker (it is pure state, decided before any leg would have run). | `loop/conductor.ts` `case "fixable"` | `conductor.test.ts`: dispute-precedence fixture |
+| The convergence classifier filters operator-owned findings out of the recorded set before bounding, using the SAME `effectiveOwner` definition — a constant operator-owned term (which no fix leg can ever change) cannot flat-stall a mixed lane's producer-owned share. | `loop/conductor.ts::gatherFixupFindingRecord` | `conductor.test.ts`: "a constant operator-owned term ... does not produce a flat/recurrence stall" |
+
+**Boundaries**
+
+- A false `"operator"` label sends the lane to a human without spending a fix leg; a false
+  `"producer"` label (or simply omitting `owner`) costs one paid, futile fix round — the same
+  asymmetry the owner ruling accepted for #865 (rather-alert-a-human over rather-spend-a-leg).
+- The engine never derives `owner` from evidence-tier prose or from `kind` — it is a session-set,
+  closed-enum field the same way `severity` is, never inferred from free text (the
+  authoritative-signals rule).
+
 ## The comment-adjudication cursor
 
 Workers are dispatched with the issue BODY only (`{{issue.body}}`, `worker.ts`), which stays

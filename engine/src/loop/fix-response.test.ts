@@ -25,6 +25,7 @@ import {
   computeDisputeEscalation,
   computeFindingDisputeEscalation,
   computeFixResponseHarvest,
+  computeOperatorOwnedEscalation,
   FixFindingResponseEntrySchema,
   FixResponseMetadataSchema,
   FixThreadResponseEntrySchema,
@@ -1684,5 +1685,100 @@ test("#461: a disputed index outside the artifact's finding range is dropped, ne
   seedRejectedWal(st, "run-1", 1);
   seedFindingResponseQueued(st, [{ runId: "run-1", findingIndex: 5, resolution: "disputed", reply: "disagree" }]);
   assert.equal(computeFindingDisputeEscalation(st, "lane-a", 55, "run-1"), null);
+  st.close();
+});
+
+// ── #865 (design #1123 D4): computeOperatorOwnedEscalation — the all-operator short-circuit ────
+
+function seedOwnerWal(
+  st: State,
+  worker: string,
+  runId: string,
+  findings: { id: string; body: string; severity?: "blocking" | "advisory"; kind?: string; owner?: "producer" | "operator" }[],
+): void {
+  st.recordEngineReviewWal(worker, { runId, head: "head-1", base: "b", diffHash: "d", attemptStart: "t" });
+  st.recordEngineReviewWalArtifact(
+    worker,
+    runId,
+    "rejected",
+    JSON.stringify({
+      perAC: [],
+      findings,
+      sessionActualIdentities: [{ provider: "anthropic", model: "m" }],
+      sessionSpends: [{ kind: "known", usd: 0 }],
+      promptHash: "p",
+    }),
+  );
+}
+
+test("#865: all-operator -> the full blocking-finding evidence list, keyed by artifact index", () => {
+  const st = new State(":memory:");
+  seedOwnerWal(st, "lane-a", "run-1", [
+    { id: "F-0", body: "missing tier-C record", owner: "operator" },
+    { id: "F-1", body: "another operator-only gap", owner: "operator" },
+  ]);
+  const escalation = computeOperatorOwnedEscalation(st, "lane-a", "run-1");
+  assert.deepEqual(escalation, {
+    headOid: "head-1",
+    items: [
+      { ref: "run-1#0", findingBody: "missing tier-C record" },
+      { ref: "run-1#1", findingBody: "another operator-only gap" },
+    ],
+  });
+  st.close();
+});
+
+test("#865: mixed producer+operator -> null (the ordinary FIXUP path still owns it)", () => {
+  const st = new State(":memory:");
+  seedOwnerWal(st, "lane-a", "run-1", [
+    { id: "F-0", body: "code-fixable", owner: "producer" },
+    { id: "F-1", body: "operator-only", owner: "operator" },
+  ]);
+  assert.equal(computeOperatorOwnedEscalation(st, "lane-a", "run-1"), null);
+  st.close();
+});
+
+test("#865: all-producer (today's default, owner absent) -> null", () => {
+  const st = new State(":memory:");
+  seedOwnerWal(st, "lane-a", "run-1", [{ id: "F-0", body: "code-fixable" }]);
+  assert.equal(computeOperatorOwnedEscalation(st, "lane-a", "run-1"), null);
+  st.close();
+});
+
+test("#865: an operator-owned finding that is ADVISORY does not participate — no blocking findings at all -> null", () => {
+  const st = new State(":memory:");
+  seedOwnerWal(st, "lane-a", "run-1", [{ id: "F-0", body: "advisory nit", owner: "operator", severity: "advisory", kind: "style" }]);
+  assert.equal(computeOperatorOwnedEscalation(st, "lane-a", "run-1"), null);
+  st.close();
+});
+
+test("#865: an advisory operator-owned finding alongside an all-operator blocking set still escalates on the blocking set only", () => {
+  const st = new State(":memory:");
+  seedOwnerWal(st, "lane-a", "run-1", [
+    { id: "F-0", body: "blocking operator-only", owner: "operator" },
+    { id: "F-1", body: "advisory aside", owner: "operator", severity: "advisory", kind: "style" },
+  ]);
+  const escalation = computeOperatorOwnedEscalation(st, "lane-a", "run-1");
+  assert.deepEqual(escalation, { headOid: "head-1", items: [{ ref: "run-1#0", findingBody: "blocking operator-only" }] });
+  st.close();
+});
+
+test("#865: an empty findings artifact (nothing to escalate) -> null", () => {
+  const st = new State(":memory:");
+  seedOwnerWal(st, "lane-a", "run-1", []);
+  assert.equal(computeOperatorOwnedEscalation(st, "lane-a", "run-1"), null);
+  st.close();
+});
+
+test("#865: a stale runId (WAL has moved past the verdict this tick is driving) -> null", () => {
+  const st = new State(":memory:");
+  seedOwnerWal(st, "lane-a", "run-2", [{ id: "F-0", body: "operator-only", owner: "operator" }]);
+  assert.equal(computeOperatorOwnedEscalation(st, "lane-a", "run-1"), null);
+  st.close();
+});
+
+test("#865: no WAL row at all -> null (fail-closed, never escalates on evidence it cannot show)", () => {
+  const st = new State(":memory:");
+  assert.equal(computeOperatorOwnedEscalation(st, "lane-a", "run-1"), null);
   st.close();
 });

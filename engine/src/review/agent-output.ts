@@ -20,6 +20,7 @@ import {
   type ClassifiedFinding,
   effectiveSeverity,
   FINDING_KINDS,
+  FINDING_OWNERS,
   resolveFindingPath,
 } from "./finding-axes.js";
 
@@ -131,6 +132,7 @@ export function validateAgentReviewOutput(
 
 const FINDING_SEVERITIES: ReadonlySet<string> = new Set(["blocking", "advisory"]);
 const FINDING_KIND_SET: ReadonlySet<string> = new Set(FINDING_KINDS);
+const FINDING_OWNER_SET: ReadonlySet<string> = new Set(FINDING_OWNERS);
 
 /** #302 review (Codex P2, findings strictness): the ENGINE-AGENT layer's OWN stricter findings
  *  validation — reviewer.ts's shared `validateFindings` (E1's contract for every reviewer kind)
@@ -141,10 +143,10 @@ const FINDING_KIND_SET: ReadonlySet<string> = new Set(FINDING_KINDS);
  *     the old `Object.keys(f).length !== 2` count check did (the property it was actually
  *     protecting — "an unknown key voids everything" — is retained verbatim, membership replaces
  *     count as the mechanism);
- *   - a present `severity`/`kind` outside its closed enum invalidates the WHOLE output — schema
- *     drift, NOT coerced to a default (design #402 §1's fail-closed-defaults table: this is the
- *     one row that voids rather than degrades); an ABSENT axis is fine (validated/defaulted later,
- *     see `finding-axes.ts`'s `effectiveSeverity`);
+ *   - a present `severity`/`kind`/`owner` (#865) outside its closed enum invalidates the WHOLE
+ *     output — schema drift, NOT coerced to a default (design #402 §1's fail-closed-defaults
+ *     table: this is the one row that voids rather than degrades); an ABSENT axis is fine
+ *     (validated/defaulted later, see `finding-axes.ts`'s `effectiveSeverity`/`effectiveOwner`);
  *   - a present `path` must be a non-empty string (structural type check only — WHICH string is
  *     valid, i.e. membership in the reviewed diff's changed-path set, is resolved afterward by
  *     `validateAgentReviewOutput`'s `resolveFindingPath` call, and never voids the output);
@@ -159,6 +161,7 @@ function validateAgentFindings(v: unknown): v is ClassifiedFinding[] {
     if (!keys.every((k) => ALLOWED_FINDING_KEYS.has(k))) return false; // unknown key voids the WHOLE output
     if ("severity" in rec && !FINDING_SEVERITIES.has(rec.severity as string)) return false; // invalid enum voids
     if ("kind" in rec && !FINDING_KIND_SET.has(rec.kind as string)) return false; // invalid enum voids
+    if ("owner" in rec && !FINDING_OWNER_SET.has(rec.owner as string)) return false; // invalid enum voids (#865)
     if ("path" in rec && (typeof rec.path !== "string" || rec.path.length === 0)) return false;
     if (seen.has(f.id)) return false; // duplicate finding id
     seen.add(f.id);

@@ -397,20 +397,25 @@ Before ending a supervision session:
    4. **Remove `needs-human`**, if it was applied for this reason.
 3. **Tier-C probe record.** When you personally run a tier-C human-witnessed probe
    (`docs/security.md`'s `ac-evidence-tiers`), the record only reaches gate② if it lands
-   in the issue **body** — a comment is an operator inbox item, not evidence
-   (`docs/REVIEW-DOCTRINE.md`'s tier-C doctrine), and gate② never reads one. Same
-   record/cursor sub-steps as the owner-ruling recovery ritual above (steps 1-3): fold the
-   record into the body, and if you also posted it — or anything else — as a comment,
-   advance the adjudication cursor past it in that SAME body edit. That edit does not
-   walk straight into a rebaseline: it is a body drift the engine fails closed on, exactly
-   like any other. On this lane's next drive attempt, `checkAcDriftBeforeDrive`
-   (`engine/src/loop/conductor.ts`) detects the drift, applies `needs-human`, and marks
-   the row rebaseline-eligible — expect that label, don't treat its absence as "nothing
-   happened." Review the new body, then remove `needs-human` (ritual step 4) to authorize
-   GATED RECLAIM, which is what actually rebaselines and re-snapshots the AC authority
-   ahead of the next `evaluate()`. Never post the probe record as a comment only: it stays
-   invisible to gate②, the criterion stays `cannot-confirm`, and that gap is the
-   operator's, not the producer's.
+   in the issue **body** — a comment is an operator inbox item, not evidence, and gate②
+   never reads one. A rejected verdict whose blocking findings the reviewer classified
+   `owner: operator` (`docs/security/adjudication.md#the-finding-owner-axis`) — the
+   finding's entire unmet requirement is exactly this missing record — escalates to
+   `needs-human` directly, with no fix leg spent proving what you already know: only an
+   operator can post it. A mixed verdict still dispatches a fix leg for its
+   producer-fixable share first, same as before. Either way, once the label lands, the
+   recovery is the same: same record/cursor sub-steps as the owner-ruling recovery ritual
+   above (steps 1-3): fold the record into the body, and if you also posted it — or
+   anything else — as a comment, advance the adjudication cursor past it in that SAME
+   body edit. That edit does not walk straight into a rebaseline: it is a body drift the
+   engine fails closed on, exactly like any other. On this lane's next drive attempt,
+   `checkAcDriftBeforeDrive` (`engine/src/loop/conductor.ts`) detects the drift, applies
+   `needs-human`, and marks the row rebaseline-eligible — expect that label, don't treat
+   its absence as "nothing happened." Review the new body, then remove `needs-human`
+   (ritual step 4) to authorize GATED RECLAIM, which is what actually rebaselines and
+   re-snapshots the AC authority ahead of the next `evaluate()`. Never post the probe
+   record as a comment only: it stays invisible to gate②, the criterion stays
+   `cannot-confirm`, and that gap is the operator's, not the producer's.
 4. **Evidence posting.** Where a decision or intervention isn't self-evident from the
    event ledger alone (a `park clear --reason`, a manual label change, a judgment call
    the ledger can't express), post it as a comment on the issue/PR it concerns. GitHub is

@@ -37,11 +37,22 @@ export type FindingKind = (typeof FINDING_KINDS)[number];
  *  the honest cardinality — see design #402 §1's "Rejected alternatives"). */
 export type FindingSeverity = "blocking" | "advisory";
 
-/** Every key a finding may carry, post-#448. `agent-output.ts`'s `validateAgentFindings` replaces
- *  its old `Object.keys(f).length !== 2` count check with membership in this set — "the strict-shape
- *  guard is relaxed by allowlist, not by loosening" (design #402 §1): a key outside this set still
- *  voids the WHOLE output, exactly as an extra key did before this issue. */
-export const ALLOWED_FINDING_KEYS: ReadonlySet<string> = new Set(["id", "body", "severity", "kind", "path"]);
+/** #865 (design #1123 D4): WHO can act on a finding — `"producer"` (default, today-equivalent)
+ *  or `"operator"` (the finding's entire unmet requirement is evidence only an operator can post,
+ *  e.g. a tier-C human-witnessed probe record absent from the snapshotted issue body). Unlike
+ *  `severity`/`kind`, this axis is never lowered by the engine — it is SESSION-set, validated
+ *  closed-enum (`agent-output.ts::validateAgentFindings`), and read straight through by
+ *  `effectiveOwner` below; the fail-closed direction lives in the DEFAULT (absent -> `producer`),
+ *  not in an override table the way D3 overrides `severity`. */
+export const FINDING_OWNERS = ["producer", "operator"] as const;
+
+export type FindingOwner = (typeof FINDING_OWNERS)[number];
+
+/** Every key a finding may carry, post-#448/#865. `agent-output.ts`'s `validateAgentFindings`
+ *  replaces its old `Object.keys(f).length !== 2` count check with membership in this set — "the
+ *  strict-shape guard is relaxed by allowlist, not by loosening" (design #402 §1): a key outside
+ *  this set still voids the WHOLE output, exactly as an extra key did before this issue. */
+export const ALLOWED_FINDING_KEYS: ReadonlySet<string> = new Set(["id", "body", "severity", "kind", "path", "owner"]);
 
 /** D3's engine-side allowlist: `severity: "advisory"` is honored ONLY for these kinds. An
  *  unclassified finding (`kind` absent) is never advisory-eligible — see the fail-closed defaults
@@ -65,6 +76,9 @@ export interface ClassifiedFinding extends Finding {
    *  changed-path set; a path outside that set is dropped to `undefined` (`pathDropped: true`
    *  recorded instead), never trusted as a location the engine did not itself verify. */
   path?: string;
+  /** #865: WHO can act on this finding. Absent ⇒ `"producer"` (see `effectiveOwner`) — today-
+   *  equivalent, fail-closed default (a session that never emits `owner` changes nothing). */
+  owner?: FindingOwner;
   /** ENGINE-RECORDED (D3): `true` only when this finding requested `severity: "advisory"` but its
    *  `kind` was not in `ADVISORY_ELIGIBLE_KINDS`, so the engine forced it back to `"blocking"`.
    *  Absent on every finding the engine did not override — never `false`, so its mere presence is
@@ -103,6 +117,20 @@ export function effectiveSeverity(f: ClassifiedFinding): FindingSeverity {
   const requested = f.severity ?? "blocking";
   if (requested === "blocking") return "blocking";
   return f.kind !== undefined && ADVISORY_ELIGIBLE_KINDS.has(f.kind) ? "advisory" : "blocking";
+}
+
+/**
+ * #865 (design #1123 D4): the `owner` axis's single fail-closed default, the same SHAPE
+ * `effectiveSeverity` above takes for its own axis — absent ⇒ `"producer"` (today-equivalent: a
+ * classic-path finding, or an engine-agent finding from before this axis existed, is
+ * producer-owned exactly as it always was). Unlike `effectiveSeverity`, there is no override
+ * table here: `agent-output.ts::validateAgentFindings` already voids the WHOLE output on an
+ * out-of-enum `owner` value (the same closed-enum posture `severity`/`kind` get), so by the time
+ * a `ClassifiedFinding` reaches this function `owner` is guaranteed to be either absent or a
+ * valid `FindingOwner` member — this is a plain default, not a validation.
+ */
+export function effectiveOwner(f: ClassifiedFinding): FindingOwner {
+  return f.owner ?? "producer";
 }
 
 /**
