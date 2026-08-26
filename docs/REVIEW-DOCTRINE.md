@@ -31,9 +31,9 @@
 Two kinds of content: technical invariants this repo's review history has already flagged more
 than once, and doctrine for how the loop should treat review findings in general.
 
-**Carrier split (#434).** This file governs the engine reviewer; external-bot discipline is in
-[`AGENTS.md`](../AGENTS.md), and per-PR context is in its review-request verification plan.
-Keep each rule in one carrier.
+**Carrier split.** This is the repository's review doctrine. Hosted-bot round discipline
+lives in the bot's instruction file — see
+[Hosted-bot review guidelines](guide/configuration.md#hosted-bot-review-guidelines).
 
 ## Technical invariants
 

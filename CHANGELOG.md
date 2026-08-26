@@ -25,6 +25,9 @@ All notable changes to sapwood are documented here. Format:
   for k in data/worker-deploy-key*; do [ -e "$k" ] && mv "$k" .sapwood/keys/; done
   # sapwood.config.yaml: worker.deployKeyPath → .sapwood/keys/worker-deploy-key[-host]
   ```
+- Removed the repository's root `AGENTS.md`; the hosted-bot review-round discipline it carried
+  is now documented as a snippet for a target repository's own instruction file (configuration
+  guide → Hosted-bot review guidelines).
 
 ### Added
 - Bare `sapwood` npm package, including the packaged dashboard; post-publish dashboard canary
