@@ -12,6 +12,8 @@ target repository* — the repo whose backlog sapwood works — not a sapwood
 contributor; keep its content operator-facing (commands, config, the one rule)
 and its behavioral claims in sync with `engine/src/cli.ts`.
 
+`.claude-plugin/skills/` ships `sapwood-event-glossary` — generated from the event-kind, park-source, and escalation-bucket registries/glossaries and never hand-edited — and `sapwood-supervision`. Claude Code exposes each skill's description ambiently and loads its body on invocation. These are target-repository-facing plugin assets, so the audience and issue-reference rules in [11 — Writing for audiences](11-writing-for-audiences.md) apply.
+
 ## Slash commands (`commands/`)
 
 Each `commands/*.md` file defines one slash command as frontmatter

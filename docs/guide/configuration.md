@@ -87,6 +87,9 @@ cache/review/trees
 cache/generated/role-skills   ← per-round hash dirs, each with a .stage-* sibling while materializing
 ```
 
+For a failed run, follow [03 — Debugging a failed run](../dev-guide/03-running.md#debugging-a-failed-run) in evidence order.
+For state-file meanings and unattended-run evidence, see [Reading engine state at a glance](troubleshooting.md#reading-engine-state-at-a-glance) and [Where to look after an unattended run](troubleshooting.md#where-to-look-after-an-unattended-run).
+
 **Two classes.** **State** is everything directly under `.sapwood/`: back it up, and never
 delete it while sapwood is running. SQLite worker rows are the recovery truth; the GitHub board
 is only a management view and sapwood deliberately never rebuilds local state from it.

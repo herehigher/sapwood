@@ -67,3 +67,4 @@ skim it if a term below reads opaque.
 | Change GitHub integration | 05 (forge adapter, proxy) → 08 |
 | Touch durable state / recovery | 06 → 08 |
 | Change a slash command or prompt | 09 |
+| Debug a failed run or read `.sapwood/` output | 03 ("Debugging a failed run") → [Troubleshooting — Reading engine state at a glance](../guide/troubleshooting.md#reading-engine-state-at-a-glance) → 06 |
