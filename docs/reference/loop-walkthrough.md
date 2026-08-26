@@ -220,10 +220,15 @@ the matching vocabulary.
 
 Board Status transitions each have **exactly one owner**, and ownership is
 structural, not conventional: peripheral roles carry no engine-granted `gh`
-capability at all, while workers have a limited `Bash(gh *)` grant whose deny
-list (`gh pr merge`, `gh pr ready`, `gh pr review`, `gh release`, `gh issue
-edit`, `gh label`, `gh project`) plus the guard hook block every governance
-write, so every Status write can only leave through the engine's
+capability at all; the normal worker profile pairs a `Bash(gh *)` grant with
+a deny list (`gh pr merge`, `gh pr ready`, `gh pr review --approve`/
+`--request-changes`, `gh release`, governance-flagged `gh issue edit`, `gh
+label`, `gh project`), and the guard hook independently blocks those same
+verbs plus `gh graphql` mutations at the argv layer. Neither layer is
+absolute — an inherited ambient MCP server (the guard's matcher never covers
+`mcp__` tools) or a host with `allowManagedPermissionRulesOnly` set can
+bypass it entirely, an accepted blind spot (`docs/security.md`) — so every
+Status write a session CAN reach leaves only through the engine's
 `setBoardStatus`. The board is the management-side *view*; the runtime truth
 source is SQLite + sentinels (§6) — the engine writes Status but never reads
 it back for recovery (the one read is the Ready lane: the human authorization

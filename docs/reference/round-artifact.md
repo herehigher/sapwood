@@ -38,7 +38,7 @@ round-view data contract: any change to it is a change to that contract and must
 | `escalations` | object | `needsHuman` (deduped issue numbers, first-seen order — drive gate② + gate⓪ plan-review), `ceiling`, `driveNoPr` counts. |
 | `egressSuspects` | `{worker, issue, executable, snippet, target?}[]` | Probable-egress command detections flagged during worker sessions; `target: "loopback"` is present only on a provably loopback-only hit, absent otherwise. |
 | `handoffs` | int | Soft-budget graceful handoffs. |
-| `degradedPhases` | `{phase, outcome, session}[]` | Every peripheral degradation this round (po-align/po-triage/po-pool/architect/harvest/retro). |
+| `degradedPhases` | `{phase, outcome, session}[]` | Every peripheral degradation this round (po-align/po-triage/po-pool/architect/plan_review/harvest/retro). |
 | `roundStops` | `{name, detail}[]` | Round-level stop-condition hits. |
 | `retro` | object | The retro proposal outcome: `opened {pr, branch}` or `degraded {branch, title, reason}` or neither. |
 | `align` | object \| null | The PO/aligning phase's own summary: `created {issue, title, hasPlan}[]` + `triaged {issue, drafted}[]`. Null when no summary was recorded (degraded align). |
