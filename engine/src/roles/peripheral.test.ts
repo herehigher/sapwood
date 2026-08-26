@@ -547,7 +547,7 @@ exit 0
  *  maybeRetainWorktree's real pure-filesystem resolution path runs, not a stubbed-out shortcut.
  *
  *  Both shapes are decided by ORDERING INSIDE THIS SCRIPT, never by racing the engine, and
- *  neither depends on filesystem timestamp granularity (docs/REVIEW-DOCTRINE.md, "No
+ *  neither depends on filesystem timestamp granularity (engine/prompts/doctrine-core.md, "No
  *  timing-dependent assertions"):
  *   - `dirty: true`  — write the index ("checkout"), THEN edit a file. The scan's comparison is
  *     inclusive (`>=`), so the edit reads dirty even if both land in the same timestamp tick.

@@ -75,9 +75,13 @@ existing suite:
   passthrough bound) say so in a comment at the site. A test that can hang on
   regression carries a hang guard with a named failure message
   (`materializer.test.ts`'s `withHangGuard`, `watchdog.test.ts`'s `waitFor`).
-  This class has reddened `main` three times — see
-  [REVIEW-DOCTRINE.md](../REVIEW-DOCTRINE.md#technical-invariants), "No
-  timing-dependent assertions", for the worked examples.
+  This class has reddened `main` before — see
+  [`engine/prompts/doctrine-core.md`](../../engine/prompts/doctrine-core.md#technical-invariants),
+  "No timing-dependent assertions", for the rule. Worked examples from this repo's own history:
+  a fake, fast, deterministic, selectively self-terminating collaborator for a load-bearing race
+  (PR #418's fake-git shim); and a documented backstop widened only with an explicit
+  measured-cost < margin < guard-ceiling justification (`REAL_OP_TIMEOUT_MS`, widened
+  500ms→1000ms, then 1000ms→3000ms, #403).
 
 ## CI
 

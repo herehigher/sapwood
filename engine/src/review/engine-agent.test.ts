@@ -166,6 +166,10 @@ function mkDeps(opts: {
         },
         getWorkerActualModels: () => opts.workerActualModels ?? [WORKER_MODEL],
         cfg: opts.cfg ?? mkCfg(),
+        // #1123 (PR-2): doctrine is a REQUIRED deps field now (the framework core is always
+        // present in the composed text) — a fixture value distinct from any real prose so a
+        // rendered-prompt assertion can never mistake it for AC/diff content.
+        doctrine: "fixture doctrine text",
         now: () => new Date("2026-07-22T00:00:00Z"),
         onReviewArtifact: (headOid, artifact) => {
           artifactCalls.push({ headOid, artifact });

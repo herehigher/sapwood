@@ -55,7 +55,6 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { SapwoodConfig } from "../config/config.js";
 import { resolveRoundDirective } from "../config/directive.js";
-import { NO_DOCTRINE } from "../config/doctrine.js";
 import type { IForge, Issue } from "../forge/forge.js";
 import { escalateToNeedsHuman } from "../loop/escalation-writer.js";
 import { type PeripheralStub, removeRoundPoolLabel } from "../loop/round.js";
@@ -110,16 +109,18 @@ export interface ArchitectDeps {
    *  below — never an empty substitution. This module itself fetches nothing to produce this
    *  string; it only renders whatever the caller hands it (or the placeholder). */
   lastMerged?: string;
-  /** #167: this repo's review-doctrine text (technical invariants + adjudication doctrine) —
-   *  the THIRD engine-assembled block, threaded the same way `lastMerged` above is: a real
-   *  caller (round-defaults.ts's createDefaultPeripherals) loads it at invocation time via
-   *  doctrine.ts's `loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars)` and assigns it before
-   *  calling this stub; a caller that omits it (every direct unit test in this file, and any
-   *  consumer that hasn't wired round-defaults.ts) gets doctrine.ts's own `NO_DOCTRINE`
-   *  placeholder below — never an empty substitution. Unlike `lastMerged`, this text has no
-   *  round-scoping of its own (the doctrine file doesn't vary per round); it's still threaded
-   *  through `ArchitectDeps` rather than loaded directly here so the load logic lives in exactly
-   *  one place (doctrine.ts), shared with worker.ts's own injection, never duplicated. */
+  /** The composed review doctrine (framework core + this repo's residue, `doctrine.ts`'s
+   *  `loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars)`) — the THIRD engine-assembled
+   *  block, threaded the same way `lastMerged` above is: production
+   *  (`round-defaults.ts::createDefaultPeripherals`) ALWAYS assigns `deps.doctrine` per
+   *  invocation before calling this stub — the fallback below is never a reachable runtime
+   *  "absent doctrine" state, only a fixture seam. Kept optional here (not required) solely
+   *  because 59 direct unit tests in this file, and any consumer that hasn't wired
+   *  round-defaults.ts, construct `ArchitectDeps` without it; those get `DOCTRINE_UNWIRED`
+   *  below, never an empty substitution. Unlike `lastMerged`, this text has no round-scoping of
+   *  its own (the doctrine file doesn't vary per round); it's still threaded through
+   *  `ArchitectDeps` rather than loaded directly here so the load logic lives in exactly one
+   *  place (doctrine.ts), shared with worker.ts's own injection, never duplicated. */
   doctrine?: string;
   /** #213: this round's ROUND-POOL members (#212's cfg.labels.roundPool-labeled issues) — the
    *  batch-review target for the per-issue verdict mechanism (pass/drop/needs-human), a SEPARATE
@@ -168,9 +169,17 @@ const NO_ALIGNED_GOALS_YET =
   "(No PO/goal-alignment peripheral output is available yet for this round. Proceed " +
   "using only the locked constraints/architecture excerpt and this round's candidate issues below.)";
 
+/** Fixture-only fallback for `deps.doctrine` (#1123 PR-2, replacing `doctrine.ts`'s now-retired
+ *  whole-composition absent-doctrine placeholder) — production
+ *  (`round-defaults.ts::createDefaultPeripherals`) always assigns
+ *  `deps.doctrine` per invocation, so this string is never a reachable runtime state; it exists
+ *  only so a test/consumer that constructs `ArchitectDeps` without wiring round-defaults.ts still
+ *  renders something explicit rather than an empty substitution. */
+export const DOCTRINE_UNWIRED = "(review doctrine not wired — fixture only)";
+
 /** #213: the explicit placeholder for an empty round pool (deps.poolIssues omitted, or the round
  *  genuinely selected zero issues into its pool) — never an empty substitution. Same "explicit
- *  placeholder, never blank" convention as NO_ALIGNED_GOALS_YET/NO_PRIOR_ROUND_YET/NO_DOCTRINE. */
+ *  placeholder, never blank" convention as NO_ALIGNED_GOALS_YET/NO_PRIOR_ROUND_YET/DOCTRINE_UNWIRED. */
 export const NO_POOL_MEMBERS = "(This round's pool is empty — there is nothing to batch-review this pass.)";
 
 /** #213: the explicit placeholder for zero drift-review candidates — reachable for the first
@@ -737,7 +746,7 @@ export function createArchitectStub(deps: ArchitectDeps): PeripheralStub {
       const poolDigestTruncated = poolIssues.length > 0 && poolIssuesJoined.length > deps.cfg.roles.architect.poolDigestMaxChars;
       const lastMergedText = deps.lastMerged ?? NO_PRIOR_ROUND_YET;
       const alignedGoalsText = deps.alignedGoals ?? NO_ALIGNED_GOALS_YET;
-      const doctrineText = deps.doctrine ?? NO_DOCTRINE;
+      const doctrineText = deps.doctrine ?? DOCTRINE_UNWIRED;
       const candidatesSummaryText = candidates.length === 0 ? NO_CANDIDATES : candidates.map(formatCandidate).join("\n\n---\n\n");
 
       const prompt = renderArchitectPrompt(template, {

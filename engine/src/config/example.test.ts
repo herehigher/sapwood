@@ -1,7 +1,7 @@
 // #984: sapwood.config.example.yaml is the ONLY reference a fresh operator gets (init copies it
 // verbatim) — these tests are the cross-artifact oracle that keeps it complete and in sync with
-// the schema, per docs/REVIEW-DOCTRINE.md's doc-content test partition (an oracle comparing two
-// artifacts, never a hash snapshot or a single-file prose pin).
+// the schema, per engine/prompts/doctrine-core.md's PROSE-PIN rule (doc-content test partition):
+// an oracle comparing two artifacts, never a hash snapshot or a single-file prose pin.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";

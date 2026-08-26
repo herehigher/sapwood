@@ -197,7 +197,7 @@ Concurrency and dispatch shape.
 | `max` | `3` | Max concurrent workers (occupied lanes). |
 | `roundDispatchCap` | `2` | Max new dispatches in a single round/tick (conservative by design). |
 | `reserveCap` | `1` | **Accepted, not yet wired** — parsed and validated, but no engine code reads it yet. |
-| `prFixCap` | `4` | A **cost ceiling**, not a quality ceiling — the hard cap `workers.fix_rounds` is checked against once the `FIXABLE` gate decides whether a further fix leg is warranted. The **quality stop** is `review/convergence.ts`'s progress classifier: a lane whose findings stop shrinking — the same finding recurring on code the fix leg just touched (`recurrence`), the count staying flat for two consecutive rounds (`flat`), or a new problem appearing inside the fix leg's own diff (`marginal-complexity`) — escalates to `needs-human` (`review-non-convergent:<signal>`) *before* this cap is ever consulted, citing the doctrine's design-re-entry principle (`docs/REVIEW-DOCTRINE.md`). `prFixCap` is reached only by a lane still measurably converging by that signal; raising it no longer trades quality for rounds, only cost for rounds. `0` still folds straight to `needs-human`, unchanged. **A cap above `0` runs the fix loop by default:** the loop is production-attached whenever [`proxy.enabled`](#proxy) is `true`, which it now is unless an operator explicitly opts out. Only an explicit `proxy.enabled: false` degrades every `FIXABLE` gate to a `fix-loop-unwired:<reason>` needs-human escalation — **announced once at startup** in that opt-out case (a `[sapwood:startup]` log line naming the opt-out, plus one durable `fix-loop-unattached` event) instead of only becoming visible on the first PR it escalates. Setting `prFixCap: 0` silences the announcement by making the fold explicit. |
+| `prFixCap` | `4` | A **cost ceiling**, not a quality ceiling — the hard cap `workers.fix_rounds` is checked against once the `FIXABLE` gate decides whether a further fix leg is warranted. The **quality stop** is `review/convergence.ts`'s progress classifier: a lane whose findings stop shrinking — the same finding recurring on code the fix leg just touched (`recurrence`), the count staying flat for two consecutive rounds (`flat`), or a new problem appearing inside the fix leg's own diff (`marginal-complexity`) — escalates to `needs-human` (`review-non-convergent:<signal>`) *before* this cap is ever consulted, citing the framework core's design-re-entry principle (`engine/prompts/doctrine-core.md`, "How the loop treats review findings"). `prFixCap` is reached only by a lane still measurably converging by that signal; raising it no longer trades quality for rounds, only cost for rounds. `0` still folds straight to `needs-human`, unchanged. **A cap above `0` runs the fix loop by default:** the loop is production-attached whenever [`proxy.enabled`](#proxy) is `true`, which it now is unless an operator explicitly opts out. Only an explicit `proxy.enabled: false` degrades every `FIXABLE` gate to a `fix-loop-unwired:<reason>` needs-human escalation — **announced once at startup** in that opt-out case (a `[sapwood:startup]` log line naming the opt-out, plus one durable `fix-loop-unattached` event) instead of only becoming visible on the first PR it escalates. Setting `prFixCap: 0` silences the announcement by making the fold explicit. |
 | `frictionMin` | `0` | **Accepted, not yet wired** — no dispatch rate-limit is enforced from it yet. |
 | `gatedReentryCap` | `2` | Bounds the **GATED RECLAIM** phase: a gate②-escalated PR that a human clears of **every** `escalation.humanLabels` entry (default `sapwood:needs-human` *and* `sapwood:blocked` — the same hold set dispatch honors) is reclaimed back to `driving` and re-driven through the existing gate①/gate② + merge path — no new worker, same PR/branch. Each reclaim counts as one attempt; once this many have re-escalated, a further label removal is rejected (re-applies `labels.needsHuman` + a "cap reached" comment) and the lane is never retried again — merge it by hand. `0` disables automatic reentry outright. **Which object to clear:** the one the escalation was written on — "the label lives where the escalation was born", so a PR-caused escalation is cleared on the **PR** and an issue-caused one on the **issue**, never both. The engine records the carrier it used per lane, so a lane escalated before this split still releases on its issue. For a PR-carried lane the same read also honors `escalation.holdLabels` on the PR: a hold there SKIPs reclaim entirely and costs no attempt. |
 
@@ -455,24 +455,24 @@ basis.
 
 ## `doctrine`
 
-The loop's **repo-level review doctrine** — durable review knowledge (recurring technical
-invariants + adjudication doctrine for how findings get treated) carried forward across rounds
-instead of living only in a human/conductor's memory. Prose for LLM readers, deliberately never
-a lint/DSL. Injected into the worker dispatch brief (`{{doctrine}}`), the architect pass
-(`{{round.doctrine}}`), and the gate② review-trigger comment (`different-model-codex` mode,
-appended after the issue's verification plan so the reviewing bot's attention is aimed at
-historical failure zones on top of this PR's own acceptance criteria) — and cited by name in
-the gated-PR-reentry-cap escalation comment when automatic fix attempts are exhausted. When no
-doctrine file is adopted, the two **internal** prompt surfaces (worker brief, architect pass)
-render an explicit "no review doctrine available" placeholder — never a silent empty
-substitution — while the **public** gate② trigger comment (posted on the PR) instead appends
-nothing at all, byte-identical to before doctrine existed: the internal placeholder text never
-appears in a public PR comment.
+The loop's **review doctrine** — a two-carrier composition. A generic, release-controlled core
+(`engine/prompts/doctrine-core.md`, shipped with the framework, not configurable here — no
+override key) is prepended to whatever this repo's own **residue** file holds; `doctrine.file`
+below configures only the residue half. Prose for LLM readers, deliberately never a lint/DSL.
+The composed text is injected into four engine-composed surfaces: the worker dispatch brief
+(`{{doctrine}}`), the fix leg, the architect pass (`{{round.doctrine}}`), and the engine-agent
+reviewer — and cited by an anchored pointer into the core in the gated-PR-reentry-cap escalation
+comment when automatic fix attempts are exhausted. **The core is always present** — there is no
+"absent doctrine" state on any of those four surfaces. When no residue file is adopted, the repo
+half degrades to an explicit "this repository has not adopted a repo-level review doctrine file"
+sentence — never a silent empty substitution. **The hosted gate② review-trigger comment carries
+neither half** (owner ruling 2026-08-26): a hosted bot's standing review guidance belongs in its
+own instruction file instead — see [Hosted-bot review guidelines](#hosted-bot-review-guidelines).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `file` | `docs/REVIEW-DOCTRINE.md` | Path to the project's review-doctrine file. The same relative-path resolution as `worker.promptFile`/`goal.file`: a relative path resolves against **the config file's own directory**, not the CLI's cwd. `sapwood init` scaffolds a starter template here (technical invariants + adjudication doctrine, seeded from the loop's own distilled review history) **iff the resolved path is missing**; it never overwrites an existing file. **Unlike** `worker.promptFile`, a missing file is not an error — it's a legal, common state (a repo that hasn't adopted the convention, or has opted out): the prompts render an explicit "no review doctrine available" placeholder, behavior otherwise unchanged. |
-| `maxChars` | `20000` | Deterministic truncation cap, in characters, on the doctrine text substituted into the prompts — same marked-cut-never-silent-drop contract as `round.directiveMaxChars` / `roles.architect.lastMergedMaxChars` / `roles.retro.digestMaxChars`. |
+| `file` | `docs/REVIEW-DOCTRINE.md` | Path to the project's own review-doctrine RESIDUE file — the repo-specific half only; the generic core is not configurable here. The same relative-path resolution as `worker.promptFile`/`goal.file`: a relative path resolves against **the config file's own directory**, not the CLI's cwd. `sapwood init` scaffolds a starter template here (technical invariants distilled from this repo's own review history; the core's own generic rules are never copied into it) **iff the resolved path is missing**; it never overwrites an existing file. **Unlike** `worker.promptFile`, a missing file is not an error — it's a legal, common state (a repo that hasn't adopted the convention, or has opted out): the composed text still carries the core, plus an explicit "no repo doctrine adopted" placeholder for the residue half. |
+| `maxChars` | `20000` | Deterministic truncation cap, in characters, on THIS REPO's own residue text substituted into the prompts — same marked-cut-never-silent-drop contract as `round.directiveMaxChars` / `roles.architect.lastMergedMaxChars` / `roles.retro.digestMaxChars`. The framework core is release-controlled and fixed-size by construction (bounded by its own CI ceiling test, never by this key). |
 
 ## Language customization
 
@@ -680,11 +680,12 @@ engine-agent's structured session output.
 
 ### Hosted-bot review guidelines
 
-The engine posts each review request with the issue's verification plan, the repository's review
-doctrine (`doctrine.file`, if adopted), the diff scope (the full PR, or the delta since the last
-reviewed head), and the head commit the verdict must bind to. Standing review-round discipline for
-a hosted bot is **not** carried in that comment: a hosted bot reads its own instruction file, and
-comment-carried instructions are honored best-effort at most. For Codex, that file is the
+The engine posts each review request with the issue's verification plan, the diff scope (the full
+PR, or the delta since the last reviewed head), and the head commit the verdict must bind to. It
+carries **no doctrine text at all** (owner ruling 2026-08-26): a hosted bot must not be re-sent
+the same doctrine every round, and comment-carried instructions are honored best-effort at most —
+its standing review-round discipline, including any repository-specific review knowledge, belongs
+entirely in its own instruction file instead. For Codex, that file is the
 repository's root `AGENTS.md` under a `## Review guidelines` heading. A starting set that keeps
 repeated reviews additive instead of circular:
 
@@ -699,8 +700,9 @@ repeated reviews additive instead of circular:
 A hosted bot reads the PR head's copy of its instruction file, so a PR could rewrite the rules for
 its own review; instruction files such as `AGENTS.md` are on `escalation.instructionPaths` by
 default, so such a PR is labelled human-merge-only instead of reaching autonomous merge.
-Repository-specific review knowledge belongs in `doctrine.file`, which reaches the bot through the
-review-request comment.
+Repository-specific review knowledge for a hosted bot goes into the bot's own instruction file
+(above), never through the comment — `doctrine.file` feeds the internal surfaces (worker brief,
+fix leg, architect pass, engine-agent reviewer) only; see [`doctrine`](#doctrine).
 
 ## `merge`
 

@@ -10,7 +10,8 @@
 //   6. the three honest-recording event kinds are REGISTERED in the copy map that owns the
 //      engine's event-kind inventory (docs/reference/frontend-design.md §7 — "every engine PR that adds an
 //      event kind must extend this map").
-// Fake executors/runners only: no subprocess, no timers (docs/REVIEW-DOCTRINE.md).
+// Fake executors/runners only: no subprocess, no timers (engine/prompts/doctrine-core.md's
+// no-timing-dependent-assertions rule).
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -151,6 +152,9 @@ function build(opts: {
     getAcSnapshot: () => SNAPSHOT,
     getWorkerActualModels: () => opts.workerActualModels ?? [WORKER_MODEL],
     cfg: opts.cfg,
+    // #1123 (PR-2): doctrine is a REQUIRED deps field now (the framework core is always present
+    // in the composed text).
+    doctrine: "fixture doctrine text",
     now: () => new Date("2026-07-22T00:00:00Z"),
     onReviewArtifact: (headOid, artifact) => artifacts.push({ headOid, artifact }),
   });

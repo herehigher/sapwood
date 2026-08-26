@@ -260,7 +260,8 @@ function formatOutstandingPRRow(row: OutstandingRetroPR): string {
 // backlog only through retro's existing gate②-reviewed PR path. An engine threshold firing at
 // `count === 3` would be a backlog spam generator with no adjudication, and would be wrong
 // precisely in the interesting cases: recognizing "the same class" requires reading design
-// intent, which is exactly why docs/REVIEW-DOCTRINE.md is deliberately prose and not a lint/DSL.
+// intent, which is exactly why review doctrine (engine/prompts/doctrine-core.md +
+// docs/REVIEW-DOCTRINE.md) is deliberately prose and not a lint/DSL.
 //
 // CROSS-ROUND, not just cross-PR. Everything else in this module is bounded by ONE round's
 // `start_event_id`; the #191/#170/#172 -> M9-wave shape recurs ACROSS rounds, so this read walks

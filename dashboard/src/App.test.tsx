@@ -3185,7 +3185,7 @@ test("#895: through the real ?demo/replay production entry point, clicking the r
 // ── #861 phase inspector ─────────────────────────────────────────────────────────────────────
 //
 // Content-correctness assertions (AC2–AC6) go through `appContent` — this repo's own WIRING
-// doctrine names it directly as a real production entry point (`review/REVIEW-DOCTRINE.md`'s
+// doctrine names it directly as a real production entry point (`docs/REVIEW-DOCTRINE.md`'s
 // "App/appContent" example), the same treatment `#803`/`#766` use above for hero/cost-strip
 // content. Click MECHANICS (AC1, AC7) go through a real mounted DOM (`mountSettledApp`,
 // `registerRealDom()` above) — `renderToStaticMarkup` strips event handlers, so only a real DOM

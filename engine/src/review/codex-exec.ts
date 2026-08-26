@@ -521,7 +521,7 @@ export function buildCodexExecArgs(opts: { treeDir: string; model: string; effor
 
 /** Everything the executor needs from its composition root. Every I/O seam is injectable so the
  *  whole class is testable against a fake spawn and a fixture CODEX_HOME — no real session, no real
- *  timers (docs/REVIEW-DOCTRINE.md: no timing-dependent assertions). */
+ *  timers (engine/prompts/doctrine-core.md: no timing-dependent assertions). */
 export interface CodexExecExecutorDeps {
   /** Directory for this runner's own artifacts (prompt, captured stream, final message). */
   stateDir: string;

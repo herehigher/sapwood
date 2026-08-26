@@ -34,3 +34,4 @@ Send doc changes through the same review gate as code.
 - Build/test/lint commands, including running a focused test subset: `docs/dev-guide/04-commands.md`.
 - Codebase orientation — layout, modules, vocabulary, and task-based reading paths: start at `docs/dev-guide/README.md`; follow its links, and do not read the guide wholesale.
 - Failed-run debugging and `.sapwood/` output: `docs/dev-guide/03-running.md`, "Debugging a failed run".
+- What reviewers hold a PR to: `engine/prompts/doctrine-core.md` (generic) + `docs/REVIEW-DOCTRINE.md` (this repo) — apply to interactive review work too.

@@ -475,7 +475,7 @@ test("real DOM: EMERGENCY STOP is keyboard-operable — holding Enter/Space arms
 
 // #895 item 6: below the app's 720px stacking floor, `.app-header`'s flex row squeezed `.controls`
 // narrower than its buttons' own natural width — with no wrap allowed, EMERGENCY STOP's own text
-// wrapped onto two lines INSIDE the button instead. STYLE doctrine (docs/REVIEW-DOCTRINE.md): a
+// wrapped onto two lines INSIDE the button instead. STYLE doctrine (engine/prompts/doctrine-core.md): a
 // computed-style AC needs `registerRealDom()` plus a real `getComputedStyle` read against the
 // full production cascade at a real simulated viewport, never a regex read of the source text.
 test("#895 item 6: at the 720px floor, the operations fieldset wraps as a group (flex-wrap: wrap) instead of squeezing EMERGENCY STOP's own text", () => {

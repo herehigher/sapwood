@@ -28,6 +28,15 @@ All notable changes to sapwood are documented here. Format:
 - Removed the repository's root `AGENTS.md`; the hosted-bot review-round discipline it carried
   is now documented as a snippet for a target repository's own instruction file (configuration
   guide → Hosted-bot review guidelines).
+- Review doctrine now ships as two carriers: `engine/prompts/doctrine-core.md` (generic,
+  framework-owned, upgraded by every release) is injected ahead of `doctrine.file` (now genuinely
+  this repo's own residue); `loadDoctrine` returns the concatenation, always present on every
+  engine-composed surface. The hosted gate② review-trigger comment no longer carries any doctrine
+  text — a hosted bot's standing review guidance belongs in its own instruction file instead.
+  **Upgrading:** if you scaffolded `doctrine.file` from `engine/prompts/doctrine-template.md`
+  before this change, delete its `## Adjudication doctrine` section (principles 1–4) and its
+  "Authoritative signals over inferred text" bullet — both now ship in the framework core and
+  would otherwise be redundant.
 
 ### Added
 - Bare `sapwood` npm package, including the packaged dashboard; post-publish dashboard canary

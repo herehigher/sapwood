@@ -220,6 +220,10 @@ test("packed engine tarball is fresh, map-free, and runnable from a clean checko
       "installed package is missing the guard hook — a worker session's PreToolUse guard would silently not run",
     );
     assert.ok(existsSync(join(installedRoot, "prompts", "worker.md")), "installed package is missing a shipped role prompt");
+    assert.ok(
+      existsSync(join(installedRoot, "prompts", "doctrine-core.md")),
+      "installed package is missing the shipped generic review-doctrine core (#1123 PR-2)",
+    );
 
     const installedExample = join(installedRoot, "sapwood.config.example.yaml");
     assert.equal(readFileSync(installedExample, "utf8"), readFileSync(join(checkoutDir, "sapwood.config.example.yaml"), "utf8"));

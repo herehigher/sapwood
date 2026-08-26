@@ -1,4 +1,5 @@
-// Doc-content test partition (docs/REVIEW-DOCTRINE.md): two oracles for the "one home" rule —
+// Doc-content test partition (engine/prompts/doctrine-core.md's PROSE-PIN rule): two oracles for
+// the "one home" rule —
 // docs/guide/configuration.md's "The `.sapwood/` runtime directory" section describes the
 // engine's runtime layout, and nowhere else does.
 //

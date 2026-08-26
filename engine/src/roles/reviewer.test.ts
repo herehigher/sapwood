@@ -2,13 +2,11 @@
 // deriveReviewAction) + the pluggable Reviewer implementations' verdictFromData (pure) and
 // triggerReview (against a fake IForge — no real gh calls anywhere in this file).
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ConfigSchema } from "../config/config.js";
-import { NO_DOCTRINE } from "../config/doctrine.js";
 import type { IForge, PRReview, PRReviewData, ReviewThreadSpan } from "../forge/forge.js";
 import { filterTrustedAuthors, findingDigest } from "../forge/forge.js";
 import { normalizeLogin } from "../forge/trust.js";
@@ -255,7 +253,7 @@ test("buildReviewTriggerComment: null plan -> an explicit fallback sentence, nev
 });
 
 test("buildReviewTriggerComment: first trigger requests the full PR diff and an exact reviewed-head OID statement", () => {
-  const body = buildReviewTriggerComment(46, "## Verification\nrun tests", "@codex review", undefined, {
+  const body = buildReviewTriggerComment(46, "## Verification\nrun tests", "@codex review", {
     head: "H1",
     baseHead: null,
   });
@@ -264,7 +262,7 @@ test("buildReviewTriggerComment: first trigger requests the full PR diff and an 
 });
 
 test("buildReviewTriggerComment: a moved head requests only the X..Y delta but binds the verdict to Y", () => {
-  const body = buildReviewTriggerComment(46, "## Verification\nrun tests", "@codex review", undefined, {
+  const body = buildReviewTriggerComment(46, "## Verification\nrun tests", "@codex review", {
     head: "H2",
     baseHead: "H1",
   });
@@ -287,43 +285,12 @@ test("buildReviewTriggerComment: a custom triggerCommand replaces the default `@
   );
 });
 
-// #167: doctrine appended after the verification plan, aimed at pointing the reviewer's
-// attention at historical failure zones.
-test("buildReviewTriggerComment: doctrine present -> appended AFTER the verification plan", () => {
-  const body = buildReviewTriggerComment(
-    46,
-    "## Verification\nrun the test suite",
-    "@codex review",
-    "disabled-consumer rule: gate probes on whether the consumer is enabled.",
-  );
-  assert.match(body, /^@codex review/);
-  assert.match(body, /run the test suite/);
-  assert.match(body, /disabled-consumer rule/);
-  // Order: plan text precedes the doctrine text.
-  assert.ok(body.indexOf("run the test suite") < body.indexOf("disabled-consumer rule"));
-});
-
-test("buildReviewTriggerComment: doctrine absent (undefined) -> comment is byte-for-byte identical to no-doctrine output, no placeholder text", () => {
-  const withoutDoctrineArg = buildReviewTriggerComment(46, "## Verification\nrun the test suite");
-  const withUndefinedDoctrine = buildReviewTriggerComment(46, "## Verification\nrun the test suite", "@codex review", undefined);
-  assert.equal(withUndefinedDoctrine, withoutDoctrineArg);
-  assert.doesNotMatch(withUndefinedDoctrine, /review doctrine/i);
-});
-
-test("buildReviewTriggerComment: doctrine null or empty string -> also appends nothing (a public PR comment must never carry the NO_DOCTRINE placeholder)", () => {
-  const base = buildReviewTriggerComment(46, "## Verification\nrun the test suite");
-  assert.equal(buildReviewTriggerComment(46, "## Verification\nrun the test suite", "@codex review", null), base);
-  assert.equal(buildReviewTriggerComment(46, "## Verification\nrun the test suite", "@codex review", ""), base);
-});
-
-// #177 review (Codex P2): the never-leaks invariant is structural, not just a caller convention
-// — the pure builder itself treats the NO_DOCTRINE placeholder like undefined, so even a caller
-// that forgets the construction-boundary mapping cannot leak it into a posted comment.
-test("buildReviewTriggerComment: the NO_DOCTRINE placeholder passed DIRECTLY is treated like undefined — byte-for-byte the no-doctrine comment", () => {
-  const base = buildReviewTriggerComment(46, "## Verification\nrun the test suite");
-  const withPlaceholder = buildReviewTriggerComment(46, "## Verification\nrun the test suite", "@codex review", NO_DOCTRINE);
-  assert.equal(withPlaceholder, base);
-  assert.doesNotMatch(withPlaceholder, /No review doctrine file is configured/i);
+// #1123 (PR-2): the hosted trigger comment carries no doctrine text at all — its own instruction
+// file is the standing channel instead (owner ruling 2026-08-26).
+test("buildReviewTriggerComment: never carries doctrine text, regardless of caller", () => {
+  const body = buildReviewTriggerComment(46, "## Verification\nrun the test suite");
+  assert.doesNotMatch(body, /review doctrine/i);
+  assert.doesNotMatch(body, /has not adopted a repo-level review doctrine file/i);
 });
 
 // ── Reviewer implementations ───────────────────────────────────────────────────────────────
@@ -892,63 +859,14 @@ test("makeReviewer: threads cfg.reviewer.triggerCommand into the built CodexRevi
   assert.match(calls[0]![1], /^\/review-please/);
 });
 
-// #167: CodexReviewer's own trigger comment carries the review doctrine, when constructed with one.
-test("CodexReviewer: a constructed doctrine is appended to the trigger comment, after the verification plan", async () => {
-  const calls: Array<[number, string]> = [];
-  const forge = {
-    addPRComment: async (pr: number, body: string) => void calls.push([pr, body]),
-    getIssueBody: async () => "## Verification\nrun the test suite",
-  } as unknown as IForge;
-  await new CodexReviewer([], "@codex review", "same-tick window rule: never a pre-tick scalar.").triggerReview(forge, 42, 46);
-  assert.match(calls[0]![1], /run the test suite/);
-  assert.match(calls[0]![1], /same-tick window rule/);
-  assert.ok(calls[0]![1].indexOf("run the test suite") < calls[0]![1].indexOf("same-tick window rule"));
-});
-
-test("CodexReviewer: no doctrine constructed -> trigger comment unchanged, no placeholder text ever appears", async () => {
-  const calls: Array<[number, string]> = [];
-  const forge = {
-    addPRComment: async (pr: number, body: string) => void calls.push([pr, body]),
-    getIssueBody: async () => "## Verification\nrun the test suite",
-  } as unknown as IForge;
-  await new CodexReviewer().triggerReview(forge, 42, 46);
-  assert.doesNotMatch(calls[0]![1], /review doctrine/i);
-  assert.doesNotMatch(calls[0]![1], /No review doctrine file is configured/i);
-});
-
-// #167: makeReviewer resolves cfg.doctrine the same way it resolves cfg.reviewer.triggerCommand
-// — loaded once at construction and threaded into the built CodexReviewer.
-test("makeReviewer: threads cfg.doctrine into the built CodexReviewer's trigger comment when a doctrine file is present", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-reviewer-doctrine-"));
-  try {
-    const path = join(dir, "REVIEW-DOCTRINE.md");
-    writeFileSync(path, "disabled-consumer rule: gate probes on consumer enablement.");
-    // #501: pin different-model-codex explicitly — reviewer.mode's own default is now
-    // engine-agent, and this test is specifically about the CodexReviewer construction path.
-    const cfg = ConfigSchema.parse({
-      board: { owner: "o", repo: "r", projectNumber: 1 },
-      reviewer: { mode: "different-model-codex" },
-      doctrine: { file: path },
-    });
-    const calls: Array<[number, string]> = [];
-    const forge = {
-      addPRComment: async (pr: number, body: string) => void calls.push([pr, body]),
-      getIssueBody: async () => "## Verification\nrun the test suite",
-    } as unknown as IForge;
-    await makeReviewer(cfg).triggerReview(forge, 42, 46);
-    assert.match(calls[0]![1], /run the test suite/);
-    assert.match(calls[0]![1], /disabled-consumer rule/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("makeReviewer: no doctrine file adopted -> the trigger comment is byte-for-byte identical to before #167, never the NO_DOCTRINE placeholder", async () => {
-  // #501: pin different-model-codex explicitly (reviewer.mode's own default is now engine-agent).
+// #1123 (PR-2): makeReviewer's built CodexReviewer never carries doctrine text — the hosted
+// trigger comment is byte-for-byte the pre-doctrine, pre-partition shape regardless of whether
+// this repo has adopted a doctrine.file.
+test("makeReviewer: the built CodexReviewer's trigger comment never carries doctrine text", async () => {
+  // #501: pin different-model-codex explicitly — reviewer.mode's own default is now engine-agent.
   const cfg = ConfigSchema.parse({
     board: { owner: "o", repo: "r", projectNumber: 1 },
     reviewer: { mode: "different-model-codex" },
-    doctrine: { file: "/nonexistent/REVIEW-DOCTRINE.md" },
   });
   const calls: Array<[number, string]> = [];
   const forge = {
@@ -960,7 +878,7 @@ test("makeReviewer: no doctrine file adopted -> the trigger comment is byte-for-
     calls[0]![1],
     "@codex review\n\nVerify this PR against issue #46's verification plan below:\n\n## Verification\nrun the test suite",
   );
-  assert.doesNotMatch(calls[0]![1], /No review doctrine file is configured/i);
+  assert.doesNotMatch(calls[0]![1], /review doctrine/i);
 });
 
 test("HumanReviewer: only an explicit APPROVED state counts — a mere COMMENTED does not", () => {
@@ -1054,33 +972,6 @@ test("makeFallbackReviewers: builds one Reviewer per configured kind, in order, 
   assert.ok(chain[0] instanceof SameModelTrustedReviewer);
   assert.ok(chain[1] instanceof HumanReviewer);
   assert.equal(chain[0]!.verdictFromData(mkData({ reviews: [mkReview("trusted-bot", "HEAD", "APPROVED")] })).action, "MERGE_OK");
-});
-
-// #167: a codex-kind fallback entry gets the same resolved doctrine text as the primary would
-// (buildReviewerByKind threads it identically to triggerCommand) — symmetry, even though
-// merge-driver.ts doesn't call triggerReview on a fallback today.
-test("makeFallbackReviewers: a different-model-codex fallback entry also carries the resolved doctrine", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-reviewer-doctrine-"));
-  try {
-    const path = join(dir, "REVIEW-DOCTRINE.md");
-    writeFileSync(path, "crash-rerun set: persist-before-terminal-transition.");
-    const cfg = ConfigSchema.parse({
-      board: { owner: "o", repo: "r", projectNumber: 1 },
-      doctrine: { file: path },
-      reviewer: { fallback: ["different-model-codex"] },
-    });
-    const chain = makeFallbackReviewers(cfg);
-    assert.equal(chain.length, 1);
-    const calls: Array<[number, string]> = [];
-    const forge = {
-      addPRComment: async (pr: number, body: string) => void calls.push([pr, body]),
-      getIssueBody: async () => "no plan section here",
-    } as unknown as IForge;
-    await chain[0]!.triggerReview(forge, 42, 46);
-    assert.match(calls[0]![1], /crash-rerun set/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });
 
 // ── resolveReviewVerdict (#54): the reviewer-failover decision core ──────────────────────────

@@ -5986,7 +5986,7 @@ test("runRounds #470: standby stays the FIRST line — a genuinely empty backlog
  *  path that keeps ticking after the signal — resolves on a MICROTASK instead, so its next tick
  *  lands between a wait-start and its own wait-end. Microtasks always precede macrotasks, so the
  *  discriminator here is ORDERING, not elapsed time: no wall-clock margin decides this verdict
- *  (docs/REVIEW-DOCTRINE.md's no-timing-dependent-assertions invariant). */
+ *  (engine/prompts/doctrine-core.md's no-timing-dependent-assertions rule). */
 function drainPacingProbe(): { sleep: (ms: number) => Promise<void>; events: string[] } {
   const events: string[] = [];
   const sleep = async (ms: number): Promise<void> => {

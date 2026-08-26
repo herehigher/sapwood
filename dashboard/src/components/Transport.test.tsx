@@ -126,7 +126,7 @@ test("no loadError and not loading: the ordinary transport controls render, not 
 // ── the transport buttons themselves must resolve real token-based (mono) styling — an operator
 // probe against production (issue #889 comment) confirmed every `.transport-controls button`
 // computed `font-family: Arial` (no mono rule reaches them) while the sibling `.transport-position`
-// readout correctly resolved "JetBrains Mono Variable". docs/REVIEW-DOCTRINE.md's STYLE rule: a
+// readout correctly resolved "JetBrains Mono Variable". engine/prompts/doctrine-core.md's STYLE rule: a
 // computed-style AC needs `registerRealDom()` + a real `getComputedStyle` read against the FULL
 // production cascade, mounted in production order — never a regex match on declaration text, which
 // proves a rule exists but never that it wins the cascade onto the element.

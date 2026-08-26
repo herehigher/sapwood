@@ -718,7 +718,7 @@ test("§889 finding [0]: the opened round-list dropdown is not clipped by the na
  * AC2's "no native default chrome" + "token-styled … in both themes" claims had no test reading
  * REAL computed style — the component tests (`RoundNavigator.test.tsx`) assert authored markup/
  * class names, never what the cascade actually resolves to, and `shots.spec.ts`'s capture loop is
- * explicitly presence-only, never a style assertion. `docs/REVIEW-DOCTRINE.md`'s own STYLE rule
+ * explicitly presence-only, never a style assertion. `engine/prompts/doctrine-core.md`'s own STYLE rule
  * ("computed-style ACs are VALUE's real-DOM exception … never a stand-in") applies directly here.
  * This repo's `happy-dom` unit-test harness cannot even serve as that stand-in for the THEME half
  * of the claim: verified directly (a scratch `light-dark()` resolution in `@happy-dom/global-

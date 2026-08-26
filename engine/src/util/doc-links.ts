@@ -34,6 +34,10 @@ const DOC_PATHS = {
   securityAdjudication: "docs/security/adjudication.md",
   supervision: "docs/guide/supervision.md",
   reviewDoctrine: "docs/REVIEW-DOCTRINE.md",
+  // #1123 PR-2: the framework-owned, generic review-doctrine core — a shipped prompt asset, not
+  // a docs/ page, but cited the same way (anchored, validated by doc-links.test.ts against the
+  // file's own real heading slugs).
+  doctrineCore: "engine/prompts/doctrine-core.md",
   plan: "docs/PLAN.md",
 } as const;
 
@@ -52,6 +56,11 @@ export const DOC_LINKS = {
   security: docUrl("security"),
   supervision: docUrl("supervision"),
   reviewDoctrine: docUrl("reviewDoctrine"),
+  doctrineCore: docUrl("doctrineCore"),
+  // #1123 PR-2: the gated-reentry-cap escalation comment's anchored pointer — the
+  // `## How the loop treats review findings` heading in the core (DOC_LINKS entries anchor by
+  // slug so a heading rename breaks doc-links.test.ts, never a runtime string silently).
+  doctrineCoreAdjudication: docUrl("doctrineCore", "how-the-loop-treats-review-findings"),
   plan: docUrl("plan"),
   securityAcceptedBlindSpots: docUrl("security", "accepted-blind-spots"),
   securityManagedSettingsException: docUrl("securityRoleSessions", "managed-settings-allowmanagedpermissionrulesonly-exception"),

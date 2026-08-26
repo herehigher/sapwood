@@ -316,7 +316,7 @@ test("#879 gate② run 2e566ac9 finding [3]: the spend meter value renders bold 
 
 /** Shared setup for the viewport tests below — real cascade (tokens + panels + app), a real
  *  happy-dom viewport, `.engine-status`'s own flex-wrap, `.round-nav-pill`'s white-space, and the
- *  meter's own shrink rule, at a given width. STYLE doctrine (docs/REVIEW-DOCTRINE.md): needs a
+ *  meter's own shrink rule, at a given width. STYLE doctrine (engine/prompts/doctrine-core.md): needs a
  *  real viewport + getComputedStyle read against the full production cascade, never a regex read
  *  of the source text — same posture Controls.test.tsx's own #895 item 6 test already established
  *  for the sibling 720px floor. */

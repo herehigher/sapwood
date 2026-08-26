@@ -11,7 +11,7 @@ import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
-import { ConfigSchema, loadConfig, type SapwoodConfig } from "../config/config.js";
+import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import {
   associateLanePr,
   type CommitInfo,
@@ -585,12 +585,14 @@ const LEGACY_LABEL_CONFIG = {
 /** #480: an ABSOLUTE, guaranteed-absent doctrine path — pinned because `mkCfg` builds cfg via
  *  `ConfigSchema.parse`, which skips `loadConfig`'s config-file-relative anchoring of
  *  `doctrine.file` (config.ts:1848). Left at the schema default (`docs/REVIEW-DOCTRINE.md`,
- *  RELATIVE), every doctrine-presence probe in this file — `capHitEscalationNote`'s `existsSync`,
- *  `loadDoctrine` — would resolve against `process.cwd()`: absent when the suite runs from
- *  `engine/` (npm's per-workspace cwd, which is why CI stayed green), PRESENT when it runs from
- *  the repo root, where this repo's own `docs/REVIEW-DOCTRINE.md` really exists. Same
- *  environment-dependence class as the doctrine's own timing-dependent-assertions ban: same code,
- *  different runner setup, different verdict. The anchor is the value, not the filesystem. */
+ *  RELATIVE), any `loadDoctrine`-based probe elsewhere in this suite would resolve against
+ *  `process.cwd()`: absent when the suite runs from `engine/` (npm's per-workspace cwd, which is
+ *  why CI stayed green), PRESENT when it runs from the repo root, where this repo's own
+ *  `docs/REVIEW-DOCTRINE.md` really exists. Same environment-dependence class as the doctrine's
+ *  own timing-dependent-assertions ban: same code, different runner setup, different verdict. The
+ *  anchor is the value, not the filesystem. `capHitEscalationNote` (below) no longer reads
+ *  `cfg.doctrine.file` at all (#1123 PR-2: it cites the framework core unconditionally, which is
+ *  always present) — this fixture stays purely for other doctrine-presence probes. */
 const ABSENT_DOCTRINE_FILE = "/nonexistent/REVIEW-DOCTRINE.md";
 
 const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
@@ -601,12 +603,10 @@ const mkCfg = (over: Record<string, unknown> = {}): SapwoodConfig =>
     ...over,
   });
 
-test("#480: mkCfg's doctrine.file is absolute and absent — every doctrine-presence probe in this file has the same verdict from the repo root as from engine/", () => {
+test("#480: mkCfg's doctrine.file is absolute and absent — a relative default would be probed against process.cwd()", () => {
   const cfg = mkCfg();
   assert.ok(isAbsolute(cfg.doctrine.file), "a relative path would be probed against process.cwd()");
   assert.equal(existsSync(cfg.doctrine.file), false);
-  // The concrete verdict the cwd-sensitivity flipped (#147 gated-reentry cap escalation).
-  assert.doesNotMatch(capHitEscalationNote(cfg), /review doctrine/i);
 });
 
 const seedRunning = (st: State, name: string, issue: number) =>
@@ -7359,6 +7359,7 @@ test("tick DRIVE (#450, escalation comment content): cites the signal, both roun
   assert.doesNotMatch(comment, /principle\s+\d/i, "no doctrine ordinal — a target repo has no such list");
   assert.doesNotMatch(comment, /REVIEW-DOCTRINE\.md/, "no link into sapwood's own doctrine doc");
   assert.match(comment, /design re-entry/i, "design re-entry, not merely human escalation");
+  assert.match(comment, /doctrine-core\.md#how-the-loop-treats-review-findings/, "the anchored framework-core pointer");
   assert.match(comment, /to reclaim\./, "the existing return path — no new re-entry channel");
   st.close();
 });
@@ -9617,8 +9618,8 @@ test("#169 restart adoption: stale confirmed-alive lane requests one graceful ha
  *  never does. The bound exists to keep a genuinely wedged process from hanging the runner until
  *  its outer ceiling — it is deliberately generous (orders of magnitude above the real work being
  *  waited on) so it bounds catastrophe rather than deciding any test's verdict. The banned shape
- *  is the opposite: a tight budget whose expiry IS the assertion (docs/REVIEW-DOCTRINE.md, "No
- *  timing-dependent assertions"). */
+ *  is the opposite: a tight budget whose expiry IS the assertion (engine/prompts/doctrine-core.md,
+ *  "No timing-dependent assertions"). */
 const waitForNamed = async (predicate: () => boolean, message: string, timeoutMs = 30_000): Promise<void> => {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
@@ -12410,17 +12411,16 @@ test("#147 gated-PR reentry: a PR that fails the re-driven gate (findings still 
   );
   assert.match(gatedNotices()[0]![1], /attempt 1\/1/);
   assert.match(gatedNotices()[0]![1], /last automatic attempt/);
-  // #167 review (Codex P2+P3 adjudication): cap-hit is this codebase's nearest mechanism to
-  // the review doctrine's prFixCap→needs-human pattern — the escalation comment states the
-  // principle (re-examine design/technical direction, not more patches) SELF-CONTAINED, true
-  // regardless of doctrine adoption. mkCfg() pins `doctrine.file` to ABSENT_DOCTRINE_FILE — the
-  // legal, common "no doctrine adopted" case (doctrine.ts's NO_DOCTRINE) — so the comment must
-  // NOT cite a doctrine file that doesn't exist. #480: that pin is what makes this a fact about
-  // the cfg rather than about the invoking directory; before it, mkCfg left the RELATIVE schema
-  // default here and this very assertion passed from `engine/` and failed from the repo root.
+  // #167 review (Codex P2+P3 adjudication), re-partitioned #1123 PR-2: cap-hit is this
+  // codebase's nearest mechanism to the review doctrine's prFixCap→needs-human pattern — the
+  // escalation comment states the principle (re-examine design/technical direction, not more
+  // patches) SELF-CONTAINED, and cites the anchored framework-core pointer UNCONDITIONALLY
+  // (capHitEscalationNote no longer reads cfg.doctrine.file at all — the core is always present,
+  // regardless of this repo's own doctrine adoption).
   assert.match(gatedNotices()[0]![1], /re-examine the feature's design/i);
   assert.doesNotMatch(gatedNotices()[0]![1], /review doctrine/i);
   assert.doesNotMatch(gatedNotices()[0]![1], /point 4/i);
+  assert.match(gatedNotices()[0]![1], /doctrine-core\.md#how-the-loop-treats-review-findings/);
   assert.equal(sup.dispatched.length, 0); // never a new worker, even across the re-escalation
 
   // Human removes needs-human a SECOND time — from the PR, the carrier the re-escalation used —
@@ -12747,65 +12747,21 @@ test("#832 gate② finding [0]: GATED RECLAIM's direct MERGED settlement carries
   st.close();
 });
 
-// #167 review (Codex P2+P3 adjudication): capHitEscalationNote — direct unit tests for the
-// helper extracted from the gated-reentry-cap escalation comment above. Covers the two
-// defects the review found: (a) unconditionally citing "review doctrine, adjudication point
-// 4" even when no doctrine file exists; (b) leaking the RESOLVED ABSOLUTE `cfg.doctrine.file`
-// path (loadConfig absolutizes it) instead of the raw path as the user wrote it in config.
+// #167 review (Codex P2+P3 adjudication), re-partitioned #1123 PR-2: capHitEscalationNote —
+// direct unit test for the helper extracted from the gated-reentry-cap escalation comment above.
+// The three prior tests here (no doctrine file / loadConfig-resolved file / ConfigSchema.parse
+// direct — all pinning that the note never leaks a RESOLVED ABSOLUTE `cfg.doctrine.file` path)
+// collapse to one: the function no longer takes a `cfg` argument or reads the repo doctrine file
+// at all — it cites the anchored, release-controlled framework-core pointer unconditionally, so
+// there is no longer a repo-doctrine-adoption axis to vary the fixture over.
 
-test("capHitEscalationNote: no doctrine file present -> principle stated self-contained, no doctrine citation", () => {
-  const cfg = ConfigSchema.parse({
-    board: { owner: "o", repo: "r", projectNumber: 4 },
-    doctrine: { file: "/nonexistent/REVIEW-DOCTRINE.md" },
-  });
-  const note = capHitEscalationNote(cfg);
+test("capHitEscalationNote: principle stated self-contained, plus the anchored framework-core pointer — unconditionally, never a resolved local path or a bare ordinal", () => {
+  const note = capHitEscalationNote();
   assert.match(note, /last automatic attempt/i);
   assert.match(note, /re-examine the feature's design/i);
   assert.doesNotMatch(note, /review doctrine/i);
-  assert.doesNotMatch(note, /\/nonexistent\/REVIEW-DOCTRINE\.md/);
-});
-
-test("capHitEscalationNote: a doctrine file loaded via loadConfig -> cites the RAW, pre-resolution path, never the resolved absolute path", () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
-  try {
-    const cfgPath = join(dir, "sapwood.config.yaml");
-    const docsDir = join(dir, "docs");
-    mkdirSync(docsDir, { recursive: true });
-    writeFileSync(join(docsDir, "REVIEW-DOCTRINE.md"), "# doctrine\nadjudication point 4: re-examine design.\n");
-    writeFileSync(cfgPath, "board: { owner: o, repo: r, projectNumber: 4 }\ndoctrine: { file: docs/REVIEW-DOCTRINE.md }\n");
-    const cfg = loadConfig(cfgPath);
-    // Sanity: loadConfig really did resolve the path to an absolute one under dir.
-    assert.equal(cfg.doctrine.file, join(docsDir, "REVIEW-DOCTRINE.md"));
-
-    const note = capHitEscalationNote(cfg);
-    assert.match(note, /last automatic attempt/i);
-    assert.match(note, /review doctrine/i);
-    // The RAW, as-configured (relative) path is cited...
-    assert.match(note, /`docs\/REVIEW-DOCTRINE\.md`/);
-    // ...but the RESOLVED ABSOLUTE path (which would leak this machine's directory layout onto
-    // a public GitHub comment) never appears.
-    assert.doesNotMatch(note, new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("capHitEscalationNote: cfg built via ConfigSchema.parse directly (no loadConfig, no fileRaw) still never cites a resolved absolute path — falls back to cfg.doctrine.file, which is already the raw value in this path", () => {
-  const dir = mkdtempSync(join(tmpdir(), "sapwood-cfg-"));
-  try {
-    const path = join(dir, "REVIEW-DOCTRINE.md");
-    writeFileSync(path, "doctrine content");
-    const cfg = ConfigSchema.parse({
-      board: { owner: "o", repo: "r", projectNumber: 4 },
-      doctrine: { file: path },
-    });
-    assert.equal(cfg.doctrine.fileRaw, undefined); // never set outside loadConfig
-    const note = capHitEscalationNote(cfg);
-    assert.match(note, /review doctrine/i);
-    assert.match(note, new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))); // cfg.doctrine.file IS the raw value here
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  assert.doesNotMatch(note, /point\s+\d/i);
+  assert.match(note, /doctrine-core\.md#how-the-loop-treats-review-findings/);
 });
 
 test("#147 round-3 P2 (Codex PR #151): CAPPED latches ONLY after the needs-human label provably lands — a transient label failure retries next tick instead of permanently hiding the PR from human triage", async () => {

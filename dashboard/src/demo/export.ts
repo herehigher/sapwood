@@ -8,7 +8,7 @@ import type { DemoBundle } from "./types.ts";
  * in the app that scrubs anything, deliberately not the live `/api/events` feed itself (§8: the
  * live feed stays verbatim; scrubbing belongs only at this public-export boundary).
  *
- * Per the doctrine on inferred-text matching (docs/REVIEW-DOCTRINE.md): both pattern lists below
+ * Per the doctrine on inferred-text matching (engine/prompts/doctrine-core.md): both pattern lists below
  * are narrow, enumerated signature shapes, not wildcards — a false NEGATIVE here (an unlisted
  * credential/path shape) is the accepted residual risk, favored over a false POSITIVE that would
  * make a legitimate fixture value (e.g. `/api/events`) unshippable.

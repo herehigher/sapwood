@@ -2,7 +2,7 @@
 // FIXTURE codex home. No real `codex` process is ever started here (the live shadow run is a
 // separate, post-merge step, mirroring #313's method) and NOTHING in this file depends on a real
 // timer, a subprocess's speed, or the scheduler: the timeout seam is injected and fired explicitly
-// (docs/REVIEW-DOCTRINE.md, "No timing-dependent assertions").
+// (engine/prompts/doctrine-core.md, "No timing-dependent assertions").
 //
 // What is pinned here:
 //   - the containment profile IS the argv (a value assertion, not prose);

@@ -116,7 +116,9 @@ own the verdict schema.
 
 - **Trigger side**: `CodexReviewer.triggerReview` posts `triggerCommand` (default
   `@codex review`, configurable via `reviewer.triggerCommand`, #156) + the issue's
-  verification plan + repo review doctrine (#167) as a PR comment — vendor-API-free.
+  verification plan as a PR comment — vendor-API-free. The comment carries no review-doctrine
+  text (owner ruling 2026-08-26, #1123): a hosted bot's standing review guidance belongs in its
+  own instruction file instead.
 - **Verdict side**: each tick re-fetches `PRReviewData` (reviews, reactions, top-level
   comments, unresolved threads) via `gh` and derives
   `MERGE_OK | WAIT_REVIEW | HANDLE_THREADS | REVIEW_UNAVAILABLE` in a pure function.
