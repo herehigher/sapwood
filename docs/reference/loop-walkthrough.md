@@ -221,15 +221,22 @@ the matching vocabulary.
 Board Status transitions each have **exactly one owner**, and ownership is
 structural, not conventional: peripheral roles carry no engine-granted `gh`
 capability at all; the normal worker profile pairs a `Bash(gh *)` grant with
-a deny list (`gh pr merge`, `gh pr ready`, `gh pr review --approve`/
-`--request-changes`, `gh release`, governance-flagged `gh issue edit`, `gh
-label`, `gh project`), and the guard hook independently blocks those same
-verbs plus `gh graphql` mutations at the argv layer. Neither layer is
-absolute — an inherited ambient MCP server (the guard's matcher never covers
-`mcp__` tools) or a host with `allowManagedPermissionRulesOnly` set can
-bypass it entirely, an accepted blind spot (`docs/security.md`) — so every
-Status write a session CAN reach leaves only through the engine's
-`setBoardStatus`. The board is the management-side *view*; the runtime truth
+a deny list that denies `gh pr merge*`, `gh pr ready*`, `gh pr review*`, `gh
+release*`, `gh issue edit*`, `gh label*`, and `gh project*` as WHOLE verbs
+(`engine/src/roles/worker.ts::WORKER_DISALLOWED_TOOLS`). The guard hook
+blocks independently, at the argv layer: `gh pr merge`/`gh pr ready`/`gh
+label`/`gh project`/`gh release` as whole subcommands too, but only a
+narrower slice of `gh pr review` (`--approve`/`--request-changes`) and `gh
+issue edit` (governance-flagged mutations only — a plain `--body` edit still
+passes), plus `gh issue` lifecycle verbs (`close`/`reopen`/`transfer`/
+`delete`), `gh graphql` mutations outright, and `gh api` mutations scoped to
+issue-governance/release/PR-merge paths (`engine/src/guard/guard.ts`'s
+`checkCategoryC`/`checkGhApi`). Neither layer is absolute — an inherited
+ambient MCP server (the guard's matcher never covers `mcp__` tools) or a
+host with `allowManagedPermissionRulesOnly` set can bypass it entirely, an
+accepted blind spot ([`docs/security.md`](../security.md#accepted-blind-spots))
+— so every Status write a session CAN reach leaves only through the
+engine's `setBoardStatus`. The board is the management-side *view*; the runtime truth
 source is SQLite + sentinels (§6) — the engine writes Status but never reads
 it back for recovery (the one read is the Ready lane: the human authorization
 channel, not a recovery channel).
