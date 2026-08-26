@@ -63,16 +63,6 @@ doctrine, including how the loop treats review findings, ships in the framework 
   false POSITIVE halting a healthy engine immediately; a too-narrow list gives a false NEGATIVE
   bounded only by the peripheral-role empty-spin breaker — the dispatched-WORKER-lane path
   depends instead on the outer ceiling (`cost.roundBudgetUsd`).
-- **A tier-C comment is an operator inbox item, not gate② evidence, and a missing tier-C RECORD
-  is never a producer stall signal.** `docs/security.md`'s evidence tiers make tier-C
-  (human-witnessed probe) producer-unforgeable BY DESIGN — the producer never self-executes or
-  self-attests it, so a missing record stays `cannot-confirm` until posted; unlabeled, the gap
-  reads as a producer failure though nothing here is producer-actionable. Author association
-  authenticates the poster, never the claim — only a **body** edit is attestation: post the
-  record into the body, advancing the [comment adjudication
-  cursor](security/adjudication.md#the-comment-adjudication-cursor) past a comment that also
-  carried it, in that SAME edit. `evaluate`/`buildPrompt` read only the dispatch-time AC
-  snapshot, never a comment — only a body-carried record reaches a later review.
 
 ## Prompt architecture doctrine (#699)
 
@@ -92,5 +82,5 @@ applied clause-by-clause. Worked example: `docs/design/699-prompt-architecture-a
 **Q3 safety-floor exception.** Unsafe-to-omit floors (AC-evidence tiers, human-merge-only paths)
 remain in prompt text even when a pull-model skill serves the same source: sessions may not invoke
 it, so it is not load-bearing. If principle 3 collides, record the tension instead of deleting.
-Multi-carrier floors enumerated by `engine/src/roles/prompts.test.ts` (#628/#653) already require
-mirror-equality across their carriers.
+Multi-carrier floors are pinned by `engine/src/roles/prompts.test.ts`'s `sapwood:floor` marker/mirror
+test.
