@@ -54,7 +54,10 @@ function parseRowCells(line: string): string[] {
     .map((cell) => cell.trim());
 }
 
-function isSeparatorRow(line: string): boolean {
+// Only the cell-content shape (dashes/colons) — NOT whether the cell count matches the
+// header above it. A separator's cell count can only be judged against a specific header, so
+// that check lives in findFirstTable, where both rows are in hand.
+function isSeparatorShapedRow(line: string): boolean {
   if (!isTableRow(line)) return false;
   const cells = parseRowCells(line);
   return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell));
@@ -75,20 +78,43 @@ function extractSection(lines: string[], heading: string): string[] {
   return lines.slice(start + 1, end);
 }
 
-/** The first header+separator+contiguous-body-rows table in the section. */
+// Blanks out (preserving line count, so callers needn't re-index) fenced code blocks and HTML
+// comments before table search — a table living inside either (e.g. commented out to "remove"
+// it without deleting it) must be invisible to the parser, not accepted as real documentation.
+const FENCED_CODE_BLOCK_RE = /```[\s\S]*?```/g;
+const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
+
+function blankMatch(match: string): string {
+  return match.replace(/[^\n]/g, "");
+}
+
+function stripNonProseBlocks(sectionText: string): string {
+  return sectionText.replace(FENCED_CODE_BLOCK_RE, blankMatch).replace(HTML_COMMENT_RE, blankMatch);
+}
+
+// A header row followed by a same-shaped separator of the WRONG cell count fails the parse
+// outright — it does not skip past and keep scanning for some other candidate table, because a
+// header/separator pair that disagree on column count is a malformed table, not a non-table.
 function findFirstTable(sectionLines: string[]): { header: string[]; bodyLines: string[] } {
   for (let i = 0; i < sectionLines.length - 1; i++) {
     const headerLine = sectionLines[i]!;
     if (!isTableRow(headerLine)) continue;
     const separatorLine = sectionLines[i + 1]!;
-    if (!isSeparatorRow(separatorLine)) continue;
+    if (!isSeparatorShapedRow(separatorLine)) continue;
+    const headerCells = parseRowCells(headerLine);
+    const separatorCells = parseRowCells(separatorLine);
+    assert.equal(
+      separatorCells.length,
+      headerCells.length,
+      `separator row ${JSON.stringify(separatorLine)} has ${separatorCells.length} cells, expected ${headerCells.length} to match its header`,
+    );
     const bodyLines: string[] = [];
     for (let j = i + 2; j < sectionLines.length; j++) {
       const bodyLine = sectionLines[j]!;
       if (!isTableRow(bodyLine)) break;
       bodyLines.push(bodyLine);
     }
-    return { header: parseRowCells(headerLine), bodyLines };
+    return { header: headerCells, bodyLines };
   }
   throw new Error("no Markdown table found in section");
 }
@@ -107,7 +133,8 @@ function parsePathCell(cell: string): string {
  *  Path-is-a-code-span, and no duplicate Path values. `riskColumn` names which cell (if any)
  *  becomes the row's preserved Risk value, for the top-level table's runtime exemption. */
 function parseDocumentedRows(heading: string, headerCells: string[], lines: string[], riskColumn?: number): DocumentedRow[] {
-  const section = extractSection(lines, heading);
+  const rawSection = extractSection(lines, heading);
+  const section = stripNonProseBlocks(rawSection.join("\n")).split("\n");
   const { header, bodyLines } = findFirstTable(section);
   assert.deepEqual(header, headerCells, `unexpected header cells under ${JSON.stringify(heading)}`);
 
@@ -218,5 +245,32 @@ test("fixture: an untracked row exempted by runtime Risk produces no error", () 
   const documented: DocumentedRow[] = [{ path: ".sapwood/", risk: RUNTIME_RISK }];
   const result = checkLayoutRows(documented, [], () => false, { riskExemption: RUNTIME_RISK });
   assert.deepEqual(result.missing, []);
+  assert.deepEqual(result.untracked, []);
+});
+
+test("fixture: a table hidden inside an HTML comment is invisible to the parser — fails as 'no table found', not a vacuous empty parse", () => {
+  const heading = "## Fixture: commented-out table";
+  const content = [
+    heading,
+    "",
+    "<!--",
+    "| Path | Risk | Purpose |",
+    "| --- | --- | --- |",
+    "| `ghost/` | NORMAL | should never be seen |",
+    "-->",
+    "",
+    "## Next heading",
+    "",
+  ].join("\n");
+
+  assert.throws(
+    () => parseDocumentedRows(heading, TOP_LEVEL_HEADER_CELLS, content.split("\n"), TOP_LEVEL_RISK_COLUMN),
+    /no Markdown table found in section/,
+  );
+});
+
+test("fixture: zero documented rows still fails the comparison against known directories — not a vacuous pass", () => {
+  const result = checkLayoutRows([], ["engine"], () => true);
+  assert.deepEqual(result.missing, ["engine/"]);
   assert.deepEqual(result.untracked, []);
 });
