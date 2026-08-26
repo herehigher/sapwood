@@ -6,27 +6,8 @@ itself.
 
 ## Ground rules
 
-- **Branch + pull request, always.** Nothing is committed directly to `main`.
-- **Every PR passes the quality gate**: `npm run build && npm run typecheck &&
-  npm run test && npm run lint` clean locally. CI runs the same families across
-  both workspaces plus an internal link check — see
-  [dev-guide 04](docs/dev-guide/04-commands.md#ci) for what it covers. New
-  behavior ships with colocated `*.test.ts` coverage.
-- **No test assertion depends on real time.** A test that seeds a timestamp
-  injects that same clock into the code under test, and no assertion's
-  pass/fail may turn on real timer ordering, real subprocess duration, or
-  scheduler order — deliberate exceptions carry a comment saying so. See
-  [dev-guide 04](docs/dev-guide/04-commands.md#how-tests-are-written-here).
-- **Some paths are human-merge-only.** Changes touching the guard, reviewer,
-  merge driver, security-relevant config, `.claude/settings*.json`, or
-  `.github/workflows/**` are never auto-merged, regardless of review outcome —
-  see [Human-merge-only paths](docs/security.md#human-merge-only-paths) for the
-  canonical list and rationale, and the
-  [change-risk map](docs/dev-guide/08-change-risk.md) before touching anything
-  near them.
-- **Docs are part of done.** A change to durable, user-visible behavior updates
-  the relevant `docs/` page (or `docs/guide/configuration.md` for config keys) in the
-  same PR. GitHub issues/PRs record process; docs record what is true now.
+- **Repository requirements.** Follow [Verification](CLAUDE.md#verification), [Non-negotiables](CLAUDE.md#non-negotiables), and the [Documentation principle](CLAUDE.md#documentation-principle-source-of-truth-partition). For the authoritative path list, see [Human-merge-only paths](docs/security.md#human-merge-only-paths).
+- **Tests.** Follow [How tests are written here](docs/dev-guide/04-commands.md#how-tests-are-written-here).
 
 ## Cutting a release
 
