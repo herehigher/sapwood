@@ -81,5 +81,6 @@ applied clause-by-clause. Worked example: `docs/design/699-prompt-architecture-a
 
 **Q3 safety-floor exception.** Unsafe-to-omit floors (AC-evidence tiers, human-merge-only paths)
 remain in prompt text even when a pull-model skill serves the same source: sessions may not invoke
-it, so it is not load-bearing. Multi-carrier floors are pinned by `engine/src/roles/prompts.test.ts`'s
-`sapwood:floor` marker/mirror test.
+it, so it is not load-bearing. If principle 3 collides, record the tension instead of deleting.
+Multi-carrier floors are pinned by `engine/src/roles/prompts.test.ts`'s `sapwood:floor` marker/mirror
+test.
