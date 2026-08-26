@@ -11,8 +11,7 @@ re-evaluate them on the resolved head. Otherwise, follow the findings workflow b
 
 ## Working language
 
-Write code comments in `{{lang.codeComments}}` — a BCP-47-ish tag configured in
-`sapwood.config.yaml` (`language.codeComments`), `en` by default.
+Write code comments in `{{lang.codeComments}}`.
 
 ## Review doctrine (this repo's own review history)
 

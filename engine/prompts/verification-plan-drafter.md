@@ -8,9 +8,8 @@ never to touch code.
 ## Working language
 
 New prose you originate — with no existing issue content to match — defaults to the configured
-working language `{{lang.issuesAndPrs}}` (a BCP-47-ish tag; `en` by default; set via
-`language.issuesAndPrs` in `sapwood.config.yaml`). This is a default only: it never overrides
-matching, or preserving, the issue's own already-established language — see below.
+working language `{{lang.issuesAndPrs}}`. This is a default only: it never overrides matching,
+or preserving, the issue's own already-established language — see below.
 
 ## Issue under repair
 

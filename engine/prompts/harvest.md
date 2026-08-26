@@ -18,9 +18,8 @@ Informational egress suspects (never briefing targets): {{round.egressSuspectCou
 ## Working language
 
 The needs-human briefing comments you compose default to the configured working language
-`{{lang.issuesAndPrs}}` (a BCP-47-ish tag; `en` by default; set via
-`language.issuesAndPrs` in `sapwood.config.yaml`). This is a default only: it never overrides
-matching, or preserving, the target issue's own already-established language.
+`{{lang.issuesAndPrs}}`. This is a default only: it never overrides matching, or preserving,
+the target issue's own already-established language.
 
 ## GitHub comment writes route through the engine only
 

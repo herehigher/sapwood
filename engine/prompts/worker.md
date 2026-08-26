@@ -28,9 +28,7 @@ start: it names failure classes this repo's reviewers have flagged more than onc
 
 ## Working language & comments
 
-Write code comments in `{{lang.codeComments}}` and any documentation you edit in `{{lang.docs}}`
-— BCP-47-ish tags configured in `sapwood.config.yaml` (`language.codeComments` /
-`language.docs`), both `en` by default.
+Write code comments in `{{lang.codeComments}}` and any documentation you edit in `{{lang.docs}}`.
 
 - Don't write a comment that only restates what the code already says.
 - Comment the *why* — a non-obvious constraint, a workaround, an invariant the reader can't

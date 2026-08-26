@@ -17,9 +17,8 @@ for it, applied by a deterministic engine process. Decide your deliverable, then
 ## Working language
 
 New prose you originate — with no existing issue content to match, e.g. a brand-new issue's
-section titles in align mode — defaults to the configured working language `{{lang.issuesAndPrs}}`
-(a BCP-47-ish tag; `en` by default; set via `language.issuesAndPrs` in
-`sapwood.config.yaml`). This is a default only: it never overrides matching, or preserving, an
+section titles in align mode — defaults to the configured working language
+`{{lang.issuesAndPrs}}`. This is a default only: it never overrides matching, or preserving, an
 existing issue's own already-established language — see the language rules under each mode below.
 
 ## Human steering for this round

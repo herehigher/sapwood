@@ -933,3 +933,41 @@ test("negative lint: no shipped engine/prompts, commands, or the generated event
     );
   }
 });
+
+// ── #1119 (negative lint): the operator-doc fact behind every {{lang.*}} reference — the tag
+// format, its default, and the config key that sets it — has exactly one home,
+// docs/guide/configuration.md "Language customization". A role session cannot change config, so
+// restating that fact in a prompt is dead prose a rewording pass has to keep re-syncing by hand.
+// Scoped to the paragraph carrying the {{lang.*}} token: po.md legitimately names
+// `sapwood.config.yaml` elsewhere (the protected-path list), and that mention must stay clear.
+
+test("#1119: no shipped prompt's {{lang.*}} paragraph restates the BCP-47/default/config-key operator-doc fact that belongs solely to docs/guide/configuration.md", () => {
+  // Top-level only (no `recursive: true`): `issue-templates/` holds human-facing issue
+  // templates, not role prompts with a {{lang.*}} block, and is out of scope for this lint.
+  const promptsDir = dirname(defaultPromptPath());
+  const shippedPrompts = readdirSync(promptsDir)
+    .filter((f) => f.endsWith(".md"))
+    .map((f) => join(promptsDir, f));
+  assert.equal(shippedPrompts.length, 14, `sanity: expected the 14 top-level shipped prompts, got ${shippedPrompts.length} .md files`);
+  const bannedInLangParagraph = [
+    /BCP-47/,
+    /language\.issuesAndPrs/,
+    /language\.codeComments/,
+    /language\.docs/,
+    /sapwood\.config\.yaml/,
+    /`en` by default/,
+  ];
+  for (const path of shippedPrompts) {
+    const paragraphs = readFileSync(path, "utf8").split(/\n[ \t]*\n/);
+    for (const paragraph of paragraphs) {
+      if (!paragraph.includes("{{lang.")) continue;
+      for (const pattern of bannedInLangParagraph) {
+        assert.doesNotMatch(
+          paragraph,
+          pattern,
+          `${path}: a {{lang.*}} paragraph restates ${pattern} — that operator-doc fact belongs only in docs/guide/configuration.md`,
+        );
+      }
+    }
+  }
+});

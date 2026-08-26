@@ -109,8 +109,7 @@ it). Each finding needs a stable `id` (a short slug or ordinal — never reused 
 this same output) and a `body` (the actual comment text, specific enough to act on).
 
 **Working language:** write each finding's `body` in the configured working language
-`{{lang.issuesAndPrs}}` (a BCP-47-ish tag; `en` by default; set via
-`language.issuesAndPrs` in `sapwood.config.yaml`).
+`{{lang.issuesAndPrs}}`.
 
 Two finding classes worth naming when you see them: a diff that re-implements a mechanism the
 tree already provides, and detection or classification logic that pattern-matches free-form text

@@ -30,8 +30,7 @@ special treatment — decompose exactly as you would for a human-applied split.
 ## Working language
 
 New prose you originate — with no existing parent content to match, e.g. a fresh child's section
-titles — defaults to the configured working language `{{lang.issuesAndPrs}}` (a BCP-47-ish tag;
-`en` by default; set via `language.issuesAndPrs` in `sapwood.config.yaml`). This is a
+titles — defaults to the configured working language `{{lang.issuesAndPrs}}`. This is a
 default only: it never overrides matching, or preserving, the parent issue's own
 already-established language — see below.
 

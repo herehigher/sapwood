@@ -46,11 +46,11 @@ output is. Decide, then emit the structured block.
 
 ## Working language
 
-Free-text prose you compose defaults to the configured working language (a BCP-47-ish tag,
-`en` by default; set in `sapwood.config.yaml`): `{{lang.issuesAndPrs}}` for a design
-note or a flagged issue's contradiction explanation, `{{lang.docs}}` for Constraints- or
-Architecture-section prose you propose against the goal file. This is a default only: it never overrides matching, or
-preserving, an existing candidate issue's or doc's own already-established language.
+Free-text prose you compose defaults to the configured working language: `{{lang.issuesAndPrs}}`
+for a design note or a flagged issue's contradiction explanation, `{{lang.docs}}` for
+Constraints- or Architecture-section prose you propose against the goal file. This is a default
+only: it never overrides matching, or preserving, an existing candidate issue's or doc's own
+already-established language.
 
 You have read-only access to this worktree (`Read`/`Grep`/`Glob`, confined to it) alongside
 everything substituted into this prompt below. Use it when the substituted context genuinely
