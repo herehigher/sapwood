@@ -4,107 +4,62 @@ Part of sapwood's security model — `docs/security.md` is the normative model; 
 
 ## Cost ceilings vs. the soft worker budget
 
-Two different things are both called "budget," and they behave differently on purpose:
+Two different things are both called "budget": `worker.budgetUsdSoft` is a **soft** per-worker
+trigger that hands a lane off gracefully; `cost.dailyBudgetUsd` and `cost.maxWallClockSec` are
+**hard**, engine-wide ceilings that freeze new admission and drain.
 
-- **`worker.budgetUsdSoft`** is a **soft** per-worker budget, auto-enforced via a live
-  token estimate. stream-json carries no in-progress `total_cost_usd` (only the
-  terminal result line has that), so the worker accumulates a running USD estimate
-  from every streamed assistant message's token usage (priced by a small, explicitly
-  approximate per-model rate table — the shipped `pricing.yaml`, overridable via
-  `worker.pricingFile` — with cache reads priced at the cache-read rate, not the
-  input rate, so a cache-heavy run doesn't look artificially expensive). Crossing
-  the threshold triggers a graceful handoff — finish the current atomic step, commit +
-  push WIP, write a progress note, drop a `.handoff` sentinel carrying a resumable
-  session id, exit clean — **never** a mid-work `SIGKILL`. A hard kill mid-step both
-  burns the spend and throws away the work; a graceful handoff preserves both. The
-  estimate is reconciled against the real terminal cost when a lane finishes (the
-  divergence is logged, not enforced) — it is a trigger signal, not a billing source
-  of truth, so `worker.timeoutSec` plus the hard ceiling below remain the actual
-  backstop. A handed-off lane re-enters before fresh dispatch when capacity and spend
-  gates permit. Each resumed leg gets a fresh soft budget, bounded by
-  `worker.maxResumes` (default 2); resumed `total_cost_usd` is per-leg and is ledgered
-  directly, so total recorded spend is the sum of the real legs. The live estimate this
-  bullet describes is blind to a spawned subagent's own spend — see the paragraph
-  under [Worker denylist vs. peripheral allowlist](role-sessions.md#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry)
-  above for the measured size of that gap and why it's accepted unbounded.
-- **`cost.dailyBudgetUsd` / `cost.maxWallClockSec`** are **hard** engine-wide ceilings.
-  Breaching either freezes new dispatch/merges and starts draining in-flight workers
-  (`cost.drainWindowSec`'s grace window), same "drain before kill" posture as the kill
-  switch: give a worker the chance to hand off cleanly, and only escalate to a hard
-  process-tree kill once the drain window elapses. Their roles differ:
-  `dailyBudgetUsd` is the **durable** runaway-spend boundary — a UTC-calendar-day
-  ledger sum that survives restarts. `maxWallClockSec` is a **per-process attention
-  alarm** — one clock per process life, anchored at process start in memory, fresh on
-  every restart at any gap length. A restart is a *sanctioned* renewal (manual, script,
-  or a user-configured supervisor — the human's standing intent); the durable
-  cross-restart bounds are money (`dailyBudgetUsd`), gates, guard, and the kill switch,
-  never the wall clock. Entering a breach emits a reason-bearing
-  `ceiling-breach-entered` event once per episode.
+| Invariant | Enforcement point | Test |
+| --- | --- | --- |
+| `worker.budgetUsdSoft` is a SOFT per-worker cap enforced from a live token-usage ESTIMATE — stream-json has no in-progress `total_cost_usd`. | `worker.ts::checkSoftBudget` | `worker.test.ts:3908` |
+| The estimate is rate-tabled via `pricing.yaml`/`worker.pricingFile`; cache reads price at the cache-read rate, not the input rate. | `pricing.ts::estimateUsd` | `pricing.test.ts:184` |
+| Crossing the soft budget requests a graceful handoff — a `.handoff` sentinel with a resumable session id — never a mid-work `SIGKILL`. | `worker.ts::checkSoftBudget`/`requestHandoff` | `worker.test.ts:3908` |
+| The estimate reconciles against the real terminal cost at lane finish; divergence is logged, never enforced. | `worker.ts::writeTerminalSentinel` | `conductor.test.ts:2435` |
+| The soft budget is a trigger signal only — `worker.timeoutSec` plus the hard ceilings below are the real backstop. | `worker.ts::writeTerminalSentinel` | `conductor.test.ts:2435` |
+| A handed-off lane re-enters before fresh dispatch, once capacity and spend gates permit. | `worker.ts::resume()` | `worker.test.ts:4051` |
+| Each resumed leg gets a FRESH soft budget, baseline-subtracted so a leg that handed off AT the budget doesn't instantly re-fire. | `worker.ts::checkSoftBudget` | `worker.test.ts:4051` |
+| Resume is bounded by `worker.maxResumes` (default 2); a second handoff past the cap engine-splits rather than resuming forever. | `conductor.ts` (cap latch) | `conductor.test.ts:9986` |
+| A cap-split child's body already carries the origin marker, so it never re-splits — it escalates to needs-human instead. | `conductor.ts` (`CAP_SPLIT_ORIGIN_MARKER` check) | `conductor.test.ts:10098` |
+| Each resumed leg's `total_cost_usd` ledgers per-leg, never cumulative, so total recorded spend sums the real legs. | `worker.ts::writeTerminalSentinel` (`jsonlLegOffset`) | `worker.test.ts:4051` |
+| `cost.dailyBudgetUsd` is a durable UTC-calendar-day ledger sum that survives restarts. | `config/config.ts` schema; `state.ts::dailySpendUsd` | `state.test.ts:848` |
+| `cost.maxWallClockSec` is a per-process alarm, reset by any restart — NOT a durable security boundary. | `config/config.ts` (schema comment) | `conductor.test.ts:10707` |
+| The durable cross-restart bounds are `dailyBudgetUsd` plus guard/gates/kill-switch — never the wall clock. | `config/config.ts` (schema comment) | doctrine statement — no test |
+| A breach freezes fresh worker-leg dispatch — every Ready issue is skipped with reason `ceiling`. | `conductor.ts` (DISPATCH loop, per-issue `ceilingBreached` check) | `conductor.test.ts:10550` |
+| A breach also blocks FIXUP fix-leg spawns — the same admission gate as fresh dispatch. | `conductor.ts` (fix-leg admission) | `conductor.test.ts:6374` |
+| A breach also folds into RESUME's own admission gate, blocking a handed-off lane's re-entry. | `conductor.ts:6090` (`resumeSpendPaused`) | source-verified only — `conductor.test.ts:11029` exercises the shared `paused` parameter generically, never `ceilingBreached` itself |
+| A breach also skips the paid llm recovery probe, so a live-outage check never spends past an open ceiling. | `conductor.ts` (llm-probe gate, `!ceilingBreached`); `round.ts:1272` (round-open probe) | no dedicated unit test found — source-verified only |
+| A breach also drains running/fixing lanes within `cost.drainWindowSec`, same drain-before-kill posture as the kill switch. | `conductor.ts::drainThenEscalate` | `conductor.test.ts` (drain-window tests) |
+| A breach does NOT gate an already-driving lane merely awaiting re-review — it can still merge for free. | `conductor.ts` DRIVE loop (no ceiling read); `merge-driver.ts` | `conductor.test.ts:8730` |
+| A driving lane whose OWN fix leg the breach blocks THIS TICK is force-escalated to needs-human past the drain window. | `conductor.ts::drainThenEscalate` (observed arm) | `conductor.test.ts:8692` |
+| A breach withholds opening a NEW round; the first round of a process life always opens unconditionally. | `round.ts::waitForDispatchClear` | `round.test.ts:5600` |
+| `ceiling-breach-entered` fires once per episode, never re-announced while the same breach stays open. | `conductor.ts::reconcileCeilingAnnouncements` | `round.test.ts:5557` |
+| A decisive engine-agent verdict ledgers its OWN spend under `<lane>:engine-review`, distinct from the reviewed lane's name. | `production.ts::reviewSpendWorkerKey` | `production.test.ts:332` |
+| That write lands in one transaction with the verdict event and the WAL decisive-outcome write. | `state.ts::recordEngineReviewVerdictAndSpend` | `production.test.ts:332` |
+| A non-decisive review attempt (retries exhausted, setup failure, a D5 same-model refusal) records ZERO ledger rows. | `production.ts` | `production.test.ts:403` |
+| `cost.dailyBudgetUsd` and `cost.roundBudgetUsd` both read `spend_ledger` as a plain, worker-unfiltered `SUM(usd)`, so a review session's spend counts toward either ceiling. | `state.ts::dailySpendUsd`/`spentUsdAfterId` | `production.test.ts:389` |
+| Every real spend site stamps `actor_kind` (`worker`\|`fix-leg`\|`peripheral-role`\|`engine-review`). | `state.ts::recordSpend` | `spend-attribution.test.ts` |
+| `role` is populated for `peripheral-role` rows only — every other actor kind carries a null role. | `state.ts::recordSpend`; `peripheral.ts::runSessionWithRetry` | `state.test.ts:4154` |
+| `estimated` is a 0/1 tri-state (NULL when never classified), marking real-total vs. estimator provenance — see [Est-vs-real cost method](../guide/supervision.md#est-vs-real-cost-method). | `worker.ts::writeTerminalSentinel` | `conductor.test.ts:2435` |
+| The read-model's spend section reports the lanes/roles/review split — `settledByWorker`/`settledByRole`/`reviewUsd`. | `read-model.ts::buildSpendSection` | `status-json.test.ts:199` |
+| `unclassifiedUsd` is the COMPLEMENT of those three positive buckets — a corrupt `actor_kind` or a role-less `peripheral-role` row lands here, never vanishing. | `state.ts::spendSummaryForDay` | `state.test.ts:1840` |
+| `incomplete` is true whenever `unclassifiedUsd > 0` OR `reviewer.mode` is `engine-agent`. | `read-model.ts::buildSpendSection` | `status-json.test.ts:234` |
+| Under engine-agent mode `incomplete: false` is unreachable — a non-decisive review can leave no ledger row despite real cost. | `read-model.ts::buildSpendSection` | `status-json.test.ts:263` |
 
-**Engine-agent review-session spend.** Under
-`reviewer.mode: engine-agent`, gate②'s review session is itself a paid Claude session — its cost
-reaches `spend_ledger` too, recorded once a verdict is decisive
-(`review/production.ts`'s `recordWalDecisiveOutcome`, via `State.recordEngineReviewVerdictAndSpend`),
-so `dailyBudgetUsd`/`roundBudgetUsd` (both plain, worker-unfiltered `SUM(usd)` reads) count it
-like any other spend. The verdict-announcing event, the WAL's `decisive_outcome` write, and this
-spend all land in **one SQLite transaction** — doing this as separate writes (event
-first, spend last) would let a crash between them leave the verdict durably recorded while the spend
-silently, permanently never lands (the event's own existence is the replay dedup memory, so a
-retry would read "already handled" and skip the spend forever). It is ledgered under a key
-**distinct** from the reviewed lane's own worker name (`<lane>:engine-review`), deliberately:
-recording it under the lane's own name would make `State.getWorkerActualModels(issue)` — keyed
-on an exact `worker` match — pick up the reviewer's own model as one of "the producing lane's
-actual models," poisoning engine-agent.ts's D5 same-model check on that lane's next review (a
-fix-round re-review would then see the reviewer overlapping itself and fail closed forever). A
-review attempt that never reaches a decisive verdict (all retries exhausted, a setup failure, a
-D5 same-model refusal) still records nothing to the ledger — its cost is real but stays visible
-only in that attempt's own WAL artifact; this mirrors the whole-logical-review cap, which
-reads the WAL, never the ledger, for the exact same reason. **This attributes what IS recorded —
-it does not widen this**: the deliberate-absence posture for non-decisive attempts is unchanged,
-still no ledger row of any kind for one.
+**Boundaries**
 
-**Durable spend attribution.** `spend_ledger` carries three additional columns, written by
-every real spend site: `actor_kind` (`worker` | `fix-leg` | `peripheral-role` | `engine-review` —
-conductor.ts's reclaim path sets the first two from whether the terminal lane was a `fixing`-origin
-leg; peripheral.ts's shared `runSessionWithRetry` sets `peripheral-role` for every po-align/
-po-triage/architect/plan-review/harvest/retro session; production.ts's decisive-verdict callback
-above sets `engine-review`), `role` (the peripheral role id, `peripheral-role` rows only), and
-`estimated` (0/1, tri-state — NULL when a caller never classified the distinction). `estimated` is
-populated at every terminal settlement, worker/fix-leg rows included: `worker.ts`'s
-`writeTerminalSentinel` persists which of "a real provider-reported `total_cost_usd`" vs. "the
-pinned-price estimator's substitute" fed the recorded cost, threaded through `LaneProbe.costEstimated`
-into `conductor.ts`'s terminal `settleTerminalWorker` calls, alongside the engine-review site's own
-pre-existing `ReviewSessionSpend.kind` distinction — see docs/guide/supervision.md's Est-vs-real cost
-method for how this feeds the estimator-bias query. Pre-v1, plain schema bump: no
-migration/backfill for rows written before this — they read `actor_kind IS NULL` forever,
-rendered `unclassified` by the read-model (`State.spendSummaryForDay`), same "never guess" stance
-as every other unattributed row. `spendPage` (the raw `/api/spend` paging transport) surfaces all
-three columns verbatim too — its own "the ledger's own columns" doc now matches what it returns.
+- The live soft-budget estimate is blind to a spawned worker subagent's own spend — see [Worker denylist vs. peripheral allowlist](role-sessions.md#worker-denylist-vs-peripheral-allowlist-deliberate-asymmetry) for the accepted gap.
+- A ceiling breach does not reach peripheral role sessions of a round that is ALREADY open: `peripheral.ts` carries no ceiling check of its own, so the round's closing harvest/retro sessions still spend after the freeze. A NEW round is withheld while breached, except the first round of a process life, which always opens.
+- An in-flight worker/fix leg already running is drained (a chance to hand off cleanly), never instantly killed — escalation to a hard kill waits for `cost.drainWindowSec` to elapse.
+- Pre-`actor_kind` rows read `actor_kind IS NULL` forever and render `unclassified` — no migration/backfill, same never-guess stance as every other unattributed row.
+- A non-decisive review attempt records nothing to the ledger — its cost is real but visible only in that attempt's own WAL artifact, so both `dailyBudgetUsd` and `roundBudgetUsd` under-count it.
+- In both directions (soft budget, hard ceilings) the design favors drain-then-escalate over an immediate hard stop.
 
-The shared read-model's spend section (`status --json`'s `spend` key) reports the real
-`lanes`/`roles`/`review` split (`settledByWorker`/`settledByRole`/`reviewUsd`) plus the
-`unclassifiedUsd` leftover bucket — now a COMPLEMENT query (every row not validly matching one of
-the three positive buckets, including a corrupt/unrecognized `actor_kind` value or a
-`peripheral-role` row missing its `role`), not an `actor_kind IS NULL`-only query, so a
-malformed row can never silently vanish from every total — and its `incomplete` flag.
-`incomplete` is true whenever `unclassifiedUsd > 0` **or** `reviewer.mode` is `engine-agent`
-(the schema default): the deliberate-absence posture above means a non-decisive review attempt's
-cost can be real yet leave **no ledger row of any kind**, so `unclassifiedUsd` alone can never
-prove the day is complete under that mode — `incomplete: false` is only reachable under a
-non-engine-agent reviewer mode. See `state/read-model.ts`'s `StatusSpendDTO` doc for the exact
-identity `todayUsd` holds by construction.
+**Supervisor prerequisite.** Operators running unattended MUST configure the supervisor's own
+crash-loop circuit-breaker (e.g. systemd's `StartLimitBurst=5`/`StartLimitIntervalSec=600`) —
+sapwood assumes it; a crash loop shows up only in the supervisor's own restart counters, so alert
+there, not on sapwood.
 
-**Supervisor prerequisite:** operators running unattended under a supervisor
-MUST configure the supervisor's own crash-loop circuit-breaker — e.g. systemd's
-`StartLimitBurst=5` / `StartLimitIntervalSec=600` (or the equivalent restart-limit in
-your process manager) — sapwood *assumes* it. A crash-looping engine is visible in the
-supervisor's restart counters; alert THERE. Defense-in-depth behind that assumption:
-the engine's own rapid-restart detector (`engine.rapidRestart`, default 5 starts in
-10 minutes) parks autonomous dispatch with an escalation when it observes its own
-crash-loop, and the single-instance data-dir lock keeps a supervisor's fast
-restarts from ever double-driving one board. A crash loop's blast radius is bounded
-either way by `dailyBudgetUsd` and the merge gates.
-
-In both directions the design favors **drain-then-escalate over an immediate hard
-stop** — a hard kill is the last resort, not the first response, because it destroys
-in-progress work as well as spend.
+Defense-in-depth behind that assumption, never a substitute: `engine.rapidRestart` (default 5
+starts/10min) parks dispatch with an escalation on its own observed crash-loop, and the
+single-instance data-dir lock stops a supervisor's fast restarts from ever double-driving one
+board. Either way, a crash loop's blast radius stays bounded by `dailyBudgetUsd` and the merge
+gates.
