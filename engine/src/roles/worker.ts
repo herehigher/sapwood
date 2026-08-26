@@ -16,8 +16,8 @@
 // fail-closed PreToolUse guard hook wired in via --settings (#26) — but only for the
 // Bash/Write/Edit/MultiEdit/Read/Grep/Glob/NotebookRead tool family its matcher covers. A
 // producer leg inherits the operator's host MCP surface (capability DR #616) and no `mcp__`
-// tool call reaches this hook at all; see docs/security/egress.md's "Worker network egress: accepted
-// blind spot" section for the residual and branch protection as the mandatory backstop.
+// tool call reaches this hook at all; see docs/security/egress.md#worker-network-egress-bash-channel-containment-available-as-a-hardening-profile
+// for the residual and branch protection as the mandatory backstop.
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {

@@ -1210,13 +1210,12 @@ export class RoleRunner {
    *      case where an attempt's draft is what would be lost.
    *   3. the worktree still holds uncommitted edits, measured as a PURE-FILESYSTEM heuristic:
    *      anything under it newer than the worktree's own git index (`<gitDir>/index`, resolved
-   *      through the linked worktree's `gitdir:` pointer). This engine execs `git` nowhere
-   *      outside worker.ts's claude-CLI spawn and gh.ts's `gh` calls (#69's grep invariant), and
-   *      `git status --porcelain` is REJECTED outright for a session-controlled worktree — it can
-   *      invoke a session-set `filter.<name>.clean` (the #65 RCE class; see worker.ts's
-   *      retainOrDeleteWorktree doc). The index is the right BASELINE because git rewrites it on
-   *      every checkout/add/commit: a fresh checkout leaves every file older than it (clean), an
-   *      edit after that leaves a file newer (dirty), and a commit rewrites it again (clean).
+   *      through the linked worktree's `gitdir:` pointer). `git status --porcelain` is REJECTED
+   *      outright for a session-controlled worktree — it can invoke a session-set
+   *      `filter.<name>.clean` (the #65 RCE class; see worker.ts's retainOrDeleteWorktree doc).
+   *      The index is the right BASELINE because git rewrites it on every checkout/add/commit: a
+   *      fresh checkout leaves every file older than it (clean), an edit after that leaves a file
+   *      newer (dirty), and a commit rewrites it again (clean).
    *      Reuses worker.ts's ONE scan (worktreeMaybeDirty) — only the baseline differs.
    *
    *  Failure directions, stated rather than implied. FALSE POSITIVE (retain a worktree that held
