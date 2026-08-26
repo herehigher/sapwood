@@ -36,11 +36,14 @@ round-view data contract: any change to it is a change to that contract and must
 | `retries` | object | `gatedReentries` / `gatedReentryCapped` (#147) and `rollbacksRecovered` / `rollbacksEscalated` (#31). |
 | `reviewRounds` | object | Reviewer-failover episodes (#54): `reviewerFallbackSwitches` / `reviewerFallbackReverts`. |
 | `escalations` | object | `needsHuman` (deduped issue numbers, first-seen order — drive gate② + gate⓪ plan-review), `ceiling`, `driveNoPr` counts. |
+| `egressSuspects` | `{worker, issue, executable, snippet, target?}[]` | Probable-egress command detections flagged during worker sessions; `target: "loopback"` is present only on a provably loopback-only hit, absent otherwise. |
 | `handoffs` | int | Soft-budget graceful handoffs. |
-| `degradedPhases` | `{phase, outcome, session}[]` | Every peripheral degradation this round (po-align/po-triage/architect/harvest/retro). |
+| `degradedPhases` | `{phase, outcome, session}[]` | Every peripheral degradation this round (po-align/po-triage/po-pool/architect/plan_review/harvest/retro). |
 | `roundStops` | `{name, detail}[]` | Round-level stop-condition hits. |
 | `retro` | object | The retro proposal outcome: `opened {pr, branch}` or `degraded {branch, title, reason}` or neither. |
 | `align` | object \| null | The PO/aligning phase's own summary: `created {issue, title, hasPlan}[]` + `triaged {issue, drafted}[]`. Null when no summary was recorded (degraded align). |
+| `concerns` | `{issue, reason}[]` | Every PO-dissent concern actually posted THIS round (`dissent.ts`'s `postConcerns`), idempotent by marker. |
+| `concernsReconciled` | `{issue, reason, originRound}[]` | Concern-posted events that land in this round's event-ID window but whose payload names an earlier round as origin — the durable sweep (`dissent.ts`'s `reconcileDurableConcerns`) catching up a receipt, listed separately so nothing silently vanishes from the round-summary view without falsely attributing it to this round. |
 
 Scope: strictly the events between the round's own open and close. Run-scoped events
 (standby waits, #125) are never part of a round's artifact.

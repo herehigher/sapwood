@@ -218,10 +218,18 @@ the matching vocabulary.
 
 ## 7. Board Status ownership — who moves what, when
 
-Board Status transitions each have **exactly one owner**, and ownership is
-structural, not conventional: workers and roles carry zero `gh` grants
-(#110), so every Status write can only leave through the engine's
-`setBoardStatus`. The board is the management-side *view*; the runtime truth
+Board Status transitions are assigned an owner on sapwood's engine-supplied
+tool paths: peripheral roles have no engine-granted `gh` capability; the
+normal worker profile pairs `Bash(gh *)` with `WORKER_DISALLOWED_TOOLS`; and
+the guard separately blocks the named `gh` governance commands, including
+`gh project` and relevant `gh api`/`gh api graphql` mutations. These layers
+are not absolute: `allowManagedPermissionRulesOnly` discards the CLI
+allow/deny arguments but not the guard hook, while a differently named
+ambient MCP server evades the name-based MCP denies and never reaches the
+guard matcher; both are accepted blind spots
+([`docs/security.md`](../security.md#accepted-blind-spots)). Engine-owned
+Status transitions go through `setBoardStatus`, while backlog → Ready
+remains human-owned. The board is the management-side *view*; the runtime truth
 source is SQLite + sentinels (§6) — the engine writes Status but never reads
 it back for recovery (the one read is the Ready lane: the human authorization
 channel, not a recovery channel).
@@ -284,9 +292,12 @@ Done}; `Done` is terminal.
   `.sapwood/rounds/*.md`. `round_artifacts` **is** the round-history contract
   (schema-versioned; the UI checks `schemaVersion` and says "newer schema —
   update the dashboard" rather than mis-render).
-- **Writes: none.** No sentinel creation (kill/pause stay CLI/human acts —
-  a write path would break the read-only security posture and turn the
-  dashboard into an attack surface), no config editing, no GitHub writes.
+- **Writes:** with `dashboard.controls` enabled, the loopback-only
+  `POST /api/control` creates or removes engine sentinels and
+  `POST /api/attention/dismiss` appends the operator-owned dismissals file —
+  gated by config so a spectator deployment has no such route to POST at,
+  preserving the read-only security posture; it never writes SQLite, config,
+  or GitHub.
   The dashboard may *display* the exact command to run (`touch
   .sapwood/KILL_SWITCH`), never a button that runs it.
 - **Not the frontend's job**: deciding state (the truth table above is

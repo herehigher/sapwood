@@ -72,7 +72,7 @@ them is a design smell regardless of how convenient it is.
 
 ## Schema version & migrations
 
-`MIGRATIONS` is an ordered array at `engine/src/state/state.ts`; array index N upgrades SQLite `PRAGMA user_version` from N to N+1. `SCHEMA_VERSION` is exactly `MIGRATIONS.length` (`engine/src/state/state.ts`) and is currently **21**.
+`MIGRATIONS` is an ordered array at `engine/src/state/state.ts`; array index N upgrades SQLite `PRAGMA user_version` from N to N+1. `SCHEMA_VERSION` is exactly `MIGRATIONS.length` (`engine/src/state/state.ts`).
 
 Migrations are forward-only and transactional. Never edit a migration that may have shipped: append a function, preserve existing data, add/update a real upgrade test in `engine/src/state/state.test.ts`, and review the crash/restart and read-only-version behavior. `input_manifest_new` appears only inside a table-rebuild migration and is renamed back; it is not a final table.
 
