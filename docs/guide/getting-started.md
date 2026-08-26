@@ -433,7 +433,7 @@ without waiting for a human click.
   Run `sapwood run`. A bounded unattended run can use an existing stop control, for
   example `sapwood run --milestone "M"` to scope dispatch to that exact milestone and
   wind down when it is complete.
-- **Risk profile:** this is the highest-autonomy level. Once gate① (CI) and gate② (the
+- **Risk profile:** this is the highest engine-authority level. Once gate① (CI) and gate② (the
   configured fresh non-author review) pass, the conductor squash-merges the exact
   reviewed head. The producer still cannot review, approve, or merge its own work;
   guard enforcement, cost ceilings, pause, and the kill switch remain active.

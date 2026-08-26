@@ -66,10 +66,9 @@ recipe](docs/guide/getting-started.md#l1--supervise-one-issue).
 
 ## Why sapwood
 
-sapwood turns a GitHub backlog into governed, trusted-repos-first
-autonomy — never handing an autonomous worker the keys to its own review.
-Like sapwood in a tree, growth happens at the living edge until it
-hardens into heartwood.
+sapwood turns a GitHub backlog into governed autonomy, trusted repos
+first — never handing a worker the keys to its own review. Like sapwood
+in a tree, growth happens at the living edge into heartwood.
 
 ## Design principles
 
@@ -182,12 +181,12 @@ Lower = safer, more human effort; higher = more autonomous.
 | L4 — LLM-supervised run | Full rounds, gated merge (as L3) | Conductor (or an explicitly authorized supervisor) | LLM | Top of the ladder |
 
 L4 keeps L3's engine authority and adds a trusted LLM supervisor whose
-scope is watching, recording, nagging, pause/kill switch, and park clears
-— by default it never adjudicates a merge; the owner may extend that by
-explicit session-start authorization; `sapwood:human-merge-only` PRs stay
-a human's call — structural against the engine's merge path, policy for
-an authorized operator session (see [Governance
-lines](docs/guide/supervision.md#governance-lines)).
+scope is watching, recording, nagging, tripping pause/kill switch, and
+clearing breaker parks with a reason — by default it never adjudicates a
+merge; the owner may extend that by explicit session-start authorization;
+`sapwood:human-merge-only` PRs stay a human's call — structural against
+the engine's merge path, policy for an authorized operator session (see
+[Governance lines](docs/guide/supervision.md#governance-lines)).
 
 Human controls (pause/kill switch/e-stop) apply at every level
 ([Human controls](docs/security.md#human-controls-three-tiers)); L3/L4
