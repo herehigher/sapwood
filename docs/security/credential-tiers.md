@@ -35,7 +35,7 @@ Part of sapwood's security model — `docs/security.md` is the normative model; 
 ```
 ssh-keygen -t ed25519 -N "" -f .sapwood/keys/worker-deploy-key
 gh repo deploy-key add .sapwood/keys/worker-deploy-key.pub -R <owner>/<repo> --allow-write --title sapwood-worker
-echo <id-from-the-add-command-above> > .sapwood/keys/worker-deploy-key.id
+gh repo deploy-key list -R <owner>/<repo> --json id,title -q '.[] | select(.title=="sapwood-worker") | .id' > .sapwood/keys/worker-deploy-key.id
 chmod 600 .sapwood/keys/worker-deploy-key .sapwood/keys/worker-deploy-key.id
 # then set worker.credentialTier: L1 in the config, and re-run:
 sapwood init
