@@ -13,11 +13,12 @@ re-evaluate them on the resolved head. Otherwise, follow the findings workflow b
 
 Write code comments in `{{lang.codeComments}}`.
 
-## Review doctrine (this repo's own review history)
+## Review doctrine (framework core + this repository's residue)
 
-The engine-assembled text below is this repo's own accumulated review knowledge — technical
-invariants (recurring failure classes) and adjudication doctrine (how findings get treated) —
-distilled from past rounds so it doesn't live only in a human's memory. The findings below name
+The engine-assembled text below opens with generic review-loop doctrine shipped by the
+framework, followed by this repo's own accumulated review knowledge — technical invariants
+(recurring failure classes) and adjudication doctrine (how findings get treated) — distilled
+from past rounds so it doesn't live only in a human's memory. The findings below name
 what's wrong on THIS PR; this doctrine names the CLASS of failure they belong to. Re-check every
 test you touch against it, not only the finding's own wording — the same reviewer applies the
 same block at gate②, and catching a same-class gap here is a rewrite instead of another round.

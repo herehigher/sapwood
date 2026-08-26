@@ -4,7 +4,7 @@
 // source (a code constant/registry, another doc, a real parser/render pipeline), (b) is a
 // negative lint over a banned class (fires only when a known-bad claim RETURNS, never on
 // legitimate rewording), or (c) pins a safety floor by MARKER BLOCK + mirror-equality across
-// carriers, never by sentence. See docs/REVIEW-DOCTRINE.md's PROSE-PIN sub-case.
+// carriers, never by sentence. See engine/prompts/doctrine-core.md's PROSE-PIN rule.
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -676,7 +676,7 @@ function normalizeWhitespace(text: string): string {
 // #963 (CONVERT, replacing a verbatim-sentence pin): the #653 veto duty is now a
 // `<!-- sapwood:floor:<name> -->` marker block in every carrier — wording may evolve freely as
 // long as every carrier changes together (mirror-pair), never pinned by sentence. See #672's
-// twin mechanism below and docs/REVIEW-DOCTRINE.md's PROSE-PIN sub-case.
+// twin mechanism below and engine/prompts/doctrine-core.md's PROSE-PIN rule.
 const FLOOR_CARRIERS: Readonly<Record<string, string>> = {
   "verification-plan-reviewer.md": defaultVerificationPlanReviewerPromptPath(),
   "verification-plan-reviewer-confirm.md": defaultVerificationPlanConfirmPromptPath(),
@@ -867,7 +867,7 @@ test("#701 (Tier B): no shipped role prompt hardcodes 'English' as a literal wor
 // plan-review.test.ts/engine-agent.test.ts's own "#963" render tests, one per role prompt. A
 // static `.includes("{{lang.*}}")` check on the raw template proves only that the LITERAL TOKEN
 // sits somewhere in the file — never that a real render actually threads the configured value
-// through it, and it is itself a single-file prose pin (PROSE-PIN, docs/REVIEW-DOCTRINE.md).
+// through it, and it is itself a single-file prose pin (PROSE-PIN, engine/prompts/doctrine-core.md).
 
 // ── Negative lint: no sapwood-dev issue/PR archaeology on the agent-facing release surface ────
 //
@@ -948,7 +948,7 @@ test("#1119: no shipped prompt's {{lang.*}} paragraph restates the BCP-47/defaul
   const shippedPrompts = readdirSync(promptsDir)
     .filter((f) => f.endsWith(".md"))
     .map((f) => join(promptsDir, f));
-  assert.equal(shippedPrompts.length, 14, `sanity: expected the 14 top-level shipped prompts, got ${shippedPrompts.length} .md files`);
+  assert.equal(shippedPrompts.length, 15, `sanity: expected the 15 top-level shipped prompts, got ${shippedPrompts.length} .md files`);
   const bannedInLangParagraph = [
     /BCP-47/,
     /language\.issuesAndPrs/,

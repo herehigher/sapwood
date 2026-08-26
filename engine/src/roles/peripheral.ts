@@ -463,7 +463,7 @@ export interface RoleRunnerDeps {
    *  against its own `heartbeatMs` cadence, with the assertion ("several post-latch ticks ran")
    *  decided by whichever wins. A test raises this so the SIGKILL is provably not what ends the
    *  child, then ends the child itself on a condition it controls — the seam, not a bigger
-   *  margin (docs/REVIEW-DOCTRINE.md, "No timing-dependent assertions").
+   *  margin (engine/prompts/doctrine-core.md, "No timing-dependent assertions").
    *
    *  Raising it costs nothing, in a test or in production: the wait is CANCELABLE (see
    *  awaitKillGrace) — it ends the instant the child exits, leaves no pending timer behind, and

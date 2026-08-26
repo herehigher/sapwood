@@ -2,8 +2,8 @@
 // under in the per-round finding record (`drive-fixup`'s `findings` field, `loop/conductor.ts`).
 // Pure, unprotected, zero I/O: every input here is data the caller already holds.
 //
-// STRUCTURAL DATA ONLY (design #402 §3a, D1's consuming-not-re-litigating stance, and this
-// repo's authoritative-signals doctrine, `docs/REVIEW-DOCTRINE.md`). Neither function below
+// STRUCTURAL DATA ONLY (design #402 §3a, D1's consuming-not-re-litigating stance, and the
+// authoritative-signals rule, `engine/prompts/doctrine-core.md`). Neither function below
 // accepts a finding `body` / review-comment TEXT at all — not "ignores it", the parameter simply
 // does not exist in either input type, so a caller cannot accidentally key on prose even by
 // mistake. This is the property verification item 1 (finding-key.test.ts: "a reworded body with

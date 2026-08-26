@@ -114,11 +114,12 @@ locked constraints/architecture", not as a full code review.
 {{round.lastMerged}}
 </round-lastMerged>
 
-## Review doctrine (this repo's own review history)
+## Review doctrine (framework core + this repository's residue)
 
-The engine-assembled text below is this repo's accumulated review knowledge — technical
-invariants (recurring failure classes past rounds have already flagged) and adjudication
-doctrine (how findings get treated). Weigh it alongside the locked constraints/architecture below
+The engine-assembled text below opens with generic review-loop doctrine shipped by the
+framework, followed by this repo's own accumulated review knowledge — technical invariants
+(recurring failure classes past rounds have already flagged) and adjudication doctrine (how
+findings get treated). Weigh it alongside the locked constraints/architecture below
 when you judge cross-issue consistency and flag contradictions: a candidate whose approach
 repeats an invariant this doctrine already names is itself worth flagging.
 

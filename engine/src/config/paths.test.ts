@@ -420,8 +420,8 @@ test("findDeployKeyAnchor: a co-located key path that is a DANGLING symlink is n
 
 // #1105: mtime ordering, not real-time delay — utimesSync sets each sidecar's mtime explicitly
 // so this pins the "most recently WRITTEN wins" rule deterministically, with no dependency on
-// wall-clock timing or filesystem mtime granularity (docs/REVIEW-DOCTRINE.md's no-timing-
-// dependent-tests rule: go around the clock, never wait on it).
+// wall-clock timing or filesystem mtime granularity (engine/prompts/doctrine-core.md's
+// no-timing-dependent-assertions rule: go around the clock, never wait on it).
 test("findDeployKeyAnchor: when more than one sidecar exists (a stale primary plus a fresher per-host replacement), the most recently WRITTEN one wins", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-anchor-"));
   const root = join(dir, ".sapwood");

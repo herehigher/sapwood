@@ -80,8 +80,9 @@ dashboard workspace's `test` script's `--import`.
 click-wiring gap; the same class recurred one level up the stack in #866/#868 — a test that
 mounts a real entry point but still hands it a synthetic view-model, or a hand-constructed state
 combination the real derivation could never itself produce, proves nothing about the actual
-TanStack Query hook → server response → render chain (see `docs/REVIEW-DOCTRINE.md`'s WIRING
-rule, data-flow sub-shape). Each PR currently re-derives an app-mount-with-settled-queries
+TanStack Query hook → server response → render chain (see
+`engine/prompts/doctrine-core.md`'s WIRING rule, data-flow sub-shape). Each PR currently
+re-derives an app-mount-with-settled-queries
 pattern ad hoc; the next one to need it should extract it to shared test infra rather than
 reinventing it again.
 

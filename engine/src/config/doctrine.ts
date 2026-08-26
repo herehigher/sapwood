@@ -1,58 +1,73 @@
-// doctrine.ts (#167): the repo-level review-doctrine file — technical invariants (disabled-
-// consumer rule, same-tick window rule, crash-rerun set) and adjudication doctrine (how the
-// loop treats review findings), authored as prose for LLM readers, deliberately never a lint/
-// DSL — the review loop's own judgment rules, not a rules engine. Data, not code — the same
-// shipping/scaffold shape as #128's north-star goal file (engine/prompts/doctrine-template.md,
-// config.ts's `doctrine.file`, init.ts's ensureDoctrineFile), but the LOAD side is its own tiny
-// module (not folded into architect.ts's loadGoalExcerpt) because it's injected into
-// THREE prompt surfaces — the worker brief (worker.ts), the architect pass (architect.ts), and
-// referenced by name in the gated-reentry-cap escalation comment (conductor.ts) — not one, and
-// none of those three modules should own the load logic the other two also need.
+// doctrine.ts (#167, repartitioned #1123 PR-2): the review doctrine every engine-composed
+// surface receives — a framework-owned, release-controlled CORE (engine/prompts/doctrine-core.md,
+// shipped the same way every other role prompt is: defaultDoctrineCorePath mirrors worker.ts's
+// own defaultPromptPath shape) prepended to whatever repo-level residue `doctrine.file` holds.
+// Data, not code — the same shipping/scaffold shape as #128's north-star goal file
+// (engine/prompts/doctrine-template.md, config.ts's `doctrine.file`, init.ts's
+// ensureDoctrineFile), but the LOAD side is its own tiny module (not folded into architect.ts's
+// loadGoalExcerpt) because it's injected into FOUR prompt surfaces — the worker brief, the fix
+// leg, the architect pass, and the engine-agent reviewer — not one, and none of those modules
+// should own the load logic the others also need.
 //
-// UNLIKE `worker.promptFile` (config.ts): a MISSING doctrine file is NOT an error. It's a legal,
-// common state — a repo that hasn't adopted the doctrine convention yet, or has deliberately
-// opted out — so absent degrades to an explicit 'none' placeholder, never a silent empty
-// substitution and never a fail-fast throw (per the #167 issue's acceptance criteria: "absent
-// file -> explicit 'none' placeholder, behavior unchanged"). A file that IS PRESENT but
-// unreadable (EACCES, a directory at the path, any other read error) is a different case —
-// review found (Codex P2) that the original implementation lumped it in with "absent" and
-// degraded it to the same kind of placeholder, which silently masks a real misconfiguration as
-// "no doctrine adopted." That branch now DOES reuse worker.promptFile's fail-fast contract
-// (#74) — throws naming the path — split from the legal-absent branch above. Present-and-
-// readable -> the file's content, bounded/truncated deterministically via retro-digest.ts's
-// capDigest — same marked-cut-never-silent-drop contract as round.directive / the architect's
-// lastMerged text.
+// The core is ALWAYS present in the composed text — a release ships it, so there is no "absent
+// doctrine" state left to represent; the old whole-composition absent-doctrine placeholder is
+// retired. Only the REPO part can legally be missing (a repo that hasn't adopted a residue file
+// yet, or has deliberately opted out): that degrades to `NO_REPO_DOCTRINE`, a public-safe
+// sentence that is part of the composed text like any other content, never a sentinel a caller
+// compares against. A repo file that IS PRESENT but unreadable (EACCES, a directory at the path,
+// any other read error) is a different case — a misconfiguration, not "no doctrine adopted" —
+// and still fails fast (worker.ts's loadWorkerPromptTemplate contract, #74). A MISSING core is a
+// packaging bug and throws too, naming the path.
 import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { capDigest } from "../retro/retro-digest.js";
 
-/** Injected verbatim wherever the doctrine text is substituted when no doctrine file exists at
- *  the configured path (or a real caller hasn't threaded a loaded value at all — architect.ts's
- *  `deps.doctrine` reuses this SAME placeholder for that case, same "one placeholder covers both
- *  degrade paths" shape as architect.ts's own NO_PRIOR_ROUND_YET) — an explicit statement, never
- *  a silent empty string, so a rendered prompt is never ambiguous about whether doctrine was
- *  withheld or simply lost. */
-export const NO_DOCTRINE =
-  "(No review doctrine file is configured for this repo — proceeding with no repo-level " +
-  "technical invariants or adjudication doctrine available.)";
+/** Resolve the shipped, framework-owned doctrine core — inside the engine package (NOT the
+ *  orchestrated target repo), the same `join(here, "..", "..", "prompts", …)` shape as
+ *  `roles/worker.ts`'s own `defaultPromptPath`, so packaged installs ship it (`engine/package.json`
+ *  `files` already includes `prompts`). No override key: the core is release-controlled by
+ *  design (D1's carrier partition) — a repo customizes doctrine only via `doctrine.file`. */
+export function defaultDoctrineCorePath(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return join(here, "..", "..", "prompts", "doctrine-core.md");
+}
 
-/** Load the repo-level review-doctrine file for prompt injection. Missing file -> NO_DOCTRINE
- *  (never an error — see module doc: absent is a legal state, unlike worker.promptFile). A
- *  file that IS present but unreadable (EACCES, a directory at the path, any other read
- *  error) is a DIFFERENT case from absent — the operator configured/left a doctrine file at
- *  this path and it can't be honored, which is a misconfiguration, not "no doctrine
- *  adopted." #167 review (Codex P2): this now THROWS, naming the path, matching
- *  worker.ts's loadWorkerPromptTemplate fail-fast contract (#74) for the same
- *  present-but-broken shape — fail-closed on a real problem rather than silently degrading a
- *  misconfiguration into content that reads as "this repo has no doctrine." Present and
- *  readable -> raw content, bounded to `maxChars` with a deterministic, marked truncation
- *  (capDigest) — never a silent drop. */
+/** Injected as the repo part whenever no repo-level doctrine file exists at the configured path —
+ *  a public-safe sentence (never an internal sentinel) since it is composed into every surface,
+ *  including ones a reviewer or human may eventually read verbatim. */
+export const NO_REPO_DOCTRINE =
+  "This repository has not adopted a repo-level review doctrine file; the framework doctrine " + "above applies.";
+
+/** Load the composed review doctrine — `core + "\n\n" + repoPart` — for prompt injection into
+ *  every one of the four engine-composed surfaces (worker brief, fix leg, architect pass,
+ *  engine-agent reviewer). The core is read fresh from `defaultDoctrineCorePath()` every call
+ *  (same "load once at the real call site, never cached across engine construction" convention
+ *  `loadDoctrine` has always had) and its absence is a fail-fast packaging bug, naming the path —
+ *  there is no legal "missing core" state, unlike the repo part below. `repoPart` is
+ *  `capDigest(repoText, maxChars)` when `path` exists (bounded/truncated deterministically, same
+ *  marked-cut-never-silent-drop contract as round.directive / the architect's lastMerged text),
+ *  else the explicit `NO_REPO_DOCTRINE` sentence — `maxChars` bounds the repo part ONLY; the core
+ *  is release-controlled and fixed-size by construction (its own ceiling is a CI test, not
+ *  config). A repo file that IS present but unreadable still throws, naming the path — a
+ *  misconfiguration, not "no doctrine adopted." */
 export function loadDoctrine(path: string, maxChars: number): string {
-  if (!existsSync(path)) return NO_DOCTRINE;
-  let text: string;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch (e) {
-    throw new Error(`doctrine.file present but unreadable: ${path} (${String(e)}) — refusing to proceed`);
+  const corePath = defaultDoctrineCorePath();
+  if (!existsSync(corePath)) {
+    throw new Error(`doctrine core missing at ${corePath} — a packaging bug, refusing to proceed`);
   }
-  return capDigest(text, maxChars);
+  const core = readFileSync(corePath, "utf8");
+  let repoPart: string;
+  if (!existsSync(path)) {
+    repoPart = NO_REPO_DOCTRINE;
+  } else {
+    let text: string;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch (e) {
+      throw new Error(`doctrine.file present but unreadable: ${path} (${String(e)}) — refusing to proceed`);
+    }
+    repoPart = capDigest(text, maxChars);
+  }
+  return `${core}\n\n${repoPart}`;
 }

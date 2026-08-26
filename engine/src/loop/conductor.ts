@@ -1794,33 +1794,27 @@ export interface FixLegResumeDeps {
   mintProxy: WorkerProxyOpts["mint"];
 }
 
-/** #167 review (Codex P2+P3 adjudication): the gated-reentry-cap-hit escalation note appended
- *  to the re-escalation comment once the last automatic reentry attempt is spent. The original
- *  version unconditionally cited "this repo's review doctrine, adjudication point 4" and the
- *  RESOLVED ABSOLUTE `cfg.doctrine.file` path — two defects: (a) a repo can legally have no
- *  doctrine file adopted (doctrine.ts's NO_DOCTRINE is a common, expected state) or have
- *  rewritten one that no longer uses this exact numbering, so citing it unconditionally can be
- *  false; (b) an absolute local filesystem path posted to a public GitHub issue comment leaks
- *  this machine's directory layout. Fixed by splitting the message: the PRINCIPLE (repeated fix
- *  rounds -> re-examine design/direction, not more patches) is stated inline and
- *  self-contained, true regardless of doctrine adoption; the doctrine pointer is ADDITIVE,
- *  appended ONLY when a doctrine file was actually loaded — `existsSync` on the RESOLVED path,
- *  the same presence check doctrine.ts's own `loadDoctrine` makes — and cites the RAW,
- *  pre-resolution path exactly as the user wrote it in config (`cfg.doctrine.fileRaw`, set by
- *  config.ts's `loadConfig` before it absolutizes `cfg.doctrine.file`; falls back to
- *  `cfg.doctrine.file` itself for a caller that built `cfg` via `ConfigSchema.parse` directly —
- *  every test in this file, and any consumer that skipped `loadConfig` — where that field is
- *  already the raw, un-resolved value since no resolution step ran). Never the resolved
- *  absolute path either way. */
-export function capHitEscalationNote(cfg: SapwoodConfig): string {
-  const principle =
+/** #167 review (Codex P2+P3 adjudication), re-partitioned #1123 PR-2: the gated-reentry-cap-hit
+ *  escalation note appended to the re-escalation comment once the last automatic reentry attempt
+ *  is spent. Originally conditioned the doctrine pointer on whether a REPO doctrine file existed
+ *  (`existsSync(cfg.doctrine.file)`) — but the doctrine core (`engine/prompts/doctrine-core.md`)
+ *  is now ALWAYS present in the composed text regardless of the repo's own adoption, so that
+ *  existence check no longer decides anything true; the anchored `DOC_LINKS.doctrineCoreAdjudication`
+ *  pointer is cited UNCONDITIONALLY instead — never the resolved absolute `cfg.doctrine.file`
+ *  path (which would leak this machine's directory layout onto a public GitHub comment), never a
+ *  bare ordinal (a repo's own residue can legally rewrite/renumber its adjudication prose; the
+ *  anchor targets the release-controlled core, which cannot). The PRINCIPLE (repeated fix rounds
+ *  -> re-examine design/direction, not more patches) is stated inline and self-contained; the
+ *  doctrine pointer is additive, appended after it. No longer takes a `cfg` parameter — nothing
+ *  it says depends on this repo's own doctrine adoption. */
+export function capHitEscalationNote(): string {
+  return (
     "That was the last automatic attempt; a further reentry will be rejected. Repeated fix " +
     "rounds that keep missing the same finding are usually a signal to re-examine the " +
     "feature's design or technical direction at the top of the loop, not to grind through " +
-    "more automatic patch attempts.";
-  if (!existsSync(cfg.doctrine.file)) return principle;
-  const rawPath = cfg.doctrine.fileRaw ?? cfg.doctrine.file;
-  return `${principle} See this repo's review doctrine (\`${rawPath}\`) for more on how repeated findings should be adjudicated.`;
+    "more automatic patch attempts. See " +
+    `<${DOC_LINKS.doctrineCoreAdjudication}> for how repeated findings should be adjudicated.`
+  );
 }
 
 /**
@@ -2480,7 +2474,7 @@ async function drainThenEscalate(
         gatedAttempts > 0
           ? `This is gated-reentry attempt ${gatedAttempts}/${cfg.lanes.gatedReentryCap} for this PR. ` +
             (gatedAttempts >= cfg.lanes.gatedReentryCap
-              ? capHitEscalationNote(cfg)
+              ? capHitEscalationNote()
               : `Remove \`${cfg.labels.needsHuman}\` again once resolved to retry.`)
           : `Remove \`${cfg.labels.needsHuman}\` once resolved to reclaim the same PR.`;
       try {
@@ -3482,7 +3476,7 @@ async function escalateNeedsHuman(
       (gatedAttempts >= cap
         ? // #167 review (Codex P2+P3): cap reached — see capHitEscalationNote's own doc
           // comment for why this is a helper, not inline text.
-          capHitEscalationNote(cfg)
+          capHitEscalationNote()
         : `Remove \`${cfg.labels.needsHuman}\` from this pull request again once it's addressed to retry.`);
     await (carrier === "pr" ? forge.addPRComment(pr, body) : forge.addIssueComment(w.issue, body)).catch(() => {});
   } else {
@@ -7031,7 +7025,8 @@ async function escalateNonConvergent(
         `(${fixRoundsSpent} fix round(s) already spent). Escalating directly to ` +
         `\`${cfg.labels.needsHuman}\` instead of dispatching another fix leg: runaway complexity ` +
         `escalates to the top of the loop, not more patches — the intended response is DESIGN ` +
-        `RE-ENTRY (architect/plan re-review), not merely this human notification.\n\n` +
+        `RE-ENTRY (architect/plan re-review), not merely this human notification. See ` +
+        `<${DOC_LINKS.doctrineCoreAdjudication}> for the full doctrine.\n\n` +
         `Round r-1 finding keys${boundedPrev.truncated ? " (truncated)" : ""}:\n` +
         `${boundedPrev.entries.map((k) => `- \`${k}\``).join("\n") || "(none — round 1 has no r-1 to compare against)"}\n\n` +
         `Current round finding keys${boundedCurr.truncated ? " (truncated)" : ""}:\n` +

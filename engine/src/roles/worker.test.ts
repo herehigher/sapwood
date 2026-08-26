@@ -1638,7 +1638,7 @@ test("probeLlmPing: a hang past probeTimeoutSec is hard-killed and resolves fail
     assert.equal(r.ok, false);
     assert.ok(r.detail?.includes("timed out"));
     // #403 (F25): a DELIBERATE real-time assertion, and the margin ordering is why it is not the
-    // banned "two uncontrolled real operations race" shape (docs/REVIEW-DOCTRINE.md). The stub
+    // banned "two uncontrolled real operations race" shape (engine/prompts/doctrine-core.md). The stub
     // does zero real work — it sleeps 30s — so the only thing that can end this call inside the
     // bound is the timeout kill under test. The three numbers are ordered by construction and by
     // orders of magnitude, not by tuning: probe timeout 1s < this bound 10s < stub sleep 30s. A
@@ -6396,9 +6396,10 @@ test("buildRenderFixPrompt: empty/whitespace template throws at build time — n
   }
 });
 
-// ── #167: {{doctrine}} — repo-level review doctrine injected into the worker brief ─────────────
+// ── #167, repartitioned #1123 PR-2: {{doctrine}} — framework core + repo residue, injected into
+// the worker brief ───────────────────────────────────────────────────────────────────────────
 
-test("buildRenderPrompt: with no doctrine.file on disk, {{doctrine}} substitutes the explicit 'none' placeholder — behavior unchanged, never an error", () => {
+test("buildRenderPrompt: with no doctrine.file on disk, {{doctrine}} substitutes core + the explicit public-safe placeholder for the repo half — never an error", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
   try {
     const p = join(dir, "tpl.md");
@@ -6409,13 +6410,14 @@ test("buildRenderPrompt: with no doctrine.file on disk, {{doctrine}} substitutes
       doctrine: { file: join(dir, "does-not-exist-DOCTRINE.md") },
     });
     const rendered = buildRenderPrompt(scfg)({ number: 1, title: "t", labels: [] });
-    assert.match(rendered, /DOCTRINE: \(No review doctrine file is configured/);
+    assert.match(rendered, /DOCTRINE: Generic review-loop doctrine/, "the framework core opens the composed text");
+    assert.match(rendered, /has not adopted a repo-level review doctrine file/i);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("buildRenderPrompt: with a doctrine.file present, {{doctrine}} substitutes its content, bounded by doctrine.maxChars", () => {
+test("buildRenderPrompt: with a doctrine.file present, {{doctrine}} substitutes core + its content verbatim", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
   try {
     const p = join(dir, "tpl.md");
@@ -6428,13 +6430,14 @@ test("buildRenderPrompt: with a doctrine.file present, {{doctrine}} substitutes 
       doctrine: { file: doctrinePath },
     });
     const rendered = buildRenderPrompt(scfg)({ number: 1, title: "t", labels: [] });
-    assert.equal(rendered, "DOCTRINE: the disabled-consumer rule matters here");
+    assert.match(rendered, /DOCTRINE: Generic review-loop doctrine/, "the framework core opens the composed text");
+    assert.ok(rendered.endsWith("the disabled-consumer rule matters here"), "the repo file's content closes it verbatim");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("buildRenderPrompt: an oversized doctrine.file is deterministically truncated with a marked cut when substituted into {{doctrine}}", () => {
+test("buildRenderPrompt: an oversized doctrine.file is deterministically truncated with a marked cut when substituted into {{doctrine}} — the cap bounds the repo part only, never the core", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-prompt-"));
   try {
     const p = join(dir, "tpl.md");
@@ -6449,8 +6452,10 @@ test("buildRenderPrompt: an oversized doctrine.file is deterministically truncat
       doctrine: { file: doctrinePath, maxChars: 200 },
     });
     const rendered = buildRenderPrompt(scfg)({ number: 1, title: "t", labels: [] });
-    assert.ok(rendered.length <= 200, `expected <= 200 chars, got ${rendered.length}`);
-    assert.match(rendered, /truncated/i);
+    const repoPart = rendered.slice(rendered.lastIndexOf("\n\n") + 2);
+    assert.ok(repoPart.length <= 200, `expected the repo part to respect the 200-char cap, got ${repoPart.length}`);
+    assert.match(repoPart, /truncated/i);
+    assert.match(rendered, /^Generic review-loop doctrine/, "the core itself is never truncated by the repo-part cap");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -8327,7 +8332,7 @@ test("probeDeployKeySsh: a hang past timeoutSec is hard-killed and resolves fail
     assert.match(r.detail ?? "", /timed out/i);
     // #606 gate② round 1 (P2-10): mirrors probeLlmPing's own timeout test (#403/F25) — a
     // DELIBERATE real-time assertion, and the margin ordering is why it is not the banned "two
-    // uncontrolled real operations race" shape (docs/REVIEW-DOCTRINE.md). The stub does zero real
+    // uncontrolled real operations race" shape (engine/prompts/doctrine-core.md). The stub does zero real
     // work — it sleeps 30s — so the only thing that can end this call inside the bound is the
     // timeout kill under test. The three numbers are ordered by construction and by orders of
     // magnitude, not by tuning: probe timeout 1s < this bound 10s < stub sleep 30s. A run 9x

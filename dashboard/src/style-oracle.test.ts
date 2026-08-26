@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 /**
- * STYLE doctrine (docs/REVIEW-DOCTRINE.md, "Is this test real?"): a computed-style assertion must
+ * STYLE doctrine (engine/prompts/doctrine-core.md, "Is this test real?"): a computed-style assertion must
  * never be `notEqual`/existence-only — any non-default value satisfies it, so the assertion proves
  * nothing about the actual rendered value. happy-dom compounds this: it returns "" (not "0px") for
  * an unresolved `var(...)` border/dimension shorthand, and "" is also != "0px", so the tautology

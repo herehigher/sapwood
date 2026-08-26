@@ -14,7 +14,7 @@ guard hook, human-merge-only paths, and cost ceilings.
 | --- | --- |
 | [`security.md`](security.md) | The trust/governance model — read before any autonomous run. |
 | [`PLAN.md`](PLAN.md) | Architecture, locked decisions, and roadmap. |
-| [`REVIEW-DOCTRINE.md`](REVIEW-DOCTRINE.md) | The review/escalation doctrine injected into role prompts. |
+| [`REVIEW-DOCTRINE.md`](REVIEW-DOCTRINE.md) | This repo's own review-doctrine residue, injected into role prompts after the framework's generic core (`engine/prompts/doctrine-core.md`). |
 
 These three stay at the `docs/` root — not a stylistic choice: engine config
 (`sapwood.config.yaml`'s `doctrine.file`/`goal.file` keys) and production

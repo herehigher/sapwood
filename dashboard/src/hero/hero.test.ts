@@ -1300,9 +1300,10 @@ test("#879 gate② run 2e566ac9 finding [4]: PLAN/IMPLEMENT/OUTCOME headers rend
 
 // #895 item 5: below the app's 720px stacking floor, `.hero`'s `width: 100%` used to scale the
 // whole stage — and every caption's authored font-size along with it — down to ~6px. STYLE
-// doctrine (docs/REVIEW-DOCTRINE.md): a computed-style AC needs `registerRealDom()` plus a real
-// `getComputedStyle` read against the FULL production cascade at a REAL simulated viewport width,
-// never a regex read of the source text (which proves the rule was authored, not that it wins).
+// doctrine (engine/prompts/doctrine-core.md): a computed-style AC needs `registerRealDom()` plus
+// a real `getComputedStyle` read against the FULL production cascade at a REAL simulated
+// viewport width, never a regex read of the source text (which proves the rule was authored, not
+// that it wins).
 test("#895 item 5: at the 720px floor, the hero stage reflows (holds its native 1200px width) instead of scaling its captions down", () => {
   assert.ok(bodyFontSizeRule);
   const style = document.createElement("style");
@@ -2474,9 +2475,10 @@ test("#920 AC3: every visible lane channel gets hollow-circle terminals at both 
 // #920 gate② finding [1] (ac3-hollow-style-unverified): "hollow" is a rendered CSS fact
 // (`fill: none`), not something the markup structure test above can see — a `.hero-lane-terminal`
 // rule declaring `fill: var(--sap-fill)` would leave that test green while violating
-// "hollow-circle terminal" outright. STYLE doctrine (docs/REVIEW-DOCTRINE.md): `registerRealDom()` + a real
-// `getComputedStyle` read against the FULL production cascade, never a regex on the source text —
-// same pattern the #879 gate② finding [1] fix already established in this file.
+// "hollow-circle terminal" outright. STYLE doctrine (engine/prompts/doctrine-core.md):
+// `registerRealDom()` + a real `getComputedStyle` read against the FULL production cascade,
+// never a regex on the source text — same pattern the #879 gate② finding [1] fix already
+// established in this file.
 test("#920 gate② finding [1]: a real .hero-lane-terminal renders fill:none under the production cascade — hollow is a rendered fact, not just a class name", () => {
   assert.ok(bodyFontSizeRule);
   const style = document.createElement("style");

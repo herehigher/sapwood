@@ -560,8 +560,8 @@ attempt, not just a transient one. There is deliberately no consecutive-failure 
 cap: distinguishing "permanently broken" from "rate-limited/network-blip" by a bare retry
 count would either escalate a healthy lane on a bad day or need a second knob to avoid
 that, and no evidence of an actual silent wedge has shown up to justify the
-complexity (marginal-complexity doctrine — see `REVIEW-DOCTRINE.md`'s adjudication
-principles). The containment is honest visibility —
+complexity (marginal-complexity doctrine — see `engine/prompts/doctrine-core.md`'s "How the
+loop treats review findings" principles). The containment is honest visibility —
 one `drive-queued` event per reason change (never per-tick spam) plus this
 watch recipe — not an automatic escalation.
 

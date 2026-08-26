@@ -49,8 +49,10 @@ description of it.
 The shipped role prompts are the behavior surface for every autonomous session:
 `worker.md`, `fix.md`, `architect.md`, `verification-plan-drafter.md`, `verification-plan-reviewer.md`,
 `verification-plan-reviewer-confirm.md`, `po.md`, `po-pool.md`, `harvest.md`, `retro.md`,
-plus `goal-template.md` / `doctrine-template.md` (provisioned into a target
-repo by `sapwood init`) and `issue-templates/`.
+`engine-reviewer.md`, plus `doctrine-core.md` (the generic review doctrine — framework-owned,
+release-controlled, injected ahead of a target repo's own doctrine residue at every render site;
+**not** scaffolded or provisioned into a target repo, unlike the pair below), `goal-template.md` /
+`doctrine-template.md` (provisioned into a target repo by `sapwood init`) and `issue-templates/`.
 
 - Prompts live **inside the engine package** so packaged installs ship them; a
   repo-root `prompts/` would be absent from installed plugins

@@ -76,10 +76,12 @@ export interface EngineAgentReviewerDeps {
    *  return unavailable"). */
   getWorkerActualModels: (issue: number) => string[];
   cfg: SapwoodConfig;
-  /** Already-loaded review-doctrine text (or undefined/empty) — same "load once at construction,
-   *  never per-call" convention as CodexReviewer's own `doctrine` constructor param
-   *  (reviewer.ts's `loadReviewDoctrine`). */
-  doctrine?: string;
+  /** The already-loaded, composed review doctrine (framework core + this repo's residue,
+   *  `doctrine.ts::loadDoctrine`) — REQUIRED, matching production's own direct
+   *  `doctrine: loadDoctrine(...)` pass (review/production.ts). The core is always present in the
+   *  composed text (there is no "absent doctrine" state to fall back from), so this field is
+   *  never optional in a real construction; loaded once at construction, never per-call. */
+  doctrine: string;
   now: () => Date;
   /** #288: construction-bound validated-artifact side channel. ApprovalResult intentionally
    *  stays small; audit provenance is reported only after strict output + model validation. */
@@ -492,8 +494,6 @@ export class EngineAgentReviewer implements ReviewerAdapter {
       snapshot.manifest.length > 0
         ? snapshot.manifest.map((a) => `${a.id}: ${a.text}`).join("\n")
         : "(no acceptance criteria in the snapshot — nothing to judge per-AC; findings may still be reported)";
-    const doctrineText =
-      this.deps.doctrine && this.deps.doctrine.trim().length > 0 ? this.deps.doctrine : "(none configured for this repo)";
     // #302 review P1: the FULL snapshotted body — not just the extracted AC lines — is a session
     // input in its own right (issue #286's What; design #279 §5: "The session reviews against the
     // SNAPSHOTTED body text"). The body carries the verification plan and every other
@@ -504,7 +504,7 @@ export class EngineAgentReviewer implements ReviewerAdapter {
       diff,
       "issue-body": snapshot.body,
       "acceptance-criteria": acText,
-      doctrine: doctrineText,
+      doctrine: this.deps.doctrine,
       // #701: the configured default working language for this review's free-text findings — an
       // issues/PRs surface (review comments the engine authors). Optional: NOT one of
       // REQUIRED_PROMPT_PLACEHOLDERS above, so a custom promptFile that doesn't reference it

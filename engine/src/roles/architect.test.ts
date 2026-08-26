@@ -20,7 +20,6 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ConfigSchema, type SapwoodConfig } from "../config/config.js";
 import { NO_ROUND_DIRECTIVE } from "../config/directive.js";
-import { NO_DOCTRINE } from "../config/doctrine.js";
 import type { CommitInfo, IForge, Issue, PRReviewData, PRStatus } from "../forge/forge.js";
 import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
 import type { EventKind } from "../state/event-kinds/index.js";
@@ -31,6 +30,7 @@ import {
   architectMarker,
   consecutiveSameBodyDropCount,
   createArchitectStub,
+  DOCTRINE_UNWIRED,
   defaultArchitectPromptPath,
   extractArchitectureChapter,
   extractConstraintsSection,
@@ -1474,7 +1474,7 @@ test("createArchitectStub (#132): an explicitly supplied lastMerged string reach
 
 // ── #167: {{round.doctrine}} — the third engine-assembled block, threaded like lastMerged ──────
 
-test("createArchitectStub (#167): the rendered prompt carries the explicit NO_DOCTRINE placeholder when deps.doctrine is not supplied", async () => {
+test("createArchitectStub (#1123 PR-2): the rendered prompt carries the explicit DOCTRINE_UNWIRED fixture placeholder when deps.doctrine is not supplied — production always assigns it per invocation, so this is a fixture seam only, never a reachable runtime state", async () => {
   const forge = new FakeForge();
   forge.planReviewCandidates = [{ number: 9, title: "t", labels: [] }];
   const runner = new ScriptedRunner([{ result: doneResult("architect-1", architectResult("note")) }]);
@@ -1482,7 +1482,7 @@ test("createArchitectStub (#167): the rendered prompt carries the explicit NO_DO
   const deps: ArchitectDeps = { now: realClock, forge, state, cfg: mkCfg(), runner, planMdPath: "/nonexistent/PLAN.md" };
   const stub = createArchitectStub(deps);
   await stub.run({ roundId: 6, phase: "architecting", marker: null });
-  assert.ok(runner.calls[0]!.prompt.includes(NO_DOCTRINE));
+  assert.ok(runner.calls[0]!.prompt.includes(DOCTRINE_UNWIRED));
 });
 
 test("createArchitectStub (#167): an explicitly supplied doctrine string reaches the prompt verbatim", async () => {

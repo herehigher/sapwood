@@ -1290,19 +1290,23 @@ const Goal = z
   })
   .strict();
 
-// #167: repo-level review doctrine — technical invariants (disabled-consumer rule, same-tick
-// window rule, crash-rerun set) and adjudication doctrine (how the loop treats review findings),
-// authored as prose for LLM readers, deliberately never a lint/DSL. Top-level (not scoped under
-// `roles.*`) since it's injected into more than one role's prompt (worker brief + architect
-// pass) and cited by name in the prFixCap-style escalation comment — same rationale #128 moved
-// `goal.file` out of `roles.architect`. Same real-`.default()` shape as `goal.file` above: every
-// reader always sees a concrete path.
+// #167 (repartitioned #1123 PR-2): repo-level review doctrine, this repo's HALF of a two-carrier
+// composition. `doctrine.ts::loadDoctrine` prepends the framework's own release-controlled,
+// always-present core (`engine/prompts/doctrine-core.md`, not configurable here — no override
+// key) to whatever this `file` holds, and injects the result into four engine-composed surfaces:
+// the worker brief, the fix leg, the architect pass, and the engine-agent reviewer. Top-level
+// (not scoped under `roles.*`) since it's injected into more than one role's prompt and cited by
+// name in the gated-reentry-cap escalation comment — same rationale #128 moved `goal.file` out
+// of `roles.architect`. Same real-`.default()` shape as `goal.file` above: every reader always
+// sees a concrete path. The hosted gate② review-trigger comment carries neither half (owner
+// ruling 2026-08-26): a hosted bot's standing review guidance lives in its own instruction file.
 const Doctrine = z
   .object({
     file: z.string().min(1).default("docs/REVIEW-DOCTRINE.md"),
     // Deterministic-truncation cap (never a silent drop — the cut is marked in the text itself,
-    // doctrine.ts's loadDoctrine reuses retro-digest.ts's capDigest) on the doctrine text
-    // substituted into the worker/architect prompts. Same user-tunable-in-config, marked-cut
+    // doctrine.ts's loadDoctrine reuses retro-digest.ts's capDigest) on THIS repo's own doctrine
+    // text — the framework core is release-controlled and fixed-size by construction, bounded by
+    // its own CI ceiling test, never by this key. Same user-tunable-in-config, marked-cut
     // contract as round.directiveMaxChars / roles.architect.lastMergedMaxChars /
     // roles.retro.digestMaxChars. #167 review (Codex P3): `.positive()` alone let an operator
     // configure a cap so small the truncation MARKER itself (capDigest's "...[truncated N

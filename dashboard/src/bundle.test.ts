@@ -16,7 +16,7 @@ const BANNED = /chart\.js|recharts|d3-|victory-|nivo|apexcharts|billboard\.js|hi
 // #894: the real `git rev-parse HEAD` of THIS tree, computed the same way `vite.config.ts`'s
 // build-time `define` computes it — asserted against below, not hardcoded, so this test actually
 // pins "the embedded value equals the built tree's own SHA" rather than a copied constant that
-// could silently drift from it (docs/REVIEW-DOCTRINE.md's VALUE rule).
+// could silently drift from it (engine/prompts/doctrine-core.md's VALUE rule).
 const realHeadSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root }).toString().trim();
 
 // One real build, shared by every test below (#742: the `?demo` export step runs first, exactly

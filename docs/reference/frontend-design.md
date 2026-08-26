@@ -781,7 +781,7 @@ color alone — the est segment carries a texture (hatch) or the `est` label.
 
 **Process note** (#729 design review, 2026-08-17): a design-fidelity issue's ACs carry a
 mockup/live crop pair as their own oracle — element-present or token-exact alone is never
-finish evidence (REVIEW-DOCTRINE.md's STRUCTURE-AS-FINISH sub-case).
+finish evidence (`engine/prompts/doctrine-core.md`'s STRUCTURE-AS-FINISH rule).
 
 ## 6. Motion spec — the hero Loop
 

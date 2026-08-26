@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import type { SapwoodConfig } from "../config/config.js";
-import { loadDoctrine, NO_DOCTRINE } from "../config/doctrine.js";
+import { loadDoctrine } from "../config/doctrine.js";
 import { defaultRuntimeRoot, runtimePaths } from "../config/paths.js";
 import type { IForge } from "../forge/forge.js";
 import { baseRedPin } from "../loop/base-ci.js";
@@ -183,10 +183,7 @@ export function makeProductionEngineAgent(
     ...(executor ? { executor } : {}),
     getAcSnapshot: (issue) => state.getAcSnapshot(issue),
     getWorkerActualModels: (issue) => state.getWorkerActualModels(issue),
-    ...(() => {
-      const d = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
-      return d === NO_DOCTRINE ? {} : { doctrine: d };
-    })(),
+    doctrine: loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars),
     now,
     onReviewArtifact: (head, artifact) => artifacts.set(head, artifact),
     materialize: async (head) => {

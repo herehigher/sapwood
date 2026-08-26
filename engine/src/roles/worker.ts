@@ -5476,12 +5476,12 @@ export function loadWorkerPromptTemplate(cfg: SapwoodConfig): string {
  *  that names ITS label. */
 const CONFIG_VARS: Record<string, (cfg: SapwoodConfig) => string> = {
   "labels.verifyNa": (cfg) => cfg.labels.verifyNa,
-  // #167: the repo-level review doctrine (technical invariants + adjudication doctrine) —
-  // loaded fresh per render (doctrine.ts's loadDoctrine, config-file-relative-resolved
-  // `cfg.doctrine.file`, capped/deterministically-truncated at `cfg.doctrine.maxChars`). Missing
-  // file is NOT an error, unlike `worker.promptFile` above — it degrades to doctrine.ts's
-  // explicit NO_DOCTRINE placeholder (see that module's doc comment), never a silent empty
-  // substitution and never a startup throw.
+  // #1123 (PR-2): the composed review doctrine — framework core (release-controlled, always
+  // present) + this repo's own residue — loaded fresh per render (doctrine.ts's loadDoctrine,
+  // config-file-relative-resolved `cfg.doctrine.file`, capped/deterministically-truncated at
+  // `cfg.doctrine.maxChars`, which bounds the repo part only). A missing repo file is NOT an
+  // error, unlike `worker.promptFile` above — it degrades to doctrine.ts's public-safe
+  // NO_REPO_DOCTRINE sentence, never a silent empty substitution and never a startup throw.
   doctrine: (cfg) => loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars),
   // #701: the configured default working language for code comments and for documentation the
   // worker edits — opaque BCP-47-ish tag, `en` by default. See config.ts's `language` section

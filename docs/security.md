@@ -319,12 +319,16 @@ would be redundant machinery. The label carries the **verdict**, not a new detec
 ### The review-doctrine file is trusted prompt input
 
 The review-doctrine file (`doctrine.file`, default `docs/REVIEW-DOCTRINE.md`) is
-user-editable repo prose and is **not** guard-protected — yet its content is injected
-verbatim into the gate② review-trigger comment the review bot reads, so it can influence the
-gate verdict. It sits inside this page's trusted-repo assumption: doctrine content is trusted
+user-editable repo prose and is **not** guard-protected — its content is injected into the
+worker brief, the fix leg, and the architect pass, so it can influence what those sessions do.
+The hosted gate② review-trigger comment no longer carries any doctrine text; a hosted bot's own
+standing review guidance lives in its own instruction file instead (`docs/guide/configuration.md#hosted-bot-review-guidelines`).
+It sits inside this page's trusted-repo assumption: doctrine content is trusted
 like the rest of the repo's prose, and changes to it deserve the same review scrutiny as
 `reviewer.*`/`merge.*` config. It is deliberately not sanitized — prose written *for* LLM
-readers, with gate② staying semantic, not a rules engine.
+readers, with gate② staying semantic, not a rules engine. The shipped generic core
+(`engine/prompts/doctrine-core.md`) is release-controlled, not user-editable — only the
+repo-level part loaded from `doctrine.file` is trusted-repo prose.
 
 ## Human controls (three tiers)
 
