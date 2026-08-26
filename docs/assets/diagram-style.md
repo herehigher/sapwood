@@ -1,8 +1,8 @@
 # Diagram style — regeneration guide
 
-The style spec for hand-regenerating `README.md`'s three Mermaid diagrams as
-static images (e.g. a docs export or social-preview card). No exported
-image is committed; this file is the recipe, not the artifact.
+The style spec for regenerating sapwood's three diagrams as static images
+(e.g. a docs export or social-preview card). The faithful SVG exports are
+committed under `docs/assets/`; this file is the regeneration recipe.
 
 ## Palette
 
@@ -31,7 +31,7 @@ image is committed; this file is the recipe, not the artifact.
 - Keep each diagram's node count at or under 10, matching the Mermaid
   source's own cap.
 
-## Diagram descriptions (source of truth: `README.md`)
+## Diagram descriptions (source of truth: `docs/assets/*.mmd`)
 
 1. **Hero loop** (`flowchart LR`) — a worker claims a Ready issue, pushes;
    the engine opens the PR, gates it on CI + review, then merges or stops
@@ -44,19 +44,17 @@ image is committed; this file is the recipe, not the artifact.
 
 ## Regeneration recipe
 
-`README.md`'s Mermaid blocks (Diagrams 1–3) are the semantic spec — the
-authoritative set of nodes, edges, and labels. A regenerated image may
-re-declare node shapes per this file's rules above; it never invents a
-node or edge the Mermaid source doesn't have.
+The checked-in `docs/assets/*.mmd` files (Diagrams 1–3) are the semantic
+spec — the authoritative set of nodes, edges, and labels. A regenerated
+image may re-declare node shapes per this file's rules above; it never
+invents a node or edge the Mermaid source doesn't have.
 
 **Faithful export** — a literal, unstyled render straight from the shipped
 source, for proofing that an image still matches the diagram:
 
-1. Copy the Mermaid code block verbatim out of `README.md` into a `.mmd`
-   file — never hand-retype it, so the export can't drift from the source.
-2. Render with the Mermaid CLI:
+1. Render with the Mermaid CLI directly against the checked-in `.mmd` file:
    ```
-   npx -y @mermaid-js/mermaid-cli@11 -i <diagram>.mmd -o <name>.png -s 2
+   npx -y @mermaid-js/mermaid-cli@11 -i <diagram>.mmd -o <name>.svg -s 2
    ```
    Verified against `npx -y @mermaid-js/mermaid-cli@11 --help` (mermaid-cli
    11.x): `-s`/`--scale` is the Puppeteer scale factor, and it's what
@@ -68,8 +66,8 @@ source, for proofing that an image still matches the diagram:
    roughly 1050–1570px on the longer edge; there is no fixed target size to
    pin, since each diagram's pixel size follows its own content layout, not
    a page setting.
-3. Save under `docs/assets/`, named for the diagram (`hero-loop.png`,
-   `architecture.png`, `worker-lifecycle.png`).
+2. Save under `docs/assets/`, named for the diagram (`hero-loop.svg`,
+   `architecture.svg`, `worker-lifecycle.svg`).
 
 **Styled poster** — a hand-designed image applying this file's palette,
 shapes, and label rules (for a docs export or social-preview card), made
@@ -77,7 +75,7 @@ with whatever image tool the owner chooses for that piece of work; this
 file assumes no specific tool beyond the mermaid-cli export above. Give
 whichever tool is used exactly these two inputs, nothing else:
 
-- the relevant `README.md` Mermaid block(s), verbatim, as the node/edge/
+- the relevant `docs/assets/*.mmd` file(s), verbatim, as the node/edge/
   label spec;
 - this file's Palette, Node shape per layer, and Label rules sections, as
   the restyling spec.

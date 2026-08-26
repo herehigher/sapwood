@@ -1,0 +1,27 @@
+flowchart TB
+subgraph L1["GitHub"]
+GH["Board/issues/PRs/CI"]
+end
+subgraph L2["Engine"]
+RD["Round driver"]
+CD["Conductor"]
+MG["Merge gate"]
+ST["SQLite state"]
+FA["Forge adapter"]
+end
+subgraph L3["Headless sessions"]
+WK["Workers + guard hook"]
+ER["engine-agent reviewer"]
+end
+subgraph L4["Reviewer adapter"]
+RA["engine-agent/hosted bot/same-model-trusted/human"]
+end
+GH <--> FA
+FA <--> CD
+RD --> CD
+CD --> ST
+CD --> WK
+WK --> FA
+CD --> MG
+MG --> RA
+RA --> ER

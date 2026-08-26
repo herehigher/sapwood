@@ -1,0 +1,7 @@
+flowchart LR
+A["Ready issue"] --> B["Worktree worker"]
+B --> C["push"]
+C --> D["Engine opens PR"]
+D --> E["CI + independent review"]
+E --> F["Merge (or stop for human)"]
+F --> G["Done"]
