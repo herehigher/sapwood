@@ -280,7 +280,7 @@ function realExec(repoRoot: string): Exec {
 // Both `prepare` (branches from it) and `publish` (tags it) need this same freshness
 // check, so it lives once here rather than as two copies that could drift apart.
 
-export type HeadCheckResult = { ok: true } | { ok: false; reason: string };
+export type HeadCheckResult = { ok: true; head: string } | { ok: false; reason: string };
 
 export function checkHeadMatchesOriginMain(deps: Deps): HeadCheckResult {
   deps.exec("git", ["fetch", "origin", "main"]);
@@ -289,7 +289,7 @@ export function checkHeadMatchesOriginMain(deps: Deps): HeadCheckResult {
   if (head !== mainHead) {
     return { ok: false, reason: `HEAD (${head}) is not origin/main (${mainHead})` };
   }
-  return { ok: true };
+  return { ok: true, head };
 }
 
 // ── tag existence: local ref cache + the actual remote ──────────────────────────────
@@ -321,7 +321,7 @@ export function checkTagExists(deps: Deps, tag: string): boolean {
 
 // ── publish preconditions ───────────────────────────────────────────────────────────
 
-export type PublishPrecondition = { ok: true; version: string } | { ok: false; reason: string };
+export type PublishPrecondition = { ok: true; version: string; commitSha: string } | { ok: false; reason: string };
 
 export function checkPublishPreconditions(deps: Deps): PublishPrecondition {
   const headCheck = checkHeadMatchesOriginMain(deps);
@@ -347,7 +347,7 @@ export function checkPublishPreconditions(deps: Deps): PublishPrecondition {
   if (checkTagExists(deps, tag)) {
     return { ok: false, reason: `tag ${tag} already exists — see rollback in docs/dev-guide/10-releasing.md.` };
   }
-  return { ok: true, version: lockstep.version };
+  return { ok: true, version: lockstep.version, commitSha: headCheck.head };
 }
 
 // ── catalog promotion ───────────────────────────────────────────────────────────────
@@ -592,6 +592,10 @@ export interface PublishContext {
   version: string;
   prerelease: boolean;
   repoRoot: string;
+  // The commit `checkHeadMatchesOriginMain` confirmed as HEAD (== origin/main) during
+  // preconditions — pinned into gh-release's `--target` so the draft names a commit even
+  // though the tag itself hasn't been pushed yet at that point (see PUBLISH_STEPS' order).
+  commitSha: string;
   catalogRemote?: string;
 }
 
@@ -653,20 +657,18 @@ export const PUBLISH_STEPS: PublishStep[] = [
     },
   },
   {
-    name: "push-tag",
-    describe: (ctx) => `git push origin v${ctx.version}`,
-    run: (ctx, deps) => {
-      deps.exec("git", ["push", "origin", `v${ctx.version}`]);
-    },
-  },
-  {
-    // Created as a draft, not published: with release immutability ON, a non-draft release's
-    // assets are frozen the instant it exists, and release.yml's own evidence upload still has
-    // to land after this step runs. `release.yml` is what flips `--draft=false`, once evidence
-    // is attached — see docs/dev-guide/10-releasing.md.
+    // Runs BEFORE push-tag, on purpose: `push-tag` is what triggers release.yml (`on: push:
+    // tags`), and that job only ever attaches evidence to an existing draft — it no longer has
+    // a fallback that creates one. So the draft must exist first, or a tag lands with nothing
+    // for CI to attach evidence to. Created as a draft, not published: with release immutability
+    // ON, a non-draft release's assets are frozen the instant it exists. `--target` pins the
+    // draft to the commit the tag will point at, since the tag hasn't been pushed (and per
+    // GitHub's docs, isn't created at all yet) at this point — without it `gh release create`
+    // would resolve the tag against the default branch instead. `release.yml` is what flips
+    // `--draft=false`, once evidence is attached — see docs/dev-guide/10-releasing.md.
     name: "gh-release",
     describe: (ctx) =>
-      `gh release create v${ctx.version} --title v${ctx.version} --notes-file <CHANGELOG [${ctx.version}] section> --generate-notes --draft` +
+      `gh release create v${ctx.version} --target ${ctx.commitSha} --title v${ctx.version} --notes-file <CHANGELOG [${ctx.version}] section> --generate-notes --draft` +
       (ctx.prerelease ? " --prerelease" : ""),
     run: (ctx, deps) => {
       const changelog = readFileSync(join(deps.repoRoot, "CHANGELOG.md"), "utf8");
@@ -678,6 +680,8 @@ export const PUBLISH_STEPS: PublishStep[] = [
           "release",
           "create",
           `v${ctx.version}`,
+          "--target",
+          ctx.commitSha,
           "--title",
           `v${ctx.version}`,
           "--notes-file",
@@ -690,6 +694,16 @@ export const PUBLISH_STEPS: PublishStep[] = [
       } finally {
         rmSync(notesPath, { force: true });
       }
+    },
+  },
+  {
+    // Only reached once gh-release above has succeeded — a thrown exec (bad `gh` invocation,
+    // network, auth) stops runPublish here (PUBLISH_STEPS.run in sequence, no try/catch), so
+    // the tag is never pushed against a draft that failed to create.
+    name: "push-tag",
+    describe: (ctx) => `git push origin v${ctx.version}`,
+    run: (ctx, deps) => {
+      deps.exec("git", ["push", "origin", `v${ctx.version}`]);
     },
   },
   {
@@ -760,6 +774,7 @@ export function runPublish(deps: Deps, opts: { dryRun: boolean; catalogRemote?: 
     version: pre.version,
     prerelease: isPrerelease(pre.version),
     repoRoot: deps.repoRoot,
+    commitSha: pre.commitSha,
     ...(opts.catalogRemote ? { catalogRemote: opts.catalogRemote } : {}),
   };
   const lines = PUBLISH_STEPS.map((step) => {

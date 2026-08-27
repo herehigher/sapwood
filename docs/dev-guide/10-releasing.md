@@ -72,20 +72,27 @@ This matters here because consumers install by exactly those two things: the
 `v<version>` tag that `scripts/release.ts` also mirrors onto the marketplace catalog,
 and `release-evidence.txt`, which is an audit artifact only if it can't be rewritten
 after the fact. That's why `publish` creates the GitHub Release as a **draft**
-(`--draft`) and `release.yml` attaches evidence to the draft before publishing it
-(`gh release edit … --draft=false`) — see "Runbook" below.
+first — pinned to the release commit via `--target`, since the tag it names hasn't
+been pushed yet at that point — and only pushes the tag once the draft exists: the
+tag push is what triggers `release.yml`, so a failed draft creation aborts `publish`
+before any tag is pushed, rather than leaving a pushed tag with nothing for CI to
+attach evidence to. `release.yml` never creates a release itself; it only attaches
+evidence to that existing draft and then publishes it (`gh release edit …
+--draft=false`) — see "Runbook" below. The release's title and notes stay editable
+even after publish; immutability freezes only the tag and the attached assets.
 
 **Rollback.** Versions never go backwards, and once a release is published under
 immutability it can't be quietly rewritten. Deleting a published release is
-possible, but GitHub retires its tag name permanently either way — even after
-deletion, that exact tag can never be reused (protection against tag-reuse/"repository
-resurrection" attacks, per the doc above) — so deleting buys nothing and only throws
-away the audit trail immutability exists to keep. The actual rollback is: ship a new
-version through the normal runbook, and run `npm deprecate sapwood@<bad-version>
-"<reason; see <new-version>>"` so installers are warned off the bad version on the
-registry side. (npm itself refuses to unpublish or overwrite a version more than
-~72h old regardless — see the Runbook's Rollback step below — so a corrected
-version is the only path either way.)
+possible, but GitHub retires its tag name permanently either way — in the doc's own
+words, "If you delete the immutable release, you can delete the tag, but you cannot
+reuse the same tag name" (see the doc linked above) — protection against
+tag-reuse/"repository resurrection" attacks — so deleting buys nothing and only
+throws away the audit trail immutability exists to keep. The actual rollback is:
+ship a new version through the normal runbook, and run `npm deprecate
+sapwood@<bad-version> "<reason; see <new-version>>"` so installers are warned off
+the bad version on the registry side. (npm itself refuses to unpublish or overwrite
+a version more than ~72h old regardless — see the Runbook's Rollback step below —
+so a corrected version is the only path either way.)
 
 **Delivery channels.** A release ships as (1) a git tag + GitHub Release, (2) the bare
 `sapwood` npm package (including its dashboard), and (3) the thin Claude Code shell promoted
@@ -154,13 +161,15 @@ npm run release -- prepare 0.3.0-alpha.1
 # 2. Review the PR like any other change, then merge it (ordinary PR merge — this
 #    step is not part of the script).
 
-# 3. Publish — from main, at the merged commit. Tags, pushes the tag, creates the
-#    GitHub Release as a draft with the CHANGELOG section as its notes (release.yml
-#    attaches evidence and publishes it once CI runs against the tag — see "Release
-#    immutability" above), then `npm publish`es the engine workspace as `sapwood`
-#    under the version's own dist-tag (see "npm publish dist-tag" above), runs the
-#    dashboard canary, verifies that npm serves the exact version, then promotes the
-#    shell into the catalog. Requires a prior local `npm login` and the catalog remote.
+# 3. Publish — from main, at the merged commit. Creates the GitHub Release as a
+#    draft with the CHANGELOG section as its notes, pinned to this commit via
+#    `--target` since the tag doesn't exist yet; only then tags and pushes the tag
+#    (release.yml attaches evidence and publishes it once CI runs against the
+#    pushed tag — see "Release immutability" above), then `npm publish`es the
+#    engine workspace as `sapwood` under the version's own dist-tag (see "npm
+#    publish dist-tag" above), runs the dashboard canary, verifies that npm serves
+#    the exact version, then promotes the shell into the catalog. Requires a prior
+#    local `npm login` and the catalog remote.
 npm run release -- publish --catalog https://github.com/herehigher/sapwood-plugin.git
 # or, to see the exact commands without running them:
 npm run release -- publish --catalog https://github.com/herehigher/sapwood-plugin.git --dry-run
