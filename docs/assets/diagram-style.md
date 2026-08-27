@@ -3,21 +3,22 @@
 The style spec for sapwood's three README diagrams. The checked-in Mermaid
 sources (`docs/assets/hero-loop.mmd`, `architecture.mmd`, `round-loop.mmd`)
 are the semantic spec — the authoritative set of nodes, edges, and labels;
-the `.svg` next to each is a derived artifact. The committed SVGs are
-currently faithful mermaid-cli renders (placeholders); the sections below
-are the spec a hand-styled redraw must satisfy, and the recipe for
-producing it.
+the `.svg` next to each is a derived artifact: a hand-styled redraw of
+the `.mmd`. The sections below describe the committed SVGs and the
+recipe for regenerating them.
 
 ## Tokens
 
-- Paper (background) — `#FAFAFA`. The styled SVG paints it explicitly, so
-  one file serves GitHub light, GitHub dark, and npm (npm strips `<picture>`
+- Paper (background) — `#FAFAFA`. The SVG paints it explicitly, so one
+  file serves GitHub light, GitHub dark, and npm (npm strips `<picture>`
   and GitHub's `#gh-*-mode-only` fragments are GitHub-only).
 - Ink — `#2d3142` (node text, primary strokes). Muted — `#4f5d75`
   (arrows, secondary text). Soft — `#7a8399` (edge labels).
 - Accent — `#4C6EF5`, tint `rgba(76,110,245,0.08)`. One focal node and at
   most one focal arrow per diagram: the merge gate (hero loop), the
-  conductor (architecture), the GitHub board hub (round loop).
+  conductor (architecture), `Execute` plus the return edge into `Align`
+  (round loop). The GitHub board hub carries the GitHub amber, not the
+  accent.
 - Layer hues (architecture only) — GitHub amber `#D9A441`, Engine slate
   blue `#4C6EF5`, Headless sessions teal `#12B886`, Reviewer adapter
   violet `#7C3AED`. A hue colors its layer's zone band only (fill at
@@ -41,9 +42,9 @@ producing it.
   uppercase Geist Mono eyebrow. Architecture's zone bands additionally
   carry a layer hue (see Tokens: fill 6–10% opacity, hairline 35–55%,
   eyebrow text in the hue), and the headless-sessions band is dashed.
-  Hero loop's swimlane bands (Human / Worker session / Engine) get the
-  same eyebrow treatment without a hue fill — they separate who acts, not
-  a layer.
+  Hero loop's swimlane bands reuse the layer hues where the role is a
+  layer (Worker session = headless-sessions teal, dashed; Engine = slate
+  blue) and a neutral ink wash for Human.
 - Denied action — the crossed edge (`--x`, architecture:
   `WK --x FA`) marks an action the guard denies (approve/merge);
   style it distinctly from a normal solid or dashed edge, e.g. a stop-tick
