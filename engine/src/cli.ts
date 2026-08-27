@@ -597,6 +597,14 @@ export async function runDryRun(overrides: Pick<EngineOverrides, "cfg" | "forge"
     process.stderr.write(formatConfigLoadError("run", e));
     return 1;
   }
+  // Same startup refusal `validate` and `run` apply (#784), checked first and before any board
+  // query — a config this fails would queue every PR fail-closed forever, so a preview that ran
+  // anyway would tell an operator to proceed into a run that can never review anything.
+  const ciConfigError = engineAgentEmptyCiRequiredChecksError(cfg);
+  if (ciConfigError) {
+    process.stderr.write(`${ciConfigError}\n`);
+    return 1;
+  }
   // Same fail-fast the real run does (#74): a broken worker.promptFile must surface in the
   // preview too — dry-run exists to predict the real run, not to green-light a config the
   // real run would reject at startup. Renderer is discarded; only validation matters here.

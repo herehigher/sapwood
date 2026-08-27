@@ -22,6 +22,9 @@ first autonomous run.
   gh auth refresh -s project   # if you're already logged in but missing the scope
   ```
 - A GitHub repo with a ProjectV2 board you're willing to let sapwood drive.
+- CI must actually run for the target repo — a public repo, or a private one with GitHub
+  Actions billing in order. A check that never starts is reported by the engine as
+  base-inherited CI-red, and every PR waits on it.
 
 ## Install
 
@@ -134,7 +137,9 @@ gh project list --owner YOU
 
 Replace `YOU` with the GitHub user or organization that owns the board. The project number
 is also in the board URL. Then create the minimal valid config below, replacing all-caps
-values with your target repository and the board number you just created:
+values with your target repository, the board number you just created, and the name of the
+repo's required CI check — the GitHub check-run name of the job that must pass, i.e. that
+job's `name:` in its workflow file, visible on any PR's checks list:
 
 ```sh
 cat > sapwood.config.yaml <<'YAML'
@@ -142,8 +147,14 @@ board:
   owner: YOU
   repo: REPOSITORY
   projectNumber: PROJECT_NUMBER
+ci:
+  requiredChecks:
+    - name: CI_CHECK_NAME
 YAML
 ```
+
+See [Configuration: `ci`](configuration.md#ci) for the full `requiredChecks` schema (each
+entry is an object; `app` defaults to `github-actions`).
 
 Verify that config and then initialize from the target repo:
 
