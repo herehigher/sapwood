@@ -14,17 +14,17 @@ const OTHER_RUN_ID = "run-99999";
 // substring this matcher can key on — starts deep into the string (#786 gate② finding
 // [sweep-ps-truncation]'s own point: a `ps` truncation bug would cut exactly this off).
 const REAP_LINE = (runId: string) =>
-  ` 62027 /Users/gmaster/.nvm/versions/node/v24.18.1/bin/node -e process.on('SIGTERM',()=>{});require('fs').writeFileSync(require('path').join('/var/folders/w_/sq1yf9n53txfm13cc96z6_rm0000gn/T/sapwood-reap-pid-registry-MB90Lk',String(process.pid)),'');require('fs').writeFileSync('/var/folders/w_/sq1yf9n53txfm13cc96z6_rm0000gn/T/sapwood-reap-${runId}-xEyobf/descendant.ready','1');setInterval(()=>{},1000);setTimeout(()=>process.exit(0),600000);`;
+  ` 62027 /Users/someone/.nvm/versions/node/v24.18.1/bin/node -e process.on('SIGTERM',()=>{});require('fs').writeFileSync(require('path').join('/var/folders/w_/sq1yf9n53txfm13cc96z6_rm0000gn/T/sapwood-reap-pid-registry-MB90Lk',String(process.pid)),'');require('fs').writeFileSync('/var/folders/w_/sq1yf9n53txfm13cc96z6_rm0000gn/T/sapwood-reap-${runId}-xEyobf/descendant.ready','1');setInterval(()=>{},1000);setTimeout(()=>process.exit(0),600000);`;
 
 // A real dashboard.test.ts dist-server child's own command line.
 const DASHBOARD_LINE = (runId: string) =>
-  ` 71234 /Users/gmaster/.nvm/versions/node/v24.18.1/bin/node /Users/gmaster/repo/dashboard/dist-server/start.js --db-path /var/folders/w_/sq1yf9n53txfm13cc96z6_rm0000gn/T/sapwood-dashboard-cli-${runId}-Ab12Cd/sapwood.sqlite --port 19955`;
+  ` 71234 /Users/someone/.nvm/versions/node/v24.18.1/bin/node /Users/someone/repo/dashboard/dist-server/start.js --db-path /var/folders/w_/sq1yf9n53txfm13cc96z6_rm0000gn/T/sapwood-dashboard-cli-${runId}-Ab12Cd/sapwood.sqlite --port 19955`;
 
 // Only the registry-dir reference (no run-id-bearing descendantReadyFile substring at all) — the
 // exact shape finding [sweep-ps-truncation] warns a naive matcher keyed on the registry dir alone
 // (never run-id-scoped) would wrongly treat as a match.
 const REGISTRY_ONLY_LINE =
-  " 62027 /Users/gmaster/.nvm/versions/node/v24.18.1/bin/node -e require('fs').writeFileSync(require('path').join('/var/folders/w_/sq1yf9n53txfm13cc96z6_rm0000gn/T/sapwood-reap-pid-registry-MB90Lk',String(process.pid)),'');";
+  " 62027 /Users/someone/.nvm/versions/node/v24.18.1/bin/node -e require('fs').writeFileSync(require('path').join('/var/folders/w_/sq1yf9n53txfm13cc96z6_rm0000gn/T/sapwood-reap-pid-registry-MB90Lk',String(process.pid)),'');";
 
 test("isLeakedSurvivorLine: a real leaderExitStub descendant line, run-id-bearing substring 180+ chars deep, matches its own run", () => {
   assert.equal(isLeakedSurvivorLine(REAP_LINE(RUN_ID), RUN_ID), true);
