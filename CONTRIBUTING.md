@@ -32,6 +32,13 @@ reviewed and merged by a human maintainer. The autonomous merge path applies
 only to the maintainer's governed dogfood loop; it does not apply to external
 contributions.
 
+## Where help is most wanted
+
+Issues labeled [help wanted](https://github.com/herehigher/sapwood/labels/help%20wanted) name the areas where an outside
+contribution is most useful right now — the dashboard's UI/UX design first.
+Each one states the constraints and where to start; for design work, share a
+screenshot or mockup on the issue before opening a PR.
+
 ## Reporting problems
 
 Open a GitHub issue. For anything security-sensitive (a way to defeat the

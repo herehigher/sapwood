@@ -152,6 +152,9 @@ L4 保留了 L3 的引擎权限，并加入一个受信任的 LLM 监督者，�
 （catalog、npm publish）正在推进中。参见 [CHANGELOG.md](CHANGELOG.md) 的
 「Unreleased」以及 [PLAN.md 的「Current milestone」](docs/PLAN.md#current-milestone)。
 
+仪表盘功能可用但尚未打磨；欢迎 UI/UX 设计方面的贡献 —— 参见
+[help wanted](https://github.com/herehigher/sapwood/labels/help%20wanted)。
+
 ## 文档
 
 - [`getting-started.md`](docs/guide/getting-started.md) —— 安装、`sapwood init`、

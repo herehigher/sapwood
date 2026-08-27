@@ -159,6 +159,9 @@ dashboard。リリースチェーン（catalog、npm publish）は進行中。
 [CHANGELOG.md](CHANGELOG.md) の「Unreleased」と
 [PLAN.md「Current milestone」](docs/PLAN.md#current-milestone) を参照。
 
+dashboard は動作するが磨き込みはまだ。UI/UX デザインの貢献を歓迎する —
+[help wanted](https://github.com/herehigher/sapwood/labels/help%20wanted) を参照。
+
 ## ドキュメント
 
 - [`getting-started.md`](docs/guide/getting-started.md) — インストール、
