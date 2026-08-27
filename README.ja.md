@@ -8,7 +8,7 @@
 
 [English](README.md) · 日本語 · [简体中文](README.zh-CN.md)
 
-本文は README.md（[6339fff6](https://github.com/herehigher/sapwood/blob/6339fff6/README.md) 時点）の翻訳です。相違がある場合は英語版を正とします。
+本文は README.md（[8aeb5cb5](https://github.com/herehigher/sapwood/blob/8aeb5cb5/README.md) 時点）の翻訳です。相違がある場合は英語版を正とします。
 
 **自律的なコーディングに、ガバナンスを。**
 
@@ -23,7 +23,7 @@
 ![ヒーローループ図](docs/assets/hero-loop.svg)
 人間が issue を Ready にサインする。ワーカーが push する一方、フェイルクローズなガードがガードされた組み込みツール内での approve と merge を拒否する（ブランチ保護が最後の砦）。エンジンは PR を開くか採用し、CI と独立レビューをゲートとする — 指摘は修正上限の下でループバックし、収束しない場合は人間に対応を求めて停止する。
 
-**[デモを見る →](https://herehigher.github.io/sapwood/)** 記録された実行をブラウザで再生 — インストール不要。
+**[ダッシュボードのデモを見る →](https://herehigher.github.io/sapwood/)** 記録された実行をダッシュボードでブラウザ再生 — インストール不要。
 
 ## クイックスタート
 

@@ -8,7 +8,7 @@
 
 [English](README.md) · [日本語](README.ja.md) · 简体中文
 
-本文为 README.md（截至 [6339fff6](https://github.com/herehigher/sapwood/blob/6339fff6/README.md)）的译文；如有出入，以英文版为准。
+本文为 README.md（截至 [8aeb5cb5](https://github.com/herehigher/sapwood/blob/8aeb5cb5/README.md)）的译文；如有出入，以英文版为准。
 
 **自主编码，接受治理。**
 
@@ -26,7 +26,7 @@
 或接管该 PR，并以 CI 加独立评审作为门禁 —— 发现的问题在修复次数上限下循环回去，
 不收敛则停下来等待人类介入。
 
-**[观看演示 →](https://herehigher.github.io/sapwood/)** 在浏览器中回放一段已录制的运行过程 —— 无需安装。
+**[观看仪表盘演示 →](https://herehigher.github.io/sapwood/)** 在浏览器中用仪表盘回放一段已录制的运行过程 —— 无需安装。
 
 ## 快速开始
 
