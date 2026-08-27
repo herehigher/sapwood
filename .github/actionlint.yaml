@@ -1,7 +1,0 @@
-# actionlint config. Declares the owner's self-hosted runner label so actionlint's
-# static `runs-on` label check doesn't flag it as unknown (actionlint only knows
-# GitHub-hosted labels by default). Used by ci.yml's `test` job (pre-public primary
-# runner, see that job's PRE-PUBLIC ONLY comment and #329).
-self-hosted-runner:
-  labels:
-    - mac-mini-docker-runner

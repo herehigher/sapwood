@@ -1,6 +1,6 @@
 name: CI
-# No secrets. Pre-public, `test` runs on a self-hosted runner and fork-PR execution
-# is prohibited; #329 restores the hosted-runner configuration before going public.
+# No secrets. `test` runs on a GitHub-hosted runner only: a fork PR's code must never
+# execute on infrastructure we own.
 on:
   pull_request:
   push:
@@ -16,9 +16,7 @@ concurrency:
 
 jobs:
   test:
-    # PRE-PUBLIC ONLY: flip back to `ubuntu-latest` before the repo goes public —
-    # a fork PR must never execute on the self-hosted runner. Cutover list: #329.
-    runs-on: [self-hosted, mac-mini-docker-runner]
+    runs-on: ubuntu-latest
     # Whole suite ~3.5 min; 20 bounds a wedged run instead of the 360-min default (#691).
     timeout-minutes: 20
     steps:
