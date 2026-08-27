@@ -19,6 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      # Job-level permissions replace the top-level block, so checkout's read must be restated.
+      contents: read
       # SARIF upload to the code-scanning dashboard.
       security-events: write
       # Consumed by `publish_results: true` for the GitHub OIDC token that
@@ -48,6 +50,6 @@ jobs:
           retention-days: 5
 
       - name: "Upload to code-scanning"
-        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: results.sarif
