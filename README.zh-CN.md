@@ -1,14 +1,8 @@
 # sapwood
 
-[![CI](https://github.com/herehigher/sapwood/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/herehigher/sapwood/actions/workflows/ci.yml?query=branch%3Amain)
-[![npm version](https://img.shields.io/npm/v/sapwood)](https://www.npmjs.com/package/sapwood)
-[![node >= 24](https://img.shields.io/badge/node-%E2%89%A524-blue)](package.json)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/herehigher/sapwood/badge)](https://securityscorecards.dev/viewer/?uri=github.com/herehigher/sapwood)
-
 [English](README.md) · [日本語](README.ja.md) · 简体中文
 
-本文为 README.md（截至 [8aeb5cb5](https://github.com/herehigher/sapwood/blob/8aeb5cb5/README.md)）的译文；如有出入，以英文版为准。
+本文为 README.md（截至 [a83d099b](https://github.com/herehigher/sapwood/blob/a83d099b/README.md)）的译文；如有出入，以英文版为准。
 
 **自主编码，接受治理。**
 
@@ -151,9 +145,9 @@ L4 保留了 L3 的引擎权限，并加入一个受信任的 LLM 监督者，�
 
 ## 状态
 
-已在 main 分支实现、尚未正式发布：引擎、守护钩子、轮次编排器、仪表盘。发布链路
-（catalog、npm publish）正在推进中。参见 [CHANGELOG.md](CHANGELOG.md) 的
-「Unreleased」以及 [PLAN.md 的「Current milestone」](docs/PLAN.md#current-milestone)。
+预发布阶段。每个版本以预发布 dist-tag（`sapwood@alpha`）发布到 npm，推送到
+marketplace catalog `herehigher/sapwood-plugin`，并附带构建证据发布为 GitHub Release。
+参见 [CHANGELOG.md](CHANGELOG.md) 以及 [PLAN.md 的「Current milestone」](docs/PLAN.md#current-milestone)。
 
 仪表盘功能可用但尚未打磨；欢迎 UI/UX 设计方面的贡献 —— 参见
 [help wanted](https://github.com/herehigher/sapwood/labels/help%20wanted)。
