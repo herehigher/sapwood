@@ -393,13 +393,14 @@ being polled for routine approval.
 
 ## Current milestone
 
-M0–M4 are **delivered and closed**. **v0.2 — the round orchestrator + dashboard — is
-the only open milestone**: peripheral roles, round summaries, and the dashboard are
-built and shipping inside the npm package; the release chain (marketplace catalog,
-publish gating) is in progress. See "[Round orchestrator](#round-orchestrator)"
-above for the detailed design, the repository's
-[milestones](https://github.com/herehigher/sapwood/milestones) for open work, and
-[CHANGELOG.md](../CHANGELOG.md) "Unreleased" for a fine-grained view of recent work.
+M0–M4 are **delivered and closed**. The round orchestrator + dashboard work — peripheral
+roles, round summaries, the dashboard — is built and shipping inside the npm package; the
+release chain (marketplace catalog, publish gating) is in progress. The loop's own
+`round.milestone` (`sapwood.config.yaml`) currently targets **v0.2 — Dashboard (dogfood)**.
+See "[Round orchestrator](#round-orchestrator)" above for the detailed design, the
+repository's [milestones page](https://github.com/herehigher/sapwood/milestones) for the
+full set of open milestones, and [CHANGELOG.md](../CHANGELOG.md) "Unreleased" for a
+fine-grained view of recent work.
 
 ## Open items
 
@@ -410,8 +411,6 @@ above for the detailed design, the repository's
   nothing yet supervises the conductor process itself — a real supervisor (launchd/daemon) is
   the open v1.1 item. See [`docs/supervision.md`](guide/supervision.md) for the operator playbook that
   stands in for it today.
-- **Naming:** "sapwood" communicates nothing to a stranger; revisit before public
-  launch (minor, pre-launch).
 - **Duplicate `Ready` issues (accepted and disclosed):** no role checks whether a
   human-authored `Ready` issue duplicates another open issue — align's dedup covers only
   the PO's own proposals, gate⓪ is barred from judging *why/what*, and architect reads a
