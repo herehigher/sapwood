@@ -5,6 +5,8 @@
 [![node >= 24](https://img.shields.io/badge/node-%E2%89%A524-blue)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+English · [日本語](README.ja.md) · [简体中文](README.zh-CN.md)
+
 **Autonomous coding, governed.**
 
 - issues in → reviewed PRs out.
