@@ -195,9 +195,7 @@ test("init --help / -h prints init usage and exits 0 — NEVER falls through tow
 });
 
 // #1182: `main()` runs loadConfig BEFORE init() ever sees a cfg, so init.ts's own "write the
-// starter if none exists" branch is unreachable from the CLI — the help text used to claim the
-// opposite ("Scaffold sapwood.config.yaml"), contradicting both the code and getting-started.md's
-// "init loads an existing config before it can provision anything".
+// starter if none exists" branch is unreachable from the CLI — the help text must describe that.
 test("init --help no longer claims to scaffold the config (#1182)", () => {
   const r = runCli(["node", "sapwood", "init", "--help"]);
   assert.doesNotMatch(r.stdout, /Scaffold/);
@@ -225,10 +223,8 @@ test("init: bare invocation still falls through to the async path unchanged (cod
   assert.equal(r.stderr, "");
 });
 
-// #1182: `init`/`run --dry-run` used to reach loadConfig's own throw uncaught — a raw
-// "Error: no config found..." stack trace instead of `validate`'s one-line refusal for the
-// identical condition. Both now go through formatConfigLoadError (lifted out of runValidate for
-// status/events, #710), so this is the same presentation with each command's own prefix.
+// #1182: a config-load failure in `init`/`run --dry-run` must render as `validate`'s one-line
+// refusal, never an uncaught stack trace.
 test("init: no config in cwd prints validate's one-line message with the init prefix, exits 1, no stack trace (#1182)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-init-no-config-"));
   try {

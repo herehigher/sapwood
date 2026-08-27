@@ -161,7 +161,7 @@ const USAGE = `\
 usage: sapwood <command> [options]
 
 Commands:
-  init          Load the repo's config and provision labels/board/deploy key/templates
+  init          Load the repo's config and provision labels/board Status lanes/deploy key/templates
   run           Run the engine loop (tick on a fixed cadence)
     --once         Run exactly one tick, then exit (exit 1 if the tick failed)
     --until-idle   Keep ticking until no lanes are in flight, then exit
@@ -588,10 +588,8 @@ export function formatDryRunPreview(preview: DryRunPreview): string {
  *  routes --dry-run here BEFORE runEngine ever runs, so the preview is driver-agnostic by
  *  construction, and this stays the one place that must never gain a driver dependency. */
 export async function runDryRun(overrides: Pick<EngineOverrides, "cfg" | "forge"> = {}, configPath?: string): Promise<number> {
-  // #1182: same one-line "no config found"/"invalid config" presentation `validate` uses,
-  // reused via formatConfigLoadError — a bare loadConfig throw here used to reach main()'s
-  // top-level catch as a raw stack trace, the opposite of runValidate's own handling for the
-  // identical condition.
+  // #1182: only config-loading failures use the shared operator-facing format; failures after
+  // the load must propagate.
   let cfg: SapwoodConfig;
   try {
     cfg = overrides.cfg ?? loadConfig(configPath);
@@ -2063,7 +2061,8 @@ usage: sapwood init
 
 Loads the sapwood config already present at the repo root (init does not scaffold one — create
 sapwood.config.yaml yourself first; see the getting-started guide) and provisions everything a
-fresh target repo needs: labels/milestones, the project board, the worker's write deploy key and
+fresh target repo needs: labels/milestones, the project board's Status lanes (the board itself
+must already exist — init reports it and stops if it doesn't), the worker's write deploy key and
 related gh-side resources, and — only when missing — starter goal/doctrine/issue-template files.
 Verifies GitHub auth along the way. These are credentialed network writes, so a bare \`--help\`
 must never trigger them.
@@ -3396,20 +3395,18 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
   // SAME unset-defaulting rule loadConfig itself already applied to the file-loaded path, so the
   // two can never silently disagree on where the log lands.
   //
-  // #1182: loadConfig's own throw (missing/invalid config) is caught HERE, narrowly around the
-  // load itself — applyMilestoneOverride/normalizeLoggingPath are pure functions over an already-
-  // Zod-validated cfg and stay outside the catch, so a real bug in either still surfaces as a
-  // raw stack trace instead of being misreported as a config-load failure. `validate` already
-  // has the one-line "no config found"/"invalid config" presentation for this exact condition;
-  // formatConfigLoadError (lifted out of runValidate for status/events, #710) is that same
-  // presentation, reused here instead of letting the ZodError/Error propagate uncaught.
-  let cfg: NormalizedSapwoodConfig;
+  // #1182: only config-loading failures use the shared operator-facing format; failures after
+  // the load must propagate. The try wraps ONLY the load — applyMilestoneOverride/
+  // normalizeLoggingPath run outside it, so a real bug in either still throws normally instead
+  // of being misreported as a config-load failure.
+  let loadedCfg: SapwoodConfig;
   try {
-    cfg = normalizeLoggingPath(applyMilestoneOverride(argv, overrides.cfg ?? loadConfig(validatedRun.configPath)));
+    loadedCfg = overrides.cfg ?? loadConfig(validatedRun.configPath);
   } catch (e) {
     process.stderr.write(formatConfigLoadError("run", e));
     return 1;
   }
+  const cfg: NormalizedSapwoodConfig = normalizeLoggingPath(applyMilestoneOverride(argv, loadedCfg));
   // #784: fail closed BEFORE any other startup work — a config only `loadConfig`/`parseConfig`
   // warn about (reviewer.mode: engine-agent + empty ci.requiredChecks) would otherwise queue
   // every PR forever with no trusted CI evidence ever confirming it. See

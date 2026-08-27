@@ -1065,9 +1065,8 @@ test("sapwood run --config load errors occur before dispatch or state writes", a
   }
   const forge = new TrackingForge();
   try {
-    // #1182: a config load failure is `validate`'s own one-line presentation now (exit 1, no
-    // stack trace) rather than an uncaught throw — same assertions on zero dispatch/state
-    // writes, just via captureStderr's {code, stderr} instead of assert.rejects.
+    // #1182: a config load failure renders as `validate`'s one-line presentation (exit 1, no
+    // stack trace) via captureStderr's {code, stderr}, not a thrown rejection.
     const missing = await captureStderr(() =>
       runEngine(["node", "sapwood", "run", "--config", join(dir, "missing.yaml"), "--once"], {
         forge,
@@ -1167,6 +1166,29 @@ test("runEngine's tests-only cfg override keeps precedence over --config", async
         logger: silentLogger,
       }),
       0,
+    );
+  } finally {
+    state.close();
+  }
+});
+
+// #1182: the try around runEngine's config resolution must wrap ONLY the load — a real bug in
+// applyMilestoneOverride/normalizeLoggingPath (which run AFTER the load, on an already-valid
+// cfg) must still propagate as a rejection, never get misreported as a config-load refusal.
+// `logging` is defined as a throwing getter so normalizeLoggingPath's own `cfg.logging.path`
+// read (not the load itself) is where the throw happens.
+test("runEngine: a throw AFTER config load (in normalizeLoggingPath/applyMilestoneOverride) still rejects — never swallowed into the config-load one-line refusal (#1182)", async () => {
+  const state = new State(":memory:");
+  const cfg = mkCfg({ engine: { driver: "tick" } });
+  Object.defineProperty(cfg, "logging", {
+    get(): never {
+      throw new Error("boom-after-load");
+    },
+  });
+  try {
+    await assert.rejects(
+      runEngine(["node", "sapwood", "run", "--once"], { cfg, forge: new FakeForge(), state, logger: silentLogger }),
+      /boom-after-load/,
     );
   } finally {
     state.close();
