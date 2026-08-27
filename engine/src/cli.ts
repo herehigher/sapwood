@@ -161,7 +161,7 @@ const USAGE = `\
 usage: sapwood <command> [options]
 
 Commands:
-  init          Load the repo's config and provision labels/board Status lanes/deploy key/templates
+  init          Load the repo's config and provision labels/deploy key/templates plus Status lanes on an existing board
   run           Run the engine loop (tick on a fixed cadence)
     --once         Run exactly one tick, then exit (exit 1 if the tick failed)
     --until-idle   Keep ticking until no lanes are in flight, then exit
@@ -2061,9 +2061,10 @@ usage: sapwood init
 
 Loads the sapwood config already present at the repo root (init does not scaffold one — create
 sapwood.config.yaml yourself first; see the getting-started guide) and provisions everything a
-fresh target repo needs: labels/milestones, the project board's Status lanes (the board itself
-must already exist — init reports it and stops if it doesn't), the worker's write deploy key and
-related gh-side resources, and — only when missing — starter goal/doctrine/issue-template files.
+fresh target repo needs: labels/milestones, Status lanes (on an existing ProjectV2 board; if none
+is found at the configured number, init reports that, carries on with the rest, and you re-run it
+after creating the board), the worker's write deploy key and related gh-side resources, and —
+only when missing — starter goal/doctrine/issue-template files.
 Verifies GitHub auth along the way. These are credentialed network writes, so a bare \`--help\`
 must never trigger them.
 
