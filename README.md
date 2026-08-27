@@ -163,12 +163,12 @@ milestone"](docs/PLAN.md#current-milestone).
 
 Inspired by:
 
-- [walkinglabs/learn-harness-engineering](https://github.com/walkinglabs/learn-harness-engineering)
-- [alchaincyf/loop-engineering-orange-book](https://github.com/alchaincyf/loop-engineering-orange-book)
-- [cobusgreyling/loop-engineering](https://github.com/cobusgreyling/loop-engineering)
-- [@AnatoliKopadze](https://x.com/AnatoliKopadze/status/2068328135611822149)
-- [@0xCodez](https://x.com/0xCodez/status/2064374643729773029)
-- [@0xCodez](https://x.com/0xCodez/status/2079165300625330317)
+- [walkinglabs/learn-harness-engineering](https://github.com/walkinglabs/learn-harness-engineering) — project-based course on harness engineering: the environment, state, verification, and control mechanisms that make coding agents reliable.
+- [alchaincyf/loop-engineering-orange-book](https://github.com/alchaincyf/loop-engineering-orange-book) — free Chinese-language guide (橙皮书) to loop engineering: architecture, cost, and real-world agent loops; "design the system that prompts the agent for you".
+- [cobusgreyling/loop-engineering](https://github.com/cobusgreyling/loop-engineering) — patterns, starters, and a CLI for designing the control loop around coding agents ("Stop prompting. Design the loop.").
+- [@AnatoliKopadze — what a loop is](https://x.com/AnatoliKopadze/status/2068328135611822149) — verify, state, and a stop condition as the three parts that turn repetition into a loop; the four-condition test for whether a task deserves one.
+- [@0xCodez — from prompter to loop designer](https://x.com/0xCodez/status/2064374643729773029) — 14-step roadmap: when a loop pays for itself, the five building blocks, and a human gate before merge or deploy.
+- [@0xCodez — graph engineering](https://x.com/0xCodez/status/2079165300625330317) — 14-step roadmap from a linear agent chain to a graph: nodes with contracts, edges as data, fan-out / verify / converge across a subagent fleet.
 
 They inform the craft — methodological prior art, not sapwood's category
 label.
