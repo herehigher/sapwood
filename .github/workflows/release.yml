@@ -24,10 +24,6 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
-      # npm provenance (docs/dev-guide/10-releasing.md) needs this to mint its attestation via
-      # OIDC. No `npm publish` step runs in this workflow yet — publish stays an operator-run
-      # `scripts/release.ts` step — this just keeps the permission in place for when it does.
-      id-token: write
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
