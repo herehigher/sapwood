@@ -1,6 +1,6 @@
 {
   "name": "@sapwood/dashboard",
-  "version": "0.0.0",
+  "version": "0.3.0-alpha.1",
   "private": true,
   "description": "sapwood v0.2 dashboard — read-only view of the loop (issue #17)",
   "type": "module",
