@@ -20,9 +20,9 @@ artifact. This file is the recipe for regenerating the SVGs.
 - Layer hues (architecture only) — GitHub amber `#D9A441`, Engine slate
   blue `#4C6EF5`, Headless sessions teal `#12B886`, Reviewer adapter
   violet `#7C3AED`. A hue colors its layer's zone band only (fill at
-  6–10% opacity, hairline at 35–55%, eyebrow text in the hue); nodes
-  inside a band keep the ink/white treatment, so the single accent still
-  reads.
+  6–10% opacity, hairline at 35–55%, eyebrow text in the hue); non-focal
+  nodes inside a band keep the ink/white treatment, so the single accent
+  (the conductor) still reads.
 
 ## Shape per role
 
@@ -31,7 +31,9 @@ artifact. This file is the recipe for regenerating the SVGs.
 - Engine component — rounded rect (`rx=6`), white fill, ink stroke.
   Store (SQLite state) — `ink @ 0.05` fill, muted stroke.
 - Ephemeral (the headless-sessions zone, the `handoff` state) — dashed
-  stroke `4,3`.
+  stroke `4,3`. Resume/return edges (`handoff → running`,
+  `handoff → fixing`, `failed → driving`) are dashed too; every other edge
+  is solid.
 - Focal — accent stroke `1.2`, accent-tint fill.
 - Terminal — `done` (lifecycle) gets a double border; `Done` (hero loop)
   is a pill (`rx` = half the height). Start (lifecycle) — filled ink dot,
@@ -72,6 +74,6 @@ artifact. This file is the recipe for regenerating the SVGs.
    box in the fallback font.
 3. Optional literal render for a node/edge audit:
    `npx -y @mermaid-js/mermaid-cli@11 -i docs/assets/<name>.mmd -o <tmp>.svg`
-   draws the `.mmd` as-is (byte-deterministic at the pinned version) so
-   the styled image can be checked against it. The committed SVG is not
+   draws the `.mmd` as-is (byte-deterministic for a given mermaid-cli
+   version) so the styled image can be checked against it. The committed SVG is not
    derived from that render.
