@@ -78,7 +78,8 @@ async function main(): Promise<void> {
     });
     process.stdout.write(`windows dashboard pack smoke: OK ${result.origin}\n`);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    // Windows releases a reaped process's file handles a beat after its exit event.
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 }
 

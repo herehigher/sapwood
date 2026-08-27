@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -51,7 +51,13 @@ function waitForExit(child: ReturnType<typeof spawn>, timeoutMs: number): Promis
       clearTimeout(timer);
       resolvePromise();
     });
-    child.kill("SIGTERM");
+    // Windows callers reach the dashboard through cmd.exe; signalling only that shell would leave
+    // the server itself running with the canary directory locked, so take the whole tree down.
+    if (process.platform === "win32" && child.pid !== undefined) {
+      spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+    } else {
+      child.kill("SIGTERM");
+    }
   });
 }
 
