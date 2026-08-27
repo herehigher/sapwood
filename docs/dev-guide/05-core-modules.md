@@ -30,7 +30,7 @@ driving --> failed
 failed --> driving: holds a PR, clean worktree
 ```
 
-Worker lane lifecycle: `done` is terminal; `failed` can resume; `handoff` returns to where it started. A `failed` lane the engine cannot rescue (no PR, or a possibly-dirty worktree) is escalated to `needs-human` and stays `failed` until a human acts; re-entry after that is gated and bounded.
+Worker lane lifecycle: `done` is terminal; `failed` can resume; `handoff` returns to where it started. A `failed` lane the engine cannot rescue (no PR, or a possibly-dirty worktree) is escalated to `needs-human` and stays `failed` until a human acts. Gated, bounded re-entry applies only to a `failed` lane that still holds a PR; a lane without one needs manual handling.
 
 ## Rounds (`loop/round.ts`, `loop/align.ts`, `loop/init.ts`, `loop/round-artifact.ts`)
 
