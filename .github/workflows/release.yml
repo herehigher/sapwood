@@ -14,9 +14,8 @@ permissions:
 
 jobs:
   attach-evidence:
-    # Tags are pushed only by someone with push access, unlike ci.yml's PR-triggered jobs (which
-    # must stay off the self-hosted runner pre-public — see that file's own note): an
-    # ordinary GitHub-hosted runner is safe here regardless of the repo's public/private state.
+    # Tags are pushed only by someone with push access, so unlike ci.yml's PR-triggered jobs
+    # this never runs a stranger's code; a GitHub-hosted runner is the safe default either way.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:

@@ -89,6 +89,6 @@ existing suite:
 section describes coverage, not steps, and does not mirror the file. On every pull request
 and push to `main`, the job type-checks both workspaces, lints, checks internal links, and
 runs all three test suites (engine, dashboard, and the root `scripts/*.test.ts`), each test
-step bounded by its own `timeout`. There is no separate `npm run build` step. Pre-public the
-job runs on a self-hosted runner, per the workflow's own comment; #329 moves it to a hosted
-`ubuntu-latest` runner at the public cutover.
+step bounded by its own `timeout`. There is no separate `npm run build` step. The job runs on a
+GitHub-hosted `ubuntu-latest` runner; a fork PR's code never executes on infrastructure the
+project owns.
