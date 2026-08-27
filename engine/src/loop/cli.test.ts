@@ -107,16 +107,18 @@ function assertNoStateFiles(dir: string): void {
   );
 }
 
+// The version shape follows SemVer 2.0.0 including the pre-release segment: the release ladder
+// ships `x.y.z-alpha.N` before any `x.y.z`, so a bare-triple assertion would fail the first real release.
 test("--version prints package version and exits 0", () => {
   const r = runCli(["node", "sapwood", "--version"]);
   assert.equal(r.code, 0);
-  assert.match(r.stdout, /^\d+\.\d+\.\d+\n$/);
+  assert.match(r.stdout, /^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?\n$/);
 });
 
 test("-v is alias for --version", () => {
   const r = runCli(["node", "sapwood", "-v"]);
   assert.equal(r.code, 0);
-  assert.match(r.stdout, /^\d+\.\d+\.\d+\n$/);
+  assert.match(r.stdout, /^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?\n$/);
 });
 
 test("formatVersionString: unstamped returns the bare manifest version", () => {
