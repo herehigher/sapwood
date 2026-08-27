@@ -23,8 +23,11 @@ first autonomous run.
   ```
 - A GitHub repo with a ProjectV2 board you're willing to let sapwood drive.
 - CI must actually run for the target repo — a public repo, or a private one with GitHub
-  Actions billing in order. A check that never starts is reported by the engine as
-  base-inherited CI-red, and every PR waits on it.
+  Actions billing in order. A required check that starts and fails outright (as a
+  billing-blocked job does) is reported as base-inherited CI-red; a required check that
+  never runs at all (a mistyped name, or a workflow that never triggers on the branch)
+  instead leaves every PR's CI-evidence wait unsatisfied indefinitely, with no red to point
+  at.
 
 ## Install
 
@@ -228,9 +231,12 @@ re-run — every step is detect-before-create, so nothing is duplicated.
 
 ## Configure
 
-Review and expand the `sapwood.config.yaml` you created for bootstrap. Only
-`board.owner`, `board.repo`, and `board.projectNumber` are required; every other key has a
-sensible default. See [`configuration.md`](configuration.md) for the full reference.
+Review and expand the `sapwood.config.yaml` you created for bootstrap. `board.owner`,
+`board.repo`, and `board.projectNumber` are the only keys the schema requires; every other
+key has a sensible default, but the shipped default reviewer (`reviewer.mode:
+engine-agent`) additionally needs `ci.requiredChecks` naming a real check before
+`sapwood run` will start, as in the bootstrap block above. See
+[`configuration.md`](configuration.md) for the full reference.
 
 ## Prepare the board and gates before your first run
 
