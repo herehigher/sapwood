@@ -1,76 +1,77 @@
 # Diagram style — regeneration guide
 
-The style spec for regenerating sapwood's three diagrams as static images
-(e.g. a docs export or social-preview card). The faithful SVG exports are
-committed under `docs/assets/`; this file is the regeneration recipe.
+The style spec for sapwood's three README diagrams. The committed images
+under `docs/assets/` (`hero-loop.svg`, `architecture.svg`,
+`worker-lifecycle.svg`) are hand-styled redraws of the checked-in Mermaid
+sources next to them (`*.mmd`). The `.mmd` is the semantic spec — the
+authoritative set of nodes, edges, and labels; the SVG is a derived
+artifact. This file is the recipe for regenerating the SVGs.
 
-## Palette
+## Tokens
 
-- GitHub layer — amber `#D9A441`
-- Engine layer — slate blue `#4C6EF5`
-- Headless sessions layer — teal `#12B886`
-- Reviewer adapter layer — violet `#7C3AED`
-- Background — `#FAFAFA` (light) / `#1E1E1E` (dark)
+- Paper (background) — `#FAFAFA`. The SVG paints it explicitly, so one
+  file serves GitHub light, GitHub dark, and npm (npm strips `<picture>`
+  and GitHub's `#gh-*-mode-only` fragments are GitHub-only).
+- Ink — `#2d3142` (node text, primary strokes). Muted — `#4f5d75`
+  (arrows, secondary text). Soft — `#7a8399` (edge labels).
+- Accent — `#4C6EF5`, tint `rgba(76,110,245,0.08)`. One focal node and at
+  most one focal arrow per diagram: the merge gate (hero loop), the
+  conductor (architecture), `done` (lifecycle).
+- Layer hues (architecture only) — GitHub amber `#D9A441`, Engine slate
+  blue `#4C6EF5`, Headless sessions teal `#12B886`, Reviewer adapter
+  violet `#7C3AED`. A hue colors its layer's zone band only (fill at
+  6–10% opacity, hairline at 35–55%, eyebrow text in the hue); nodes
+  inside a band keep the ink/white treatment, so the single accent still
+  reads.
 
-## Node shape per layer
+## Shape per role
 
-- GitHub — rounded rectangle (external system).
-- Engine — plain rectangle (deterministic code).
-- Headless sessions — rounded rectangle, dashed border (ephemeral process).
-- Reviewer adapter — diamond (pluggable choice point).
-- Worker-lifecycle states (Diagram 3) — rounded rectangle; the terminal
-  `done` state gets a double border.
+- External system (GitHub) — rounded rect, `ink @ 0.03` fill, `ink @ 0.30`
+  stroke.
+- Engine component — rounded rect (`rx=6`), white fill, ink stroke.
+  Store (SQLite state) — `ink @ 0.05` fill, muted stroke.
+- Ephemeral (the headless-sessions zone, the `handoff` state) — dashed
+  stroke `4,3`.
+- Focal — accent stroke `1.2`, accent-tint fill.
+- Terminal — `done` (lifecycle) gets a double border; `Done` (hero loop)
+  is a pill (`rx` = half the height). Start (lifecycle) — filled ink dot,
+  `r=6`.
+- Zones — one band per `.mmd` subgraph, filled with its layer hue (see
+  Tokens), uppercase Geist Mono eyebrow in the same hue; the
+  headless-sessions band is dashed.
 
 ## Label rules
 
-- Match the `.mmd`'s node text exactly — the image renders the same
-  diagram, it does not redesign it.
-- Quote any label containing a comma, parenthesis, or the `·` separator.
-- No file paths or module names in labels — concepts only, same "map, not
-  manual" rule the source diagrams already follow.
-- Keep each diagram's node count at or under 10, matching the Mermaid
-  source's own cap.
-
-## Diagram descriptions (source of truth: `docs/assets/*.mmd`)
-
-1. **Hero loop** (`flowchart LR`) — a worker claims a Ready issue, pushes;
-   the engine opens the PR, gates it on CI + review, then merges or stops
-   for a human.
-2. **Layered architecture** (`flowchart TB`) — GitHub holds process truth;
-   the engine orchestrates; headless sessions do the work; a pluggable
-   adapter reviews it.
-3. **Worker lifecycle** (`stateDiagram-v2`) — `done` is terminal; `failed`
-   can resume; a soft-budget `handoff` returns to where it started.
+- Node text comes from the `.mmd`. A redraw may break a label over two
+  lines or move a `/`-separated list into a mono sublabel; it never
+  rewords it.
+- Every `.mmd` subgraph is drawn as a zone band carrying its title as the
+  eyebrow; a band's single node shows only the node's own text
+  (architecture: the Reviewer adapter band holds the adapter list as two
+  mono lines).
+- Edge labels (guards) — uppercase Geist Mono 8px on an opaque paper mask,
+  6–10px off the stroke.
+- Every node and edge in the `.mmd` appears in the image; the image never
+  invents a node or edge. Drawn-node budget: 9 per diagram.
+- Fonts — names in `'Geist','Helvetica Neue',Arial,sans-serif`; sublabels
+  and edge labels in `'Geist Mono',Menlo,Consolas,monospace`. The SVG
+  carries no font `@import`: GitHub renders README images inside `<img>`,
+  which cannot fetch fonts, so the committed file must already look right
+  in the fallback face.
 
 ## Regeneration recipe
 
-The checked-in `docs/assets/*.mmd` files (Diagrams 1–3) are the semantic
-spec — the authoritative set of nodes, edges, and labels. A regenerated
-image may re-declare node shapes per this file's rules above; it never
-invents a node or edge the Mermaid source doesn't have.
-
-**Faithful export** — a literal, unstyled render straight from the shipped
-source, for proofing that an image still matches the diagram:
-
-1. Render with the Mermaid CLI directly against the checked-in `.mmd` file:
-   ```
-   npx -y @mermaid-js/mermaid-cli@11 -i <diagram>.mmd -o <name>.svg
-   ```
-   The output is a vector SVG sized to its content. Omit `-s`/`--scale`
-   (a Puppeteer raster scale factor; the SVG is byte-identical with or
-   without it) and `-w`/`--width` (a rendering page width; Mermaid
-   auto-sizes the SVG to the diagram, so it has no effect). At a pinned
-   mermaid-cli version the render is byte-deterministic.
-2. Save under `docs/assets/`, named for the diagram (`hero-loop.svg`,
-   `architecture.svg`, `worker-lifecycle.svg`).
-
-**Styled poster** — a hand-designed image applying this file's palette,
-shapes, and label rules (for a docs export or social-preview card), made
-with whatever image tool the owner chooses for that piece of work; this
-file assumes no specific tool beyond the mermaid-cli export above. Give
-whichever tool is used exactly these two inputs, nothing else:
-
-- the relevant `docs/assets/*.mmd` file(s), verbatim, as the node/edge/
-  label spec;
-- this file's Palette, Node shape per layer, and Label rules sections, as
-  the restyling spec.
+1. Redraw from the source with the `diagram-design` Claude Code plugin
+   (marketplace `cathrynlavery/diagram-design`):
+   `/diagram-design:import-mermaid docs/assets/<name>.mmd`, detail
+   `faithful`, size `fit`, applying the Tokens / Shape / Label sections
+   above in place of the plugin's default skin. Export the `<svg>` element
+   alone — no font `@import` — to `docs/assets/<name>.svg`.
+2. Proof it the way README shows it: load the SVG through `<img src>` on a
+   white page and on `#0d1117` (GitHub dark); no label may overflow its
+   box in the fallback font.
+3. Optional literal render for a node/edge audit:
+   `npx -y @mermaid-js/mermaid-cli@11 -i docs/assets/<name>.mmd -o <tmp>.svg`
+   draws the `.mmd` as-is (byte-deterministic at the pinned version) so
+   the styled image can be checked against it. The committed SVG is not
+   derived from that render.
