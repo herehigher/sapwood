@@ -26,6 +26,8 @@
 /.claude/rules/                          @herehigher
 /AGENTS.md                               @herehigher
 /engine/prompts/                         @herehigher
+/engine/src/forge/forge.ts                @herehigher
+/engine/src/proxy/                        @herehigher
 /engine/src/review/instruction-path-escalation.ts @herehigher
 /engine/src/config/config.ts             @herehigher
 /docs/security.md                        @herehigher
