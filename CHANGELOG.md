@@ -7,6 +7,8 @@ All notable changes to sapwood are documented here. Format:
 
 ## [Unreleased]
 
+## [0.3.0-alpha.1] - 2026-08-27
+
 ### Changed
 - Runtime directory rename — see [Configuration — The `.sapwood/` runtime
   directory](docs/guide/configuration.md#the-sapwood-runtime-directory) for the layout.
@@ -91,3 +93,4 @@ All notable changes to sapwood are documented here. Format:
   config, `.claude/settings*.json`, and `.github/workflows/**`.
 - Branch-protection detection (warn-only) as the documented backstop for the
   inherited-host-tool-surface trust model.
+
