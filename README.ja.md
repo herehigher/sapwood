@@ -7,7 +7,7 @@
 
 [English](README.md) · 日本語 · [简体中文](README.zh-CN.md)
 
-本文は README.md（[20b33268](https://github.com/herehigher/sapwood/blob/20b33268/README.md) 時点）の翻訳です。相違がある場合は英語版を正とします。
+本文は README.md（[f47caf73](https://github.com/herehigher/sapwood/blob/f47caf73/README.md) 時点）の翻訳です。相違がある場合は英語版を正とします。
 
 **自律的なコーディングに、ガバナンスを。**
 
@@ -188,3 +188,6 @@ dashboard。リリースチェーン（catalog、npm publish）は進行中。
 [SECURITY.md](SECURITY.md)。
 
 [MIT](LICENSE)。
+
+メンテナ: [@kanhigher](https://x.com/kanhigher) — 質問やバグ報告は
+[issues](https://github.com/herehigher/sapwood/issues) へ。

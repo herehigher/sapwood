@@ -20,6 +20,7 @@
   "homepage": "https://github.com/herehigher/sapwood",
   "bugs": { "url": "https://github.com/herehigher/sapwood/issues" },
   "keywords": ["claude-code", "automation", "github", "governance", "ci"],
+  "author": { "name": "HereHigher", "url": "https://x.com/kanhigher" },
   "license": "MIT",
   "publishConfig": { "access": "public" },
   "dependencies": {
