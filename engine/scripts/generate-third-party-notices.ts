@@ -28,19 +28,16 @@ function isPackageManifest(value: unknown): value is PackageManifest {
 }
 
 function packageRootForModule(moduleId: string): string | undefined {
-  const marker = `${requirePathSeparator()}node_modules${requirePathSeparator()}`;
-  const start = moduleId.lastIndexOf(marker);
+  // Both bundlers emit forward-slash module ids on every platform, so match on that shape
+  // and let `join` produce the native path.
+  const marker = "/node_modules/";
+  const normalized = moduleId.replaceAll("\\", "/");
+  const start = normalized.lastIndexOf(marker);
   if (start === -1) return undefined;
-  const rest = moduleId.slice(start + marker.length).split(requirePathSeparator());
+  const rest = normalized.slice(start + marker.length).split("/");
   const packageParts = rest[0]?.startsWith("@") ? rest.slice(0, 2) : rest.slice(0, 1);
   if (packageParts.length === 0 || packageParts.some((part) => part === undefined)) return undefined;
-  return join(moduleId.slice(0, start + marker.length), ...packageParts);
-}
-
-function requirePathSeparator(): string {
-  // Build metadata records native filesystem module ids; the release package is built on the
-  // platform which generated them. `process.platform` avoids treating a scoped package as a file.
-  return process.platform === "win32" ? "\\" : "/";
+  return join(normalized.slice(0, start + marker.length), ...packageParts);
 }
 
 function bundledModuleIds(repoRoot: string): string[] {
