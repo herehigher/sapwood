@@ -1,0 +1,9 @@
+flowchart LR
+A["Align: select a bounded pool from Ready"] --> B["Plan: architect + plan review"]
+B -->|"round budget · lane caps"| C["Execute: N lanes, gated merge"]
+C --> D["Harvest"]
+D --> E["Retro: proposes changes as PRs — a human merges"]
+E -->|"next round — until a final stop condition"| A
+A -.-> GH["GitHub board · issues · PRs — the trail"]
+C -.-> GH
+E -.-> GH

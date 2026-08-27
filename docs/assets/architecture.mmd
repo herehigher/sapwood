@@ -1,27 +1,30 @@
 flowchart TB
+HC["Human controls: pause / kill switch / e-stop"]
 subgraph L1["GitHub"]
 GH["Board/issues/PRs/CI"]
 end
 subgraph L2["Engine"]
-RD["Round driver"]
+RO["Round orchestrator"]
 CD["Conductor"]
 MG["Merge gate"]
-ST["SQLite state"]
+ST["SQLite: dispatched / observed / spent"]
 FA["Forge adapter"]
 end
 subgraph L3["Headless sessions"]
-WK["Workers + guard hook"]
-ER["engine-agent reviewer"]
+WK["Workers + fail-closed guard"]
 end
 subgraph L4["Reviewer adapter"]
-RA["engine-agent/hosted bot/same-model-trusted/human"]
+RA["engine-agent session / hosted bot / same-model-trusted / human"]
 end
 GH <--> FA
 FA <--> CD
-RD --> CD
+HC -->|"every tick"| CD
+RO --> CD
 CD --> ST
 CD --> WK
-WK --> FA
+WK -->|push| FA
+WK -- "guard denies approve / merge (built-in tools)" --x FA
 CD --> MG
 MG --> RA
-RA --> ER
+RA -->|verdict| MG
+MG -->|merge| FA

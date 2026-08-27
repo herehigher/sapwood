@@ -18,7 +18,7 @@
 
 <!-- source: docs/assets/hero-loop.mmd — regenerate per docs/assets/diagram-style.md -->
 ![Hero loop](docs/assets/hero-loop.svg)
-Worker claims a Ready issue, pushes; engine opens the PR, gates on CI + review, merges or stops for a human.
+A human signs the issue Ready; a worker pushes while the fail-closed guard denies approve and merge within the guarded built-in tools (branch protection is the backstop); the engine opens or adopts the PR and gates it on CI + independent review — findings loop back under a fix cap, non-convergence stops for a human.
 
 ## Quick start
 
@@ -106,11 +106,11 @@ See [`docs/security.md`](docs/security.md).
 
 <!-- source: docs/assets/architecture.mmd — regenerate per docs/assets/diagram-style.md -->
 ![Architecture layers](docs/assets/architecture.svg)
-GitHub holds process truth; engine orchestrates; sessions do the work; a pluggable adapter reviews it.
+GitHub holds process truth; the engine orchestrates and records dispatches and ledgered spend; a worker can push, and the fail-closed guard denies approve and merge within the guarded built-in tools; the reviewer's verdict gates the merge; a human can pause, drain, or stop at any tick.
 
-<!-- source: docs/assets/worker-lifecycle.mmd — regenerate per docs/assets/diagram-style.md -->
-![Worker lane lifecycle](docs/assets/worker-lifecycle.svg)
-Worker lane lifecycle: `done` is terminal; `failed` can resume; `handoff` returns to where it started.
+<!-- source: docs/assets/round-loop.mmd — regenerate per docs/assets/diagram-style.md -->
+![Round loop](docs/assets/round-loop.svg)
+A round is a batch wrapped in peripherals: align, plan, execute under a round budget and lane caps, harvest, and a retrospective that can only propose — through a PR a human merges.
 
 Round phases: `aligning → architecting → plan_review → executing →
 harvesting → retro → closed`. Default board lanes: `Todo → Ready → In

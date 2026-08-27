@@ -2,10 +2,26 @@
 
 The style spec for sapwood's three README diagrams. The committed images
 under `docs/assets/` (`hero-loop.svg`, `architecture.svg`,
-`worker-lifecycle.svg`) are hand-styled redraws of the checked-in Mermaid
+`round-loop.svg`) are hand-styled redraws of the checked-in Mermaid
 sources next to them (`*.mmd`). The `.mmd` is the semantic spec — the
 authoritative set of nodes, edges, and labels; the SVG is a derived
 artifact. This file is the recipe for regenerating the SVGs.
+
+## Diagram descriptions
+
+- **Hero loop** (`hero-loop.mmd`) — a human signs an issue Ready, a worker
+  pushes under the fail-closed guard, and the engine gates the PR on CI +
+  independent review before merge; findings loop back under a fix cap,
+  non-convergence stops for a human. Swimlane bands: Human / Worker
+  session / Engine.
+- **Architecture** (`architecture.mmd`) — GitHub, the engine (round
+  orchestrator, conductor, merge gate, SQLite, forge adapter), headless
+  sessions, and the reviewer adapter, with human controls reaching the
+  conductor every tick and the crossed edge marking the guard's denial of
+  push-time approve/merge.
+- **Round loop** (`round-loop.mmd`) — align, plan, execute, harvest,
+  retro, cycling back to align; the GitHub board is the hub each stage
+  reports to.
 
 ## Tokens
 
@@ -16,7 +32,7 @@ artifact. This file is the recipe for regenerating the SVGs.
   (arrows, secondary text). Soft — `#7a8399` (edge labels).
 - Accent — `#4C6EF5`, tint `rgba(76,110,245,0.08)`. One focal node and at
   most one focal arrow per diagram: the merge gate (hero loop), the
-  conductor (architecture), `done` (lifecycle).
+  conductor (architecture), the GitHub board hub (round loop).
 - Layer hues (architecture only) — GitHub amber `#D9A441`, Engine slate
   blue `#4C6EF5`, Headless sessions teal `#12B886`, Reviewer adapter
   violet `#7C3AED`. A hue colors its layer's zone band only (fill at
@@ -30,17 +46,24 @@ artifact. This file is the recipe for regenerating the SVGs.
   stroke.
 - Engine component — rounded rect (`rx=6`), white fill, ink stroke.
   Store (SQLite state) — `ink @ 0.05` fill, muted stroke.
-- Ephemeral (the headless-sessions zone, the `handoff` state) — dashed
-  stroke `4,3`. Resume/return edges (`handoff → running`,
-  `handoff → fixing`, `failed → driving`) are dashed too; every other edge
-  is solid.
+- Ephemeral (the headless-sessions zone) — dashed stroke `4,3`; every
+  other edge is solid.
 - Focal — accent stroke `1.2`, accent-tint fill.
-- Terminal — `done` (lifecycle) gets a double border; `Done` (hero loop)
-  is a pill (`rx` = half the height). Start (lifecycle) — filled ink dot,
-  `r=6`.
-- Zones — one band per `.mmd` subgraph, filled with its layer hue (see
-  Tokens), uppercase Geist Mono eyebrow in the same hue; the
-  headless-sessions band is dashed.
+- Terminal — `Done` (hero loop) is a pill (`rx` = half the height).
+- Zones — one band per `.mmd` subgraph, carrying its title as an
+  uppercase Geist Mono eyebrow. Architecture's zone bands additionally
+  carry a layer hue (see Tokens: fill 6–10% opacity, hairline 35–55%,
+  eyebrow text in the hue), and the headless-sessions band is dashed.
+  Hero loop's swimlane bands (Human / Worker session / Engine) get the
+  same eyebrow treatment without a hue fill — they separate who acts, not
+  a layer.
+- Denied action — the crossed edge (`--x`, architecture:
+  `WK --x FA`) marks an action the guard denies (push-time approve/merge);
+  style it distinctly from a normal solid or dashed edge, e.g. a stop-tick
+  crossing the stroke, not just a color change.
+- Round-loop layout — drawn as a cycle, not a straight pipeline; the
+  GitHub board node (`GH`) sits at the hub the other stages point into
+  (`-.->`), off the main A→B→C→D→E ring.
 
 ## Label rules
 
