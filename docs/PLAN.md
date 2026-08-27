@@ -329,9 +329,10 @@ conversational continuity — it is externalized institutional memory, held in a
 session re-reads as relevant to its own role, not a uniform feed every role consumes alike.
 
 **Self-evolution goes through a PR, never a direct write.** When the retrospective role
-proposes a change to a prompt, doc, or config, it opens a PR through the same gate②
-path every other change takes — never a direct write to disk. This is why
-`worker.promptFile` landed in v1: it gives the retrospective role a concrete file
+proposes a change to a prompt, doc, or config, it opens a PR that a human merges — never a
+direct write to disk. The engine never merges, approves, or reviews a retro PR: the role
+belongs to no worker lane, so the conductor's autonomous-merge driver never picks it up. This
+is why `worker.promptFile` landed in v1: it gives the retrospective role a concrete file
 to open a PR against, rather than an inline prompt with no addressable target.
 
 **Ready-as-signature.** Moving an issue to `Ready` — whether confirming an `origin:agent`
