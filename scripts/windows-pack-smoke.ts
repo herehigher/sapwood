@@ -12,10 +12,12 @@ const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CMD = process.env.ComSpec ?? "cmd.exe";
 
 // npm on Windows is a .cmd shim, and Node refuses to spawn .cmd files without a shell, so npm
-// goes through cmd.exe the same way the installed sapwood.cmd does below.
+// goes through cmd.exe the same way the installed sapwood.cmd does below. Every cmd.exe call
+// passes its argument string verbatim: the quoting is already cmd.exe-shaped, and Node's own
+// Windows argument escaping would wrap the whole command line into one unrecognised token.
 function npm(args: string[], options: { cwd: string; timeout: number; encoding?: "utf8"; stdio?: "inherit" }): string {
   const quoted = args.map((arg) => `"${arg}"`).join(" ");
-  return execFileSync(CMD, ["/d", "/s", "/c", `"npm ${quoted}"`], options) as string;
+  return execFileSync(CMD, ["/d", "/s", "/c", `"npm ${quoted}"`], { ...options, windowsVerbatimArguments: true }) as string;
 }
 
 interface PackManifest {
@@ -54,7 +56,12 @@ async function main(): Promise<void> {
 
     const bin = join(prefix, "sapwood.cmd");
     if (!existsSync(bin)) throw new Error(`npm global install did not create ${bin}`);
-    execFileSync(CMD, ["/d", "/s", "/c", `""${bin}" --version"`], { cwd: canaryDir, stdio: "inherit", timeout: 15_000 });
+    execFileSync(CMD, ["/d", "/s", "/c", `""${bin}" --version"`], {
+      cwd: canaryDir,
+      stdio: "inherit",
+      timeout: 15_000,
+      windowsVerbatimArguments: true,
+    });
 
     const port = await availableDashboardPort();
     const result = await runDashboardCanary({
@@ -62,6 +69,7 @@ async function main(): Promise<void> {
       args: ["/d", "/s", "/c", `""${bin}" dashboard --port ${port}"`],
       cwd: canaryDir,
       timeoutMs: 30_000,
+      windowsVerbatimArguments: true,
     });
     process.stdout.write(`windows dashboard pack smoke: OK ${result.origin}\n`);
   } finally {
