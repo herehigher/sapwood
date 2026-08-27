@@ -71,15 +71,18 @@ it points at and its assets can't be added, changed, or removed —
 This matters here because consumers install by exactly those two things: the
 `v<version>` tag that `scripts/release.ts` also mirrors onto the marketplace catalog,
 and `release-evidence.txt`, which is an audit artifact only if it can't be rewritten
-after the fact. That's why `publish` creates the GitHub Release as a **draft**
-first — pinned to the release commit via `--target`, since the tag it names hasn't
-been pushed yet at that point — and only pushes the tag once the draft exists: the
-tag push is what triggers `release.yml`, so a failed draft creation aborts `publish`
-before any tag is pushed, rather than leaving a pushed tag with nothing for CI to
-attach evidence to. `release.yml` never creates a release itself; it only attaches
-evidence to that existing draft and then publishes it (`gh release edit …
---draft=false`) — see "Runbook" below. The release's title and notes stay editable
-even after publish; immutability freezes only the tag and the attached assets.
+after the fact. That's why `publish` runs draft, then tag, then push, in that
+order: it creates the GitHub Release as a **draft** first — pinned to the release
+commit via `--target`, since the tag it names doesn't exist yet — then tags that
+same commit (the one `--target` named, not whatever `HEAD` happens to be by then;
+the Windows-smoke wait earlier in `publish` can take minutes), and only then pushes
+the tag: the tag push is what triggers `release.yml`, so a failed draft creation
+aborts `publish` before any tag exists at all, rather than leaving a tag (local or
+pushed) with nothing for CI to attach evidence to. `release.yml` never creates a
+release itself; it only attaches evidence to that existing draft and then publishes
+it (`gh release edit … --draft=false`) — see "Runbook" below. The release's title
+and notes stay editable even after publish; immutability freezes only the tag and
+the attached assets.
 
 **Rollback.** Versions never go backwards, and once a release is published under
 immutability it can't be quietly rewritten. Deleting a published release is
@@ -139,13 +142,14 @@ an OIDC ID token, which only a supported CI provider can mint (for GitHub Action
 that means the job has `permissions: id-token: write` and runs on a GitHub-hosted
 runner), and a `package.json` `repository` field matching, case-sensitively, the
 repo being published from — `engine/package.json`'s already does.
-`.github/workflows/release.yml`'s `attach-evidence` job carries `id-token: write`
-for this reason. That grant alone doesn't get us provenance today, though: `npm
-publish` still runs from `scripts/release.ts publish` on the operator's own
-machine via a local `npm login`, not inside that or any CI job, and a local run
-has no OIDC token to mint from regardless of flags. `npm publish --provenance` is
-the form to use whenever this step actually runs inside a CI job — passing
-`--provenance` from a local run today would not produce a valid attestation.
+`.github/workflows/release.yml` does not carry `id-token: write` today — nothing
+in that workflow consumes it, since `npm publish` runs from `scripts/release.ts
+publish` on the operator's own machine via a local `npm login`, not inside that or
+any CI job, and a local run has no OIDC token to mint from regardless of flags.
+The grant returns to `release.yml` only once a CI-run `npm publish` step exists to
+consume it. `npm publish --provenance` is the form to use whenever that step
+actually runs inside a CI job — passing `--provenance` from a local run today
+would not produce a valid attestation.
 
 **Pre-releases always pass `--prerelease`.** `gh release create` does not infer
 pre-release status from a `-` in the tag name, so `publish` passes `--prerelease`
@@ -161,15 +165,17 @@ npm run release -- prepare 0.3.0-alpha.1
 # 2. Review the PR like any other change, then merge it (ordinary PR merge — this
 #    step is not part of the script).
 
-# 3. Publish — from main, at the merged commit. Creates the GitHub Release as a
-#    draft with the CHANGELOG section as its notes, pinned to this commit via
-#    `--target` since the tag doesn't exist yet; only then tags and pushes the tag
-#    (release.yml attaches evidence and publishes it once CI runs against the
-#    pushed tag — see "Release immutability" above), then `npm publish`es the
-#    engine workspace as `sapwood` under the version's own dist-tag (see "npm
-#    publish dist-tag" above), runs the dashboard canary, verifies that npm serves
-#    the exact version, then promotes the shell into the catalog. Requires a prior
-#    local `npm login` and the catalog remote.
+# 3. Publish — from main, at the merged commit. Runs the Windows pack/install/
+#    dashboard smoke first, then: draft (creates the GitHub Release as a draft
+#    with the CHANGELOG section as its notes, pinned to this commit via `--target`
+#    since the tag doesn't exist yet) -> tag (tags that same commit, not whatever
+#    HEAD is by then) -> push tag (release.yml attaches evidence and publishes the
+#    draft once CI runs against the pushed tag — see "Release immutability"
+#    above). Then `npm publish`es the engine workspace as `sapwood` under the
+#    version's own dist-tag (see "npm publish dist-tag" above), runs the
+#    dashboard canary, verifies that npm serves the exact version, then promotes
+#    the shell into the catalog. Requires a prior local `npm login` and the
+#    catalog remote.
 npm run release -- publish --catalog https://github.com/herehigher/sapwood-plugin.git
 # or, to see the exact commands without running them:
 npm run release -- publish --catalog https://github.com/herehigher/sapwood-plugin.git --dry-run

@@ -650,22 +650,15 @@ export const PUBLISH_STEPS: PublishStep[] = [
     },
   },
   {
-    name: "tag",
-    describe: (ctx) => `git tag -a v${ctx.version} -m "v${ctx.version}"`,
-    run: (ctx, deps) => {
-      deps.exec("git", ["tag", "-a", `v${ctx.version}`, "-m", `v${ctx.version}`]);
-    },
-  },
-  {
-    // Runs BEFORE push-tag, on purpose: `push-tag` is what triggers release.yml (`on: push:
-    // tags`), and that job only ever attaches evidence to an existing draft — it no longer has
-    // a fallback that creates one. So the draft must exist first, or a tag lands with nothing
-    // for CI to attach evidence to. Created as a draft, not published: with release immutability
-    // ON, a non-draft release's assets are frozen the instant it exists. `--target` pins the
-    // draft to the commit the tag will point at, since the tag hasn't been pushed (and per
-    // GitHub's docs, isn't created at all yet) at this point — without it `gh release create`
-    // would resolve the tag against the default branch instead. `release.yml` is what flips
-    // `--draft=false`, once evidence is attached — see docs/dev-guide/10-releasing.md.
+    // Runs BEFORE the tag/push-tag pair, on purpose: `push-tag` is what triggers release.yml
+    // (`on: push: tags`), and that job only ever attaches evidence to an existing draft — it no
+    // longer has a fallback that creates one. So the draft must exist first, or a tag lands with
+    // nothing for CI to attach evidence to. Created as a draft, not published: with release
+    // immutability ON, a non-draft release's assets are frozen the instant it exists. `--target`
+    // pins the draft to the commit the tag will point at, since the tag hasn't been created yet
+    // at this point — without it `gh release create` would resolve against the default branch
+    // instead. `release.yml` is what flips `--draft=false`, once evidence is attached — see
+    // docs/dev-guide/10-releasing.md.
     name: "gh-release",
     describe: (ctx) =>
       `gh release create v${ctx.version} --target ${ctx.commitSha} --title v${ctx.version} --notes-file <CHANGELOG [${ctx.version}] section> --generate-notes --draft` +
@@ -698,8 +691,19 @@ export const PUBLISH_STEPS: PublishStep[] = [
   },
   {
     // Only reached once gh-release above has succeeded — a thrown exec (bad `gh` invocation,
-    // network, auth) stops runPublish here (PUBLISH_STEPS.run in sequence, no try/catch), so
-    // the tag is never pushed against a draft that failed to create.
+    // network, auth) stops runPublish here (PUBLISH_STEPS.run in sequence, no try/catch), so a
+    // draft that failed to create never gets a local tag left behind either. Tagged on
+    // `ctx.commitSha` (the sha `checkPublishPreconditions` pinned as `--target` above), not
+    // `HEAD` — the Windows-smoke wait earlier in this list can take minutes, and HEAD must not
+    // be allowed to move underneath the tag in that window.
+    name: "tag",
+    describe: (ctx) => `git tag -a v${ctx.version} ${ctx.commitSha} -m "v${ctx.version}"`,
+    run: (ctx, deps) => {
+      deps.exec("git", ["tag", "-a", `v${ctx.version}`, ctx.commitSha, "-m", `v${ctx.version}`]);
+    },
+  },
+  {
+    // Only reached once tag (above) has succeeded.
     name: "push-tag",
     describe: (ctx) => `git push origin v${ctx.version}`,
     run: (ctx, deps) => {

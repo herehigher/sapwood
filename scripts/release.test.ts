@@ -718,11 +718,13 @@ test("the Windows smoke gates publish: first step, before the tag exists", () =>
   assert.ok(names.indexOf("windows-smoke") < names.indexOf("tag"));
 });
 
-test("the gh-release draft is created before the tag is pushed", () => {
+test("the gh-release draft is created before the tag exists at all, which is before it's pushed", () => {
   const names = PUBLISH_STEPS.map((step) => step.name);
   // push-tag is what triggers release.yml, and that job only attaches evidence to an existing
-  // draft — so the draft has to exist first, or a failed draft still leaves a pushed tag behind.
-  assert.ok(names.indexOf("gh-release") < names.indexOf("push-tag"));
+  // draft — so the draft has to exist first, or a failed draft still leaves a local (or pushed)
+  // tag behind with nothing for CI to attach evidence to.
+  assert.ok(names.indexOf("gh-release") < names.indexOf("tag"));
+  assert.ok(names.indexOf("tag") < names.indexOf("push-tag"));
 });
 
 test("runWindowsSmoke: dispatches, finds the run for HEAD, watches it with --exit-status", () => {
@@ -1025,7 +1027,9 @@ test("runPublish (real run, not dry-run): exact tag/push/gh-release argv, --prer
     assert.equal(r.code, 0);
 
     const tagCall = calls.find((c) => c.file === "git" && c.args[0] === "tag" && c.args[1] === "-a");
-    assert.deepEqual(tagCall?.args, ["tag", "-a", `v${version}`, "-m", `v${version}`]);
+    // "aaa" is the fake HEAD sha (== the precondition-captured commitSha) — the tag names that
+    // commit explicitly, never a bare HEAD, so it can't drift from `--target` above.
+    assert.deepEqual(tagCall?.args, ["tag", "-a", `v${version}`, "aaa", "-m", `v${version}`]);
 
     const pushCall = calls.find((c) => c.file === "git" && c.args[0] === "push");
     assert.deepEqual(pushCall?.args, ["push", "origin", `v${version}`]);
@@ -1060,9 +1064,11 @@ test("runPublish (real run, not dry-run): exact tag/push/gh-release argv, --prer
     // only once the tag + GitHub Release (the durable "this version shipped" record) exist.
     assert.ok(calls.indexOf(npmCall!) > calls.indexOf(ghCall!));
     assert.ok(calls.indexOf(canaryCall!) > calls.indexOf(npmCall!));
-    // The draft must exist before the tag is pushed: `push-tag` is what triggers release.yml,
-    // and that job no longer creates a release on its own if it finds none.
-    assert.ok(calls.indexOf(ghCall!) < calls.indexOf(pushCall!));
+    // The draft must exist before the tag exists at all, which must exist before it's pushed:
+    // `push-tag` is what triggers release.yml, and that job no longer creates a release on its
+    // own if it finds none.
+    assert.ok(calls.indexOf(ghCall!) < calls.indexOf(tagCall!));
+    assert.ok(calls.indexOf(tagCall!) < calls.indexOf(pushCall!));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1128,9 +1134,14 @@ test("runPublish (real run): a failing draft creation aborts before the tag is p
     });
     const deps: Deps = { repoRoot: dir, exec };
     assert.throws(() => runPublish(deps, { dryRun: false }), /gh release create failed/);
-    // The local annotated tag may already exist (harmless, never pushed) — what must never
-    // happen is the remote push, since that's what triggers release.yml against a tag with no
-    // draft release for it to find.
+    // `tag` runs AFTER gh-release now, so a failed draft never even creates a local tag — let
+    // alone pushes one that would trigger release.yml against a draft that doesn't exist.
+    // (`git tag -l` is excluded: `checkPublishPreconditions` legitimately runs that existence
+    // check before any of PUBLISH_STEPS, including the gh-release step that fails here.)
+    assert.equal(
+      calls.some((call) => call.file === "git" && call.args[0] === "tag" && call.args[1] === "-a"),
+      false,
+    );
     assert.equal(
       calls.some((call) => call.file === "git" && call.args[0] === "push"),
       false,
