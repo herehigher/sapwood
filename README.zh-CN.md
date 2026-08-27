@@ -7,7 +7,7 @@
 
 [English](README.md) · [日本語](README.ja.md) · 简体中文
 
-本文为 README.md（截至 [f47caf73](https://github.com/herehigher/sapwood/blob/f47caf73/README.md)）的译文；如有出入，以英文版为准。
+本文为 README.md（截至 [b703eca5](https://github.com/herehigher/sapwood/blob/b703eca5/README.md)）的译文；如有出入，以英文版为准。
 
 **自主编码，接受治理。**
 
@@ -151,6 +151,9 @@ L4 保留了 L3 的引擎权限，并加入一个受信任的 LLM 监督者，�
 已在 main 分支实现、尚未正式发布：引擎、守护钩子、轮次编排器、仪表盘。发布链路
 （catalog、npm publish）正在推进中。参见 [CHANGELOG.md](CHANGELOG.md) 的
 「Unreleased」以及 [PLAN.md 的「Current milestone」](docs/PLAN.md#current-milestone)。
+
+仪表盘功能可用但尚未打磨；欢迎 UI/UX 设计方面的贡献 —— 参见
+[help wanted](https://github.com/herehigher/sapwood/labels/help%20wanted)。
 
 ## 文档
 

@@ -153,6 +153,9 @@ dashboard. Release chain (catalog, npm publish) in progress. See
 [CHANGELOG.md](CHANGELOG.md) "Unreleased" and [PLAN.md "Current
 milestone"](docs/PLAN.md#current-milestone).
 
+The dashboard is functional but unpolished; UI/UX design contributions are
+welcome — see [help wanted](https://github.com/herehigher/sapwood/labels/help%20wanted).
+
 ## Documentation
 
 - [`getting-started.md`](docs/guide/getting-started.md) — install,
