@@ -16,15 +16,8 @@
   hook) around the `sapwood` engine CLI. Install the plugin (recommended),
   or run the CLI from npm on its own — both are complete paths.
 
-```mermaid
-flowchart LR
-A["Ready issue"] --> B["Worktree worker"]
-B --> C["push"]
-C --> D["Engine opens PR"]
-D --> E["CI + independent review"]
-E --> F["Merge (or stop for human)"]
-F --> G["Done"]
-```
+<!-- source: docs/assets/hero-loop.mmd — regenerate per docs/assets/diagram-style.md -->
+![Hero loop](docs/assets/hero-loop.svg)
 Worker claims a Ready issue, pushes; engine opens the PR, gates on CI + review, merges or stops for a human.
 
 ## Quick start
@@ -111,54 +104,12 @@ See [`docs/security.md`](docs/security.md).
 
 ## Architecture
 
-```mermaid
-flowchart TB
-subgraph L1["GitHub"]
-GH["Board/issues/PRs/CI"]
-end
-subgraph L2["Engine"]
-RD["Round driver"]
-CD["Conductor"]
-MG["Merge gate"]
-ST["SQLite state"]
-FA["Forge adapter"]
-end
-subgraph L3["Headless sessions"]
-WK["Workers + guard hook"]
-ER["engine-agent reviewer"]
-end
-subgraph L4["Reviewer adapter"]
-RA["engine-agent/hosted bot/same-model-trusted/human"]
-end
-GH <--> FA
-FA <--> CD
-RD --> CD
-CD --> ST
-CD --> WK
-WK --> FA
-CD --> MG
-MG --> RA
-RA --> ER
-```
+<!-- source: docs/assets/architecture.mmd — regenerate per docs/assets/diagram-style.md -->
+![Architecture layers](docs/assets/architecture.svg)
 GitHub holds process truth; engine orchestrates; sessions do the work; a pluggable adapter reviews it.
 
-```mermaid
-stateDiagram-v2
-[*] --> running
-running --> driving
-driving --> fixing
-fixing --> driving
-running --> handoff
-fixing --> handoff
-handoff --> running: resume by origin
-handoff --> fixing: resume by origin
-running --> done
-driving --> done
-running --> failed
-fixing --> failed
-driving --> failed
-failed --> driving: eligible lanes only
-```
+<!-- source: docs/assets/worker-lifecycle.mmd — regenerate per docs/assets/diagram-style.md -->
+![Worker lane lifecycle](docs/assets/worker-lifecycle.svg)
 Worker lane lifecycle: `done` is terminal; `failed` can resume; `handoff` returns to where it started.
 
 Round phases: `aligning → architecting → plan_review → executing →
