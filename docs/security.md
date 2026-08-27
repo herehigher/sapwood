@@ -239,6 +239,10 @@ would let a worker weaken the very mechanism that constrains it. Any change to t
   `merge.mode: produce-pr-and-stop` safe-by-default pin every future `sapwood init` inherits,
   so weakening it here degrades that default repo-wide, not just this repo's live config.
 - `.claude/settings*.json` and `.github/workflows/**`
+- `.github/CODEOWNERS` — the guard does **not** path-deny this file; its controls are
+  process-level instead: `escalation.instructionPaths` (`sapwood.config.yaml`) labels any PR
+  touching it `sapwood:human-merge-only`, so the conductor never merges it, and the file owns
+  itself, so a change to it needs the repo owner's review.
 
 The guard enforces this as a write-path denial (both for the `Write`/`Edit` tools and
 for `Bash` redirection/`tee`/`sed -i`/`git mv`/etc. against these paths, checked

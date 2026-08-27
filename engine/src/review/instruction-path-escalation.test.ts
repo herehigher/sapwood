@@ -42,6 +42,12 @@ test("#292 matchedInstructionPaths: a rename matches either old or new instructi
   assert.deepEqual(matchedInstructionPaths(files, ["CLAUDE.md", ".claude/rules/**"]), ["CLAUDE.md", ".claude/rules/nested/review.md"]);
 });
 
+test("#1150 matchedInstructionPaths: a PR changing .github/CODEOWNERS escalates under the default config", () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
+  const files: PRChangedFile[] = [{ filename: ".github/CODEOWNERS" }];
+  assert.deepEqual(matchedInstructionPaths(files, effectiveInstructionPaths(cfg)), [".github/CODEOWNERS"]);
+});
+
 test("#292 escalation helper: label-presence latch writes label then one comment exactly once across ticks", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1 } });
   const calls: string[] = [];

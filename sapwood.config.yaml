@@ -67,6 +67,8 @@ escalation:
     - .claude/rules/**
     - AGENTS.md
     - engine/prompts/**
+    - engine/src/forge/forge.ts
+    - engine/src/proxy/**
     - engine/src/review/instruction-path-escalation.ts
     - engine/src/config/config.ts
     - sapwood.config.example.yaml
@@ -74,6 +76,7 @@ escalation:
     - docs/security/**
     - engine/src/roles/skills-plugin.ts
     - engine/src/forge/labels.ts
+    - .github/CODEOWNERS
 doctrine:
   file: docs/REVIEW-DOCTRINE.md
 
