@@ -1154,10 +1154,14 @@ function DemoApp({ now, initialConfigOpen }: AppProps) {
   });
 }
 
-/** `?demo` (#742): true when the URL's query string carries `demo`. `window` is absent under this
- *  repo's `renderToStaticMarkup`-only test harness (no jsdom) — a real browser is the only
- *  environment where this reads anything but the explicit `demo` prop `App` accepts below. */
+/** `?demo` (#742): true when the URL's query string carries `demo`, or when the bundle was built
+ *  with `VITE_DEMO_ONLY=1` — the GitHub Pages showcase (#704) has no engine behind it, so its root
+ *  URL must land in demo mode rather than render a live panel that can never connect. `window` is
+ *  absent under this repo's `renderToStaticMarkup`-only test harness (no jsdom) — a real browser
+ *  is the only environment where this reads anything but the explicit `demo` prop `App` accepts
+ *  below. */
 function isDemoRoute(): boolean {
+  if (import.meta.env?.VITE_DEMO_ONLY === "1") return true;
   return typeof window !== "undefined" && new URLSearchParams(window.location.search).has("demo");
 }
 

@@ -187,7 +187,10 @@ npm run release -- publish --catalog https://github.com/herehigher/sapwood-plugi
 npm run release -- publish --catalog https://github.com/herehigher/sapwood-plugin.git --dry-run
 
 # 4. Verify. The release shows as a draft until release.yml finishes attaching
-#    evidence and publishing it — allow a few minutes for that run.
+#    evidence and publishing it — allow a few minutes for that run. The same
+#    run then redeploys the public demo (https://herehigher.github.io/sapwood/,
+#    release.yml `deploy-demo`); `gh workflow run release.yml` republishes the
+#    demo alone, without a release.
 gh release view v0.3.0-alpha.1
 git describe --tags
 npm view sapwood dist-tags
