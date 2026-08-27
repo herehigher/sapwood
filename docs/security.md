@@ -128,7 +128,9 @@ in-engine *tool-permission* management for producer legs is abandoned. Five mech
   reviews/checks) is mandatory. Presence is detected, not just documented:
   `branch-protection-warning.ts::createBranchProtectionDetector` warns naming both operator
   exits **only when positively verified unprotected**; an inconclusive read never fires it, and
-  the warning never enforces the backstop it names.
+  the warning never enforces the backstop it names. [OpenSSF Scorecard](../.github/workflows/scorecard.yml)
+  gives this platform posture an external, third-party-readable attestation — results at
+  https://securityscorecards.dev/viewer/?uri=github.com/herehigher/sapwood.
 - **(b′) server-granularity MCP deny vs. `allowManagedPermissionRulesOnly`.** The producer-leg
   server-granularity MCP deny lands in `--disallowedTools`; a target repo whose managed
   settings set `allowManagedPermissionRulesOnly: true` causes the CLI to discard every
