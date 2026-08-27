@@ -718,6 +718,15 @@ test("the Windows smoke gates publish: first step, before the tag exists", () =>
   assert.ok(names.indexOf("windows-smoke") < names.indexOf("tag"));
 });
 
+test("the gh-release draft is created before the tag exists at all, which is before it's pushed", () => {
+  const names = PUBLISH_STEPS.map((step) => step.name);
+  // push-tag is what triggers release.yml, and that job only attaches evidence to an existing
+  // draft — so the draft has to exist first, or a failed draft still leaves a local (or pushed)
+  // tag behind with nothing for CI to attach evidence to.
+  assert.ok(names.indexOf("gh-release") < names.indexOf("tag"));
+  assert.ok(names.indexOf("tag") < names.indexOf("push-tag"));
+});
+
 test("runWindowsSmoke: dispatches, finds the run for HEAD, watches it with --exit-status", () => {
   const calls: string[][] = [];
   let listed = 0;
@@ -855,7 +864,7 @@ test("checkPublishPreconditions: succeeds when everything lines up (tag absent b
   const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
   try {
     const deps: Deps = { repoRoot: dir, exec: fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }) };
-    assert.deepEqual(checkPublishPreconditions(deps), { ok: true, version: "0.3.0" });
+    assert.deepEqual(checkPublishPreconditions(deps), { ok: true, version: "0.3.0", commitSha: "aaa" });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -864,7 +873,7 @@ test("checkPublishPreconditions: succeeds when everything lines up (tag absent b
 // ── npm dist-tag selection ──────────────────────────────────────────────────────────
 
 function publishCtx(version: string): PublishContext {
-  return { version, prerelease: isPrerelease(version), repoRoot: "" };
+  return { version, prerelease: isPrerelease(version), repoRoot: "", commitSha: "aaa" };
 }
 
 test("npmDistTag: a plain release is always latest", () => {
@@ -892,6 +901,7 @@ test("runPublish --dry-run: prints --prerelease for an alpha version, runs nothi
     assert.equal(r.code, 0);
     assert.match(r.output, /--dry-run/);
     assert.match(r.output, /--prerelease/);
+    assert.match(r.output, /gh release create v0\.3\.0-alpha\.1.*--draft/);
     assert.match(r.output, /npm publish --workspace engine --tag alpha/);
     assert.match(r.output, /node scripts\/dashboard-canary\.ts 0\.3\.0-alpha\.1/);
     assert.deepEqual(calls, [
@@ -914,6 +924,7 @@ test("runPublish --dry-run: omits --prerelease for a plain release version, npm 
     const r = runPublish(deps, { dryRun: true });
     assert.equal(r.code, 0);
     assert.doesNotMatch(r.output, /--prerelease/);
+    assert.match(r.output, /gh release create v0\.3\.0.*--draft/);
     assert.match(r.output, /npm publish --workspace engine --tag latest/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1016,19 +1027,31 @@ test("runPublish (real run, not dry-run): exact tag/push/gh-release argv, --prer
     assert.equal(r.code, 0);
 
     const tagCall = calls.find((c) => c.file === "git" && c.args[0] === "tag" && c.args[1] === "-a");
-    assert.deepEqual(tagCall?.args, ["tag", "-a", `v${version}`, "-m", `v${version}`]);
+    // "aaa" is the fake HEAD sha (== the precondition-captured commitSha) — the tag names that
+    // commit explicitly, never a bare HEAD, so it can't drift from `--target` above.
+    assert.deepEqual(tagCall?.args, ["tag", "-a", `v${version}`, "aaa", "-m", `v${version}`]);
 
     const pushCall = calls.find((c) => c.file === "git" && c.args[0] === "push");
     assert.deepEqual(pushCall?.args, ["push", "origin", `v${version}`]);
 
-    const ghCall = calls.find((c) => c.file === "gh" && c.args[0] === "release");
-    assert.equal(ghCall?.args[0], "release");
-    assert.equal(ghCall?.args[1], "create");
-    assert.equal(ghCall?.args[2], `v${version}`);
-    assert.ok(ghCall?.args.includes("--title"));
-    assert.ok(ghCall?.args.includes("--notes-file"));
-    assert.ok(ghCall?.args.includes("--generate-notes"));
-    assert.ok(ghCall?.args.includes("--prerelease"));
+    const notesPath = join(tmpdir(), `sapwood-release-notes-${version}.md`);
+    const ghCall = calls.find((c) => c.file === "gh" && c.args[0] === "release" && c.args[1] === "create");
+    // Exact argv, not a regex/includes check: "aaa" is the fake HEAD sha `fakeExec` returns for
+    // `git rev-parse HEAD`, which `checkHeadMatchesOriginMain` threads through as `commitSha`.
+    assert.deepEqual(ghCall?.args, [
+      "release",
+      "create",
+      `v${version}`,
+      "--target",
+      "aaa",
+      "--title",
+      `v${version}`,
+      "--notes-file",
+      notesPath,
+      "--generate-notes",
+      "--draft",
+      "--prerelease",
+    ]);
 
     assert.equal(notesFileContents.length, 1);
     assert.equal(notesFileContents[0], extractVersionSection(changelog, version));
@@ -1041,23 +1064,88 @@ test("runPublish (real run, not dry-run): exact tag/push/gh-release argv, --prer
     // only once the tag + GitHub Release (the durable "this version shipped" record) exist.
     assert.ok(calls.indexOf(npmCall!) > calls.indexOf(ghCall!));
     assert.ok(calls.indexOf(canaryCall!) > calls.indexOf(npmCall!));
+    // The draft must exist before the tag exists at all, which must exist before it's pushed:
+    // `push-tag` is what triggers release.yml, and that job no longer creates a release on its
+    // own if it finds none.
+    assert.ok(calls.indexOf(ghCall!) < calls.indexOf(tagCall!));
+    assert.ok(calls.indexOf(tagCall!) < calls.indexOf(pushCall!));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("runPublish (real run): --prerelease absent from the gh-release argv for a plain release version, npm tag is latest", () => {
+  const version = "0.3.0";
+  const dir = setupPublishRepo(version, READY_CHANGELOG);
+  try {
+    const { exec, calls } = withRecorder(fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }));
+    const deps: Deps = { repoRoot: dir, exec };
+    const r = runPublish(deps, { dryRun: false });
+    assert.equal(r.code, 0);
+    const notesPath = join(tmpdir(), `sapwood-release-notes-${version}.md`);
+    const ghCall = calls.find((c) => c.file === "gh" && c.args[0] === "release" && c.args[1] === "create");
+    assert.deepEqual(ghCall?.args, [
+      "release",
+      "create",
+      `v${version}`,
+      "--target",
+      "aaa",
+      "--title",
+      `v${version}`,
+      "--notes-file",
+      notesPath,
+      "--generate-notes",
+      "--draft",
+    ]);
+    const npmCall = calls.find((c) => c.file === "npm");
+    assert.deepEqual(npmCall?.args, ["publish", "--workspace", "engine", "--tag", "latest"]);
+    assert.ok(calls.indexOf(npmCall!) > calls.indexOf(ghCall!));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runPublish (real run): the draft create is invoked before the tag push", () => {
   const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
   try {
     const { exec, calls } = withRecorder(fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }));
     const deps: Deps = { repoRoot: dir, exec };
     const r = runPublish(deps, { dryRun: false });
     assert.equal(r.code, 0);
-    const ghCall = calls.find((c) => c.file === "gh" && c.args[0] === "release");
-    assert.ok(!ghCall?.args.includes("--prerelease"));
-    const npmCall = calls.find((c) => c.file === "npm");
-    assert.deepEqual(npmCall?.args, ["publish", "--workspace", "engine", "--tag", "latest"]);
-    assert.ok(calls.indexOf(npmCall!) > calls.indexOf(ghCall!));
+    const ghCreateIdx = calls.findIndex((c) => c.file === "gh" && c.args[0] === "release" && c.args[1] === "create");
+    const pushIdx = calls.findIndex((c) => c.file === "git" && c.args[0] === "push");
+    assert.notEqual(ghCreateIdx, -1);
+    assert.notEqual(pushIdx, -1);
+    assert.ok(ghCreateIdx < pushIdx, `expected gh-release (index ${ghCreateIdx}) before push-tag (index ${pushIdx})`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runPublish (real run): a failing draft creation aborts before the tag is pushed", () => {
+  const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
+  try {
+    const base = fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" });
+    const { exec, calls } = withRecorder((file, args, cwd) => {
+      if (file === "gh" && args[0] === "release" && args[1] === "create") {
+        throw new Error("gh release create failed: HTTP 422 Validation Failed");
+      }
+      return base(file, args, cwd);
+    });
+    const deps: Deps = { repoRoot: dir, exec };
+    assert.throws(() => runPublish(deps, { dryRun: false }), /gh release create failed/);
+    // `tag` runs AFTER gh-release now, so a failed draft never even creates a local tag — let
+    // alone pushes one that would trigger release.yml against a draft that doesn't exist.
+    // (`git tag -l` is excluded: `checkPublishPreconditions` legitimately runs that existence
+    // check before any of PUBLISH_STEPS, including the gh-release step that fails here.)
+    assert.equal(
+      calls.some((call) => call.file === "git" && call.args[0] === "tag" && call.args[1] === "-a"),
+      false,
+    );
+    assert.equal(
+      calls.some((call) => call.file === "git" && call.args[0] === "push"),
+      false,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
