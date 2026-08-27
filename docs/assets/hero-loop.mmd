@@ -1,7 +1,21 @@
 flowchart LR
-A["Ready issue"] --> B["Worktree worker"]
-B --> C["push"]
-C --> D["Engine opens PR"]
-D --> E["CI + independent review"]
-E --> F["Merge (or stop for human)"]
-F --> G["Done"]
+subgraph H["Human"]
+A["Ready issue"]
+N["needs-human"]
+end
+subgraph W["Worker session"]
+B["Worktree worker"]
+end
+subgraph E["Engine"]
+C["Engine opens (or adopts) the PR"]
+D["CI + independent review"]
+F["Merge (never the producer)"]
+G["Done"]
+end
+A -->|"signed why/what"| B
+B -->|"push — guard denies approve / merge"| C
+C --> D
+D -->|pass| F
+D -->|"findings, under fix cap"| B
+D -->|"non-convergent"| N
+F --> G

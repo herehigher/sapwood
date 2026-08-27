@@ -10,6 +10,28 @@ Running workers occupy `running`; completed workers with a PR become `driving`; 
 
 The kill switch freezes dispatch and merges, requests graceful handoff, then permits a process-tree kill after `cost.drainWindowSec`. Daily-spend and wall-clock ceilings use the same bounded drain machinery. Change lane classification or tick phase order in `conductor.ts`; change cadence/flat-driver stop behavior in `driver.ts`.
 
+### Worker lane lifecycle
+
+```mermaid
+stateDiagram-v2
+[*] --> running
+running --> driving
+driving --> fixing: findings, under fix cap
+fixing --> driving
+running --> handoff: soft budget / kill switch drain
+fixing --> handoff: soft budget / kill switch drain
+handoff --> running: resume by origin
+handoff --> fixing: resume by origin
+running --> done
+driving --> done: merged
+running --> failed
+fixing --> failed
+driving --> failed
+failed --> driving: holds a PR, clean worktree
+```
+
+Worker lane lifecycle: `done` is terminal; `failed` can resume; `handoff` returns to where it started. A `failed` lane the engine cannot rescue (no PR, or a possibly-dirty worktree) is escalated to `needs-human` and stays `failed` until a human acts. Gated, bounded re-entry applies only to a `failed` lane that still holds a PR; a lane without one needs manual handling.
+
 ## Rounds (`loop/round.ts`, `loop/align.ts`, `loop/init.ts`, `loop/round-artifact.ts`)
 
 `runRounds()` (`engine/src/loop/round.ts`) layers the durable round state machine over the unchanged tick engine. The persisted phases are `aligning → architecting → plan_review → executing → harvesting → retro → closed` (`RoundPhase` in `engine/src/state/state.ts`). On startup it opens or resumes the current phase, reruns that phase as a fresh idempotent attempt, drains the executing batch, and closes only after post-execution roles and artifact persistence.
