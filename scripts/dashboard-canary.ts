@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -7,6 +7,8 @@ import { join } from "node:path";
 export interface DashboardCanaryOptions {
   command: string;
   args: string[];
+  /** Pass `args` through untouched on Windows — for callers that hand cmd.exe an already-quoted command line. */
+  windowsVerbatimArguments?: boolean;
   cwd: string;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
@@ -49,7 +51,13 @@ function waitForExit(child: ReturnType<typeof spawn>, timeoutMs: number): Promis
       clearTimeout(timer);
       resolvePromise();
     });
-    child.kill("SIGTERM");
+    // Windows callers reach the dashboard through cmd.exe; signalling only that shell would leave
+    // the server itself running with the canary directory locked, so take the whole tree down.
+    if (process.platform === "win32" && child.pid !== undefined) {
+      spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+    } else {
+      child.kill("SIGTERM");
+    }
   });
 }
 
@@ -65,7 +73,12 @@ export async function runDashboardCanary(opts: DashboardCanaryOptions): Promise<
       return match[1];
     });
   const expectedRepoHeadSha = opts.expectedRepoHeadSha ?? null;
-  const child = spawn(opts.command, opts.args, { cwd: opts.cwd, env: opts.env, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(opts.command, opts.args, {
+    cwd: opts.cwd,
+    env: opts.env,
+    stdio: ["ignore", "pipe", "pipe"],
+    ...(opts.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+  });
   let output = "";
   const append = (chunk: Buffer) => {
     output += chunk.toString("utf8");

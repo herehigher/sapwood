@@ -15,7 +15,10 @@ function removeStagedDashboard(): void {
 if (process.argv.includes("--clean")) {
   removeStagedDashboard();
 } else {
-  execFileSync("npm", ["run", "build", "--workspace", "dashboard"], { cwd: repoRoot, stdio: "inherit" });
+  // This runs inside npm's prepack, where npm_execpath names npm-cli.js: running that through
+  // node sidesteps the npm.cmd shim, which Node cannot spawn on Windows without a shell.
+  const npm = process.env.npm_execpath ? [process.execPath, process.env.npm_execpath] : ["npm"];
+  execFileSync(npm[0], [...npm.slice(1), "run", "build", "--workspace", "dashboard"], { cwd: repoRoot, stdio: "inherit" });
   writeThirdPartyNotices(repoRoot);
   removeStagedDashboard();
   cpSync(join(repoRoot, "dashboard", "dist"), join(stagedRoot, "dist"), { recursive: true });

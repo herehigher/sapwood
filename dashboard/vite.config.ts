@@ -30,7 +30,7 @@ export default defineConfig({
         const modules = Object.values(bundle)
           .filter((output): output is Extract<typeof output, { type: "chunk" }> => output.type === "chunk")
           .flatMap((chunk) => Object.keys(chunk.modules))
-          .filter((id) => id.includes("node_modules/"))
+          .filter((id) => id.replaceAll("\\", "/").includes("/node_modules/"))
           .sort();
         writeFileSync(join("dist", "third-party-modules.json"), JSON.stringify([...new Set(modules)], null, 2));
       },

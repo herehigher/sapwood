@@ -35,4 +35,4 @@ const result = await build({
   metafile: true,
   logLevel: "info",
 });
-writeFileSync(`${OUT_DIR}/third-party-modules.json`, JSON.stringify(Object.keys(result.metafile.inputs).filter((id) => id.includes("node_modules/")).sort(), null, 2));
+writeFileSync(`${OUT_DIR}/third-party-modules.json`, JSON.stringify(Object.keys(result.metafile.inputs).filter((id) => id.replaceAll("\\", "/").includes("/node_modules/")).sort(), null, 2));
