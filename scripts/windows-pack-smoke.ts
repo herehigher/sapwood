@@ -16,7 +16,11 @@ const CMD = process.env.ComSpec ?? "cmd.exe";
 // passes its command line verbatim: the quoting is already cmd.exe-shaped, and Node's own
 // Windows argument escaping would wrap the whole line into one unrecognised token.
 function cmdExe(commandLine: string, options: SpawnSyncOptions): string {
-  const result = spawnSync(CMD, ["/d", "/s", "/c", `"${commandLine}"`], { ...options, windowsVerbatimArguments: true });
+  const result = spawnSync(CMD, ["/d", "/s", "/c", `"${commandLine}"`], {
+    stdio: ["ignore", "pipe", "inherit"],
+    ...options,
+    windowsVerbatimArguments: true,
+  });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${commandLine} exited with ${result.status ?? `signal ${result.signal}`}`);
   return String(result.stdout ?? "");
