@@ -100,7 +100,13 @@ class FakeForge extends UnstubbedForge implements IForge {
     if (this.reconcileError) throw this.reconcileError;
     return this.reconcileData;
   }
+  // #1181: a separate counter, not folded into boardCalls — several existing tests
+  // (e.g. "sapwood run startup reconcile emits board/PR orphans...", line ~258) assert
+  // boardCalls' exact contents via deepEqual, and getReadyIssues fires on every dispatching
+  // run those tests already exercise, so adding it to that shared list would break them.
+  getReadyIssuesCalls = 0;
   override async getReadyIssues(): Promise<Issue[]> {
+    this.getReadyIssuesCalls++;
     return [];
   }
   override async getPoolEligibleIssues(): Promise<Issue[]> {
@@ -1039,7 +1045,10 @@ test("sapwood run --dry-run --config loads the named config", async () => {
   const originalWrite = process.stdout.write.bind(process.stdout);
   let stdout = "";
   try {
-    writeFileSync(join(dir, "alternate.yaml"), "board: { owner: o, repo: r, projectNumber: 4 }\nworker: { budgetUsdSoft: 7.25 }\n");
+    writeFileSync(
+      join(dir, "alternate.yaml"),
+      "board: { owner: o, repo: r, projectNumber: 4 }\nworker: { budgetUsdSoft: 7.25 }\nci: { requiredChecks: [{ name: test }] }\n",
+    );
     process.stdout.write = ((chunk: string | Uint8Array): boolean => {
       stdout += chunk.toString();
       return true;
@@ -1121,6 +1130,63 @@ test("#784: sapwood run --config <fixture reproducing engine-agent + empty ci.re
     assert.match(status.stdout, /no state DB/);
   } finally {
     state.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #1181: `sapwood run --dry-run` must apply the SAME #784 startup refusal `validate` and `run`
+// apply, before any board query — previously dry-run only WARNed (loadConfig's own console.warn)
+// and printed a preview for a config that a real `run` would refuse outright, so `validate` and
+// `run --dry-run` disagreed about whether the config was usable.
+test("#1181: sapwood run --dry-run refuses the same engine-agent + empty ci.requiredChecks config `validate`/`run` refuse — zero forge access", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-1181-dry-run-"));
+  try {
+    writeFileSync(join(dir, "footgun.yaml"), "board: { owner: o, repo: r, projectNumber: 4 }\n");
+    const forge = new FakeForge();
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    let stderr = "";
+    process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+      stderr += chunk.toString();
+      return true;
+    }) as typeof process.stderr.write;
+    let code: number;
+    try {
+      code = await runDryRun({ forge }, join(dir, "footgun.yaml"));
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+    assert.equal(code, 1);
+    assert.deepEqual(forge.boardCalls, [], "refused before any dispatch or forge access, same as `run`");
+    // The real ordering proof: runDryRun's own first forge call is getReadyIssues, which
+    // boardCalls never records (it fires on every dispatching run other tests already assert
+    // an exact boardCalls list against) — this counter is the one signal that would catch the
+    // refusal check moving below the board query.
+    assert.equal(forge.getReadyIssuesCalls, 0, "refused before the board query itself, not just before dispatch");
+    assert.match(stderr, /reviewer\.mode is "engine-agent"/);
+    assert.match(stderr, /ci\.requiredChecks is empty/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#1181: sapwood run --dry-run still previews normally once ci.requiredChecks names a check", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-1181-dry-run-ok-"));
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  let stdout = "";
+  try {
+    writeFileSync(
+      join(dir, "ok.yaml"),
+      "board: { owner: o, repo: r, projectNumber: 4 }\nci: { requiredChecks: [{ name: CI_CHECK_NAME }] }\n",
+    );
+    process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+      stdout += chunk.toString();
+      return true;
+    }) as typeof process.stdout.write;
+    const code = await runDryRun({ forge: new FakeForge() }, join(dir, "ok.yaml"));
+    assert.equal(code, 0);
+    assert.match(stdout, /no worker dispatched, no state written/);
+  } finally {
+    process.stdout.write = originalWrite;
     rmSync(dir, { recursive: true, force: true });
   }
 });

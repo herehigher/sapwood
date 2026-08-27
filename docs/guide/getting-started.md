@@ -22,6 +22,11 @@ first autonomous run.
   gh auth refresh -s project   # if you're already logged in but missing the scope
   ```
 - A GitHub repo with a ProjectV2 board you're willing to let sapwood drive.
+- CI must actually run for the target repo — a public repo, or a private one with GitHub
+  Actions billing in order. A required check that fails on the default branch (as a
+  billing-blocked job does) is reported as base-inherited CI-red and every PR waits on it;
+  a required check that never runs at all (a mistyped name, or a workflow that never
+  triggers) leaves the wait unsatisfied indefinitely, with no red to point at.
 
 ## Install
 
@@ -134,7 +139,9 @@ gh project list --owner YOU
 
 Replace `YOU` with the GitHub user or organization that owns the board. The project number
 is also in the board URL. Then create the minimal valid config below, replacing all-caps
-values with your target repository and the board number you just created:
+values with your target repository, the board number you just created, and the name of the
+repo's required CI check — the GitHub check-run name of the job that must pass, i.e. that
+job's `name:` in its workflow file, visible on any PR's checks list:
 
 ```sh
 cat > sapwood.config.yaml <<'YAML'
@@ -142,8 +149,14 @@ board:
   owner: YOU
   repo: REPOSITORY
   projectNumber: PROJECT_NUMBER
+ci:
+  requiredChecks:
+    - name: CI_CHECK_NAME
 YAML
 ```
+
+See [Configuration: `ci`](configuration.md#ci) for the full `requiredChecks` schema (each
+entry is an object; `app` defaults to `github-actions`).
 
 Verify that config and then initialize from the target repo:
 
@@ -217,9 +230,12 @@ re-run — every step is detect-before-create, so nothing is duplicated.
 
 ## Configure
 
-Review and expand the `sapwood.config.yaml` you created for bootstrap. Only
-`board.owner`, `board.repo`, and `board.projectNumber` are required; every other key has a
-sensible default. See [`configuration.md`](configuration.md) for the full reference.
+Review and expand the `sapwood.config.yaml` you created for bootstrap. `board.owner`,
+`board.repo`, and `board.projectNumber` are the only keys the schema requires; every other
+key has a sensible default, but the shipped default reviewer (`reviewer.mode:
+engine-agent`) additionally needs `ci.requiredChecks` naming a real check before
+`sapwood run` will start, as in the bootstrap block above. See
+[`configuration.md`](configuration.md) for the full reference.
 
 ## Prepare the board and gates before your first run
 
