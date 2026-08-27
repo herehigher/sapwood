@@ -194,6 +194,16 @@ test("init --help / -h prints init usage and exits 0 — NEVER falls through tow
   }
 });
 
+// #1182: `main()` runs loadConfig BEFORE init() ever sees a cfg, so init.ts's own "write the
+// starter if none exists" branch is unreachable from the CLI — the help text used to claim the
+// opposite ("Scaffold sapwood.config.yaml"), contradicting both the code and getting-started.md's
+// "init loads an existing config before it can provision anything".
+test("init --help no longer claims to scaffold the config (#1182)", () => {
+  const r = runCli(["node", "sapwood", "init", "--help"]);
+  assert.doesNotMatch(r.stdout, /Scaffold/);
+  assert.match(r.stdout, /loads the sapwood config already present/i);
+});
+
 test("init with an unknown flag or a stray operand errors + usage, exit 1 — fail closed, never silently swallowed (#638)", () => {
   const bogus = runCli(["node", "sapwood", "init", "--bogus"]);
   assert.equal(bogus.code, 1);
@@ -213,6 +223,60 @@ test("init: bare invocation still falls through to the async path unchanged (cod
   assert.equal(r.code, -1);
   assert.equal(r.stdout, "");
   assert.equal(r.stderr, "");
+});
+
+// #1182: `init`/`run --dry-run` used to reach loadConfig's own throw uncaught — a raw
+// "Error: no config found..." stack trace instead of `validate`'s one-line refusal for the
+// identical condition. Both now go through formatConfigLoadError (lifted out of runValidate for
+// status/events, #710), so this is the same presentation with each command's own prefix.
+test("init: no config in cwd prints validate's one-line message with the init prefix, exits 1, no stack trace (#1182)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-init-no-config-"));
+  try {
+    const r = await runMainAtCwd(dir, ["node", "sapwood", "init"]);
+    assert.equal(r.code, 1);
+    assert.equal(r.stderr, "sapwood init: no config found; looked for sapwood.config.yaml, sapwood.config.yml, sapwood.config.json\n");
+    assert.doesNotMatch(r.stderr, /\n\s+at /, "must be one line, not a stack trace");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("init: invalid config in cwd prints validate's Zod-issue rendering with the init prefix, exits 1, no stack trace (#1182)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-init-invalid-config-"));
+  try {
+    writeFileSync(join(dir, "sapwood.config.yaml"), "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nlanes:\n  max: three\n");
+    const r = await runMainAtCwd(dir, ["node", "sapwood", "init"]);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /^sapwood init: invalid config:\n {2}lanes\.max:/);
+    assert.doesNotMatch(r.stderr, /\n\s+at /, "must be validate's rendering, not a raw ZodError stack");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run --dry-run: no config in cwd prints validate's one-line message with the run prefix, exits 1, no stack trace (#1182)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-run-dry-run-no-config-"));
+  try {
+    const r = await runMainAtCwd(dir, ["node", "sapwood", "run", "--dry-run"]);
+    assert.equal(r.code, 1);
+    assert.equal(r.stderr, "sapwood run: no config found; looked for sapwood.config.yaml, sapwood.config.yml, sapwood.config.json\n");
+    assert.doesNotMatch(r.stderr, /\n\s+at /, "must be one line, not a stack trace");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run --dry-run: invalid config in cwd prints validate's Zod-issue rendering with the run prefix, exits 1, no stack trace (#1182)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-run-dry-run-invalid-config-"));
+  try {
+    writeFileSync(join(dir, "sapwood.config.yaml"), "board:\n  owner: acme\n  repo: widgets\n  projectNumber: 7\nlanes:\n  max: three\n");
+    const r = await runMainAtCwd(dir, ["node", "sapwood", "run", "--dry-run"]);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /^sapwood run: invalid config:\n {2}lanes\.max:/);
+    assert.doesNotMatch(r.stderr, /\n\s+at /, "must be validate's rendering, not a raw ZodError stack");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("run: --once and --until-idle appear in --help usage", () => {

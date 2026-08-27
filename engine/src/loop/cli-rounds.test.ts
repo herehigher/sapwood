@@ -1065,22 +1065,28 @@ test("sapwood run --config load errors occur before dispatch or state writes", a
   }
   const forge = new TrackingForge();
   try {
-    await assert.rejects(
+    // #1182: a config load failure is `validate`'s own one-line presentation now (exit 1, no
+    // stack trace) rather than an uncaught throw — same assertions on zero dispatch/state
+    // writes, just via captureStderr's {code, stderr} instead of assert.rejects.
+    const missing = await captureStderr(() =>
       runEngine(["node", "sapwood", "run", "--config", join(dir, "missing.yaml"), "--once"], {
         forge,
         state,
         logger: silentLogger,
       }),
-      /ENOENT/,
     );
+    assert.equal(missing.code, 1);
+    assert.match(missing.stderr, /^sapwood run: ENOENT/);
     writeFileSync(join(dir, "invalid.yaml"), "board: { owner: o }\n");
-    await assert.rejects(
+    const invalid = await captureStderr(() =>
       runEngine(["node", "sapwood", "run", "--config", join(dir, "invalid.yaml"), "--once"], {
         forge,
         state,
         logger: silentLogger,
       }),
     );
+    assert.equal(invalid.code, 1);
+    assert.match(invalid.stderr, /^sapwood run: invalid config:/);
     assert.equal(forge.readyReads, 0);
     assert.equal(state.activeWorkers().length, 0);
     assert.equal(state.getRound(1), undefined);
