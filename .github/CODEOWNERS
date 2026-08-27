@@ -1,0 +1,37 @@
+# Mirrors docs/security.md "Human-merge-only paths" and sapwood.config.yaml's
+# escalation.instructionPaths — keep all three in lockstep.
+
+# docs/security.md "Human-merge-only paths": guard write-path denial.
+/engine/src/guard/guard.ts               @herehigher
+/engine/src/guard/guard-hook.ts          @herehigher
+/engine/src/roles/reviewer.ts            @herehigher
+/engine/src/roles/merge-driver.ts        @herehigher
+/engine/dist/guard/guard.js              @herehigher
+/engine/dist/guard/guard-hook.js         @herehigher
+/engine/dist/roles/reviewer.js           @herehigher
+/engine/dist/roles/merge-driver.js       @herehigher
+/sapwood.config.yaml                     @herehigher
+/sapwood.config.yml                      @herehigher
+/sapwood.config.json                     @herehigher
+/sapwood.config.example.yaml             @herehigher
+/sapwood.config.example.yml              @herehigher
+/sapwood.config.example.json             @herehigher
+/.claude/settings*.json                  @herehigher
+/.github/workflows/                      @herehigher
+
+# escalation.instructionPaths (sapwood.config.yaml): PR-level humanMergeOnly escalation.
+/CLAUDE.md                               @herehigher
+/CLAUDE.local.md                         @herehigher
+/.claude/CLAUDE.md                       @herehigher
+/.claude/rules/                          @herehigher
+/AGENTS.md                               @herehigher
+/engine/prompts/                         @herehigher
+/engine/src/review/instruction-path-escalation.ts @herehigher
+/engine/src/config/config.ts             @herehigher
+/docs/security.md                        @herehigher
+/docs/security/                          @herehigher
+/engine/src/roles/skills-plugin.ts       @herehigher
+/engine/src/forge/labels.ts              @herehigher
+
+# This file is itself authority-bearing (it decides who may approve a PR), so it owns itself.
+/.github/CODEOWNERS                      @herehigher

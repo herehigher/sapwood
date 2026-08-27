@@ -124,6 +124,9 @@ test("#292: escalation.instructionPaths has trust-chain defaults, is configurabl
     // #640: labels.ts's LABEL_SEMANTICS registry — rendered verbatim into the sapwood-labels
     // skill, the same "instruction source" exposure the entry above names for skills-plugin.ts.
     "engine/src/forge/labels.ts",
+    // #1150: CODEOWNERS decides who may approve a PR, so a PR editing it changes its own
+    // reviewer set — the same self-referential class as the entries above.
+    ".github/CODEOWNERS",
   ]);
   assert.deepEqual(
     parseConfig(`${base}escalation: { instructionPaths: ["**/AGENTS.md", instructions/*.md] }`).escalation.instructionPaths,

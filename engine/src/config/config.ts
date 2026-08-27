@@ -1563,6 +1563,10 @@ const ConfigSchemaRaw = z
           // (skills-plugin.ts's buildLabelsSkillFile), the same "changes what a session reads
           // without a prompt-text diff" exposure the entry above names for skills-plugin.ts itself.
           "engine/src/forge/labels.ts",
+          // #1150: CODEOWNERS is itself authority-bearing — it decides who may approve a PR — so
+          // a PR editing it changes its own reviewer set and joins the same escalation surface as
+          // the other self-referential entries above.
+          ".github/CODEOWNERS",
         ]),
         // #248: the WAIT-tier hold label list (three-tier escalation model) — a HUMAN-applied
         // "I'm actively reviewing this" signal, distinct from `humanLabels`' engine-written
