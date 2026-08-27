@@ -23,6 +23,8 @@ English · [日本語](README.ja.md) · [简体中文](README.zh-CN.md)
 ![Hero loop](docs/assets/hero-loop.svg)
 A human signs the issue Ready; a worker pushes while the fail-closed guard denies approve and merge within the guarded built-in tools (branch protection is the backstop); the engine opens or adopts the PR and gates it on CI + independent review — findings loop back under a fix cap, non-convergence stops for a human.
 
+**[Watch the dashboard demo →](https://herehigher.github.io/sapwood/)** a recorded run replayed in the dashboard, in your browser — no install.
+
 ## Quick start
 
 **Requirements**
@@ -156,8 +158,6 @@ milestone"](docs/PLAN.md#current-milestone).
 
 The dashboard is functional but unpolished; UI/UX design contributions are
 welcome — see [help wanted](https://github.com/herehigher/sapwood/labels/help%20wanted).
-[Watch a recorded run replay](https://herehigher.github.io/sapwood/) — static,
-read-only, no install.
 
 ## Documentation
 

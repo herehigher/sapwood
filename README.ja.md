@@ -4,10 +4,11 @@
 [![npm version](https://img.shields.io/npm/v/sapwood)](https://www.npmjs.com/package/sapwood)
 [![node >= 24](https://img.shields.io/badge/node-%E2%89%A524-blue)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/herehigher/sapwood/badge)](https://securityscorecards.dev/viewer/?uri=github.com/herehigher/sapwood)
 
 [English](README.md) · 日本語 · [简体中文](README.zh-CN.md)
 
-本文は README.md（[b703eca5](https://github.com/herehigher/sapwood/blob/b703eca5/README.md) 時点）の翻訳です。相違がある場合は英語版を正とします。
+本文は README.md（[8aeb5cb5](https://github.com/herehigher/sapwood/blob/8aeb5cb5/README.md) 時点）の翻訳です。相違がある場合は英語版を正とします。
 
 **自律的なコーディングに、ガバナンスを。**
 
@@ -21,6 +22,8 @@
 <!-- source: docs/assets/hero-loop.mmd — regenerate per docs/assets/diagram-style.md -->
 ![ヒーローループ図](docs/assets/hero-loop.svg)
 人間が issue を Ready にサインする。ワーカーが push する一方、フェイルクローズなガードがガードされた組み込みツール内での approve と merge を拒否する（ブランチ保護が最後の砦）。エンジンは PR を開くか採用し、CI と独立レビューをゲートとする — 指摘は修正上限の下でループバックし、収束しない場合は人間に対応を求めて停止する。
+
+**[ダッシュボードのデモを見る →](https://herehigher.github.io/sapwood/)** 記録された実行をダッシュボードでブラウザ再生 — インストール不要。
 
 ## クイックスタート
 

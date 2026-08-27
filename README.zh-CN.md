@@ -4,10 +4,11 @@
 [![npm version](https://img.shields.io/npm/v/sapwood)](https://www.npmjs.com/package/sapwood)
 [![node >= 24](https://img.shields.io/badge/node-%E2%89%A524-blue)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/herehigher/sapwood/badge)](https://securityscorecards.dev/viewer/?uri=github.com/herehigher/sapwood)
 
 [English](README.md) · [日本語](README.ja.md) · 简体中文
 
-本文为 README.md（截至 [b703eca5](https://github.com/herehigher/sapwood/blob/b703eca5/README.md)）的译文；如有出入，以英文版为准。
+本文为 README.md（截至 [8aeb5cb5](https://github.com/herehigher/sapwood/blob/8aeb5cb5/README.md)）的译文；如有出入，以英文版为准。
 
 **自主编码，接受治理。**
 
@@ -24,6 +25,8 @@
 钩子在受保护的内置工具范围内拒绝 approve 与 merge（分支保护是最后防线）；引擎打开
 或接管该 PR，并以 CI 加独立评审作为门禁 —— 发现的问题在修复次数上限下循环回去，
 不收敛则停下来等待人类介入。
+
+**[观看仪表盘演示 →](https://herehigher.github.io/sapwood/)** 在浏览器中用仪表盘回放一段已录制的运行过程 —— 无需安装。
 
 ## 快速开始
 
