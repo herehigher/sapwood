@@ -23,11 +23,11 @@ first autonomous run.
   ```
 - A GitHub repo with a ProjectV2 board you're willing to let sapwood drive.
 - CI must actually run for the target repo — a public repo, or a private one with GitHub
-  Actions billing in order. A required check that starts and fails outright (as a
-  billing-blocked job does) is reported as base-inherited CI-red; a required check that
-  never runs at all (a mistyped name, or a workflow that never triggers on the branch)
-  instead leaves every PR's CI-evidence wait unsatisfied indefinitely, with no red to point
-  at.
+  Actions billing in order. A required check that fails on the default branch (as a
+  billing-blocked job does) is reported as base-inherited CI-red and every PR waits on it;
+  a check that fails only on a PR is that PR's own CI-evidence wait; a required check that
+  never runs at all (a mistyped name, or a workflow that never triggers) leaves the wait
+  unsatisfied indefinitely, with no red to point at.
 
 ## Install
 
