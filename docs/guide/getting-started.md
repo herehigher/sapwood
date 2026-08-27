@@ -94,6 +94,8 @@ sapwood --version
 sapwood dashboard
 ```
 
+Pre-release: both channels go live with the first tagged release.
+
 `alpha` is the pre-release dist-tag (a pre-release version never becomes `latest` — see
 [`10-releasing.md`](../dev-guide/10-releasing.md)); use the shipped version or `latest` after a
 plain release.
