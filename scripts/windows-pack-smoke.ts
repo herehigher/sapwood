@@ -9,6 +9,14 @@ import { fileURLToPath } from "node:url";
 import { availableDashboardPort, runDashboardCanary } from "./dashboard-canary.ts";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const CMD = process.env.ComSpec ?? "cmd.exe";
+
+// npm on Windows is a .cmd shim, and Node refuses to spawn .cmd files without a shell, so npm
+// goes through cmd.exe the same way the installed sapwood.cmd does below.
+function npm(args: string[], options: { cwd: string; timeout: number; encoding?: "utf8"; stdio?: "inherit" }): string {
+  const quoted = args.map((arg) => `"${arg}"`).join(" ");
+  return execFileSync(CMD, ["/d", "/s", "/c", `"npm ${quoted}"`], options) as string;
+}
 
 interface PackManifest {
   filename?: string;
@@ -31,14 +39,14 @@ async function main(): Promise<void> {
   try {
     mkdirSync(packDir, { recursive: true });
     mkdirSync(canaryDir, { recursive: true });
-    const packOutput = execFileSync("npm", ["pack", "--json", "--workspace", "engine", "--pack-destination", packDir], {
+    const packOutput = npm(["pack", "--json", "--workspace", "engine", "--pack-destination", packDir], {
       cwd: REPO_ROOT,
       encoding: "utf8",
       timeout: 180_000,
     });
     const tarball = packedTarball(packOutput, packDir);
     if (!existsSync(tarball)) throw new Error(`npm pack did not create ${tarball}`);
-    execFileSync("npm", ["install", "--global", "--prefix", prefix, tarball, "--ignore-scripts", "--no-audit", "--no-fund"], {
+    npm(["install", "--global", "--prefix", prefix, tarball, "--ignore-scripts", "--no-audit", "--no-fund"], {
       cwd: REPO_ROOT,
       stdio: "inherit",
       timeout: 120_000,
@@ -46,12 +54,11 @@ async function main(): Promise<void> {
 
     const bin = join(prefix, "sapwood.cmd");
     if (!existsSync(bin)) throw new Error(`npm global install did not create ${bin}`);
-    const cmd = process.env.ComSpec ?? "cmd.exe";
-    execFileSync(cmd, ["/d", "/s", "/c", `""${bin}" --version"`], { cwd: canaryDir, stdio: "inherit", timeout: 15_000 });
+    execFileSync(CMD, ["/d", "/s", "/c", `""${bin}" --version"`], { cwd: canaryDir, stdio: "inherit", timeout: 15_000 });
 
     const port = await availableDashboardPort();
     const result = await runDashboardCanary({
-      command: cmd,
+      command: CMD,
       args: ["/d", "/s", "/c", `""${bin}" dashboard --port ${port}"`],
       cwd: canaryDir,
       timeoutMs: 30_000,
