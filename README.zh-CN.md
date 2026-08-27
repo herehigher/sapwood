@@ -7,7 +7,7 @@
 
 [English](README.md) · [日本語](README.ja.md) · 简体中文
 
-本文为 README.md 的译文；如有出入，以英文版为准。
+本文为 README.md（截至 [20b33268](https://github.com/herehigher/sapwood/blob/20b33268/README.md)）的译文；如有出入，以英文版为准。
 
 **自主编码，接受治理。**
 
