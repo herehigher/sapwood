@@ -15,14 +15,16 @@ recipe for regenerating them.
 - Ink — `#2d3142` (node text, primary strokes). Muted — `#4f5d75`
   (arrows, secondary text). Soft — `#7a8399` (edge labels).
 - Accent — `#4C6EF5`, tint `rgba(76,110,245,0.08)`. One focal node and at
-  most one focal arrow per diagram: the merge gate (hero loop), the
-  conductor (architecture), `Execute` plus the return edge into `Align`
+  most one focal arrow per diagram: the `CI + independent review` gate and
+  its `pass` edge (hero loop), the conductor (architecture), `Execute` plus the return edge into `Align`
   (round loop). The GitHub board hub carries the GitHub amber, not the
   accent.
 - Layer hues (architecture only) — GitHub amber `#D9A441`, Engine slate
   blue `#4C6EF5`, Headless sessions teal `#12B886`, Reviewer adapter
   violet `#7C3AED`. A hue colors its layer's zone band only (fill at
-  6–10% opacity, hairline at 35–55%, eyebrow text in the hue); non-focal
+  6–10% opacity, hairline at 35–55%, eyebrow text in a darker readable
+  variant of the hue — amber `#B8860B`, teal `#0E9F75`, blue and violet
+  as declared); non-focal
   nodes inside a band keep the ink/white treatment, so the single accent
   (the conductor) still reads.
 
@@ -34,8 +36,8 @@ recipe for regenerating them.
   Store (SQLite state) — `ink @ 0.05` fill, muted stroke.
 - Ephemeral (the headless-sessions zone) — dashed stroke `4,3`. Dashed
   edges: the round loop's hub edges (`-.->`) and, in the hero loop, the
-  feedback edges into the worker and into `needs-human`; every other edge
-  is solid.
+  feedback edges into the worker and into `needs-human`, and in the
+  architecture the denied edge (`--x`); every other edge is solid.
 - Focal — accent stroke `1.2`, accent-tint fill.
 - Terminal — `Done` (hero loop) is a pill (`rx` = half the height).
 - Zones — one band per `.mmd` subgraph, carrying its title as an
@@ -56,8 +58,9 @@ recipe for regenerating them.
 ## Label rules
 
 - Node text comes from the `.mmd`. A redraw may break a label over two
-  lines or move a `/`-separated list into a mono sublabel; it never
-  rewords it.
+  lines, split a `Name: detail` label at the colon into a name plus a
+  sublabel (the colon dropped), or move a `/`-separated list into a mono
+  sublabel; it never rewords it.
 - Every `.mmd` subgraph is drawn as a zone band carrying its title as the
   eyebrow; a band's single node shows only the node's own text
   (architecture: the Reviewer adapter band holds the adapter list as two
@@ -66,8 +69,11 @@ recipe for regenerating them.
   6–10px off the stroke.
 - Every node and edge in the `.mmd` appears in the image; the image never
   invents a node or edge. Drawn-node budget: 9 per diagram.
-- Fonts — names in `'Geist','Helvetica Neue',Arial,sans-serif`; sublabels
-  and edge labels in `'Geist Mono',Menlo,Consolas,monospace`. The SVG
+- Fonts — names, and a name's second line (`(never the producer)`,
+  `+ fail-closed guard`, the round loop's phase details), in
+  `'Geist','Helvetica Neue',Arial,sans-serif`; technical sublabels (lists,
+  `dispatched / observed / spent`, `pause / kill switch / e-stop`,
+  `— the trail`) and edge labels in `'Geist Mono',Menlo,Consolas,monospace`. The SVG
   carries no font `@import`: GitHub renders README images inside `<img>`,
   which cannot fetch fonts, so the committed file must already look right
   in the fallback face.
