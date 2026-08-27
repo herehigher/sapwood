@@ -188,3 +188,6 @@ dashboard。リリースチェーン（catalog、npm publish）は進行中。
 [SECURITY.md](SECURITY.md)。
 
 [MIT](LICENSE)。
+
+メンテナ: [@kanhigher](https://x.com/kanhigher) — 質問やバグ報告は
+[issues](https://github.com/herehigher/sapwood/issues) へ。

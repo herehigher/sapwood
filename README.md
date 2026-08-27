@@ -182,3 +182,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) (workflow) and
 [SECURITY.md](SECURITY.md).
 
 [MIT](LICENSE).
+
+Maintained by [@kanhigher](https://x.com/kanhigher) — questions and bug
+reports go to [issues](https://github.com/herehigher/sapwood/issues).

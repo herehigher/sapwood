@@ -180,3 +180,6 @@ L4 保留了 L3 的引擎权限，并加入一个受信任的 LLM 监督者，�
 [SECURITY.md](SECURITY.md)。
 
 [MIT](LICENSE)。
+
+维护者：[@kanhigher](https://x.com/kanhigher) —— 提问与 bug 报告请走
+[issues](https://github.com/herehigher/sapwood/issues)。
