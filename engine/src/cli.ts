@@ -161,7 +161,7 @@ const USAGE = `\
 usage: sapwood <command> [options]
 
 Commands:
-  init          Scaffold sapwood.config.yaml (repo root) and verify GitHub auth
+  init          Load the repo's config and provision labels/deploy key/templates plus Status lanes on an existing board
   run           Run the engine loop (tick on a fixed cadence)
     --once         Run exactly one tick, then exit (exit 1 if the tick failed)
     --until-idle   Keep ticking until no lanes are in flight, then exit
@@ -588,7 +588,15 @@ export function formatDryRunPreview(preview: DryRunPreview): string {
  *  routes --dry-run here BEFORE runEngine ever runs, so the preview is driver-agnostic by
  *  construction, and this stays the one place that must never gain a driver dependency. */
 export async function runDryRun(overrides: Pick<EngineOverrides, "cfg" | "forge"> = {}, configPath?: string): Promise<number> {
-  const cfg = overrides.cfg ?? loadConfig(configPath);
+  // #1182: only config-loading failures use the shared operator-facing format; failures after
+  // the load must propagate.
+  let cfg: SapwoodConfig;
+  try {
+    cfg = overrides.cfg ?? loadConfig(configPath);
+  } catch (e) {
+    process.stderr.write(formatConfigLoadError("run", e));
+    return 1;
+  }
   // Same fail-fast the real run does (#74): a broken worker.promptFile must surface in the
   // preview too — dry-run exists to predict the real run, not to green-light a config the
   // real run would reject at startup. Renderer is discarded; only validation matters here.
@@ -2051,10 +2059,14 @@ export async function runDashboard(validated: ValidatedDashboardArgs, deps: Dash
 const INIT_USAGE = `\
 usage: sapwood init
 
-Scaffold sapwood.config.yaml at the repo root and verify GitHub auth: creates labels/milestones, the
-project board, the starter config + goal/doctrine/issue templates, and
-provisions the worker's write deploy key and related gh-side resources — credentialed
-network writes, so a bare \`--help\` must never trigger them.
+Loads the sapwood config already present at the repo root (init does not scaffold one — create
+sapwood.config.yaml yourself first; see the getting-started guide) and provisions everything a
+fresh target repo needs: labels/milestones, Status lanes (on an existing ProjectV2 board; if none
+is found at the configured number, init reports that, carries on with the rest, and you re-run it
+after creating the board), the worker's write deploy key and related gh-side resources, and —
+only when missing — starter goal/doctrine/issue-template files.
+Verifies GitHub auth along the way. These are credentialed network writes, so a bare \`--help\`
+must never trigger them.
 
 init takes no options today; any flag or extra argument is rejected rather than
 silently ignored.
@@ -3383,7 +3395,19 @@ export async function runEngine(argv: string[], overrides: EngineOverrides = {},
   // EngineOverrides.cfg (built by a test's bare parseConfig, never through loadConfig) gets the
   // SAME unset-defaulting rule loadConfig itself already applied to the file-loaded path, so the
   // two can never silently disagree on where the log lands.
-  const cfg = normalizeLoggingPath(applyMilestoneOverride(argv, overrides.cfg ?? loadConfig(validatedRun.configPath)));
+  //
+  // #1182: only config-loading failures use the shared operator-facing format; failures after
+  // the load must propagate. The try wraps ONLY the load — applyMilestoneOverride/
+  // normalizeLoggingPath run outside it, so a real bug in either still throws normally instead
+  // of being misreported as a config-load failure.
+  let loadedCfg: SapwoodConfig;
+  try {
+    loadedCfg = overrides.cfg ?? loadConfig(validatedRun.configPath);
+  } catch (e) {
+    process.stderr.write(formatConfigLoadError("run", e));
+    return 1;
+  }
+  const cfg: NormalizedSapwoodConfig = normalizeLoggingPath(applyMilestoneOverride(argv, loadedCfg));
   // #784: fail closed BEFORE any other startup work — a config only `loadConfig`/`parseConfig`
   // warn about (reviewer.mode: engine-agent + empty ci.requiredChecks) would otherwise queue
   // every PR forever with no trusted CI evidence ever confirming it. See
@@ -3498,8 +3522,19 @@ export async function main(argv: string[]): Promise<number> {
     return runDashboard(validatedDashboard ?? {});
   }
 
+  // #1182: loadConfig's own throw (missing/invalid config) gets validate's one-line
+  // presentation, caught separately from init()'s own InitError handling below — init()'s
+  // errors are about auth/scope AFTER a config is in hand, a different failure class from
+  // "there is no config to load in the first place".
+  let cfg: SapwoodConfig;
   try {
-    const { actions } = await init(loadConfig());
+    cfg = loadConfig();
+  } catch (e) {
+    process.stderr.write(formatConfigLoadError("init", e));
+    return 1;
+  }
+  try {
+    const { actions } = await init(cfg);
     for (const a of actions) console.log("•", a);
     console.log("init complete.");
     return 0;
