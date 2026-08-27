@@ -27,11 +27,10 @@ driving --> done: merged
 running --> failed
 fixing --> failed
 driving --> failed
-failed --> driving: holds a PR
-failed --> [*]: needs-human
+failed --> driving: holds a PR, clean worktree
 ```
 
-Worker lane lifecycle: `done` is terminal; `failed` can resume; `handoff` returns to where it started.
+Worker lane lifecycle: `done` is terminal; `failed` can resume; `handoff` returns to where it started. A `failed` lane the engine cannot rescue (no PR, or a possibly-dirty worktree) is escalated to `needs-human` and stays `failed` until a human acts; re-entry after that is gated and bounded.
 
 ## Rounds (`loop/round.ts`, `loop/align.ts`, `loop/init.ts`, `loop/round-artifact.ts`)
 

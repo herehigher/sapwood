@@ -1,32 +1,17 @@
 # Diagram style — regeneration guide
 
-The style spec for sapwood's three README diagrams. The committed images
-under `docs/assets/` (`hero-loop.svg`, `architecture.svg`,
-`round-loop.svg`) are hand-styled redraws of the checked-in Mermaid
-sources next to them (`*.mmd`). The `.mmd` is the semantic spec — the
-authoritative set of nodes, edges, and labels; the SVG is a derived
-artifact. This file is the recipe for regenerating the SVGs.
-
-## Diagram descriptions
-
-- **Hero loop** (`hero-loop.mmd`) — a human signs an issue Ready, a worker
-  pushes under the fail-closed guard, and the engine gates the PR on CI +
-  independent review before merge; findings loop back under a fix cap,
-  non-convergence stops for a human. Swimlane bands: Human / Worker
-  session / Engine.
-- **Architecture** (`architecture.mmd`) — GitHub, the engine (round
-  orchestrator, conductor, merge gate, SQLite, forge adapter), headless
-  sessions, and the reviewer adapter, with human controls reaching the
-  conductor every tick and the crossed edge marking the guard's denial of
-  push-time approve/merge.
-- **Round loop** (`round-loop.mmd`) — align, plan, execute, harvest,
-  retro, cycling back to align; the GitHub board is the hub each stage
-  reports to.
+The style spec for sapwood's three README diagrams. The checked-in Mermaid
+sources (`docs/assets/hero-loop.mmd`, `architecture.mmd`, `round-loop.mmd`)
+are the semantic spec — the authoritative set of nodes, edges, and labels;
+the `.svg` next to each is a derived artifact. The committed SVGs are
+currently faithful mermaid-cli renders (placeholders); the sections below
+are the spec a hand-styled redraw must satisfy, and the recipe for
+producing it.
 
 ## Tokens
 
-- Paper (background) — `#FAFAFA`. The SVG paints it explicitly, so one
-  file serves GitHub light, GitHub dark, and npm (npm strips `<picture>`
+- Paper (background) — `#FAFAFA`. The styled SVG paints it explicitly, so
+  one file serves GitHub light, GitHub dark, and npm (npm strips `<picture>`
   and GitHub's `#gh-*-mode-only` fragments are GitHub-only).
 - Ink — `#2d3142` (node text, primary strokes). Muted — `#4f5d75`
   (arrows, secondary text). Soft — `#7a8399` (edge labels).
@@ -46,8 +31,10 @@ artifact. This file is the recipe for regenerating the SVGs.
   stroke.
 - Engine component — rounded rect (`rx=6`), white fill, ink stroke.
   Store (SQLite state) — `ink @ 0.05` fill, muted stroke.
-- Ephemeral (the headless-sessions zone) — dashed stroke `4,3`; every
-  other edge is solid.
+- Ephemeral (the headless-sessions zone) — dashed stroke `4,3`. Dashed
+  edges: the round loop's hub edges (`-.->`) and, in the hero loop, the
+  feedback edges into the worker and into `needs-human`; every other edge
+  is solid.
 - Focal — accent stroke `1.2`, accent-tint fill.
 - Terminal — `Done` (hero loop) is a pill (`rx` = half the height).
 - Zones — one band per `.mmd` subgraph, carrying its title as an
@@ -58,7 +45,7 @@ artifact. This file is the recipe for regenerating the SVGs.
   same eyebrow treatment without a hue fill — they separate who acts, not
   a layer.
 - Denied action — the crossed edge (`--x`, architecture:
-  `WK --x FA`) marks an action the guard denies (push-time approve/merge);
+  `WK --x FA`) marks an action the guard denies (approve/merge);
   style it distinctly from a normal solid or dashed edge, e.g. a stop-tick
   crossing the stroke, not just a color change.
 - Round-loop layout — drawn as a cycle, not a straight pipeline; the
