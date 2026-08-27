@@ -8,16 +8,21 @@ name: Release
 # than racing `publish`'s own creation of it. It attaches evidence to that draft and only then
 # publishes it (`--draft=false`): release immutability is ON for this repo, so a published
 # release's assets are frozen the instant it stops being a draft — see
-# docs/dev-guide/10-releasing.md. No publish secrets — `GITHUB_TOKEN` only.
+# docs/dev-guide/10-releasing.md. No publish secrets — `GITHUB_TOKEN` only. A second job then
+# redeploys the public demo dashboard to GitHub Pages (`deploy-demo`).
 on:
   push:
     tags: ["v*"]
+  # Manual trigger runs only `deploy-demo` (it is gated below): re-publishes the Pages showcase
+  # from whatever ref was dispatched without touching any release.
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   attach-evidence:
+    if: github.event_name == 'push'
     # Tags are pushed only by someone with push access, so unlike ci.yml's PR-triggered jobs
     # this never runs a stranger's code; a GitHub-hosted runner is the safe default either way.
     runs-on: ubuntu-latest
@@ -66,3 +71,42 @@ jobs:
           fi
           gh release upload "$GITHUB_REF_NAME" release-evidence.txt --clobber
           gh release edit "$GITHUB_REF_NAME" --draft=false
+
+  # The public read-only replay showcase. `VITE_DEMO_ONLY=1` makes the bundle's root URL land in
+  # `?demo` mode (dashboard/src/App.tsx `isDemoRoute`). The dashboard build already runs the
+  # fixture export gate (credential scan + host-absolute-path rewrite) before Vite copies the
+  # fixture in, so this job adds no scrubbing of its own. Pages source must be "GitHub Actions"
+  # (repo Settings → Pages); `GITHUB_TOKEN` cannot enable that itself.
+  deploy-demo:
+    needs: attach-evidence
+    # `always()` so a manual dispatch (where attach-evidence is skipped, not failed) still deploys;
+    # on a tag push the showcase only follows a release that actually published.
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.attach-evidence.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm --workspace dashboard run build
+        env:
+          VITE_DEMO_ONLY: "1"
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: dashboard/dist
+      - id: deploy
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

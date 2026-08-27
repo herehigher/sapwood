@@ -156,6 +156,8 @@ milestone"](docs/PLAN.md#current-milestone).
 
 The dashboard is functional but unpolished; UI/UX design contributions are
 welcome — see [help wanted](https://github.com/herehigher/sapwood/labels/help%20wanted).
+[Watch a recorded run replay](https://herehigher.github.io/sapwood/) — static,
+read-only, no install.
 
 ## Documentation
 
