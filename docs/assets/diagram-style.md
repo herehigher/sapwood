@@ -23,7 +23,7 @@ committed under `docs/assets/`; this file is the regeneration recipe.
 
 ## Label rules
 
-- Match `README.md`'s node text exactly — the image renders the same
+- Match the `.mmd`'s node text exactly — the image renders the same
   diagram, it does not redesign it.
 - Quote any label containing a comma, parenthesis, or the `·` separator.
 - No file paths or module names in labels — concepts only, same "map, not
@@ -54,18 +54,13 @@ source, for proofing that an image still matches the diagram:
 
 1. Render with the Mermaid CLI directly against the checked-in `.mmd` file:
    ```
-   npx -y @mermaid-js/mermaid-cli@11 -i <diagram>.mmd -o <name>.svg -s 2
+   npx -y @mermaid-js/mermaid-cli@11 -i <diagram>.mmd -o <name>.svg
    ```
-   Verified against `npx -y @mermaid-js/mermaid-cli@11 --help` (mermaid-cli
-   11.x): `-s`/`--scale` is the Puppeteer scale factor, and it's what
-   actually doubles the output's pixel dimensions for a sharp 2× export.
-   `-w`/`--width` sets the rendering page width, not the diagram's own
-   size — Mermaid auto-sizes its SVG to the diagram's content regardless of
-   page width, so passing `-w` has no effect on these three diagrams and
-   should be omitted. At `-s 2` the three shipped diagrams render at
-   roughly 1050–1570px on the longer edge; there is no fixed target size to
-   pin, since each diagram's pixel size follows its own content layout, not
-   a page setting.
+   The output is a vector SVG sized to its content. Omit `-s`/`--scale`
+   (a Puppeteer raster scale factor; the SVG is byte-identical with or
+   without it) and `-w`/`--width` (a rendering page width; Mermaid
+   auto-sizes the SVG to the diagram, so it has no effect). At a pinned
+   mermaid-cli version the render is byte-deterministic.
 2. Save under `docs/assets/`, named for the diagram (`hero-loop.svg`,
    `architecture.svg`, `worker-lifecycle.svg`).
 
