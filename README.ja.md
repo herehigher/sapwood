@@ -1,14 +1,8 @@
 # sapwood
 
-[![CI](https://github.com/herehigher/sapwood/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/herehigher/sapwood/actions/workflows/ci.yml?query=branch%3Amain)
-[![npm version](https://img.shields.io/npm/v/sapwood)](https://www.npmjs.com/package/sapwood)
-[![node >= 24](https://img.shields.io/badge/node-%E2%89%A524-blue)](package.json)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/herehigher/sapwood/badge)](https://securityscorecards.dev/viewer/?uri=github.com/herehigher/sapwood)
-
 [English](README.md) · 日本語 · [简体中文](README.zh-CN.md)
 
-本文は README.md（[8aeb5cb5](https://github.com/herehigher/sapwood/blob/8aeb5cb5/README.md) 時点）の翻訳です。相違がある場合は英語版を正とします。
+本文は README.md（[a83d099b](https://github.com/herehigher/sapwood/blob/a83d099b/README.md) 時点）の翻訳です。相違がある場合は英語版を正とします。
 
 **自律的なコーディングに、ガバナンスを。**
 
@@ -157,9 +151,9 @@ breaker park の解除であり — デフォルトでは merge を裁定する�
 
 ## ステータス
 
-main に実装済み、プレリリース: engine、guard、round オーケストレーター、
-dashboard。リリースチェーン（catalog、npm publish）は進行中。
-[CHANGELOG.md](CHANGELOG.md) の「Unreleased」と
+プレリリース段階。各リリースは npm にプレリリース用 dist-tag（`sapwood@alpha`）で、
+マーケットプレイスカタログ `herehigher/sapwood-plugin` に、そしてビルド証跡を添付した
+GitHub Release として配布されます。[CHANGELOG.md](CHANGELOG.md) と
 [PLAN.md「Current milestone」](docs/PLAN.md#current-milestone) を参照。
 
 dashboard は動作するが磨き込みはまだ。UI/UX デザインの貢献を歓迎する —

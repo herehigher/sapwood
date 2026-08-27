@@ -1,7 +1,7 @@
 # sapwood
 
 [![CI](https://github.com/herehigher/sapwood/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/herehigher/sapwood/actions/workflows/ci.yml?query=branch%3Amain)
-[![npm version](https://img.shields.io/npm/v/sapwood)](https://www.npmjs.com/package/sapwood)
+[![npm version](https://img.shields.io/npm/v/sapwood/alpha)](https://www.npmjs.com/package/sapwood)
 [![node >= 24](https://img.shields.io/badge/node-%E2%89%A524-blue)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/herehigher/sapwood/badge)](https://securityscorecards.dev/viewer/?uri=github.com/herehigher/sapwood)
@@ -151,10 +151,10 @@ prerequisites](docs/guide/getting-started.md#trust-model-prerequisites).
 
 ## Status
 
-Implemented on main, pre-release: engine, guard, round orchestrator,
-dashboard. Release chain (catalog, npm publish) in progress. See
-[CHANGELOG.md](CHANGELOG.md) "Unreleased" and [PLAN.md "Current
-milestone"](docs/PLAN.md#current-milestone).
+Pre-release. Each release ships to npm under its pre-release dist-tag
+(`sapwood@alpha`), to the marketplace catalog `herehigher/sapwood-plugin`, and as a
+GitHub Release with build evidence attached. See [CHANGELOG.md](CHANGELOG.md) and
+[PLAN.md "Current milestone"](docs/PLAN.md#current-milestone).
 
 The dashboard is functional but unpolished; UI/UX design contributions are
 welcome — see [help wanted](https://github.com/herehigher/sapwood/labels/help%20wanted).

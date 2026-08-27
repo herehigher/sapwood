@@ -157,6 +157,13 @@ consume it. `npm publish --provenance` is the form to use whenever that step
 actually runs inside a CI job — passing `--provenance` from a local run today
 would not produce a valid attestation.
 
+**README npm badge tracks the dist-tag that actually has a release.** While only
+pre-releases exist, the badge in the three READMEs reads `npm/v/sapwood/alpha`; a bare
+`npm/v/sapwood` shows `latest`, which stays on the name-reservation placeholder until the
+first stable release. Switching the badge back to the bare form is part of that first stable
+release's PR, alongside the `## Status` section — the release PR is where "what is true now"
+statements flip.
+
 **Pre-releases always pass `--prerelease`.** `gh release create` does not infer
 pre-release status from a `-` in the tag name, so `publish` passes `--prerelease`
 itself whenever the version contains one.
