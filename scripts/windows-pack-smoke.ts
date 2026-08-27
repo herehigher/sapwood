@@ -1,7 +1,7 @@
 // The release-gated Windows workflow packs the published surface first: using the installed .cmd shim here, rather than
 // an engine source path, catches packaging and npm-global-install regressions in the same shape
 // an end user gets.
-import { execFileSync } from "node:child_process";
+import { type SpawnSyncOptions, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -13,11 +13,17 @@ const CMD = process.env.ComSpec ?? "cmd.exe";
 
 // npm on Windows is a .cmd shim, and Node refuses to spawn .cmd files without a shell, so npm
 // goes through cmd.exe the same way the installed sapwood.cmd does below. Every cmd.exe call
-// passes its argument string verbatim: the quoting is already cmd.exe-shaped, and Node's own
-// Windows argument escaping would wrap the whole command line into one unrecognised token.
-function npm(args: string[], options: { cwd: string; timeout: number; encoding?: "utf8"; stdio?: "inherit" }): string {
-  const quoted = args.map((arg) => `"${arg}"`).join(" ");
-  return execFileSync(CMD, ["/d", "/s", "/c", `"npm ${quoted}"`], { ...options, windowsVerbatimArguments: true }) as string;
+// passes its command line verbatim: the quoting is already cmd.exe-shaped, and Node's own
+// Windows argument escaping would wrap the whole line into one unrecognised token.
+function cmdExe(commandLine: string, options: SpawnSyncOptions): string {
+  const result = spawnSync(CMD, ["/d", "/s", "/c", `"${commandLine}"`], { ...options, windowsVerbatimArguments: true });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`${commandLine} exited with ${result.status ?? `signal ${result.signal}`}`);
+  return String(result.stdout ?? "");
+}
+
+function npm(args: string[], options: SpawnSyncOptions): string {
+  return cmdExe(`npm ${args.map((arg) => `"${arg}"`).join(" ")}`, options);
 }
 
 interface PackManifest {
@@ -56,12 +62,7 @@ async function main(): Promise<void> {
 
     const bin = join(prefix, "sapwood.cmd");
     if (!existsSync(bin)) throw new Error(`npm global install did not create ${bin}`);
-    execFileSync(CMD, ["/d", "/s", "/c", `""${bin}" --version"`], {
-      cwd: canaryDir,
-      stdio: "inherit",
-      timeout: 15_000,
-      windowsVerbatimArguments: true,
-    });
+    cmdExe(`"${bin}" --version`, { cwd: canaryDir, stdio: "inherit", timeout: 15_000 });
 
     const port = await availableDashboardPort();
     const result = await runDashboardCanary({
