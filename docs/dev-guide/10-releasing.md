@@ -64,9 +64,28 @@ manifests and open the CHANGELOG PR — but it cannot *publish* one: the guard d
 Publishing is a human running `scripts/release.ts publish` from their own machine
 or an authorized CI job triggered by a human-pushed tag.
 
-**Rollback.** Versions never go backwards. If a release is bad: delete the tag and
-the GitHub Release, then ship a patch. Don't reuse or force-move a tag that was
-ever pushed.
+**Release immutability: ON.** GitHub's repository-level "Enable release immutability"
+setting is ON. Once a release is published (not draft), its tag is locked to the commit
+it points at and its assets can't be added, changed, or removed —
+[GitHub's immutable releases doc](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases).
+This matters here because consumers install by exactly those two things: the
+`v<version>` tag that `scripts/release.ts` also mirrors onto the marketplace catalog,
+and `release-evidence.txt`, which is an audit artifact only if it can't be rewritten
+after the fact. That's why `publish` creates the GitHub Release as a **draft**
+(`--draft`) and `release.yml` attaches evidence to the draft before publishing it
+(`gh release edit … --draft=false`) — see "Runbook" below.
+
+**Rollback.** Versions never go backwards, and once a release is published under
+immutability it can't be quietly rewritten. Deleting a published release is
+possible, but GitHub retires its tag name permanently either way — even after
+deletion, that exact tag can never be reused (protection against tag-reuse/"repository
+resurrection" attacks, per the doc above) — so deleting buys nothing and only throws
+away the audit trail immutability exists to keep. The actual rollback is: ship a new
+version through the normal runbook, and run `npm deprecate sapwood@<bad-version>
+"<reason; see <new-version>>"` so installers are warned off the bad version on the
+registry side. (npm itself refuses to unpublish or overwrite a version more than
+~72h old regardless — see the Runbook's Rollback step below — so a corrected
+version is the only path either way.)
 
 **Delivery channels.** A release ships as (1) a git tag + GitHub Release, (2) the bare
 `sapwood` npm package (including its dashboard), and (3) the thin Claude Code shell promoted
@@ -106,6 +125,21 @@ There is no `NPM_TOKEN` CI secret or automated npm-publish workflow today. An
 `NPM_TOKEN` workflow remains an open, human-merge-only owner decision; this
 release path stays human-triggered unless the owner makes and merges that change.
 
+**npm provenance: `--provenance` is the required form, but nothing runs it yet.**
+npm's provenance attestation needs two things — see
+[npm's provenance docs](https://docs.npmjs.com/generating-provenance-statements/):
+an OIDC ID token, which only a supported CI provider can mint (for GitHub Actions
+that means the job has `permissions: id-token: write` and runs on a GitHub-hosted
+runner), and a `package.json` `repository` field matching, case-sensitively, the
+repo being published from — `engine/package.json`'s already does.
+`.github/workflows/release.yml`'s `attach-evidence` job carries `id-token: write`
+for this reason. That grant alone doesn't get us provenance today, though: `npm
+publish` still runs from `scripts/release.ts publish` on the operator's own
+machine via a local `npm login`, not inside that or any CI job, and a local run
+has no OIDC token to mint from regardless of flags. `npm publish --provenance` is
+the form to use whenever this step actually runs inside a CI job — passing
+`--provenance` from a local run today would not produce a valid attestation.
+
 **Pre-releases always pass `--prerelease`.** `gh release create` does not infer
 pre-release status from a `-` in the tag name, so `publish` passes `--prerelease`
 itself whenever the version contains one.
@@ -121,27 +155,31 @@ npm run release -- prepare 0.3.0-alpha.1
 #    step is not part of the script).
 
 # 3. Publish — from main, at the merged commit. Tags, pushes the tag, creates the
-#    GitHub Release with the CHANGELOG section as its notes, then `npm publish`es
-#    the engine workspace as `sapwood` under the version's own dist-tag (see "npm
-#    publish dist-tag" above), runs the dashboard canary, verifies that npm serves the
-#    exact version, then promotes the shell into the catalog. Requires a prior local
-#    `npm login` and the catalog remote.
+#    GitHub Release as a draft with the CHANGELOG section as its notes (release.yml
+#    attaches evidence and publishes it once CI runs against the tag — see "Release
+#    immutability" above), then `npm publish`es the engine workspace as `sapwood`
+#    under the version's own dist-tag (see "npm publish dist-tag" above), runs the
+#    dashboard canary, verifies that npm serves the exact version, then promotes the
+#    shell into the catalog. Requires a prior local `npm login` and the catalog remote.
 npm run release -- publish --catalog https://github.com/herehigher/sapwood-plugin.git
 # or, to see the exact commands without running them:
 npm run release -- publish --catalog https://github.com/herehigher/sapwood-plugin.git --dry-run
 
-# 4. Verify.
+# 4. Verify. The release shows as a draft until release.yml finishes attaching
+#    evidence and publishing it — allow a few minutes for that run.
 gh release view v0.3.0-alpha.1
 git describe --tags
 npm view sapwood dist-tags
 
-# 5. Rollback, if needed.
-gh release delete v0.3.0-alpha.1 --yes
-git push origin :refs/tags/v0.3.0-alpha.1
-# then ship a patch through the same runbook.
-# npm never lets a version be re-published or removed after ~72h (unpublish policy);
-# ship a corrected version instead — see npm's own unpublish policy for the narrow
-# window in which `npm unpublish` still applies.
+# 5. Rollback, if needed — see "Rollback" above (Policy section): a published
+#    release's tag and assets are frozen, and its tag name can never be reused
+#    even if the release itself is deleted, so deleting buys nothing. Ship a new
+#    version through this same runbook instead, and warn installers off the bad
+#    one on the npm side:
+npm deprecate sapwood@0.3.0-alpha.1 "broken; use <new-version> instead"
+# npm also refuses to unpublish or overwrite a version more than ~72h old
+# regardless — see npm's own unpublish policy for the narrow window in which
+# `npm unpublish` still applies.
 
 # 5b. Retry, if only the npm step failed (tag + GitHub Release already exist —
 #     `publish` itself refuses to re-run once the tag exists, so retry this one

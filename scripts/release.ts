@@ -660,9 +660,13 @@ export const PUBLISH_STEPS: PublishStep[] = [
     },
   },
   {
+    // Created as a draft, not published: with release immutability ON, a non-draft release's
+    // assets are frozen the instant it exists, and release.yml's own evidence upload still has
+    // to land after this step runs. `release.yml` is what flips `--draft=false`, once evidence
+    // is attached — see docs/dev-guide/10-releasing.md.
     name: "gh-release",
     describe: (ctx) =>
-      `gh release create v${ctx.version} --title v${ctx.version} --notes-file <CHANGELOG [${ctx.version}] section> --generate-notes` +
+      `gh release create v${ctx.version} --title v${ctx.version} --notes-file <CHANGELOG [${ctx.version}] section> --generate-notes --draft` +
       (ctx.prerelease ? " --prerelease" : ""),
     run: (ctx, deps) => {
       const changelog = readFileSync(join(deps.repoRoot, "CHANGELOG.md"), "utf8");
@@ -670,7 +674,17 @@ export const PUBLISH_STEPS: PublishStep[] = [
       const notesPath = join(tmpdir(), `sapwood-release-notes-${ctx.version}.md`);
       writeFileSync(notesPath, section);
       try {
-        const args = ["release", "create", `v${ctx.version}`, "--title", `v${ctx.version}`, "--notes-file", notesPath, "--generate-notes"];
+        const args = [
+          "release",
+          "create",
+          `v${ctx.version}`,
+          "--title",
+          `v${ctx.version}`,
+          "--notes-file",
+          notesPath,
+          "--generate-notes",
+          "--draft",
+        ];
         if (ctx.prerelease) args.push("--prerelease");
         deps.exec("gh", args);
       } finally {

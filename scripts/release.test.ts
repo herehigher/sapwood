@@ -892,6 +892,7 @@ test("runPublish --dry-run: prints --prerelease for an alpha version, runs nothi
     assert.equal(r.code, 0);
     assert.match(r.output, /--dry-run/);
     assert.match(r.output, /--prerelease/);
+    assert.match(r.output, /gh release create v0\.3\.0-alpha\.1.*--draft/);
     assert.match(r.output, /npm publish --workspace engine --tag alpha/);
     assert.match(r.output, /node scripts\/dashboard-canary\.ts 0\.3\.0-alpha\.1/);
     assert.deepEqual(calls, [
@@ -914,6 +915,7 @@ test("runPublish --dry-run: omits --prerelease for a plain release version, npm 
     const r = runPublish(deps, { dryRun: true });
     assert.equal(r.code, 0);
     assert.doesNotMatch(r.output, /--prerelease/);
+    assert.match(r.output, /gh release create v0\.3\.0.*--draft/);
     assert.match(r.output, /npm publish --workspace engine --tag latest/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1028,6 +1030,7 @@ test("runPublish (real run, not dry-run): exact tag/push/gh-release argv, --prer
     assert.ok(ghCall?.args.includes("--title"));
     assert.ok(ghCall?.args.includes("--notes-file"));
     assert.ok(ghCall?.args.includes("--generate-notes"));
+    assert.ok(ghCall?.args.includes("--draft"));
     assert.ok(ghCall?.args.includes("--prerelease"));
 
     assert.equal(notesFileContents.length, 1);
@@ -1055,6 +1058,7 @@ test("runPublish (real run): --prerelease absent from the gh-release argv for a 
     assert.equal(r.code, 0);
     const ghCall = calls.find((c) => c.file === "gh" && c.args[0] === "release");
     assert.ok(!ghCall?.args.includes("--prerelease"));
+    assert.ok(ghCall?.args.includes("--draft"));
     const npmCall = calls.find((c) => c.file === "npm");
     assert.deepEqual(npmCall?.args, ["publish", "--workspace", "engine", "--tag", "latest"]);
     assert.ok(calls.indexOf(npmCall!) > calls.indexOf(ghCall!));

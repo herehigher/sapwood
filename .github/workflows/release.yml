@@ -2,15 +2,18 @@ name: Release
 # Runs once per pushed release tag (docs/dev-guide/10-releasing.md's `publish` step pushes the
 # tag). Rebuilds with a CI build stamp, reruns the full quality gate against the exact tagged
 # commit, and attaches the verified `--version` output as release evidence. The GitHub Release
-# itself is normally already created by the human's `publish`; this job creates it only if that
-# step's own `gh release create` hasn't landed yet, so a tag pushed by any other path still gets
-# a Release. No publish secrets — `GITHUB_TOKEN` only.
+# itself is normally already created — as a draft — by the human's `publish`; this job creates
+# it (also as a draft) only if that step's own `gh release create` hasn't landed yet, so a tag
+# pushed by any other path still gets a Release. Every path attaches evidence to the draft and
+# only then publishes it (`--draft=false`): release immutability is ON for this repo, so a
+# published release's assets are frozen the instant it stops being a draft — see
+# docs/dev-guide/10-releasing.md. No publish secrets — `GITHUB_TOKEN` only.
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   attach-evidence:
@@ -18,6 +21,12 @@ jobs:
     # this never runs a stranger's code; a GitHub-hosted runner is the safe default either way.
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write
+      # npm provenance (docs/dev-guide/10-releasing.md) needs this to mint its attestation via
+      # OIDC. No `npm publish` step runs in this workflow yet — publish stays an operator-run
+      # `scripts/release.ts` step — this just keeps the permission in place for when it does.
+      id-token: write
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -40,15 +49,26 @@ jobs:
       - run: npm run lint
       - name: Record the built, stamped --version as release evidence
         run: node engine/dist/cli.js --version > release-evidence.txt
-      - name: Ensure the GitHub Release exists, then attach evidence
+      - name: Attach evidence to the draft, then publish
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)"
+            if [[ "$is_draft" != "true" ]]; then
+              # Immutability means a published release's assets can never be added, changed,
+              # or removed (docs/dev-guide/10-releasing.md) — uploading here would silently
+              # no-op or error deep in `gh`. Fail loud instead: something published this
+              # release before evidence attached, which should never happen along the
+              # `scripts/release.ts publish` path.
+              echo "::error::$GITHUB_REF_NAME is already published (not a draft) — release immutability forbids attaching assets to it now. Evidence was never attached to this release; investigate how it got published before this job ran." >&2
+              exit 1
+            fi
             gh release upload "$GITHUB_REF_NAME" release-evidence.txt --clobber
           else
-            args=(--generate-notes)
+            args=(--generate-notes --draft)
             if [[ "$GITHUB_REF_NAME" == *-* ]]; then
               args+=(--prerelease)
             fi
             gh release create "$GITHUB_REF_NAME" "${args[@]}"
             gh release upload "$GITHUB_REF_NAME" release-evidence.txt --clobber
           fi
+          gh release edit "$GITHUB_REF_NAME" --draft=false
