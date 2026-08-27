@@ -109,6 +109,12 @@ pushes the catalog, and tags it with the same `v<version>` so catalog history ma
 one-to-one onto releases. Its catalog CI rejects files outside that shell and validates the two
 manifest versions.
 
+The catalog repo's own workflow file has no separate source: it is `scripts/catalog/ci.yml`,
+promoted byte-for-byte, so any action pin or trigger change there must be made in this template.
+It stays SHA-pinned (not `@v4` tags) because the catalog repo enforces `sha_pinning_required`;
+enable that setting only after a template change has already been promoted, never before, or
+the promoted workflow fails to run and the promotion looks green with no checks having executed.
+
 **Package name: bare `sapwood`, not `@sapwood/engine`.** The `engine` workspace
 publishes under the bare npm name `sapwood`, not the scoped `@sapwood/engine` its
 `package.json` used before this decision. The `@sapwood` scope stays reserved for
