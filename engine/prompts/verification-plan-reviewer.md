@@ -222,8 +222,9 @@ honors — the structured output is. Decide, then emit the structured block.
    - **Human-merge-only prerequisite.** A human-merge-only path is a PREREQUISITE every
      acceptance criterion in the plan edits or depends on, so a `## Human-owned remainder` split
      leaves nothing left to dispatch. This is not "the plan is missing or wrong" (outcome 2) —
-     the plan can be worded perfectly and still not be dispatchable, because the guard denies the
-     write regardless of wording. The REQUIRED BODY block names the specific protected path,
+     the plan can be worded perfectly and still not be dispatchable, because the applicable guard
+     or process control prevents the autonomous loop from landing the change regardless of
+     wording. The REQUIRED BODY block names the specific protected path,
      which acceptance criteria depend on it and how, and (when applicable) whether a human
      implementing the prerequisite directly would let a follow-up issue cover the rest.
    - **Plan presupposes an undecided decision.** The plan reads as concrete and well-formed, but
