@@ -895,14 +895,19 @@ export function runStamp(deps: Deps): CommandResult {
 
 export type OtpParseResult = { ok: true; otp?: string } | { ok: false; message: string };
 
-// A missing/empty value, or the next flag swallowed as the value (`--otp --dry-run`), must
-// fail the command outright rather than silently fall back to "no OTP given" — by the time
-// that absence would otherwise surface, at the npm-publish step, PUBLISH_STEPS has already
-// run the gh-release draft, the tag, and the tag push, none of which are cheaply undone.
+// Reject malformed or ambiguous OTP options before runPublish: it creates and pushes the
+// release tag before npm authentication can report that the requested code is missing or wrong.
 export function parseOtpArg(argv: string[]): OtpParseResult {
-  const otpIndex = argv.indexOf("--otp");
-  if (otpIndex === -1) return { ok: true };
-  const value = argv[otpIndex + 1];
+  // Both `--otp <code>` and `--otp=<code>` are accepted (npm's own CLI takes both forms), so
+  // both must be recognized here or the `--otp=<code>` form would silently read as absent.
+  const occurrences = argv.flatMap((arg, index) =>
+    arg === "--otp" ? [{ value: argv[index + 1] }] : arg.startsWith("--otp=") ? [{ value: arg.slice("--otp=".length) }] : [],
+  );
+  if (occurrences.length === 0) return { ok: true };
+  if (occurrences.length > 1) {
+    return { ok: false, message: "release publish: --otp may be provided only once" };
+  }
+  const value = occurrences[0]!.value;
   if (value === undefined || value.trim() === "" || value.startsWith("--")) {
     return { ok: false, message: "release publish: --otp requires a non-empty <code>" };
   }
