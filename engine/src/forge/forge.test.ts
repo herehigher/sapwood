@@ -3658,7 +3658,7 @@ test("listOpenIssues #1163: pages to exhaustion (hasNextPage false before the ce
   assert.deepEqual(seenAfter, ["after=null", "after=cursor-1"]);
 });
 
-test("listOpenIssues #1163 (gate② round 2 P2): a page reporting hasNextPage:true with NO endCursor is a malformed response — fails closed instead of returning it as a complete (pageCapped: false) backlog, which would let a duplicate slip past dedup", async () => {
+test("listOpenIssues #1163: hasNextPage without endCursor fails closed", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(cfg);
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () =>
@@ -3666,7 +3666,7 @@ test("listOpenIssues #1163 (gate② round 2 P2): a page reporting hasNextPage:tr
   await assert.rejects(() => forge.listOpenIssues(), /hasNextPage without endCursor/);
 });
 
-test("listOpenIssues #1163 (gate② round 2 P3, complement of the partial-ceiling test above): exactly OPEN_ISSUES_PAGE_CEILING full pages with the LAST one reporting hasNextPage:false is a COMPLETE read, not a ceiling rejection — proves the reader doesn't throw unconditionally once it reaches the ceiling", async () => {
+test("listOpenIssues #1163: ten complete full pages return exactly 1,000 issues in ten calls", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(cfg);
   let calls = 0;
@@ -4049,7 +4049,7 @@ function projectResponseWithOneItem(content: Record<string, unknown>): string {
   });
 }
 
-test("parseProject → selectPlanTriageCandidates → filterTrustedAuthors #1163 (gate② round 2 P2): parseProject preserves an ABSENT provenance key as absent rather than coercing it to `null` — a ProjectV2 response missing `authorAssociation` still throws downstream through the SAME filterTrustedAuthors test, while an explicit `author: null` (deleted account) is withheld, never a throw", () => {
+test("parseProject #1163: preserves absent versus explicit-null provenance through plan-triage filtering", () => {
   const deletedAuthorProject = parseProject(
     projectResponseWithOneItem({
       number: 1,
