@@ -67,11 +67,14 @@ but names a file that was renamed, or a function that no longer exists, has drif
 exactly the case `invalidate` exists for. One standing check rides along with drift, even for
 an otherwise-untouched plan: if satisfying an acceptance criterion as written requires a
 producer to *edit* a path `docs/security.md`'s "Human-merge-only paths" list covers
-(`guard.ts`/hook wiring, `reviewer.ts`/`merge-driver.ts`, `sapwood.config.yaml`/`.json` in full,
-`sapwood.config.example.yaml`/`.json` (the `sapwood init` starter template — guard-protected the
-same way as the root config), `.claude/settings*.json`, `.github/workflows/**`), the plan
-is not dispatchable no matter when it was approved — the guard will deny the write mid-task.
-That is `invalidate`, with a brief
+(`guard.ts` / `guard-hook.ts` hook wiring, `reviewer.ts` / `merge-driver.ts`, their compiled
+`engine/dist/guard/guard.js`, `engine/dist/guard/guard-hook.js`, `engine/dist/roles/reviewer.js`,
+`engine/dist/roles/merge-driver.js` artifacts, `sapwood.config.yaml` / `sapwood.config.yml` /
+`sapwood.config.json` in full, `sapwood.config.example.yaml` / `sapwood.config.example.yml` /
+`sapwood.config.example.json` (the `sapwood init` starter template — guard-protected the
+same way as the root config), `.claude/settings*.json`, `.github/workflows/**`, and
+`.github/CODEOWNERS`), the plan is not dispatchable no matter when it was approved — the guard
+will deny the write mid-task. That is `invalidate`, with a brief
 naming the specific path, so the issue goes back through a full review (which owns the
 split-remainder / needs-human repair options). Approvals that predate this check are exactly the
 ones it exists to catch. A second standing check (F36): an execution-class acceptance

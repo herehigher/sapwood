@@ -127,12 +127,15 @@ Name the entry point and what makes the fixture's live vs. condition values dist
 ## If the brief flags a human-merge-only conflict
 
 If the reviewer's brief says an acceptance criterion requires editing a path
-`docs/security.md`'s "Human-merge-only paths" list covers (`guard.ts`/hook wiring,
-`reviewer.ts`/`merge-driver.ts`, `sapwood.config.yaml`/`.json` in full (the guard blocks
-the whole file by path, not just its security-relevant fields, so a comment-only or
-non-security edit is covered too), `sapwood.config.example.yaml`/`.json` (the `sapwood
-init` starter template — guard-protected the same way as the root config),
-`.claude/settings*.json`, `.github/workflows/**`),
+`docs/security.md`'s "Human-merge-only paths" list covers (`guard.ts` / `guard-hook.ts`
+hook wiring, `reviewer.ts` / `merge-driver.ts`, their compiled `engine/dist/guard/guard.js`,
+`engine/dist/guard/guard-hook.js`, `engine/dist/roles/reviewer.js`,
+`engine/dist/roles/merge-driver.js` artifacts, `sapwood.config.yaml` / `sapwood.config.yml` /
+`sapwood.config.json` in full (the guard blocks the whole file by path, not just its
+security-relevant fields, so a comment-only or non-security edit is covered too),
+`sapwood.config.example.yaml` / `sapwood.config.example.yml` / `sapwood.config.example.json`
+(the `sapwood init` starter template — guard-protected the same way as the root config),
+`.claude/settings*.json`, `.github/workflows/**`, and `.github/CODEOWNERS`),
 do not draft an AC that still asks a producer to make that edit —
 the guard will deny it regardless of how the criterion is worded. Draft the
 non-human-merge-only portion only — and PRESERVE the dropped portion inside the issue

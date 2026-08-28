@@ -974,36 +974,31 @@ test("#1119: no shipped prompt's {{lang.*}} paragraph restates the BCP-47/defaul
   }
 });
 
-// ── #828: docs/security.md's "Human-merge-only paths" marker block is the canonical list
-// (already extracted verbatim by skills-plugin.ts's `human-merge-only-paths` skill), but five
-// prompts ALSO hand-copy it inline because each needs to check an acceptance criterion against
-// it before that skill would ever be pulled: po.md, po-decompose.md, verification-plan-drafter.md,
-// verification-plan-reviewer.md, verification-plan-reviewer-confirm.md. #699's audit rejected
-// collapsing these into a bare skill pointer (Q3-class safety floor; a Claude Code skill is
-// pull-model, so a session that never invokes it never sees the rule) — the enumeration must stay
-// prompt-resident. What was missing was an oracle tying the five copies to the canonical source,
-// so a drift (po-decompose.md once omitted the two example-config entries; confirm.md once
-// collapsed the whole enumeration to the "security-relevant config" shorthand docs/security.md's
-// own text warns against) surfaces here instead of at incident time. ──────────────────────────────
+// #828: These five prompts must carry the human-merge-only floor inline because skills are
+// pull-model and may never load. Derive their required paths from docs/security.md's marked
+// canonical section so a source-list change fails every stale carrier.
 
-// The subset of docs/security.md's marker items a prompt-resident AC check actually needs to
-// name. Deliberately narrower than the marker's full item set: `engine/dist/**` (the compiled
-// artifacts bullet) is build output no producer diff ever touches directly, and
-// `.github/CODEOWNERS` is explicitly carved out by the marker's OWN text ("the guard does
-// **not** path-deny this file" — a process-level control, not a write-path denial an AC-drafting
-// check needs to catch). Every token below is asserted, first, to be an exact backtick-quoted
-// substring of the REAL extracted marker (never a hand-typed guess independent of it) before it
-// is used to check the five carriers, so a rename or removal in docs/security.md reddens the
-// precondition test below rather than silently going unchecked.
-const HUMAN_MERGE_ONLY_PROMPT_TOKENS = [
-  "`guard.ts`",
-  "`reviewer.ts`",
-  "`merge-driver.ts`",
-  "`sapwood.config.yaml`",
-  "`sapwood.config.example.yaml`",
-  "`.claude/settings*.json`",
-  "`.github/workflows/**`",
-];
+// Explanatory prose in the marker also quotes commands, config keys, and source references;
+// limiting extraction to each bullet's path-enumeration head keeps those out of the carrier set.
+function humanMergeOnlyPathTokens(section: string): string[] {
+  const bulletItems = [...section.matchAll(/^- (.*(?:\n {2,}.*)*)/gm)].map((match) => match[1]!);
+  assert.ok(bulletItems.length > 0, "human-merge-only-paths marker contains no list items");
+  const tokens = bulletItems.flatMap((item) => {
+    const pathEnumeration = item.split(/\s+—\s+/, 1)[0]!;
+    return [...pathEnumeration.matchAll(/`([^`]+)`/g)]
+      .filter((match) => {
+        const value = match[1]!;
+        return (
+          value === ".github/CODEOWNERS" ||
+          /^(?:[^/`\s]+\/)*[^/`\s]+\.(?:ts|js|ya?ml|json)$/.test(value) ||
+          /^[^`\s]*[*?][^`\s]*$/.test(value)
+        );
+      })
+      .map((match) => match[0]);
+  });
+  assert.ok(tokens.length > 0, "human-merge-only-paths marker contains no protected path tokens");
+  return [...new Set(tokens)];
+}
 
 function realSecurityMdHumanMergeOnlySection(): string {
   const here = dirname(fileURLToPath(import.meta.url));
@@ -1011,17 +1006,8 @@ function realSecurityMdHumanMergeOnlySection(): string {
   return extractMarkedSection(readFileSync(securityMdPath, "utf8"), "human-merge-only-paths");
 }
 
-test("#828 precondition: every token this test checks the five prompt carriers for is itself an exact backtick-quoted substring of docs/security.md's REAL human-merge-only-paths marker section", () => {
-  const section = realSecurityMdHumanMergeOnlySection();
-  for (const token of HUMAN_MERGE_ONLY_PROMPT_TOKENS) {
-    assert.ok(
-      section.includes(token),
-      `docs/security.md's human-merge-only-paths marker no longer contains ${token} — update HUMAN_MERGE_ONLY_PROMPT_TOKENS above to match the canonical list`,
-    );
-  }
-});
-
 test("#828: po.md, po-decompose.md, verification-plan-drafter.md, verification-plan-reviewer.md, and verification-plan-reviewer-confirm.md each mirror every docs/security.md human-merge-only-paths token, and none uses the 'security-relevant config' shorthand the marker's own text warns against", () => {
+  const tokens = humanMergeOnlyPathTokens(realSecurityMdHumanMergeOnlySection());
   const carriers: [name: string, path: string][] = [
     ["po.md", defaultPoPromptPath()],
     ["po-decompose.md", defaultPoDecomposePromptPath()],
@@ -1029,9 +1015,15 @@ test("#828: po.md, po-decompose.md, verification-plan-drafter.md, verification-p
     ["verification-plan-reviewer.md", defaultVerificationPlanReviewerPromptPath()],
     ["verification-plan-reviewer-confirm.md", defaultVerificationPlanConfirmPromptPath()],
   ];
+  assert.equal(carriers.length, 5, "sanity: the human-merge-only floor has five prompt carriers");
+  assert.equal(
+    new Set(carriers.map(([name]) => name)).size,
+    carriers.length,
+    "sanity: carrier names must be unique — a duplicate would silently drop coverage of the missing one",
+  );
   for (const [name, path] of carriers) {
     const body = readFileSync(path, "utf8");
-    for (const token of HUMAN_MERGE_ONLY_PROMPT_TOKENS) {
+    for (const token of tokens) {
       assert.ok(
         body.includes(token),
         `${name} is missing the human-merge-only-paths token ${token} — it must match docs/security.md's canonical list (see po.md for reference wording)`,

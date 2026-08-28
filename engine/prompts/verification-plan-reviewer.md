@@ -92,10 +92,13 @@ continue — defaults to the configured working language `{{lang.issuesAndPrs}}`
   not executable as written — bounce it (outcome 2), requiring an authoritative signal or a stated
   heuristic with its failure direction. A checkability defect, never a scope re-litigation.
 - **Feasibility against human-merge-only paths.** Cross-check the acceptance criteria against
-  `docs/security.md`'s "Human-merge-only paths" list (`guard.ts`/hook wiring, `reviewer.ts`/
-  `merge-driver.ts`, `sapwood.config.yaml`/`.json` **in full**, `sapwood.config.example.yaml`/
-  `.json` (the `sapwood init` starter — guard-protected in its own right),
-  `.claude/settings*.json`, `.github/workflows/**`). `sapwood.config.*` (root and the
+  `docs/security.md`'s "Human-merge-only paths" list (`guard.ts` / `guard-hook.ts` hook wiring,
+  `reviewer.ts` / `merge-driver.ts`, their compiled `engine/dist/guard/guard.js`,
+  `engine/dist/guard/guard-hook.js`, `engine/dist/roles/reviewer.js`,
+  `engine/dist/roles/merge-driver.js` artifacts, `sapwood.config.yaml` / `sapwood.config.yml` /
+  `sapwood.config.json` **in full**, `sapwood.config.example.yaml` / `sapwood.config.example.yml` /
+  `sapwood.config.example.json` (the `sapwood init` starter — guard-protected in its own right),
+  `.claude/settings*.json`, `.github/workflows/**`, and `.github/CODEOWNERS`). `sapwood.config.*` (root and the
   starter template alike) is blocked as a whole file by path pattern, not
   by field — an AC that only touches a comment, a non-security default, or an unrelated key in
   that file is just as infeasible as one touching guard/reviewer/merge mode; do not wave it
