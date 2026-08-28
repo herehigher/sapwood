@@ -15,6 +15,7 @@ import {
   compareSemver,
   type Deps,
   type Exec,
+  type ExecOptions,
   extractUnreleasedBody,
   extractVersionSection,
   formatBuildStamp,
@@ -1146,6 +1147,55 @@ test("runPublish (real run): a failing draft creation aborts before the tag is p
       calls.some((call) => call.file === "git" && call.args[0] === "push"),
       false,
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runPublish (real run): npm-publish alone runs with inherited stdio, so npm's web-auth flow can wait on a browser", () => {
+  const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
+  try {
+    const base = fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" });
+    const calls: Array<{ file: string; args: string[]; opts: ExecOptions | undefined }> = [];
+    const exec: Exec = (file, args, cwd, opts) => {
+      calls.push({ file, args: [...args], opts });
+      return base(file, args, cwd);
+    };
+    const deps: Deps = { repoRoot: dir, exec };
+    const r = runPublish(deps, { dryRun: false });
+    assert.equal(r.code, 0, r.output);
+    const npmPublishCall = calls.find((c) => c.file === "npm" && c.args[0] === "publish");
+    assert.deepEqual(npmPublishCall?.opts, { stdio: "inherit" });
+    // No other step needs a TTY — inheriting stdio elsewhere would break output capture
+    // (dry-run rendering, the notes-file read, JSON parsing of `gh run list`, etc.).
+    assert.deepEqual(
+      calls.filter((c) => c.opts?.stdio === "inherit").map((c) => c.file),
+      ["npm"],
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runPublish: --otp is passed through to the npm-publish argv and to its dry-run rendering; other steps are untouched", () => {
+  const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
+  try {
+    const { exec, calls } = withRecorder(fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }));
+    const deps: Deps = { repoRoot: dir, exec };
+    const r = runPublish(deps, { dryRun: false, otp: "123456" });
+    assert.equal(r.code, 0, r.output);
+    const npmPublishCall = calls.find((c) => c.file === "npm" && c.args[0] === "publish");
+    assert.deepEqual(npmPublishCall?.args, ["publish", "--workspace", "engine", "--tag", "latest", "--otp", "123456"]);
+
+    const dry = runPublish(
+      { repoRoot: dir, exec: fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }) },
+      { dryRun: true, otp: "123456" },
+    );
+    assert.match(dry.output, /npm publish --workspace engine --tag latest --otp 123456/);
+    // Every other step's rendering is byte-identical to the no-otp case (see the --dry-run
+    // tests above for the without-otp baseline) — --otp is appended only to npm-publish's line.
+    assert.match(dry.output, /gh release create v0\.3\.0.*--draft/);
+    assert.doesNotMatch(dry.output, /gh release create[^\n]*--otp/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

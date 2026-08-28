@@ -265,7 +265,15 @@ export function formatBuildStamp(version: string, date: string, sha: string): st
 
 // ── exec seam (testable: tests inject a fake) ───────────────────────────────────────
 
-export type Exec = (file: string, args: string[], cwd?: string) => string;
+// `stdio: "inherit"` is an opt-in per call, not the default, because every other command
+// this script runs relies on its output being captured (rendered in --dry-run output,
+// parsed as JSON, scanned for a notes file, etc.) — piped stdio stays the default and
+// only the one step that needs a real TTY (npm's 2FA web-auth flow) asks for inherited.
+export interface ExecOptions {
+  stdio?: "inherit";
+}
+
+export type Exec = (file: string, args: string[], cwd?: string, opts?: ExecOptions) => string;
 
 export interface Deps {
   exec: Exec;
@@ -273,7 +281,13 @@ export interface Deps {
 }
 
 function realExec(repoRoot: string): Exec {
-  return (file, args, cwd = repoRoot) => execFileSync(file, args, { cwd, encoding: "utf8" });
+  return (file, args, cwd = repoRoot, opts) => {
+    if (opts?.stdio === "inherit") {
+      execFileSync(file, args, { cwd, stdio: "inherit" });
+      return "";
+    }
+    return execFileSync(file, args, { cwd, encoding: "utf8" });
+  };
 }
 
 // ── shared precondition: HEAD must be exactly origin/main ──────────────────────────
@@ -597,6 +611,9 @@ export interface PublishContext {
   // though the tag itself hasn't been pushed yet at that point (see PUBLISH_STEPS' order).
   commitSha: string;
   catalogRemote?: string;
+  // One-time code for accounts that authenticate via `--otp` instead of the interactive
+  // web-auth flow the npm-publish step's inherited stdio otherwise waits on.
+  otp?: string;
 }
 
 export interface PublishStep {
@@ -722,9 +739,17 @@ export const PUBLISH_STEPS: PublishStep[] = [
     // refuses once the tag exists — see docs/dev-guide/10-releasing.md's Rollback section
     // for the manual one-line retry instead.
     name: "npm-publish",
-    describe: (ctx) => `npm publish --workspace engine --tag ${npmDistTag(ctx)}`,
+    describe: (ctx) => `npm publish --workspace engine --tag ${npmDistTag(ctx)}${ctx.otp ? ` --otp ${ctx.otp}` : ""}`,
+    // npm 2FA `auth-and-writes` web-auth waits on a browser and only ever offers that prompt
+    // when stdout is a TTY — this script's usual piped stdio (needed everywhere else so output
+    // can be captured/rendered) would make that flow print a URL and exit `EOTP` instead of
+    // waiting, so this one step alone inherits the parent process's stdio. `--otp` is threaded
+    // through as well, not instead: an account that authenticates via a one-time code rather
+    // than web auth needs it regardless of stdio, so both paths are wired rather than picking one.
     run: (ctx, deps) => {
-      deps.exec("npm", ["publish", "--workspace", "engine", "--tag", npmDistTag(ctx)]);
+      const args = ["publish", "--workspace", "engine", "--tag", npmDistTag(ctx)];
+      if (ctx.otp) args.push("--otp", ctx.otp);
+      deps.exec("npm", args, undefined, { stdio: "inherit" });
     },
   },
   {
@@ -771,7 +796,7 @@ export interface CommandResult {
   output: string;
 }
 
-export function runPublish(deps: Deps, opts: { dryRun: boolean; catalogRemote?: string }): CommandResult {
+export function runPublish(deps: Deps, opts: { dryRun: boolean; catalogRemote?: string; otp?: string }): CommandResult {
   const pre = checkPublishPreconditions(deps);
   if (!pre.ok) return { code: 1, output: `release publish: ${pre.reason}\n` };
   const ctx: PublishContext = {
@@ -780,6 +805,7 @@ export function runPublish(deps: Deps, opts: { dryRun: boolean; catalogRemote?: 
     repoRoot: deps.repoRoot,
     commitSha: pre.commitSha,
     ...(opts.catalogRemote ? { catalogRemote: opts.catalogRemote } : {}),
+    ...(opts.otp ? { otp: opts.otp } : {}),
   };
   const lines = PUBLISH_STEPS.map((step) => {
     if (!opts.dryRun) step.run(ctx, deps);
@@ -899,7 +925,9 @@ function main(argv: string[]): number {
       process.stderr.write("release publish: provide --catalog <git remote> or SAPWOOD_CATALOG_REMOTE\n");
       return 1;
     }
-    const r = runPublish(deps, { dryRun: argv.slice(3).includes("--dry-run"), catalogRemote });
+    const otpIndex = argv.indexOf("--otp");
+    const otp = otpIndex === -1 ? undefined : argv[otpIndex + 1];
+    const r = runPublish(deps, { dryRun: argv.slice(3).includes("--dry-run"), catalogRemote, ...(otp ? { otp } : {}) });
     process.stdout.write(r.output);
     return r.code;
   }
@@ -920,7 +948,7 @@ function main(argv: string[]): number {
     return r.code;
   }
   process.stderr.write(
-    "usage: release <prepare <version>|publish --catalog <git remote> [--dry-run]|promote --catalog <git remote> [--dry-run]|stamp>\n",
+    "usage: release <prepare <version>|publish --catalog <git remote> [--otp <code>] [--dry-run]|promote --catalog <git remote> [--dry-run]|stamp>\n",
   );
   return 1;
 }
