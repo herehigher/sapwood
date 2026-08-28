@@ -2,7 +2,7 @@
 
 [English](README.md) · 日本語 · [简体中文](README.zh-CN.md)
 
-本文は README.md（[205b732a](https://github.com/herehigher/sapwood/blob/205b732a/README.md) 時点）の翻訳です。相違がある場合は英語版を正とします。
+本文は README.md（[9d3319c6](https://github.com/herehigher/sapwood/blob/9d3319c6/README.md) 時点）の翻訳です。相違がある場合は英語版を正とします。
 
 **自律的なコーディングに、ガバナンスを。**
 
@@ -19,7 +19,7 @@
 
 **[ダッシュボードのデモを見る →](https://herehigher.github.io/sapwood/)** 記録された実行をダッシュボードでブラウザ再生 — インストール不要。
 
-**または証拠を読む →** [#1183](https://github.com/herehigher/sapwood/pull/1183) はループによって作成され、レビューされ、マージされた — そのレビュースレッドを読む。
+**または証拠を読む →** [#939](https://github.com/herehigher/sapwood/pull/939) はループが作成しレビューし、レビューが収束しなくなった時点で `needs-human` にエスカレートされ、裁定の後にマージされた — そのスレッドを読む。
 
 ## クイックスタート
 

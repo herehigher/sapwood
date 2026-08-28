@@ -2,7 +2,7 @@
 
 [English](README.md) · [日本語](README.ja.md) · 简体中文
 
-本文为 README.md（截至 [205b732a](https://github.com/herehigher/sapwood/blob/205b732a/README.md)）的译文；如有出入，以英文版为准。
+本文为 README.md（截至 [9d3319c6](https://github.com/herehigher/sapwood/blob/9d3319c6/README.md)）的译文；如有出入，以英文版为准。
 
 **自主编码，接受治理。**
 
@@ -22,7 +22,7 @@
 
 **[观看仪表盘演示 →](https://herehigher.github.io/sapwood/)** 在浏览器中用仪表盘回放一段已录制的运行过程 —— 无需安装。
 
-**或阅读证据 →** [#1183](https://github.com/herehigher/sapwood/pull/1183) 由该循环生产、评审并合并 —— 读一读它的评审过程。
+**或阅读证据 →** [#939](https://github.com/herehigher/sapwood/pull/939) 由该循环生产并评审，在评审不再收敛时升级为 `needs-human`，经裁决后合并 —— 读一读它的完整线程。
 
 ## 快速开始
 
