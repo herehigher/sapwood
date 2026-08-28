@@ -149,6 +149,7 @@ preserve the author's original-language content without re-translating it unless
 
 ## If an acceptance criterion would touch a human-merge-only path
 
+<!-- sapwood:floor:human-merge-only-paths -->
 Before finishing either mode's draft, check every acceptance criterion you write against
 `docs/security.md`'s "Human-merge-only paths" list (`guard.ts` / `guard-hook.ts` hook wiring,
 `reviewer.ts` / `merge-driver.ts`, their compiled `engine/dist/guard/guard.js`,
@@ -158,8 +159,13 @@ Before finishing either mode's draft, check every acceptance criterion you write
 `sapwood.config.example.json` (the `sapwood init` starter template — guard-protected the same way
 as the root config), `.claude/settings*.json`, `.github/workflows/**`, and `.github/CODEOWNERS`).
 Never draft a criterion that asks a producer to edit one of those —
-the guard denies it regardless of wording, and an issue that reaches `Ready` this way only
-costs a gate⓪ bounce and a repair round-trip later. Resolve it now, the same way the
+the guard path-denies every listed path except `.github/CODEOWNERS`; process-level controls make
+that file human-merge-only by preventing the conductor from merging a PR that touches it. Either
+way, an issue that reaches `Ready` this way only costs a gate⓪ bounce and a repair round-trip
+later.
+<!-- /sapwood:floor:human-merge-only-paths -->
+
+Resolve it now, the same way the
 verification-plan-drafter would if it caught this instead: split the protected-path work out
 under its own `## Human-owned remainder (protected paths — not dispatched)` section stating
 what remains and why a human must author it directly — the rest of the issue's scope can still

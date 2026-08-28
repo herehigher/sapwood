@@ -979,22 +979,19 @@ test("#1119: no shipped prompt's {{lang.*}} paragraph restates the BCP-47/defaul
 // canonical section so a source-list change fails every stale carrier.
 
 // Explanatory prose in the marker also quotes commands, config keys, and source references;
-// limiting extraction to each bullet's path-enumeration head keeps those out of the carrier set.
+// limiting extraction to each bullet's path-enumeration head (the text before " — ") keeps
+// those out of the carrier set. No further shape filter (extension allowlist, glob pattern):
+// an allowlist recreates #828 itself for whatever path shape docs/security.md adds next — a
+// canonical token that doesn't match the allowlist would be silently dropped, and no carrier
+// would ever fail for missing it. Every backtick span in the head is a token; if a future
+// enumeration head ever quotes something that is not a path, the fix is to tighten the head
+// boundary, not to filter tokens after the fact.
 function humanMergeOnlyPathTokens(section: string): string[] {
   const bulletItems = [...section.matchAll(/^- (.*(?:\n {2,}.*)*)/gm)].map((match) => match[1]!);
   assert.ok(bulletItems.length > 0, "human-merge-only-paths marker contains no list items");
   const tokens = bulletItems.flatMap((item) => {
     const pathEnumeration = item.split(/\s+—\s+/, 1)[0]!;
-    return [...pathEnumeration.matchAll(/`([^`]+)`/g)]
-      .filter((match) => {
-        const value = match[1]!;
-        return (
-          value === ".github/CODEOWNERS" ||
-          /^(?:[^/`\s]+\/)*[^/`\s]+\.(?:ts|js|ya?ml|json)$/.test(value) ||
-          /^[^`\s]*[*?][^`\s]*$/.test(value)
-        );
-      })
-      .map((match) => match[0]);
+    return [...pathEnumeration.matchAll(/`([^`]+)`/g)].map((match) => match[0]);
   });
   assert.ok(tokens.length > 0, "human-merge-only-paths marker contains no protected path tokens");
   return [...new Set(tokens)];
@@ -1021,16 +1018,23 @@ test("#828: po.md, po-decompose.md, verification-plan-drafter.md, verification-p
     carriers.length,
     "sanity: carrier names must be unique — a duplicate would silently drop coverage of the missing one",
   );
+  // Scoped to each carrier's own <!-- sapwood:floor:human-merge-only-paths --> block, not the
+  // whole prompt body: po-decompose.md, for instance, also mentions `merge-driver.ts` and
+  // `.github/workflows/**` elsewhere (outside the enumeration), so a whole-body `includes` check
+  // would stay green even after a token is dropped from the actual list. Carriers are NOT
+  // required to be byte-identical (unlike assertFloorMirrored elsewhere in this file) — each
+  // keeps role-specific surrounding wording; only the token set is pinned.
   for (const [name, path] of carriers) {
     const body = readFileSync(path, "utf8");
+    const floor = extractFloor(body, "human-merge-only-paths");
     for (const token of tokens) {
       assert.ok(
-        body.includes(token),
-        `${name} is missing the human-merge-only-paths token ${token} — it must match docs/security.md's canonical list (see po.md for reference wording)`,
+        floor.includes(token),
+        `${name}'s human-merge-only-paths floor is missing canonical token ${token} — it must match docs/security.md's canonical list (see po.md for reference wording)`,
       );
     }
     assert.doesNotMatch(
-      body,
+      floor,
       /security-relevant config/,
       `${name} uses the "security-relevant config" shorthand — docs/security.md's own marker text warns this misreads the block as scoping to a subset of the file's contents; enumerate the protected paths explicitly instead`,
     );

@@ -65,7 +65,9 @@ path, does the command it describes still make sense given the code's current sh
 directory/module structure it assumes still hold. A plan that reads as reasonable in isolation
 but names a file that was renamed, or a function that no longer exists, has drifted — that is
 exactly the case `invalidate` exists for. One standing check rides along with drift, even for
-an otherwise-untouched plan: if satisfying an acceptance criterion as written requires a
+an otherwise-untouched plan:
+<!-- sapwood:floor:human-merge-only-paths -->
+if satisfying an acceptance criterion as written requires a
 producer to *edit* a path `docs/security.md`'s "Human-merge-only paths" list covers
 (`guard.ts` / `guard-hook.ts` hook wiring, `reviewer.ts` / `merge-driver.ts`, their compiled
 `engine/dist/guard/guard.js`, `engine/dist/guard/guard-hook.js`, `engine/dist/roles/reviewer.js`,
@@ -74,7 +76,10 @@ producer to *edit* a path `docs/security.md`'s "Human-merge-only paths" list cov
 `sapwood.config.example.json` (the `sapwood init` starter template — guard-protected the
 same way as the root config), `.claude/settings*.json`, `.github/workflows/**`, and
 `.github/CODEOWNERS`), the plan is not dispatchable no matter when it was approved — the guard
-will deny the write mid-task. That is `invalidate`, with a brief
+path-denies every listed path except `.github/CODEOWNERS`; process-level controls make that
+file human-merge-only by preventing the conductor from merging a PR that touches it.
+<!-- /sapwood:floor:human-merge-only-paths -->
+That is `invalidate`, with a brief
 naming the specific path, so the issue goes back through a full review (which owns the
 split-remainder / needs-human repair options). Approvals that predate this check are exactly the
 ones it exists to catch. A second standing check (F36): an execution-class acceptance

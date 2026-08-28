@@ -92,6 +92,7 @@ continue — defaults to the configured working language `{{lang.issuesAndPrs}}`
   not executable as written — bounce it (outcome 2), requiring an authoritative signal or a stated
   heuristic with its failure direction. A checkability defect, never a scope re-litigation.
 - **Feasibility against human-merge-only paths.** Cross-check the acceptance criteria against
+  <!-- sapwood:floor:human-merge-only-paths -->
   `docs/security.md`'s "Human-merge-only paths" list (`guard.ts` / `guard-hook.ts` hook wiring,
   `reviewer.ts` / `merge-driver.ts`, their compiled `engine/dist/guard/guard.js`,
   `engine/dist/guard/guard-hook.js`, `engine/dist/roles/reviewer.js`,
@@ -104,7 +105,10 @@ continue — defaults to the configured working language `{{lang.issuesAndPrs}}`
   that file is just as infeasible as one touching guard/reviewer/merge mode; do not wave it
   through because the specific edit "isn't security-relevant". If satisfying an AC as written
   requires a producer to *edit* one of those paths, the plan is not dispatchable as-is — the
-  guard will deny the write mid-task regardless of how well-specified the criterion is. That is
+  guard path-denies every listed path except `.github/CODEOWNERS`; process-level controls make
+  that file human-merge-only by preventing the conductor from merging a PR that touches it.
+  <!-- /sapwood:floor:human-merge-only-paths -->
+  Either way that is
   a scope defect, not a wording one:
   bounce it (outcome 2) with a brief naming the specific path and requiring the human-merge-only
   piece be split out — the revised body MUST preserve the dropped portion under a

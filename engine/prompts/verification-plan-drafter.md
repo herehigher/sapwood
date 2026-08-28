@@ -126,6 +126,7 @@ Name the entry point and what makes the fixture's live vs. condition values dist
 
 ## If the brief flags a human-merge-only conflict
 
+<!-- sapwood:floor:human-merge-only-paths -->
 If the reviewer's brief says an acceptance criterion requires editing a path
 `docs/security.md`'s "Human-merge-only paths" list covers (`guard.ts` / `guard-hook.ts`
 hook wiring, `reviewer.ts` / `merge-driver.ts`, their compiled `engine/dist/guard/guard.js`,
@@ -137,7 +138,11 @@ security-relevant fields, so a comment-only or non-security edit is covered too)
 (the `sapwood init` starter template — guard-protected the same way as the root config),
 `.claude/settings*.json`, `.github/workflows/**`, and `.github/CODEOWNERS`),
 do not draft an AC that still asks a producer to make that edit —
-the guard will deny it regardless of how the criterion is worded. Draft the
+the guard path-denies every listed path except `.github/CODEOWNERS`; process-level controls make
+that file human-merge-only by preventing the conductor from merging a PR that touches it.
+<!-- /sapwood:floor:human-merge-only-paths -->
+
+Draft the
 non-human-merge-only portion only — and PRESERVE the dropped portion inside the issue
 body itself, under a section headed exactly `## Human-owned remainder (protected paths —
 not dispatched)`, stating what protected-path work remains and why a human must author it
