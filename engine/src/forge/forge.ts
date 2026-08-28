@@ -112,6 +112,19 @@ export interface Issue {
   // (additive, same pattern as body above): undefined means no milestone assigned, not "no
   // data fetched" (the project GraphQL query always requests it — see projectQuery).
   milestone?: string;
+  // #1163: the issue's own author login and GitHub author-association, carried by
+  // listOpenIssues/listRecentlyClosedIssues so a digest consumer can run the SAME
+  // filterTrustedAuthors provenance test #1070 already applies to PR comments/reviews — an
+  // issue's title/body is exactly as untrusted as a stranger's PR comment. Optional/additive,
+  // same convention as every field above: absent on any Issue synthesized locally (a
+  // not-yet-created decompose child, the triage placeholder) rather than read from the forge, or
+  // on a pre-#1163 fixture/fake — callers that never dereference these two fields are unaffected.
+  // Board- and label-gated candidate selection (getPoolEligibleIssues, getIssuesNeedingPlanTriage,
+  // decompose.ts's isDecomposeCandidate) deliberately never sets or reads them: those paths are
+  // already gated on state only a repo collaborator can set (project-board membership/Status, or
+  // a label), so an untrusted issue's own authorship is moot there — see docs/security.md.
+  author?: string;
+  authorAssociation?: string | null;
 }
 
 export interface PRStatus {
@@ -1583,75 +1596,40 @@ export class GithubForge implements IForge {
 
   async listOpenIssues(): Promise<Issue[]> {
     // Keep this separate from listOpenIssueNumbers: that smaller read is also the cheap forge
-    // reachability probe, while the PO digest needs richer fields and milestone scoping.
+    // reachability probe, while the PO digest needs richer fields, milestone scoping, and (#1163)
+    // author provenance — REST's issues endpoint carries author_association natively where the
+    // `gh issue list --json` shorthand this used before #1163 has no such field at all.
+    // `--paginate --slurp` follows every page within this ONE gh invocation (same convention as
+    // getIssueComments' `.../comments --paginate --slurp` above).
     const out = await this.gh([
-      "issue",
-      "list",
-      "--repo",
-      `${this.cfg.board.owner}/${this.repo()}`,
-      "--state",
-      "open",
-      "--json",
-      "number,title,body,labels,milestone",
-      "--limit",
-      String(OPEN_ISSUES_LIMIT),
+      "api",
+      `repos/${this.cfg.board.owner}/${this.repo()}/issues?state=open&per_page=100`,
+      "--paginate",
+      "--slurp",
     ]);
-    const issues = JSON.parse(out) as Array<{
-      number: number;
-      title: string;
-      body?: string;
-      labels: Array<{ name: string }>;
-      milestone: { title: string } | null;
-    }>;
-    if (issues.length === OPEN_ISSUES_LIMIT) {
+    const issues = parseIssueList(out);
+    if (issues.length >= OPEN_ISSUES_LIMIT) {
       throw new Error(`listOpenIssues: backlog read is incomplete (limit ${OPEN_ISSUES_LIMIT})`);
     }
-    return issues.map((i) => ({
-      number: i.number,
-      title: i.title,
-      ...(i.body !== undefined ? { body: i.body } : {}),
-      labels: i.labels.map((label) => label.name),
-      ...(i.milestone ? { milestone: i.milestone.title } : {}),
-    }));
+    return issues;
   }
 
-  /** #528: see IForge.listRecentlyClosedIssues' doc. Same fields and mapping as listOpenIssues
-   *  above (so the same dedup code reads both), with two deliberate differences: `--state closed`
-   *  and a hard `--limit` that is the BOUND, not a truncation to detect — so no incompleteness
-   *  throw. `sort:updated-desc` (gh's own search qualifier) is what makes the bounded slice the
-   *  RECENT tail rather than the oldest N; GitHub's issue list has no closed-at sort, and an
-   *  issue's close is an update, so recently-updated is the available proxy for recently-closed.
-   *  It can drag in an old issue someone just commented on — a harmless extra dedup candidate,
-   *  the failure direction this read should favour. */
+  /** #528: see IForge.listRecentlyClosedIssues' doc. Same transport and fields as listOpenIssues
+   *  above (so the same dedup code reads both — see parseIssueList), with two deliberate
+   *  differences: `state=closed` and a `per_page` that IS the hard bound (RECENTLY_CLOSED_ISSUES_
+   *  LIMIT is well under REST's 100-per-page ceiling, so one page is the whole read — no
+   *  `--paginate`, no incompleteness throw, same "bounded backstop, not a completeness read"
+   *  contract as before). `sort=updated&direction=desc` is REST's native equivalent of the old
+   *  `gh issue list --search sort:updated-desc` qualifier — GitHub's issue list has no closed-at
+   *  sort, and an issue's close is an update, so recently-updated is the available proxy for
+   *  recently-closed. It can drag in an old issue someone just commented on — a harmless extra
+   *  dedup candidate, the failure direction this read should favour. */
   async listRecentlyClosedIssues(): Promise<Issue[]> {
     const out = await this.gh([
-      "issue",
-      "list",
-      "--repo",
-      `${this.cfg.board.owner}/${this.repo()}`,
-      "--state",
-      "closed",
-      "--search",
-      "sort:updated-desc",
-      "--json",
-      "number,title,body,labels,milestone",
-      "--limit",
-      String(RECENTLY_CLOSED_ISSUES_LIMIT),
+      "api",
+      `repos/${this.cfg.board.owner}/${this.repo()}/issues?state=closed&sort=updated&direction=desc&per_page=${RECENTLY_CLOSED_ISSUES_LIMIT}`,
     ]);
-    const issues = JSON.parse(out) as Array<{
-      number: number;
-      title: string;
-      body?: string;
-      labels: Array<{ name: string }>;
-      milestone: { title: string } | null;
-    }>;
-    return issues.map((i) => ({
-      number: i.number,
-      title: i.title,
-      ...(i.body !== undefined ? { body: i.body } : {}),
-      labels: i.labels.map((label) => label.name),
-      ...(i.milestone ? { milestone: i.milestone.title } : {}),
-    }));
+    return parseIssueList(out);
   }
 
   async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
@@ -3163,7 +3141,11 @@ function isPoolEligible(labels: string[], l: ReadyCfg["labels"]): boolean {
 /** Ready-lane + OPEN + this repo + pool-eligible (#214: Ready lane minus holds — see
  *  isPoolEligible's doc for why this is a body-independent label check, not a dispatchability
  *  union). The round pool's candidate source — see IForge.getPoolEligibleIssues' doc for the
- *  deadlock this widening avoids and what stays narrow (executing-phase dispatch). */
+ *  deadlock this widening avoids and what stays narrow (executing-phase dispatch).
+ *  #1163 audit: `ProjectItem` (this function's only input, via `project.items`) carries no
+ *  author field at all — candidacy here is gated purely on board Status, a value only a repo
+ *  collaborator can set, so an untrusted issue author cannot self-promote into this set the way
+ *  #1070 closed off for PR comments/reviews. See docs/security.md. */
 export function selectPoolEligibleIssues(project: ParsedProject, cfg: ReadyCfg): Issue[] {
   const fullName = `${cfg.board.owner}/${cfg.board.repo}`;
   return project.items
@@ -3197,7 +3179,12 @@ function needsPlanTriage(body: string, labels: string[], l: ReadyCfg["labels"]):
 }
 
 /** OPEN + this repo + still lacking a verification plan (#89). The PO/triage peripheral's
- *  candidate set — deliberately NOT scoped to the Ready lane (see needsPlanTriage above). */
+ *  candidate set — deliberately NOT scoped to the Ready lane (see needsPlanTriage above).
+ *  #1163 audit: candidacy here is board MEMBERSHIP (this function only ever sees `project.items`,
+ *  never the wider open-issue list) plus label state — both are collaborator-only actions, so an
+ *  issue a stranger opened is a candidate only after a human/workflow already added it to the
+ *  board (this repo's project has no such auto-add automation — see docs/security.md). Same
+ *  reasoning as selectPoolEligibleIssues' #1163 note above. */
 export function selectPlanTriageCandidates(project: ParsedProject, cfg: ReadyCfg): Issue[] {
   const fullName = `${cfg.board.owner}/${cfg.board.repo}`;
   return project.items
@@ -3911,6 +3898,42 @@ export function parsePRComments(json: string): PRComment[] {
     body: c.body ?? "",
     ...(c.id != null ? { id: String(c.id) } : {}),
   }));
+}
+
+/** Pure parse of `gh api repos/.../issues?state=...` (REST; listOpenIssues' `--paginate --slurp`
+ *  read, or listRecentlyClosedIssues' single bounded page — same `Raw[] | Raw[][]` page-shape
+ *  convention as parsePRComments above). #1163: `author_association` travels through
+ *  UNCONDITIONALLY (`?? null`, never omitted) — REST always populates this field for a real
+ *  issue, so a caller that skips it would be lying about "not fetched"; filterTrustedAuthors'
+ *  provenance-required design treats an omitted key as a transport failure, not a trust
+ *  decision, and that distinction only holds if a successful fetch never omits it.
+ *  GitHub's issues endpoint interleaves pull requests with issues (a PR IS an issue by REST's
+ *  own data model) — `pull_request` presence is the one field that tells them apart, so it is
+ *  the exclusion test here rather than a second query. */
+export function parseIssueList(json: string): Issue[] {
+  type Raw = {
+    number: number;
+    title: string;
+    body?: string;
+    labels: Array<{ name: string }>;
+    milestone: { title: string } | null;
+    author_association?: string | null;
+    user?: { login?: string } | null;
+    pull_request?: unknown;
+  };
+  const parsed = JSON.parse(json) as Raw[] | Raw[][];
+  const arr = parsed.flatMap((p) => (Array.isArray(p) ? p : [p]));
+  return arr
+    .filter((i) => i.pull_request === undefined)
+    .map((i) => ({
+      number: i.number,
+      title: i.title,
+      ...(i.body !== undefined ? { body: i.body } : {}),
+      labels: i.labels.map((label) => label.name),
+      ...(i.milestone ? { milestone: i.milestone.title } : {}),
+      ...(i.user?.login !== undefined ? { author: i.user.login } : {}),
+      authorAssociation: i.author_association ?? null,
+    }));
 }
 
 /** Pure parse of `gh api .../commits?since=... --paginate --slurp` (same page-shape convention

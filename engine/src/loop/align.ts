@@ -33,7 +33,7 @@ import { z } from "zod";
 import { DEFAULT_GOAL_FILE, type SapwoodConfig } from "../config/config.js";
 import { resolveRoundDirective } from "../config/directive.js";
 import type { IForge, Issue } from "../forge/forge.js";
-import { extractOrigin, extractVerificationPlan } from "../forge/forge.js";
+import { extractOrigin, extractVerificationPlan, filterTrustedAuthors } from "../forge/forge.js";
 import { labelsInclude } from "../forge/labels.js";
 import { applyRoleBodyRewrite, checkMarkerWritePrecondition } from "../review/comment-cursor.js";
 // po-pool's candidate digest now substitutes the SAME formatCandidate shape the architect
@@ -212,6 +212,10 @@ export interface BacklogDigestResult extends BoundedDigest {
    *  an issue that exists but was truncated out of the digest is just as out-of-view as one about
    *  an issue that was never a candidate at all. Empty on a read failure or an empty backlog. */
   renderedIssueNumbers: number[];
+  /** #1163: how many open+recently-closed issues filterTrustedAuthors withheld from THIS digest
+   *  because their author fails the #1070 provenance test — never rendered as a title/body, only
+   *  counted (see externalAuthorCountLine below). 0 on a read failure (nothing was evaluated). */
+  withheldAuthors: number;
 }
 
 /** #444: milestone scope ORDERS and ANNOTATES this digest — it no longer EXCLUDES. An issue
@@ -230,6 +234,14 @@ function scopeAnnotation(issue: Issue, milestone: string | undefined): string {
  *  annotation's vocabulary: a closed issue is not "outside this round", it is settled work that
  *  must not be re-proposed at all. po.md explains the marker to the session. */
 export const CLOSED_ANNOTATION = " [recently closed — do not re-propose]";
+
+/** #1163: the digest's "at most a count" line for issues filterTrustedAuthors withheld —
+ *  appended OUTSIDE packDigestRecords' own char budget (never itself a candidate for
+ *  truncation-drop) so it is present whenever `withheld > 0`, the same "never silently gone"
+ *  guarantee #231/#558 already give every RENDERED record, extended to the withheld count. */
+export function externalAuthorCountLine(withheld: number): string {
+  return `${withheld} issue${withheld === 1 ? "" : "s"} by external authors, not shown.`;
+}
 
 /** Engine-side PO context (#215): deterministic; milestone scope is applied here at the digest
  *  consumer.
@@ -256,16 +268,33 @@ export const CLOSED_ANNOTATION = " [recently closed — do not re-propose]";
  *  into an `ok: false` that suppresses creation). Rendered LAST — after the decomposition focus
  *  and the open dedup context — so a tight cap drops closed records first, and annotated
  *  distinctly (`CLOSED_ANNOTATION`). Same single packDigestRecords budget as #444: no second
- *  section, no second cap. Default `[]` keeps every pre-#528 caller byte-identical. */
+ *  section, no second cap. Default `[]` keeps every pre-#528 caller byte-identical.
+ *
+ *  #1163: once the repo is public, any GitHub user can open an issue — its title/body is exactly
+ *  as untrusted as a stranger's PR comment, which #1070's filterTrustedAuthors already fences off
+ *  at the forge-read layer. This digest is the ONE place that free text reaches a PO/align
+ *  session, so BOTH halves (open and recently-closed) are run through the SAME trust test before
+ *  a single record is built — an untrusted-author issue never contributes a title/body line, only
+ *  a tally toward `withheldAuthors` (rendered via externalAuthorCountLine, outside the char
+ *  budget so it can never itself be truncation-dropped). Decomposition/triage/pool candidate
+ *  selection do NOT need this same treatment — see the #1163 notes on forge.ts's
+ *  selectPoolEligibleIssues/selectPlanTriageCandidates and decompose.ts's isDecomposeCandidate. */
 export async function buildBacklogDigest(
   forge: IForge,
   cfg: SapwoodConfig,
   recentlyClosed: readonly Issue[] = [],
 ): Promise<BacklogDigestResult> {
   let issues: Issue[];
+  let trustedClosed: Issue[];
+  let withheldAuthors: number;
   try {
     const allIssues = await forge.listOpenIssues();
-    issues = allIssues.filter((issue) => !labelsInclude(issue.labels, cfg.labels.decomposed));
+    const actor = await forge.getAuthenticatedActor();
+    const openFiltered = filterTrustedAuthors(allIssues, actor);
+    const closedFiltered = filterTrustedAuthors(recentlyClosed, actor);
+    issues = openFiltered.entries.filter((issue) => !labelsInclude(issue.labels, cfg.labels.decomposed));
+    trustedClosed = closedFiltered.entries;
+    withheldAuthors = openFiltered.withheld + closedFiltered.withheld;
   } catch (e) {
     return {
       text: BACKLOG_READ_FAILED,
@@ -276,10 +305,21 @@ export async function buildBacklogDigest(
       truncated: false,
       reason: String(e),
       renderedIssueNumbers: [],
+      withheldAuthors: 0,
     };
   }
-  if (issues.length === 0 && recentlyClosed.length === 0) {
-    return { text: NO_OPEN_ISSUES, ok: true, total: 0, rendered: 0, omitted: 0, truncated: false, renderedIssueNumbers: [] };
+  const countSuffix = withheldAuthors > 0 ? `\n\n${externalAuthorCountLine(withheldAuthors)}` : "";
+  if (issues.length === 0 && trustedClosed.length === 0) {
+    return {
+      text: NO_OPEN_ISSUES + countSuffix,
+      ok: true,
+      total: 0,
+      rendered: 0,
+      omitted: 0,
+      truncated: false,
+      renderedIssueNumbers: [],
+      withheldAuthors,
+    };
   }
   // #444: this round's milestone first (so the decomposition focus is what survives a truncated
   // cap), then the rest of the open backlog as dedup-only context; each half number-ascending, so
@@ -294,7 +334,7 @@ export async function buildBacklogDigest(
   });
   // #528: closed records carry neither the scope nor the hold annotation — both describe live
   // routing state, meaningless for settled work. Number-ascending, same determinism rule.
-  const closedRecords = [...recentlyClosed]
+  const closedRecords = [...trustedClosed]
     .sort(byNumber)
     .map((issue) => ({ number: issue.number, text: `- #${issue.number} — ${issue.title}${CLOSED_ANNOTATION}` }));
   const packed = packDigestRecords([...openRecords, ...closedRecords], cfg.roles.po.backlogDigestMaxChars, NO_OPEN_ISSUES);
@@ -307,8 +347,10 @@ export async function buildBacklogDigest(
   // exactly its pre-#528 bounds (closed lines sort last, so this is just the open prefix).
   return {
     ...packed,
+    text: packed.text + countSuffix,
     ok: true,
     renderedIssueNumbers: ordered.slice(0, packed.rendered).map((issue) => issue.number),
+    withheldAuthors,
   };
 }
 

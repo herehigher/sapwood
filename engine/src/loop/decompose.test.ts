@@ -369,14 +369,37 @@ test("anti-recursion: origin:agent is autonomous-ineligible; a human split re-ad
   );
 });
 
+test("#1163 audit: isDecomposeCandidate never consults issue authorship — only a repo collaborator can apply `split`, and that label alone (not author/authorAssociation) is the gate", () => {
+  const strangerFiled: Issue = {
+    number: 3,
+    title: "Opened by a stranger, later split by a maintainer",
+    labels: [cfg.labels.split],
+    author: "outside-contributor",
+    authorAssociation: "NONE",
+  };
+  assert.equal(
+    isDecomposeCandidate(strangerFiled, cfg),
+    true,
+    "an untrusted author's issue is still a candidate once a human labels it split",
+  );
+  assert.equal(
+    isDecomposeCandidate({ ...strangerFiled, labels: [] }, cfg),
+    false,
+    "without the human-appliable split label, authorship (even a trusted one) never substitutes for it",
+  );
+});
+
 test("#310 backlog blindness: the PO digest omits decomposed parents", async () => {
   const digest = await buildBacklogDigest(
     {
       async listOpenIssues() {
         return [
-          { number: 1, title: "tracking parent", labels: [cfg.labels.decomposed] },
-          { number: 2, title: "real backlog child", labels: [] },
+          { number: 1, title: "tracking parent", labels: [cfg.labels.decomposed], author: "maintainer", authorAssociation: "OWNER" },
+          { number: 2, title: "real backlog child", labels: [], author: "maintainer", authorAssociation: "OWNER" },
         ];
+      },
+      async getAuthenticatedActor() {
+        return null;
       },
     } as unknown as IForge,
     cfg,

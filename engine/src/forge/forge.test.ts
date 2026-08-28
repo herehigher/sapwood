@@ -34,6 +34,7 @@ import {
   parseFailedCheckSummary,
   parseFailingCheckRuns,
   parseIssueLabels,
+  parseIssueList,
   parseIssueMeta,
   parseIssueRelations,
   parsePageInfo,
@@ -3528,28 +3529,46 @@ test("listOpenIssueNumbers: every open issue number in this repo", async () => {
   assert.ok(args.includes("--state") && args.includes("open"));
 });
 
-test("listOpenIssues #215/#216: returns digest fields plus bodies for marker reconciliation", async () => {
+test("listOpenIssues #215/#216/#1163: returns digest fields plus bodies for marker reconciliation, and author provenance for the #1070 trust test", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(cfg);
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
     return JSON.stringify([
-      { number: 5, title: "Parked gap", body: "one", labels: [{ name: "blocked" }], milestone: { title: "M4" } },
-      { number: 7, title: "Unassigned gap", body: "two", labels: [], milestone: null },
+      {
+        number: 5,
+        title: "Parked gap",
+        body: "one",
+        labels: [{ name: "blocked" }],
+        milestone: { title: "M4" },
+        user: { login: "maintainer" },
+        author_association: "OWNER",
+      },
+      {
+        number: 7,
+        title: "Unassigned gap",
+        body: "two",
+        labels: [],
+        milestone: null,
+        user: { login: "outsider" },
+        author_association: "NONE",
+      },
+      // #1163: REST's issues endpoint interleaves pull requests — a `pull_request` key is the
+      // exclusion test, not a separate query. This entry must never surface as an Issue.
+      { number: 9, title: "A PR, not an issue", body: "", labels: [], milestone: null, user: { login: "maintainer" }, pull_request: {} },
     ]);
   };
   assert.deepEqual(await forge.listOpenIssues(), [
-    { number: 5, title: "Parked gap", body: "one", labels: ["blocked"], milestone: "M4" },
-    { number: 7, title: "Unassigned gap", body: "two", labels: [] },
+    { number: 5, title: "Parked gap", body: "one", labels: ["blocked"], milestone: "M4", author: "maintainer", authorAssociation: "OWNER" },
+    { number: 7, title: "Unassigned gap", body: "two", labels: [], author: "outsider", authorAssociation: "NONE" },
   ]);
   const args = seen[0]!;
-  assert.deepEqual(args.slice(0, 2), ["issue", "list"]);
-  assert.ok(args.includes("--state") && args.includes("open"));
-  assert.ok(args.includes("number,title,body,labels,milestone"));
+  assert.deepEqual(args.slice(0, 2), ["api", `repos/o/r/issues?state=open&per_page=100`]);
+  assert.ok(args.includes("--paginate") && args.includes("--slurp"));
 });
 
-test("listOpenIssues #215: rejects an exactly-limit-sized response but accepts limit minus one", async () => {
+test("listOpenIssues #215: rejects an at-or-past-limit response but accepts limit minus one", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(cfg);
   let issueCount = 999;
@@ -3560,6 +3579,8 @@ test("listOpenIssues #215: rejects an exactly-limit-sized response but accepts l
         title: `Issue ${index + 1}`,
         labels: [],
         milestone: null,
+        user: { login: "maintainer" },
+        author_association: "OWNER",
       })),
     );
 
@@ -3568,28 +3589,52 @@ test("listOpenIssues #215: rejects an exactly-limit-sized response but accepts l
   await assert.rejects(() => forge.listOpenIssues(), /backlog read is incomplete \(limit 1000\)/);
 });
 
-test("listRecentlyClosedIssues #528: one BOUNDED closed-issue read, same fields as listOpenIssues", async () => {
+test("listRecentlyClosedIssues #528/#1163: one BOUNDED closed-issue read, same fields (incl. author provenance) as listOpenIssues", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(cfg);
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
     return JSON.stringify([
-      { number: 461, title: "Shipped fact", body: "one", labels: [{ name: "type:bug" }], milestone: { title: "v0.2.1" } },
-      { number: 5, title: "Older closed gap", body: "two", labels: [], milestone: null },
+      {
+        number: 461,
+        title: "Shipped fact",
+        body: "one",
+        labels: [{ name: "type:bug" }],
+        milestone: { title: "v0.2.1" },
+        user: { login: "maintainer" },
+        author_association: "MEMBER",
+      },
+      {
+        number: 5,
+        title: "Older closed gap",
+        body: "two",
+        labels: [],
+        milestone: null,
+        user: { login: "stranger" },
+        author_association: null,
+      },
     ]);
   };
   assert.deepEqual(await forge.listRecentlyClosedIssues(), [
-    { number: 461, title: "Shipped fact", body: "one", labels: ["type:bug"], milestone: "v0.2.1" },
-    { number: 5, title: "Older closed gap", body: "two", labels: [] },
+    {
+      number: 461,
+      title: "Shipped fact",
+      body: "one",
+      labels: ["type:bug"],
+      milestone: "v0.2.1",
+      author: "maintainer",
+      authorAssociation: "MEMBER",
+    },
+    { number: 5, title: "Older closed gap", body: "two", labels: [], author: "stranger", authorAssociation: null },
   ]);
   const args = seen[0]!;
   assert.equal(seen.length, 1, "one read — no pagination loop");
-  assert.deepEqual(args.slice(0, 2), ["issue", "list"]);
-  assert.ok(args.includes("--state") && args.includes("closed"));
-  assert.ok(args.includes("number,title,body,labels,milestone"));
-  assert.ok(args.includes("--limit") && args.includes(String(RECENTLY_CLOSED_ISSUES_LIMIT)));
-  assert.ok(args.includes("--search") && args.includes("sort:updated-desc"), "recency-ordered, so the bound keeps the RECENT tail");
+  assert.deepEqual(args.slice(0, 2), [
+    "api",
+    `repos/o/r/issues?state=closed&sort=updated&direction=desc&per_page=${RECENTLY_CLOSED_ISSUES_LIMIT}`,
+  ]);
+  assert.ok(!args.includes("--paginate"), "a single bounded page — RECENTLY_CLOSED_ISSUES_LIMIT is under REST's per-page ceiling");
 });
 
 test("listRecentlyClosedIssues #528: an exactly-limit-sized response is the BOUND, never an incompleteness error", async () => {
@@ -3602,11 +3647,22 @@ test("listRecentlyClosedIssues #528: an exactly-limit-sized response is the BOUN
         title: `Closed ${index + 1}`,
         labels: [],
         milestone: null,
+        user: { login: "maintainer" },
+        author_association: "OWNER",
       })),
     );
   // Unlike listOpenIssues (whose completeness is load-bearing for the fail-closed create
   // boundary), this read is a BOUNDED backstop by design — hitting the bound is the normal case.
   assert.equal((await forge.listRecentlyClosedIssues()).length, RECENTLY_CLOSED_ISSUES_LIMIT);
+});
+
+test("parseIssueList #1163: a missing author_association travels through as null, never omitted — filterTrustedAuthors' provenance-required design must never see a silently-omitted key on a successful REST fetch", () => {
+  const issues = parseIssueList(
+    JSON.stringify([{ number: 1, title: "Ghost author", labels: [], milestone: null, user: null, author_association: null }]),
+  );
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0]!.authorAssociation, null);
+  assert.equal(issues[0]!.author, undefined, "no login at all (deleted account) stays absent, not a fabricated empty string");
 });
 
 // ── #110 PR0: updateIssueBody — the WRITE counterpart to getIssueBody, additive infra for the

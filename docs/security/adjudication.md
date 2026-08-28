@@ -166,9 +166,15 @@ adjudicated, not that every comment's current text was seen.
 - **The public/private threat-model split.** In a public repo, comment entries from an author
   outside GitHub `OWNER`/`MEMBER`/`COLLABORATOR`, the authenticated engine actor, or the reviewer-bot
   allowlist are dropped at five forge reads (issue/PR comments, reviews, review threads, tails);
-  missing author provenance fails the whole read. Nothing else in the engine filters comment
-  provenance. The filter records only an aggregate withheld count and does not write to GitHub.
-  Editing an already-cursored comment remains the separate "v1 residual" case above.
+  missing author provenance fails the whole read. The same `filterTrustedAuthors` test also covers
+  issues themselves: the PO/align backlog digest (`align.ts::buildBacklogDigest`) withholds an
+  untrusted-author issue's title/body — both the open and recently-closed halves — showing only an
+  aggregate count in its place. Decomposition, pool, and plan-triage candidate selection need no
+  such filter of their own: those paths are gated on a project-board Status/membership or a label,
+  each a collaborator-only write, so an untrusted issue's own authorship never determines
+  candidacy there. Nothing else in the engine filters comment or issue provenance. The filter
+  records only an aggregate withheld count and does not write to GitHub. Editing an
+  already-cursored comment remains the separate "v1 residual" case above.
 - **`docs/security.md` itself, and the prompt files, both ride the instruction-path escalation.**
   `engine/prompts/**` and `docs/security.md` are both entries in `escalation.instructionPaths`
   (see [Instruction-path changes escalate to human review](instruction-path-escalation.md#instruction-path-changes-escalate-to-human-review)),

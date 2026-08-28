@@ -66,7 +66,11 @@ export function defaultPoDecomposePromptPath(): string {
 }
 
 /** Human split is a fresh signature even on origin:agent; without it agent-created issues are
- * never autonomous candidates. decomposed is the one-way machine fence. */
+ * never autonomous candidates. decomposed is the one-way machine fence.
+ * #1163 audit: this test never reads issue authorship — the `split` label is the gate, and only a
+ * repo collaborator can apply it, so a stranger's issue is a decompose candidate only once a
+ * human (or the engine, on their behalf) already labeled it. Same board/label-gating reasoning as
+ * forge.ts's selectPoolEligibleIssues/selectPlanTriageCandidates #1163 notes. */
 export function isDecomposeCandidate(issue: Issue, cfg: SapwoodConfig): boolean {
   return (
     labelsInclude(issue.labels, cfg.labels.split) &&
