@@ -13,8 +13,8 @@
     "build": "tsc",
     "test": "sh scripts/run-tests.sh",
     "test:focus": "node --import tsx --test --test-timeout=60000",
-    "prepack": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && npm run build && node ../scripts/release.ts stamp && node -e \"require('node:fs').copyFileSync('../sapwood.config.example.yaml','sapwood.config.example.yaml')\" && node scripts/stage-dashboard.ts",
-    "postpack": "node scripts/stage-dashboard.ts --clean && node -e \"require('node:fs').rmSync('sapwood.config.example.yaml',{force:true})\""
+    "prepack": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && npm run build && node ../scripts/release.ts stamp && node -e \"const{copyFileSync}=require('node:fs');copyFileSync('../sapwood.config.example.yaml','sapwood.config.example.yaml');copyFileSync('../README.md','README.md');copyFileSync('../LICENSE','LICENSE')\" && node scripts/stage-dashboard.ts",
+    "postpack": "node scripts/stage-dashboard.ts --clean && node -e \"const{rmSync}=require('node:fs');rmSync('sapwood.config.example.yaml',{force:true});rmSync('README.md',{force:true});rmSync('LICENSE',{force:true})\""
   },
   "repository": { "type": "git", "url": "git+https://github.com/herehigher/sapwood.git" },
   "homepage": "https://github.com/herehigher/sapwood",

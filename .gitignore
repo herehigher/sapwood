@@ -24,5 +24,9 @@ dashboard/shots-output/
 
 # #1032: prepack copies the repo-root example config in for `npm pack`/`npm publish` so it
 # ships inside the installed package — the repo root copy stays the single source of truth.
+# npm always takes README/LICENSE from the package root, which for the `sapwood` npm package
+# is `engine/`; prepack stages the repo-root copies there for the same reason.
 engine/sapwood.config.example.yaml
+engine/README.md
+engine/LICENSE
 engine/dashboard-dist/
