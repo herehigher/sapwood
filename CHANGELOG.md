@@ -7,6 +7,40 @@ All notable changes to sapwood are documented here. Format:
 
 ## [Unreleased]
 
+### Fixed
+- `sapwood init` and `sapwood run` in a directory with no config, or an invalid one, stop with
+  the same one-line refusal `sapwood validate` prints instead of a Node stack trace;
+  `sapwood init --help` describes the flow `init` actually runs.
+- The getting-started bootstrap config validates as written, and `sapwood run --dry-run` applies
+  the same engine-agent CI refusal as `sapwood validate` instead of exiting 0 with a warning.
+- The goal file, review doctrine, and architecture chapter reach prompts with HTML comments
+  removed, so the authoring guidance in `sapwood init`'s scaffolds no longer reads as doctrine
+  or locked architecture. Comments inside Markdown code spans, fenced blocks, and indented code
+  are kept; on-disk files are unchanged.
+- `release publish`'s npm step runs on an interactive terminal so 2FA web-auth can complete, and
+  `publish --otp <code>` is accepted; the runbook names the `github-pages` `v*` tag deployment
+  policy the `deploy-demo` job needs.
+
+### Security
+- The PO/align backlog digest and plan-triage candidate selection apply the author-trust filter
+  to issues: an issue whose author is not a repository collaborator appears at most as an
+  aggregate count, never as rendered text. Forge issue reads are bounded GraphQL pages with a
+  fixed ten-page ceiling and fail closed on an incomplete response.
+- The shipped PO and verification-plan prompts carry the complete human-merge-only path list
+  from `docs/security.md` (the compiled guard, reviewer, and merge-driver artifacts and
+  `.github/CODEOWNERS` were missing); a test derives the list from the canonical section so a
+  future addition fails every stale prompt.
+
+### Changed
+- `docs/guide/configuration.md` gains rows for 23 schema-valid keys that had none: the empty-spin
+  breaker, pool-removal and concern-post caps, the architect drop cap, proxy audit-comment caps,
+  per-role `model`/`effort`/`promptFile`, and `roles.skills.enabled`.
+- README badges and status reflect the published pre-release; the OpenSSF Scorecard badge uses
+  the official `scorecard.dev` URLs.
+- Until the first plain release, the publishing human moves npm's `latest` tag to the newest
+  pre-release after each publish, so a bare `npx sapwood` installs a working engine instead of
+  the `0.0.1` placeholder.
+
 ## [0.3.0-alpha.1] - 2026-08-27
 
 ### Changed
