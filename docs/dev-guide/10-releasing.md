@@ -135,6 +135,13 @@ Either way, a pre-release **never** publishes under `latest` — `latest` is wha
 a bare `npm install sapwood` (no version) and `npx sapwood@latest` resolve, so a
 pre-release landing there would silently become the default install for everyone.
 
+One bounded exception, in force only until the first plain release exists: while
+`latest` would otherwise resolve to the deprecated `0.0.1` placeholder, the publishing
+human moves it by hand to the newest pre-release after each `publish` —
+`npm dist-tag add sapwood@<version> latest` — so a bare install gets a working
+engine rather than the placeholder. `publish` does not do this itself, and the first
+plain release retires the exception by landing on `latest` in the ordinary way.
+
 **npm publish token: lives on the publishing human's machine.** `npm publish`
 authenticates via `npm login` run once, locally, by whoever executes `publish`.
 There is no `NPM_TOKEN` CI secret or automated npm-publish workflow today. An
