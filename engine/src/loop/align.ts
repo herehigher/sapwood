@@ -337,7 +337,15 @@ export async function buildBacklogDigest(
   const closedRecords = [...trustedClosed]
     .sort(byNumber)
     .map((issue) => ({ number: issue.number, text: `- #${issue.number} — ${issue.title}${CLOSED_ANNOTATION}` }));
-  const packed = packDigestRecords([...openRecords, ...closedRecords], cfg.roles.po.backlogDigestMaxChars, NO_OPEN_ISSUES);
+  // #1163: countSuffix is appended AFTER packing (below), so its length must be reserved out of
+  // the cap here — otherwise packDigestRecords could legitimately fill the whole
+  // backlogDigestMaxChars budget and the suffix would push the final text past the documented
+  // hard cap.
+  const packed = packDigestRecords(
+    [...openRecords, ...closedRecords],
+    cfg.roles.po.backlogDigestMaxChars - countSuffix.length,
+    NO_OPEN_ISSUES,
+  );
   // #237: packDigestRecords only ever drops a TRAILING run of whole records (its own doc
   // comment) — so the first `rendered` entries of `ordered` (same order the lines were built in)
   // are exactly what made it into `packed.text`.

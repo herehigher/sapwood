@@ -204,14 +204,7 @@ class FakeForge extends UnstubbedForge implements IForge {
   override async listOpenIssueNumbers(): Promise<number[]> {
     return this.openIssueNumbers;
   }
-  // #1163: buildBacklogDigest now runs every returned Issue through filterTrustedAuthors, which
-  // fails closed on an entry missing author/authorAssociation (forge.ts's own doc: "missing
-  // provenance is a transport failure, never a trust decision") — the real GithubForge always
-  // populates both (forge.ts's parseIssueList), so this suite's `backlogIssues`/`closedIssues`
-  // fixtures (about digest/decompose/triage MECHANICS, not authorship) default to a trusted
-  // maintainer here rather than every one of them needing to say so. A test that specifically
-  // exercises the #1163 exclusion path sets authorAssociation on its own fixture, which (being
-  // set AFTER the defaults in this spread) always wins.
+  // Digest fixtures default to trusted provenance; trust-specific tests override it.
   override async listOpenIssues(): Promise<Issue[]> {
     return this.backlogIssues.map((issue) => ({ author: "sapwood-test-owner", authorAssociation: "OWNER", ...issue }));
   }
@@ -2747,6 +2740,26 @@ test("buildBacklogDigest #1163: a NULL authorAssociation (GitHub's own 'no class
   const digest = await buildBacklogDigest(forge, mkCfg());
   assert.equal(digest.ok, true);
   assert.equal(digest.text, "(no open issues yet)\n\n1 issue by external authors, not shown.");
+});
+
+test("buildBacklogDigest #1163: the withheld-author count line is reserved OUT of backlogDigestMaxChars, never appended past it — the final text never exceeds the documented hard cap", async () => {
+  const forge = new FakeForge();
+  forge.backlogIssues = [
+    // Trusted (FakeForge's default). At 180 chars, this record fits under the RAW 200-char cap
+    // (the bug: packDigestRecords would render it whole, then the suffix pushes the total over)
+    // but not under the cap MINUS the withheld-count suffix's own length — which is exactly the
+    // budget this fix must pack against.
+    { number: 1, title: "z".repeat(173), labels: [] },
+    { number: 2, title: "STRANGER's issue", labels: [], author: "stranger", authorAssociation: "NONE" },
+  ];
+  const digest = await buildBacklogDigest(forge, mkCfg({ roles: { po: { backlogDigestMaxChars: 200 } } }));
+  assert.equal(digest.ok, true);
+  assert.equal(digest.withheldAuthors, 1);
+  assert.ok(digest.text.length <= 200, `digest.text.length was ${digest.text.length}, over the 200-char cap`);
+  assert.ok(
+    digest.text.endsWith("1 issue by external authors, not shown."),
+    "the count line still renders in full — it's the packed budget that shrinks, not the suffix",
+  );
 });
 
 test("packDigestRecords: an absurdly tiny cap still never exceeds maxChars, even with zero rendered records", () => {

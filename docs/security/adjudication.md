@@ -169,12 +169,16 @@ adjudicated, not that every comment's current text was seen.
   missing author provenance fails the whole read. The same `filterTrustedAuthors` test also covers
   issues themselves: the PO/align backlog digest (`align.ts::buildBacklogDigest`) withholds an
   untrusted-author issue's title/body — both the open and recently-closed halves — showing only an
-  aggregate count in its place. Decomposition, pool, and plan-triage candidate selection need no
-  such filter of their own: those paths are gated on a project-board Status/membership or a label,
-  each a collaborator-only write, so an untrusted issue's own authorship never determines
-  candidacy there. Nothing else in the engine filters comment or issue provenance. The filter
-  records only an aggregate withheld count and does not write to GitHub. Editing an
-  already-cursored comment remains the separate "v1 residual" case above.
+  aggregate count in its place. Plan-triage candidate selection (`getIssuesNeedingPlanTriage`) is
+  author-filtered the same way: a ProjectV2 board can gain items via an automatic-add workflow, so
+  board membership there is NOT a trusted-promotion gate the generic engine can rely on — a
+  candidate's own title/body only reaches the triage-drafting session after passing
+  `filterTrustedAuthors`. Decomposition and pool candidate selection need no such filter of their
+  own: those two are gated on the Ready Status or the `split` label respectively, each an explicit
+  trusted-promotion action only a repo collaborator can take, so an untrusted issue's own
+  authorship never determines candidacy there. Nothing else in the engine filters comment or issue
+  provenance. The filter records only an aggregate withheld count and does not write to GitHub.
+  Editing an already-cursored comment remains the separate "v1 residual" case above.
 - **`docs/security.md` itself, and the prompt files, both ride the instruction-path escalation.**
   `engine/prompts/**` and `docs/security.md` are both entries in `escalation.instructionPaths`
   (see [Instruction-path changes escalate to human review](instruction-path-escalation.md#instruction-path-changes-escalate-to-human-review)),

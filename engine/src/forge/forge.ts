@@ -19,6 +19,12 @@ import { CODEX_REVIEWER_LOGINS, normalizeLogin } from "./trust.js";
 // instead of duplicating the literal 1000.
 export const OPEN_ISSUES_LIMIT = 1000;
 
+/** #1163: fetchAllOpenIssues' fixed page ceiling for `repository.issues(first: 100)` — mirrors
+ *  OPEN_ISSUES_LIMIT at GraphQL's own page size, so the "at most this many gh calls" bound this
+ *  read makes is checked as each page arrives (see fetchAllOpenIssues), not after every page in
+ *  the repo has already been fetched. */
+export const OPEN_ISSUES_PAGE_CEILING = OPEN_ISSUES_LIMIT / 100;
+
 /** #528: the recently-closed dedup window, expressed as "the last N closed issues" rather than a
  *  configured time window — no new config key for a backstop, and N is what the underlying `gh`
  *  read bounds natively. 50 covers several dogfood rounds' worth of shipped facts at this repo's
@@ -28,11 +34,12 @@ export const RECENTLY_CLOSED_ISSUES_LIMIT = 50;
 
 const TRUSTED_AUTHOR_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 
-/** The sole forge-read provenance rule for public comments, reviews, and review threads.
- * GitHub owns the association classification; the two login exceptions are identities the
- * engine itself already relies on. Missing provenance is a transport failure, never a trust
- * decision. */
-export function filterTrustedAuthors<T extends { authorAssociation?: string | null; author?: string; login?: string }>(
+/** The sole forge-read provenance rule for public comments, reviews, review threads, and issues
+ * (#1163). GitHub owns the association classification; the two login exceptions are identities
+ * the engine itself already relies on. An ABSENT author/authorAssociation key is a transport
+ * failure and throws; an explicit `author: null` (GitHub's own shape for a deleted account) is a
+ * determinate, untrusted result, never a trust decision to make and never a throw. */
+export function filterTrustedAuthors<T extends { authorAssociation?: string | null; author?: string | null; login?: string }>(
   entries: readonly T[],
   authenticatedActor: string | null,
 ): { entries: T[]; visibleTotal: number; withheld: number } {
@@ -40,10 +47,12 @@ export function filterTrustedAuthors<T extends { authorAssociation?: string | nu
   const bots = new Set(CODEX_REVIEWER_LOGINS.map((login) => normalizeLogin(login).toLowerCase()));
   const visible: T[] = [];
   for (const entry of entries) {
-    const author = entry.author ?? entry.login;
-    if (typeof author !== "string" || author.trim() === "" || entry.authorAssociation === undefined) {
-      throw new Error("forge comment provenance is incomplete");
+    const author = entry.author !== undefined ? entry.author : entry.login;
+    const authorInvalid = author === undefined || (author !== null && (typeof author !== "string" || author.trim() === ""));
+    if (authorInvalid || entry.authorAssociation === undefined) {
+      throw new Error("forge author provenance is incomplete");
     }
+    if (author === null) continue; // a deleted account: no login to trust-match, always withheld.
     const login = author.toLowerCase();
     if (
       (typeof entry.authorAssociation === "string" && TRUSTED_AUTHOR_ASSOCIATIONS.has(entry.authorAssociation)) ||
@@ -112,18 +121,11 @@ export interface Issue {
   // (additive, same pattern as body above): undefined means no milestone assigned, not "no
   // data fetched" (the project GraphQL query always requests it — see projectQuery).
   milestone?: string;
-  // #1163: the issue's own author login and GitHub author-association, carried by
-  // listOpenIssues/listRecentlyClosedIssues so a digest consumer can run the SAME
-  // filterTrustedAuthors provenance test #1070 already applies to PR comments/reviews — an
-  // issue's title/body is exactly as untrusted as a stranger's PR comment. Optional/additive,
-  // same convention as every field above: absent on any Issue synthesized locally (a
-  // not-yet-created decompose child, the triage placeholder) rather than read from the forge, or
-  // on a pre-#1163 fixture/fake — callers that never dereference these two fields are unaffected.
-  // Board- and label-gated candidate selection (getPoolEligibleIssues, getIssuesNeedingPlanTriage,
-  // decompose.ts's isDecomposeCandidate) deliberately never sets or reads them: those paths are
-  // already gated on state only a repo collaborator can set (project-board membership/Status, or
-  // a label), so an untrusted issue's own authorship is moot there — see docs/security.md.
-  author?: string;
+  // Forge-read issues carry provenance so prompt consumers can apply the central trust rule.
+  // Locally synthesized issues never cross that boundary, so these fields remain optional.
+  // `author: null` is a determinate result (GitHub's own shape for a deleted account), distinct
+  // from the key being absent entirely (a transport failure) — see filterTrustedAuthors below.
+  author?: string | null;
   authorAssociation?: string | null;
 }
 
@@ -538,7 +540,9 @@ export interface IForge {
    *  open issue regardless of board Status, not just the Ready lane, because triage runs
    *  proactively (before a human ever moves an issue to Ready) so it already carries a plan by
    *  the time gate⓪ sees it. needs-human/blocked/verify:n/a issues are excluded — settled
-   *  state, not a drafting target (same exclusion stance as needsPlanReview). */
+   *  state, not a drafting target (same exclusion stance as needsPlanReview). #1163: candidates
+   *  are additionally author-filtered (filterTrustedAuthors) before being returned — see
+   *  selectPlanTriageCandidates' doc for why board membership alone isn't a trusted gate here. */
   getIssuesNeedingPlanTriage(): Promise<Issue[]>;
   /** #234: one issue's core metadata (title/state/labels/updatedAt/milestone) — the forge MCP
    *  proxy's `issue_details` tool composes this with getIssueBody/getIssueComments/
@@ -1597,44 +1601,75 @@ export class GithubForge implements IForge {
   async listOpenIssues(): Promise<Issue[]> {
     // Keep this separate from listOpenIssueNumbers: that smaller read is also the cheap forge
     // reachability probe, while the PO digest needs richer fields, milestone scoping, and (#1163)
-    // author provenance — REST's issues endpoint carries author_association natively where the
-    // `gh issue list --json` shorthand this used before #1163 has no such field at all.
-    // `--paginate --slurp` follows every page within this ONE gh invocation (same convention as
-    // getIssueComments' `.../comments --paginate --slurp` above).
-    const out = await this.gh([
-      "api",
-      `repos/${this.cfg.board.owner}/${this.repo()}/issues?state=open&per_page=100`,
-      "--paginate",
-      "--slurp",
-    ]);
-    const issues = parseIssueList(out);
-    if (issues.length >= OPEN_ISSUES_LIMIT) {
+    // author provenance. GraphQL exposes authorAssociation on an issue directly; the `gh issue
+    // list --json` shorthand this used before #1163 has no such field at all. GraphQL over REST
+    // `--paginate --slurp` for a second reason too: `repository.issues` is issue-only by
+    // construction (unlike REST's issues-or-PRs endpoint), and fetchAllOpenIssues bounds the walk
+    // to a FIXED page ceiling checked as each page arrives — `--paginate --slurp` would instead
+    // exhaust every page (however many that is, PRs included) before this method ever got to look
+    // at the count, so a huge repo could make many multiples of the intended worst-case call
+    // count before the incompleteness throw below ever fires.
+    const page = await fetchAllOpenIssues((after) =>
+      this.gh([
+        "api",
+        "graphql",
+        "-f",
+        `query=${OPEN_ISSUES_QUERY}`,
+        "-f",
+        `owner=${this.cfg.board.owner}`,
+        "-f",
+        `repo=${this.repo()}`,
+        ...(after === null ? ["-F", "after=null"] : ["-f", `after=${after}`]),
+      ]),
+    );
+    if (page.pageCapped) {
+      this.announcePageCeiling(`open-issue read (${this.cfg.board.owner}/${this.repo()}) stopped at ${OPEN_ISSUES_PAGE_CEILING} pages`, {
+        source: "open-issues",
+        owner: this.cfg.board.owner,
+        repo: this.repo(),
+        pages: OPEN_ISSUES_PAGE_CEILING,
+      });
       throw new Error(`listOpenIssues: backlog read is incomplete (limit ${OPEN_ISSUES_LIMIT})`);
     }
-    return issues;
+    return page.issues;
   }
 
-  /** #528: see IForge.listRecentlyClosedIssues' doc. Same transport and fields as listOpenIssues
-   *  above (so the same dedup code reads both — see parseIssueList), with two deliberate
-   *  differences: `state=closed` and a `per_page` that IS the hard bound (RECENTLY_CLOSED_ISSUES_
-   *  LIMIT is well under REST's 100-per-page ceiling, so one page is the whole read — no
-   *  `--paginate`, no incompleteness throw, same "bounded backstop, not a completeness read"
-   *  contract as before). `sort=updated&direction=desc` is REST's native equivalent of the old
-   *  `gh issue list --search sort:updated-desc` qualifier — GitHub's issue list has no closed-at
-   *  sort, and an issue's close is an update, so recently-updated is the available proxy for
-   *  recently-closed. It can drag in an old issue someone just commented on — a harmless extra
-   *  dedup candidate, the failure direction this read should favour. */
+  /** #528: see IForge.listRecentlyClosedIssues' doc. Same GraphQL shape as listOpenIssues above
+   *  (so the same dedup code reads both — see parseIssuesConnectionPage), with two deliberate
+   *  differences: `states: CLOSED` and a `first` that IS the hard bound (RECENTLY_CLOSED_ISSUES_
+   *  LIMIT is well under GraphQL's 100-per-page ceiling, so one page is the whole read — no
+   *  pagination loop, no incompleteness throw, same "bounded backstop, not a completeness read"
+   *  contract as before). `orderBy: UPDATED_AT DESC` is GraphQL's native equivalent of the old
+   *  `sort:updated-desc` search qualifier — GitHub's issue list has no closed-at sort, and an
+   *  issue's close is an update, so recently-updated is the available proxy for recently-closed.
+   *  It can drag in an old issue someone just commented on — a harmless extra dedup candidate,
+   *  the failure direction this read should favour. */
   async listRecentlyClosedIssues(): Promise<Issue[]> {
     const out = await this.gh([
       "api",
-      `repos/${this.cfg.board.owner}/${this.repo()}/issues?state=closed&sort=updated&direction=desc&per_page=${RECENTLY_CLOSED_ISSUES_LIMIT}`,
+      "graphql",
+      "-f",
+      `query=${RECENTLY_CLOSED_ISSUES_QUERY}`,
+      "-f",
+      `owner=${this.cfg.board.owner}`,
+      "-f",
+      `repo=${this.repo()}`,
+      "-F",
+      `first=${RECENTLY_CLOSED_ISSUES_LIMIT}`,
     ]);
-    return parseIssueList(out);
+    return parseIssuesConnectionPage(out).issues;
   }
 
+  /** #1163: selectPlanTriageCandidates' own doc explains why board membership alone is not
+   *  trusted here (unlike the pool/decompose gates) — this is the one place that filters its
+   *  output through filterTrustedAuthors before a triage-drafting session ever sees a candidate's
+   *  title/body. */
   async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
     const project = await this.fetchProject();
-    return selectPlanTriageCandidates(project, this.cfg);
+    const candidates = selectPlanTriageCandidates(project, this.cfg);
+    const filtered = filterTrustedAuthors(candidates, await this.getAuthenticatedActor());
+    this.announceWithheld("plan-triage", filtered.withheld);
+    return filtered.entries;
   }
 
   async getIssueMeta(issue: number): Promise<IssueMeta> {
@@ -2052,6 +2087,14 @@ export interface ProjectItem {
   labels: string[];
   status: string | null; // current Status single-select value, if set
   milestone: string | null; // #86: GitHub milestone title, or null if unassigned
+  // #1163: GitHub login, or null when the issue's author is a deleted account (GraphQL's own
+  // shape). parseProject always supplies a determinate value (defaulting to null, same
+  // convention as `milestone` above); optional only so pre-#1163 ParsedProject fixtures/fakes
+  // built by hand (rather than through parseProject) keep typechecking. selectPlanTriageCandidates
+  // threads this through to Issue.author so GithubForge.getIssuesNeedingPlanTriage can run the
+  // SAME filterTrustedAuthors test #1070 applies to PR comments/reviews.
+  author?: string | null;
+  authorAssociation?: string | null;
 }
 
 export interface ParsedProject {
@@ -2169,6 +2212,8 @@ query($login: String!, $number: Int!, $after: String) {
               repository { nameWithOwner }
               labels(first: 100) { nodes { name } }
               milestone { title }
+              author { login }
+              authorAssociation
             }
           }
           # first:100 — an item has at most one value per project field, and GitHub caps a
@@ -2340,6 +2385,8 @@ export function parseProject(json: string, statusField: string): ParsedProject {
       labels: (n.content.labels?.nodes ?? []).map((l) => l.name),
       status: statusValue(n, statusField),
       milestone: n.content.milestone?.title ?? null,
+      author: n.content.author?.login ?? null,
+      authorAssociation: n.content.authorAssociation ?? null,
     }));
   return {
     projectId: proj.id,
@@ -2364,6 +2411,8 @@ interface RawItem {
     repository?: { nameWithOwner?: string };
     labels?: { nodes?: { name: string }[] };
     milestone?: { title?: string } | null;
+    author?: { login?: string } | null;
+    authorAssociation?: string | null;
   };
   fieldValues?: { nodes?: { name?: string; field?: { name?: string } }[] };
 }
@@ -3142,10 +3191,7 @@ function isPoolEligible(labels: string[], l: ReadyCfg["labels"]): boolean {
  *  isPoolEligible's doc for why this is a body-independent label check, not a dispatchability
  *  union). The round pool's candidate source — see IForge.getPoolEligibleIssues' doc for the
  *  deadlock this widening avoids and what stays narrow (executing-phase dispatch).
- *  #1163 audit: `ProjectItem` (this function's only input, via `project.items`) carries no
- *  author field at all — candidacy here is gated purely on board Status, a value only a repo
- *  collaborator can set, so an untrusted issue author cannot self-promote into this set the way
- *  #1070 closed off for PR comments/reviews. See docs/security.md. */
+ *  Ready and split are explicit trusted-promotion boundaries; authorship cannot replace them. */
 export function selectPoolEligibleIssues(project: ParsedProject, cfg: ReadyCfg): Issue[] {
   const fullName = `${cfg.board.owner}/${cfg.board.repo}`;
   return project.items
@@ -3180,11 +3226,13 @@ function needsPlanTriage(body: string, labels: string[], l: ReadyCfg["labels"]):
 
 /** OPEN + this repo + still lacking a verification plan (#89). The PO/triage peripheral's
  *  candidate set — deliberately NOT scoped to the Ready lane (see needsPlanTriage above).
- *  #1163 audit: candidacy here is board MEMBERSHIP (this function only ever sees `project.items`,
- *  never the wider open-issue list) plus label state — both are collaborator-only actions, so an
- *  issue a stranger opened is a candidate only after a human/workflow already added it to the
- *  board (this repo's project has no such auto-add automation — see docs/security.md). Same
- *  reasoning as selectPoolEligibleIssues' #1163 note above. */
+ *  #1163: unlike selectPoolEligibleIssues/isDecomposeCandidate, board membership here is NOT a
+ *  trusted-promotion gate — this function scopes on Status-independent membership plus label
+ *  state, and a ProjectV2 board can gain items via an automatic-add workflow, so the generic
+ *  engine cannot assume every member issue was placed there by a human. author/authorAssociation
+ *  are threaded through UNCHANGED for that reason: GithubForge.getIssuesNeedingPlanTriage runs
+ *  this function's output through filterTrustedAuthors before a session ever sees it — see that
+ *  method and docs/security/adjudication.md's public/private threat-model split. */
 export function selectPlanTriageCandidates(project: ParsedProject, cfg: ReadyCfg): Issue[] {
   const fullName = `${cfg.board.owner}/${cfg.board.repo}`;
   return project.items
@@ -3197,6 +3245,8 @@ export function selectPlanTriageCandidates(project: ParsedProject, cfg: ReadyCfg
       labels: it.labels,
       body: it.body,
       ...(it.milestone != null ? { milestone: it.milestone } : {}),
+      ...(it.author !== undefined ? { author: it.author } : {}),
+      ...(it.authorAssociation !== undefined ? { authorAssociation: it.authorAssociation } : {}),
     }));
 }
 
@@ -3900,40 +3950,114 @@ export function parsePRComments(json: string): PRComment[] {
   }));
 }
 
-/** Pure parse of `gh api repos/.../issues?state=...` (REST; listOpenIssues' `--paginate --slurp`
- *  read, or listRecentlyClosedIssues' single bounded page — same `Raw[] | Raw[][]` page-shape
- *  convention as parsePRComments above). #1163: `author_association` travels through
- *  UNCONDITIONALLY (`?? null`, never omitted) — REST always populates this field for a real
- *  issue, so a caller that skips it would be lying about "not fetched"; filterTrustedAuthors'
- *  provenance-required design treats an omitted key as a transport failure, not a trust
- *  decision, and that distinction only holds if a successful fetch never omits it.
- *  GitHub's issues endpoint interleaves pull requests with issues (a PR IS an issue by REST's
- *  own data model) — `pull_request` presence is the one field that tells them apart, so it is
- *  the exclusion test here rather than a second query. */
-export function parseIssueList(json: string): Issue[] {
-  type Raw = {
-    number: number;
-    title: string;
-    body?: string;
-    labels: Array<{ name: string }>;
-    milestone: { title: string } | null;
-    author_association?: string | null;
-    user?: { login?: string } | null;
-    pull_request?: unknown;
+/** listOpenIssues' bounded GraphQL read — `repository.issues` (issue-only; unlike REST's
+ *  interleaved issues-or-PRs endpoint, no `pull_request` exclusion test is needed). `states: OPEN`
+ *  is server-side, so an interleaved open PR can never inflate the page count the way REST's
+ *  `--paginate --slurp` over the raw issues-or-PRs endpoint could (see listOpenIssues' doc). */
+export const OPEN_ISSUES_QUERY = `
+query($owner: String!, $repo: String!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    issues(first: 100, after: $after, states: OPEN) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number title body
+        labels(first: 100) { nodes { name } }
+        milestone { title }
+        author { login }
+        authorAssociation
+      }
+    }
+  }
+}`;
+
+/** listRecentlyClosedIssues' single-page GraphQL read — same node shape as OPEN_ISSUES_QUERY,
+ *  `states: CLOSED` and `orderBy: UPDATED_AT DESC` in place of `states: OPEN`/pagination (see
+ *  that method's own doc for why `$first` IS the hard bound here, never an incompleteness
+ *  throw). */
+export const RECENTLY_CLOSED_ISSUES_QUERY = `
+query($owner: String!, $repo: String!, $first: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issues(first: $first, states: CLOSED, orderBy: { field: UPDATED_AT, direction: DESC }) {
+      nodes {
+        number title body
+        labels(first: 100) { nodes { name } }
+        milestone { title }
+        author { login }
+        authorAssociation
+      }
+    }
+  }
+}`;
+
+/** Pure parse of one `repository.issues` connection page (OPEN_ISSUES_QUERY or
+ *  RECENTLY_CLOSED_ISSUES_QUERY — same node shape). #1163: `author`/`authorAssociation` both
+ *  travel through with the SAME presence they arrived with — a key GraphQL omitted (malformed
+ *  response) stays omitted on the Issue, which is what makes filterTrustedAuthors' "an absent
+ *  key is a transport failure" throw fire; a key GraphQL populated with `null` (its own shape for
+ *  a deleted account, or a real association-less association) stays explicit `null`, which
+ *  filterTrustedAuthors treats as a determinate untrusted result, never a throw. Collapsing
+ *  either key's absence into a fabricated `null` (or vice versa) would defeat that distinction —
+ *  see Issue.author's own doc. */
+function parseIssuesConnectionPage(json: string): { issues: Issue[]; hasNextPage: boolean; endCursor: string | null } {
+  const d = JSON.parse(json) as {
+    data?: {
+      repository?: {
+        issues?: {
+          pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+          nodes?: Array<{
+            number?: number;
+            title?: string;
+            body?: string | null;
+            labels?: { nodes?: { name: string }[] };
+            milestone?: { title?: string } | null;
+            author?: { login?: string } | null;
+            authorAssociation?: string | null;
+          }>;
+        };
+      };
+    };
   };
-  const parsed = JSON.parse(json) as Raw[] | Raw[][];
-  const arr = parsed.flatMap((p) => (Array.isArray(p) ? p : [p]));
-  return arr
-    .filter((i) => i.pull_request === undefined)
-    .map((i) => ({
-      number: i.number,
-      title: i.title,
-      ...(i.body !== undefined ? { body: i.body } : {}),
-      labels: i.labels.map((label) => label.name),
-      ...(i.milestone ? { milestone: i.milestone.title } : {}),
-      ...(i.user?.login !== undefined ? { author: i.user.login } : {}),
-      authorAssociation: i.author_association ?? null,
-    }));
+  const conn = d.data?.repository?.issues;
+  const issues = (conn?.nodes ?? []).map((n) => ({
+    number: n.number ?? 0,
+    title: n.title ?? "",
+    body: n.body ?? "", // a null body (GitHub's shape for "no description") must not escape Issue.body's `string` type.
+    labels: (n.labels?.nodes ?? []).map((l) => l.name),
+    ...(n.milestone?.title != null ? { milestone: n.milestone.title } : {}),
+    ...(n.author !== undefined ? { author: n.author?.login ?? null } : {}),
+    ...(n.authorAssociation !== undefined ? { authorAssociation: n.authorAssociation } : {}),
+  }));
+  return {
+    issues,
+    hasNextPage: conn?.pageInfo?.hasNextPage ?? false,
+    endCursor: conn?.pageInfo?.endCursor ?? null,
+  };
+}
+
+/** Exported wrapper of parseIssuesConnectionPage for direct parser tests (same split as
+ *  parsePRCommentsPage/parsePRReviewsPage above their own connection-page parsers). */
+export function parseIssuesPage(json: string): Issue[] {
+  return parseIssuesConnectionPage(json).issues;
+}
+
+/** Bounded GraphQL reader for `repository.issues(states: OPEN)` — OPEN_ISSUES_PAGE_CEILING pages
+ *  at 100/page mirrors OPEN_ISSUES_LIMIT, checked as each page arrives so a huge open backlog can
+ *  make at most that many gh calls before this returns (see listOpenIssues' doc for why that
+ *  matters). Same "connection ceiling, not a visible-cap boundary" contract and page-loop shape
+ *  as fetchAllPRComments/fetchAllPRReviews above — pageCapped is the caller's own signal to
+ *  decide what an exhausted ceiling means for its read; listOpenIssues throws on it. */
+export async function fetchAllOpenIssues(
+  fetchPage: (after: string | null) => Promise<string>,
+): Promise<{ issues: Issue[]; pageCapped: boolean }> {
+  const issues: Issue[] = [];
+  let after: string | null = null;
+  for (let page = 0; page < OPEN_ISSUES_PAGE_CEILING; page++) {
+    const parsed = parseIssuesConnectionPage(await fetchPage(after));
+    issues.push(...parsed.issues);
+    if (!parsed.hasNextPage || !parsed.endCursor) return { issues, pageCapped: false };
+    after = parsed.endCursor;
+  }
+  return { issues, pageCapped: true };
 }
 
 /** Pure parse of `gh api .../commits?since=... --paginate --slurp` (same page-shape convention
