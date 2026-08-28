@@ -168,8 +168,8 @@ adjudicated, not that every comment's current text was seen.
   allowlist are dropped at five forge reads (issue/PR comments, reviews, review threads, tails);
   missing author provenance fails the whole read. The same `filterTrustedAuthors` test also covers
   issues themselves: the PO/align backlog digest (`align.ts::buildBacklogDigest`) withholds an
-  untrusted-author issue's title/body — both the open and recently-closed halves — showing only an
-  aggregate count in its place. Plan-triage candidate selection (`getIssuesNeedingPlanTriage`) is
+  untrusted-author issue's rendered title — both the open and recently-closed halves — showing only
+  an aggregate count in its place. Plan-triage candidate selection (`getIssuesNeedingPlanTriage`) is
   author-filtered the same way: a ProjectV2 board can gain items via an automatic-add workflow, so
   board membership there is NOT a trusted-promotion gate the generic engine can rely on — a
   candidate's own title/body only reaches the triage-drafting session after passing

@@ -3658,6 +3658,31 @@ test("listOpenIssues #1163: pages to exhaustion (hasNextPage false before the ce
   assert.deepEqual(seenAfter, ["after=null", "after=cursor-1"]);
 });
 
+test("listOpenIssues #1163 (gate② round 2 P2): a page reporting hasNextPage:true with NO endCursor is a malformed response — fails closed instead of returning it as a complete (pageCapped: false) backlog, which would let a duplicate slip past dedup", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () =>
+    issuesConnectionPage([{ number: 1, title: "page one" }], { hasNextPage: true, endCursor: null });
+  await assert.rejects(() => forge.listOpenIssues(), /hasNextPage without endCursor/);
+});
+
+test("listOpenIssues #1163 (gate② round 2 P3, complement of the partial-ceiling test above): exactly OPEN_ISSUES_PAGE_CEILING full pages with the LAST one reporting hasNextPage:false is a COMPLETE read, not a ceiling rejection — proves the reader doesn't throw unconditionally once it reaches the ceiling", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  let calls = 0;
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => {
+    calls += 1;
+    const isLastPage = calls === OPEN_ISSUES_PAGE_CEILING;
+    return issuesConnectionPage(
+      Array.from({ length: 100 }, (_, i) => ({ number: calls * 1000 + i, title: `issue ${calls}-${i}` })),
+      { hasNextPage: !isLastPage, endCursor: isLastPage ? null : `cursor-${calls}` },
+    );
+  };
+  const issues = await forge.listOpenIssues();
+  assert.equal(issues.length, OPEN_ISSUES_LIMIT);
+  assert.equal(calls, OPEN_ISSUES_PAGE_CEILING);
+});
+
 test("listRecentlyClosedIssues #528/#1163: one BOUNDED closed-issue GraphQL read, same fields (incl. author provenance) as listOpenIssues — an issue-only query, never REST's issues-or-PRs endpoint", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(cfg);
@@ -4004,6 +4029,59 @@ test("selectPlanTriageCandidates #1163: threads author/authorAssociation through
   assert.deepEqual(candidates, [
     { number: 100, title: "planless, stranger-authored", labels: [], body: "no plan yet", author: "stranger", authorAssociation: "NONE" },
   ]);
+});
+
+// A raw ProjectV2 GraphQL response for one `content` node, letting a test omit a key entirely
+// (rather than parseProject's fixtures elsewhere, which always fill author/authorAssociation).
+function projectResponseWithOneItem(content: Record<string, unknown>): string {
+  return JSON.stringify({
+    data: {
+      user: {
+        projectV2: {
+          id: "PVT_p",
+          field: { id: "PVTF_s", options: [] },
+          items: {
+            nodes: [{ id: "ITEM_1", content, fieldValues: { nodes: [] } }],
+          },
+        },
+      },
+    },
+  });
+}
+
+test("parseProject → selectPlanTriageCandidates → filterTrustedAuthors #1163 (gate② round 2 P2): parseProject preserves an ABSENT provenance key as absent rather than coercing it to `null` — a ProjectV2 response missing `authorAssociation` still throws downstream through the SAME filterTrustedAuthors test, while an explicit `author: null` (deleted account) is withheld, never a throw", () => {
+  const deletedAuthorProject = parseProject(
+    projectResponseWithOneItem({
+      number: 1,
+      title: "deleted-account issue",
+      state: "OPEN",
+      body: "planless",
+      repository: { nameWithOwner: "herehigher/sapwood" },
+      labels: { nodes: [] },
+      author: null, // GraphQL's own shape for a deleted account.
+      authorAssociation: null,
+    }),
+    "Status",
+  );
+  const deletedAuthorCandidates = selectPlanTriageCandidates(deletedAuthorProject, cfg);
+  assert.deepEqual(filterTrustedAuthors(deletedAuthorCandidates, null), { entries: [], visibleTotal: 0, withheld: 1 });
+
+  const malformedProject = parseProject(
+    projectResponseWithOneItem({
+      number: 2,
+      title: "malformed provenance",
+      state: "OPEN",
+      body: "planless",
+      repository: { nameWithOwner: "herehigher/sapwood" },
+      labels: { nodes: [] },
+      author: { login: "stranger" },
+      // authorAssociation key is entirely absent: an incomplete/malformed response, not a
+      // determinate "no association" result.
+    }),
+    "Status",
+  );
+  const malformedCandidates = selectPlanTriageCandidates(malformedProject, cfg);
+  assert.throws(() => filterTrustedAuthors(malformedCandidates, null), /forge author provenance is incomplete/);
 });
 
 test("GithubForge.getIssuesNeedingPlanTriage #1163: a NONE-associated planless issue already on the board is not returned — board membership alone is not a trusted-promotion gate here", async () => {

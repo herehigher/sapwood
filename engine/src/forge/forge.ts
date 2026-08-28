@@ -1601,14 +1601,15 @@ export class GithubForge implements IForge {
   async listOpenIssues(): Promise<Issue[]> {
     // Keep this separate from listOpenIssueNumbers: that smaller read is also the cheap forge
     // reachability probe, while the PO digest needs richer fields, milestone scoping, and (#1163)
-    // author provenance. GraphQL exposes authorAssociation on an issue directly; the `gh issue
-    // list --json` shorthand this used before #1163 has no such field at all. GraphQL over REST
-    // `--paginate --slurp` for a second reason too: `repository.issues` is issue-only by
-    // construction (unlike REST's issues-or-PRs endpoint), and fetchAllOpenIssues bounds the walk
-    // to a FIXED page ceiling checked as each page arrives — `--paginate --slurp` would instead
-    // exhaust every page (however many that is, PRs included) before this method ever got to look
-    // at the count, so a huge repo could make many multiples of the intended worst-case call
-    // count before the incompleteness throw below ever fires.
+    // author provenance.
+    // GraphQL supplies author provenance, excludes PRs server-side, and exposes pageInfo
+    // so completeness is decided within the ten-call ceiling.
+    // GraphQL over REST `--paginate --slurp` for a second reason too: `repository.issues` is
+    // issue-only by construction (unlike REST's issues-or-PRs endpoint), and fetchAllOpenIssues
+    // bounds the walk to a FIXED page ceiling checked as each page arrives — `--paginate --slurp`
+    // would instead exhaust every page (however many that is, PRs included) before this method
+    // ever got to look at the count, so a huge repo could make many multiples of the intended
+    // worst-case call count before the incompleteness throw below ever fires.
     const page = await fetchAllOpenIssues((after) =>
       this.gh([
         "api",
@@ -1639,11 +1640,11 @@ export class GithubForge implements IForge {
    *  differences: `states: CLOSED` and a `first` that IS the hard bound (RECENTLY_CLOSED_ISSUES_
    *  LIMIT is well under GraphQL's 100-per-page ceiling, so one page is the whole read — no
    *  pagination loop, no incompleteness throw, same "bounded backstop, not a completeness read"
-   *  contract as before). `orderBy: UPDATED_AT DESC` is GraphQL's native equivalent of the old
-   *  `sort:updated-desc` search qualifier — GitHub's issue list has no closed-at sort, and an
-   *  issue's close is an update, so recently-updated is the available proxy for recently-closed.
-   *  It can drag in an old issue someone just commented on — a harmless extra dedup candidate,
-   *  the failure direction this read should favour. */
+   *  contract as above). UPDATED_AT descending keeps the bounded closed slice on the recent tail.
+   *  GitHub's issue list has no closed-at sort, and an issue's close is an update, so
+   *  recently-updated is the available proxy for recently-closed. It can drag in an old issue
+   *  someone just commented on — a harmless extra dedup candidate, the failure direction this
+   *  read should favour. */
   async listRecentlyClosedIssues(): Promise<Issue[]> {
     const out = await this.gh([
       "api",
@@ -2088,11 +2089,10 @@ export interface ProjectItem {
   status: string | null; // current Status single-select value, if set
   milestone: string | null; // #86: GitHub milestone title, or null if unassigned
   // #1163: GitHub login, or null when the issue's author is a deleted account (GraphQL's own
-  // shape). parseProject always supplies a determinate value (defaulting to null, same
-  // convention as `milestone` above); optional only so pre-#1163 ParsedProject fixtures/fakes
-  // built by hand (rather than through parseProject) keep typechecking. selectPlanTriageCandidates
-  // threads this through to Issue.author so GithubForge.getIssuesNeedingPlanTriage can run the
-  // SAME filterTrustedAuthors test #1070 applies to PR comments/reviews.
+  // shape). Omitted provenance denotes an incomplete response; explicit null denotes a deleted
+  // author. selectPlanTriageCandidates threads this through to Issue.author so
+  // GithubForge.getIssuesNeedingPlanTriage can run the SAME filterTrustedAuthors test #1070
+  // applies to PR comments/reviews.
   author?: string | null;
   authorAssociation?: string | null;
 }
@@ -2385,8 +2385,8 @@ export function parseProject(json: string, statusField: string): ParsedProject {
       labels: (n.content.labels?.nodes ?? []).map((l) => l.name),
       status: statusValue(n, statusField),
       milestone: n.content.milestone?.title ?? null,
-      author: n.content.author?.login ?? null,
-      authorAssociation: n.content.authorAssociation ?? null,
+      ...(n.content.author !== undefined ? { author: n.content.author?.login ?? null } : {}),
+      ...(n.content.authorAssociation !== undefined ? { authorAssociation: n.content.authorAssociation } : {}),
     }));
   return {
     projectId: proj.id,
@@ -4054,7 +4054,8 @@ export async function fetchAllOpenIssues(
   for (let page = 0; page < OPEN_ISSUES_PAGE_CEILING; page++) {
     const parsed = parseIssuesConnectionPage(await fetchPage(after));
     issues.push(...parsed.issues);
-    if (!parsed.hasNextPage || !parsed.endCursor) return { issues, pageCapped: false };
+    if (!parsed.hasNextPage) return { issues, pageCapped: false };
+    if (!parsed.endCursor) throw new Error("fetchAllOpenIssues: hasNextPage without endCursor");
     after = parsed.endCursor;
   }
   return { issues, pageCapped: true };

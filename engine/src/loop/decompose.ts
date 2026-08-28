@@ -67,7 +67,7 @@ export function defaultPoDecomposePromptPath(): string {
 
 /** Human split is a fresh signature even on origin:agent; without it agent-created issues are
  * never autonomous candidates. decomposed is the one-way machine fence.
- * Ready and split are explicit trusted-promotion boundaries; authorship cannot replace them. */
+ * `split` is an explicit trusted-promotion boundary; authorship cannot replace it. */
 export function isDecomposeCandidate(issue: Issue, cfg: SapwoodConfig): boolean {
   return (
     labelsInclude(issue.labels, cfg.labels.split) &&
