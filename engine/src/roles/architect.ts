@@ -62,7 +62,7 @@ import { capDigest } from "../retro/retro-digest.js";
 import { hashBody } from "../review/ac-snapshot.js";
 import type { InputManifestRow, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
-import { extractMarkdownSections } from "../util/markdown.js";
+import { extractMarkdownSections, stripHtmlComments } from "../util/markdown.js";
 import {
   ARCHITECT_ALLOWED_TOOLS,
   envFailureHook,
@@ -350,8 +350,11 @@ function loadGoalExcerptWithStatus(path: string): {
       architectureFound: false,
     };
   }
-  const constraints = extractConstraintsSection(text);
-  const architecture = extractArchitectureChapter(text);
+  // Strip comments before heading detection so headings inside authoring guidance cannot become
+  // real sections; a present bare heading remains found.
+  const promptText = stripHtmlComments(text);
+  const constraints = extractConstraintsSection(promptText);
+  const architecture = extractArchitectureChapter(promptText);
   return {
     excerpt: [constraints ?? constraintsPlaceholder(path), architecture ?? architecturePlaceholder(path)].join("\n\n"),
     ok: true,

@@ -64,11 +64,51 @@ test("loadDoctrine: repo content over maxChars is deterministically truncated wi
   }
 });
 
+// ── #830: HTML comments in the repo doctrine file must never reach the composed prompt text ────
+
+test("loadDoctrine: strips an HTML comment shaped like doctrine-template.md's leading header from the repo part, leaving the plain-prose control content intact", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-doctrine-"));
+  try {
+    const path = join(dir, "REVIEW-DOCTRINE.md");
+    const content = [
+      "<!--",
+      "  sapwood review doctrine — this repository's own review knowledge, read by the worker",
+      "  dispatch brief. Configured as `doctrine.file` in sapwood.config.yaml (default:",
+      "  docs/REVIEW-DOCTRINE.md).",
+      "-->",
+      "",
+      "# Review doctrine",
+      "",
+      "REAL_INVARIANT_CONTROL_LINE",
+    ].join("\n");
+    writeFileSync(path, content);
+    const result = loadDoctrine(path, 10_000);
+    assert.ok(!result.includes("<!--"), "the HTML comment must be stripped from the composed doctrine text");
+    assert.ok(!result.includes("Configured as `doctrine.file`"), "the comment's config-key sentence must not reach the prompt");
+    assert.ok(result.includes("# Review doctrine"), "plain-prose heading survives the strip");
+    assert.ok(result.includes("REAL_INVARIANT_CONTROL_LINE"), "plain-prose control content survives the strip");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("loadDoctrine: an empty repo file (exists, zero bytes) is NOT treated as absent — core + empty repo part, never NO_REPO_DOCTRINE", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-doctrine-"));
   try {
     const path = join(dir, "REVIEW-DOCTRINE.md");
     writeFileSync(path, "");
+    assert.equal(loadDoctrine(path, 1000), `${CORE_TEXT}\n\n`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A present comments-only file has the same semantic repo part as a present zero-byte file.
+test("loadDoctrine: a repo file containing ONLY an HTML comment normalizes to an empty repo part, byte-identical to the zero-bytes-file case above — never a whitespace remainder", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-doctrine-"));
+  try {
+    const path = join(dir, "REVIEW-DOCTRINE.md");
+    writeFileSync(path, "<!-- nothing but scaffold guidance here -->\n");
     assert.equal(loadDoctrine(path, 1000), `${CORE_TEXT}\n\n`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -143,6 +183,20 @@ test("#419: the loaded doctrine (core + repo part) never reintroduces the retrac
   const cfg = loadConfig(REPO_CONFIG_PATH);
   const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
   assert.doesNotMatch(loaded, /bounded and recoverable/i);
+});
+
+// Cross-artifact check: the configured repo doctrine uses the generic load path without
+// modifying its source file. Reads the leading comment straight off the live file rather than
+// pinning its exact wording, so an ordinary doctrine edit can't false-fail this test; syntax
+// preservation (a comment-shaped marker inside a backtick span surviving the strip) is already
+// pinned by markdown.test.ts's own unit for stripHtmlComments.
+test("#830: this repo's own docs/REVIEW-DOCTRINE.md loads with its leading guidance comment stripped", () => {
+  const cfg = loadConfig(REPO_CONFIG_PATH);
+  const rawFile = readFileSync(cfg.doctrine.file, "utf8");
+  const leadingComment = rawFile.match(/^<!--[\s\S]*?-->/)?.[0];
+  assert.ok(leadingComment, "sanity: the on-disk file itself still carries a leading HTML comment (never edited by this fix)");
+  const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
+  assert.ok(!loaded.includes(leadingComment), "the leading guidance comment must not reach the composed doctrine text");
 });
 
 test("#411: this repo's own repo part is under doctrine.maxChars with NO truncation marker (not silently cut)", () => {

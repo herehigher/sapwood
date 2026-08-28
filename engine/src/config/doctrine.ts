@@ -22,6 +22,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { capDigest } from "../retro/retro-digest.js";
+import { stripHtmlComments } from "../util/markdown.js";
 
 /** Resolve the shipped, framework-owned doctrine core — inside the engine package (NOT the
  *  orchestrated target repo), the same `join(here, "..", "..", "prompts", …)` shape as
@@ -44,16 +45,20 @@ export const NO_REPO_DOCTRINE =
  *  engine-agent reviewer). The core is read fresh from `defaultDoctrineCorePath()` every call
  *  (same "load once at the real call site, never cached across engine construction" convention
  *  `loadDoctrine` has always had) and its absence is a fail-fast packaging bug, naming the path —
- *  there is no legal "missing core" state, unlike the repo part below. `repoPart` is
- *  `capDigest(repoText, maxChars)` when `path` exists (bounded/truncated deterministically, same
- *  marked-cut-never-silent-drop contract as round.directive / the architect's lastMerged text),
+ *  there is no legal "missing core" state, unlike the repo part below. `repoPart` is the repo
+ *  file's cleaned content passed through `capDigest` when `path` exists (bounded/truncated
+ *  deterministically, same marked-cut-never-silent-drop contract as round.directive / the
+ *  architect's lastMerged text),
  *  else the explicit `NO_REPO_DOCTRINE` sentence — `maxChars` bounds the repo part ONLY; the core
  *  is release-controlled and fixed-size by construction (its own ceiling is a CI test, not
  *  config). A repo file that IS present but unreadable still throws, naming the path — a
  *  misconfiguration, not "no doctrine adopted." `corePath` defaults to the real shipped location
  *  and exists only as a test seam (a missing-core throw is otherwise unreachable without moving
  *  the real installed file, racing every other concurrently running suite that also calls
- *  `loadDoctrine`); every production caller omits it and gets the real path. */
+ *  `loadDoctrine`); every production caller omits it and gets the real path.
+ *
+ *  Closed HTML comments outside Markdown code are removed before capping so scaffold guidance
+ *  neither consumes the doctrine budget nor reaches a raw prompt. */
 export function loadDoctrine(path: string, maxChars: number, corePath: string = defaultDoctrineCorePath()): string {
   if (!existsSync(corePath)) {
     throw new Error(`doctrine core missing at ${corePath} — a packaging bug, refusing to proceed`);
@@ -69,7 +74,9 @@ export function loadDoctrine(path: string, maxChars: number, corePath: string = 
     } catch (e) {
       throw new Error(`doctrine.file present but unreadable: ${path} (${String(e)}) — refusing to proceed`);
     }
-    repoPart = capDigest(text, maxChars);
+    // Normalize comment-only content so a present semantically empty file follows the existing empty-file contract.
+    const cleaned = stripHtmlComments(text);
+    repoPart = capDigest(cleaned.trim() === "" ? "" : cleaned, maxChars);
   }
   return `${core}\n\n${repoPart}`;
 }

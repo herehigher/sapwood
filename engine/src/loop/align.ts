@@ -52,6 +52,7 @@ import {
 import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.js";
 import type { InputManifestRow, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
+import { stripHtmlComments } from "../util/markdown.js";
 import { issuePriority } from "./conductor.js";
 import { runDecompositionPass } from "./decompose.js";
 import { type Concern, ConcernSchema, postConcerns, validateConcerns } from "./dissent.js";
@@ -1938,7 +1939,9 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           const alignPrompt = renderRolePrompt(template, NO_ISSUE, deps.cfg, {
             "po.mode": "align",
             "round.milestone": deps.cfg.round.milestone ?? "(none configured for this round — decompose against the goal file alone)",
-            "plan.md": planRead.content,
+            // Remove scaffold authoring guidance from the in-memory prompt input; readPlanMd
+            // leaves the configured file unchanged.
+            "plan.md": stripHtmlComments(planRead.content),
             "round.directive": directive,
             "backlog.digest": backlogDigest.text,
           });

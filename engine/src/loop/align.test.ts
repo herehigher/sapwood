@@ -2780,6 +2780,56 @@ test("createAligningStub #215: a pre-existing custom PO prompt without {{backlog
   }
 });
 
+// ── #830: HTML comments in the goal file must never reach the po-align session's {{plan.md}} ──
+
+test("#830: createAligningStub — a goal file shaped like goal-template.md's HTML-comment authoring guidance never reaches the po-align session's rendered {{plan.md}}, while the real goal prose does", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-goalfile-html-comment-"));
+  try {
+    const goalPath = join(dir, "GOAL.md");
+    // Same shape as engine/prompts/goal-template.md: an inline HTML comment authoring guidance
+    // to the human customizing the scaffold, alongside real goal prose.
+    writeFileSync(
+      goalPath,
+      [
+        "<!-- Fill in each section for this project, then delete these HTML comments (or leave",
+        "     them — they're invisible in rendered markdown). -->",
+        "",
+        "# Goal",
+        "",
+        "REAL_GOAL_PROSE_CONTROL_LINE",
+        "",
+      ].join("\n"),
+    );
+    const forge = new FakeForge();
+    const cfg = mkCfg({ goal: { file: goalPath } });
+    const runner = new ScriptedRunner([doneResult("po-align-1", alignResultText([]))]);
+    const state = new State(":memory:");
+    const deps: AlignDeps = { now: realClock, forge, state, cfg, runner };
+    await createAligningStub(deps).run({ roundId: 1, phase: "aligning", marker: null });
+    const prompt = runner.calls[0]!.prompt;
+    // po.md itself legitimately teaches sessions the literal `<!-- sapwood:ac -->` anchor syntax
+    // elsewhere in its instructions (unrelated to #830) — so the assertion is scoped to exactly
+    // the substituted `<plan-md>...</plan-md>` block (po.md's own wrapper around {{plan.md}}),
+    // not the whole rendered prompt.
+    const planMdStart = prompt.indexOf("<plan-md>") + "<plan-md>".length;
+    const planMdEnd = prompt.indexOf("</plan-md>");
+    assert.ok(planMdStart > 0 && planMdEnd > planMdStart, "expected po.md's <plan-md> wrapper around the substituted goal-file content");
+    const planMdSection = prompt.slice(planMdStart, planMdEnd);
+    assert.ok(!planMdSection.includes("<!--"), "the substituted goal-file content must carry no HTML comment marker");
+    assert.ok(!planMdSection.includes("-->"));
+    assert.ok(
+      !planMdSection.includes("they're invisible in rendered markdown"),
+      "the scaffold's own authoring-guidance sentence must not leak in",
+    );
+    // The real goal prose alongside the comment must still reach the session — this is a
+    // targeted strip, not a wholesale drop of {{plan.md}}.
+    assert.ok(planMdSection.includes("REAL_GOAL_PROSE_CONTROL_LINE"));
+    state.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("#128: a real caller (deps.planMdPath omitted) renders {{plan.md}} from cfg.goal.file, the single resolved north-star path", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-goalfile-"));
   try {
