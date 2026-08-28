@@ -4,7 +4,7 @@
 [![npm version](https://img.shields.io/npm/v/sapwood/alpha)](https://www.npmjs.com/package/sapwood)
 [![node >= 24](https://img.shields.io/badge/node-%E2%89%A524-blue)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/herehigher/sapwood/badge)](https://securityscorecards.dev/viewer/?uri=github.com/herehigher/sapwood)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/herehigher/sapwood/badge)](https://scorecard.dev/viewer/?uri=github.com/herehigher/sapwood)
 
 English · [日本語](README.ja.md) · [简体中文](README.zh-CN.md)
 
