@@ -15,7 +15,6 @@ import {
   compareSemver,
   type Deps,
   type Exec,
-  type ExecOptions,
   extractUnreleasedBody,
   extractVersionSection,
   formatBuildStamp,
@@ -25,14 +24,16 @@ import {
   npmDistTag,
   PUBLISH_STEPS,
   type PublishContext,
-  parseOtpArg,
+  RELEASE_WORKFLOW,
   readManifestVersion,
   runCatalogPromote,
+  runDistTag,
   runPrepare,
   runPublish,
   runWindowsSmoke,
   validateReleaseVersion,
   WINDOWS_SMOKE_WORKFLOW,
+  waitForReleaseWorkflow,
   writeManifestVersion,
 } from "./release.ts";
 
@@ -904,8 +905,10 @@ test("runPublish --dry-run: prints --prerelease for an alpha version, runs nothi
     assert.match(r.output, /--dry-run/);
     assert.match(r.output, /--prerelease/);
     assert.match(r.output, /gh release create v0\.3\.0-alpha\.1.*--draft/);
-    assert.match(r.output, /npm publish --workspace engine --tag alpha/);
+    assert.match(r.output, /gh run watch <release\.yml run for v0\.3\.0-alpha\.1, matched by commit aaa> --exit-status/);
     assert.match(r.output, /node scripts\/dashboard-canary\.ts 0\.3\.0-alpha\.1/);
+    // the CI-wait step renders before the canary in the dry-run listing, matching the real order.
+    assert.ok(r.output.indexOf("gh run watch") < r.output.indexOf("dashboard-canary.ts"));
     assert.deepEqual(calls, [
       { file: "git", args: ["fetch", "origin", "main"] },
       { file: "git", args: ["rev-parse", "HEAD"] },
@@ -919,7 +922,7 @@ test("runPublish --dry-run: prints --prerelease for an alpha version, runs nothi
   }
 });
 
-test("runPublish --dry-run: omits --prerelease for a plain release version, npm tag is latest", () => {
+test("runPublish --dry-run: omits --prerelease for a plain release version", () => {
   const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
   try {
     const deps: Deps = { repoRoot: dir, exec: fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }) };
@@ -927,7 +930,7 @@ test("runPublish --dry-run: omits --prerelease for a plain release version, npm 
     assert.equal(r.code, 0);
     assert.doesNotMatch(r.output, /--prerelease/);
     assert.match(r.output, /gh release create v0\.3\.0.*--draft/);
-    assert.match(r.output, /npm publish --workspace engine --tag latest/);
+    assert.match(r.output, /gh run watch <release\.yml run for v0\.3\.0, matched by commit aaa> --exit-status/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1058,14 +1061,38 @@ test("runPublish (real run, not dry-run): exact tag/push/gh-release argv, --prer
     assert.equal(notesFileContents.length, 1);
     assert.equal(notesFileContents[0], extractVersionSection(changelog, version));
 
-    const npmCall = calls.find((c) => c.file === "npm");
-    assert.deepEqual(npmCall?.args, ["publish", "--workspace", "engine", "--tag", "alpha"]);
+    // `npm publish` itself runs inside release.yml's own `npm-publish` job now — this script
+    // only waits for that job's run (found by commit sha, same field windows-smoke matches on).
+    assert.equal(
+      calls.some((c) => c.file === "npm"),
+      false,
+    );
+    // windows-smoke (earlier in PUBLISH_STEPS) also does its own "run list"/"run watch" pair
+    // against a different workflow — pick out release.yml's specifically, and the LAST "run
+    // watch" call (npm-publish's own wait, since it runs after windows-smoke's).
+    const ghRunListCall = calls
+      .filter((c) => c.file === "gh" && c.args[0] === "run" && c.args[1] === "list")
+      .find((c) => c.args.includes(RELEASE_WORKFLOW));
+    assert.deepEqual(ghRunListCall?.args, [
+      "run",
+      "list",
+      "--workflow",
+      RELEASE_WORKFLOW,
+      "--event",
+      "push",
+      "--limit",
+      "5",
+      "--json",
+      "databaseId,headSha",
+    ]);
+    const ghRunWatchCall = calls.filter((c) => c.file === "gh" && c.args[0] === "run" && c.args[1] === "watch").at(-1);
+    assert.deepEqual(ghRunWatchCall?.args, ["run", "watch", "7", "--exit-status"]);
     const canaryCall = calls.find((c) => c.file === "node");
     assert.deepEqual(canaryCall?.args, ["scripts/dashboard-canary.ts", version]);
-    // never `latest` for a pre-release, and the npm step is the LAST step run — it publishes
-    // only once the tag + GitHub Release (the durable "this version shipped" record) exist.
-    assert.ok(calls.indexOf(npmCall!) > calls.indexOf(ghCall!));
-    assert.ok(calls.indexOf(canaryCall!) > calls.indexOf(npmCall!));
+    // the CI-wait step is the LAST publish-shipping step run — it waits only once the tag +
+    // GitHub Release (the durable "this version shipped" record) exist.
+    assert.ok(calls.indexOf(ghRunWatchCall!) > calls.indexOf(ghCall!));
+    assert.ok(calls.indexOf(canaryCall!) > calls.indexOf(ghRunWatchCall!));
     // The draft must exist before the tag exists at all, which must exist before it's pushed:
     // `push-tag` is what triggers release.yml, and that job no longer creates a release on its
     // own if it finds none.
@@ -1076,7 +1103,7 @@ test("runPublish (real run, not dry-run): exact tag/push/gh-release argv, --prer
   }
 });
 
-test("runPublish (real run): --prerelease absent from the gh-release argv for a plain release version, npm tag is latest", () => {
+test("runPublish (real run): --prerelease absent from the gh-release argv for a plain release version", () => {
   const version = "0.3.0";
   const dir = setupPublishRepo(version, READY_CHANGELOG);
   try {
@@ -1099,9 +1126,11 @@ test("runPublish (real run): --prerelease absent from the gh-release argv for a 
       "--generate-notes",
       "--draft",
     ]);
-    const npmCall = calls.find((c) => c.file === "npm");
-    assert.deepEqual(npmCall?.args, ["publish", "--workspace", "engine", "--tag", "latest"]);
-    assert.ok(calls.indexOf(npmCall!) > calls.indexOf(ghCall!));
+    // windows-smoke's own "run watch" comes first (before the tag exists at all); npm-publish's
+    // wait is the LAST one, since it runs after gh-release/tag/push-tag.
+    const ghRunWatchCall = calls.filter((c) => c.file === "gh" && c.args[0] === "run" && c.args[1] === "watch").at(-1);
+    assert.deepEqual(ghRunWatchCall?.args, ["run", "watch", "7", "--exit-status"]);
+    assert.ok(calls.indexOf(ghRunWatchCall!) > calls.indexOf(ghCall!));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1153,119 +1182,62 @@ test("runPublish (real run): a failing draft creation aborts before the tag is p
   }
 });
 
-test("runPublish (real run): npm-publish alone runs with inherited stdio, so npm's web-auth flow can wait on a browser", () => {
-  const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
-  try {
-    const base = fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" });
-    const calls: Array<{ file: string; args: string[]; opts: ExecOptions | undefined }> = [];
-    const exec: Exec = (file, args, cwd, opts) => {
-      calls.push({ file, args: [...args], opts });
-      return base(file, args, cwd);
-    };
-    const deps: Deps = { repoRoot: dir, exec };
-    const r = runPublish(deps, { dryRun: false });
-    assert.equal(r.code, 0, r.output);
-    const npmPublishCall = calls.find((c) => c.file === "npm" && c.args[0] === "publish");
-    assert.deepEqual(npmPublishCall?.opts, { stdio: "inherit" });
-    assert.deepEqual(
-      calls.filter((c) => c.opts?.stdio === "inherit").map((c) => c.file),
-      ["npm"],
-    );
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("runPublish: --otp is passed through to the npm-publish argv only; every other step's real-run and dry-run output is byte-identical to the no-otp case", () => {
-  const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
-  try {
-    const { exec, calls } = withRecorder(fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }));
-    const deps: Deps = { repoRoot: dir, exec };
-    const r = runPublish(deps, { dryRun: false, otp: "123456" });
-    assert.equal(r.code, 0, r.output);
-    const npmPublishCall = calls.find((c) => c.file === "npm" && c.args[0] === "publish");
-    assert.deepEqual(npmPublishCall?.args, ["publish", "--workspace", "engine", "--tag", "latest", "--otp", "123456"]);
-    assert.deepEqual(
-      calls.filter((c) => !(c.file === "npm" && c.args[0] === "publish")).filter((c) => c.args.includes("--otp")),
-      [],
-    );
-
-    const dry = runPublish(
-      { repoRoot: dir, exec: fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }) },
-      { dryRun: true, otp: "123456" },
-    );
-    const baseline = runPublish({ repoRoot: dir, exec: fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }) }, { dryRun: true });
-    assert.equal((dry.output.match(/ --otp 123456/g) ?? []).length, 1);
-    assert.equal(dry.output.replace(" --otp 123456", ""), baseline.output);
-
-    // Direct describe() comparison, catalog steps included (a catalogRemote is set here so
-    // npm-view-verify/catalog-promote render real plans instead of "skipped: no --catalog remote").
-    const withOtpCtx: PublishContext = {
-      ...publishCtx("0.3.0"),
-      repoRoot: dir,
-      catalogRemote: "https://catalog.invalid/sapwood-plugin.git",
-      otp: "123456",
-    };
-    const withoutOtpCtx: PublishContext = { ...withOtpCtx };
-    delete withoutOtpCtx.otp;
-    for (const step of PUBLISH_STEPS.filter((step) => step.name !== "npm-publish")) {
-      assert.equal(step.describe(withOtpCtx), step.describe(withoutOtpCtx), step.name);
+test("waitForReleaseWorkflow: finds the release.yml run matching the tagged commit, watches it with --exit-status", () => {
+  const calls: string[][] = [];
+  let listed = 0;
+  const exec: Exec = (file, args) => {
+    calls.push([file, ...args]);
+    if (args[0] === "run" && args[1] === "list") {
+      // First poll: only a stale run for another commit; the tag's own run shows up second.
+      return listed++ === 0
+        ? JSON.stringify([{ databaseId: 1, headSha: "old" }])
+        : JSON.stringify([
+            { databaseId: 2, headSha: "abc123" },
+            { databaseId: 1, headSha: "old" },
+          ]);
     }
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+    if (args[0] === "run" && args[1] === "watch" && args[2] !== "2") throw new Error(`watched the wrong run: ${args[2]}`);
+    return "";
+  };
+  waitForReleaseWorkflow({ repoRoot: "/unused", exec }, "abc123");
+  assert.deepEqual(calls[0], [
+    "gh",
+    "run",
+    "list",
+    "--workflow",
+    RELEASE_WORKFLOW,
+    "--event",
+    "push",
+    "--limit",
+    "5",
+    "--json",
+    "databaseId,headSha",
+  ]);
+  assert.deepEqual(calls.at(-1), ["gh", "run", "watch", "2", "--exit-status"]);
+  assert.throws(
+    () => waitForReleaseWorkflow({ repoRoot: "/unused", exec: (_f, a) => (a[1] === "list" ? "[]" : "") }, "abc123", 1),
+    /no release\.yml run appeared for commit abc123/,
+  );
 });
 
-test("parseOtpArg: a valid --otp alongside --dry-run parses the code, unaffected by the other flag", () => {
-  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x", "--otp", "123456", "--dry-run"]);
-  assert.deepEqual(r, { ok: true, otp: "123456" });
+test("runDistTag: alpha/beta/rc pre-releases print their own identifier, matching npmDistTag exactly", () => {
+  assert.deepEqual(runDistTag("0.3.0-alpha.3"), { code: 0, output: "alpha\n" });
+  assert.deepEqual(runDistTag("0.3.0-beta.1"), { code: 0, output: "beta\n" });
+  assert.deepEqual(runDistTag("0.3.0-rc.1"), { code: 0, output: "rc\n" });
 });
 
-test("parseOtpArg: no --otp at all is fine — publish without OTP is a legitimate case", () => {
-  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x"]);
-  assert.deepEqual(r, { ok: true });
+test("runDistTag: a non-alphabetic first pre-release identifier prints next, never latest", () => {
+  assert.deepEqual(runDistTag("0.3.0-1"), { code: 0, output: "next\n" });
 });
 
-test("parseOtpArg: --otp at the end of argv (missing value) fails closed instead of silently meaning 'no OTP'", () => {
-  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x", "--otp"]);
-  assert.equal(r.ok, false);
-  assert.match((r as { ok: false; message: string }).message, /--otp requires a non-empty <code>/);
+test("runDistTag: a plain release version prints latest", () => {
+  assert.deepEqual(runDistTag("0.3.0"), { code: 0, output: "latest\n" });
 });
 
-test('parseOtpArg: --otp "" (empty value) fails closed, not silently treated as absent', () => {
-  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x", "--otp", ""]);
-  assert.equal(r.ok, false);
-  assert.match((r as { ok: false; message: string }).message, /--otp requires a non-empty <code>/);
-});
-
-test("parseOtpArg: whitespace-only values fail closed", () => {
-  assert.deepEqual(parseOtpArg(["node", "release.ts", "publish", "--otp", " \t "]), {
-    ok: false,
-    message: "release publish: --otp requires a non-empty <code>",
-  });
-});
-
-test("parseOtpArg: --otp immediately followed by another option never reads that option as the code", () => {
-  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x", "--otp", "--dry-run"]);
-  assert.equal(r.ok, false);
-  assert.match((r as { ok: false; message: string }).message, /--otp requires a non-empty <code>/);
-});
-
-test("parseOtpArg: --otp=<code> (equals form) is accepted, matching npm's own CLI syntax", () => {
-  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x", "--otp=123456"]);
-  assert.deepEqual(r, { ok: true, otp: "123456" });
-});
-
-test("parseOtpArg: a repeated --otp is rejected, never silently taking the first occurrence", () => {
-  const r = parseOtpArg(["node", "release.ts", "publish", "--otp", "111111", "--otp", "222222"]);
-  assert.equal(r.ok, false);
-  assert.match((r as { ok: false; message: string }).message, /--otp may be provided only once/);
-});
-
-test("parseOtpArg: a repeated --otp mixing the space and equals forms is also rejected", () => {
-  const r = parseOtpArg(["node", "release.ts", "publish", "--otp", "111111", "--otp=222222"]);
-  assert.equal(r.ok, false);
-  assert.match((r as { ok: false; message: string }).message, /--otp may be provided only once/);
+test("runDistTag: an invalid version fails closed instead of guessing a tag", () => {
+  const r = runDistTag("not-a-version");
+  assert.equal(r.code, 1);
+  assert.match(r.output, /not a valid SemVer/);
 });
 
 // ── runPrepare preconditions ────────────────────────────────────────────────────────

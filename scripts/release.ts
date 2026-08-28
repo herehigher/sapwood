@@ -265,13 +265,7 @@ export function formatBuildStamp(version: string, date: string, sha: string): st
 
 // ── exec seam (testable: tests inject a fake) ───────────────────────────────────────
 
-// Captured stdio remains the default because several callers parse returned output;
-// npm publish alone opts into inheritance so npm's 2FA web-auth can use a TTY.
-export interface ExecOptions {
-  stdio?: "inherit";
-}
-
-export type Exec = (file: string, args: string[], cwd?: string, opts?: ExecOptions) => string;
+export type Exec = (file: string, args: string[], cwd?: string) => string;
 
 export interface Deps {
   exec: Exec;
@@ -279,13 +273,7 @@ export interface Deps {
 }
 
 function realExec(repoRoot: string): Exec {
-  return (file, args, cwd = repoRoot, opts) => {
-    if (opts?.stdio === "inherit") {
-      execFileSync(file, args, { cwd, stdio: "inherit" });
-      return "";
-    }
-    return execFileSync(file, args, { cwd, encoding: "utf8" });
-  };
+  return (file, args, cwd = repoRoot) => execFileSync(file, args, { cwd, encoding: "utf8" });
 }
 
 // ── shared precondition: HEAD must be exactly origin/main ──────────────────────────
@@ -596,9 +584,9 @@ export function runCatalogPromote(deps: Deps, opts: { catalogRemote: string; dry
 }
 
 // ── publish steps ────────────────────────────────────────────────────────────────────
-// Deliberately an ordered, appendable list rather than inline procedural code: the
-// npm-publish step (docs/dev-guide/10-releasing.md's "Delivery channels") lands here
-// as one more entry, without touching runPublish's orchestration.
+// Deliberately an ordered, appendable list rather than inline procedural code: a new delivery
+// channel (docs/dev-guide/10-releasing.md's "Delivery channels") lands here as one more entry,
+// without touching runPublish's orchestration.
 
 export interface PublishContext {
   version: string;
@@ -609,9 +597,6 @@ export interface PublishContext {
   // though the tag itself hasn't been pushed yet at that point (see PUBLISH_STEPS' order).
   commitSha: string;
   catalogRemote?: string;
-  // One-time code for accounts that authenticate via `--otp` instead of the interactive
-  // web-auth flow the npm-publish step's inherited stdio otherwise waits on.
-  otp?: string;
 }
 
 export interface PublishStep {
@@ -654,6 +639,28 @@ export function runWindowsSmoke(deps: Deps, attempts = 20): void {
     }
   }
   throw new Error(`windows-smoke: no ${WINDOWS_SMOKE_WORKFLOW} run appeared for ${head}`);
+}
+
+export const RELEASE_WORKFLOW = "release.yml";
+
+// Unlike windows-smoke, this never dispatches a run: `push-tag` already triggered release.yml
+// (`on: push: tags: ["v*"]`), so this only has to find the run GitHub already started for that
+// tag and wait for it — same run-finder-then-watch pattern as `runWindowsSmoke`, matched by
+// `headSha` (the commit `tag` pinned, threaded through as `ctx.commitSha`) since a tag-push run
+// carries that field identically to a workflow_dispatch run.
+export function waitForReleaseWorkflow(deps: Deps, commitSha: string, attempts = 20): void {
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);
+    const runs = JSON.parse(
+      deps.exec("gh", ["run", "list", "--workflow", RELEASE_WORKFLOW, "--event", "push", "--limit", "5", "--json", "databaseId,headSha"]),
+    ) as Array<{ databaseId: number; headSha: string }>;
+    const run = runs.find((r) => r.headSha === commitSha);
+    if (run) {
+      deps.exec("gh", ["run", "watch", String(run.databaseId), "--exit-status"]);
+      return;
+    }
+  }
+  throw new Error(`npm-publish: no ${RELEASE_WORKFLOW} run appeared for commit ${commitSha}`);
 }
 
 export const PUBLISH_STEPS: PublishStep[] = [
@@ -726,31 +733,19 @@ export const PUBLISH_STEPS: PublishStep[] = [
     },
   },
   {
-    // Pre-releases must never become `latest` — that's the tag `npm install sapwood` (no
-    // version) and `npx sapwood@latest` resolve, so a pre-release landing there would
-    // silently become the default install for everyone. Runs after gh-release: the tag +
-    // GitHub Release are the durable, always-true record of what was cut, so a step that
-    // can still fail for reasons outside this script's control (an npm outage, a stale
-    // local `npm login`) runs after the durable release record. The canary follows publish
-    // because it verifies the version that registry clients can actually install. If a later
-    // step fails, `publish` itself is NOT safely re-runnable — `checkPublishPreconditions`
-    // refuses once the tag exists — see docs/dev-guide/10-releasing.md's Rollback section
-    // for the manual one-line retry instead.
+    // The actual `npm publish` now runs in CI: release.yml's `npm-publish` job, gated on this
+    // same tag push, authenticates via npm trusted publishing (OIDC) — no token, no human 2FA
+    // prompt, on no one's machine. This step just waits for that job's run to finish. Runs
+    // after gh-release/tag/push-tag: the tag + GitHub Release are the durable, always-true
+    // record of what was cut, so a step that can still fail for reasons outside this script's
+    // control (a CI outage, a registry hiccup) runs after that durable record, not before it.
+    // If this or a later step fails, `publish` itself is NOT safely re-runnable —
+    // `checkPublishPreconditions` refuses once the tag exists — see
+    // docs/dev-guide/10-releasing.md's Rollback / runbook step 5b for the manual retry instead.
     name: "npm-publish",
-    describe: (ctx) => `npm publish --workspace engine --tag ${npmDistTag(ctx)}${ctx.otp ? ` --otp ${ctx.otp}` : ""}`,
-    // npm 2FA web-auth needs a TTY to wait for browser approval; otherwise npm can exit EOTP.
-    // Inherit stdio here while still forwarding --otp for code-based authentication.
+    describe: (ctx) => `gh run watch <release.yml run for v${ctx.version}, matched by commit ${ctx.commitSha}> --exit-status`,
     run: (ctx, deps) => {
-      const args = ["publish", "--workspace", "engine", "--tag", npmDistTag(ctx)];
-      if (ctx.otp) args.push("--otp", ctx.otp);
-      deps.exec("npm", args, undefined, { stdio: "inherit" });
-    },
-  },
-  {
-    name: "dashboard-canary",
-    describe: (ctx) => `node scripts/dashboard-canary.ts ${ctx.version}`,
-    run: (ctx, deps) => {
-      deps.exec("node", ["scripts/dashboard-canary.ts", ctx.version]);
+      waitForReleaseWorkflow(deps, ctx.commitSha);
     },
   },
   {
@@ -758,6 +753,13 @@ export const PUBLISH_STEPS: PublishStep[] = [
     describe: (ctx) => (ctx.catalogRemote ? `npm view sapwood@${ctx.version} version` : "skipped: no --catalog remote"),
     run: (ctx, deps) => {
       if (ctx.catalogRemote) verifyPublishedVersion(deps, ctx.version);
+    },
+  },
+  {
+    name: "dashboard-canary",
+    describe: (ctx) => `node scripts/dashboard-canary.ts ${ctx.version}`,
+    run: (ctx, deps) => {
+      deps.exec("node", ["scripts/dashboard-canary.ts", ctx.version]);
     },
   },
   {
@@ -790,7 +792,17 @@ export interface CommandResult {
   output: string;
 }
 
-export function runPublish(deps: Deps, opts: { dryRun: boolean; catalogRemote?: string; otp?: string }): CommandResult {
+// `release.yml`'s `npm-publish` job calls this directly (`node scripts/release.ts dist-tag
+// "${GITHUB_REF_NAME#v}"`) so the alpha/beta/rc/next/latest rule has exactly one source —
+// `npmDistTag` — instead of a second implementation of it living in workflow shell.
+export function runDistTag(version: string): CommandResult {
+  const validation = validateReleaseVersion(version);
+  if (!validation.ok) return { code: 1, output: `release dist-tag: ${validation.message}\n` };
+  const tag = npmDistTag({ version, prerelease: isPrerelease(version), repoRoot: "", commitSha: "" });
+  return { code: 0, output: `${tag}\n` };
+}
+
+export function runPublish(deps: Deps, opts: { dryRun: boolean; catalogRemote?: string }): CommandResult {
   const pre = checkPublishPreconditions(deps);
   if (!pre.ok) return { code: 1, output: `release publish: ${pre.reason}\n` };
   const ctx: PublishContext = {
@@ -799,7 +811,6 @@ export function runPublish(deps: Deps, opts: { dryRun: boolean; catalogRemote?: 
     repoRoot: deps.repoRoot,
     commitSha: pre.commitSha,
     ...(opts.catalogRemote ? { catalogRemote: opts.catalogRemote } : {}),
-    ...(opts.otp ? { otp: opts.otp } : {}),
   };
   const lines = PUBLISH_STEPS.map((step) => {
     if (!opts.dryRun) step.run(ctx, deps);
@@ -893,27 +904,6 @@ export function runStamp(deps: Deps): CommandResult {
 
 // ── CLI entry ────────────────────────────────────────────────────────────────────────
 
-export type OtpParseResult = { ok: true; otp?: string } | { ok: false; message: string };
-
-// Reject malformed or ambiguous OTP options before runPublish: it creates and pushes the
-// release tag before npm authentication can report that the requested code is missing or wrong.
-export function parseOtpArg(argv: string[]): OtpParseResult {
-  // Both `--otp <code>` and `--otp=<code>` are accepted (npm's own CLI takes both forms), so
-  // both must be recognized here or the `--otp=<code>` form would silently read as absent.
-  const occurrences = argv.flatMap((arg, index) =>
-    arg === "--otp" ? [{ value: argv[index + 1] }] : arg.startsWith("--otp=") ? [{ value: arg.slice("--otp=".length) }] : [],
-  );
-  if (occurrences.length === 0) return { ok: true };
-  if (occurrences.length > 1) {
-    return { ok: false, message: "release publish: --otp may be provided only once" };
-  }
-  const value = occurrences[0]!.value;
-  if (value === undefined || value.trim() === "" || value.startsWith("--")) {
-    return { ok: false, message: "release publish: --otp requires a non-empty <code>" };
-  }
-  return { ok: true, otp: value };
-}
-
 function repoRootFromThisFile(): string {
   return dirname(dirname(fileURLToPath(import.meta.url)));
 }
@@ -940,16 +930,17 @@ function main(argv: string[]): number {
       process.stderr.write("release publish: provide --catalog <git remote> or SAPWOOD_CATALOG_REMOTE\n");
       return 1;
     }
-    const otpResult = parseOtpArg(argv);
-    if (!otpResult.ok) {
-      process.stderr.write(`${otpResult.message}\n`);
+    const r = runPublish(deps, { dryRun: argv.slice(3).includes("--dry-run"), catalogRemote });
+    process.stdout.write(r.output);
+    return r.code;
+  }
+  if (cmd === "dist-tag") {
+    const version = argv[3];
+    if (!version) {
+      process.stderr.write("usage: release dist-tag <version>\n");
       return 1;
     }
-    const r = runPublish(deps, {
-      dryRun: argv.slice(3).includes("--dry-run"),
-      catalogRemote,
-      ...(otpResult.otp !== undefined ? { otp: otpResult.otp } : {}),
-    });
+    const r = runDistTag(version);
     process.stdout.write(r.output);
     return r.code;
   }
@@ -970,7 +961,7 @@ function main(argv: string[]): number {
     return r.code;
   }
   process.stderr.write(
-    "usage: release <prepare <version>|publish --catalog <git remote> [--otp <code>] [--dry-run]|promote --catalog <git remote> [--dry-run]|stamp>\n",
+    "usage: release <prepare <version>|publish --catalog <git remote> [--dry-run]|promote --catalog <git remote> [--dry-run]|dist-tag <version>|stamp>\n",
   );
   return 1;
 }
