@@ -280,9 +280,9 @@ function realExec(repoRoot: string): Exec {
   return (file, args, cwd = repoRoot) => execFileSync(file, args, { cwd, encoding: "utf8" });
 }
 
-// Node offers no synchronous sleep primitive; blocking on a zero-timeout atomic wait against a
-// throwaway buffer is the standard workaround. Extracted once so the two pollers below share it
-// instead of each carrying its own copy of this comment.
+// Node offers no synchronous sleep primitive; an Atomics.wait that times out after `ms` on a
+// throwaway buffer nobody ever notifies is the standard workaround. Extracted once so the two
+// pollers below share it instead of each carrying its own copy of this comment.
 function syncSleep(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
