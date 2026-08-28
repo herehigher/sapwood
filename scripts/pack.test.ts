@@ -182,9 +182,30 @@ test("packed engine tarball is fresh, map-free, and runnable from a clean checko
     const packed = packManifest[0];
     assert.ok(packed, "npm pack --json must report one package manifest");
     const packedFiles = new Set(packed.files?.map((file) => file.path));
-    for (const required of ["dashboard-dist/dist/index.html", "dashboard-dist/dist-server/start.js", "THIRD_PARTY_NOTICES"]) {
+    for (const required of [
+      "dashboard-dist/dist/index.html",
+      "dashboard-dist/dist-server/start.js",
+      "THIRD_PARTY_NOTICES",
+      "README.md",
+      "LICENSE",
+    ]) {
       assert.ok(packedFiles.has(required), `npm pack manifest is missing ${required}`);
     }
+    // npm always takes README/LICENSE from the package root, which for this package is `engine/`
+    // — comparing against the checked-out root copies (not the repo this test runs from) proves
+    // prepack staged the exact bytes `npm pack` just read, not a stale leftover from a prior run.
+    const packedReadme = execFileSync("tar", ["-xOzf", tarballPath, "package/README.md"], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(
+      packedReadme,
+      readFileSync(join(checkoutDir, "README.md"), "utf8"),
+      "tarball README.md must be byte-identical to the root README.md",
+    );
+    const packedLicense = execFileSync("tar", ["-xOzf", tarballPath, "package/LICENSE"], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(
+      packedLicense,
+      readFileSync(join(checkoutDir, "LICENSE"), "utf8"),
+      "tarball LICENSE must be byte-identical to the root LICENSE",
+    );
     const notices = execFileSync("tar", ["-xOzf", tarballPath, "package/THIRD_PARTY_NOTICES"], { encoding: "utf8", timeout: 15_000 });
     assert.match(notices, /Vite's optimized SPA output does not retain dependency @license banners/);
     // This independent literal inventory must be updated deliberately when Vite/esbuild's graph
