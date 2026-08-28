@@ -7,6 +7,8 @@ All notable changes to sapwood are documented here. Format:
 
 ## [Unreleased]
 
+## [0.3.0-alpha.3] - 2026-08-28
+
 ### Changed
 - `release publish` no longer runs `npm publish` locally — the tag-push run's `npm-publish`
   job publishes via npm trusted publishing (OIDC) with provenance; `--otp` removed; `release
