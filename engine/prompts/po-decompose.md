@@ -191,13 +191,23 @@ overrides whatever the "Cut dimension" priority order above would otherwise have
 
 ## If a `ready` child's acceptance criterion would touch a human-merge-only path
 
+<!-- sapwood:floor:human-merge-only-paths -->
 Check every acceptance criterion you write against `docs/security.md`'s "Human-merge-only
-paths" list (`guard.ts`/hook wiring, `reviewer.ts`/`merge-driver.ts`, `sapwood.config.yaml`/
-`.json` in full, `sapwood.config.example.yaml`/`.json` (the `sapwood init` starter template —
-guard-protected the same way as the root config), `.claude/settings*.json`,
-`.github/workflows/**`). Never draft a criterion that
-asks a producer to edit one of those — the guard denies it regardless of wording, and a `ready`
-child that reaches gate⓪ this way only costs a bounce and a repair round-trip later. Resolve it
+paths" list (`guard.ts` / `guard-hook.ts` hook wiring, `reviewer.ts` / `merge-driver.ts`, their
+compiled `engine/dist/guard/guard.js`, `engine/dist/guard/guard-hook.js`,
+`engine/dist/roles/reviewer.js`, `engine/dist/roles/merge-driver.js` artifacts,
+`sapwood.config.yaml` / `sapwood.config.yml` / `sapwood.config.json` in full,
+`sapwood.config.example.yaml` / `sapwood.config.example.yml` / `sapwood.config.example.json`
+(the `sapwood init` starter template — guard-protected the same way as the root config),
+`.claude/settings*.json`, `.github/workflows/**`, and `.github/CODEOWNERS`). Never draft a
+criterion that
+asks a producer to edit one of those — the guard path-denies every listed path except
+`.github/CODEOWNERS`; process-level controls make that file human-merge-only by preventing the
+conductor from merging a PR that touches it. Either way, a `ready` child that reaches gate⓪ this
+way only costs a bounce and a repair round-trip later.
+<!-- /sapwood:floor:human-merge-only-paths -->
+
+Resolve it
 now: carve the protected-path work into its own `remainder` child instead of a `ready` one, with
 `unresolvedContext` naming the protected path and that a human must author the edit directly. The
 rest of the child's scope can still land in a dispatched PR. There is no patch/diff a producer

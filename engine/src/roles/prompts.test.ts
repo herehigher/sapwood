@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { defaultPoolPromptPath, defaultPoPromptPath } from "../loop/align.js";
 import { defaultPoDecomposePromptPath, validateDecomposeOutput } from "../loop/decompose.js";
 import { defaultHarvestPromptPath } from "../loop/harvest.js";
@@ -38,6 +39,7 @@ import {
   defaultVerificationPlanDrafterPromptPath,
   defaultVerificationPlanReviewerPromptPath,
 } from "./plan-review.js";
+import { extractMarkedSection } from "./skills-plugin.js";
 import { defaultFixPromptPath, defaultPromptPath } from "./worker.js";
 
 function readPrompt(path: string): string {
@@ -703,9 +705,13 @@ const SPLIT_YARDSTICK_CARRIERS: Readonly<Record<string, string>> = {
 function extractFloor(body: string, floorName: string): string {
   const startTag = `<!-- sapwood:floor:${floorName} -->`;
   const endTag = `<!-- /sapwood:floor:${floorName} -->`;
+  const starts = body.split(startTag).length - 1;
+  const ends = body.split(endTag).length - 1;
+  assert.equal(starts, 1, `expected exactly one ${startTag}, got ${starts}`);
+  assert.equal(ends, 1, `expected exactly one ${endTag}, got ${ends}`);
   const start = body.indexOf(startTag);
   const end = body.indexOf(endTag);
-  assert.ok(start >= 0 && end > start, `missing or malformed <!-- sapwood:floor:${floorName} --> block`);
+  assert.ok(end > start, `malformed ${startTag} block`);
   return normalizeWhitespace(body.slice(start + startTag.length, end));
 }
 
@@ -969,5 +975,63 @@ test("#1119: no shipped prompt's {{lang.*}} paragraph restates the BCP-47/defaul
         );
       }
     }
+  }
+});
+
+// #828: These five prompts must carry the human-merge-only floor inline because skills are
+// pull-model and may never load. Derive their required paths from docs/security.md's marked
+// canonical section so a source-list change fails every stale carrier.
+
+// Explanatory prose quotes non-path code spans after each bullet's em dash. Do not add a
+// token-shape allowlist: an unfamiliar canonical path must fail carriers, not disappear.
+function humanMergeOnlyPathTokens(section: string): string[] {
+  const bulletItems = [...section.matchAll(/^- (.*(?:\n {2,}.*)*)/gm)].map((match) => match[1]!);
+  assert.ok(bulletItems.length > 0, "human-merge-only-paths marker contains no list items");
+  const tokens = bulletItems.flatMap((item) => {
+    const pathEnumeration = item.split(/\s+—\s+/, 1)[0]!;
+    return [...pathEnumeration.matchAll(/`([^`]+)`/g)].map((match) => match[0]);
+  });
+  assert.ok(tokens.length > 0, "human-merge-only-paths marker contains no protected path tokens");
+  return [...new Set(tokens)];
+}
+
+function realSecurityMdHumanMergeOnlySection(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const securityMdPath = join(here, "..", "..", "..", "docs", "security.md");
+  return extractMarkedSection(readFileSync(securityMdPath, "utf8"), "human-merge-only-paths");
+}
+
+test("#828: po.md, po-decompose.md, verification-plan-drafter.md, verification-plan-reviewer.md, and verification-plan-reviewer-confirm.md each mirror every docs/security.md human-merge-only-paths token, and none uses the 'security-relevant config' shorthand the marker's own text warns against", () => {
+  const tokens = humanMergeOnlyPathTokens(realSecurityMdHumanMergeOnlySection());
+  const carriers: [name: string, path: string][] = [
+    ["po.md", defaultPoPromptPath()],
+    ["po-decompose.md", defaultPoDecomposePromptPath()],
+    ["verification-plan-drafter.md", defaultVerificationPlanDrafterPromptPath()],
+    ["verification-plan-reviewer.md", defaultVerificationPlanReviewerPromptPath()],
+    ["verification-plan-reviewer-confirm.md", defaultVerificationPlanConfirmPromptPath()],
+  ];
+  assert.equal(carriers.length, 5, "sanity: the human-merge-only floor has five prompt carriers");
+  assert.equal(
+    new Set(carriers.map(([name]) => name)).size,
+    carriers.length,
+    "sanity: carrier names must be unique — a duplicate would silently drop coverage of the missing one",
+  );
+  // A whole-prompt search is unsound because po-decompose.md names `merge-driver.ts` and
+  // `.github/workflows/**` outside this list. Role-specific guidance also makes byte equality
+  // inappropriate; canonical token membership is the shared invariant.
+  for (const [name, path] of carriers) {
+    const body = readFileSync(path, "utf8");
+    const floor = extractFloor(body, "human-merge-only-paths");
+    for (const token of tokens) {
+      assert.ok(
+        floor.includes(token),
+        `${name}'s human-merge-only-paths floor is missing canonical token ${token} — it must match docs/security.md's canonical list (see po.md for reference wording)`,
+      );
+    }
+    assert.doesNotMatch(
+      floor,
+      /security-relevant config/,
+      `${name} uses the "security-relevant config" shorthand — docs/security.md's own marker text warns this misreads the block as scoping to a subset of the file's contents; enumerate the protected paths explicitly instead`,
+    );
   }
 });
