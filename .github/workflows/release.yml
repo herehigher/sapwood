@@ -76,7 +76,12 @@ jobs:
   # `?demo` mode (dashboard/src/App.tsx `isDemoRoute`). The dashboard build already runs the
   # fixture export gate (credential scan + host-absolute-path rewrite) before Vite copies the
   # fixture in, so this job adds no scrubbing of its own. Pages source must be "GitHub Actions"
-  # (repo Settings → Pages); `GITHUB_TOKEN` cannot enable that itself.
+  # (repo Settings → Pages); `GITHUB_TOKEN` cannot enable that itself. The `github-pages`
+  # environment's deployment branch policy must also allow `v*` tags (Settings → Environments →
+  # github-pages → Deployment branches and tags, or `POST
+  # /repos/{owner}/{repo}/environments/github-pages/deployment-branch-policies
+  # {"name":"v*","type":"tag"}`) — a tag-push run deploys from `refs/tags/v<version>`, which a
+  # `main`-only policy rejects before any step here runs, producing no job log to explain why.
   deploy-demo:
     needs: attach-evidence
     # `always()` so a manual dispatch (where attach-evidence is skipped, not failed) still deploys;

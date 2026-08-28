@@ -15,6 +15,7 @@ import {
   compareSemver,
   type Deps,
   type Exec,
+  type ExecOptions,
   extractUnreleasedBody,
   extractVersionSection,
   formatBuildStamp,
@@ -24,6 +25,7 @@ import {
   npmDistTag,
   PUBLISH_STEPS,
   type PublishContext,
+  parseOtpArg,
   readManifestVersion,
   runCatalogPromote,
   runPrepare,
@@ -1149,6 +1151,121 @@ test("runPublish (real run): a failing draft creation aborts before the tag is p
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("runPublish (real run): npm-publish alone runs with inherited stdio, so npm's web-auth flow can wait on a browser", () => {
+  const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
+  try {
+    const base = fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" });
+    const calls: Array<{ file: string; args: string[]; opts: ExecOptions | undefined }> = [];
+    const exec: Exec = (file, args, cwd, opts) => {
+      calls.push({ file, args: [...args], opts });
+      return base(file, args, cwd);
+    };
+    const deps: Deps = { repoRoot: dir, exec };
+    const r = runPublish(deps, { dryRun: false });
+    assert.equal(r.code, 0, r.output);
+    const npmPublishCall = calls.find((c) => c.file === "npm" && c.args[0] === "publish");
+    assert.deepEqual(npmPublishCall?.opts, { stdio: "inherit" });
+    assert.deepEqual(
+      calls.filter((c) => c.opts?.stdio === "inherit").map((c) => c.file),
+      ["npm"],
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runPublish: --otp is passed through to the npm-publish argv only; every other step's real-run and dry-run output is byte-identical to the no-otp case", () => {
+  const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
+  try {
+    const { exec, calls } = withRecorder(fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }));
+    const deps: Deps = { repoRoot: dir, exec };
+    const r = runPublish(deps, { dryRun: false, otp: "123456" });
+    assert.equal(r.code, 0, r.output);
+    const npmPublishCall = calls.find((c) => c.file === "npm" && c.args[0] === "publish");
+    assert.deepEqual(npmPublishCall?.args, ["publish", "--workspace", "engine", "--tag", "latest", "--otp", "123456"]);
+    assert.deepEqual(
+      calls.filter((c) => !(c.file === "npm" && c.args[0] === "publish")).filter((c) => c.args.includes("--otp")),
+      [],
+    );
+
+    const dry = runPublish(
+      { repoRoot: dir, exec: fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }) },
+      { dryRun: true, otp: "123456" },
+    );
+    const baseline = runPublish({ repoRoot: dir, exec: fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }) }, { dryRun: true });
+    assert.equal((dry.output.match(/ --otp 123456/g) ?? []).length, 1);
+    assert.equal(dry.output.replace(" --otp 123456", ""), baseline.output);
+
+    // Direct describe() comparison, catalog steps included (a catalogRemote is set here so
+    // npm-view-verify/catalog-promote render real plans instead of "skipped: no --catalog remote").
+    const withOtpCtx: PublishContext = {
+      ...publishCtx("0.3.0"),
+      repoRoot: dir,
+      catalogRemote: "https://catalog.invalid/sapwood-plugin.git",
+      otp: "123456",
+    };
+    const withoutOtpCtx: PublishContext = { ...withOtpCtx };
+    delete withoutOtpCtx.otp;
+    for (const step of PUBLISH_STEPS.filter((step) => step.name !== "npm-publish")) {
+      assert.equal(step.describe(withOtpCtx), step.describe(withoutOtpCtx), step.name);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("parseOtpArg: a valid --otp alongside --dry-run parses the code, unaffected by the other flag", () => {
+  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x", "--otp", "123456", "--dry-run"]);
+  assert.deepEqual(r, { ok: true, otp: "123456" });
+});
+
+test("parseOtpArg: no --otp at all is fine — publish without OTP is a legitimate case", () => {
+  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x"]);
+  assert.deepEqual(r, { ok: true });
+});
+
+test("parseOtpArg: --otp at the end of argv (missing value) fails closed instead of silently meaning 'no OTP'", () => {
+  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x", "--otp"]);
+  assert.equal(r.ok, false);
+  assert.match((r as { ok: false; message: string }).message, /--otp requires a non-empty <code>/);
+});
+
+test('parseOtpArg: --otp "" (empty value) fails closed, not silently treated as absent', () => {
+  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x", "--otp", ""]);
+  assert.equal(r.ok, false);
+  assert.match((r as { ok: false; message: string }).message, /--otp requires a non-empty <code>/);
+});
+
+test("parseOtpArg: whitespace-only values fail closed", () => {
+  assert.deepEqual(parseOtpArg(["node", "release.ts", "publish", "--otp", " \t "]), {
+    ok: false,
+    message: "release publish: --otp requires a non-empty <code>",
+  });
+});
+
+test("parseOtpArg: --otp immediately followed by another option never reads that option as the code", () => {
+  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x", "--otp", "--dry-run"]);
+  assert.equal(r.ok, false);
+  assert.match((r as { ok: false; message: string }).message, /--otp requires a non-empty <code>/);
+});
+
+test("parseOtpArg: --otp=<code> (equals form) is accepted, matching npm's own CLI syntax", () => {
+  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x", "--otp=123456"]);
+  assert.deepEqual(r, { ok: true, otp: "123456" });
+});
+
+test("parseOtpArg: a repeated --otp is rejected, never silently taking the first occurrence", () => {
+  const r = parseOtpArg(["node", "release.ts", "publish", "--otp", "111111", "--otp", "222222"]);
+  assert.equal(r.ok, false);
+  assert.match((r as { ok: false; message: string }).message, /--otp may be provided only once/);
+});
+
+test("parseOtpArg: a repeated --otp mixing the space and equals forms is also rejected", () => {
+  const r = parseOtpArg(["node", "release.ts", "publish", "--otp", "111111", "--otp=222222"]);
+  assert.equal(r.ok, false);
+  assert.match((r as { ok: false; message: string }).message, /--otp may be provided only once/);
 });
 
 // ── runPrepare preconditions ────────────────────────────────────────────────────────

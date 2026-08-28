@@ -265,7 +265,13 @@ export function formatBuildStamp(version: string, date: string, sha: string): st
 
 // ── exec seam (testable: tests inject a fake) ───────────────────────────────────────
 
-export type Exec = (file: string, args: string[], cwd?: string) => string;
+// Captured stdio remains the default because several callers parse returned output;
+// npm publish alone opts into inheritance so npm's 2FA web-auth can use a TTY.
+export interface ExecOptions {
+  stdio?: "inherit";
+}
+
+export type Exec = (file: string, args: string[], cwd?: string, opts?: ExecOptions) => string;
 
 export interface Deps {
   exec: Exec;
@@ -273,7 +279,13 @@ export interface Deps {
 }
 
 function realExec(repoRoot: string): Exec {
-  return (file, args, cwd = repoRoot) => execFileSync(file, args, { cwd, encoding: "utf8" });
+  return (file, args, cwd = repoRoot, opts) => {
+    if (opts?.stdio === "inherit") {
+      execFileSync(file, args, { cwd, stdio: "inherit" });
+      return "";
+    }
+    return execFileSync(file, args, { cwd, encoding: "utf8" });
+  };
 }
 
 // ── shared precondition: HEAD must be exactly origin/main ──────────────────────────
@@ -597,6 +609,9 @@ export interface PublishContext {
   // though the tag itself hasn't been pushed yet at that point (see PUBLISH_STEPS' order).
   commitSha: string;
   catalogRemote?: string;
+  // One-time code for accounts that authenticate via `--otp` instead of the interactive
+  // web-auth flow the npm-publish step's inherited stdio otherwise waits on.
+  otp?: string;
 }
 
 export interface PublishStep {
@@ -722,9 +737,13 @@ export const PUBLISH_STEPS: PublishStep[] = [
     // refuses once the tag exists — see docs/dev-guide/10-releasing.md's Rollback section
     // for the manual one-line retry instead.
     name: "npm-publish",
-    describe: (ctx) => `npm publish --workspace engine --tag ${npmDistTag(ctx)}`,
+    describe: (ctx) => `npm publish --workspace engine --tag ${npmDistTag(ctx)}${ctx.otp ? ` --otp ${ctx.otp}` : ""}`,
+    // npm 2FA web-auth needs a TTY to wait for browser approval; otherwise npm can exit EOTP.
+    // Inherit stdio here while still forwarding --otp for code-based authentication.
     run: (ctx, deps) => {
-      deps.exec("npm", ["publish", "--workspace", "engine", "--tag", npmDistTag(ctx)]);
+      const args = ["publish", "--workspace", "engine", "--tag", npmDistTag(ctx)];
+      if (ctx.otp) args.push("--otp", ctx.otp);
+      deps.exec("npm", args, undefined, { stdio: "inherit" });
     },
   },
   {
@@ -771,7 +790,7 @@ export interface CommandResult {
   output: string;
 }
 
-export function runPublish(deps: Deps, opts: { dryRun: boolean; catalogRemote?: string }): CommandResult {
+export function runPublish(deps: Deps, opts: { dryRun: boolean; catalogRemote?: string; otp?: string }): CommandResult {
   const pre = checkPublishPreconditions(deps);
   if (!pre.ok) return { code: 1, output: `release publish: ${pre.reason}\n` };
   const ctx: PublishContext = {
@@ -780,6 +799,7 @@ export function runPublish(deps: Deps, opts: { dryRun: boolean; catalogRemote?: 
     repoRoot: deps.repoRoot,
     commitSha: pre.commitSha,
     ...(opts.catalogRemote ? { catalogRemote: opts.catalogRemote } : {}),
+    ...(opts.otp ? { otp: opts.otp } : {}),
   };
   const lines = PUBLISH_STEPS.map((step) => {
     if (!opts.dryRun) step.run(ctx, deps);
@@ -873,6 +893,27 @@ export function runStamp(deps: Deps): CommandResult {
 
 // ── CLI entry ────────────────────────────────────────────────────────────────────────
 
+export type OtpParseResult = { ok: true; otp?: string } | { ok: false; message: string };
+
+// Reject malformed or ambiguous OTP options before runPublish: it creates and pushes the
+// release tag before npm authentication can report that the requested code is missing or wrong.
+export function parseOtpArg(argv: string[]): OtpParseResult {
+  // Both `--otp <code>` and `--otp=<code>` are accepted (npm's own CLI takes both forms), so
+  // both must be recognized here or the `--otp=<code>` form would silently read as absent.
+  const occurrences = argv.flatMap((arg, index) =>
+    arg === "--otp" ? [{ value: argv[index + 1] }] : arg.startsWith("--otp=") ? [{ value: arg.slice("--otp=".length) }] : [],
+  );
+  if (occurrences.length === 0) return { ok: true };
+  if (occurrences.length > 1) {
+    return { ok: false, message: "release publish: --otp may be provided only once" };
+  }
+  const value = occurrences[0]!.value;
+  if (value === undefined || value.trim() === "" || value.startsWith("--")) {
+    return { ok: false, message: "release publish: --otp requires a non-empty <code>" };
+  }
+  return { ok: true, otp: value };
+}
+
 function repoRootFromThisFile(): string {
   return dirname(dirname(fileURLToPath(import.meta.url)));
 }
@@ -899,7 +940,16 @@ function main(argv: string[]): number {
       process.stderr.write("release publish: provide --catalog <git remote> or SAPWOOD_CATALOG_REMOTE\n");
       return 1;
     }
-    const r = runPublish(deps, { dryRun: argv.slice(3).includes("--dry-run"), catalogRemote });
+    const otpResult = parseOtpArg(argv);
+    if (!otpResult.ok) {
+      process.stderr.write(`${otpResult.message}\n`);
+      return 1;
+    }
+    const r = runPublish(deps, {
+      dryRun: argv.slice(3).includes("--dry-run"),
+      catalogRemote,
+      ...(otpResult.otp !== undefined ? { otp: otpResult.otp } : {}),
+    });
     process.stdout.write(r.output);
     return r.code;
   }
@@ -920,7 +970,7 @@ function main(argv: string[]): number {
     return r.code;
   }
   process.stderr.write(
-    "usage: release <prepare <version>|publish --catalog <git remote> [--dry-run]|promote --catalog <git remote> [--dry-run]|stamp>\n",
+    "usage: release <prepare <version>|publish --catalog <git remote> [--otp <code>] [--dry-run]|promote --catalog <git remote> [--dry-run]|stamp>\n",
   );
   return 1;
 }

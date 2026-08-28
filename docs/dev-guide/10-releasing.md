@@ -64,6 +64,24 @@ manifests and open the CHANGELOG PR — but it cannot *publish* one: the guard d
 Publishing is a human running `scripts/release.ts publish` from their own machine
 or an authorized CI job triggered by a human-pushed tag.
 
+**`npm publish` needs an interactive terminal.** npm accounts with 2FA
+`auth-and-writes` (the setting npm is moving accounts toward) perform web
+authentication only when stdout is a TTY; without one, `npm publish` prints the
+auth URL and exits `EOTP` rather than waiting for browser approval. `scripts/release.ts`'s
+`npm-publish` step runs with this process's stdio inherited for exactly that reason,
+so run `publish` from a real terminal, not backgrounded or piped through another
+tool. `publish --otp <code>` is also accepted and passed straight through to `npm
+publish --otp <code>` for accounts that use one-time codes instead of web auth.
+
+**The `github-pages` environment must allow `v*` tag deployments before the first
+publish.** `release.yml`'s `deploy-demo` job deploys from the pushed tag
+(`refs/tags/v<version>`); a deployment branch policy that only allows `main` rejects
+that run before any step executes, and produces no job log to explain why. Add the
+policy once, before the first publish: Settings → Environments → github-pages →
+Deployment branches and tags → add `v*` as a tag rule; or via the API: `POST
+/repos/{owner}/{repo}/environments/github-pages/deployment-branch-policies
+{"name":"v*","type":"tag"}`.
+
 **Release immutability: ON.** GitHub's repository-level "Enable release immutability"
 setting is ON. Once a release is published (not draft), its tag is locked to the commit
 it points at and its assets can't be added, changed, or removed —
@@ -212,15 +230,20 @@ npm deprecate sapwood@0.3.0-alpha.1 "broken; use <new-version> instead"
 # regardless — see npm's own unpublish policy for the narrow window in which
 # `npm unpublish` still applies.
 
-# 5b. Retry, if only the npm step failed (tag + GitHub Release already exist —
-#     `publish` itself refuses to re-run once the tag exists, so retry this one
-#     step by hand from the tagged commit). <dist-tag> is whatever
+# 5b. Retry, if the npm step (or anything after it) failed or was skipped — tag +
+#     GitHub Release already exist, so `publish` itself refuses to re-run; finish
+#     the remaining steps by hand, in the same order `publish` would have run
+#     them, from the tagged commit. <dist-tag> is whatever
 #     `npm run release -- publish --dry-run` printed for this version (see "npm
-#     publish dist-tag" above — latest / alpha / beta / rc / next):
+#     publish dist-tag" above — latest / alpha / beta / rc / next); run this from
+#     a real terminal (see "npm publish needs an interactive terminal" above):
 git checkout v0.3.0-alpha.1
 npm publish --workspace engine --tag <dist-tag>
+node scripts/dashboard-canary.ts 0.3.0-alpha.1
+npm run release -- promote --catalog https://github.com/herehigher/sapwood-plugin.git
 
-# 5c. Retry only catalog promotion after a catalog push failure. This verifies the
-#     published npm version again, then replaces the catalog shell from the release tag.
+# 5c. Retry only catalog promotion after a catalog push failure (npm publish and the
+#     canary already succeeded). This verifies the published npm version again, then
+#     replaces the catalog shell from the release tag.
 npm run release -- promote --catalog https://github.com/herehigher/sapwood-plugin.git
 ```
