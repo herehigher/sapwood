@@ -14,6 +14,11 @@ All notable changes to sapwood are documented here. Format:
   job publishes via npm trusted publishing (OIDC) with provenance; `--otp` removed; `release
   dist-tag <version>` added.
 
+### Fixed
+- The `sapwood` npm tarball ships `README.md` and `LICENSE`: `engine`'s `prepack` stages the
+  repository-root copies into the package root, so npmjs.com renders the README and shows the
+  license instead of "This package does not have a README".
+
 ## [0.3.0-alpha.2] - 2026-08-28
 
 ### Changed
