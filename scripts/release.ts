@@ -659,41 +659,33 @@ const NPM_PUBLISH_JOB = "npm-publish";
 // Unlike windows-smoke, this never dispatches a run: `push-tag` already triggered release.yml
 // (`on: push: tags: ["v*"]`), so this only has to find the run GitHub already started for that
 // tag, matched by `headSha` (the commit `tag` pinned, threaded through as `ctx.commitSha`) since
-// a tag-push run carries that field identically to a workflow_dispatch run. It then polls that
-// run's own job list for `npm-publish` specifically rather than watching the whole run: the
-// same run also carries the independent `deploy-demo` job (GitHub Pages), and a `gh run watch
-// --exit-status` on the whole run would fail this wait — and so block npm-view-verify, the
-// canary and catalog promotion — on a Pages failure that has nothing to do with whether npm
-// publish succeeded.
+// a tag-push run carries that field identically to a workflow_dispatch run. The short retry
+// only covers the seconds between the push and the run being listed; the run itself takes as
+// long as its jobs take (a full quality gate before `npm-publish` can start), so completion is
+// left to `gh run watch`, which blocks until the whole run is over. It is deliberately NOT
+// `--exit-status`: the same run also carries the independent `deploy-demo` job (GitHub Pages),
+// whose failure must not fail this wait — and so block npm-view-verify, the canary and catalog
+// promotion — when npm publish itself succeeded. Only `npm-publish`'s own conclusion decides.
 export function waitForReleaseWorkflow(deps: Deps, commitSha: string, attempts = 20): void {
   const sleep = deps.sleep ?? syncSleep;
   let runId: number | undefined;
-  for (let i = 0; i < attempts; i++) {
+  for (let i = 0; i < attempts && runId === undefined; i++) {
     if (i > 0) sleep(3000);
-    if (runId === undefined) {
-      const runs = JSON.parse(
-        deps.exec("gh", ["run", "list", "--workflow", RELEASE_WORKFLOW, "--event", "push", "--limit", "5", "--json", "databaseId,headSha"]),
-      ) as Array<{ databaseId: number; headSha: string }>;
-      const run = runs.find((r) => r.headSha === commitSha);
-      if (run) runId = run.databaseId;
-    }
-    if (runId !== undefined) {
-      const view = JSON.parse(deps.exec("gh", ["run", "view", String(runId), "--json", "jobs"])) as {
-        jobs: Array<{ name: string; status: string; conclusion: string | null }>;
-      };
-      const job = view.jobs.find((j) => j.name === NPM_PUBLISH_JOB);
-      if (job?.status === "completed") {
-        if (job.conclusion === "success") return;
-        throw new Error(`${NPM_PUBLISH_JOB}: run ${runId} of ${RELEASE_WORKFLOW} finished with conclusion "${job.conclusion}"`);
-      }
-      // job absent (not yet scheduled) or still in_progress/queued — keep polling.
-    }
+    const runs = JSON.parse(
+      deps.exec("gh", ["run", "list", "--workflow", RELEASE_WORKFLOW, "--event", "push", "--limit", "5", "--json", "databaseId,headSha"]),
+    ) as Array<{ databaseId: number; headSha: string }>;
+    runId = runs.find((r) => r.headSha === commitSha)?.databaseId;
   }
-  throw new Error(
-    runId === undefined
-      ? `${NPM_PUBLISH_JOB}: no ${RELEASE_WORKFLOW} run appeared for commit ${commitSha}`
-      : `${NPM_PUBLISH_JOB}: job on run ${runId} of ${RELEASE_WORKFLOW} did not complete within ${attempts} attempts`,
-  );
+  if (runId === undefined) throw new Error(`${NPM_PUBLISH_JOB}: no ${RELEASE_WORKFLOW} run appeared for commit ${commitSha}`);
+  deps.exec("gh", ["run", "watch", String(runId)]);
+  const view = JSON.parse(deps.exec("gh", ["run", "view", String(runId), "--json", "jobs"])) as {
+    jobs: Array<{ name: string; conclusion: string | null }>;
+  };
+  const job = view.jobs.find((j) => j.name === NPM_PUBLISH_JOB);
+  if (!job) throw new Error(`${NPM_PUBLISH_JOB}: run ${runId} of ${RELEASE_WORKFLOW} finished without that job`);
+  if (job.conclusion !== "success") {
+    throw new Error(`${NPM_PUBLISH_JOB}: run ${runId} of ${RELEASE_WORKFLOW} finished with conclusion "${job.conclusion}"`);
+  }
 }
 
 export const PUBLISH_STEPS: PublishStep[] = [
@@ -779,7 +771,7 @@ export const PUBLISH_STEPS: PublishStep[] = [
     // docs/dev-guide/10-releasing.md's Rollback / runbook step 5b for the manual retry instead.
     name: "npm-publish",
     describe: (ctx) =>
-      `gh run view <release.yml run for v${ctx.version}, matched by commit ${ctx.commitSha}> --json jobs (poll until the npm-publish job completes)`,
+      `gh run watch <release.yml run for v${ctx.version}, matched by commit ${ctx.commitSha}> && gh run view <that run> --json jobs (npm-publish must conclude success)`,
     run: (ctx, deps) => {
       waitForReleaseWorkflow(deps, ctx.commitSha);
     },

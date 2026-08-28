@@ -915,11 +915,11 @@ test("runPublish --dry-run: prints --prerelease for an alpha version, runs nothi
     assert.match(r.output, /gh release create v0\.3\.0-alpha\.1.*--draft/);
     assert.match(
       r.output,
-      /gh run view <release\.yml run for v0\.3\.0-alpha\.1, matched by commit aaa> --json jobs \(poll until the npm-publish job completes\)/,
+      /gh run watch <release\.yml run for v0\.3\.0-alpha\.1, matched by commit aaa> && gh run view <that run> --json jobs \(npm-publish must conclude success\)/,
     );
     assert.match(r.output, /node scripts\/dashboard-canary\.ts 0\.3\.0-alpha\.1/);
     // the CI-wait step renders before the canary in the dry-run listing, matching the real order.
-    assert.ok(r.output.indexOf("gh run view") < r.output.indexOf("dashboard-canary.ts"));
+    assert.ok(r.output.indexOf("gh run watch <release.yml") < r.output.indexOf("dashboard-canary.ts"));
     assert.deepEqual(calls, [
       { file: "git", args: ["fetch", "origin", "main"] },
       { file: "git", args: ["rev-parse", "HEAD"] },
@@ -943,7 +943,7 @@ test("runPublish --dry-run: omits --prerelease for a plain release version", () 
     assert.match(r.output, /gh release create v0\.3\.0.*--draft/);
     assert.match(
       r.output,
-      /gh run view <release\.yml run for v0\.3\.0, matched by commit aaa> --json jobs \(poll until the npm-publish job completes\)/,
+      /gh run watch <release\.yml run for v0\.3\.0, matched by commit aaa> && gh run view <that run> --json jobs \(npm-publish must conclude success\)/,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1141,7 +1141,7 @@ test("runPublish (real run): --prerelease absent from the gh-release argv for a 
       "--draft",
     ]);
     // windows-smoke's own "run watch" comes first (before the tag exists at all); npm-publish's
-    // job-status poll ("run view") runs after gh-release/tag/push-tag.
+    // job-conclusion read ("run view") runs after gh-release/tag/push-tag.
     const ghRunViewCall = calls.find((c) => c.file === "gh" && c.args[0] === "run" && c.args[1] === "view");
     assert.deepEqual(ghRunViewCall?.args, ["run", "view", "7", "--json", "jobs"]);
     assert.ok(calls.indexOf(ghRunViewCall!) > calls.indexOf(ghCall!));
@@ -1235,7 +1235,7 @@ function jobsReply(jobs: Array<{ name: string; status: string; conclusion: strin
   return JSON.stringify({ jobs });
 }
 
-test("waitForReleaseWorkflow: finds the release.yml run matching the tagged commit, polls npm-publish to completion, no real sleep", () => {
+test("waitForReleaseWorkflow: finds the release.yml run matching the tagged commit, watches it, reads npm-publish's conclusion, no real sleep", () => {
   const calls: string[][] = [];
   let listed = 0;
   let sleepCalls = 0;
@@ -1252,7 +1252,11 @@ test("waitForReleaseWorkflow: finds the release.yml run matching the tagged comm
     }
     if (args[0] === "run" && args[1] === "view") {
       if (args[2] !== "2") throw new Error(`viewed the wrong run: ${args[2]}`);
-      return jobsReply([{ name: "npm-publish", status: "completed", conclusion: "success" }]);
+      // deploy-demo failed on the same run: irrelevant to whether npm publish succeeded.
+      return jobsReply([
+        { name: "npm-publish", status: "completed", conclusion: "success" },
+        { name: "deploy-demo", status: "completed", conclusion: "failure" },
+      ]);
     }
     return "";
   };
@@ -1272,10 +1276,14 @@ test("waitForReleaseWorkflow: finds the release.yml run matching the tagged comm
     "--json",
     "databaseId,headSha",
   ]);
-  assert.deepEqual(calls.at(-1), ["gh", "run", "view", "2", "--json", "jobs"]);
-  // one poll missed the run entirely (stale-only), the next found it and the job already
-  // succeeded — exactly one sleep in between, and the injected no-op proves it never blocks
-  // on the real clock.
+  // Completion is `gh run watch` blocking on the run — never `--exit-status`, which would fail
+  // on the unrelated deploy-demo job — followed by exactly one read of the job list.
+  assert.deepEqual(calls.slice(-2), [
+    ["gh", "run", "watch", "2"],
+    ["gh", "run", "view", "2", "--json", "jobs"],
+  ]);
+  // one poll missed the run entirely (stale-only), the next found it — exactly one sleep in
+  // between, and the injected no-op proves it never blocks on the real clock.
   assert.equal(sleepCalls, 1);
   assert.throws(
     () => waitForReleaseWorkflow({ repoRoot: "/unused", exec: (_f, a) => (a[1] === "list" ? "[]" : ""), sleep: () => {} }, "abc123", 1),
@@ -1295,23 +1303,18 @@ test("waitForReleaseWorkflow: a failed npm-publish job throws, naming the job", 
   );
 });
 
-test("waitForReleaseWorkflow: keeps polling while the npm-publish job hasn't appeared yet, then succeeds once it does", () => {
-  let viewed = 0;
-  let sleepCalls = 0;
+test("waitForReleaseWorkflow: a finished run with no npm-publish job throws instead of passing", () => {
   const exec: Exec = (_file, args) => {
     if (args[0] === "run" && args[1] === "list") return JSON.stringify([{ databaseId: 2, headSha: "abc123" }]);
-    if (args[0] === "run" && args[1] === "view") {
-      // The job list is present from the first poll, but `npm-publish` itself hasn't been
-      // scheduled onto it yet — a real run's other job (`attach-evidence`) can appear first.
-      return viewed++ === 0
-        ? jobsReply([{ name: "attach-evidence", status: "completed", conclusion: "success" }])
-        : jobsReply([{ name: "npm-publish", status: "completed", conclusion: "success" }]);
-    }
+    // e.g. the job was skipped by its `if:` guard — a run that never published must not read as delivered.
+    if (args[0] === "run" && args[1] === "view")
+      return jobsReply([{ name: "attach-evidence", status: "completed", conclusion: "success" }]);
     return "";
   };
-  waitForReleaseWorkflow({ repoRoot: "/unused", exec, sleep: () => sleepCalls++ }, "abc123");
-  assert.equal(viewed, 2);
-  assert.equal(sleepCalls, 1);
+  assert.throws(
+    () => waitForReleaseWorkflow({ repoRoot: "/unused", exec, sleep: () => {} }, "abc123"),
+    /npm-publish.*run 2.*release\.yml.*without that job/,
+  );
 });
 
 test("runDistTag: alpha/beta/rc pre-releases print their own identifier, matching npmDistTag exactly", () => {
