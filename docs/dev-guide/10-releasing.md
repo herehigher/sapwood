@@ -58,20 +58,28 @@ Rationale for keeping these three layers distinct:
 - The getting-started install path has been walked end-to-end on a clean machine,
   for the version about to ship — not just unit-tested.
 
-**Who publishes.** A human. The loop may *prepare* a release — bump the four
-manifests and open the CHANGELOG PR — but it cannot *publish* one: the guard denies
-`gh release` and a direct push to the default branch from any session it governs.
-Publishing is a human running `scripts/release.ts publish` from their own machine
-or an authorized CI job triggered by a human-pushed tag.
-
-**`npm publish` needs an interactive terminal.** npm accounts with 2FA
-`auth-and-writes` (the setting npm is moving accounts toward) perform web
-authentication only when stdout is a TTY; without one, `npm publish` prints the
-auth URL and exits `EOTP` rather than waiting for browser approval. `scripts/release.ts`'s
-`npm-publish` step runs with this process's stdio inherited for exactly that reason,
-so run `publish` from a real terminal, not backgrounded or piped through another
-tool. `publish --otp <code>` is also accepted and passed straight through to `npm
-publish --otp <code>` for accounts that use one-time codes instead of web auth.
+**Who publishes.** A human pushes the tag; nothing after that touches a human
+credential. The loop may *prepare* a release — bump the four manifests and open
+the CHANGELOG PR — but it cannot *publish* one: the guard denies `gh release` and
+a direct push to the default branch from any session it governs. A human runs
+`scripts/release.ts publish`, which creates the draft release, tags the release
+commit, and pushes the tag; the tag push (`on: push: tags: ["v*"]`) is what
+triggers `release.yml`'s `npm-publish` job, which is what runs `npm publish`.
+That job is built to authenticate via npm trusted publishing (OIDC) rather than
+any stored credential: it requests a short-lived, GitHub-issued OIDC token via
+`permissions: id-token: write`, and npm CLI ≥ 11.5.1 (bundled with Node 24)
+detects and uses it automatically — no `NPM_TOKEN`, no human 2FA prompt, on no
+one's machine. Two things must be configured by the owner before the first
+publish on this path, or the job fails closed: on npmjs.com, a trusted publisher
+entry for `sapwood` naming this exact workflow (`release.yml`) in this exact
+repository (`herehigher/sapwood`) — without it the registry has nothing to trust
+the job's OIDC token against; and, on this repo, a tag ruleset on `v*`
+restricting tag creation to the owner, so the one remaining human action —
+pushing the tag — is also the one gate on who can trigger a publish. `publish`
+itself waits specifically for the `npm-publish` job to finish — not the whole
+`release.yml` run, whose independent `deploy-demo` job must not be able to block
+a publish that already succeeded — before moving on to the dashboard canary and
+catalog promotion.
 
 **The `github-pages` environment must allow `v*` tag deployments before the first
 publish.** `release.yml`'s `deploy-demo` job deploys from the pushed tag
@@ -119,8 +127,9 @@ so a corrected version is the only path either way.)
 `sapwood` npm package (including its dashboard), and (3) the thin Claude Code shell promoted
 into the separate catalog repository. `publish` first dispatches the Windows pack/install/dashboard
 smoke workflow against `origin/main` and waits for it — a red run stops the release before the
-tag exists. Then the promotion order is npm publish, dashboard canary,
-exact `npm view sapwood@<version> version` verification, then catalog promotion. The promotion
+tag exists. Then the promotion order is: draft the GitHub Release, tag, push the tag (which
+triggers `release.yml`'s `npm-publish` job), wait for that job, exact `npm view
+sapwood@<version> version` verification, dashboard canary, then catalog promotion. The promotion
 copies only `.claude-plugin/`, `commands/`, and `bin/` from the release commit, stamps its
 manifest with the version, records the source commit in the catalog promotion commit message,
 pushes the catalog, and tags it with the same `v<version>` so catalog history maps
@@ -152,6 +161,9 @@ non-alphabetic first identifier (`0.3.0-1`) falls back to the generic `next`.
 Either way, a pre-release **never** publishes under `latest` — `latest` is what
 a bare `npm install sapwood` (no version) and `npx sapwood@latest` resolve, so a
 pre-release landing there would silently become the default install for everyone.
+`scripts/release.ts npmDistTag` is the one place this rule is implemented;
+`release.yml`'s `npm-publish` job calls it via `node scripts/release.ts dist-tag
+"${GITHUB_REF_NAME#v}"` rather than re-encoding the rule in workflow shell.
 
 One bounded exception, in force only until the first plain release exists: while
 `latest` would otherwise resolve to the deprecated `0.0.1` placeholder, the publishing
@@ -160,27 +172,18 @@ human moves it by hand to the newest pre-release after each `publish` —
 engine rather than the placeholder. `publish` does not do this itself, and the first
 plain release retires the exception by landing on `latest` in the ordinary way.
 
-**npm publish token: lives on the publishing human's machine.** `npm publish`
-authenticates via `npm login` run once, locally, by whoever executes `publish`.
-There is no `NPM_TOKEN` CI secret or automated npm-publish workflow today. An
-`NPM_TOKEN` workflow remains an open, human-merge-only owner decision; this
-release path stays human-triggered unless the owner makes and merges that change.
-
-**npm provenance: `--provenance` is the required form, but nothing runs it yet.**
-npm's provenance attestation needs two things — see
-[npm's provenance docs](https://docs.npmjs.com/generating-provenance-statements/):
+**npm provenance: automatic on this path.** npm's provenance attestation needs
+two things — see [npm's provenance docs](https://docs.npmjs.com/generating-provenance-statements/):
 an OIDC ID token, which only a supported CI provider can mint (for GitHub Actions
 that means the job has `permissions: id-token: write` and runs on a GitHub-hosted
 runner), and a `package.json` `repository` field matching, case-sensitively, the
 repo being published from — `engine/package.json`'s already does.
-`.github/workflows/release.yml` does not carry `id-token: write` today — nothing
-in that workflow consumes it, since `npm publish` runs from `scripts/release.ts
-publish` on the operator's own machine via a local `npm login`, not inside that or
-any CI job, and a local run has no OIDC token to mint from regardless of flags.
-The grant returns to `release.yml` only once a CI-run `npm publish` step exists to
-consume it. `npm publish --provenance` is the form to use whenever that step
-actually runs inside a CI job — passing `--provenance` from a local run today
-would not produce a valid attestation.
+`release.yml`'s `npm-publish` job carries `id-token: write` and runs on
+`ubuntu-latest`, so both conditions are met on every publish; per npm's own docs,
+"you don't need to add the `--provenance` flag" for a public repo + public
+package on this path — nobody types it, and no local run can produce a valid
+attestation regardless of flags, since a local run has no OIDC token to mint
+from.
 
 **README npm badge tracks the pre-release channel.** While only pre-releases exist, the
 badge in the three READMEs reads `npm/v/sapwood/alpha`. Switching the badge back to the bare
@@ -205,14 +208,15 @@ npm run release -- prepare 0.3.0-alpha.1
 #    dashboard smoke first, then: draft (creates the GitHub Release as a draft
 #    with the CHANGELOG section as its notes, pinned to this commit via `--target`
 #    since the tag doesn't exist yet) -> tag (tags that same commit, not whatever
-#    HEAD is by then) -> push tag (release.yml attaches evidence and publishes the
-#    draft once CI runs against the pushed tag — see "Release immutability"
-#    above). Then `npm publish`es the engine workspace as `sapwood` under the
-#    version's own dist-tag (see "npm publish dist-tag" above), runs the
-#    dashboard canary, verifies that npm serves the exact version, then promotes
-#    the shell into the catalog. Requires a prior local `npm login` and the
-#    catalog remote. For a pre-release, after publish succeeds follow the manual
-#    `latest` step in "npm publish dist-tag" above.
+#    HEAD is by then) -> push tag. The tag push triggers release.yml, which both
+#    attaches evidence and publishes the draft (see "Release immutability" above)
+#    and, in its own `npm-publish` job, `npm publish`es the engine workspace as
+#    `sapwood` under the version's own dist-tag via trusted publishing/OIDC (see
+#    "Who publishes" and "npm publish dist-tag" above — no npm login needed on
+#    this machine at all). `publish` waits for that job, verifies npm serves the
+#    exact version, runs the dashboard canary, then promotes the shell into the
+#    catalog. Requires the catalog remote. For a pre-release, after publish
+#    succeeds follow the manual `latest` step in "npm publish dist-tag" above.
 npm run release -- publish --catalog https://github.com/herehigher/sapwood-plugin.git
 # or, to see the exact commands without running them:
 npm run release -- publish --catalog https://github.com/herehigher/sapwood-plugin.git --dry-run
@@ -236,15 +240,14 @@ npm deprecate sapwood@0.3.0-alpha.1 "broken; use <new-version> instead"
 # regardless — see npm's own unpublish policy for the narrow window in which
 # `npm unpublish` still applies.
 
-# 5b. Retry, if the npm step (or anything after it) failed or was skipped — tag +
-#     GitHub Release already exist, so `publish` itself refuses to re-run; finish
-#     the remaining steps by hand, in the same order `publish` would have run
-#     them, from the tagged commit. <dist-tag> is whatever
-#     `npm run release -- publish --dry-run` printed for this version (see "npm
-#     publish dist-tag" above — latest / alpha / beta / rc / next); run this from
-#     a real terminal (see "npm publish needs an interactive terminal" above):
+# 5b. Retry, if release.yml's `npm-publish` job (or anything after it) failed —
+#     tag + GitHub Release already exist, so `publish` itself refuses to re-run.
+#     Do NOT publish locally: fix whatever failed, then re-run the failed job(s)
+#     on that same run (`--failed` reruns only what didn't succeed) or from the
+#     Actions UI, then finish the remaining steps by hand, from the tagged commit:
+gh run list --workflow release.yml --json databaseId,headBranch --jq '.[] | select(.headBranch=="v0.3.0-alpha.1")'
+gh run rerun <run-id> --failed
 git checkout v0.3.0-alpha.1
-npm publish --workspace engine --tag <dist-tag>
 node scripts/dashboard-canary.ts 0.3.0-alpha.1
 npm run release -- promote --catalog https://github.com/herehigher/sapwood-plugin.git
 
