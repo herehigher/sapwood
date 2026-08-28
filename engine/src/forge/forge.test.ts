@@ -28,6 +28,8 @@ import {
   hasVerificationPlan,
   isFailedCheckSummaryTruncated,
   OPEN_ISSUES_LIMIT,
+  OPEN_ISSUES_PAGE_CEILING,
+  OPEN_ISSUES_QUERY,
   parseCheckRunAnnotations,
   parseCompareChangedFiles,
   parseDefaultBranchChecksPage,
@@ -36,6 +38,7 @@ import {
   parseIssueLabels,
   parseIssueMeta,
   parseIssueRelations,
+  parseIssuesPage,
   parsePageInfo,
   parsePRChangedFiles,
   parsePRChecksPage,
@@ -55,6 +58,7 @@ import {
   prOwnerMarker,
   projectQuery,
   RECENTLY_CLOSED_ISSUES_LIMIT,
+  RECENTLY_CLOSED_ISSUES_QUERY,
   readPrOwner,
   renderAnnotationsText,
   renderFailingCheckRunSection,
@@ -92,6 +96,28 @@ test("#943 forge provenance filter: trusted associations, actor, and reviewer bo
 test("#943 forge provenance filter: missing author or association fails the whole read", () => {
   assert.throws(() => filterTrustedAuthors([{ author: "owner", authorAssociation: "OWNER" }, { author: "missing-association" }], null));
   assert.throws(() => filterTrustedAuthors([{ author: "", authorAssociation: "OWNER" }], null));
+  // #1163: an entry with neither `author` nor `login` set at all (no fallback identity either)
+  // is the same transport-failure shape as a missing authorAssociation — throws, not "".
+  assert.throws(() => filterTrustedAuthors([{ authorAssociation: "OWNER" }], null));
+});
+
+test("#1163 forge provenance filter: an explicit `null` author (GitHub's own shape for a deleted account) is a determinate, untrusted result — never a throw, unlike an ABSENT author/authorAssociation key", () => {
+  const filtered = filterTrustedAuthors(
+    [
+      { author: "trusted", authorAssociation: "OWNER" },
+      // A live login with no classification (GitHub can return this) — untrusted, not a throw.
+      { author: "unclassified-login", authorAssociation: null },
+      // The real deleted-account payload shape: both fields explicitly null.
+      { author: null, authorAssociation: null },
+    ],
+    null,
+  );
+  assert.deepEqual(
+    filtered.entries.map((e) => e.author),
+    ["trusted"],
+  );
+  assert.equal(filtered.visibleTotal, 1);
+  assert.equal(filtered.withheld, 2);
 });
 
 test("#943 getPRComments: pages past 25 public comments before capping, preserving all three older trusted comments", async () => {
@@ -3528,85 +3554,218 @@ test("listOpenIssueNumbers: every open issue number in this repo", async () => {
   assert.ok(args.includes("--state") && args.includes("open"));
 });
 
-test("listOpenIssues #215/#216: returns digest fields plus bodies for marker reconciliation", async () => {
+// A representative `repository.issues` GraphQL connection page — OPEN_ISSUES_QUERY and
+// RECENTLY_CLOSED_ISSUES_QUERY share this node shape (see parseIssuesConnectionPage).
+function issuesConnectionPage(
+  nodes: Array<{
+    number: number;
+    title: string;
+    body?: string;
+    labels?: string[];
+    milestone?: string | null;
+    author?: { login: string } | null;
+    authorAssociation?: string | null;
+  }>,
+  pageInfo: { hasNextPage: boolean; endCursor: string | null } = { hasNextPage: false, endCursor: null },
+): string {
+  return JSON.stringify({
+    data: {
+      repository: {
+        issues: {
+          pageInfo,
+          nodes: nodes.map((n) => ({
+            number: n.number,
+            title: n.title,
+            body: n.body ?? "",
+            labels: { nodes: (n.labels ?? []).map((name) => ({ name })) },
+            milestone: n.milestone != null ? { title: n.milestone } : null,
+            author: n.author === undefined ? { login: "maintainer" } : n.author,
+            authorAssociation: n.authorAssociation === undefined ? "OWNER" : n.authorAssociation,
+          })),
+        },
+      },
+    },
+  });
+}
+
+test("listOpenIssues #215/#216/#1163: returns digest fields plus bodies for marker reconciliation, and author provenance for the #1070 trust test", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(cfg);
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
-    return JSON.stringify([
-      { number: 5, title: "Parked gap", body: "one", labels: [{ name: "blocked" }], milestone: { title: "M4" } },
-      { number: 7, title: "Unassigned gap", body: "two", labels: [], milestone: null },
+    return issuesConnectionPage([
+      {
+        number: 5,
+        title: "Parked gap",
+        body: "one",
+        labels: ["blocked"],
+        milestone: "M4",
+        author: { login: "maintainer" },
+        authorAssociation: "OWNER",
+      },
+      { number: 7, title: "Unassigned gap", body: "two", labels: [], author: { login: "outsider" }, authorAssociation: "NONE" },
     ]);
   };
   assert.deepEqual(await forge.listOpenIssues(), [
-    { number: 5, title: "Parked gap", body: "one", labels: ["blocked"], milestone: "M4" },
-    { number: 7, title: "Unassigned gap", body: "two", labels: [] },
+    { number: 5, title: "Parked gap", body: "one", labels: ["blocked"], milestone: "M4", author: "maintainer", authorAssociation: "OWNER" },
+    { number: 7, title: "Unassigned gap", body: "two", labels: [], author: "outsider", authorAssociation: "NONE" },
   ]);
   const args = seen[0]!;
-  assert.deepEqual(args.slice(0, 2), ["issue", "list"]);
-  assert.ok(args.includes("--state") && args.includes("open"));
-  assert.ok(args.includes("number,title,body,labels,milestone"));
+  assert.deepEqual(args.slice(0, 2), ["api", "graphql"]);
+  assert.ok(args.includes(`query=${OPEN_ISSUES_QUERY}`));
+  assert.ok(args.includes("owner=o") && args.includes("repo=r"));
+  assert.ok(args.includes("after=null"), 'first page passes the literal GraphQL null, not the string "null" via -f');
 });
 
-test("listOpenIssues #215: rejects an exactly-limit-sized response but accepts limit minus one", async () => {
+test("listOpenIssues #215/#1163: a GraphQL-reported PARTIAL page ceiling (hasNextPage still true after OPEN_ISSUES_PAGE_CEILING pages) rejects — and makes no eleventh fetch", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(cfg);
-  let issueCount = 999;
-  (forge as unknown as { gh: () => Promise<string> }).gh = async () =>
-    JSON.stringify(
-      Array.from({ length: issueCount }, (_, index) => ({
-        number: index + 1,
-        title: `Issue ${index + 1}`,
-        labels: [],
-        milestone: null,
-      })),
+  let calls = 0;
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => {
+    calls += 1;
+    // Every one of the OPEN_ISSUES_PAGE_CEILING pages this reader is allowed to make is FULL
+    // (100 issues) and still claims more are coming — the read can never conclude it's complete.
+    return issuesConnectionPage(
+      Array.from({ length: 100 }, (_, i) => ({ number: calls * 1000 + i, title: `issue ${calls}-${i}` })),
+      { hasNextPage: true, endCursor: `cursor-${calls}` },
     );
-
-  assert.equal((await forge.listOpenIssues()).length, 999);
-  issueCount = 1000;
+  };
   await assert.rejects(() => forge.listOpenIssues(), /backlog read is incomplete \(limit 1000\)/);
+  assert.equal(
+    calls,
+    OPEN_ISSUES_PAGE_CEILING,
+    "stops at the ceiling — never a page 11 fetch to confirm what it already knows is incomplete",
+  );
 });
 
-test("listRecentlyClosedIssues #528: one BOUNDED closed-issue read, same fields as listOpenIssues", async () => {
+test("listOpenIssues #1163: pages to exhaustion (hasNextPage false before the ceiling) and returns every page's issues, threading the cursor through", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  const seenAfter: string[] = [];
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    seenAfter.push(args.find((a) => a.startsWith("after="))!);
+    if (seenAfter.length === 1) {
+      return issuesConnectionPage([{ number: 1, title: "page one" }], { hasNextPage: true, endCursor: "cursor-1" });
+    }
+    return issuesConnectionPage([{ number: 2, title: "page two" }], { hasNextPage: false, endCursor: null });
+  };
+  const issues = await forge.listOpenIssues();
+  assert.deepEqual(
+    issues.map((i) => i.number),
+    [1, 2],
+  );
+  assert.deepEqual(seenAfter, ["after=null", "after=cursor-1"]);
+});
+
+test("listOpenIssues #1163: hasNextPage without endCursor fails closed", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () =>
+    issuesConnectionPage([{ number: 1, title: "page one" }], { hasNextPage: true, endCursor: null });
+  await assert.rejects(() => forge.listOpenIssues(), /hasNextPage without endCursor/);
+});
+
+test("listOpenIssues #1163: ten complete full pages return exactly 1,000 issues in ten calls", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  let calls = 0;
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => {
+    calls += 1;
+    const isLastPage = calls === OPEN_ISSUES_PAGE_CEILING;
+    return issuesConnectionPage(
+      Array.from({ length: 100 }, (_, i) => ({ number: calls * 1000 + i, title: `issue ${calls}-${i}` })),
+      { hasNextPage: !isLastPage, endCursor: isLastPage ? null : `cursor-${calls}` },
+    );
+  };
+  const issues = await forge.listOpenIssues();
+  assert.equal(issues.length, OPEN_ISSUES_LIMIT);
+  assert.equal(calls, OPEN_ISSUES_PAGE_CEILING);
+});
+
+test("listRecentlyClosedIssues #528/#1163: one BOUNDED closed-issue GraphQL read, same fields (incl. author provenance) as listOpenIssues — an issue-only query, never REST's issues-or-PRs endpoint", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(cfg);
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
-    return JSON.stringify([
-      { number: 461, title: "Shipped fact", body: "one", labels: [{ name: "type:bug" }], milestone: { title: "v0.2.1" } },
-      { number: 5, title: "Older closed gap", body: "two", labels: [], milestone: null },
+    return issuesConnectionPage([
+      {
+        number: 461,
+        title: "Shipped fact",
+        body: "one",
+        labels: ["type:bug"],
+        milestone: "v0.2.1",
+        author: { login: "maintainer" },
+        authorAssociation: "MEMBER",
+      },
+      { number: 5, title: "Older closed gap", body: "two", labels: [], author: { login: "stranger" }, authorAssociation: null },
     ]);
   };
   assert.deepEqual(await forge.listRecentlyClosedIssues(), [
-    { number: 461, title: "Shipped fact", body: "one", labels: ["type:bug"], milestone: "v0.2.1" },
-    { number: 5, title: "Older closed gap", body: "two", labels: [] },
+    {
+      number: 461,
+      title: "Shipped fact",
+      body: "one",
+      labels: ["type:bug"],
+      milestone: "v0.2.1",
+      author: "maintainer",
+      authorAssociation: "MEMBER",
+    },
+    { number: 5, title: "Older closed gap", body: "two", labels: [], author: "stranger", authorAssociation: null },
   ]);
   const args = seen[0]!;
   assert.equal(seen.length, 1, "one read — no pagination loop");
-  assert.deepEqual(args.slice(0, 2), ["issue", "list"]);
-  assert.ok(args.includes("--state") && args.includes("closed"));
-  assert.ok(args.includes("number,title,body,labels,milestone"));
-  assert.ok(args.includes("--limit") && args.includes(String(RECENTLY_CLOSED_ISSUES_LIMIT)));
-  assert.ok(args.includes("--search") && args.includes("sort:updated-desc"), "recency-ordered, so the bound keeps the RECENT tail");
+  assert.deepEqual(args.slice(0, 2), ["api", "graphql"]);
+  assert.ok(args.includes(`query=${RECENTLY_CLOSED_ISSUES_QUERY}`));
+  assert.ok(args.includes(`first=${RECENTLY_CLOSED_ISSUES_LIMIT}`));
 });
 
 test("listRecentlyClosedIssues #528: an exactly-limit-sized response is the BOUND, never an incompleteness error", async () => {
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(cfg);
   (forge as unknown as { gh: () => Promise<string> }).gh = async () =>
-    JSON.stringify(
-      Array.from({ length: RECENTLY_CLOSED_ISSUES_LIMIT }, (_, index) => ({
-        number: index + 1,
-        title: `Closed ${index + 1}`,
-        labels: [],
-        milestone: null,
-      })),
+    issuesConnectionPage(
+      Array.from({ length: RECENTLY_CLOSED_ISSUES_LIMIT }, (_, index) => ({ number: index + 1, title: `Closed ${index + 1}` })),
     );
   // Unlike listOpenIssues (whose completeness is load-bearing for the fail-closed create
   // boundary), this read is a BOUNDED backstop by design — hitting the bound is the normal case.
   assert.equal((await forge.listRecentlyClosedIssues()).length, RECENTLY_CLOSED_ISSUES_LIMIT);
+});
+
+test("parseIssuesPage #1163: author/authorAssociation each travel through with the SAME presence they arrived with — an omitted key stays omitted (so filterTrustedAuthors throws, the transport-failure case), an explicit `null` (the real deleted-account payload) stays `null` (so filterTrustedAuthors withholds, not throws)", () => {
+  const deletedAccount = parseIssuesPage(
+    JSON.stringify({
+      data: {
+        repository: {
+          issues: { nodes: [{ number: 1, title: "Ghost author", labels: { nodes: [] }, author: null, authorAssociation: null }] },
+        },
+      },
+    }),
+  );
+  assert.equal(deletedAccount.length, 1);
+  assert.equal(
+    deletedAccount[0]!.author,
+    null,
+    "user: null (deleted account) is carried through as an explicit null, not a fabricated empty string",
+  );
+  assert.equal(deletedAccount[0]!.authorAssociation, null);
+
+  const omittedKey = parseIssuesPage(
+    JSON.stringify({
+      data: {
+        repository: {
+          issues: { nodes: [{ number: 2, title: "No association field at all", labels: { nodes: [] }, author: { login: "someone" } }] },
+        },
+      },
+    }),
+  );
+  assert.equal(omittedKey.length, 1);
+  assert.equal(
+    omittedKey[0]!.authorAssociation,
+    undefined,
+    "an authorAssociation key GraphQL never sent stays absent, not coerced to null",
+  );
 });
 
 // ── #110 PR0: updateIssueBody — the WRITE counterpart to getIssueBody, additive infra for the
@@ -3841,6 +4000,143 @@ test("selectPlanTriageCandidates: unlike selectPlanReviewCandidates, a NON-Ready
   assert.deepEqual(
     selectPlanReviewCandidates(project, cfg).map((i) => i.number),
     [],
+  );
+});
+
+test("selectPlanTriageCandidates #1163: threads author/authorAssociation through unchanged — unlike selectPoolEligibleIssues, this is NOT a trusted-promotion gate on its own (see GithubForge.getIssuesNeedingPlanTriage, which filters the result)", () => {
+  const project = {
+    projectId: "P",
+    statusFieldId: "F",
+    options: [],
+    items: [
+      {
+        itemId: "I1",
+        number: 100,
+        title: "planless, stranger-authored",
+        state: "OPEN",
+        body: "no plan yet",
+        repo: "herehigher/sapwood",
+        labels: [],
+        status: null,
+        milestone: null,
+        author: "stranger",
+        authorAssociation: "NONE",
+      },
+    ],
+    placements: [],
+  };
+  const candidates = selectPlanTriageCandidates(project, cfg);
+  assert.deepEqual(candidates, [
+    { number: 100, title: "planless, stranger-authored", labels: [], body: "no plan yet", author: "stranger", authorAssociation: "NONE" },
+  ]);
+});
+
+// A raw ProjectV2 GraphQL response for one `content` node, letting a test omit a key entirely
+// (rather than parseProject's fixtures elsewhere, which always fill author/authorAssociation).
+function projectResponseWithOneItem(content: Record<string, unknown>): string {
+  return JSON.stringify({
+    data: {
+      user: {
+        projectV2: {
+          id: "PVT_p",
+          field: { id: "PVTF_s", options: [] },
+          items: {
+            nodes: [{ id: "ITEM_1", content, fieldValues: { nodes: [] } }],
+          },
+        },
+      },
+    },
+  });
+}
+
+test("parseProject #1163: preserves absent versus explicit-null provenance through plan-triage filtering", () => {
+  const deletedAuthorProject = parseProject(
+    projectResponseWithOneItem({
+      number: 1,
+      title: "deleted-account issue",
+      state: "OPEN",
+      body: "planless",
+      repository: { nameWithOwner: "herehigher/sapwood" },
+      labels: { nodes: [] },
+      author: null, // GraphQL's own shape for a deleted account.
+      authorAssociation: null,
+    }),
+    "Status",
+  );
+  const deletedAuthorCandidates = selectPlanTriageCandidates(deletedAuthorProject, cfg);
+  assert.deepEqual(filterTrustedAuthors(deletedAuthorCandidates, null), { entries: [], visibleTotal: 0, withheld: 1 });
+
+  const malformedProject = parseProject(
+    projectResponseWithOneItem({
+      number: 2,
+      title: "malformed provenance",
+      state: "OPEN",
+      body: "planless",
+      repository: { nameWithOwner: "herehigher/sapwood" },
+      labels: { nodes: [] },
+      author: { login: "stranger" },
+      // authorAssociation key is entirely absent: an incomplete/malformed response, not a
+      // determinate "no association" result.
+    }),
+    "Status",
+  );
+  const malformedCandidates = selectPlanTriageCandidates(malformedProject, cfg);
+  assert.throws(() => filterTrustedAuthors(malformedCandidates, null), /forge author provenance is incomplete/);
+});
+
+test("GithubForge.getIssuesNeedingPlanTriage #1163: a NONE-associated planless issue already on the board is not returned — board membership alone is not a trusted-promotion gate here", async () => {
+  const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
+  const forge = new GithubForge(cfg);
+  (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
+    if (args[1] === "user") return "maintainer";
+    return JSON.stringify({
+      data: {
+        user: {
+          projectV2: {
+            id: "PVT_1",
+            field: { id: "F1", options: [] },
+            items: {
+              nodes: [
+                {
+                  id: "ITEM_1",
+                  content: {
+                    number: 1,
+                    title: "trusted maintainer's planless issue",
+                    state: "OPEN",
+                    body: "no plan yet",
+                    repository: { nameWithOwner: "o/r" },
+                    labels: { nodes: [] },
+                    author: { login: "maintainer" },
+                    authorAssociation: "OWNER",
+                  },
+                  fieldValues: { nodes: [] },
+                },
+                {
+                  id: "ITEM_2",
+                  content: {
+                    number: 2,
+                    title: "STRANGER planless issue, already on the board",
+                    state: "OPEN",
+                    body: "no plan yet either",
+                    repository: { nameWithOwner: "o/r" },
+                    labels: { nodes: [] },
+                    author: { login: "stranger" },
+                    authorAssociation: "NONE",
+                  },
+                  fieldValues: { nodes: [] },
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+  };
+  const candidates = await forge.getIssuesNeedingPlanTriage();
+  assert.deepEqual(
+    candidates.map((i) => i.number),
+    [1],
+    "the untrusted-author candidate (#2) never reaches the triage-drafting session",
   );
 });
 
