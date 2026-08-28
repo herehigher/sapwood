@@ -18,10 +18,16 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { runEngine } from "../cli.js";
 import { engineAgentEmptyCiRequiredChecksError, loadConfig, parseConfig } from "../config/config.js";
+import { loadDoctrine } from "../config/doctrine.js";
 import { keyIdSidecarPath } from "../config/paths.js";
 import type { GhRunner } from "../forge/gh.js";
+import { defaultArchitectPromptPath, loadGoalExcerpt, renderArchitectPrompt } from "../roles/architect.js";
+import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.js";
+import { buildRenderPrompt } from "../roles/worker.js";
 import { State } from "../state/state.js";
 import { DOC_LINKS } from "../util/doc-links.js";
+import { stripHtmlComments } from "../util/markdown.js";
+import { defaultPoPromptPath, readPlanMd } from "./align.js";
 import {
   type DeployKeyPermissionsFsOps,
   defaultDoctrineTemplatePath,
@@ -940,6 +946,114 @@ test("init scaffolds the doctrine file at a custom doctrine.file location, creat
     const doctrinePath = join(dir, "notes", "nested", "DOCTRINE.md");
     assert.ok(existsSync(doctrinePath));
     assert.ok(actions.some((a) => /wrote starter doctrine file/.test(a)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #830: a fresh `sapwood init` scaffold's HTML-comment authoring guidance must never reach a
+// rendered prompt. `doctrine-template.md`/`goal-template.md` (copied verbatim into a repo's
+// live `doctrine.file`/`goal.file` by ensureDoctrineFile/ensureGoalFile, per this file's scaffold
+// tests above) author their customization guidance to the human as inline `<!-- ... -->`
+// comments. Three loaders substitute that content raw into a live prompt: `doctrine.ts`'s
+// `loadDoctrine` ({{doctrine}}, worker.md), `architect.ts`'s `loadGoalExcerpt`
+// ({{plan.architectureChapter}}, architect.md), and `align.ts`'s `readPlanMd` + the shared
+// `stripHtmlComments` helper ({{plan.md}}, po.md). This test runs a REAL `sapwood init` into a
+// temp dir (never a synthetic fixture standing in for the scaffold) and renders all three prompt
+// paths against the files init actually wrote, using each loader's own real exported function
+// plus the real shipped worker.md/architect.md/po.md templates and real render functions — the
+// same ones production dispatch uses. Before #830's loader-side fix, every assertion below fails
+// (see the PR's test-evidence section for the red-before run).
+test("#830: a fresh sapwood-init scaffold's goal/doctrine files render into the worker, architect, and po-align prompts with no HTML comment reaching any of the three, and the known scaffold-comment sentences are gone", async () => {
+  const { run } = fakeRun({
+    labels: requiredLabels(cfg).map((l) => l.name),
+    boardExists: true,
+    boardOptions: ["Ready", "In Progress", "Done"],
+  });
+  const dir = tmpCwd();
+  try {
+    await init(cfg, { run, getAuthStatus: async () => OK_AUTH, cwd: dir, ...nonInteractive });
+    const goalPath = join(dir, "docs", "GOAL.md");
+    const doctrinePath = join(dir, "docs", "REVIEW-DOCTRINE.md");
+    assert.ok(existsSync(goalPath) && existsSync(doctrinePath), "init must have scaffolded both files");
+    // Sanity: the scaffolded files really do carry HTML comments — a false pass below would mean
+    // the shipped templates changed shape, not that the loader-side fix works.
+    assert.match(readFileSync(goalPath, "utf8"), /<!--/);
+    assert.match(readFileSync(doctrinePath, "utf8"), /<!--/);
+
+    const projectCfg = parseConfig(
+      `board: { owner: acme, repo: widgets, projectNumber: 7 }\ngoal: { file: ${JSON.stringify(goalPath)} }\ndoctrine: { file: ${JSON.stringify(doctrinePath)} }`,
+    );
+
+    // Worker prompt: buildRenderPrompt is the REAL production renderer for worker.md —
+    // {{doctrine}} is wired straight to doctrine.ts's loadDoctrine via its own CONFIG_VARS map,
+    // never reimplemented by this test.
+    const renderWorkerPrompt = buildRenderPrompt(projectCfg);
+    const workerPrompt = renderWorkerPrompt({ number: 1, title: "t", labels: [], body: "b" });
+    assert.ok(!workerPrompt.includes("<!--"), "worker prompt: no HTML comment marker may reach {{doctrine}}");
+    assert.ok(
+      !workerPrompt.includes("This file was scaffolded because none existed yet"),
+      "worker prompt: doctrine-template.md's own scaffold-authoring sentence must not leak in",
+    );
+
+    // Architect prompt: the real renderArchitectPrompt + real architect.md, fed the real
+    // loadGoalExcerpt/loadDoctrine outputs off the scaffolded files — the exact values
+    // createArchitectStub substitutes in production for {{plan.architectureChapter}}/
+    // {{round.doctrine}}. Every other var is an inert marker; only these two are under test.
+    const architectTemplate = loadRolePromptTemplate(undefined, defaultArchitectPromptPath());
+    const architectPrompt = renderArchitectPrompt(architectTemplate, {
+      "round.id": "1",
+      "round.marker": "m-1",
+      "round.designNoteIssue": "(none)",
+      "round.alignedGoals": "(none)",
+      "round.lastMerged": "(none)",
+      "round.doctrine": loadDoctrine(projectCfg.doctrine.file, projectCfg.doctrine.maxChars),
+      "plan.architectureChapter": loadGoalExcerpt(projectCfg.goal.file),
+      "candidates.summary": "(none)",
+      "round.pool": "(none)",
+      "labels.blocked": projectCfg.labels.blocked,
+      "labels.needsHuman": projectCfg.labels.needsHuman,
+      "round.directive": "(none)",
+      "lang.docs": projectCfg.language.docs,
+      "lang.issuesAndPrs": projectCfg.language.issuesAndPrs,
+    });
+    assert.ok(
+      !architectPrompt.includes("<!--"),
+      "architect prompt: no HTML comment marker may reach {{plan.architectureChapter}}/{{round.doctrine}}",
+    );
+    assert.ok(
+      !architectPrompt.includes("advisory only, a missing section never blocks a round"),
+      "architect prompt: goal-template.md's own Architecture-section fallback-placeholder sentence must not leak in",
+    );
+    assert.ok(
+      !architectPrompt.includes("This file was scaffolded because none existed yet"),
+      "architect prompt: doctrine-template.md's own scaffold-authoring sentence must not leak in via {{round.doctrine}}",
+    );
+
+    // po-align prompt: the real po.md + real renderRolePrompt + real readPlanMd, applying the
+    // SAME shared stripHtmlComments helper align.ts's own {{plan.md}} substitution calls.
+    const poTemplate = loadRolePromptTemplate(undefined, defaultPoPromptPath());
+    const planRead = readPlanMd(projectCfg.goal.file);
+    assert.ok(planRead.ok, "the scaffolded goal file must be readable");
+    const alignPrompt = renderRolePrompt(poTemplate, { number: 0, title: "", labels: [] }, projectCfg, {
+      "po.mode": "align",
+      "round.milestone": "(none)",
+      "plan.md": stripHtmlComments(planRead.ok ? planRead.content : ""),
+      "round.directive": "(none)",
+      "backlog.digest": "(none)",
+    });
+    // po.md itself legitimately teaches sessions the literal `<!-- sapwood:ac -->` anchor
+    // syntax elsewhere in its instructions (unrelated to #830), so this check is scoped to
+    // po.md's own `<plan-md>...</plan-md>` wrapper around the substituted {{plan.md}} value.
+    const planMdStart = alignPrompt.indexOf("<plan-md>") + "<plan-md>".length;
+    const planMdEnd = alignPrompt.indexOf("</plan-md>");
+    assert.ok(planMdStart > 0 && planMdEnd > planMdStart, "expected po.md's <plan-md> wrapper");
+    const planMdSection = alignPrompt.slice(planMdStart, planMdEnd);
+    assert.ok(!planMdSection.includes("<!--"), "po-align prompt: no HTML comment marker may reach the substituted {{plan.md}}");
+    assert.ok(
+      !planMdSection.includes("they're invisible in rendered markdown"),
+      "po-align prompt: goal-template.md's own authoring-guidance sentence must not leak in",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -1384,6 +1384,57 @@ test("loadGoalExcerpt: a '# Constraints' H1 wrapping the real '## Constraints' H
   }
 });
 
+// ── #830: HTML comments in the goal file must never reach the architect's rendered excerpt ────
+
+test("loadGoalExcerpt: strips HTML comments shaped like goal-template.md's Constraints AND Architecture guidance, from both sections independently, leaving each section's real content intact", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-goalexcerpt-"));
+  try {
+    const goalPath = join(dir, "PLAN.md");
+    writeFileSync(
+      goalPath,
+      [
+        "# Goal",
+        "",
+        "## Constraints",
+        "",
+        "<!-- Locked decisions and hard limits any change must respect. -->",
+        "",
+        "REAL_CONSTRAINTS_LINE",
+        "",
+        "## Architecture",
+        "",
+        "<!-- The architect proceeds with an explicit 'no architecture chapter available'",
+        "     placeholder — advisory only, it never blocks a round. -->",
+        "",
+        "REAL_ARCHITECTURE_LINE",
+        "",
+      ].join("\n"),
+    );
+    const excerpt = loadGoalExcerpt(goalPath);
+    assert.ok(!excerpt.includes("<!--"), "no HTML comment marker reaches the excerpt");
+    assert.ok(!excerpt.includes("-->"));
+    assert.ok(!excerpt.includes("Locked decisions and hard limits"));
+    assert.ok(!excerpt.includes("no architecture chapter available"), "the architect's own fallback-placeholder sentence must not leak in");
+    assert.ok(excerpt.includes("REAL_CONSTRAINTS_LINE"), "real Constraints content survives the strip");
+    assert.ok(excerpt.includes("REAL_ARCHITECTURE_LINE"), "real Architecture content survives the strip");
+    // #830: a comment-only body still counts as a FOUND section, not a missing one — the
+    // strip must not flip a present heading into the placeholder branch.
+    assert.ok(!excerpt.includes("not found"), "both headings were present with real content beyond the comment — no placeholder text");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadGoalExcerpt: the shipped goal-template.md (the exact file `sapwood init` scaffolds) renders with no HTML comment reaching the excerpt", () => {
+  // engine/src/roles/architect.test.ts -> engine/prompts/goal-template.md.
+  const templatePath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "prompts", "goal-template.md");
+  assert.ok(existsSync(templatePath), `expected the shipped goal template at ${templatePath}`);
+  assert.match(readFileSync(templatePath, "utf8"), /<!--/, "sanity: the shipped template itself still carries HTML comments");
+  const excerpt = loadGoalExcerpt(templatePath);
+  assert.ok(!excerpt.includes("<!--"), "the shipped template's own Constraints/Architecture comments must not reach the excerpt");
+  assert.ok(!excerpt.includes("-->"));
+});
+
 test("#128: a real caller (deps.planMdPath omitted) renders {{plan.architectureChapter}} from cfg.goal.file, the single resolved north-star path", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-goalfile-"));
   try {

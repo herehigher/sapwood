@@ -82,3 +82,18 @@ export function extractMarkdownSections(body: string, headingPattern: RegExp, le
 export function escapeAngleBrackets(text: string): string {
   return text.replaceAll("<", "&lt;");
 }
+
+/** #830: strip every HTML comment (`<!-- ... -->`) from `text` before it is substituted into a
+ *  role prompt. A scaffolded file a human edits in a text editor or on GitHub (goal-template.md,
+ *  doctrine-template.md, and anything shaped like them) authors ITS OWN customization guidance as
+ *  inline HTML comments — invisible on a rendered-markdown viewer, but ordinary text to a raw
+ *  substitution into an LLM prompt. Doing this at the LOAD boundary (`doctrine.ts`'s
+ *  `loadDoctrine`, `align.ts`'s `{{plan.md}}` substitution, `architect.ts`'s
+ *  `loadGoalExcerptWithStatus`) rather than by editing the templates keeps the on-disk file —
+ *  and a human editing it — untouched; only the copy actually handed to a session is cleaned.
+ *  Non-greedy and dotAll-equivalent (`[\s\S]*?`, not `.` — a real comment in either template
+ *  spans multiple lines) so two adjacent comments are stripped as two matches, never merged into
+ *  one that also eats the prose between them. */
+export function stripHtmlComments(text: string): string {
+  return text.replace(/<!--[\s\S]*?-->/g, "");
+}

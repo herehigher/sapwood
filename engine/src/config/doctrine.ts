@@ -22,6 +22,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { capDigest } from "../retro/retro-digest.js";
+import { stripHtmlComments } from "../util/markdown.js";
 
 /** Resolve the shipped, framework-owned doctrine core — inside the engine package (NOT the
  *  orchestrated target repo), the same `join(here, "..", "..", "prompts", …)` shape as
@@ -53,7 +54,16 @@ export const NO_REPO_DOCTRINE =
  *  misconfiguration, not "no doctrine adopted." `corePath` defaults to the real shipped location
  *  and exists only as a test seam (a missing-core throw is otherwise unreachable without moving
  *  the real installed file, racing every other concurrently running suite that also calls
- *  `loadDoctrine`); every production caller omits it and gets the real path. */
+ *  `loadDoctrine`); every production caller omits it and gets the real path.
+ *
+ *  #830: the repo part is stripped of HTML comments (`stripHtmlComments`) before capping — a
+ *  fresh `sapwood init`'d repo's `doctrine.file` starts as `doctrine-template.md`'s verbatim
+ *  copy, which authors its own customization guidance as inline `<!-- ... -->` comments meant for
+ *  a human reading rendered markdown, not for a session reading raw substituted text. Applies
+ *  equally to this repo's own `docs/REVIEW-DOCTRINE.md`, which carries the identical leading
+ *  comment — no special-casing needed, the file is read through this same path. Stripped BEFORE
+ *  capping so the char budget is spent on real doctrine content, never on comment bytes that
+ *  would just be discarded anyway. */
 export function loadDoctrine(path: string, maxChars: number, corePath: string = defaultDoctrineCorePath()): string {
   if (!existsSync(corePath)) {
     throw new Error(`doctrine core missing at ${corePath} — a packaging bug, refusing to proceed`);
@@ -69,7 +79,7 @@ export function loadDoctrine(path: string, maxChars: number, corePath: string = 
     } catch (e) {
       throw new Error(`doctrine.file present but unreadable: ${path} (${String(e)}) — refusing to proceed`);
     }
-    repoPart = capDigest(text, maxChars);
+    repoPart = capDigest(stripHtmlComments(text), maxChars);
   }
   return `${core}\n\n${repoPart}`;
 }

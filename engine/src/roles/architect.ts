@@ -62,7 +62,7 @@ import { capDigest } from "../retro/retro-digest.js";
 import { hashBody } from "../review/ac-snapshot.js";
 import type { InputManifestRow, State } from "../state/state.js";
 import { parseStructuredBlock } from "../state/structured-output.js";
-import { extractMarkdownSections } from "../util/markdown.js";
+import { extractMarkdownSections, stripHtmlComments } from "../util/markdown.js";
 import {
   ARCHITECT_ALLOWED_TOOLS,
   envFailureHook,
@@ -350,14 +350,25 @@ function loadGoalExcerptWithStatus(path: string): {
       architectureFound: false,
     };
   }
-  const constraints = extractConstraintsSection(text);
-  const architecture = extractArchitectureChapter(text);
+  // #830: both sections are scaffold-descended (goal-template.md, copied verbatim by `sapwood
+  // init`) and author their own customization guidance to a human as inline `<!-- ... -->`
+  // comments — stripped here, at the substitution boundary, before either joins the excerpt
+  // actually handed to the architect session. `extractConstraintsSection`/
+  // `extractArchitectureChapter` (and the on-disk `text` above) stay untouched — only the copy
+  // that reaches the prompt is cleaned. Null-ness (found vs. missing) is decided on the RAW
+  // extraction, before stripping: a heading whose body is comment-only still counts as found —
+  // same "bare heading is not a missing section" contract loadGoalExcerptWithStatus already
+  // documents above.
+  const constraintsRaw = extractConstraintsSection(text);
+  const architectureRaw = extractArchitectureChapter(text);
+  const constraints = constraintsRaw == null ? null : stripHtmlComments(constraintsRaw);
+  const architecture = architectureRaw == null ? null : stripHtmlComments(architectureRaw);
   return {
     excerpt: [constraints ?? constraintsPlaceholder(path), architecture ?? architecturePlaceholder(path)].join("\n\n"),
     ok: true,
     detail: null,
-    constraintsFound: constraints != null,
-    architectureFound: architecture != null,
+    constraintsFound: constraintsRaw != null,
+    architectureFound: architectureRaw != null,
   };
 }
 

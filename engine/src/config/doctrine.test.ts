@@ -64,6 +64,34 @@ test("loadDoctrine: repo content over maxChars is deterministically truncated wi
   }
 });
 
+// ── #830: HTML comments in the repo doctrine file must never reach the composed prompt text ────
+
+test("loadDoctrine: strips an HTML comment shaped like doctrine-template.md's leading header from the repo part, leaving the plain-prose control content intact", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-doctrine-"));
+  try {
+    const path = join(dir, "REVIEW-DOCTRINE.md");
+    const content = [
+      "<!--",
+      "  sapwood review doctrine — this repository's own review knowledge, read by the worker",
+      "  dispatch brief. Configured as `doctrine.file` in sapwood.config.yaml (default:",
+      "  docs/REVIEW-DOCTRINE.md).",
+      "-->",
+      "",
+      "# Review doctrine",
+      "",
+      "REAL_INVARIANT_CONTROL_LINE",
+    ].join("\n");
+    writeFileSync(path, content);
+    const result = loadDoctrine(path, 10_000);
+    assert.ok(!result.includes("<!--"), "the HTML comment must be stripped from the composed doctrine text");
+    assert.ok(!result.includes("Configured as `doctrine.file`"), "the comment's config-key sentence must not reach the prompt");
+    assert.ok(result.includes("# Review doctrine"), "plain-prose heading survives the strip");
+    assert.ok(result.includes("REAL_INVARIANT_CONTROL_LINE"), "plain-prose control content survives the strip");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("loadDoctrine: an empty repo file (exists, zero bytes) is NOT treated as absent — core + empty repo part, never NO_REPO_DOCTRINE", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-doctrine-"));
   try {
@@ -143,6 +171,19 @@ test("#419: the loaded doctrine (core + repo part) never reintroduces the retrac
   const cfg = loadConfig(REPO_CONFIG_PATH);
   const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
   assert.doesNotMatch(loaded, /bounded and recoverable/i);
+});
+
+// #830 AC5: docs/REVIEW-DOCTRINE.md — the doctrine file THIS repo's own live config points
+// `doctrine.file` at — carries its own leading HTML comment (the same shape as
+// doctrine-template.md's header, per #830's issue body). No special-casing for that file was
+// added anywhere: it is cleaned by the exact same loadDoctrine call every other repo's doctrine
+// file goes through. Before the loader-side fix, this test fails on `main`.
+test("#830 AC5: this repo's own docs/REVIEW-DOCTRINE.md loads with its leading HTML comment stripped — no special-casing needed, same loadDoctrine path every repo's doctrine.file uses", () => {
+  const cfg = loadConfig(REPO_CONFIG_PATH);
+  const rawFile = readFileSync(cfg.doctrine.file, "utf8");
+  assert.match(rawFile, /<!--/, "sanity: the on-disk file itself still carries its leading HTML comment (never edited by this fix)");
+  const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
+  assert.ok(!loaded.includes("<!--"), "the composed doctrine text handed to a session must carry no HTML comment");
 });
 
 test("#411: this repo's own repo part is under doctrine.maxChars with NO truncation marker (not silently cut)", () => {
