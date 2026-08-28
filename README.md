@@ -25,7 +25,7 @@ A human signs the issue Ready; a worker pushes while the fail-closed guard denie
 
 **[Watch the dashboard demo →](https://herehigher.github.io/sapwood/)** a recorded run replayed in the dashboard, in your browser — no install.
 
-**Or read the evidence →** [#1183](https://github.com/herehigher/sapwood/pull/1183) was produced, reviewed, and merged by the loop — read its review thread.
+**Or read the evidence →** [#939](https://github.com/herehigher/sapwood/pull/939) was produced and reviewed by the loop, escalated to `needs-human` when review stopped converging, and merged after adjudication — read its thread.
 
 ## Quick start
 
