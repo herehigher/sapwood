@@ -7,6 +7,8 @@ All notable changes to sapwood are documented here. Format:
 
 ## [Unreleased]
 
+## [0.3.0-alpha.2] - 2026-08-28
+
 ### Changed
 - `docs/guide/configuration.md` gains rows for 23 schema-valid keys that had none: the empty-spin
   breaker, pool-removal and concern-post caps, the architect drop cap, proxy audit-comment caps,

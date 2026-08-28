@@ -1,6 +1,6 @@
 {
   "name": "sapwood",
-  "version": "0.3.0-alpha.1",
+  "version": "0.3.0-alpha.2",
   "description": "sapwood orchestration engine (conductor, worker, forge, guard, state)",
   "type": "module",
   "engines": { "node": ">=24.0.0" },
