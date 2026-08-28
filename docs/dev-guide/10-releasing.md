@@ -64,16 +64,21 @@ the CHANGELOG PR — but it cannot *publish* one: the guard denies `gh release` 
 a direct push to the default branch from any session it governs. A human runs
 `scripts/release.ts publish`, which creates the draft release, tags the release
 commit, and pushes the tag; the tag push (`on: push: tags: ["v*"]`) is what
-triggers `release.yml`'s `npm-publish` job, which is what actually runs `npm
-publish`. That job authenticates via npm trusted publishing (OIDC): npm's
-registry trusts one exact workflow (`release.yml`) in one exact repository
-(`herehigher/sapwood`); the job requests a short-lived, GitHub-issued OIDC token
-via `permissions: id-token: write`, and npm CLI ≥ 11.5.1 (bundled with Node 24)
+triggers `release.yml`'s `npm-publish` job, which is what runs `npm publish`.
+That job is built to authenticate via npm trusted publishing (OIDC) rather than
+any stored credential: it requests a short-lived, GitHub-issued OIDC token via
+`permissions: id-token: write`, and npm CLI ≥ 11.5.1 (bundled with Node 24)
 detects and uses it automatically — no `NPM_TOKEN`, no human 2FA prompt, on no
-one's machine. A tag ruleset on `v*` restricts tag creation to the owner, so the
-one remaining human action — pushing the tag — is also the one gate on who can
-trigger a publish. `publish` itself waits for that job's run to finish
-(`gh run watch --exit-status`) before moving on to the dashboard canary and
+one's machine. Two things must be configured by the owner before the first
+publish on this path, or the job fails closed: on npmjs.com, a trusted publisher
+entry for `sapwood` naming this exact workflow (`release.yml`) in this exact
+repository (`herehigher/sapwood`) — without it the registry has nothing to trust
+the job's OIDC token against; and, on this repo, a tag ruleset on `v*`
+restricting tag creation to the owner, so the one remaining human action —
+pushing the tag — is also the one gate on who can trigger a publish. `publish`
+itself waits specifically for the `npm-publish` job to finish — not the whole
+`release.yml` run, whose independent `deploy-demo` job must not be able to block
+a publish that already succeeded — before moving on to the dashboard canary and
 catalog promotion.
 
 **The `github-pages` environment must allow `v*` tag deployments before the first

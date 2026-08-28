@@ -270,10 +270,21 @@ export type Exec = (file: string, args: string[], cwd?: string) => string;
 export interface Deps {
   exec: Exec;
   repoRoot: string;
+  // Optional so every existing `Deps` literal (production and test) keeps working unchanged;
+  // `runWindowsSmoke`/`waitForReleaseWorkflow` fall back to `syncSleep` when it's absent, and
+  // tests inject a no-op to assert on poll counts instead of waiting on the real clock.
+  sleep?: (ms: number) => void;
 }
 
 function realExec(repoRoot: string): Exec {
   return (file, args, cwd = repoRoot) => execFileSync(file, args, { cwd, encoding: "utf8" });
+}
+
+// Node offers no synchronous sleep primitive; blocking on a zero-timeout atomic wait against a
+// throwaway buffer is the standard workaround. Extracted once so the two pollers below share it
+// instead of each carrying its own copy of this comment.
+function syncSleep(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 // ── shared precondition: HEAD must be exactly origin/main ──────────────────────────
@@ -612,12 +623,13 @@ export const WINDOWS_SMOKE_WORKFLOW = "windows-pack-smoke.yml";
 // per-PR windows-latest job would be paid for on every push and almost never say anything new.
 // It runs before `tag` so a red run leaves nothing durable behind: nothing to delete, no
 // rollback. `gh workflow run` returns no run id, so the run is found by matching HEAD's sha
-// among the workflow's recent dispatches, and the only sync sleep Node offers is Atomics.wait.
+// among the workflow's recent dispatches.
 export function runWindowsSmoke(deps: Deps, attempts = 20): void {
+  const sleep = deps.sleep ?? syncSleep;
   const head = deps.exec("git", ["rev-parse", "HEAD"]).trim();
   deps.exec("gh", ["workflow", "run", WINDOWS_SMOKE_WORKFLOW, "--ref", "main"]);
   for (let i = 0; i < attempts; i++) {
-    if (i > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);
+    if (i > 0) sleep(3000);
     const runs = JSON.parse(
       deps.exec("gh", [
         "run",
@@ -642,25 +654,46 @@ export function runWindowsSmoke(deps: Deps, attempts = 20): void {
 }
 
 export const RELEASE_WORKFLOW = "release.yml";
+const NPM_PUBLISH_JOB = "npm-publish";
 
 // Unlike windows-smoke, this never dispatches a run: `push-tag` already triggered release.yml
 // (`on: push: tags: ["v*"]`), so this only has to find the run GitHub already started for that
-// tag and wait for it — same run-finder-then-watch pattern as `runWindowsSmoke`, matched by
-// `headSha` (the commit `tag` pinned, threaded through as `ctx.commitSha`) since a tag-push run
-// carries that field identically to a workflow_dispatch run.
+// tag, matched by `headSha` (the commit `tag` pinned, threaded through as `ctx.commitSha`) since
+// a tag-push run carries that field identically to a workflow_dispatch run. It then polls that
+// run's own job list for `npm-publish` specifically rather than watching the whole run: the
+// same run also carries the independent `deploy-demo` job (GitHub Pages), and a `gh run watch
+// --exit-status` on the whole run would fail this wait — and so block npm-view-verify, the
+// canary and catalog promotion — on a Pages failure that has nothing to do with whether npm
+// publish succeeded.
 export function waitForReleaseWorkflow(deps: Deps, commitSha: string, attempts = 20): void {
+  const sleep = deps.sleep ?? syncSleep;
+  let runId: number | undefined;
   for (let i = 0; i < attempts; i++) {
-    if (i > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);
-    const runs = JSON.parse(
-      deps.exec("gh", ["run", "list", "--workflow", RELEASE_WORKFLOW, "--event", "push", "--limit", "5", "--json", "databaseId,headSha"]),
-    ) as Array<{ databaseId: number; headSha: string }>;
-    const run = runs.find((r) => r.headSha === commitSha);
-    if (run) {
-      deps.exec("gh", ["run", "watch", String(run.databaseId), "--exit-status"]);
-      return;
+    if (i > 0) sleep(3000);
+    if (runId === undefined) {
+      const runs = JSON.parse(
+        deps.exec("gh", ["run", "list", "--workflow", RELEASE_WORKFLOW, "--event", "push", "--limit", "5", "--json", "databaseId,headSha"]),
+      ) as Array<{ databaseId: number; headSha: string }>;
+      const run = runs.find((r) => r.headSha === commitSha);
+      if (run) runId = run.databaseId;
+    }
+    if (runId !== undefined) {
+      const view = JSON.parse(deps.exec("gh", ["run", "view", String(runId), "--json", "jobs"])) as {
+        jobs: Array<{ name: string; status: string; conclusion: string | null }>;
+      };
+      const job = view.jobs.find((j) => j.name === NPM_PUBLISH_JOB);
+      if (job?.status === "completed") {
+        if (job.conclusion === "success") return;
+        throw new Error(`${NPM_PUBLISH_JOB}: run ${runId} of ${RELEASE_WORKFLOW} finished with conclusion "${job.conclusion}"`);
+      }
+      // job absent (not yet scheduled) or still in_progress/queued — keep polling.
     }
   }
-  throw new Error(`npm-publish: no ${RELEASE_WORKFLOW} run appeared for commit ${commitSha}`);
+  throw new Error(
+    runId === undefined
+      ? `${NPM_PUBLISH_JOB}: no ${RELEASE_WORKFLOW} run appeared for commit ${commitSha}`
+      : `${NPM_PUBLISH_JOB}: job on run ${runId} of ${RELEASE_WORKFLOW} did not complete within ${attempts} attempts`,
+  );
 }
 
 export const PUBLISH_STEPS: PublishStep[] = [
@@ -735,7 +768,9 @@ export const PUBLISH_STEPS: PublishStep[] = [
   {
     // The actual `npm publish` now runs in CI: release.yml's `npm-publish` job, gated on this
     // same tag push, authenticates via npm trusted publishing (OIDC) — no token, no human 2FA
-    // prompt, on no one's machine. This step just waits for that job's run to finish. Runs
+    // prompt, on no one's machine. This step just waits for that job specifically to finish, not
+    // the whole run — release.yml also carries the independent `deploy-demo` (Pages) job, which
+    // must not be able to fail this wait once npm-publish itself has already succeeded. Runs
     // after gh-release/tag/push-tag: the tag + GitHub Release are the durable, always-true
     // record of what was cut, so a step that can still fail for reasons outside this script's
     // control (a CI outage, a registry hiccup) runs after that durable record, not before it.
@@ -743,7 +778,8 @@ export const PUBLISH_STEPS: PublishStep[] = [
     // `checkPublishPreconditions` refuses once the tag exists — see
     // docs/dev-guide/10-releasing.md's Rollback / runbook step 5b for the manual retry instead.
     name: "npm-publish",
-    describe: (ctx) => `gh run watch <release.yml run for v${ctx.version}, matched by commit ${ctx.commitSha}> --exit-status`,
+    describe: (ctx) =>
+      `gh run view <release.yml run for v${ctx.version}, matched by commit ${ctx.commitSha}> --json jobs (poll until the npm-publish job completes)`,
     run: (ctx, deps) => {
       waitForReleaseWorkflow(deps, ctx.commitSha);
     },
