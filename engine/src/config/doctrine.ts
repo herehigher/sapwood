@@ -74,9 +74,7 @@ export function loadDoctrine(path: string, maxChars: number, corePath: string = 
     } catch (e) {
       throw new Error(`doctrine.file present but unreadable: ${path} (${String(e)}) — refusing to proceed`);
     }
-    // #830 gate② P2: a comments-only file strips down to pure whitespace, not "" — capDigest
-    // would then cap/pass through that whitespace instead of the true-empty repo part the
-    // "empty repo file" test below (and #167's own empty-is-not-absent contract) expects.
+    // Normalize comment-only content so a present semantically empty file follows the existing empty-file contract.
     const cleaned = stripHtmlComments(text);
     repoPart = capDigest(cleaned.trim() === "" ? "" : cleaned, maxChars);
   }

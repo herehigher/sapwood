@@ -92,17 +92,24 @@ export function escapeAngleBrackets(text: string): string {
  *  `loadGoalExcerptWithStatus`) rather than by editing the templates keeps the on-disk file —
  *  and a human editing it — untouched; only the copy actually handed to a session is cleaned.
  *
- *  #830 gate② P1: a blanket `/<!--[\s\S]*?-->/g` (the original #830 fix) is not Markdown-aware —
- *  it strips a `<!-- ... -->` marker quoted inside a backtick span (this repo's own
- *  docs/REVIEW-DOCTRINE.md:55, `` `<!-- sapwood:floor:<name> -->` ``, corrupting the very floor
- *  marker every doctrine load composes into the prompt) or shown as a literal example inside a
- *  fenced code block. This single-pass scanner walks `text` once, tracking three mutually
- *  exclusive states — inside a FENCED block (``` or ~~~, closer run length >= opener run length,
- *  the same shape `extractMarkdownSections` above already tracks), inside a BACKTICK SPAN (opened
- *  by a run of N backticks, closed only by the next run of EXACTLY N backticks — a shorter or
- *  longer run is not a closer and is copied through as literal text), or NORMAL TEXT — and only
- *  strips a `<!--...-->` pair found in NORMAL TEXT; content inside a fence or a backtick span is
- *  copied through byte-for-byte, comments and all.
+ *  A blanket `/<!--[\s\S]*?-->/g` is not Markdown-aware — it would strip a `<!-- ... -->` marker
+ *  quoted inside a backtick span (this repo's own docs/REVIEW-DOCTRINE.md:55,
+ *  `` `<!-- sapwood:floor:<name> -->` ``, corrupting the very floor marker every doctrine load
+ *  composes into the prompt) or shown as a literal example inside a fenced code block. This
+ *  single-pass scanner walks `text` once, tracking four mutually exclusive states — inside a
+ *  FENCED block (``` or ~~~, closer run length >= opener run length, the same shape
+ *  `extractMarkdownSections` above already tracks), on an INDENTED CODE line (4+ spaces or a tab
+ *  at line start — copied through whole, untouched, like fenced content), inside a BACKTICK SPAN
+ *  (opened by a run of N backticks, closed only by the next run of EXACTLY N backticks — a
+ *  shorter or longer run is not a closer and is copied through as literal text), or NORMAL TEXT —
+ *  and only strips a `<!--...-->` pair found in NORMAL TEXT; content inside a fence, an indented
+ *  code line, or a backtick span is copied through byte-for-byte, comments and all.
+ *
+ *  Ceiling on the indented-code recognition: a 4-space Markdown list-continuation line reads as
+ *  code too (indistinguishable from real code without a full tokenizer), so a scaffold comment
+ *  indented under a list item would survive uncut. No shipped template has one today — pinned by
+ *  a negative-lint test in markdown.test.ts — so a future template edit that adds one would need
+ *  to catch this gap itself.
  *
  *  An UNTERMINATED `<!--` (no matching `-->` anywhere after it) is left completely unchanged,
  *  never stripped to end-of-string: a truncated opener is more likely a Markdown edge case (a
@@ -119,17 +126,26 @@ export function stripHtmlComments(text: string): string {
     if (atLineStart) {
       const lineEnd = text.indexOf("\n", i);
       const lineBreakAt = lineEnd === -1 ? text.length : lineEnd + 1;
-      const line = lineEnd === -1 ? text.slice(i) : text.slice(i, lineEnd);
+      const rawLine = lineEnd === -1 ? text.slice(i) : text.slice(i, lineEnd);
+      // Detection only: a CRLF line's trailing \r must not defeat the anchored fence/indent
+      // regexes below. The output slices always read from `text` directly, so this never changes
+      // an emitted byte.
+      const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
       if (fence) {
         const closer = /^ {0,3}(`+|~+)[ \t]*$/.exec(line)?.[1];
         if (closer?.[0] === fence.char && closer.length >= fence.length) fence = null;
-        out += text.slice(i, lineBreakAt); // fence markers AND fenced content: verbatim either way
+        out += text.slice(i, lineBreakAt);
         i = lineBreakAt;
         continue;
       }
       const opener = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
       if (opener) {
         fence = { char: opener[0] as "`" | "~", length: opener.length };
+        out += text.slice(i, lineBreakAt);
+        i = lineBreakAt;
+        continue;
+      }
+      if (/^(?: {4,}|\t)/.test(line)) {
         out += text.slice(i, lineBreakAt);
         i = lineBreakAt;
         continue;
@@ -180,7 +196,7 @@ export function stripHtmlComments(text: string): string {
     if (ch === "<" && text.startsWith("<!--", i)) {
       const end = text.indexOf("-->", i + 4);
       if (end !== -1) {
-        i = end + 3; // the whole comment is dropped — nothing appended for it
+        i = end + 3;
         continue;
       }
       out += text.slice(i); // unterminated: keep the remainder byte-for-byte, never truncate to EOF

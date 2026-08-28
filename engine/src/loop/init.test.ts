@@ -953,15 +953,7 @@ test("init scaffolds the doctrine file at a custom doctrine.file location, creat
   }
 });
 
-// Cross-artifact check: init's verbatim scaffolds are cleaned only by the production prompt
-// paths. `doctrine-template.md`/`goal-template.md` (copied verbatim into a repo's live
-// `doctrine.file`/`goal.file` by ensureDoctrineFile/ensureGoalFile, per this file's scaffold
-// tests above) author their customization guidance to the human as inline `<!-- ... -->`
-// comments. This test runs a REAL `sapwood init` into a temp dir (never a synthetic fixture
-// standing in for the scaffold), then dispatches the real worker/architect/align prompt paths —
-// buildRenderPrompt, and the architect/align peripheral stubs (createArchitectStub/
-// createAligningStub) against a scripted session runner — against the files init actually wrote,
-// capturing exactly what each hands a session. This file never calls stripHtmlComments itself.
+// Cross-artifact coverage uses production dispatch so test-side cleaning cannot mask loader wiring regressions.
 
 /** Minimal `IForge` double for `createArchitectStub`'s dispatch: one Ready-lane candidate is
  *  enough to make it render + dispatch a session (see architect.ts's own candidates.length===0
@@ -1032,9 +1024,7 @@ test("#830: a fresh sapwood-init scaffold's goal/doctrine files render into the 
     // missing path as "no directive this round", the same as a real repo with none dropped.
     const directivePath = join(dir, "no-directive-dropped-this-round.md");
 
-    // Worker prompt: buildRenderPrompt is the REAL production renderer for worker.md —
-    // {{doctrine}} is wired straight to doctrine.ts's loadDoctrine via its own CONFIG_VARS map,
-    // never reimplemented by this test.
+    // Cross-artifact coverage uses production dispatch so test-side cleaning cannot mask loader wiring regressions.
     const renderWorkerPrompt = buildRenderPrompt(projectCfg);
     const workerPrompt = renderWorkerPrompt({ number: 1, title: "t", labels: [], body: "b" });
     assert.ok(!workerPrompt.includes("<!--"), "worker prompt: no HTML comment marker may reach {{doctrine}}");

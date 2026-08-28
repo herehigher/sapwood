@@ -103,11 +103,7 @@ test("loadDoctrine: an empty repo file (exists, zero bytes) is NOT treated as ab
   }
 });
 
-// #830 gate② P2: a comments-only repo file strips down to pure whitespace (the trailing newline
-// after the removed comment), not "" — without normalizing that whitespace to true-empty before
-// capDigest, the composed text would carry a dangling blank line instead of matching the
-// zero-bytes-file case above byte-for-byte. Red-before this fix: the assertion below fails with
-// a trailing "\n" left in the repo part.
+// A present comments-only file has the same semantic repo part as a present zero-byte file.
 test("loadDoctrine: a repo file containing ONLY an HTML comment normalizes to an empty repo part, byte-identical to the zero-bytes-file case above — never a whitespace remainder", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-doctrine-"));
   try {
@@ -190,25 +186,17 @@ test("#419: the loaded doctrine (core + repo part) never reintroduces the retrac
 });
 
 // Cross-artifact check: the configured repo doctrine uses the generic load path without
-// modifying its source file.
-test("#830 AC5: this repo's own docs/REVIEW-DOCTRINE.md loads with its leading guidance comment stripped, while the `<!-- sapwood:floor:<name> -->` marker quoted inside a backtick span (this file's own PROSE-PIN entry) survives — a blanket \"no `<!--` anywhere\" pin would demand the marker be deleted too, locking in the gate② P1 bug", () => {
+// modifying its source file. Reads the leading comment straight off the live file rather than
+// pinning its exact wording, so an ordinary doctrine edit can't false-fail this test; syntax
+// preservation (a comment-shaped marker inside a backtick span surviving the strip) is already
+// pinned by markdown.test.ts's own unit for stripHtmlComments.
+test("#830: this repo's own docs/REVIEW-DOCTRINE.md loads with its leading guidance comment stripped", () => {
   const cfg = loadConfig(REPO_CONFIG_PATH);
   const rawFile = readFileSync(cfg.doctrine.file, "utf8");
-  assert.match(rawFile, /<!--/, "sanity: the on-disk file itself still carries its leading HTML comment (never edited by this fix)");
-  assert.match(
-    rawFile,
-    /`<!-- sapwood:floor:<name> -->`/,
-    "sanity: the on-disk file still carries the floor-marker example inside a backtick span",
-  );
+  const leadingComment = rawFile.match(/^<!--[\s\S]*?-->/)?.[0];
+  assert.ok(leadingComment, "sanity: the on-disk file itself still carries a leading HTML comment (never edited by this fix)");
   const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
-  assert.ok(
-    !loaded.includes("do not duplicate anything that already lives there"),
-    "the leading guidance comment's own sentence must not reach the composed doctrine text",
-  );
-  assert.ok(
-    loaded.includes("`<!-- sapwood:floor:<name> -->`"),
-    "a comment-shaped marker quoted inside a backtick span must survive the strip, not be deleted as if it were a live comment",
-  );
+  assert.ok(!loaded.includes(leadingComment), "the leading guidance comment must not reach the composed doctrine text");
 });
 
 test("#411: this repo's own repo part is under doctrine.maxChars with NO truncation marker (not silently cut)", () => {

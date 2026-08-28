@@ -5,7 +5,10 @@
 // added, including the default-unchanged guarantee and the H1-wraps-H2 case a post-filter over
 // the any-level result cannot solve (see this function's own doc comment).
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { extractMarkdownSections, stripHtmlComments } from "./markdown.js";
 
 test("extractMarkdownSections: level=2 matches only a heading with exactly two hashes, ignoring an H1 with the same text — the H3 below is a deeper heading so it stays inside the H2's own section, not a phantom H3-level match", () => {
@@ -89,13 +92,6 @@ test("stripHtmlComments: an empty string stays empty", () => {
   assert.equal(stripHtmlComments(""), "");
 });
 
-// ── #830 gate② P1: a blanket regex is not Markdown-aware — it corrupts a `<!-- ... -->` marker
-// quoted inside a backtick span (docs/REVIEW-DOCTRINE.md:55's own floor-marker example) or shown
-// as a literal inside a fenced code block. The scanner must preserve BOTH verbatim while still
-// stripping a real, code-free comment. Red-before: on the pre-scanner blanket-regex code, this
-// assertion fails — the backtick span collapses to `` `` `` (its comment content deleted) and the
-// fenced block's own comment example is deleted too.
-
 test("stripHtmlComments: preserves a comment-shaped marker inside a backtick span AND a comment-shaped example inside a fenced code block, stripping only the real comment outside both", () => {
   assert.equal(
     stripHtmlComments("Keep `<!-- sapwood:ac -->`.\n```md\n<!-- example -->\n```\n<!-- guidance -->\nREAL"),
@@ -110,4 +106,23 @@ test("stripHtmlComments: an unterminated `<!--` (no matching `-->` anywhere afte
 
 test("stripHtmlComments: a backtick run with no matching equal-length closer anywhere in the text is literal text, not a span — a comment after it on the same line is still stripped", () => {
   assert.equal(stripHtmlComments("stray ` backtick <!-- drop me --> REAL"), "stray ` backtick  REAL");
+});
+
+test("stripHtmlComments: a CRLF-terminated fence opener/closer (```\\r\\n ... ```\\r\\n) still closes the fence — a real scaffold comment after it is stripped, not left inside the fence forever", () => {
+  assert.equal(stripHtmlComments("```md\r\n<!-- keep -->\r\n```\r\n<!-- drop -->\r\n"), "```md\r\n<!-- keep -->\r\n```\r\n\r\n");
+});
+
+test("stripHtmlComments: a 4-space-indented line is Markdown code and is copied through untouched, comment-shaped marker and all — only the following unindented, real comment is stripped", () => {
+  assert.equal(stripHtmlComments("    <!-- keep as code -->\n<!-- drop as guidance -->\n"), "    <!-- keep as code -->\n\n");
+});
+
+// Indented-code recognition can't tell a real code line from a 4-space Markdown list-continuation
+// line — this pins that neither shipped template relies on the gap today, so a future template
+// edit that adds one has to notice and handle it deliberately.
+test("neither shipped template (goal-template.md, doctrine-template.md) has an HTML comment on an indented (4-space/tab) line — the one shape stripHtmlComments's indented-code recognition cannot tell apart from real code", () => {
+  const promptsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "prompts");
+  for (const name of ["goal-template.md", "doctrine-template.md"]) {
+    const text = readFileSync(join(promptsDir, name), "utf8");
+    assert.ok(!/^(?: {4,}|\t).*<!--/m.test(text), `${name} must not carry an HTML comment on an indented (code-shaped) line`);
+  }
 });
