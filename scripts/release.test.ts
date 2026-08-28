@@ -25,6 +25,7 @@ import {
   npmDistTag,
   PUBLISH_STEPS,
   type PublishContext,
+  parseOtpArg,
   readManifestVersion,
   runCatalogPromote,
   runPrepare,
@@ -1166,8 +1167,6 @@ test("runPublish (real run): npm-publish alone runs with inherited stdio, so npm
     assert.equal(r.code, 0, r.output);
     const npmPublishCall = calls.find((c) => c.file === "npm" && c.args[0] === "publish");
     assert.deepEqual(npmPublishCall?.opts, { stdio: "inherit" });
-    // No other step needs a TTY — inheriting stdio elsewhere would break output capture
-    // (dry-run rendering, the notes-file read, JSON parsing of `gh run list`, etc.).
     assert.deepEqual(
       calls.filter((c) => c.opts?.stdio === "inherit").map((c) => c.file),
       ["npm"],
@@ -1177,7 +1176,7 @@ test("runPublish (real run): npm-publish alone runs with inherited stdio, so npm
   }
 });
 
-test("runPublish: --otp is passed through to the npm-publish argv and to its dry-run rendering; other steps are untouched", () => {
+test("runPublish: --otp is passed through to the npm-publish argv only; every other step's real-run and dry-run output is byte-identical to the no-otp case", () => {
   const dir = setupPublishRepo("0.3.0", READY_CHANGELOG);
   try {
     const { exec, calls } = withRecorder(fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }));
@@ -1186,19 +1185,51 @@ test("runPublish: --otp is passed through to the npm-publish argv and to its dry
     assert.equal(r.code, 0, r.output);
     const npmPublishCall = calls.find((c) => c.file === "npm" && c.args[0] === "publish");
     assert.deepEqual(npmPublishCall?.args, ["publish", "--workspace", "engine", "--tag", "latest", "--otp", "123456"]);
+    // Exhaustive, not a spot-check on gh-release alone: no call OTHER than npm-publish carries
+    // --otp anywhere in its argv (dashboard-canary, catalog-promote, etc. all included).
+    assert.deepEqual(
+      calls.filter((c) => !(c.file === "npm" && c.args[0] === "publish")).filter((c) => c.args.includes("--otp")),
+      [],
+    );
 
     const dry = runPublish(
       { repoRoot: dir, exec: fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }) },
       { dryRun: true, otp: "123456" },
     );
-    assert.match(dry.output, /npm publish --workspace engine --tag latest --otp 123456/);
-    // Every other step's rendering is byte-identical to the no-otp case (see the --dry-run
-    // tests above for the without-otp baseline) — --otp is appended only to npm-publish's line.
-    assert.match(dry.output, /gh release create v0\.3\.0.*--draft/);
-    assert.doesNotMatch(dry.output, /gh release create[^\n]*--otp/);
+    const baseline = runPublish({ repoRoot: dir, exec: fakeExec({ head: "aaa", origin: "aaa", dirty: "", tagOut: "" }) }, { dryRun: true });
+    assert.equal((dry.output.match(/ --otp 123456/g) ?? []).length, 1);
+    assert.equal(dry.output.replace(" --otp 123456", ""), baseline.output);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("parseOtpArg: a valid --otp alongside --dry-run parses the code, unaffected by the other flag", () => {
+  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x", "--otp", "123456", "--dry-run"]);
+  assert.deepEqual(r, { ok: true, otp: "123456" });
+});
+
+test("parseOtpArg: no --otp at all is fine — publish without OTP is a legitimate case", () => {
+  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x"]);
+  assert.deepEqual(r, { ok: true });
+});
+
+test("parseOtpArg: --otp at the end of argv (missing value) fails closed instead of silently meaning 'no OTP'", () => {
+  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x", "--otp"]);
+  assert.equal(r.ok, false);
+  assert.match((r as { ok: false; message: string }).message, /--otp requires a non-empty <code>/);
+});
+
+test('parseOtpArg: --otp "" (empty value) fails closed, not silently treated as absent', () => {
+  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x", "--otp", ""]);
+  assert.equal(r.ok, false);
+  assert.match((r as { ok: false; message: string }).message, /--otp requires a non-empty <code>/);
+});
+
+test("parseOtpArg: --otp immediately followed by another option never reads that option as the code", () => {
+  const r = parseOtpArg(["node", "release.ts", "publish", "--catalog", "x", "--otp", "--dry-run"]);
+  assert.equal(r.ok, false);
+  assert.match((r as { ok: false; message: string }).message, /--otp requires a non-empty <code>/);
 });
 
 // ── runPrepare preconditions ────────────────────────────────────────────────────────

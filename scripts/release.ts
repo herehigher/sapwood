@@ -265,10 +265,8 @@ export function formatBuildStamp(version: string, date: string, sha: string): st
 
 // ── exec seam (testable: tests inject a fake) ───────────────────────────────────────
 
-// `stdio: "inherit"` is an opt-in per call, not the default, because every other command
-// this script runs relies on its output being captured (rendered in --dry-run output,
-// parsed as JSON, scanned for a notes file, etc.) — piped stdio stays the default and
-// only the one step that needs a real TTY (npm's 2FA web-auth flow) asks for inherited.
+// Captured stdio remains the default because several callers parse returned output;
+// npm publish alone opts into inheritance so npm's 2FA web-auth can use a TTY.
 export interface ExecOptions {
   stdio?: "inherit";
 }
@@ -740,12 +738,8 @@ export const PUBLISH_STEPS: PublishStep[] = [
     // for the manual one-line retry instead.
     name: "npm-publish",
     describe: (ctx) => `npm publish --workspace engine --tag ${npmDistTag(ctx)}${ctx.otp ? ` --otp ${ctx.otp}` : ""}`,
-    // npm 2FA `auth-and-writes` web-auth waits on a browser and only ever offers that prompt
-    // when stdout is a TTY — this script's usual piped stdio (needed everywhere else so output
-    // can be captured/rendered) would make that flow print a URL and exit `EOTP` instead of
-    // waiting, so this one step alone inherits the parent process's stdio. `--otp` is threaded
-    // through as well, not instead: an account that authenticates via a one-time code rather
-    // than web auth needs it regardless of stdio, so both paths are wired rather than picking one.
+    // npm 2FA web-auth needs a TTY to wait for browser approval; otherwise npm can exit EOTP.
+    // Inherit stdio here while still forwarding --otp for code-based authentication.
     run: (ctx, deps) => {
       const args = ["publish", "--workspace", "engine", "--tag", npmDistTag(ctx)];
       if (ctx.otp) args.push("--otp", ctx.otp);
@@ -899,6 +893,22 @@ export function runStamp(deps: Deps): CommandResult {
 
 // ── CLI entry ────────────────────────────────────────────────────────────────────────
 
+export type OtpParseResult = { ok: true; otp?: string } | { ok: false; message: string };
+
+// A missing/empty value, or the next flag swallowed as the value (`--otp --dry-run`), must
+// fail the command outright rather than silently fall back to "no OTP given" — by the time
+// that absence would otherwise surface, at the npm-publish step, PUBLISH_STEPS has already
+// run the gh-release draft, the tag, and the tag push, none of which are cheaply undone.
+export function parseOtpArg(argv: string[]): OtpParseResult {
+  const otpIndex = argv.indexOf("--otp");
+  if (otpIndex === -1) return { ok: true };
+  const value = argv[otpIndex + 1];
+  if (value === undefined || value.trim() === "" || value.startsWith("--")) {
+    return { ok: false, message: "release publish: --otp requires a non-empty <code>" };
+  }
+  return { ok: true, otp: value };
+}
+
 function repoRootFromThisFile(): string {
   return dirname(dirname(fileURLToPath(import.meta.url)));
 }
@@ -925,9 +935,16 @@ function main(argv: string[]): number {
       process.stderr.write("release publish: provide --catalog <git remote> or SAPWOOD_CATALOG_REMOTE\n");
       return 1;
     }
-    const otpIndex = argv.indexOf("--otp");
-    const otp = otpIndex === -1 ? undefined : argv[otpIndex + 1];
-    const r = runPublish(deps, { dryRun: argv.slice(3).includes("--dry-run"), catalogRemote, ...(otp ? { otp } : {}) });
+    const otpResult = parseOtpArg(argv);
+    if (!otpResult.ok) {
+      process.stderr.write(`${otpResult.message}\n`);
+      return 1;
+    }
+    const r = runPublish(deps, {
+      dryRun: argv.slice(3).includes("--dry-run"),
+      catalogRemote,
+      ...(otpResult.otp !== undefined ? { otp: otpResult.otp } : {}),
+    });
     process.stdout.write(r.output);
     return r.code;
   }
