@@ -1384,6 +1384,28 @@ test("loadGoalExcerpt: a '# Constraints' H1 wrapping the real '## Constraints' H
   }
 });
 
+// ── #830 gate② P1: comments must be stripped from the WHOLE document before heading extraction
+// runs — stripping only the already-extracted section text (the pre-fix order) lets a heading
+// hidden inside a comment become a real section boundary. ──────────────────────────────────────
+
+test("loadGoalExcerpt (#830 gate② P1): a fake '## Architecture' heading INSIDE an HTML comment must never become a real section — comments are stripped from the whole document before heading extraction runs, not after", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-goalexcerpt-"));
+  try {
+    const goalPath = join(dir, "PLAN.md");
+    writeFileSync(goalPath, "<!--\n## Architecture\nFAKE\n-->\n## Constraints\nREAL\n");
+    const excerpt = loadGoalExcerpt(goalPath);
+    assert.ok(!excerpt.includes("FAKE"), "the commented-out heading's body must never reach the excerpt");
+    assert.ok(!excerpt.includes("-->"), "no dangling comment-closer leaking from a heading captured mid-comment");
+    assert.ok(excerpt.includes("## Constraints\nREAL"), "the real Constraints section still excerpts correctly");
+    assert.ok(
+      excerpt.includes('No "## Architecture" heading found'),
+      "with the fake heading stripped before extraction, Architecture is correctly reported as absent, not FAKE's fabricated section",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── #830: HTML comments in the goal file must never reach the architect's rendered excerpt ────
 
 test("loadGoalExcerpt: strips HTML comments shaped like goal-template.md's Constraints AND Architecture guidance, from both sections independently, leaving each section's real content intact", () => {
@@ -1417,9 +1439,28 @@ test("loadGoalExcerpt: strips HTML comments shaped like goal-template.md's Const
     assert.ok(!excerpt.includes("no architecture chapter available"), "the architect's own fallback-placeholder sentence must not leak in");
     assert.ok(excerpt.includes("REAL_CONSTRAINTS_LINE"), "real Constraints content survives the strip");
     assert.ok(excerpt.includes("REAL_ARCHITECTURE_LINE"), "real Architecture content survives the strip");
-    // #830: a comment-only body still counts as a FOUND section, not a missing one — the
-    // strip must not flip a present heading into the placeholder branch.
     assert.ok(!excerpt.includes("not found"), "both headings were present with real content beyond the comment — no placeholder text");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadGoalExcerpt: a heading whose ENTIRE body is an HTML comment (nothing else) still counts as a FOUND section, not a missing one — the strip must not flip a present-but-comment-only heading into the placeholder branch", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-goalexcerpt-"));
+  try {
+    const goalPath = join(dir, "PLAN.md");
+    writeFileSync(
+      goalPath,
+      "# Goal\n\n## Constraints\n\n<!-- Locked decisions and hard limits any change must respect. -->\n\n## Next\nN\n",
+    );
+    const excerpt = loadGoalExcerpt(goalPath);
+    assert.ok(!excerpt.includes("<!--"), "no HTML comment marker reaches the excerpt");
+    assert.ok(!excerpt.includes("Locked decisions and hard limits"));
+    // Found, not missing: the bare "## Constraints" heading itself is visible in the excerpt,
+    // never the "no ... heading found" placeholder — a comment-only body degrades to the bare
+    // heading (empty section), not to "the heading was absent".
+    assert.ok(excerpt.includes("## Constraints"), "the bare heading survives — it WAS present");
+    assert.ok(!excerpt.includes("not found"), "a comment-only body is not a missing section");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

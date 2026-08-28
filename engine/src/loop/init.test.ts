@@ -20,14 +20,16 @@ import { runEngine } from "../cli.js";
 import { engineAgentEmptyCiRequiredChecksError, loadConfig, parseConfig } from "../config/config.js";
 import { loadDoctrine } from "../config/doctrine.js";
 import { keyIdSidecarPath } from "../config/paths.js";
+import type { IForge, Issue } from "../forge/forge.js";
 import type { GhRunner } from "../forge/gh.js";
-import { defaultArchitectPromptPath, loadGoalExcerpt, renderArchitectPrompt } from "../roles/architect.js";
-import { loadRolePromptTemplate, renderRolePrompt } from "../roles/plan-review.js";
+import { UnstubbedForge } from "../forge/unstubbed-forge.test-support.js";
+import { type ArchitectDeps, architectMarker, createArchitectStub } from "../roles/architect.js";
+import type { RoleSessionOpts, RoleSessionResult } from "../roles/peripheral.js";
 import { buildRenderPrompt } from "../roles/worker.js";
 import { State } from "../state/state.js";
+import { BODY_BLOCK_END, BODY_BLOCK_START, RESULT_BLOCK_END, RESULT_BLOCK_START } from "../state/structured-output.js";
 import { DOC_LINKS } from "../util/doc-links.js";
-import { stripHtmlComments } from "../util/markdown.js";
-import { defaultPoPromptPath, readPlanMd } from "./align.js";
+import { type AlignDeps, createAligningStub } from "./align.js";
 import {
   type DeployKeyPermissionsFsOps,
   defaultDoctrineTemplatePath,
@@ -951,19 +953,61 @@ test("init scaffolds the doctrine file at a custom doctrine.file location, creat
   }
 });
 
-// ── #830: a fresh `sapwood init` scaffold's HTML-comment authoring guidance must never reach a
-// rendered prompt. `doctrine-template.md`/`goal-template.md` (copied verbatim into a repo's
-// live `doctrine.file`/`goal.file` by ensureDoctrineFile/ensureGoalFile, per this file's scaffold
+// Cross-artifact check: init's verbatim scaffolds are cleaned only by the production prompt
+// paths. `doctrine-template.md`/`goal-template.md` (copied verbatim into a repo's live
+// `doctrine.file`/`goal.file` by ensureDoctrineFile/ensureGoalFile, per this file's scaffold
 // tests above) author their customization guidance to the human as inline `<!-- ... -->`
-// comments. Three loaders substitute that content raw into a live prompt: `doctrine.ts`'s
-// `loadDoctrine` ({{doctrine}}, worker.md), `architect.ts`'s `loadGoalExcerpt`
-// ({{plan.architectureChapter}}, architect.md), and `align.ts`'s `readPlanMd` + the shared
-// `stripHtmlComments` helper ({{plan.md}}, po.md). This test runs a REAL `sapwood init` into a
-// temp dir (never a synthetic fixture standing in for the scaffold) and renders all three prompt
-// paths against the files init actually wrote, using each loader's own real exported function
-// plus the real shipped worker.md/architect.md/po.md templates and real render functions — the
-// same ones production dispatch uses. Before #830's loader-side fix, every assertion below fails
-// (see the PR's test-evidence section for the red-before run).
+// comments. This test runs a REAL `sapwood init` into a temp dir (never a synthetic fixture
+// standing in for the scaffold), then dispatches the real worker/architect/align prompt paths —
+// buildRenderPrompt, and the architect/align peripheral stubs (createArchitectStub/
+// createAligningStub) against a scripted session runner — against the files init actually wrote,
+// capturing exactly what each hands a session. This file never calls stripHtmlComments itself.
+
+/** Minimal `IForge` double for `createArchitectStub`'s dispatch: one Ready-lane candidate is
+ *  enough to make it render + dispatch a session (see architect.ts's own candidates.length===0
+ *  short-circuit) — everything else architect.ts reads from `deps`/`deps.cfg`, never the forge.
+ *  `addIssueComment` is a no-op only reached because the scripted result below validates clean
+ *  (zero contradictions/verdicts), which still applies the round design note comment. */
+class ArchitectCandidateForge extends UnstubbedForge implements IForge {
+  constructor(private readonly candidate: Issue) {
+    super();
+  }
+  override async getIssuesNeedingPlanReview(): Promise<Issue[]> {
+    return [this.candidate];
+  }
+  override async addIssueComment(): Promise<void> {}
+}
+
+/** Minimal `IForge` double for `createAligningStub`'s dispatch at `roundId: 1` — align.ts's own
+ *  #621 short-circuit (`alignCreationHasNothingToDo`) returns `false` unconditionally for
+ *  roundId <= 1, so no `getReadyIssues` read is needed to reach the align-creation session; an
+ *  empty backlog/triage-candidate set keeps every downstream branch (issue creation, triage) a
+ *  no-op with zero further forge calls. */
+class EmptyBacklogForge extends UnstubbedForge implements IForge {
+  override async listOpenIssues(): Promise<Issue[]> {
+    return [];
+  }
+  override async listRecentlyClosedIssues(): Promise<Issue[]> {
+    return [];
+  }
+  override async getIssuesNeedingPlanTriage(): Promise<Issue[]> {
+    return [];
+  }
+}
+
+/** Captures every `RoleSessionOpts` a peripheral stub dispatches — `.prompt` on the FIRST call is
+ *  the real substituted prompt text this test asserts on. Always reports a clean, validating
+ *  "done" result so the calling stub's own post-session write logic (a comment/label/issue write)
+ *  either no-ops or hits the fake forge's own no-op override — never a second retried attempt. */
+class PromptCapturingRunner {
+  calls: RoleSessionOpts[] = [];
+  constructor(private readonly resultText: string) {}
+  async run(opts: RoleSessionOpts): Promise<RoleSessionResult> {
+    this.calls.push(opts);
+    return { outcome: "done", costUsd: 0.01, modelUsage: [], exitCode: 0, name: opts.roleId, resultText: this.resultText };
+  }
+}
+
 test("#830: a fresh sapwood-init scaffold's goal/doctrine files render into the worker, architect, and po-align prompts with no HTML comment reaching any of the three, and the known scaffold-comment sentences are gone", async () => {
   const { run } = fakeRun({
     labels: requiredLabels(cfg).map((l) => l.name),
@@ -984,6 +1028,9 @@ test("#830: a fresh sapwood-init scaffold's goal/doctrine files render into the 
     const projectCfg = parseConfig(
       `board: { owner: acme, repo: widgets, projectNumber: 7 }\ngoal: { file: ${JSON.stringify(goalPath)} }\ndoctrine: { file: ${JSON.stringify(doctrinePath)} }`,
     );
+    // Never a real file — resolveRoundDirective (shared by both dispatches below) treats a
+    // missing path as "no directive this round", the same as a real repo with none dropped.
+    const directivePath = join(dir, "no-directive-dropped-this-round.md");
 
     // Worker prompt: buildRenderPrompt is the REAL production renderer for worker.md —
     // {{doctrine}} is wired straight to doctrine.ts's loadDoctrine via its own CONFIG_VARS map,
@@ -995,30 +1042,52 @@ test("#830: a fresh sapwood-init scaffold's goal/doctrine files render into the 
       !workerPrompt.includes("This file was scaffolded because none existed yet"),
       "worker prompt: doctrine-template.md's own scaffold-authoring sentence must not leak in",
     );
-
-    // Architect prompt: the real renderArchitectPrompt + real architect.md, fed the real
-    // loadGoalExcerpt/loadDoctrine outputs off the scaffolded files — the exact values
-    // createArchitectStub substitutes in production for {{plan.architectureChapter}}/
-    // {{round.doctrine}}. Every other var is an inert marker; only these two are under test.
-    const architectTemplate = loadRolePromptTemplate(undefined, defaultArchitectPromptPath());
-    const architectPrompt = renderArchitectPrompt(architectTemplate, {
-      "round.id": "1",
-      "round.marker": "m-1",
-      "round.designNoteIssue": "(none)",
-      "round.alignedGoals": "(none)",
-      "round.lastMerged": "(none)",
-      "round.doctrine": loadDoctrine(projectCfg.doctrine.file, projectCfg.doctrine.maxChars),
-      "plan.architectureChapter": loadGoalExcerpt(projectCfg.goal.file),
-      "candidates.summary": "(none)",
-      "round.pool": "(none)",
-      "labels.blocked": projectCfg.labels.blocked,
-      "labels.needsHuman": projectCfg.labels.needsHuman,
-      "round.directive": "(none)",
-      "lang.docs": projectCfg.language.docs,
-      "lang.issuesAndPrs": projectCfg.language.issuesAndPrs,
-    });
     assert.ok(
-      !architectPrompt.includes("<!--"),
+      !workerPrompt.includes("See docs/guide/configuration.md#doctrine for the full topology"),
+      "worker prompt: doctrine-template.md's own config-key-reference sentence must not leak in",
+    );
+
+    // Architect prompt: dispatched through the REAL createArchitectStub against the scaffolded
+    // goal/doctrine files — the exact call production round dispatch makes. `deps.doctrine` is
+    // supplied via the real loadDoctrine (round-defaults.ts's own production wiring: it computes
+    // this value the SAME way, at the SAME call site, before invoking this stub); every other
+    // engine-assembled block (`plan.architectureChapter`/`round.doctrine`'s substitution site
+    // itself) is exercised by architect.ts's own code, never reconstructed by this test.
+    const architectResultText = [
+      RESULT_BLOCK_START,
+      JSON.stringify({ contradictions: [], verdicts: [] }),
+      RESULT_BLOCK_END,
+      BODY_BLOCK_START,
+      "round design note",
+      BODY_BLOCK_END,
+    ].join("\n");
+    const architectForge = new ArchitectCandidateForge({ number: 501, title: "a plan-review candidate", labels: [] });
+    const architectRunner = new PromptCapturingRunner(architectResultText);
+    const architectState = new State(":memory:");
+    const architectDeps: ArchitectDeps = {
+      now: () => new Date(),
+      forge: architectForge,
+      state: architectState,
+      cfg: projectCfg,
+      runner: architectRunner,
+      planMdPath: goalPath,
+      directivePath,
+      doctrine: loadDoctrine(projectCfg.doctrine.file, projectCfg.doctrine.maxChars),
+    };
+    await createArchitectStub(architectDeps).run({ roundId: 1, phase: "architecting", marker: null });
+    architectState.close();
+    assert.equal(architectRunner.calls.length, 1, "expected exactly one architect session dispatch");
+    const architectPrompt = architectRunner.calls[0]!.prompt;
+    // {{round.marker}} substitutes architectMarker(roundId) — a deliberate, comment-SHAPED
+    // idempotence marker (`<!-- sapwood:round:N:architecting -->`) architect.md's own "Round
+    // context" section teaches the session to recognize, completely unrelated to #830's scaffold-
+    // comment concern. Removing this ONE known-legitimate occurrence before the blanket "<!--"
+    // check below isolates it from an actual scaffold-guidance leak, the same way the po-align
+    // assertion further down scopes itself to just the <plan-md> wrapper to dodge po.md's own
+    // legitimate `<!-- sapwood:ac -->` anchor-syntax prose.
+    const architectPromptWithoutMarker = architectPrompt.split(architectMarker(1)).join("");
+    assert.ok(
+      !architectPromptWithoutMarker.includes("<!--"),
       "architect prompt: no HTML comment marker may reach {{plan.architectureChapter}}/{{round.doctrine}}",
     );
     assert.ok(
@@ -1029,19 +1098,33 @@ test("#830: a fresh sapwood-init scaffold's goal/doctrine files render into the 
       !architectPrompt.includes("This file was scaffolded because none existed yet"),
       "architect prompt: doctrine-template.md's own scaffold-authoring sentence must not leak in via {{round.doctrine}}",
     );
+    assert.ok(
+      !architectPrompt.includes("See docs/guide/configuration.md#doctrine for the full topology"),
+      "architect prompt: doctrine-template.md's own config-key-reference sentence must not leak in via {{round.doctrine}}",
+    );
 
-    // po-align prompt: the real po.md + real renderRolePrompt + real readPlanMd, applying the
-    // SAME shared stripHtmlComments helper align.ts's own {{plan.md}} substitution calls.
-    const poTemplate = loadRolePromptTemplate(undefined, defaultPoPromptPath());
-    const planRead = readPlanMd(projectCfg.goal.file);
-    assert.ok(planRead.ok, "the scaffolded goal file must be readable");
-    const alignPrompt = renderRolePrompt(poTemplate, { number: 0, title: "", labels: [] }, projectCfg, {
-      "po.mode": "align",
-      "round.milestone": "(none)",
-      "plan.md": stripHtmlComments(planRead.ok ? planRead.content : ""),
-      "round.directive": "(none)",
-      "backlog.digest": "(none)",
-    });
+    // po-align prompt: dispatched through the REAL createAligningStub against the scaffolded
+    // goal file — the exact {{plan.md}} substitution align.ts's own dispatch performs. roundId:
+    // 1 keeps the align-creation session's own short-circuit (#621) from skipping it, and an
+    // empty backlog/triage set keeps every OTHER forge-dependent branch a no-op.
+    const alignResultText = [RESULT_BLOCK_START, JSON.stringify({ issues: [] }), RESULT_BLOCK_END].join("\n");
+    const alignForge = new EmptyBacklogForge();
+    const alignRunner = new PromptCapturingRunner(alignResultText);
+    const alignState = new State(":memory:");
+    const alignDeps: AlignDeps = {
+      now: () => new Date(),
+      forge: alignForge,
+      state: alignState,
+      cfg: projectCfg,
+      runner: alignRunner,
+      planMdPath: goalPath,
+      directivePath,
+    };
+    await createAligningStub(alignDeps).run({ roundId: 1, phase: "aligning", marker: null });
+    alignState.close();
+    const poAlignCall = alignRunner.calls.find((c) => c.roleId === "po-align");
+    assert.ok(poAlignCall, "expected a po-align session dispatch");
+    const alignPrompt = poAlignCall!.prompt;
     // po.md itself legitimately teaches sessions the literal `<!-- sapwood:ac -->` anchor
     // syntax elsewhere in its instructions (unrelated to #830), so this check is scoped to
     // po.md's own `<plan-md>...</plan-md>` wrapper around the substituted {{plan.md}} value.

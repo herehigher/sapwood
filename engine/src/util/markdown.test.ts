@@ -88,3 +88,26 @@ test("stripHtmlComments: a document with no HTML comment at all is returned byte
 test("stripHtmlComments: an empty string stays empty", () => {
   assert.equal(stripHtmlComments(""), "");
 });
+
+// ── #830 gate② P1: a blanket regex is not Markdown-aware — it corrupts a `<!-- ... -->` marker
+// quoted inside a backtick span (docs/REVIEW-DOCTRINE.md:55's own floor-marker example) or shown
+// as a literal inside a fenced code block. The scanner must preserve BOTH verbatim while still
+// stripping a real, code-free comment. Red-before: on the pre-scanner blanket-regex code, this
+// assertion fails — the backtick span collapses to `` `` `` (its comment content deleted) and the
+// fenced block's own comment example is deleted too.
+
+test("stripHtmlComments: preserves a comment-shaped marker inside a backtick span AND a comment-shaped example inside a fenced code block, stripping only the real comment outside both", () => {
+  assert.equal(
+    stripHtmlComments("Keep `<!-- sapwood:ac -->`.\n```md\n<!-- example -->\n```\n<!-- guidance -->\nREAL"),
+    "Keep `<!-- sapwood:ac -->`.\n```md\n<!-- example -->\n```\n\nREAL",
+  );
+});
+
+test("stripHtmlComments: an unterminated `<!--` (no matching `-->` anywhere after it) is left byte-for-byte unchanged, never stripped to end-of-string — keeping possibly-real trailing content is safer than silently deleting it on a parse ambiguity", () => {
+  const doc = "REAL PROSE BEFORE\n<!-- this comment never closes\nmore text that looks like it could be real doctrine";
+  assert.equal(stripHtmlComments(doc), doc);
+});
+
+test("stripHtmlComments: a backtick run with no matching equal-length closer anywhere in the text is literal text, not a span — a comment after it on the same line is still stripped", () => {
+  assert.equal(stripHtmlComments("stray ` backtick <!-- drop me --> REAL"), "stray ` backtick  REAL");
+});

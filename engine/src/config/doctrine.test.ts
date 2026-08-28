@@ -103,6 +103,22 @@ test("loadDoctrine: an empty repo file (exists, zero bytes) is NOT treated as ab
   }
 });
 
+// #830 gate② P2: a comments-only repo file strips down to pure whitespace (the trailing newline
+// after the removed comment), not "" — without normalizing that whitespace to true-empty before
+// capDigest, the composed text would carry a dangling blank line instead of matching the
+// zero-bytes-file case above byte-for-byte. Red-before this fix: the assertion below fails with
+// a trailing "\n" left in the repo part.
+test("loadDoctrine: a repo file containing ONLY an HTML comment normalizes to an empty repo part, byte-identical to the zero-bytes-file case above — never a whitespace remainder", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sapwood-doctrine-"));
+  try {
+    const path = join(dir, "REVIEW-DOCTRINE.md");
+    writeFileSync(path, "<!-- nothing but scaffold guidance here -->\n");
+    assert.equal(loadDoctrine(path, 1000), `${CORE_TEXT}\n\n`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("loadDoctrine: a PRESENT-but-unreadable repo path (a directory, not a file) throws naming the path — never degrades to a placeholder", () => {
   const dir = mkdtempSync(join(tmpdir(), "sapwood-doctrine-"));
   try {
@@ -173,17 +189,26 @@ test("#419: the loaded doctrine (core + repo part) never reintroduces the retrac
   assert.doesNotMatch(loaded, /bounded and recoverable/i);
 });
 
-// #830 AC5: docs/REVIEW-DOCTRINE.md — the doctrine file THIS repo's own live config points
-// `doctrine.file` at — carries its own leading HTML comment (the same shape as
-// doctrine-template.md's header, per #830's issue body). No special-casing for that file was
-// added anywhere: it is cleaned by the exact same loadDoctrine call every other repo's doctrine
-// file goes through. Before the loader-side fix, this test fails on `main`.
-test("#830 AC5: this repo's own docs/REVIEW-DOCTRINE.md loads with its leading HTML comment stripped — no special-casing needed, same loadDoctrine path every repo's doctrine.file uses", () => {
+// Cross-artifact check: the configured repo doctrine uses the generic load path without
+// modifying its source file.
+test("#830 AC5: this repo's own docs/REVIEW-DOCTRINE.md loads with its leading guidance comment stripped, while the `<!-- sapwood:floor:<name> -->` marker quoted inside a backtick span (this file's own PROSE-PIN entry) survives — a blanket \"no `<!--` anywhere\" pin would demand the marker be deleted too, locking in the gate② P1 bug", () => {
   const cfg = loadConfig(REPO_CONFIG_PATH);
   const rawFile = readFileSync(cfg.doctrine.file, "utf8");
   assert.match(rawFile, /<!--/, "sanity: the on-disk file itself still carries its leading HTML comment (never edited by this fix)");
+  assert.match(
+    rawFile,
+    /`<!-- sapwood:floor:<name> -->`/,
+    "sanity: the on-disk file still carries the floor-marker example inside a backtick span",
+  );
   const loaded = loadDoctrine(cfg.doctrine.file, cfg.doctrine.maxChars);
-  assert.ok(!loaded.includes("<!--"), "the composed doctrine text handed to a session must carry no HTML comment");
+  assert.ok(
+    !loaded.includes("do not duplicate anything that already lives there"),
+    "the leading guidance comment's own sentence must not reach the composed doctrine text",
+  );
+  assert.ok(
+    loaded.includes("`<!-- sapwood:floor:<name> -->`"),
+    "a comment-shaped marker quoted inside a backtick span must survive the strip, not be deleted as if it were a live comment",
+  );
 });
 
 test("#411: this repo's own repo part is under doctrine.maxChars with NO truncation marker (not silently cut)", () => {

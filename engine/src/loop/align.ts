@@ -1939,10 +1939,8 @@ export function createAligningStub(deps: AlignDeps): PeripheralStub {
           const alignPrompt = renderRolePrompt(template, NO_ISSUE, deps.cfg, {
             "po.mode": "align",
             "round.milestone": deps.cfg.round.milestone ?? "(none configured for this round — decompose against the goal file alone)",
-            // #830: the goal file is a `sapwood init` scaffold until a human customizes it away —
-            // its inline `<!-- ... -->` authoring guidance is stripped here, at the substitution
-            // boundary, so it never reaches the align session as if it were the human's own goal
-            // content. The on-disk file (read above via readPlanMd) is untouched.
+            // Remove scaffold authoring guidance from the in-memory prompt input; readPlanMd
+            // leaves the configured file unchanged.
             "plan.md": stripHtmlComments(planRead.content),
             "round.directive": directive,
             "backlog.digest": backlogDigest.text,

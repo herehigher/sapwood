@@ -91,9 +91,104 @@ export function escapeAngleBrackets(text: string): string {
  *  `loadDoctrine`, `align.ts`'s `{{plan.md}}` substitution, `architect.ts`'s
  *  `loadGoalExcerptWithStatus`) rather than by editing the templates keeps the on-disk file —
  *  and a human editing it — untouched; only the copy actually handed to a session is cleaned.
- *  Non-greedy and dotAll-equivalent (`[\s\S]*?`, not `.` — a real comment in either template
- *  spans multiple lines) so two adjacent comments are stripped as two matches, never merged into
- *  one that also eats the prose between them. */
+ *
+ *  #830 gate② P1: a blanket `/<!--[\s\S]*?-->/g` (the original #830 fix) is not Markdown-aware —
+ *  it strips a `<!-- ... -->` marker quoted inside a backtick span (this repo's own
+ *  docs/REVIEW-DOCTRINE.md:55, `` `<!-- sapwood:floor:<name> -->` ``, corrupting the very floor
+ *  marker every doctrine load composes into the prompt) or shown as a literal example inside a
+ *  fenced code block. This single-pass scanner walks `text` once, tracking three mutually
+ *  exclusive states — inside a FENCED block (``` or ~~~, closer run length >= opener run length,
+ *  the same shape `extractMarkdownSections` above already tracks), inside a BACKTICK SPAN (opened
+ *  by a run of N backticks, closed only by the next run of EXACTLY N backticks — a shorter or
+ *  longer run is not a closer and is copied through as literal text), or NORMAL TEXT — and only
+ *  strips a `<!--...-->` pair found in NORMAL TEXT; content inside a fence or a backtick span is
+ *  copied through byte-for-byte, comments and all.
+ *
+ *  An UNTERMINATED `<!--` (no matching `-->` anywhere after it) is left completely unchanged,
+ *  never stripped to end-of-string: a truncated opener is more likely a Markdown edge case (a
+ *  literal `<!--` in prose, or a comment a human is mid-editing) than license to discard
+ *  everything after it, and silently deleting real trailing doctrine content on a parse ambiguity
+ *  is the worse failure of the two directions — see markdown.test.ts's pin for this exact case. */
 export function stripHtmlComments(text: string): string {
-  return text.replace(/<!--[\s\S]*?-->/g, "");
+  let out = "";
+  let i = 0;
+  let atLineStart = true;
+  let fence: { char: "`" | "~"; length: number } | null = null;
+
+  while (i < text.length) {
+    if (atLineStart) {
+      const lineEnd = text.indexOf("\n", i);
+      const lineBreakAt = lineEnd === -1 ? text.length : lineEnd + 1;
+      const line = lineEnd === -1 ? text.slice(i) : text.slice(i, lineEnd);
+      if (fence) {
+        const closer = /^ {0,3}(`+|~+)[ \t]*$/.exec(line)?.[1];
+        if (closer?.[0] === fence.char && closer.length >= fence.length) fence = null;
+        out += text.slice(i, lineBreakAt); // fence markers AND fenced content: verbatim either way
+        i = lineBreakAt;
+        continue;
+      }
+      const opener = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+      if (opener) {
+        fence = { char: opener[0] as "`" | "~", length: opener.length };
+        out += text.slice(i, lineBreakAt);
+        i = lineBreakAt;
+        continue;
+      }
+      atLineStart = false;
+    }
+
+    const ch = text[i]!;
+    if (ch === "\n") {
+      out += ch;
+      i++;
+      atLineStart = true;
+      continue;
+    }
+    if (ch === "`") {
+      let j = i;
+      while (text[j] === "`") j++;
+      const openLen = j - i;
+      // Scan forward for the next run of EXACTLY openLen backticks — a run of any other length
+      // is not a valid closer and is skipped whole (its own length disqualifies every backtick
+      // inside it as a partial match).
+      let k = j;
+      let closerStart = -1;
+      while (k < text.length) {
+        if (text[k] === "`") {
+          let m = k;
+          while (text[m] === "`") m++;
+          if (m - k === openLen) {
+            closerStart = k;
+            break;
+          }
+          k = m;
+        } else {
+          k++;
+        }
+      }
+      if (closerStart !== -1) {
+        // The whole span, opener through closer, copied verbatim — a comment quoted inside it
+        // (a doctrine floor marker shown as inline code, e.g.) is real prose, not a live comment.
+        out += text.slice(i, closerStart + openLen);
+        i = closerStart + openLen;
+      } else {
+        out += text.slice(i, j); // no closer anywhere in the rest of the text -> literal backticks
+        i = j;
+      }
+      continue;
+    }
+    if (ch === "<" && text.startsWith("<!--", i)) {
+      const end = text.indexOf("-->", i + 4);
+      if (end !== -1) {
+        i = end + 3; // the whole comment is dropped — nothing appended for it
+        continue;
+      }
+      out += text.slice(i); // unterminated: keep the remainder byte-for-byte, never truncate to EOF
+      i = text.length;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
 }
