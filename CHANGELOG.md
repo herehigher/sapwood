@@ -7,6 +7,43 @@ All notable changes to sapwood are documented here. Format:
 
 ## [Unreleased]
 
+### Changed
+- `docs/guide/configuration.md` gains rows for 23 schema-valid keys that had none: the empty-spin
+  breaker, pool-removal and concern-post caps, the architect drop cap, proxy audit-comment caps,
+  per-role `model`/`effort`/`promptFile`, and `roles.skills.enabled`.
+- README badges and status reflect the published pre-release; the OpenSSF Scorecard badge uses
+  the official `scorecard.dev` URLs.
+- Until the first plain release, the publishing human moves npm's `latest` tag to the newest
+  pre-release after each publish, so a bare `npx sapwood` installs a working engine instead of
+  the `0.0.1` placeholder.
+
+### Fixed
+- `sapwood init` and `sapwood run` in a directory with no config, or an invalid one, stop with
+  `sapwood validate`'s concise config-error formatting instead of a Node stack trace;
+  `sapwood init --help` describes the flow `init` actually runs.
+- The getting-started bootstrap config validates as written, and `sapwood run --dry-run` applies
+  the same engine-agent CI refusal as `sapwood validate` instead of exiting 0 with a warning.
+- The goal file, review doctrine, and architecture chapter reach prompts with HTML comments
+  removed, so the authoring guidance in `sapwood init`'s scaffolds no longer reads as doctrine
+  or locked architecture. Comments inside Markdown code spans, fenced blocks, and indented code
+  are kept; on-disk files are unchanged.
+- `release publish`'s npm step runs on an interactive terminal so 2FA web-auth can complete, and
+  `publish --otp <code>` is accepted; the runbook names the `github-pages` `v*` tag deployment
+  policy the `deploy-demo` job needs.
+
+### Security
+- The PO/align backlog digest and plan-triage candidate selection apply the author-trust filter
+  to issues: text is shown only for authors GitHub classifies as owner, member, or collaborator,
+  the authenticated operator, or a known reviewer bot; other issues appear at most as an
+  aggregate count, never as rendered text. The open-backlog read pages GraphQL with a fixed
+  ten-page ceiling and fails closed if the ceiling is reached before exhaustion; the
+  recently-closed dedup read is a separate bounded one-page window.
+- The shipped PO and verification-plan prompts carry the complete human-merge-only path list
+  from `docs/security.md`; the guard-hook source, the compiled guard, guard-hook, reviewer, and
+  merge-driver artifacts, both `.yml` config variants, and `.github/CODEOWNERS` were absent
+  before this fix. The prompts are checked against the canonical section so a future addition
+  cannot leave any carrier stale.
+
 ## [0.3.0-alpha.1] - 2026-08-27
 
 ### Changed
