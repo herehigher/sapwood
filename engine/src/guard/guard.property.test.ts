@@ -1,5 +1,5 @@
-// Property-based test on top of guard.fuzz.test.ts's differential corpus (issue #8, fixed
-// command list vs. a static guard.py verdict table). That corpus is powerful for catching
+// Property-based test on top of guard.fuzz.test.ts's differential corpus (a fixed command
+// list vs. a static guard.py verdict table). That corpus is powerful for catching
 // tokenizer divergence on KNOWN inputs, but every case in it was hand-picked or generated
 // once and frozen — it can't discover a path-normalisation or wrapper-shape bypass nobody
 // thought to write down. fast-check instead draws arbitrary directory prefixes, casings, and
@@ -27,21 +27,22 @@ const CWD = "/repo";
 // exercise — the property is about arbitrary PREFIXES around a known protected suffix, not
 // about path-normalisation edge cases (those are normalizePath's own concern, unit-tested
 // directly in guard.test.ts).
-// "-" is deliberately excluded: a segment starting with it would make the assembled path's
-// first character "-", and the write-command checks below treat any "-"-leading argument as
-// a flag (`args.filter((a) => !a.startsWith("-"))`) rather than a path — a real shell
-// argument-parsing ambiguity, but orthogonal to the path-normalisation invariants this file
-// tests, so the generator sidesteps it instead of asserting through it.
+// "-" is excluded for now: the write-command scan treats any "-"-leading argument as a flag
+// rather than a path, so a leading-dash segment is a known guard gap (tracked as its own
+// security issue, fixed in guard.ts, which this file must not edit). Excluding it keeps the
+// gap from being frozen into these properties as if it were intended; once the guard closes
+// it, "-" joins the alphabet and the properties cover that shape too.
 const SEGMENT_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".split("");
 const segmentArb = () => fc.array(fc.constantFrom(...SEGMENT_CHARS), { minLength: 1, maxLength: 10 }).map((chars) => chars.join(""));
 const prefixArb = () => fc.array(segmentArb(), { minLength: 0, maxLength: 4 });
 
 const joinRel = (prefix: string[], suffix: string): string => (prefix.length ? `${prefix.join("/")}/${suffix}` : suffix);
 
-// ── the human-merge-only universe, mirroring docs/security.md's "Human-merge-only paths"
-// list (the canonical enumeration — guard.ts itself does not export a single list combining
-// all its path rules, only the narrower source-file PROTECTED_SUFFIXES and the
-// SAPWOOD_ROOT_SEGMENT constant, so this list is kept here rather than imported). ──────────
+// ── the write-path universe: docs/security.md's "Human-merge-only paths" list (the canonical
+// enumeration) plus the `.sapwood/` control file guard.ts fences on its own (not human-merge-only
+// in the docs' sense — it is runtime state, not source — but the same write-path rule guards it).
+// guard.ts does not export one list combining all its path rules (only the narrower source-file
+// PROTECTED_SUFFIXES and the SAPWOOD_ROOT_SEGMENT constant), so the list is kept here. ─────────
 const HUMAN_MERGE_ONLY_SUFFIXES = [
   ".github/workflows/ci.yml",
   ".claude/settings.json",
