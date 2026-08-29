@@ -121,6 +121,15 @@ function basename(p: string): string {
 function hasPathSep(t: string): boolean {
   return t.includes("/") || t.includes("\\");
 }
+// A `-`-leading token that contains a path separator is either a relative path whose first
+// segment starts with `-` (the shell passes it through as a path, exactly like `./-x/…`) or an
+// option carrying a path value (`--work-tree=/repo`). Both deserve examination, and examining
+// can only ever BLOCK when the text names a protected path — so the scan treats both as
+// candidates. This widens only what the SCAN examines; grammar (which token is the git
+// subcommand, which positional is cp's destination) keeps its own narrower reading.
+function isPathCandidate(t: string): boolean {
+  return !t.startsWith("-") || hasPathSep(t);
+}
 
 // ── command substitution extraction ($() recurses; backticks too) ────────────
 function extractCommandSubstitutions(text: string): string[] {
@@ -835,7 +844,10 @@ function isUnderSapwoodRoot(abs: string): boolean {
 /** If `abs` (a normalized absolute path) is a boundary file, return a short label; else null. */
 function protectedPathLabel(abs: string): string | null {
   if (isUnderSapwoodRoot(abs)) return ".sapwood/** (sapwood runtime root)";
-  if (/\/\.claude\/settings(\.local)?\.json$/.test(abs)) return ".claude/settings.json (hook wiring)";
+  // docs/security.md names this rule `.claude/settings*.json` (a shell glob); mirror it
+  // literally rather than enumerating the two names Claude Code itself reads today, so a doc
+  // reader's shell-glob mental model and the guard's actual match stay the same shape.
+  if (/\/\.claude\/settings[^/]*\.json$/.test(abs)) return ".claude/settings.json (hook wiring)";
   if (/\/\.github\/workflows(\/|$)/.test(abs)) return ".github/workflows/** (CI integrity)";
   // The engine config carries guard.mode + reviewer/security settings — a worker editing it to
   // guard.mode:soft would make future workers observe-only. Human-merge-only (Codex #26 R2).
@@ -884,9 +896,16 @@ const WRITE_CMDS = new Set(["tee", "dd", "sed", "perl", "cp", "install", "mv", "
 /** Evaluate one write/destructive command's path args; return a block reason or null. */
 function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null {
   const hitFor = (t: string): string | null => protectedPathLabel(normalizePath(t, cwd));
+  // Two views of the same argv, kept separate on purpose: `nonFlag` is grammar (which token IS
+  // the git subcommand, which positional IS cp/install's legacy destination) — an option that
+  // legitimately carries a path via `=`/grouping (`--work-tree=/repo`, `--strip-program=/usr/bin/strip`)
+  // still reads as a flag there, so it's examined by its own branch below, not swept in as a
+  // destination. `pathCandidates` is the widened SCAN target: every token grammar can't rule out
+  // as a path, dash-leading included.
   const nonFlag = args.filter((a) => !a.startsWith("-"));
+  const pathCandidates = args.filter(isPathCandidate);
   const blockAny = (verb: string): string | null => {
-    for (const a of nonFlag) {
+    for (const a of pathCandidates) {
       const h = hitFor(a);
       if (h) return `BLOCK [write-path] ${verb} ${h} is human-merge-only`;
     }
@@ -916,7 +935,13 @@ function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null
   if (cmd === "git") {
     const sub = nonFlag[0]?.toLowerCase();
     if (sub === "rm" || sub === "mv" || sub === "restore" || sub === "checkout") {
-      for (const a of nonFlag.slice(1)) {
+      // Grammar (nonFlag[0]) finds the subcommand's raw position; the scan then only looks at
+      // path candidates AFTER it, so an option before the subcommand (`--work-tree=X`) can't be
+      // mistaken for a path argument the subcommand didn't actually receive.
+      const subIdx = args.findIndex((a) => !a.startsWith("-"));
+      for (let k = subIdx + 1; k < args.length; k++) {
+        const a = args[k]!;
+        if (!isPathCandidate(a)) continue;
         const h = hitFor(a);
         if (h) return `BLOCK [write-path] git ${sub} ${h} is human-merge-only`;
       }
@@ -932,14 +957,24 @@ function writeCmdTarget(cmd: string, args: string[], cwd: string): string | null
       else if (a.startsWith("--target-directory=")) dest = a.slice("--target-directory=".length);
       else if (a.startsWith("-t") && a.length > 2) dest = a.slice(2);
     }
-    if (dest === undefined) dest = nonFlag[nonFlag.length - 1];
-    if (dest) {
+    if (dest !== undefined) {
       const h = hitFor(dest);
+      if (h) return `BLOCK [write-path] ${cmd} writes ${h} is human-merge-only`;
+      return null;
+    }
+    // No explicit target-directory option: grammar says the destination is the last positional
+    // (`nonFlag`'s legacy reading), but a dash-leading path segment in that same trailing slot
+    // would be invisible to it — check both readings, either hit blocks.
+    const candidates = new Set(
+      [nonFlag[nonFlag.length - 1], pathCandidates[pathCandidates.length - 1]].filter((c): c is string => c !== undefined),
+    );
+    for (const c of candidates) {
+      const h = hitFor(c);
       if (h) return `BLOCK [write-path] ${cmd} writes ${h} is human-merge-only`;
     }
     return null;
   }
-  // tee: every non-flag arg is a write target
+  // tee: every path-candidate arg is a write target
   return blockAny("tee writes");
 }
 
@@ -961,7 +996,18 @@ function checkControlSentinelArg(tokens: string[], cwd: string): string | null {
     if (!t) continue;
     // A flag can glue the path to its value (`--target=../../.sapwood/PAUSE`) — judge the
     // substring after the first `=` for `-`-prefixed tokens (#84 gate② P2-2, carried forward).
-    const candidate = t.startsWith("-") ? (t.includes("=") ? t.slice(t.indexOf("=") + 1) : null) : t;
+    // A `-`-leading token with no `=` is still a candidate when it contains a path separator
+    // (`-x/../.sapwood/PAUSE` is a path whose first segment starts with `-`, and examining it
+    // can only block if it really resolves under the runtime root); otherwise it's an ordinary
+    // flag, skipped.
+    let candidate: string | null;
+    if (t.startsWith("-")) {
+      if (t.includes("=")) candidate = t.slice(t.indexOf("=") + 1);
+      else if (hasPathSep(t)) candidate = t;
+      else candidate = null;
+    } else {
+      candidate = t;
+    }
     if (!candidate) continue;
     const abs = normalizePath(candidate, cwd);
     if (isUnderSapwoodRoot(abs)) {

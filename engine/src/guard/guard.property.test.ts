@@ -29,12 +29,7 @@ const CWD = "/repo";
 // exercise — the property is about arbitrary PREFIXES around a known protected suffix, not
 // about path-normalisation edge cases (those are normalizePath's own concern, unit-tested
 // directly in guard.test.ts).
-// "-" is excluded for now: the write-command scan treats any "-"-leading argument as a flag
-// rather than a path, so a leading-dash segment is a known guard gap (tracked as its own
-// security issue, fixed in guard.ts, which this file must not edit). Excluding it keeps the
-// gap from being frozen into these properties as if it were intended; once the guard closes
-// it, "-" joins the alphabet and the properties cover that shape too.
-const SEGMENT_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".split("");
+const SEGMENT_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-".split("");
 const segmentArb = () => fc.array(fc.constantFrom(...SEGMENT_CHARS), { minLength: 1, maxLength: 10 }).map((chars) => chars.join(""));
 const prefixArb = () => fc.array(segmentArb(), { minLength: 0, maxLength: 4 });
 
@@ -48,13 +43,9 @@ const joinRel = (prefix: string[], suffix: string): string => (prefix.length ? `
 // but the same write-path rule). Families the docs write as globs are drawn from generators
 // (bounded: up to three nested directories, names and extensions from the segment alphabet), so
 // a regression that keeps one example blocked while freeing siblings in that range fails here.
-// `.claude/settings*.json` is the exception: the guard matches exactly two names today and the
-// doc/guard disagreement is tracked separately, so only those two are asserted. guard.ts does not
-// export one list combining all its path rules (only the narrower source-file PROTECTED_SUFFIXES
-// and the SAPWOOD_ROOT_SEGMENT constant), so the fixed part is kept here. ────────────────────────
+// guard.ts does not export one list combining all its path rules (only the narrower source-file
+// PROTECTED_SUFFIXES and the SAPWOOD_ROOT_SEGMENT constant), so the fixed part is kept here. ───
 const FIXED_PROTECTED_SUFFIXES = [
-  ".claude/settings.json",
-  ".claude/settings.local.json",
   "sapwood.config.yaml",
   "sapwood.config.yml",
   "sapwood.config.json",
@@ -80,7 +71,16 @@ const fileUnderArb = (dir: string) =>
 const workflowsPathArb = () => fileUnderArb(".github/workflows");
 // `.sapwood/**`: the whole runtime directory.
 const sapwoodPathArb = () => fileUnderArb(".sapwood");
-const protectedSuffixArb = () => fc.oneof(fc.constantFrom(...FIXED_PROTECTED_SUFFIXES), workflowsPathArb(), sapwoodPathArb());
+// `.claude/settings*.json`: docs/security.md writes this as a shell glob, directly under
+// `.claude/` — the `*` is generated as 0–2 pieces, each an optional "." then a segment (the
+// alphabet includes "-"), so `settings.json`, `settingsX9.json`, `settings-team.json` and
+// `settings.team.local.json` all occur.
+const claudeSettingsArb = () =>
+  fc
+    .array(fc.tuple(fc.constantFrom("", "."), segmentArb()), { minLength: 0, maxLength: 2 })
+    .map((pieces) => `.claude/settings${pieces.map(([dot, seg]) => `${dot}${seg}`).join("")}.json`);
+const protectedSuffixArb = () =>
+  fc.oneof(fc.constantFrom(...FIXED_PROTECTED_SUFFIXES), workflowsPathArb(), sapwoodPathArb(), claudeSettingsArb());
 
 // The families guard.ts's own comments call out as matched case-insensitively (macOS/APFS
 // default, deliberate fail-closed stance) — `.github/workflows/**` and `.claude/settings*.json`

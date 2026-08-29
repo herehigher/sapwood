@@ -248,6 +248,28 @@ const BLOCK: [string, string, string][] = [
   ["node unpause.js --file=.sapwood/kill_switch", CWD, "write-path"],
   // absolute path under the repo.
   ["rm /repo/.sapwood/EMERGENCY_STOP", CWD, "write-path"],
+  // A relative path whose first segment starts with `-` is still a path: the shell passes it
+  // through untouched, so the scan must examine `-`-leading tokens that contain a separator
+  // (options can carry paths too — `--work-tree=/repo` — which is why grammar keeps its own
+  // narrower reading; see the preservation cases below). No `--` end-of-options marker needed.
+  ["cp /tmp/src -x/../sapwood.config.yaml", CWD, "write-path"],
+  ["mv -x/../sapwood.config.yaml /tmp/x", CWD, "write-path"],
+  ["rm -x/../.sapwood/PAUSE", CWD, "write-path"],
+  ["tee -x/sapwood.config.yaml", CWD, "write-path"],
+  // Same shape behind an explicit `--` (still resolved by the widened scan, not just grammar).
+  ["sed -i s/a/b/ -- -x/../.github/workflows/ci.yml", CWD, "write-path"],
+  ["git rm -- -x/../engine/dist/guard/guard.js", CWD, "write-path"],
+  ["mv -- -x/../sapwood.config.yaml /tmp/x", CWD, "write-path"],
+  ["rm -- -x/../.sapwood/PAUSE", CWD, "write-path"],
+  ["tee -- -x/sapwood.config.yaml", CWD, "write-path"],
+  // A quoted backslash-separated leading-dash path resolves the same way as the forward-slash form.
+  ["rm -- '-x\\..\\.sapwood\\PAUSE'", CWD, "write-path"],
+  // An option that legitimately CARRIES a path (via `=`/grouping, or as an explicit git/cp
+  // flag value) must keep blocking too — the scan widens, grammar doesn't narrow.
+  ["git --work-tree=/repo rm sapwood.config.yaml", CWD, "write-path"],
+  ["install /tmp/src sapwood.config.yaml --strip-program=/usr/bin/strip", CWD, "write-path"],
+  ["tee -- ./-x/../sapwood.config.yaml", CWD, "write-path"],
+  ["echo x > -x/sapwood.config.yaml", CWD, "write-path"],
 ];
 
 for (const [command, cwd, kw] of BLOCK) {
@@ -499,6 +521,16 @@ const ALLOW: string[] = [
   // #781 reverse test: sapwood.config.example near-misses must still pass.
   "touch sapwood.config.example2.yaml",
   "touch sapwood.config.example-notes.md",
+  // Ordinary `-`-leading flags on a write command, with no path-separator in sight, must still
+  // parse as flags — the widened scan only pulls in a dash-leading token when it CONTAINS a
+  // path separator, so these never become path candidates in the first place.
+  "cp -r a b",
+  "sed -i s/a/b/ notes.md",
+  "sed -es/a/b/ notes.md",
+  "git rm --cached notes.md",
+  "rm -rf build",
+  "cp -t dist a",
+  "git --work-tree=/repo status",
 ];
 
 for (const command of ALLOW) {
@@ -848,6 +880,11 @@ const WRITE_BLOCK: [string, string][] = [
   ["/repo/.claude/settings.json", "write-path"],
   [".claude/settings.json", "write-path"],
   [".claude/settings.local.json", "write-path"],
+  // docs/security.md's own glob (`settings*.json`) covers more than the two names Claude Code
+  // itself reads today — the guard mirrors the doc's shape literally, not just those two.
+  ["x/.claude/settings.local.json", "write-path"],
+  [".claude/settings.team.json", "write-path"],
+  [".claude/settingsX.json", "write-path"],
   [".github/workflows/ci.yml", "write-path"],
   ["/repo/.github/workflows/nested/deploy.yaml", "write-path"],
   ["engine/src/guard/guard.ts", "write-path"],
@@ -920,6 +957,8 @@ for (const file_path of [
   "notes/about.sapwood.md",
   // #781 reverse: near-miss template name stays allowed ($-anchor).
   "sapwood.config.example2.yaml",
+  // A `.claude/` file that doesn't start with "settings" is outside the doc's glob entirely.
+  ".claude/other.json",
 ]) {
   test(`WRITE ALLOW: ${file_path}`, () => {
     assert.equal(guardDecision("Edit", { file_path }, CWD).allow, true);
