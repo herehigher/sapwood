@@ -248,9 +248,10 @@ const BLOCK: [string, string, string][] = [
   ["node unpause.js --file=.sapwood/kill_switch", CWD, "write-path"],
   // absolute path under the repo.
   ["rm /repo/.sapwood/EMERGENCY_STOP", CWD, "write-path"],
-  // A relative path whose first segment starts with `-` is still a path, not a flag — a shell
-  // option can never contain `/`, so any `-`-leading token that does is a positional argument.
-  // These reach a protected path with no `--` end-of-options marker at all.
+  // A relative path whose first segment starts with `-` is still a path: the shell passes it
+  // through untouched, so the scan must examine `-`-leading tokens that contain a separator
+  // (options can carry paths too — `--work-tree=/repo` — which is why grammar keeps its own
+  // narrower reading; see the preservation cases below). No `--` end-of-options marker needed.
   ["cp /tmp/src -x/../sapwood.config.yaml", CWD, "write-path"],
   ["mv -x/../sapwood.config.yaml /tmp/x", CWD, "write-path"],
   ["rm -x/../.sapwood/PAUSE", CWD, "write-path"],

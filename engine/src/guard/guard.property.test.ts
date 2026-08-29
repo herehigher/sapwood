@@ -72,9 +72,13 @@ const workflowsPathArb = () => fileUnderArb(".github/workflows");
 // `.sapwood/**`: the whole runtime directory.
 const sapwoodPathArb = () => fileUnderArb(".sapwood");
 // `.claude/settings*.json`: docs/security.md writes this as a shell glob, directly under
-// `.claude/` (not nested) — bare `settings.json` or `settings.<anything>.json`.
-const claudeSettingsArb = () =>
-  fc.option(segmentArb(), { nil: undefined }).map((seg) => `.claude/settings${seg === undefined ? "" : `.${seg}`}.json`);
+// `.claude/` — the `*` is generated as 0–2 pieces, each an optional "." then a segment (the
+// alphabet includes "-"), so `settings.json`, `settingsX9.json`, `settings-team.json` and
+// `settings.team.local.json` all occur.
+const claudeSettingsPathArb = () =>
+  fc
+    .array(fc.tuple(fc.constantFrom("", "."), segmentArb()), { minLength: 0, maxLength: 2 })
+    .map((pieces) => `.claude/settings${pieces.map(([dot, seg]) => `${dot}${seg}`).join("")}.json`);
 const protectedSuffixArb = () =>
   fc.oneof(fc.constantFrom(...FIXED_PROTECTED_SUFFIXES), workflowsPathArb(), sapwoodPathArb(), claudeSettingsArb());
 
