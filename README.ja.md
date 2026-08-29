@@ -2,7 +2,7 @@
 
 [English](README.md) · 日本語 · [简体中文](README.zh-CN.md)
 
-本文は README.md（[a83d099b](https://github.com/herehigher/sapwood/blob/a83d099b/README.md) 時点）の翻訳です。相違がある場合は英語版を正とします。
+本文は README.md（[660e06ca](https://github.com/herehigher/sapwood/blob/660e06ca/README.md) 時点）の翻訳です。相違がある場合は英語版を正とします。
 
 **自律的なコーディングに、ガバナンスを。**
 
@@ -51,7 +51,6 @@ npx sapwood@<version> run --dry-run
 書き込まない。
 
 npm のみ: `npm i -g sapwood@alpha` で同じ CLI が使えるが、スラッシュコマンドはない。
-プレリリース: 両チャンネルとも最初のタグ付きリリースで公開される。
 
 [インストール](docs/guide/getting-started.md#install) と
 [L1 レシピ](docs/guide/getting-started.md#l1--supervise-one-issue) を参照。

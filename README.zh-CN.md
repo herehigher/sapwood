@@ -2,7 +2,7 @@
 
 [English](README.md) · [日本語](README.ja.md) · 简体中文
 
-本文为 README.md（截至 [a83d099b](https://github.com/herehigher/sapwood/blob/a83d099b/README.md)）的译文；如有出入，以英文版为准。
+本文为 README.md（截至 [660e06ca](https://github.com/herehigher/sapwood/blob/660e06ca/README.md)）的译文；如有出入，以英文版为准。
 
 **自主编码，接受治理。**
 
@@ -53,7 +53,6 @@ npx sapwood@<version> run --dry-run
 部署密钥 —— 尽力而为且幂等。`run --dry-run` 只读，不写入任何内容。
 
 仅使用 npm：`npm i -g sapwood@alpha` 提供相同的 CLI，但没有斜杠命令。
-预发布阶段：两条渠道都会随首个打标签的发布版本一同上线。
 
 参见[安装](docs/guide/getting-started.md#install)与
 [L1 方案](docs/guide/getting-started.md#l1--supervise-one-issue)。
