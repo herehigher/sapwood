@@ -2,7 +2,7 @@
 
 [English](README.md) · [日本語](README.ja.md) · 简体中文
 
-本文为 README.md（截至 [660e06ca](https://github.com/herehigher/sapwood/blob/660e06ca/README.md)）的译文；如有出入，以英文版为准。
+本文为 README.md（截至 [5715bbdb](https://github.com/herehigher/sapwood/blob/5715bbdb/README.md)）的译文；如有出入，以英文版为准。
 
 **自主编码，接受治理。**
 
