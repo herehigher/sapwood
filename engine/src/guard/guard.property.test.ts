@@ -45,8 +45,9 @@ const joinRel = (prefix: string[], suffix: string): string => (prefix.length ? `
 
 // ── the write-path universe. docs/security.md "Human-merge-only paths" is the list this mirrors,
 // plus the `.sapwood/` runtime directory guard.ts fences on its own (runtime state, not source —
-// but the same write-path rule). Families the docs write as globs are GENERATED, not sampled, so
-// a regression that keeps one example blocked while freeing its siblings still fails here.
+// but the same write-path rule). Families the docs write as globs are drawn from generators
+// (bounded: up to three nested directories, names and extensions from the segment alphabet), so
+// a regression that keeps one example blocked while freeing siblings in that range fails here.
 // `.claude/settings*.json` is the exception: the guard matches exactly two names today and the
 // doc/guard disagreement is tracked separately, so only those two are asserted. guard.ts does not
 // export one list combining all its path rules (only the narrower source-file PROTECTED_SUFFIXES
@@ -69,16 +70,16 @@ const FIXED_PROTECTED_SUFFIXES = [
   "engine/dist/roles/reviewer.js",
   "engine/dist/roles/merge-driver.js",
 ];
-// `.github/workflows/**`: any depth, any extension (the rule is on the directory, not on YAML).
-const workflowsPathArb = () =>
+// A generated file under a protected directory: 0–3 nested dirs, then a name with an optional
+// extension drawn from the segment alphabet (so ".json", ".sqlite", ".x9" all occur, not only YAML).
+const fileUnderArb = (dir: string) =>
   fc
-    .tuple(fc.array(segmentArb(), { minLength: 0, maxLength: 2 }), segmentArb(), fc.constantFrom(".yml", ".yaml", ".md", ""))
-    .map(([dirs, name, ext]) => [".github/workflows", ...dirs, `${name}${ext}`].join("/"));
-// `.sapwood/**`: the whole runtime directory, any depth.
-const sapwoodPathArb = () =>
-  fc
-    .tuple(fc.array(segmentArb(), { minLength: 0, maxLength: 2 }), segmentArb())
-    .map(([dirs, name]) => [".sapwood", ...dirs, name].join("/"));
+    .tuple(fc.array(segmentArb(), { minLength: 0, maxLength: 3 }), segmentArb(), fc.option(segmentArb(), { nil: undefined }))
+    .map(([dirs, name, ext]) => [dir, ...dirs, ext === undefined ? name : `${name}.${ext}`].join("/"));
+// `.github/workflows/**`: the rule is on the directory, not on YAML — extension is drawn, not fixed.
+const workflowsPathArb = () => fileUnderArb(".github/workflows");
+// `.sapwood/**`: the whole runtime directory.
+const sapwoodPathArb = () => fileUnderArb(".sapwood");
 const protectedSuffixArb = () => fc.oneof(fc.constantFrom(...FIXED_PROTECTED_SUFFIXES), workflowsPathArb(), sapwoodPathArb());
 
 // The families guard.ts's own comments call out as matched case-insensitively (macOS/APFS
