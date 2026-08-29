@@ -9,7 +9,9 @@
 // asserted here — every property restates something guard.ts's own comments already claim.
 //
 // ponytail: does not cover Bash tokenizer edge cases (quoting, escaping, command
-// substitution) — that surface is guard.fuzz.test.ts's job against the guard.py oracle. Also
+// substitution) around a write path — guard.fuzz.test.ts compares only opaque-construct and
+// gh-overreach verdicts against the guard.py oracle, so a quoted write-path regression is
+// caught by neither file today. Also
 // does not cover the `.github/CODEOWNERS` rule (guard.ts does not path-deny it; it's a
 // process-level control per docs/security.md), symlink aliasing (a documented residual, not
 // something any lexical path check closes), or gh-overreach/opaque-construct categories
@@ -36,15 +38,20 @@ const SEGMENT_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234
 const segmentArb = () => fc.array(fc.constantFrom(...SEGMENT_CHARS), { minLength: 1, maxLength: 10 }).map((chars) => chars.join(""));
 const prefixArb = () => fc.array(segmentArb(), { minLength: 0, maxLength: 4 });
 
+// Basenames the source-file suffix rule matches regardless of prefix (see FIXED_PROTECTED_SUFFIXES).
+const PROTECTED_TS_BASENAMES = new Set(["guard", "guard-hook", "reviewer", "merge-driver"]);
+
 const joinRel = (prefix: string[], suffix: string): string => (prefix.length ? `${prefix.join("/")}/${suffix}` : suffix);
 
-// ── the write-path universe: docs/security.md's "Human-merge-only paths" list (the canonical
-// enumeration) plus the `.sapwood/` control file guard.ts fences on its own (not human-merge-only
-// in the docs' sense — it is runtime state, not source — but the same write-path rule guards it).
-// guard.ts does not export one list combining all its path rules (only the narrower source-file
-// PROTECTED_SUFFIXES and the SAPWOOD_ROOT_SEGMENT constant), so the list is kept here. ─────────
-const HUMAN_MERGE_ONLY_SUFFIXES = [
-  ".github/workflows/ci.yml",
+// ── the write-path universe. docs/security.md "Human-merge-only paths" is the list this mirrors,
+// plus the `.sapwood/` runtime directory guard.ts fences on its own (runtime state, not source —
+// but the same write-path rule). Families the docs write as globs are GENERATED, not sampled, so
+// a regression that keeps one example blocked while freeing its siblings still fails here.
+// `.claude/settings*.json` is the exception: the guard matches exactly two names today and the
+// doc/guard disagreement is tracked separately, so only those two are asserted. guard.ts does not
+// export one list combining all its path rules (only the narrower source-file PROTECTED_SUFFIXES
+// and the SAPWOOD_ROOT_SEGMENT constant), so the fixed part is kept here. ────────────────────────
+const FIXED_PROTECTED_SUFFIXES = [
   ".claude/settings.json",
   ".claude/settings.local.json",
   "sapwood.config.yaml",
@@ -61,21 +68,34 @@ const HUMAN_MERGE_ONLY_SUFFIXES = [
   "engine/dist/guard/guard-hook.js",
   "engine/dist/roles/reviewer.js",
   "engine/dist/roles/merge-driver.js",
-  ".sapwood/PAUSE",
 ];
+// `.github/workflows/**`: any depth, any extension (the rule is on the directory, not on YAML).
+const workflowsPathArb = () =>
+  fc
+    .tuple(fc.array(segmentArb(), { minLength: 0, maxLength: 2 }), segmentArb(), fc.constantFrom(".yml", ".yaml", ".md", ""))
+    .map(([dirs, name, ext]) => [".github/workflows", ...dirs, `${name}${ext}`].join("/"));
+// `.sapwood/**`: the whole runtime directory, any depth.
+const sapwoodPathArb = () =>
+  fc
+    .tuple(fc.array(segmentArb(), { minLength: 0, maxLength: 2 }), segmentArb())
+    .map(([dirs, name]) => [".sapwood", ...dirs, name].join("/"));
+const protectedSuffixArb = () => fc.oneof(fc.constantFrom(...FIXED_PROTECTED_SUFFIXES), workflowsPathArb(), sapwoodPathArb());
 
-// Subset guard.ts's own comments call out as matched case-insensitively (macOS/APFS default,
-// deliberate fail-closed stance) — `.github/workflows/**` and `.claude/settings*.json` are
-// NOT in this subset because their regexes carry no `i` flag.
-const CASE_INSENSITIVE_SUFFIXES = [
-  ".sapwood/PAUSE",
-  "sapwood.config.yaml",
-  "sapwood.config.yml",
-  "sapwood.config.json",
-  "sapwood.config.example.yaml",
-  "sapwood.config.example.yml",
-  "sapwood.config.example.json",
-];
+// The families guard.ts's own comments call out as matched case-insensitively (macOS/APFS
+// default, deliberate fail-closed stance) — `.github/workflows/**` and `.claude/settings*.json`
+// are NOT among them because their regexes carry no `i` flag.
+const caseInsensitiveSuffixArb = () =>
+  fc.oneof(
+    fc.constantFrom(
+      "sapwood.config.yaml",
+      "sapwood.config.yml",
+      "sapwood.config.json",
+      "sapwood.config.example.yaml",
+      "sapwood.config.example.yml",
+      "sapwood.config.example.json",
+    ),
+    sapwoodPathArb(),
+  );
 
 const caseVariantArb = (s: string) =>
   fc.array(fc.boolean(), { minLength: s.length, maxLength: s.length }).map((bits) =>
@@ -110,7 +130,7 @@ test("guard.property: any directory prefix + a human-merge-only path suffix is b
   fc.assert(
     fc.property(
       prefixArb(),
-      fc.constantFrom(...HUMAN_MERGE_ONLY_SUFFIXES),
+      protectedSuffixArb(),
       fc.constantFrom("Write", "Edit"),
       fc.boolean(), // resolve as an absolute path under cwd, vs. a bare relative one
       fc.boolean(), // relative form gets a "./" prefix
@@ -128,17 +148,12 @@ test("guard.property: any directory prefix + a human-merge-only path suffix is b
 
 test("guard.property: the same human-merge-only path reached through a Bash write vector is blocked", () => {
   fc.assert(
-    fc.property(
-      prefixArb(),
-      fc.constantFrom(...HUMAN_MERGE_ONLY_SUFFIXES),
-      fc.constantFrom(...BASH_WRITE_TEMPLATES),
-      (prefix, suffix, template) => {
-        const command = template(joinRel(prefix, suffix));
-        const decision = guardDecision("Bash", { command }, CWD);
-        assert.equal(decision.allow, false, `expected BLOCK for: ${command}`);
-        assert.match(decision.reason, /write-path/i, `expected write-path category, got: ${decision.reason}`);
-      },
-    ),
+    fc.property(prefixArb(), protectedSuffixArb(), fc.constantFrom(...BASH_WRITE_TEMPLATES), (prefix, suffix, template) => {
+      const command = template(joinRel(prefix, suffix));
+      const decision = guardDecision("Bash", { command }, CWD);
+      assert.equal(decision.allow, false, `expected BLOCK for: ${command}`);
+      assert.match(decision.reason, /write-path/i, `expected write-path category, got: ${decision.reason}`);
+    }),
     { numRuns: 200 },
   );
 });
@@ -147,7 +162,7 @@ test("guard.property: .sapwood/** and sapwood.config* block regardless of letter
   fc.assert(
     fc.property(
       prefixArb(),
-      fc.constantFrom(...CASE_INSENSITIVE_SUFFIXES).chain((s) => caseVariantArb(s)),
+      caseInsensitiveSuffixArb().chain(caseVariantArb),
       fc.constantFrom("Write", "Edit"),
       (prefix, casedSuffix, tool) => {
         const filePath = joinRel(prefix, casedSuffix);
@@ -164,12 +179,13 @@ test("guard.property: a path outside every protected prefix/basename is not bloc
   fc.assert(
     fc.property(
       fc.array(segmentArb(), { minLength: 0, maxLength: 3 }),
-      segmentArb(),
+      segmentArb().filter((name) => !PROTECTED_TS_BASENAMES.has(name)),
       fc.constantFrom("Write", "Edit"),
       (subdirs, filename, tool) => {
-        // "src/..." can never collide with a protected suffix (all of them require a
-        // ".github", ".claude", ".sapwood", "engine/dist/...", or "sapwood.config*" segment
-        // this prefix never introduces), so this is safe by construction, not by luck.
+        // Segments carry no "." so ".github", ".claude", ".sapwood" and "sapwood.config*" can't
+        // appear, and a ".ts" name can't hit the compiled "engine/dist/**/*.js" rules. The one
+        // remaining collision is a ".ts" basename the source-file suffix match recognises under
+        // any prefix ("src/engine/src/guard/guard.ts" IS blocked, correctly) — hence the filter.
         const rel = ["src", ...subdirs, `${filename}.ts`].join("/");
         const decision = guardDecision(tool, { file_path: rel }, CWD);
         // Write/Edit/MultiEdit/NotebookEdit run through exactly one rule in guardDecision
