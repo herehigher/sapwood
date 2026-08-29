@@ -75,7 +75,7 @@ const sapwoodPathArb = () => fileUnderArb(".sapwood");
 // `.claude/` — the `*` is generated as 0–2 pieces, each an optional "." then a segment (the
 // alphabet includes "-"), so `settings.json`, `settingsX9.json`, `settings-team.json` and
 // `settings.team.local.json` all occur.
-const claudeSettingsPathArb = () =>
+const claudeSettingsArb = () =>
   fc
     .array(fc.tuple(fc.constantFrom("", "."), segmentArb()), { minLength: 0, maxLength: 2 })
     .map((pieces) => `.claude/settings${pieces.map(([dot, seg]) => `${dot}${seg}`).join("")}.json`);
