@@ -3330,6 +3330,7 @@ test("#438 getPRReviewData: a truncated review-threads read is announced on BOTH
         reviews: [],
       });
     }
+    if (args[0] === "api" && args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return "sapwood-actor"; // #1165: not a threads page
     if (args[0] === "api" && args[1] === "graphql") {
       graphqlPages++;
       // Runaway cursor: hasNextPage never goes false, so the real 50-page ceiling is what stops it.
@@ -4088,7 +4089,7 @@ test("GithubForge.getIssuesNeedingPlanTriage #1163: a NONE-associated planless i
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(cfg);
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "user") return "maintainer";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return "maintainer"; // #1165: the actor read is GraphQL viewer
     return JSON.stringify({
       data: {
         user: {
@@ -4167,7 +4168,7 @@ test("getIssueComments: reuses parsePRComments' shape/pagination tolerance off t
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
-    if (args[1] === "user") return "sapwood-actor";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return "sapwood-actor"; // #1165: the actor read is GraphQL viewer
     return JSON.stringify([
       {
         body: "please fix the plan",
