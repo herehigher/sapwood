@@ -29,12 +29,7 @@ const CWD = "/repo";
 // exercise — the property is about arbitrary PREFIXES around a known protected suffix, not
 // about path-normalisation edge cases (those are normalizePath's own concern, unit-tested
 // directly in guard.test.ts).
-// "-" is excluded for now: the write-command scan treats any "-"-leading argument as a flag
-// rather than a path, so a leading-dash segment is a known guard gap (tracked as its own
-// security issue, fixed in guard.ts, which this file must not edit). Excluding it keeps the
-// gap from being frozen into these properties as if it were intended; once the guard closes
-// it, "-" joins the alphabet and the properties cover that shape too.
-const SEGMENT_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".split("");
+const SEGMENT_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-".split("");
 const segmentArb = () => fc.array(fc.constantFrom(...SEGMENT_CHARS), { minLength: 1, maxLength: 10 }).map((chars) => chars.join(""));
 const prefixArb = () => fc.array(segmentArb(), { minLength: 0, maxLength: 4 });
 

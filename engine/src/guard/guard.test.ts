@@ -248,6 +248,27 @@ const BLOCK: [string, string, string][] = [
   ["node unpause.js --file=.sapwood/kill_switch", CWD, "write-path"],
   // absolute path under the repo.
   ["rm /repo/.sapwood/EMERGENCY_STOP", CWD, "write-path"],
+  // A relative path whose first segment starts with `-` is still a path, not a flag — a shell
+  // option can never contain `/`, so any `-`-leading token that does is a positional argument.
+  // These reach a protected path with no `--` end-of-options marker at all.
+  ["cp /tmp/src -x/../sapwood.config.yaml", CWD, "write-path"],
+  ["mv -x/../sapwood.config.yaml /tmp/x", CWD, "write-path"],
+  ["rm -x/../.sapwood/PAUSE", CWD, "write-path"],
+  ["tee -x/sapwood.config.yaml", CWD, "write-path"],
+  // Same shape behind an explicit `--` (still resolved by the widened scan, not just grammar).
+  ["sed -i s/a/b/ -- -x/../.github/workflows/ci.yml", CWD, "write-path"],
+  ["git rm -- -x/../engine/dist/guard/guard.js", CWD, "write-path"],
+  ["mv -- -x/../sapwood.config.yaml /tmp/x", CWD, "write-path"],
+  ["rm -- -x/../.sapwood/PAUSE", CWD, "write-path"],
+  ["tee -- -x/sapwood.config.yaml", CWD, "write-path"],
+  // A quoted backslash-separated leading-dash path resolves the same way as the forward-slash form.
+  ["rm -- '-x\\..\\.sapwood\\PAUSE'", CWD, "write-path"],
+  // An option that legitimately CARRIES a path (via `=`/grouping, or as an explicit git/cp
+  // flag value) must keep blocking too — the scan widens, grammar doesn't narrow.
+  ["git --work-tree=/repo rm sapwood.config.yaml", CWD, "write-path"],
+  ["install /tmp/src sapwood.config.yaml --strip-program=/usr/bin/strip", CWD, "write-path"],
+  ["tee -- ./-x/../sapwood.config.yaml", CWD, "write-path"],
+  ["echo x > -x/sapwood.config.yaml", CWD, "write-path"],
 ];
 
 for (const [command, cwd, kw] of BLOCK) {
@@ -499,6 +520,16 @@ const ALLOW: string[] = [
   // #781 reverse test: sapwood.config.example near-misses must still pass.
   "touch sapwood.config.example2.yaml",
   "touch sapwood.config.example-notes.md",
+  // Ordinary `-`-leading flags on a write command, with no path-separator in sight, must still
+  // parse as flags — the widened scan only pulls in a dash-leading token when it CONTAINS a
+  // path separator, so these never become path candidates in the first place.
+  "cp -r a b",
+  "sed -i s/a/b/ notes.md",
+  "sed -es/a/b/ notes.md",
+  "git rm --cached notes.md",
+  "rm -rf build",
+  "cp -t dist a",
+  "git --work-tree=/repo status",
 ];
 
 for (const command of ALLOW) {
