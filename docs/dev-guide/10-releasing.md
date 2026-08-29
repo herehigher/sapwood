@@ -96,8 +96,12 @@ it points at and its assets can't be added, changed, or removed —
 [GitHub's immutable releases doc](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases).
 This matters here because consumers install by exactly those two things: the
 `v<version>` tag that `scripts/release.ts` also mirrors onto the marketplace catalog,
-and `release-evidence.txt`, which is an audit artifact only if it can't be rewritten
-after the fact. That's why `publish` runs draft, then tag, then push, in that
+and the release's assets, which are audit artifacts only if they can't be rewritten
+after the fact — `release-evidence.txt`, the packed engine tarball
+(`sapwood-<version>.tgz`), and its Sigstore provenance bundle
+(`sapwood-<version>.tgz.sigstore.json`, from `actions/attest-build-provenance`). A
+consumer verifies the tarball offline against that bundle with `gh attestation verify
+sapwood-<version>.tgz --owner herehigher`. That's why `publish` runs draft, then tag, then push, in that
 order: it creates the GitHub Release as a **draft** first — pinned to the release
 commit via `--target`, since the tag it names doesn't exist yet — then tags that
 same commit (the one `--target` named, not whatever `HEAD` happens to be by then;
