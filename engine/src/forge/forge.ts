@@ -1535,9 +1535,13 @@ export class GithubForge implements IForge {
   async getAuthenticatedActor(): Promise<string | null> {
     this.authenticatedActor ??= (async () => {
       try {
-        const out = await this.gh(["api", "graphql", "-f", `query=${VIEWER_LOGIN_QUERY}`, "--jq", ".data.viewer.login"]);
-        const login = out.trim();
-        return login.length > 0 ? login : null;
+        // No `--jq`: a GraphQL error comes back HTTP 200 with `data.viewer` null and gh exits 0,
+        // and jq would print the literal `null` — which must not become an actor.
+        const out = await this.gh(["api", "graphql", "-f", `query=${VIEWER_LOGIN_QUERY}`]);
+        const parsed = JSON.parse(out) as { data?: { viewer?: { login?: unknown } | null }; errors?: unknown[] };
+        if (Array.isArray(parsed.errors) && parsed.errors.length > 0) return null;
+        const login = parsed.data?.viewer?.login;
+        return typeof login === "string" && login.trim().length > 0 ? login.trim() : null;
       } catch {
         return null;
       }
@@ -2009,18 +2013,18 @@ mutation($threadId: ID!, $body: String!) {
 
 /** #247: `resolveReviewThread` — marks a thread resolved. See IForge.resolveReviewThread's doc
  *  for why this can never by itself flip a merge verdict. */
-export /** #1165: the token's own login — `viewer` answers for a user token and an App installation
- *  token alike (REST `GET /user` refuses the latter). */
-const VIEWER_LOGIN_QUERY = `
-query {
-  viewer { login }
-}`;
-
-const RESOLVE_REVIEW_THREAD_MUTATION = `
+export const RESOLVE_REVIEW_THREAD_MUTATION = `
 mutation($threadId: ID!) {
   resolveReviewThread(input: {threadId: $threadId}) {
     thread { id isResolved }
   }
+}`;
+
+/** The token's own login — `viewer` answers for a user token and an App installation token
+ *  alike (REST `GET /user` refuses the latter). */
+const VIEWER_LOGIN_QUERY = `
+query {
+  viewer { login }
 }`;
 
 /** The reply-marker tail pages the thread before filtering so an untrusted marker never becomes
