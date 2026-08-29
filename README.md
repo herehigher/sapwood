@@ -57,7 +57,6 @@ admin) a deploy key — best-effort, idempotent. `run --dry-run` reads only,
 nothing is written.
 
 npm only: `npm i -g sapwood@alpha` gives the same CLI, no slash commands.
-Pre-release: both channels go live with the first tagged release.
 
 See [Install](docs/guide/getting-started.md#install) and [L1
 recipe](docs/guide/getting-started.md#l1--supervise-one-issue).
