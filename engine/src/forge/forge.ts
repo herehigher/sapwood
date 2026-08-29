@@ -1523,15 +1523,19 @@ export class GithubForge implements IForge {
     return filtered.entries;
   }
 
-  /** #652: `gh api user` — the authenticated actor's own login, per GitHub's REST identity
-   *  endpoint (the same token every other `gh` call in this class already uses). Fails closed to
-   *  `null` on ANY error (auth failure, network blip, malformed response) — never throws, per
+  /** #652: the authenticated actor's own login, read through GraphQL `viewer` (the same token
+   *  every other `gh` call in this class already uses). GraphQL rather than REST `GET /user`
+   *  because a GitHub App installation token (#1165: the engine's identity is an App on a
+   *  bot-run deployment) is refused by `/user` with 403 while `viewer` resolves for it and for a
+   *  user token alike — with the bot's `<slug>[bot]` login, which is exactly the login GitHub
+   *  stamps on the comments this actor is matched against. Fails closed to `null` on ANY error
+   *  (auth failure, network blip, malformed response) — never throws, per
    *  IForge.getAuthenticatedActor's contract that an unresolvable actor exempts no comment. The
    *  promise is memoized so one forge instance does not issue this identity read per comment read. */
   async getAuthenticatedActor(): Promise<string | null> {
     this.authenticatedActor ??= (async () => {
       try {
-        const out = await this.gh(["api", "user", "--jq", ".login"]);
+        const out = await this.gh(["api", "graphql", "-f", `query=${VIEWER_LOGIN_QUERY}`, "--jq", ".data.viewer.login"]);
         const login = out.trim();
         return login.length > 0 ? login : null;
       } catch {
@@ -2005,7 +2009,14 @@ mutation($threadId: ID!, $body: String!) {
 
 /** #247: `resolveReviewThread` — marks a thread resolved. See IForge.resolveReviewThread's doc
  *  for why this can never by itself flip a merge verdict. */
-export const RESOLVE_REVIEW_THREAD_MUTATION = `
+export /** #1165: the token's own login — `viewer` answers for a user token and an App installation
+ *  token alike (REST `GET /user` refuses the latter). */
+const VIEWER_LOGIN_QUERY = `
+query {
+  viewer { login }
+}`;
+
+const RESOLVE_REVIEW_THREAD_MUTATION = `
 mutation($threadId: ID!) {
   resolveReviewThread(input: {threadId: $threadId}) {
     thread { id isResolved }

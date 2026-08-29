@@ -4200,7 +4200,7 @@ test("parsePRComments: carries the REST numeric id, stringified; absent id is si
   ]);
 });
 
-test("getAuthenticatedActor: parses `gh api user --jq .login` to the login", async () => {
+test("getAuthenticatedActor: reads the login through GraphQL `viewer` — the one identity read that answers for an App installation token as well as a user token (#1165: REST `GET /user` is 403 for the former)", async () => {
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);
   const seen: string[][] = [];
@@ -4209,7 +4209,11 @@ test("getAuthenticatedActor: parses `gh api user --jq .login` to the login", asy
     return "sapwood-bot\n";
   };
   assert.equal(await forge.getAuthenticatedActor(), "sapwood-bot");
-  assert.deepEqual(seen[0], ["api", "user", "--jq", ".login"]);
+  assert.equal(seen[0]![0], "api");
+  assert.equal(seen[0]![1], "graphql");
+  assert.match(seen[0]![3]!, /viewer \{ login \}/);
+  assert.deepEqual(seen[0]!.slice(-2), ["--jq", ".data.viewer.login"]);
+  assert.ok(!seen.some((args) => args[0] === "api" && args[1] === "user"), "never REST `GET /user`");
 });
 
 test("getAuthenticatedActor: any failure (auth, network, empty output) fails closed to null, never throws", async () => {
