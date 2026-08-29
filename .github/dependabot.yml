@@ -1,0 +1,10 @@
+# SHA-pinned GitHub Actions go stale silently — nothing else in this repo checks
+# `uses:` refs for newer upstream releases. Package dependencies (npm) stay on
+# alerts-only per owner ruling, so no ecosystem entry is added for them here.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 2
