@@ -5,6 +5,7 @@
 [![node >= 24](https://img.shields.io/badge/node-%E2%89%A524-blue)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/herehigher/sapwood/badge)](https://scorecard.dev/viewer/?uri=github.com/herehigher/sapwood)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14349/badge)](https://www.bestpractices.dev/projects/14349)
 
 English · [日本語](README.ja.md) · [简体中文](README.zh-CN.md)
 
