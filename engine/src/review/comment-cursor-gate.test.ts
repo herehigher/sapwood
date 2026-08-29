@@ -74,7 +74,7 @@ test("#943 cursor gate: a real GithubForge hides public-only comments while trus
   ];
   let read = 0;
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "user") return "sapwood-bot\n";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return "sapwood-bot\n"; // #1165: the actor read is GraphQL viewer, not REST /user
     return JSON.stringify(responses[read++]!);
   };
   const publicResult = await checkCommentCursorFreshness(forge, 9, "body without a cursor marker");

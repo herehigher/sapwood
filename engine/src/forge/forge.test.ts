@@ -125,7 +125,7 @@ test("#943 getPRComments: pages past 25 public comments before capping, preservi
   const forge = new GithubForge(c);
   const cursors: string[] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "user") return "sapwood-bot\n";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return "sapwood-bot\n"; // #1165: the actor read is GraphQL viewer, not REST /user
     const after = args.find((arg) => arg.startsWith("after="))!;
     cursors.push(after);
     const publicNodes = Array.from({ length: 25 }, (_, i) => ({
@@ -176,7 +176,7 @@ test("#943 getPRReviews: keeps GitHub total separate from trusted visible total 
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "user") return "sapwood-bot\n";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return "sapwood-bot\n"; // #1165: the actor read is GraphQL viewer, not REST /user
     const trusted = Array.from({ length: 21 }, (_, i) => ({
       author: { login: "maintainer" },
       authorAssociation: "MEMBER",
@@ -217,7 +217,7 @@ test("#943 getPRReviewThreads: withholds an untrusted nested reply and announces
   const events: Array<{ kind: string; payload: unknown }> = [];
   const forge = new GithubForge(c, { state: { appendEvent: (kind: string, payload: unknown) => events.push({ kind, payload }) } as never });
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "user") return "sapwood-bot\n";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return "sapwood-bot\n"; // #1165: the actor read is GraphQL viewer, not REST /user
     if (args.some((arg) => arg.includes("node(id: $threadId)"))) {
       return JSON.stringify({
         data: {
@@ -269,7 +269,7 @@ test("#943 getPRReviewThreads: pages past 19 public replies before applying the 
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "user") return "sapwood-bot\n";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return "sapwood-bot\n"; // #1165: the actor read is GraphQL viewer, not REST /user
     if (args.some((arg) => arg.includes("node(id: $threadId)"))) {
       const after = args.find((arg) => arg.startsWith("after="));
       const publicReplies = Array.from({ length: 19 }, (_, i) => ({
@@ -338,7 +338,7 @@ test("#943 getPRReviewThreads: a nested comment page ceiling is announced and ma
   const forge = new GithubForge(c, { state: { appendEvent: (kind: string, payload: unknown) => events.push({ kind, payload }) } as never });
   let nestedPages = 0;
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "user") return "sapwood-bot\n";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return "sapwood-bot\n"; // #1165: the actor read is GraphQL viewer, not REST /user
     if (args.some((arg) => arg.includes("node(id: $threadId)"))) {
       nestedPages++;
       return JSON.stringify({
@@ -379,7 +379,7 @@ test("#943 getIssueComments: GithubForge filters public REST comments before its
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "user") return "sapwood-bot\n";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return "sapwood-bot\n"; // #1165: the actor read is GraphQL viewer, not REST /user
     return JSON.stringify([
       { id: 1, user: { login: "outside" }, author_association: "NONE", created_at: "t1", body: "public" },
       { id: 2, user: { login: "maintainer" }, author_association: "MEMBER", created_at: "t2", body: "trusted" },
@@ -395,7 +395,7 @@ test("#943 GithubForge comment reads fail closed when GitHub supplies a null aut
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "user") return "sapwood-bot\n";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return "sapwood-bot\n"; // #1165: the actor read is GraphQL viewer, not REST /user
     return JSON.stringify({
       data: {
         repository: {
@@ -420,7 +420,7 @@ test("#943 marker-bearing PR comment and thread-tail reads throw rather than tre
   let prPages = 0;
   let tailPages = 0;
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "user") return "sapwood-bot\n";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return "sapwood-bot\n"; // #1165: the actor read is GraphQL viewer, not REST /user
     if (args.some((arg) => arg.includes("node(id: $threadId)"))) {
       tailPages++;
       return JSON.stringify({
@@ -4712,7 +4712,7 @@ test("getPRReviews: pages the owner/repo review connection before applying the v
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
-    if (args[1] === "user") return "sapwood-bot\n";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return "sapwood-bot\n"; // #1165: the actor read is GraphQL viewer, not REST /user
     return JSON.stringify({
       data: { repository: { pullRequest: { reviews: { totalCount: 0, pageInfo: { hasNextPage: false }, nodes: [] } } } },
     });
@@ -5025,7 +5025,7 @@ test("#288 getPRComments pages before its newest-visible-comments cap and preser
   let seen: string[] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen = args;
-    if (args[1] === "user") return "sapwood-bot\n";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return "sapwood-bot\n"; // #1165: the actor read is GraphQL viewer, not REST /user
     return JSON.stringify({
       data: {
         repository: {
@@ -5066,7 +5066,7 @@ test("#943 comments-withheld announces only count changes, including restored vi
   ];
   let read = 0;
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "user") return "sapwood-bot\n";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return "sapwood-bot\n"; // #1165: the actor read is GraphQL viewer, not REST /user
     return JSON.stringify([responses[Math.min(read++, responses.length - 1)]]);
   };
   await forge.getIssueComments(7);
@@ -5115,7 +5115,7 @@ test("getReviewThreadCommentsTail (#247 F2(b)): filters paged node(id:) comments
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
-    if (args[1] === "user") return "sapwood-bot\n";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return "sapwood-bot\n"; // #1165: the actor read is GraphQL viewer, not REST /user
     return JSON.stringify({
       data: {
         node: {
