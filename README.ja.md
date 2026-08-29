@@ -2,7 +2,7 @@
 
 [English](README.md) · 日本語 · [简体中文](README.zh-CN.md)
 
-本文は README.md（[660e06ca](https://github.com/herehigher/sapwood/blob/660e06ca/README.md) 時点）の翻訳です。相違がある場合は英語版を正とします。
+本文は README.md（[5715bbdb](https://github.com/herehigher/sapwood/blob/5715bbdb/README.md) 時点）の翻訳です。相違がある場合は英語版を正とします。
 
 **自律的なコーディングに、ガバナンスを。**
 
