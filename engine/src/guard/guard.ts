@@ -121,11 +121,12 @@ function basename(p: string): string {
 function hasPathSep(t: string): boolean {
   return t.includes("/") || t.includes("\\");
 }
-// A shell option can never contain a path separator, so a `-`-leading token that does is a
-// relative path whose first segment happens to start with `-`, not a flag — the same reading a
-// real shell gives it. Ordinary bare tokens are candidates too; this only widens what the SCAN
-// treats as examinable, it doesn't change which tokens grammar (subcommand index, explicit
-// option values) still finds.
+// A `-`-leading token that contains a path separator is either a relative path whose first
+// segment starts with `-` (the shell passes it through as a path, exactly like `./-x/…`) or an
+// option carrying a path value (`--work-tree=/repo`). Both deserve examination, and examining
+// can only ever BLOCK when the text names a protected path — so the scan treats both as
+// candidates. This widens only what the SCAN examines; grammar (which token is the git
+// subcommand, which positional is cp's destination) keeps its own narrower reading.
 function isPathCandidate(t: string): boolean {
   return !t.startsWith("-") || hasPathSep(t);
 }
@@ -995,9 +996,10 @@ function checkControlSentinelArg(tokens: string[], cwd: string): string | null {
     if (!t) continue;
     // A flag can glue the path to its value (`--target=../../.sapwood/PAUSE`) — judge the
     // substring after the first `=` for `-`-prefixed tokens (#84 gate② P2-2, carried forward).
-    // A `-`-leading token with no `=` is still a candidate when it itself contains a path
-    // separator (`-x/../.sapwood/PAUSE` — a shell option never contains one, so this is a path
-    // whose first segment starts with `-`, not a flag); otherwise it's an ordinary flag, skipped.
+    // A `-`-leading token with no `=` is still a candidate when it contains a path separator
+    // (`-x/../.sapwood/PAUSE` is a path whose first segment starts with `-`, and examining it
+    // can only block if it really resolves under the runtime root); otherwise it's an ordinary
+    // flag, skipped.
     let candidate: string | null;
     if (t.startsWith("-")) {
       if (t.includes("=")) candidate = t.slice(t.indexOf("=") + 1);
