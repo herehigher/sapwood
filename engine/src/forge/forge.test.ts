@@ -125,7 +125,8 @@ test("#943 getPRComments: pages past 25 public comments before capping, preservi
   const forge = new GithubForge(c);
   const cursors: string[] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
     const after = args.find((arg) => arg.startsWith("after="))!;
     cursors.push(after);
     const publicNodes = Array.from({ length: 25 }, (_, i) => ({
@@ -176,7 +177,8 @@ test("#943 getPRReviews: keeps GitHub total separate from trusted visible total 
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
     const trusted = Array.from({ length: 21 }, (_, i) => ({
       author: { login: "maintainer" },
       authorAssociation: "MEMBER",
@@ -217,7 +219,8 @@ test("#943 getPRReviewThreads: withholds an untrusted nested reply and announces
   const events: Array<{ kind: string; payload: unknown }> = [];
   const forge = new GithubForge(c, { state: { appendEvent: (kind: string, payload: unknown) => events.push({ kind, payload }) } as never });
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
     if (args.some((arg) => arg.includes("node(id: $threadId)"))) {
       return JSON.stringify({
         data: {
@@ -269,7 +272,8 @@ test("#943 getPRReviewThreads: pages past 19 public replies before applying the 
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
     if (args.some((arg) => arg.includes("node(id: $threadId)"))) {
       const after = args.find((arg) => arg.startsWith("after="));
       const publicReplies = Array.from({ length: 19 }, (_, i) => ({
@@ -338,7 +342,8 @@ test("#943 getPRReviewThreads: a nested comment page ceiling is announced and ma
   const forge = new GithubForge(c, { state: { appendEvent: (kind: string, payload: unknown) => events.push({ kind, payload }) } as never });
   let nestedPages = 0;
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
     if (args.some((arg) => arg.includes("node(id: $threadId)"))) {
       nestedPages++;
       return JSON.stringify({
@@ -379,7 +384,8 @@ test("#943 getIssueComments: GithubForge filters public REST comments before its
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
     return JSON.stringify([
       { id: 1, user: { login: "outside" }, author_association: "NONE", created_at: "t1", body: "public" },
       { id: 2, user: { login: "maintainer" }, author_association: "MEMBER", created_at: "t2", body: "trusted" },
@@ -395,7 +401,8 @@ test("#943 GithubForge comment reads fail closed when GitHub supplies a null aut
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(c);
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
     return JSON.stringify({
       data: {
         repository: {
@@ -420,7 +427,8 @@ test("#943 marker-bearing PR comment and thread-tail reads throw rather than tre
   let prPages = 0;
   let tailPages = 0;
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
     if (args.some((arg) => arg.includes("node(id: $threadId)"))) {
       tailPages++;
       return JSON.stringify({
@@ -3330,7 +3338,8 @@ test("#438 getPRReviewData: a truncated review-threads read is announced on BOTH
         reviews: [],
       });
     }
-    if (args[0] === "api" && args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return JSON.stringify({ data: { viewer: { login: "sapwood-actor" } } }); // #1165: not a threads page
+    if (args[0] === "api" && args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-actor" } } }); // #1165: not a threads page
     if (args[0] === "api" && args[1] === "graphql") {
       graphqlPages++;
       // Runaway cursor: hasNextPage never goes false, so the real 50-page ceiling is what stops it.
@@ -3423,7 +3432,8 @@ test("#438 the announcement is never load-bearing: no state (dry-run) and a thro
           reviews: [],
         });
       }
-      if (args[0] === "api" && args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return JSON.stringify({ data: { viewer: { login: "sapwood-actor" } } }); // not a threads page
+      if (args[0] === "api" && args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+        return JSON.stringify({ data: { viewer: { login: "sapwood-actor" } } }); // not a threads page
       if (args[0] === "api" && args[1] === "graphql") {
         page++;
         return richThreadsPage([{ id: `T${page}`, isResolved: false }], { hasNextPage: true, endCursor: `C${page}` });
@@ -4090,7 +4100,8 @@ test("GithubForge.getIssuesNeedingPlanTriage #1163: a NONE-associated planless i
   const cfg = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
   const forge = new GithubForge(cfg);
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return JSON.stringify({ data: { viewer: { login: "maintainer" } } });
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "maintainer" } } });
     return JSON.stringify({
       data: {
         user: {
@@ -4169,7 +4180,8 @@ test("getIssueComments: reuses parsePRComments' shape/pagination tolerance off t
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
-    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return JSON.stringify({ data: { viewer: { login: "sapwood-actor" } } });
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-actor" } } });
     return JSON.stringify([
       {
         body: "please fix the plan",
@@ -4231,9 +4243,12 @@ test("getAuthenticatedActor: any failure (auth, network, empty output) fails clo
   assert.equal(await forge2.getAuthenticatedActor(), null);
 });
 
-test("getAuthenticatedActor: a GraphQL error body (HTTP 200, gh exit 0, `data.viewer` null) and a bare `null` both fail closed — never the literal string \"null\" as an actor", async () => {
+test('getAuthenticatedActor: a GraphQL error body (HTTP 200, gh exit 0, `data.viewer` null) and a bare `null` both fail closed — never the literal string "null" as an actor', async () => {
   const c = ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } });
-  const errorBody = JSON.stringify({ data: { viewer: null }, errors: [{ type: "FORBIDDEN", message: "Resource not accessible by integration" }] });
+  const errorBody = JSON.stringify({
+    data: { viewer: null },
+    errors: [{ type: "FORBIDDEN", message: "Resource not accessible by integration" }],
+  });
   for (const out of [errorBody, "null\n", JSON.stringify({ data: { viewer: { login: "" } } }), JSON.stringify({ data: {} })]) {
     const forge = new GithubForge(c);
     (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async () => out;
@@ -4724,7 +4739,8 @@ test("getPRReviews: pages the owner/repo review connection before applying the v
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
-    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
     return JSON.stringify({
       data: { repository: { pullRequest: { reviews: { totalCount: 0, pageInfo: { hasNextPage: false }, nodes: [] } } } },
     });
@@ -5037,7 +5053,8 @@ test("#288 getPRComments pages before its newest-visible-comments cap and preser
   let seen: string[] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen = args;
-    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
     return JSON.stringify({
       data: {
         repository: {
@@ -5078,7 +5095,8 @@ test("#943 comments-withheld announces only count changes, including restored vi
   ];
   let read = 0;
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
     return JSON.stringify([responses[Math.min(read++, responses.length - 1)]]);
   };
   await forge.getIssueComments(7);
@@ -5127,7 +5145,8 @@ test("getReviewThreadCommentsTail (#247 F2(b)): filters paged node(id:) comments
   const seen: string[][] = [];
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
     seen.push(args);
-    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }")) return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
     return JSON.stringify({
       data: {
         node: {
