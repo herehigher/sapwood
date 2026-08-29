@@ -879,6 +879,11 @@ const WRITE_BLOCK: [string, string][] = [
   ["/repo/.claude/settings.json", "write-path"],
   [".claude/settings.json", "write-path"],
   [".claude/settings.local.json", "write-path"],
+  // docs/security.md's own glob (`settings*.json`) covers more than the two names Claude Code
+  // itself reads today — the guard mirrors the doc's shape literally, not just those two.
+  ["x/.claude/settings.local.json", "write-path"],
+  [".claude/settings.team.json", "write-path"],
+  [".claude/settingsX.json", "write-path"],
   [".github/workflows/ci.yml", "write-path"],
   ["/repo/.github/workflows/nested/deploy.yaml", "write-path"],
   ["engine/src/guard/guard.ts", "write-path"],
@@ -951,6 +956,8 @@ for (const file_path of [
   "notes/about.sapwood.md",
   // #781 reverse: near-miss template name stays allowed ($-anchor).
   "sapwood.config.example2.yaml",
+  // A `.claude/` file that doesn't start with "settings" is outside the doc's glob entirely.
+  ".claude/other.json",
 ]) {
   test(`WRITE ALLOW: ${file_path}`, () => {
     assert.equal(guardDecision("Edit", { file_path }, CWD).allow, true);

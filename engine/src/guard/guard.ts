@@ -843,7 +843,10 @@ function isUnderSapwoodRoot(abs: string): boolean {
 /** If `abs` (a normalized absolute path) is a boundary file, return a short label; else null. */
 function protectedPathLabel(abs: string): string | null {
   if (isUnderSapwoodRoot(abs)) return ".sapwood/** (sapwood runtime root)";
-  if (/\/\.claude\/settings(\.local)?\.json$/.test(abs)) return ".claude/settings.json (hook wiring)";
+  // docs/security.md names this rule `.claude/settings*.json` (a shell glob); mirror it
+  // literally rather than enumerating the two names Claude Code itself reads today, so a doc
+  // reader's shell-glob mental model and the guard's actual match stay the same shape.
+  if (/\/\.claude\/settings[^/]*\.json$/.test(abs)) return ".claude/settings.json (hook wiring)";
   if (/\/\.github\/workflows(\/|$)/.test(abs)) return ".github/workflows/** (CI integrity)";
   // The engine config carries guard.mode + reviewer/security settings — a worker editing it to
   // guard.mode:soft would make future workers observe-only. Human-merge-only (Codex #26 R2).

@@ -43,13 +43,9 @@ const joinRel = (prefix: string[], suffix: string): string => (prefix.length ? `
 // but the same write-path rule). Families the docs write as globs are drawn from generators
 // (bounded: up to three nested directories, names and extensions from the segment alphabet), so
 // a regression that keeps one example blocked while freeing siblings in that range fails here.
-// `.claude/settings*.json` is the exception: the guard matches exactly two names today and the
-// doc/guard disagreement is tracked separately, so only those two are asserted. guard.ts does not
-// export one list combining all its path rules (only the narrower source-file PROTECTED_SUFFIXES
-// and the SAPWOOD_ROOT_SEGMENT constant), so the fixed part is kept here. ────────────────────────
+// guard.ts does not export one list combining all its path rules (only the narrower source-file
+// PROTECTED_SUFFIXES and the SAPWOOD_ROOT_SEGMENT constant), so the fixed part is kept here. ───
 const FIXED_PROTECTED_SUFFIXES = [
-  ".claude/settings.json",
-  ".claude/settings.local.json",
   "sapwood.config.yaml",
   "sapwood.config.yml",
   "sapwood.config.json",
@@ -75,7 +71,12 @@ const fileUnderArb = (dir: string) =>
 const workflowsPathArb = () => fileUnderArb(".github/workflows");
 // `.sapwood/**`: the whole runtime directory.
 const sapwoodPathArb = () => fileUnderArb(".sapwood");
-const protectedSuffixArb = () => fc.oneof(fc.constantFrom(...FIXED_PROTECTED_SUFFIXES), workflowsPathArb(), sapwoodPathArb());
+// `.claude/settings*.json`: docs/security.md writes this as a shell glob, directly under
+// `.claude/` (not nested) — bare `settings.json` or `settings.<anything>.json`.
+const claudeSettingsArb = () =>
+  fc.option(segmentArb(), { nil: undefined }).map((seg) => `.claude/settings${seg === undefined ? "" : `.${seg}`}.json`);
+const protectedSuffixArb = () =>
+  fc.oneof(fc.constantFrom(...FIXED_PROTECTED_SUFFIXES), workflowsPathArb(), sapwoodPathArb(), claudeSettingsArb());
 
 // The families guard.ts's own comments call out as matched case-insensitively (macOS/APFS
 // default, deliberate fail-closed stance) — `.github/workflows/**` and `.claude/settings*.json`
