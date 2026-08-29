@@ -100,9 +100,11 @@ and the release's assets, which are audit artifacts only if they can't be rewrit
 after the fact — `release-evidence.txt`, the packed engine tarball
 (`sapwood-<version>.tgz`), and its Sigstore provenance bundle
 (`sapwood-<version>.tgz.sigstore.json`, from `actions/attest-build-provenance`). A
-consumer verifies the tarball offline against that bundle with `gh attestation verify
-sapwood-<version>.tgz --owner herehigher --bundle sapwood-<version>.tgz.sigstore.json`
-(without `--bundle`, `gh` fetches the attestation from the GitHub API instead). That's why `publish` runs draft, then tag, then push, in that
+consumer verifies the tarball against that bundle with `gh attestation verify
+sapwood-<version>.tgz --repo herehigher/sapwood --bundle sapwood-<version>.tgz.sigstore.json`
+(`--repo`, not `--owner`, so an attestation from another repository under the same
+owner is not accepted; without `--bundle`, `gh` fetches the attestation from the GitHub
+API instead). That's why `publish` runs draft, then tag, then push, in that
 order: it creates the GitHub Release as a **draft** first — pinned to the release
 commit via `--target`, since the tag it names doesn't exist yet — then tags that
 same commit (the one `--target` named, not whatever `HEAD` happens to be by then;
