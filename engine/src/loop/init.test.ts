@@ -1172,6 +1172,31 @@ test("parseDeployKeys: parses the --json id,title array; malformed/non-array JSO
     ],
   );
   assert.deepEqual(parseDeployKeys("[]"), []);
+});
+
+test("parseDeployKeys: reads the read-only flag under BOTH spellings — gh 2.95 ignores the --json selection and returns the raw REST `read_only` — and anything non-boolean still parses as not-proven-writable", () => {
+  // The exact raw shape gh 2.95.0 returns for `--json id,title,readOnly` (field selection ignored).
+  const raw = parseDeployKeys(
+    '[{"id":161781875,"key":"ssh-ed25519 AAAA","title":"sapwood-worker","created_at":"2026-08-31T00:31:06Z","read_only":false}]',
+  );
+  assert.deepEqual(raw, [{ id: 161781875, title: "sapwood-worker", key: "ssh-ed25519 AAAA", readOnly: false }]);
+  const camel = parseDeployKeys('[{"id":7,"title":"t","readOnly":true}]');
+  assert.deepEqual(camel, [{ id: 7, title: "t", readOnly: true }]);
+  // Fail-closed: a string/absent flag in either spelling never becomes a readOnly boolean.
+  for (const body of [
+    '[{"id":7,"title":"t","read_only":"false"}]',
+    '[{"id":7,"title":"t","readOnly":"false"}]',
+    '[{"id":7,"title":"t"}]',
+    // A PRESENT-but-malformed camelCase field is never rescued by a writable raw field.
+    '[{"id":7,"title":"t","readOnly":"true","read_only":false}]',
+  ]) {
+    assert.deepEqual(parseDeployKeys(body), [{ id: 7, title: "t" }]);
+  }
+  // A primitive entry inside a valid array is discarded, never a throw (this function's contract).
+  assert.deepEqual(parseDeployKeys('[7, {"id":7,"title":"t","read_only":false}]'), [{ id: 7, title: "t", readOnly: false }]);
+  // Both spellings valid booleans: the documented camelCase field wins, in either direction.
+  assert.deepEqual(parseDeployKeys('[{"id":7,"title":"t","readOnly":true,"read_only":false}]'), [{ id: 7, title: "t", readOnly: true }]);
+  assert.deepEqual(parseDeployKeys('[{"id":7,"title":"t","readOnly":false,"read_only":true}]'), [{ id: 7, title: "t", readOnly: false }]);
   assert.deepEqual(parseDeployKeys("not json"), []);
   assert.deepEqual(parseDeployKeys(JSON.stringify({ not: "an array" })), []);
   // an entry missing id or title (unexpected gh output shape) is dropped, not half-adopted.

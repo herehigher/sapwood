@@ -511,7 +511,14 @@ export function parseDeployKeys(text: string): DeployKeyListEntry[] {
     const id = (entry as { id?: unknown } | null)?.id;
     const title = (entry as { title?: unknown } | null)?.title;
     const key = (entry as { key?: unknown } | null)?.key;
-    const readOnly = (entry as { readOnly?: unknown } | null)?.readOnly;
+    // gh 2.95 ignores the `--json` field selection for this command and returns the raw REST
+    // shape, so the read-only flag arrives as `read_only` while gh's own help still advertises
+    // `readOnly` — accept the genuine boolean under either spelling; anything else still parses
+    // as "not proven writable" for the startup gate's fail-closed check.
+    const rawEntry = entry as { readOnly?: unknown; read_only?: unknown } | null;
+    // The documented camelCase field wins whenever the KEY is present — a malformed value there
+    // must stay malformed (and parse as not-proven-writable), never be rescued by the raw field.
+    const readOnly = rawEntry !== null && typeof rawEntry === "object" && "readOnly" in rawEntry ? rawEntry.readOnly : rawEntry?.read_only;
     if (typeof id === "number" && typeof title === "string") {
       out.push({
         id,
