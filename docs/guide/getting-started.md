@@ -209,7 +209,7 @@ sapwood init
    board — the engine does all of that from its own, separately-held credential (see
    [Worker credential tiers](../security/credential-tiers.md#worker-credential-tiers) for the full L0/L1
    picture and honest residuals). `worker.credentialTier` defaults to `L0` (the full-credentialed
-   env, never reading or probing a deploy key) — this repo's own config keeps it. If
+   env, never reading or probing a deploy key); this repo's own config pins `L1`. If
    `credentialTier` is `L1` and no working key is found at `sapwood run` startup, the run
    **refuses to start, before any dispatch or board/label mutation**, naming `sapwood init` as
    the fix — never a silent fallback to L0. If you don't have repo admin, `init` logs exactly what to do by hand and moves
@@ -296,14 +296,19 @@ Complete this setup before choosing L3.
   worker identity or deploy key a bypass. This is the mandatory platform backstop for the
   producer's inherited host tool surface; sapwood can warn when protection is absent, but
   does not enforce it.
-- Use a merger GitHub identity and credential distinct from the worker identity. Give the
-  worker the L1 deploy key (`worker.credentialTier: L1`, provisioned by `sapwood init`) rather
-  than a forge API credential, and keep the conductor's merger credential outside the worker's
-  normal credential lookup paths. Actual unreadability requires the L2 [enterprise posture
-  checklist](../security/credential-tiers.md#l2-enterprise-posture-checklist). Both controls
-  matter: branch protection prevents a producer from bypassing review with a direct push, while
-  a distinct merger identity prevents it from acting as the conductor. Without both, producer ≠
-  merger is not a fully load-bearing deployment guarantee.
+- Run every producer leg with `worker.credentialTier: L1` (provisioned by `sapwood init`):
+  producer legs then hold no forge API credential at all — a credential-free environment plus
+  repository-scoped deploy-key push transport — while only the conductor is provisioned
+  with forge API credentials.
+  Keep `guard.mode: hard`, and do not give the deploy key a branch-protection bypass. This is
+  capability separation at the process/session boundary, not a second GitHub or OS principal:
+  the conductor merges under the operator's own identity, so GitHub's `mergedBy` field does not
+  distinguish an engine merge from a human merge, and engine audit comments are process-level
+  evidence, not independent platform attestation. Deploy a separate merger principal (a GitHub
+  App or machine account) only when you need actor-specific platform enforcement, independently
+  revocable merge authority, or GitHub-native merger attribution — and know that without
+  OS-account isolation it does not close same-host credential theft either (the L2 [enterprise
+  posture checklist](../security/credential-tiers.md#l2-enterprise-posture-checklist)).
 
 Credential isolation has deliberate limits: the L1 environment removes the normal forge
 credential path, but it is not OS-level confinement from arbitrary code or the host's

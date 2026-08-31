@@ -46,6 +46,21 @@ engine code alone writes GitHub state. The audit trail — reviewed head + diff,
 identity, spend (never read as $0), prompt hash, tree-manifest hash — is recorded before any
 merge/FIXABLE outcome: inspectable, not two principals.
 
+**Single-identity limitation — merger.** The same stance covers the merge itself: producer ≠
+merger rests on capability absence (`worker.credentialTier: L1`), the guard, and the single
+`mergePR` call path — not on a second GitHub principal, so GitHub's `mergedBy` shows the
+operator for engine and human merges alike. A deployment that needs more — actor-specific
+platform enforcement, independently revocable merge authority, or GitHub-native merger
+attribution — can hold a GitHub App identity for the single `gh pr merge` call; nothing in the
+engine assumes such a principal exists. Platform constraints on that move: a GitHub App
+installation token cannot call REST `GET /user` (GraphQL `viewer { login }` answers for user
+and installation tokens alike, and the engine's identity read uses it); App-authored comments
+carry `author_association: NONE`, so the engine's own-comment exemption stands only on that
+identity read; a **user-owned** Projects v2 board rejects item mutations from an installation
+token under every grantable permission, so such a token cannot drive the engine's board
+writes; and GitHub refuses an App push that creates a branch whose workflow files differ from
+the default-branch head unless the App holds the Workflows permission.
+
 ### Guard modes: hard vs. soft
 
 `guard.mode` (default `hard`) controls how the hook responds to a blocked command:
