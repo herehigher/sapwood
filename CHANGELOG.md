@@ -7,6 +7,8 @@ All notable changes to sapwood are documented here. Format:
 
 ## [Unreleased]
 
+## [0.3.0-alpha.4] - 2026-08-31
+
 ### Security
 - The guard's Bash write-path scan no longer drops a `-`-leading argv token that contains a path
   separator, so a relative path whose first segment starts with `-` (`cp src -x/../sapwood.config.yaml`,

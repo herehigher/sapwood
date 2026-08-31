@@ -1,7 +1,7 @@
 {
   "name": "sapwood-workspace",
   "private": true,
-  "version": "0.3.0-alpha.3",
+  "version": "0.3.0-alpha.4",
   "description": "sapwood — the autonomous coding loop with governance built in",
   "type": "module",
   "workspaces": [
