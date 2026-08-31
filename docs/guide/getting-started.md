@@ -209,7 +209,7 @@ sapwood init
    board — the engine does all of that from its own, separately-held credential (see
    [Worker credential tiers](../security/credential-tiers.md#worker-credential-tiers) for the full L0/L1
    picture and honest residuals). `worker.credentialTier` defaults to `L0` (the full-credentialed
-   env, never reading or probing a deploy key) — this repo's own config keeps it. If
+   env, never reading or probing a deploy key); this repo's own config pins `L1` (#1165). If
    `credentialTier` is `L1` and no working key is found at `sapwood run` startup, the run
    **refuses to start, before any dispatch or board/label mutation**, naming `sapwood init` as
    the fix — never a silent fallback to L0. If you don't have repo admin, `init` logs exactly what to do by hand and moves
@@ -298,7 +298,8 @@ Complete this setup before choosing L3.
   does not enforce it.
 - Run every producer leg with `worker.credentialTier: L1` (provisioned by `sapwood init`):
   producer legs then hold no forge API credential at all — a credential-free environment plus
-  repository-scoped deploy-key push transport — while the conductor alone talks to the forge.
+  repository-scoped deploy-key push transport — while only the conductor is provisioned
+  with forge API credentials.
   Keep `guard.mode: hard`, and do not give the deploy key a branch-protection bypass. This is
   capability separation at the process/session boundary, not a second GitHub or OS principal:
   the conductor merges under the operator's own identity, so GitHub's `mergedBy` field does not
