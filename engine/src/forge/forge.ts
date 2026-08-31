@@ -1523,17 +1523,25 @@ export class GithubForge implements IForge {
     return filtered.entries;
   }
 
-  /** #652: `gh api user` — the authenticated actor's own login, per GitHub's REST identity
-   *  endpoint (the same token every other `gh` call in this class already uses). Fails closed to
-   *  `null` on ANY error (auth failure, network blip, malformed response) — never throws, per
+  /** #652: the authenticated actor's own login, read through GraphQL `viewer` (the same token
+   *  every other `gh` call in this class already uses). GraphQL rather than REST `GET /user`
+   *  because a GitHub App installation token (#1165: the engine's identity is an App on a
+   *  bot-run deployment) is refused by `/user` with 403 while `viewer` resolves for it and for a
+   *  user token alike — with the bot's `<slug>[bot]` login, which is exactly the login GitHub
+   *  stamps on the comments this actor is matched against. Fails closed to `null` on ANY error
+   *  (auth failure, network blip, malformed response) — never throws, per
    *  IForge.getAuthenticatedActor's contract that an unresolvable actor exempts no comment. The
    *  promise is memoized so one forge instance does not issue this identity read per comment read. */
   async getAuthenticatedActor(): Promise<string | null> {
     this.authenticatedActor ??= (async () => {
       try {
-        const out = await this.gh(["api", "user", "--jq", ".login"]);
-        const login = out.trim();
-        return login.length > 0 ? login : null;
+        // No `--jq`: a GraphQL error comes back HTTP 200 with `data.viewer` null and gh exits 0,
+        // and jq would print the literal `null` — which must not become an actor.
+        const out = await this.gh(["api", "graphql", "-f", `query=${VIEWER_LOGIN_QUERY}`]);
+        const parsed = JSON.parse(out) as { data?: { viewer?: { login?: unknown } | null }; errors?: unknown[] };
+        if (Array.isArray(parsed.errors) && parsed.errors.length > 0) return null;
+        const login = parsed.data?.viewer?.login;
+        return typeof login === "string" && login.trim().length > 0 ? login.trim() : null;
       } catch {
         return null;
       }
@@ -2010,6 +2018,13 @@ mutation($threadId: ID!) {
   resolveReviewThread(input: {threadId: $threadId}) {
     thread { id isResolved }
   }
+}`;
+
+/** The token's own login — `viewer` answers for a user token and an App installation token
+ *  alike (REST `GET /user` refuses the latter). */
+const VIEWER_LOGIN_QUERY = `
+query {
+  viewer { login }
 }`;
 
 /** The reply-marker tail pages the thread before filtering so an untrusted marker never becomes

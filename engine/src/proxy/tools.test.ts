@@ -168,7 +168,8 @@ test("#943 pr_audit_comments reaches the engine audit receipt but not a public c
     `<!-- sapwood-audit kind=engine-agent head=${"a".repeat(40)} diff=${"b".repeat(64)} run=${run} -->\nAudit`;
   const forge = new GithubForge(ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } }));
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "user") return "sapwood-bot\n";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
     return JSON.stringify({
       data: {
         repository: {
@@ -197,7 +198,8 @@ test("#943 pr_audit_comments reaches an older trusted receipt after 25 public co
   const marker = `<!-- sapwood-audit kind=engine-agent head=${"a".repeat(40)} diff=${"b".repeat(64)} run=engine -->\nAudit`;
   const forge = new GithubForge(ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } }));
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "user") return "sapwood-bot\n";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
     const publicNodes = Array.from({ length: 25 }, (_, i) => ({
       id: `public-${i}`,
       author: { login: `outside-${i}` },
@@ -617,7 +619,8 @@ test("fetchPRReviewsResponse: complete is false when the fetch bound cut the con
 test("#943 fetchPRReviewsResponse: real GithubForge keeps raw total and visible-total completeness separate", async () => {
   const forge = new GithubForge(ConfigSchema.parse({ board: { owner: "o", repo: "r", projectNumber: 1, ownerKind: "user" } }));
   (forge as unknown as { gh: (args: string[]) => Promise<string> }).gh = async (args) => {
-    if (args[1] === "user") return "sapwood-bot\n";
+    if (args[1] === "graphql" && String(args[3]).includes("viewer { login }"))
+      return JSON.stringify({ data: { viewer: { login: "sapwood-bot\n" } } });
     const trusted = Array.from({ length: 6 }, (_, i) => ({
       author: { login: "maintainer" },
       authorAssociation: "MEMBER",
