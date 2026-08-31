@@ -209,7 +209,7 @@ sapwood init
    board — the engine does all of that from its own, separately-held credential (see
    [Worker credential tiers](../security/credential-tiers.md#worker-credential-tiers) for the full L0/L1
    picture and honest residuals). `worker.credentialTier` defaults to `L0` (the full-credentialed
-   env, never reading or probing a deploy key); this repo's own config pins `L1` (#1165). If
+   env, never reading or probing a deploy key); this repo's own config pins `L1`. If
    `credentialTier` is `L1` and no working key is found at `sapwood run` startup, the run
    **refuses to start, before any dispatch or board/label mutation**, naming `sapwood init` as
    the fix — never a silent fallback to L0. If you don't have repo admin, `init` logs exactly what to do by hand and moves

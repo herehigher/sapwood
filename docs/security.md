@@ -46,20 +46,20 @@ engine code alone writes GitHub state. The audit trail — reviewed head + diff,
 identity, spend (never read as $0), prompt hash, tree-manifest hash — is recorded before any
 merge/FIXABLE outcome: inspectable, not two principals.
 
-**Single-identity limitation — merger (#1165, adjudicated 2026-08-31).** The same stance covers
-the merge itself: producer ≠ merger rests on capability absence (`worker.credentialTier: L1`),
-the guard, and the single `mergePR` call path — not on a second GitHub principal, so GitHub's
-`mergedBy` shows the operator for engine and human merges alike. Platform facts established by
-probe (commands and outputs on #1165), for anyone revisiting this: a GitHub App installation
-token cannot call REST `GET /user` (GraphQL `viewer { login }` answers for user and
-installation tokens alike — PR #1217 moves the engine's identity read onto it); App-authored
-comments carry `author_association: NONE`; a **user-owned** Projects v2 board rejects item
-mutations from an installation token under every grantable permission, so an App's
-installation token cannot drive this engine's board writes; and without the Workflows permission GitHub refuses an App push creating a
-branch whose workflow files differ from the default-branch head. The pre-designed upgrade
-path — if GitHub-native merger attribution or independently revocable merge authority ever
-becomes a requirement — is the suspended `sapwood-runner` App plus a merge-only token overlay
-on the single `gh pr merge` call; nothing in the engine assumes it exists.
+**Single-identity limitation — merger.** The same stance covers the merge itself: producer ≠
+merger rests on capability absence (`worker.credentialTier: L1`), the guard, and the single
+`mergePR` call path — not on a second GitHub principal, so GitHub's `mergedBy` shows the
+operator for engine and human merges alike. A deployment that needs more — actor-specific
+platform enforcement, independently revocable merge authority, or GitHub-native merger
+attribution — can hold a GitHub App identity for the single `gh pr merge` call; nothing in the
+engine assumes such a principal exists. Platform constraints on that move: a GitHub App
+installation token cannot call REST `GET /user` (GraphQL `viewer { login }` answers for user
+and installation tokens alike, and the engine's identity read uses it); App-authored comments
+carry `author_association: NONE`, so the engine's own-comment exemption stands only on that
+identity read; a **user-owned** Projects v2 board rejects item mutations from an installation
+token under every grantable permission, so such a token cannot drive the engine's board
+writes; and GitHub refuses an App push that creates a branch whose workflow files differ from
+the default-branch head unless the App holds the Workflows permission.
 
 ### Guard modes: hard vs. soft
 
