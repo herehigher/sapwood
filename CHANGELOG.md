@@ -7,6 +7,35 @@ All notable changes to sapwood are documented here. Format:
 
 ## [Unreleased]
 
+### Security
+- The guard's Bash write-path scan no longer drops a `-`-leading argv token that contains a path
+  separator, so a relative path whose first segment starts with `-` (`cp src -x/../sapwood.config.yaml`,
+  `rm -- -x/../.sapwood/PAUSE`) is examined like any other and denied; the `.claude/settings*.json`
+  human-merge-only rule matches the documented glob (any `settings*.json` directly under `.claude/`),
+  not just `settings.json` and `settings.local.json`.
+- Dependabot watches the `github-actions` ecosystem (monthly, two open PRs at most) so SHA-pinned
+  actions stop going stale silently; npm dependencies stay on the alerts-only posture.
+
+### Changed
+- Every GitHub Release carries the packed engine tarball (`sapwood-<version>.tgz`) and its Sigstore
+  provenance bundle (`sapwood-<version>.tgz.sigstore.json`) next to `release-evidence.txt`, attested
+  with `actions/attest-build-provenance` from the tag-push run; a consumer verifies with
+  `gh attestation verify sapwood-<version>.tgz --repo herehigher/sapwood --bundle <bundle>`.
+- The getting-started "Trust model prerequisites" and `docs/security.md` state producer≠merger as what
+  it is — `credentialTier: L1` + the guard + a single merge call site — instead of implying a distinct
+  merger identity; they name when a separate merger principal (a GitHub App or machine account) is
+  worth deploying for the single merge call, and the platform constraints on running the whole
+  conductor as an App (installation-token `/user` 403, bot `author_association: NONE`, user-owned
+  Projects v2 closed to Apps).
+- README shows the OpenSSF Best Practices badge next to the Scorecard badge.
+
+### Fixed
+- The forge reads the authenticated actor through GraphQL `viewer { login }`, so a GitHub App
+  installation token resolves to its `<slug>[bot]` login instead of falling closed to `null` (REST
+  `GET /user` answers 403 for it) and having the trusted-author filter withhold the engine's own comments.
+- The startup write-access check accepts gh 2.95's raw `read_only` spelling in the deploy-key list, so
+  the L1 gate confirms write access on a healthy key instead of failing closed.
+
 ## [0.3.0-alpha.3] - 2026-08-28
 
 ### Changed
