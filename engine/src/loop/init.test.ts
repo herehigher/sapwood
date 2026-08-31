@@ -1183,7 +1183,11 @@ test("parseDeployKeys: reads the read-only flag under BOTH spellings — gh 2.95
   const camel = parseDeployKeys('[{"id":7,"title":"t","readOnly":true}]');
   assert.deepEqual(camel, [{ id: 7, title: "t", readOnly: true }]);
   // Fail-closed: a string/absent flag in either spelling never becomes a readOnly boolean.
-  for (const body of ['[{"id":7,"title":"t","read_only":"false"}]', '[{"id":7,"title":"t","readOnly":"false"}]', '[{"id":7,"title":"t"}]']) {
+  for (const body of [
+    '[{"id":7,"title":"t","read_only":"false"}]',
+    '[{"id":7,"title":"t","readOnly":"false"}]',
+    '[{"id":7,"title":"t"}]',
+  ]) {
     assert.deepEqual(parseDeployKeys(body), [{ id: 7, title: "t" }]);
   }
   assert.deepEqual(parseDeployKeys("not json"), []);
