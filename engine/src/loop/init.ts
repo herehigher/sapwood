@@ -516,7 +516,9 @@ export function parseDeployKeys(text: string): DeployKeyListEntry[] {
     // `readOnly` — accept the genuine boolean under either spelling; anything else still parses
     // as "not proven writable" for the startup gate's fail-closed check.
     const rawEntry = entry as { readOnly?: unknown; read_only?: unknown } | null;
-    const readOnly = typeof rawEntry?.readOnly === "boolean" ? rawEntry.readOnly : rawEntry?.read_only;
+    // The documented camelCase field wins whenever the KEY is present — a malformed value there
+    // must stay malformed (and parse as not-proven-writable), never be rescued by the raw field.
+    const readOnly = rawEntry !== null && rawEntry !== undefined && "readOnly" in rawEntry ? rawEntry.readOnly : rawEntry?.read_only;
     if (typeof id === "number" && typeof title === "string") {
       out.push({
         id,

@@ -1187,9 +1187,14 @@ test("parseDeployKeys: reads the read-only flag under BOTH spellings — gh 2.95
     '[{"id":7,"title":"t","read_only":"false"}]',
     '[{"id":7,"title":"t","readOnly":"false"}]',
     '[{"id":7,"title":"t"}]',
+    // A PRESENT-but-malformed camelCase field is never rescued by a writable raw field.
+    '[{"id":7,"title":"t","readOnly":"true","read_only":false}]',
   ]) {
     assert.deepEqual(parseDeployKeys(body), [{ id: 7, title: "t" }]);
   }
+  // Both spellings valid booleans: the documented camelCase field wins, in either direction.
+  assert.deepEqual(parseDeployKeys('[{"id":7,"title":"t","readOnly":true,"read_only":false}]'), [{ id: 7, title: "t", readOnly: true }]);
+  assert.deepEqual(parseDeployKeys('[{"id":7,"title":"t","readOnly":false,"read_only":true}]'), [{ id: 7, title: "t", readOnly: false }]);
   assert.deepEqual(parseDeployKeys("not json"), []);
   assert.deepEqual(parseDeployKeys(JSON.stringify({ not: "an array" })), []);
   // an entry missing id or title (unexpected gh output shape) is dropped, not half-adopted.
