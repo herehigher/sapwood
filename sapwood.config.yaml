@@ -31,6 +31,9 @@ worker:
   model: sonnet
   budgetUsdSoft: 30
   maxResumes: 4
+  # #1165: producer legs run credential-free (deploy-key transport only) — producer ≠ merger
+  # holds by capability absence, not by a second GitHub principal.
+  credentialTier: L1
 
 cost:
   roundBudgetUsd: 180
