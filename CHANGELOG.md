@@ -23,8 +23,10 @@ All notable changes to sapwood are documented here. Format:
   `gh attestation verify sapwood-<version>.tgz --repo herehigher/sapwood --bundle <bundle>`.
 - The getting-started "Trust model prerequisites" and `docs/security.md` state producer≠merger as what
   it is — `credentialTier: L1` + the guard + a single merge call site — instead of implying a distinct
-  merger identity, and record why a GitHub App cannot be that identity today (installation-token
-  `/user` 403, bot `author_association: NONE`, user-owned Projects v2 closed to Apps).
+  merger identity; they name when a separate merger principal (a GitHub App or machine account) is
+  worth deploying for the single merge call, and the platform constraints on running the whole
+  conductor as an App (installation-token `/user` 403, bot `author_association: NONE`, user-owned
+  Projects v2 closed to Apps).
 - README shows the OpenSSF Best Practices badge next to the Scorecard badge.
 
 ### Fixed
