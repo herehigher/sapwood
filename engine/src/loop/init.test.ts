@@ -1192,6 +1192,8 @@ test("parseDeployKeys: reads the read-only flag under BOTH spellings — gh 2.95
   ]) {
     assert.deepEqual(parseDeployKeys(body), [{ id: 7, title: "t" }]);
   }
+  // A primitive entry inside a valid array is discarded, never a throw (this function's contract).
+  assert.deepEqual(parseDeployKeys('[7, {"id":7,"title":"t","read_only":false}]'), [{ id: 7, title: "t", readOnly: false }]);
   // Both spellings valid booleans: the documented camelCase field wins, in either direction.
   assert.deepEqual(parseDeployKeys('[{"id":7,"title":"t","readOnly":true,"read_only":false}]'), [{ id: 7, title: "t", readOnly: true }]);
   assert.deepEqual(parseDeployKeys('[{"id":7,"title":"t","readOnly":false,"read_only":true}]'), [{ id: 7, title: "t", readOnly: false }]);

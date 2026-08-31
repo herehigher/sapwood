@@ -518,7 +518,7 @@ export function parseDeployKeys(text: string): DeployKeyListEntry[] {
     const rawEntry = entry as { readOnly?: unknown; read_only?: unknown } | null;
     // The documented camelCase field wins whenever the KEY is present — a malformed value there
     // must stay malformed (and parse as not-proven-writable), never be rescued by the raw field.
-    const readOnly = rawEntry !== null && rawEntry !== undefined && "readOnly" in rawEntry ? rawEntry.readOnly : rawEntry?.read_only;
+    const readOnly = rawEntry !== null && typeof rawEntry === "object" && "readOnly" in rawEntry ? rawEntry.readOnly : rawEntry?.read_only;
     if (typeof id === "number" && typeof title === "string") {
       out.push({
         id,
